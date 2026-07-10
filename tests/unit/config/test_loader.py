@@ -134,6 +134,15 @@ def test_settings_require_absolute_roots_and_positive_nested_limits(tmp_path: Pa
                 "concurrency": {"heavy": 0},
             }
         )
+    with pytest.raises(ValidationError, match="less than or equal to 50"):
+        Settings.model_validate(
+            {
+                "repository_root": tmp_path,
+                "artifact_root": tmp_path,
+                "secret_file_root": tmp_path,
+                "database": {"pool_size": 51},
+            }
+        )
 
 
 def test_enabled_project_is_normalized_in_bundle(tmp_path: Path) -> None:

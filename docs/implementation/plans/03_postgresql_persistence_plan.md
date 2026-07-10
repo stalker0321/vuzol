@@ -4,6 +4,8 @@
 
 Planning pass complete. No Step 03 runtime code or migration has been applied yet.
 
+Typed database pool, timeout, and migration-lock settings are implemented as the first prerequisite. Storage runtime code and migrations remain not started.
+
 ## Technology decision
 
 - SQLAlchemy 2 typed declarative models and explicit async sessions;

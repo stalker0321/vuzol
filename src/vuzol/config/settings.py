@@ -39,6 +39,19 @@ class HardLimits(BaseModel):
     input_bytes: int = Field(default=25_000_000, ge=1)
 
 
+class DatabaseSettings(BaseModel):
+    """Bounded connection and migration controls; the DSN remains a secret reference."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pool_size: int = Field(default=5, ge=1, le=50)
+    max_overflow: int = Field(default=5, ge=0, le=50)
+    pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    statement_timeout_ms: int = Field(default=30_000, ge=100, le=3_600_000)
+    lock_timeout_ms: int = Field(default=5_000, ge=100, le=300_000)
+    migration_advisory_lock_key: int = 8_946_527_031
+
+
 class Settings(BaseSettings):
     """Process settings loaded at the composition boundary."""
 
@@ -65,6 +78,7 @@ class Settings(BaseSettings):
     artifact_root: Path = Path("/srv/vuzol/artifacts")
     secret_file_root: Path = Path("/run/secrets")
     concurrency: ConcurrencyLimits = ConcurrencyLimits()
+    database: DatabaseSettings = DatabaseSettings()
     retention: RetentionDefaults = RetentionDefaults()
     limits: HardLimits = HardLimits()
     redaction_patterns: tuple[str, ...] = ()

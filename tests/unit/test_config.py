@@ -24,8 +24,10 @@ def test_settings_reject_invalid_log_level() -> None:
 def test_nested_settings_load_from_environment(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("VUZOL_CONCURRENCY__HEAVY", "2")
     monkeypatch.setenv("VUZOL_LIMITS__PROVIDER_ATTEMPTS", "5")
+    monkeypatch.setenv("VUZOL_DATABASE__POOL_SIZE", "7")
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.concurrency.heavy == 2
     assert settings.limits.provider_attempts == 5
+    assert settings.database.pool_size == 7

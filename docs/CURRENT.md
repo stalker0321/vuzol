@@ -1,8 +1,8 @@
 # Current Project State
 
 Current phase: MVP implementation  
-Current step: Step 02 complete
-Status: ready for Step 03
+Current step: Step 03 planning complete
+Status: ready for Step 03 implementation
 
 ## Completed
 
@@ -32,6 +32,10 @@ Status: ready for Step 03
 Start Step 03:
 
 `docs/implementation/steps/03_postgresql_persistence.md`
+
+Use the completed planning pass:
+
+`docs/implementation/plans/03_postgresql_persistence_plan.md`
 
 ## Open decisions
 

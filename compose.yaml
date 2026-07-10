@@ -1,0 +1,33 @@
+services:
+  app:
+    build: .
+    environment:
+      VUZOL_ENVIRONMENT: development
+      VUZOL_HOST: 0.0.0.0
+      VUZOL_PORT: 8000
+      VUZOL_SERVICE_NAME: vuzol
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    init: true
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["vuzol-worker"]
+    environment:
+      VUZOL_ENVIRONMENT: development
+      VUZOL_SERVICE_NAME: vuzol
+    init: true
+    restart: unless-stopped

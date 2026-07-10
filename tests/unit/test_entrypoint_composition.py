@@ -10,14 +10,22 @@ from pytest import LogCaptureFixture, MonkeyPatch
 
 from vuzol.cli import app as app_cli
 from vuzol.cli import worker as worker_cli
-from vuzol.config import Settings
+from vuzol.config import RegistryDocument, RuntimeConfiguration, Settings, build_bundle
+
+
+def runtime_configuration(settings: Settings) -> RuntimeConfiguration:
+    return RuntimeConfiguration(
+        settings=settings, registries=build_bundle(RegistryDocument(), settings)
+    )
 
 
 def test_app_main_composes_server(monkeypatch: MonkeyPatch) -> None:
     settings = Settings(environment="test", host="127.0.0.2", port=9001)
     calls: dict[str, object] = {}
 
-    monkeypatch.setattr(app_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        app_cli, "get_runtime_configuration", lambda: runtime_configuration(settings)
+    )
     monkeypatch.setattr(app_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
     monkeypatch.setattr(
         uvicorn,
@@ -39,7 +47,9 @@ def test_worker_main_registers_signals_and_runs(monkeypatch: MonkeyPatch) -> Non
     handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
     run_arguments: dict[str, object] = {}
 
-    monkeypatch.setattr(worker_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        worker_cli, "get_runtime_configuration", lambda: runtime_configuration(settings)
+    )
     monkeypatch.setattr(worker_cli, "configure_logging", lambda **_kwargs: None)
     monkeypatch.setattr(
         signal,
@@ -67,7 +77,9 @@ def test_worker_stop_handler_logs_signal(
     settings = Settings(environment="test")
     handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
 
-    monkeypatch.setattr(worker_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        worker_cli, "get_runtime_configuration", lambda: runtime_configuration(settings)
+    )
     monkeypatch.setattr(worker_cli, "configure_logging", lambda **_kwargs: None)
     monkeypatch.setattr(
         signal,

@@ -45,6 +45,8 @@ The app and worker use the same image and run as a non-root user. The Compose co
 
 Settings use the `VUZOL_` prefix. See [.env.example](.env.example). Invalid settings fail during process initialization with a concise error and non-zero exit status.
 
+Project, provider, topic, secret-reference, revision, and reload contracts are documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). A disabled example registry is available at [config/registries.example.toml](config/registries.example.toml).
+
 ## Documentation
 
 The documentation committed in this repository is canonical. Architecture changes require the ADR and documentation workflow described in [docs/ARCHITECTURE_INVARIANTS.md](docs/ARCHITECTURE_INVARIANTS.md).

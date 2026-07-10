@@ -1,0 +1,39 @@
+[[projects]]
+id = "example"
+display_name = "Example project"
+repository_path = "example"
+default_branch = "main"
+allowed_capabilities = ["repository_read", "code_edit", "git", "project_shell"]
+sandbox_profile = "project-default"
+enabled = false
+
+[projects.git_delivery]
+allowed_modes = ["retain", "patch"]
+approval_required = []
+
+[projects.network]
+enabled = false
+destinations = []
+
+[[profiles]]
+id = "example-api"
+provider = "openai-compatible"
+model = "replace-me"
+launch_mode = "api"
+credential_reference = "env:VUZOL_EXAMPLE_API_KEY"
+credential_required = true
+capabilities = ["repository_read"]
+concurrency_limit = 1
+cost_class = "balanced"
+supported_task_types = ["general"]
+fallback_profile_ids = []
+sandbox_required = false
+enabled = false
+
+[[topics]]
+chat_id = -1000000000000
+message_thread_id = 1
+kind = "inbox"
+accepts_new_tasks = true
+default_workflow = "simple_model_task"
+enabled = false

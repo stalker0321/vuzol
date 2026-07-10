@@ -1,8 +1,8 @@
 # Current Project State
 
 Current phase: MVP implementation  
-Current step: Step 01 complete  
-Status: ready for Step 02
+Current step: Step 02 complete
+Status: ready for Step 03
 
 ## Completed
 
@@ -20,12 +20,18 @@ Status: ready for Step 02
 - strict Ruff, mypy, pytest coverage, dependency-audit, and secret-scan gates implemented;
 - non-root Docker image and Compose app/worker topology verified;
 - GitHub SSH `origin` and tracking `main` branch configured.
+- typed application limits, retention, concurrency, authorization scope, and secret references implemented;
+- strict TOML models and loaders for projects, provider profiles, and Telegram topics implemented;
+- immutable project, profile, and topic registries with normalized paths and cross-reference validation implemented;
+- consumer-scoped environment and file secret resolution implemented without global secret materialization;
+- deterministic non-secret configuration revisions and security-sensitive snapshot compatibility checks implemented;
+- invalid registry files and missing required secrets verified to stop app and worker startup.
 
 ## Next action
 
-Start Step 02:
+Start Step 03:
 
-`docs/implementation/steps/02_configuration_and_registries.md`
+`docs/implementation/steps/03_postgresql_persistence.md`
 
 ## Open decisions
 

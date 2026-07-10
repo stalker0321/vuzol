@@ -3,7 +3,7 @@
 import signal
 import threading
 
-from vuzol.config import get_settings
+from vuzol.config import get_runtime_configuration
 from vuzol.observability import configure_logging, get_logger
 
 
@@ -20,7 +20,7 @@ def run_worker(*, poll_interval_seconds: float, stop_event: threading.Event) -> 
 def main() -> None:
     """Load settings and run the worker process."""
 
-    settings = get_settings()
+    settings = get_runtime_configuration().settings
     configure_logging(service=f"{settings.service_name}-worker", level=settings.log_level)
     stop_event = threading.Event()
 

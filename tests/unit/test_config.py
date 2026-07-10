@@ -1,5 +1,5 @@
 from pydantic import ValidationError
-from pytest import raises
+from pytest import MonkeyPatch, raises
 
 from vuzol.config import Settings
 
@@ -19,3 +19,13 @@ def test_settings_reject_invalid_port() -> None:
 def test_settings_reject_invalid_log_level() -> None:
     with raises(ValidationError, match="Input should be"):
         Settings(log_level="VERBOSE")  # type: ignore[arg-type]
+
+
+def test_nested_settings_load_from_environment(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("VUZOL_CONCURRENCY__HEAVY", "2")
+    monkeypatch.setenv("VUZOL_LIMITS__PROVIDER_ATTEMPTS", "5")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.concurrency.heavy == 2
+    assert settings.limits.provider_attempts == 5

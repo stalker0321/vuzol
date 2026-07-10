@@ -33,7 +33,7 @@ The plan is ordered so that every step produces a testable, runnable increment. 
 |---|---|---|---|---|
 | 01 | Repository foundation | complete | — | Runnable typed Python application with quality gates |
 | 02 | Configuration and registries | complete | 01 | Validated configuration, secrets boundaries, project/provider registries |
-| 03 | PostgreSQL persistence model | not started | 01–02 | Migrations and repositories for tasks, steps, events, topics, profiles |
+| 03 | PostgreSQL persistence model | planning | 01–02 | Migrations and repositories for tasks, steps, events, topics, profiles |
 | 04 | Telegram forum workspace | not started | 02–03 | Authorized forum-group ingress and reconstructable projections |
 | 05 | Voice and semantic interpretation | not started | 02–04 | Transcription, TaskDraft schema, cheap model interpreter, clarification flow |
 | 06 | Task manager and workflow engine | not started | 03–05 | Persisted state machine, queue, leases, retries, pause/resume/cancel |

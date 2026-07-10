@@ -27,6 +27,7 @@ from vuzol.config.runtime import RuntimeConfiguration, get_runtime_configuration
 from vuzol.config.secrets import ScopedSecretResolver, SecretResolutionError
 from vuzol.config.settings import (
     ConcurrencyLimits,
+    DatabaseSettings,
     HardLimits,
     RetentionDefaults,
     Settings,
@@ -39,6 +40,7 @@ __all__ = [
     "ConcurrencyLimits",
     "ConfigurationBundle",
     "ConfigurationLoadError",
+    "DatabaseSettings",
     "DeliveryMode",
     "EgressDestination",
     "GitDeliveryPolicy",

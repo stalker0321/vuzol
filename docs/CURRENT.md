@@ -26,6 +26,7 @@ Status: ready for Step 03 implementation
 - consumer-scoped environment and file secret resolution implemented without global secret materialization;
 - deterministic non-secret configuration revisions and security-sensitive snapshot compatibility checks implemented;
 - invalid registry files and missing required secrets verified to stop app and worker startup.
+- Step 03 prerequisite added: bounded database pool, statement/lock timeout, and migration advisory-lock settings.
 
 ## Next action
 

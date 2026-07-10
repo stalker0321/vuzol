@@ -11,5 +11,6 @@ This file records completed implementation changes, not plans or speculative ide
 - clarified one-time documentation bootstrap into the project repository and SSH remote setup without copying credentials.
 - completed Step 01 repository foundation with Python 3.12, `uv`, typed settings, app and worker entry points, JSON logging, health endpoints, tests, security gates, and non-root Docker packaging.
 - completed Step 02 configuration and registries with typed hard limits, TOML project/profile/topic models, immutable registries, scoped secret resolution, stable revisions, reload compatibility checks, and startup validation.
+- added typed bounded PostgreSQL pool, timeout, and migration-lock settings as a Step 03 prerequisite.
 
 - Initial architecture and MVP implementation documentation created.

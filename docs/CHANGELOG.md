@@ -15,5 +15,6 @@ This file records completed implementation changes, not plans or speculative ide
 - completed Step 03 with the canonical PostgreSQL schema, Alembic migrations, async repositories and unit of work, atomic audit transitions, inbox/outbox, approval consumption, fenced leasing, and real concurrency tests.
 - completed Step 04 with authorized forum ingress, ID-based topic routing, task affinity and clarification, attachment intake policy, idempotent controls, transactional Telegram delivery, reconstructable revision-safe status cards, and a `python-telegram-bot` long-polling adapter.
 - completed Step 04.1 with a dedicated Telegram delivery runtime, destination-filtered fenced outbox leases, canonical-state status and clarification dispatch, bounded retry/dead-letter/ambiguous outcomes, and an optional single-bot Compose profile.
+- completed Step 05 with strict provider-neutral TaskDraft interpretation, durable attachment and voice transcription flow, replaceable OpenAI-compatible and fake adapters, repair/fallback policy, escaped semantic clarification, and a 45-fixture safety-gated evaluation harness.
 
 - Initial architecture and MVP implementation documentation created.

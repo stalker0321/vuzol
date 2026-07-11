@@ -54,6 +54,11 @@ class PythonTelegramClient:
             chat_id=chat_id, message_id=message_id, text=html, parse_mode=ParseMode.HTML
         )
 
+    async def download(self, file_id: str) -> bytes:
+        telegram_file = await self._bot.get_file(file_id)
+        content = await telegram_file.download_as_bytearray()
+        return bytes(content)
+
 
 def message_update(update: Update, bot_id: str) -> MessageUpdate | None:
     message = update.effective_message

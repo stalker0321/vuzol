@@ -96,5 +96,32 @@ services:
     init: true
     restart: unless-stopped
 
+  interpreter:
+    profiles: [interpretation]
+    image: vuzol:local
+    build: .
+    command: ["vuzol-interpreter"]
+    env_file:
+      - ${VUZOL_RUNTIME_ENV_FILE:-.env.example}
+    environment:
+      VUZOL_ENVIRONMENT: development
+      VUZOL_SERVICE_NAME: vuzol
+      VUZOL_REGISTRY_FILE: /app/config/registries.toml
+      VUZOL_DATABASE_DSN_REFERENCE: env:VUZOL_DATABASE_DSN
+      VUZOL_DATABASE_DSN: ${VUZOL_DATABASE_DSN:-postgresql+psycopg://vuzol:vuzol-local-only@postgres:5432/vuzol} # pragma: allowlist secret
+      VUZOL_TELEGRAM_BOT_TOKEN_REFERENCE: env:VUZOL_TELEGRAM_BOT_TOKEN
+      VUZOL_TELEGRAM_BOT_TOKEN: ${VUZOL_TELEGRAM_BOT_TOKEN:-}
+      VUZOL_INTERPRETATION__PROFILE_ID: ${VUZOL_INTERPRETATION__PROFILE_ID:-}
+      VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID: ${VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID:-}
+    volumes:
+      - ${VUZOL_REGISTRY_FILE_HOST:-./config/registries.example.toml}:/app/config/registries.toml:ro
+      - artifact-data:/srv/vuzol/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+
 volumes:
   postgres-data:
+  artifact-data:

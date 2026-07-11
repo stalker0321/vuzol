@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "alembic>=1.16,<2",
   "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
   "psycopg[binary,pool]>=3.2,<4",
   "pydantic-settings>=2.10,<3",
   "python-telegram-bot>=22,<23",
@@ -23,6 +24,7 @@ vuzol-app = "vuzol.cli.app:main"
 vuzol-worker = "vuzol.cli.worker:main"
 vuzol-telegram = "vuzol.cli.telegram:main"
 vuzol-telegram-delivery = "vuzol.cli.telegram_delivery:main"
+vuzol-interpreter = "vuzol.cli.interpreter:main"
 
 [dependency-groups]
 dev = [
@@ -69,3 +71,6 @@ ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S603"]
 "alembic/**" = ["ANN"]
+
+[tool.ruff.format]
+exclude = ["tests/fixtures/**"]

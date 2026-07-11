@@ -73,6 +73,45 @@ def test_enabled_profile_requires_credential_reference() -> None:
         )
 
 
+def test_provider_api_base_url_is_safe_https_origin() -> None:
+    with pytest.raises(ValidationError, match="credential-free HTTPS"):
+        ProviderProfileConfig.model_validate(
+            {
+                "id": "profile-a",
+                "provider": "provider",
+                "model": "model",
+                "api_base_url": "http://user@example.com/v1",
+                "launch_mode": "api",
+                "credential_reference": "env:KEY",
+                "capabilities": [],
+                "concurrency_limit": 1,
+                "cost_class": "balanced",
+                "supported_task_types": ["general"],
+            }
+        )
+
+    for unsafe_url in (
+        "https://example.com/v1?token=x",
+        "https://localhost/v1",
+        "https://127.0.0.1/v1",
+    ):
+        with pytest.raises(ValidationError, match="provider API base URL"):
+            ProviderProfileConfig.model_validate(
+                {
+                    "id": "profile-a",
+                    "provider": "provider",
+                    "model": "model",
+                    "api_base_url": unsafe_url,
+                    "launch_mode": "api",
+                    "credential_reference": "env:KEY",
+                    "capabilities": [],
+                    "concurrency_limit": 1,
+                    "cost_class": "balanced",
+                    "supported_task_types": ["general"],
+                }
+            )
+
+
 def test_unknown_capability_is_rejected() -> None:
     with pytest.raises(ValidationError, match="Input should be"):
         ProviderProfileConfig.model_validate(

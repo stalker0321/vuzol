@@ -11,7 +11,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY --from=uv /uv /uvx /bin/
 
 RUN groupadd --system --gid 10001 vuzol \
-    && useradd --system --uid 10001 --gid vuzol --create-home vuzol
+    && useradd --system --uid 10001 --gid vuzol --create-home vuzol \
+    && mkdir -p /srv/vuzol/artifacts \
+    && chown -R vuzol:vuzol /srv/vuzol
 
 WORKDIR /app
 

@@ -127,6 +127,7 @@ class ProviderProfileConfig(FrozenModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
+    api_base_url: HttpUrl | None = None
     launch_mode: LaunchMode
     credential_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
     credential_required: bool = True
@@ -144,6 +145,22 @@ class ProviderProfileConfig(FrozenModel):
     def validate_credential_reference(self) -> "ProviderProfileConfig":
         if self.enabled and self.credential_required and self.credential_reference is None:
             raise ValueError("enabled profile requires a credential reference")
+        if self.api_base_url is not None:
+            url = self.api_base_url
+            if url.scheme != "https" or url.username is not None or url.password is not None:
+                raise ValueError("provider API base URL must be a credential-free HTTPS URL")
+            if url.query is not None or url.fragment is not None:
+                raise ValueError("provider API base URL cannot contain query or fragment")
+            if url.host in {"localhost", "metadata.google.internal"}:
+                raise ValueError("provider API base URL cannot target local or metadata hosts")
+            if url.host is not None:
+                try:
+                    provider_address = ip_address(url.host)
+                except ValueError:
+                    pass
+                else:
+                    if not provider_address.is_global:
+                        raise ValueError("provider API base URL must use a global address")
         return self
 
 

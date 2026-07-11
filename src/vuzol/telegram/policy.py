@@ -27,6 +27,11 @@ def validate_message(settings: Settings, update: MessageUpdate) -> None:
         raise TelegramPolicyError("attachment count exceeds configured limit")
     if update.text is None and not update.attachments:
         raise TelegramPolicyError("message has no supported content")
+    audio_count = sum(
+        attachment.kind.value in {"voice", "audio"} for attachment in update.attachments
+    )
+    if audio_count > 1:
+        raise TelegramPolicyError("only one audio attachment is accepted per message")
     for attachment in update.attachments:
         validate_attachment(settings, attachment)
 

@@ -19,6 +19,7 @@ destinations = []
 id = "example-api"
 provider = "openai-compatible"
 model = "replace-me"
+api_base_url = "https://api.example.com/v1"
 launch_mode = "api"
 credential_reference = "env:VUZOL_EXAMPLE_API_KEY"
 credential_required = true

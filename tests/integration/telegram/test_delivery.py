@@ -8,6 +8,7 @@ from telegram.error import NetworkError
 
 from tests.integration.storage.helpers import storage
 from vuzol.storage.models import (
+    Interpretation,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
@@ -205,6 +206,64 @@ def test_unknown_send_is_ambiguous_and_clarification_has_no_task_link(
             )
             assert item is not None and item.status == DeliveryStatus.DELIVERED
             assert link is not None and link.task_id is None
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_semantic_clarification_is_rebuilt_from_persisted_interpretation(
+    postgres_dsn: str,
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, original_outbox = await seed_delivery(factory, message_id=50)
+        assert task_id is not None
+        async with factory.begin() as session:
+            await session.execute(
+                update(TransactionalOutbox)
+                .where(TransactionalOutbox.id == original_outbox)
+                .values(status=DeliveryStatus.DELIVERED)
+            )
+            interpretation = Interpretation(
+                task_id=task_id,
+                original_input_hash="a" * 64,
+                task_draft={
+                    "normalized_title": "Unsafe <title>",
+                    "clarification_question": "Deploy to <production>?",
+                },
+                profile_id="fake",
+                model="fake",
+                prompt_version="step-05-v1",
+                schema_version="1.0",
+            )
+            session.add(interpretation)
+            await session.flush()
+            intake_id = await session.scalar(
+                select(TelegramIntakeMessage.id).where(TelegramIntakeMessage.task_id == task_id)
+            )
+            assert intake_id is not None
+            session.add(
+                TransactionalOutbox(
+                    destination="telegram",
+                    operation_type="send_message",
+                    linked_entity_type="telegram_intake",
+                    linked_entity_id=intake_id,
+                    idempotency_key="semantic-clarification",
+                    payload={
+                        "role": "semantic_clarification",
+                        "interpretation_id": str(interpretation.id),
+                    },
+                )
+            )
+        client = FakeTelegramClient(next_message_id=101)
+        assert await service(factory, client).deliver_one()
+        assert "Unsafe &lt;title&gt;" in client.sent[0][2]
+        assert "Deploy to &lt;production&gt;?" in client.sent[0][2]
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(TelegramMessageLink.message_id == 101)
+            )
+            assert link is not None and link.task_id == task_id
         await engine.dispose()
 
     asyncio.run(scenario())

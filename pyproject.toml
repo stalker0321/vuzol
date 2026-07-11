@@ -22,6 +22,7 @@ dependencies = [
 vuzol-app = "vuzol.cli.app:main"
 vuzol-worker = "vuzol.cli.worker:main"
 vuzol-telegram = "vuzol.cli.telegram:main"
+vuzol-telegram-delivery = "vuzol.cli.telegram_delivery:main"
 
 [dependency-groups]
 dev = [

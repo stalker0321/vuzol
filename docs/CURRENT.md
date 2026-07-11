@@ -1,7 +1,7 @@
 # Current Project State
 
 Current phase: MVP implementation  
-Current step: Step 04 complete
+Current step: Step 04.1 complete
 Status: ready for Step 05
 
 ## Completed
@@ -40,6 +40,11 @@ Status: ready for Step 05
 - reconstructable, escaped status cards with monotonic revisions and edit rate limiting;
 - `python-telegram-bot` 22 long-polling adapter behind provider-neutral DTOs and client protocol;
 - ambiguous Telegram sends quarantined from automatic retry pending reconciliation.
+- dedicated fenced Telegram outbox delivery runtime with destination-filtered claiming;
+- canonical-state acknowledgement/status dispatch, clarification rendering, and confirmed message
+  link persistence;
+- bounded transient retry, dead-letter, and ambiguous-outcome handling;
+- optional Compose profile for separate ingress and delivery processes sharing one bot token.
 
 ## Next action
 

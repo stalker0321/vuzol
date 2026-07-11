@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,6 +59,11 @@ class TelegramSettings(BaseModel):
     max_attachments: int = Field(default=10, ge=0, le=20)
     max_attachment_bytes: int = Field(default=25_000_000, ge=1)
     edit_min_interval_seconds: float = Field(default=2.0, ge=0.1, le=60)
+    delivery_poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=60)
+    delivery_lease_seconds: int = Field(default=30, ge=5, le=600)
+    delivery_max_attempts: int = Field(default=5, ge=1, le=20)
+    delivery_retry_min_seconds: float = Field(default=1.0, ge=0.1, le=300)
+    delivery_retry_max_seconds: float = Field(default=60.0, ge=0.1, le=3_600)
     allowed_media_types: tuple[str, ...] = (
         "audio/ogg",
         "audio/mpeg",
@@ -67,6 +72,12 @@ class TelegramSettings(BaseModel):
         "text/plain",
         "application/pdf",
     )
+
+    @model_validator(mode="after")
+    def validate_retry_bounds(self) -> "TelegramSettings":
+        if self.delivery_retry_min_seconds > self.delivery_retry_max_seconds:
+            raise ValueError("delivery retry minimum must not exceed maximum")
+        return self
 
 
 class Settings(BaseSettings):

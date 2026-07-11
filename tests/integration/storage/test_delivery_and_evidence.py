@@ -2,9 +2,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
-from vuzol.storage.errors import StorageError
+from vuzol.storage.errors import LeaseLost, StorageError
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, mark_outbox_ambiguous
 from vuzol.storage.models import (
     Approval,
@@ -12,10 +12,11 @@ from vuzol.storage.models import (
     ExternalInbox,
     Task,
     TelegramMessageLink,
+    TransactionalOutbox,
     UsageRecord,
 )
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.storage.types import ApprovalStatus
+from vuzol.storage.types import ApprovalStatus, DeliveryStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
 from .helpers import seed_task_run_step, storage
@@ -64,7 +65,12 @@ def test_outbox_delivery_uses_single_fenced_lease(postgres_dsn: str) -> None:
 
         async def claim(owner: str) -> OutboxLeaseToken | None:
             async with factory.begin() as session:
-                return await claim_outbox_item(session, owner=owner, lease_seconds=60)
+                return await claim_outbox_item(
+                    session,
+                    owner=owner,
+                    lease_seconds=60,
+                    allowed_destinations=frozenset({"telegram"}),
+                )
 
         claims = await asyncio.gather(claim("delivery-a"), claim("delivery-b"))
         tokens = [token for token in claims if token is not None]
@@ -91,11 +97,83 @@ def test_ambiguous_outbox_delivery_is_not_automatically_retried(postgres_dsn: st
                 payload={"text": "status"},
             )
         async with factory.begin() as session:
-            token = await claim_outbox_item(session, owner="delivery-a", lease_seconds=60)
+            token = await claim_outbox_item(
+                session,
+                owner="delivery-a",
+                lease_seconds=60,
+                allowed_destinations=frozenset({"telegram"}),
+            )
             assert token is not None
             await mark_outbox_ambiguous(session, token)
         async with factory.begin() as session:
-            assert await claim_outbox_item(session, owner="delivery-b", lease_seconds=60) is None
+            assert (
+                await claim_outbox_item(
+                    session,
+                    owner="delivery-b",
+                    lease_seconds=60,
+                    allowed_destinations=frozenset({"telegram"}),
+                )
+                is None
+            )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_outbox_claim_filters_destination_and_reclaims_expired_lease(
+    postgres_dsn: str,
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task, _, _ = await seed_task_run_step(factory)
+        async with UnitOfWork(factory) as uow:
+            for destination in ("workflow_control", "telegram_file", "telegram"):
+                await uow.outbox.enqueue(
+                    destination=destination,
+                    operation_type="test",
+                    entity_type="task",
+                    entity_id=task.id,
+                    idempotency_key=destination,
+                    payload={},
+                )
+        async with factory.begin() as session:
+            first = await claim_outbox_item(
+                session,
+                owner="delivery-a",
+                lease_seconds=60,
+                allowed_destinations=frozenset({"telegram"}),
+            )
+        assert first is not None
+        async with factory.begin() as session:
+            await session.execute(
+                update(TransactionalOutbox)
+                .where(TransactionalOutbox.id == first.item_id)
+                .values(lease_expires_at=func.now() - timedelta(seconds=1))
+            )
+        async with factory.begin() as session:
+            second = await claim_outbox_item(
+                session,
+                owner="delivery-b",
+                lease_seconds=60,
+                allowed_destinations=frozenset({"telegram"}),
+            )
+        assert second is not None and second.item_id == first.item_id
+        assert second.generation == first.generation + 1
+        with pytest.raises(LeaseLost):
+            async with factory.begin() as session:
+                await complete_outbox_item(session, first)
+        async with factory.begin() as session:
+            await complete_outbox_item(session, second)
+        async with factory() as session:
+            untouched = (
+                await session.scalars(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.destination.in_(["workflow_control", "telegram_file"])
+                    )
+                )
+            ).all()
+            assert all(item.status == DeliveryStatus.PENDING for item in untouched)
         await engine.dispose()
 
     asyncio.run(scenario())

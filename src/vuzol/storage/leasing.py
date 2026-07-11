@@ -109,12 +109,25 @@ async def find_expired_leases(session: AsyncSession) -> tuple[StepRecord, ...]:
 
 
 async def claim_outbox_item(
-    session: AsyncSession, *, owner: str, lease_seconds: int
+    session: AsyncSession,
+    *,
+    owner: str,
+    lease_seconds: int,
+    allowed_destinations: frozenset[str],
 ) -> OutboxLeaseToken | None:
+    if not allowed_destinations:
+        return None
     statement = (
         select(TransactionalOutbox)
         .where(
-            TransactionalOutbox.status == DeliveryStatus.PENDING,
+            TransactionalOutbox.destination.in_(sorted(allowed_destinations)),
+            (
+                (TransactionalOutbox.status == DeliveryStatus.PENDING)
+                | (
+                    (TransactionalOutbox.status == DeliveryStatus.LEASED)
+                    & (TransactionalOutbox.lease_expires_at < func.now())
+                )
+            ),
             TransactionalOutbox.available_at <= func.now(),
         )
         .order_by(TransactionalOutbox.available_at, TransactionalOutbox.created_at)
@@ -175,6 +188,66 @@ async def mark_outbox_ambiguous(session: AsyncSession, token: OutboxLeaseToken) 
         )
         .values(
             status=DeliveryStatus.AMBIGUOUS,
+            last_error_category="ambiguous_external_outcome",
+            last_error_ambiguous=True,
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+    )
+    result = cast(CursorResult[Any], await session.execute(statement))
+    if result.rowcount != 1:
+        raise LeaseLost(f"outbox lease lost: {token.item_id}")
+
+
+async def retry_outbox_item(
+    session: AsyncSession,
+    token: OutboxLeaseToken,
+    *,
+    delay_seconds: float,
+    error_category: str,
+) -> None:
+    """Return a transient failure to the queue while preserving fencing metadata."""
+
+    statement = (
+        update(TransactionalOutbox)
+        .where(
+            TransactionalOutbox.id == token.item_id,
+            TransactionalOutbox.lease_owner == token.owner,
+            TransactionalOutbox.lease_generation == token.generation,
+            TransactionalOutbox.status == DeliveryStatus.LEASED,
+        )
+        .values(
+            status=DeliveryStatus.PENDING,
+            available_at=func.now() + timedelta(seconds=delay_seconds),
+            last_error_category=error_category,
+            last_error_ambiguous=False,
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+    )
+    result = cast(CursorResult[Any], await session.execute(statement))
+    if result.rowcount != 1:
+        raise LeaseLost(f"outbox lease lost: {token.item_id}")
+
+
+async def dead_letter_outbox_item(
+    session: AsyncSession,
+    token: OutboxLeaseToken,
+    *,
+    error_category: str,
+) -> None:
+    statement = (
+        update(TransactionalOutbox)
+        .where(
+            TransactionalOutbox.id == token.item_id,
+            TransactionalOutbox.lease_owner == token.owner,
+            TransactionalOutbox.lease_generation == token.generation,
+            TransactionalOutbox.status == DeliveryStatus.LEASED,
+        )
+        .values(
+            status=DeliveryStatus.DEAD_LETTER,
+            last_error_category=error_category,
+            last_error_ambiguous=False,
             lease_owner=None,
             lease_expires_at=None,
         )

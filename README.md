@@ -22,6 +22,8 @@ cp .env.example .env
 ```bash
 make run-app       # HTTP application on 127.0.0.1:8000
 make run-worker    # foundation worker process
+vuzol-telegram     # Telegram long-polling ingress
+vuzol-telegram-delivery # Telegram outbox delivery runtime
 make test          # pytest suite
 make lint          # Ruff lint
 make format-check  # Ruff formatting check
@@ -41,6 +43,17 @@ docker compose up
 ```
 
 The app and worker use the same image and run as a non-root user. The Compose configuration does not mount the Docker socket or use privileged mode.
+
+Telegram is an optional profile. Configure the registry, allowlists, database DSN reference, and
+one shared bot token as described in [.env.example](.env.example), run migrations, then start both
+separate Telegram processes with:
+
+```bash
+docker compose --profile telegram up
+```
+
+Ingress receives updates; delivery exclusively consumes normal `telegram` outbox operations.
+The base stack does not require a Telegram token.
 
 ## Configuration
 

@@ -1,6 +1,8 @@
-.PHONY: run-app run-worker test lint format format-check type-check dependency-audit secret-scan security check
+.PHONY: run-app run-worker test test-postgres lint format format-check type-check dependency-audit secret-scan security check db-up db-down db-migrate db-current
 
 UV ?= uv
+LOCAL_DATABASE_DSN ?= postgresql+psycopg://vuzol:vuzol-local-only@127.0.0.1:5432/vuzol# pragma: allowlist secret
+LOCAL_TEST_DATABASE_DSN ?= postgresql://vuzol:vuzol-local-only@127.0.0.1:5432/vuzol_test# pragma: allowlist secret
 
 run-app:
 	$(UV) run vuzol-app
@@ -10,6 +12,10 @@ run-worker:
 
 test:
 	$(UV) run pytest
+
+test-postgres: db-up db-migrate
+	VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_DATABASE_DSN VUZOL_DATABASE_DSN="$(subst postgresql://,postgresql+psycopg://,$(LOCAL_TEST_DATABASE_DSN))" $(UV) run alembic upgrade head
+	VUZOL_TEST_DATABASE_DSN="$(LOCAL_TEST_DATABASE_DSN)" $(UV) run pytest -m postgresql --no-cov
 
 lint:
 	$(UV) run ruff check .
@@ -32,3 +38,15 @@ secret-scan:
 security: dependency-audit secret-scan
 
 check: lint format-check type-check test security
+
+db-up:
+	docker compose up -d postgres
+
+db-down:
+	docker compose down
+
+db-migrate:
+	VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_DATABASE_DSN VUZOL_DATABASE_DSN="$(LOCAL_DATABASE_DSN)" $(UV) run alembic upgrade head
+
+db-current:
+	VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_DATABASE_DSN VUZOL_DATABASE_DSN="$(LOCAL_DATABASE_DSN)" $(UV) run alembic current

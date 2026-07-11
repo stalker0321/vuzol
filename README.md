@@ -28,6 +28,7 @@ make format-check  # Ruff formatting check
 make type-check    # strict mypy
 make security      # dependency and secret checks
 make check         # all required quality gates
+make test-postgres # real PostgreSQL migration and concurrency tests
 ```
 
 Equivalent commands can be run directly with `uv run`. The application health endpoints are `/health/live` and `/health/ready`.
@@ -46,6 +47,8 @@ The app and worker use the same image and run as a non-root user. The Compose co
 Settings use the `VUZOL_` prefix. See [.env.example](.env.example). Invalid settings fail during process initialization with a concise error and non-zero exit status.
 
 Project, provider, topic, secret-reference, revision, and reload contracts are documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). A disabled example registry is available at [config/registries.example.toml](config/registries.example.toml).
+
+PostgreSQL schema, migration, transaction, and test operations are documented in [docs/STORAGE.md](docs/STORAGE.md).
 
 ## Documentation
 

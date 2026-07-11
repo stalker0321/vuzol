@@ -1,8 +1,8 @@
 # Current Project State
 
 Current phase: MVP implementation  
-Current step: Step 03 planning complete
-Status: ready for Step 03 implementation
+Current step: Step 03 complete
+Status: ready for Step 04
 
 ## Completed
 
@@ -27,16 +27,18 @@ Status: ready for Step 03 implementation
 - deterministic non-secret configuration revisions and security-sensitive snapshot compatibility checks implemented;
 - invalid registry files and missing required secrets verified to stop app and worker startup.
 - Step 03 prerequisite added: bounded database pool, statement/lock timeout, and migration advisory-lock settings.
+- PostgreSQL 16 Compose topology and isolated test database added;
+- complete 20-table MVP persistence schema and Alembic migration implemented;
+- async engine, scoped DSN resolution, unit of work, and explicit repositories implemented;
+- atomic task transitions/events, inbox/outbox, single-use approvals, and projection-safe deletion implemented;
+- step and outbox `SKIP LOCKED` leasing with fencing generations implemented;
+- clean/repeated/concurrent migration and real PostgreSQL concurrency tests verified.
 
 ## Next action
 
-Start Step 03:
+Start Step 04:
 
-`docs/implementation/steps/03_postgresql_persistence.md`
-
-Use the completed planning pass:
-
-`docs/implementation/plans/03_postgresql_persistence_plan.md`
+`docs/implementation/steps/04_telegram_forum_workspace.md`
 
 ## Open decisions
 

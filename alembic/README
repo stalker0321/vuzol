@@ -1,0 +1,3 @@
+Alembic migration environment for the canonical PostgreSQL schema.
+
+Run migrations explicitly with `make db-migrate`; app and worker processes do not migrate on startup.

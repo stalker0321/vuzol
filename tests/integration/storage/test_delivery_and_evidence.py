@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import func, select
 
 from vuzol.storage.errors import StorageError
-from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item
+from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, mark_outbox_ambiguous
 from vuzol.storage.models import (
     Approval,
     Artifact,
@@ -71,6 +71,31 @@ def test_outbox_delivery_uses_single_fenced_lease(postgres_dsn: str) -> None:
         assert len(tokens) == 1
         async with factory.begin() as session:
             await complete_outbox_item(session, tokens[0])
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_ambiguous_outbox_delivery_is_not_automatically_retried(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task, _, _ = await seed_task_run_step(factory)
+        async with UnitOfWork(factory) as uow:
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send",
+                entity_type="task",
+                entity_id=task.id,
+                idempotency_key="unknown-send",
+                payload={"text": "status"},
+            )
+        async with factory.begin() as session:
+            token = await claim_outbox_item(session, owner="delivery-a", lease_seconds=60)
+            assert token is not None
+            await mark_outbox_ambiguous(session, token)
+        async with factory.begin() as session:
+            assert await claim_outbox_item(session, owner="delivery-b", lease_seconds=60) is None
         await engine.dispose()
 
     asyncio.run(scenario())

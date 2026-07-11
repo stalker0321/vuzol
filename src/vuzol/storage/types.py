@@ -109,6 +109,19 @@ class ProcessStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class IntakeStatus(StrEnum):
+    RECEIVED = "received"
+    AWAITING_INTERPRETATION = "awaiting_interpretation"
+    NEEDS_CLARIFICATION = "needs_clarification"
+    REJECTED = "rejected"
+
+
+class ControlActionStatus(StrEnum):
+    QUEUED = "queued"
+    PROCESSED = "processed"
+    REJECTED = "rejected"
+
+
 def enum_type(enum: type[StrEnum], name: str) -> SqlEnum:
     return SqlEnum(
         enum,

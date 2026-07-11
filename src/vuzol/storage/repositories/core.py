@@ -75,6 +75,26 @@ class TaskRepository:
     async def record(self, task_id: uuid.UUID) -> TaskRecord:
         return task_record(await self.get(task_id))
 
+    async def active_in_topic(self, chat_id: int, thread_id: int) -> tuple[TaskRecord, ...]:
+        terminal = (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.ROLLED_BACK,
+        )
+        tasks = (
+            await self._session.scalars(
+                select(Task)
+                .where(
+                    Task.source_chat_id == chat_id,
+                    Task.source_thread_id == thread_id,
+                    Task.status.not_in(terminal),
+                )
+                .order_by(Task.created_at, Task.id)
+            )
+        ).all()
+        return tuple(task_record(task) for task in tasks)
+
 
 class RunRepository:
     def __init__(self, session: AsyncSession) -> None:

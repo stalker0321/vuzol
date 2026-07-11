@@ -1,4 +1,4 @@
-.PHONY: run-app run-worker test test-postgres lint format format-check type-check dependency-audit secret-scan security check db-up db-down db-migrate db-current
+.PHONY: run-app run-worker run-telegram test test-postgres lint format format-check type-check dependency-audit secret-scan security check db-up db-down db-migrate db-current
 
 UV ?= uv
 LOCAL_DATABASE_DSN ?= postgresql+psycopg://vuzol:vuzol-local-only@127.0.0.1:5432/vuzol# pragma: allowlist secret
@@ -9,6 +9,9 @@ run-app:
 
 run-worker:
 	$(UV) run vuzol-worker
+
+run-telegram:
+	$(UV) run vuzol-telegram
 
 test:
 	$(UV) run pytest

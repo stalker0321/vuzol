@@ -1,8 +1,8 @@
 # Current Project State
 
 Current phase: MVP implementation  
-Current step: Step 03 complete
-Status: ready for Step 04
+Current step: Step 04 complete
+Status: ready for Step 05
 
 ## Completed
 
@@ -33,18 +33,24 @@ Status: ready for Step 04
 - atomic task transitions/events, inbox/outbox, single-use approvals, and projection-safe deletion implemented;
 - step and outbox `SKIP LOCKED` leasing with fencing generations implemented;
 - clean/repeated/concurrent migration and real PostgreSQL concurrency tests verified.
+- authorized Telegram forum ingress with ID-based topic routing and transactional deduplication;
+- reply and single-active-task affinity with explicit ambiguity instead of recency guessing;
+- persisted attachment metadata and bounded pre-download safety policy;
+- idempotent callback actions that enqueue workflow controls without executing them inline;
+- reconstructable, escaped status cards with monotonic revisions and edit rate limiting;
+- `python-telegram-bot` 22 long-polling adapter behind provider-neutral DTOs and client protocol;
+- ambiguous Telegram sends quarantined from automatic retry pending reconciliation.
 
 ## Next action
 
-Start Step 04:
+Start Step 05:
 
-`docs/implementation/steps/04_telegram_forum_workspace.md`
+`docs/implementation/steps/05_voice_and_semantic_interpreter.md`
 
 ## Open decisions
 
 - first semantic-interpreter provider;
 - first transcription provider;
-- long polling versus webhook for the earliest local development loop.
 - initial numeric limits and targets: interpreter evaluation gates, task budgets, retention, shutdown deadline, RPO, and RTO.
 
 These choices must not delay repository initialization. They should remain replaceable configuration decisions.

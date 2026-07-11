@@ -114,7 +114,7 @@ async def claim_outbox_item(
     statement = (
         select(TransactionalOutbox)
         .where(
-            TransactionalOutbox.status.in_((DeliveryStatus.PENDING, DeliveryStatus.AMBIGUOUS)),
+            TransactionalOutbox.status == DeliveryStatus.PENDING,
             TransactionalOutbox.available_at <= func.now(),
         )
         .order_by(TransactionalOutbox.available_at, TransactionalOutbox.created_at)
@@ -153,6 +153,28 @@ async def complete_outbox_item(session: AsyncSession, token: OutboxLeaseToken) -
         .values(
             status=DeliveryStatus.DELIVERED,
             delivered_at=func.now(),
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+    )
+    result = cast(CursorResult[Any], await session.execute(statement))
+    if result.rowcount != 1:
+        raise LeaseLost(f"outbox lease lost: {token.item_id}")
+
+
+async def mark_outbox_ambiguous(session: AsyncSession, token: OutboxLeaseToken) -> None:
+    """Quarantine an unknown external outcome until explicit reconciliation."""
+
+    statement = (
+        update(TransactionalOutbox)
+        .where(
+            TransactionalOutbox.id == token.item_id,
+            TransactionalOutbox.lease_owner == token.owner,
+            TransactionalOutbox.lease_generation == token.generation,
+            TransactionalOutbox.status == DeliveryStatus.LEASED,
+        )
+        .values(
+            status=DeliveryStatus.AMBIGUOUS,
             lease_owner=None,
             lease_expires_at=None,
         )

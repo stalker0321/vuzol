@@ -52,6 +52,23 @@ class DatabaseSettings(BaseModel):
     migration_advisory_lock_key: int = 8_946_527_031
 
 
+class TelegramSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_text_chars: int = Field(default=16_000, ge=1, le=100_000)
+    max_attachments: int = Field(default=10, ge=0, le=20)
+    max_attachment_bytes: int = Field(default=25_000_000, ge=1)
+    edit_min_interval_seconds: float = Field(default=2.0, ge=0.1, le=60)
+    allowed_media_types: tuple[str, ...] = (
+        "audio/ogg",
+        "audio/mpeg",
+        "image/jpeg",
+        "image/png",
+        "text/plain",
+        "application/pdf",
+    )
+
+
 class Settings(BaseSettings):
     """Process settings loaded at the composition boundary."""
 
@@ -80,6 +97,7 @@ class Settings(BaseSettings):
     concurrency: ConcurrencyLimits = ConcurrencyLimits()
     database: DatabaseSettings = DatabaseSettings()
     retention: RetentionDefaults = RetentionDefaults()
+    telegram: TelegramSettings = TelegramSettings()
     limits: HardLimits = HardLimits()
     redaction_patterns: tuple[str, ...] = ()
 

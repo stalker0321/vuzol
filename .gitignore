@@ -14,3 +14,8 @@ dist/
 build/
 *.log
 .DS_Store
+
+# Local agent output; stable product documentation remains tracked.
+docs/internal-handoffs/
+docs/internal-specs/
+docs/run-reports/

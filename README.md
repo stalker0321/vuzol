@@ -1,72 +1,83 @@
 # Vuzol
 
-Vuzol is a personal task execution system controlled primarily through a private Telegram forum group. The MVP is a modular Python application with worker processes and PostgreSQL.
+Vuzol is a personal task-intake system controlled through a private Telegram forum group. It uses
+PostgreSQL as its source of truth and keeps Telegram messages as reconstructable projections of
+durable state.
 
-The architecture and implementation sequence are defined in [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) and [docs/implementation/00_MVP_PLAN.md](docs/implementation/00_MVP_PLAN.md).
+## Current flow
 
-## Requirements
+The implemented flow is:
+
+```text
+Telegram text or voice message
+→ authorized, deduplicated durable intake
+→ persisted Task and Telegram status card
+→ private attachment storage and transcription when needed
+→ semantic interpretation
+→ validated, provider-neutral TaskDraft
+```
+
+Ingress, Telegram delivery, and interpretation run as separate processes. Their inbox/outbox and
+lease records make completed delivery, transcription, and interpretation safe across process
+restarts.
+
+The current MVP foundation does **not** execute tasks. Workflow management, executor routing,
+Codex integration, Git worktrees, sandbox execution, automated validation, and deployment are not
+implemented or advertised as available behavior.
+
+## Requirements and setup
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
-- Docker with Compose for container checks
-
-## Setup
+- Docker with Compose
 
 ```bash
 uv sync --frozen
 cp .env.example .env
+make db-up
+make db-migrate
 ```
 
-## Commands
+Settings use the `VUZOL_` prefix. Registry files contain non-secret project, provider-profile, and
+Telegram-topic configuration; credentials are supplied through scoped environment or file
+references. See [Configuration](docs/CONFIGURATION.md).
+
+## Runtime commands
 
 ```bash
-make run-app       # HTTP application on 127.0.0.1:8000
-make run-worker    # foundation worker process
-vuzol-telegram     # Telegram long-polling ingress
-vuzol-telegram-delivery # Telegram outbox delivery runtime
-vuzol-interpreter  # Step 05 voice/transcription and semantic runtime
-make test          # pytest suite
-make lint          # Ruff lint
-make format-check  # Ruff formatting check
-make type-check    # strict mypy
-make security      # dependency and secret checks
-make check         # all required quality gates
-make test-postgres # real PostgreSQL migration and concurrency tests
+make run-app                  # HTTP health application on 127.0.0.1:8000
+make run-worker               # foundation worker process
+vuzol-telegram                # Telegram long-polling ingress
+vuzol-telegram-delivery       # Telegram outbox delivery
+vuzol-interpreter             # transcription and semantic interpretation
+make check                    # lint, format, types, tests, and security checks
+make test-postgres            # PostgreSQL migration and concurrency tests
 ```
 
-Equivalent commands can be run directly with `uv run`. The application health endpoints are `/health/live` and `/health/ready`.
+The health endpoints are `/health/live` and `/health/ready`.
 
-## Containers
+For containers, the base stack is available through `docker compose up`. Telegram and
+interpretation are optional Compose profiles:
 
 ```bash
-docker compose build
-docker compose up
+docker compose --profile telegram --profile interpretation up
 ```
 
-The app and worker use the same image and run as a non-root user. The Compose configuration does not mount the Docker socket or use privileged mode.
-
-Telegram is an optional profile. Configure the registry, allowlists, database DSN reference, and
-one shared bot token as described in [.env.example](.env.example), run migrations, then start both
-separate Telegram processes with:
-
-```bash
-docker compose --profile telegram up
-```
-
-Ingress receives updates; delivery exclusively consumes normal `telegram` outbox operations.
-The base stack does not require a Telegram token.
-
-## Configuration
-
-Settings use the `VUZOL_` prefix. See [.env.example](.env.example). Invalid settings fail during process initialization with a concise error and non-zero exit status.
-
-Project, provider, topic, secret-reference, revision, and reload contracts are documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). A disabled example registry is available at [config/registries.example.toml](config/registries.example.toml).
-
-PostgreSQL schema, migration, transaction, and test operations are documented in [docs/STORAGE.md](docs/STORAGE.md).
-
-Voice transcription, strict TaskDraft interpretation, provider configuration, failure behavior,
-and evaluation safety gates are documented in [docs/INTERPRETATION.md](docs/INTERPRETATION.md).
+Configure the registry, allowlists, database DSN reference, one shared Telegram bot token, and the
+selected interpretation profiles before enabling them. The default image is non-root and the
+Compose services do not mount the Docker socket or use privileged mode.
 
 ## Documentation
 
-The documentation committed in this repository is canonical. Architecture changes require the ADR and documentation workflow described in [docs/ARCHITECTURE_INVARIANTS.md](docs/ARCHITECTURE_INVARIANTS.md).
+- [Configuration](docs/CONFIGURATION.md)
+- [PostgreSQL storage](docs/STORAGE.md)
+- [Telegram workspace](docs/TELEGRAM.md)
+- [Voice and semantic interpretation](docs/INTERPRETATION.md)
+- [Architecture invariants](docs/ARCHITECTURE_INVARIANTS.md)
+- [Accepted architecture decisions](docs/decisions/)
+- [Changelog](docs/CHANGELOG.md)
+- [Contributing and documentation policy](CONTRIBUTING.md)
+
+Repository documentation covers the public product, operation, stable architecture, and accepted
+decisions. Internal implementation plans and agent handoffs are maintained outside the repository
+and are never required by the application, build, installation, or tests.

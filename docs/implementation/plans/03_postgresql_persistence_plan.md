@@ -2,9 +2,7 @@
 
 ## Status
 
-Planning pass complete. No Step 03 runtime code or migration has been applied yet.
-
-Typed database pool, timeout, and migration-lock settings are implemented as the first prerequisite. Storage runtime code and migrations remain not started.
+Implementation and review complete. The initial migration, async storage boundary, repositories, atomic transitions, inbox/outbox, fenced leases, and real PostgreSQL tests are implemented.
 
 ## Technology decision
 

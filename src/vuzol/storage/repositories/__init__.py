@@ -1,0 +1,28 @@
+"""Explicit persistence repository interfaces."""
+
+from vuzol.storage.repositories.core import (
+    EventRepository,
+    RunRepository,
+    StepRepository,
+    TaskRepository,
+)
+from vuzol.storage.repositories.delivery import (
+    InboxRepository,
+    OutboxRepository,
+    TelegramMessageLinkRepository,
+    TopicMappingRepository,
+)
+from vuzol.storage.repositories.evidence import ApprovalRepository, ModelRepository
+
+__all__ = [
+    "ApprovalRepository",
+    "EventRepository",
+    "InboxRepository",
+    "ModelRepository",
+    "OutboxRepository",
+    "RunRepository",
+    "StepRepository",
+    "TaskRepository",
+    "TelegramMessageLinkRepository",
+    "TopicMappingRepository",
+]

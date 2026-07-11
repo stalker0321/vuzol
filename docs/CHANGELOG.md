@@ -12,5 +12,6 @@ This file records completed implementation changes, not plans or speculative ide
 - completed Step 01 repository foundation with Python 3.12, `uv`, typed settings, app and worker entry points, JSON logging, health endpoints, tests, security gates, and non-root Docker packaging.
 - completed Step 02 configuration and registries with typed hard limits, TOML project/profile/topic models, immutable registries, scoped secret resolution, stable revisions, reload compatibility checks, and startup validation.
 - added typed bounded PostgreSQL pool, timeout, and migration-lock settings as a Step 03 prerequisite.
+- completed Step 03 with the canonical PostgreSQL schema, Alembic migrations, async repositories and unit of work, atomic audit transitions, inbox/outbox, approval consumption, fenced leasing, and real concurrency tests.
 
 - Initial architecture and MVP implementation documentation created.

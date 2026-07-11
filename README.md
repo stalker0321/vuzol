@@ -24,6 +24,7 @@ make run-app       # HTTP application on 127.0.0.1:8000
 make run-worker    # foundation worker process
 vuzol-telegram     # Telegram long-polling ingress
 vuzol-telegram-delivery # Telegram outbox delivery runtime
+vuzol-interpreter  # Step 05 voice/transcription and semantic runtime
 make test          # pytest suite
 make lint          # Ruff lint
 make format-check  # Ruff formatting check
@@ -62,6 +63,9 @@ Settings use the `VUZOL_` prefix. See [.env.example](.env.example). Invalid sett
 Project, provider, topic, secret-reference, revision, and reload contracts are documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). A disabled example registry is available at [config/registries.example.toml](config/registries.example.toml).
 
 PostgreSQL schema, migration, transaction, and test operations are documented in [docs/STORAGE.md](docs/STORAGE.md).
+
+Voice transcription, strict TaskDraft interpretation, provider configuration, failure behavior,
+and evaluation safety gates are documented in [docs/INTERPRETATION.md](docs/INTERPRETATION.md).
 
 ## Documentation
 

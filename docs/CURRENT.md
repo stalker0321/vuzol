@@ -1,8 +1,8 @@
 # Current Project State
 
 Current phase: MVP implementation  
-Current step: Step 04.1 complete
-Status: ready for Step 05
+Current step: Step 05 complete
+Status: ready for Step 06
 
 ## Completed
 
@@ -45,17 +45,23 @@ Status: ready for Step 05
   link persistence;
 - bounded transient retry, dead-letter, and ambiguous-outcome handling;
 - optional Compose profile for separate ingress and delivery processes sharing one bot token.
+- strict provider-neutral TaskDraft schema and deterministic policy tightening;
+- durable Telegram attachment download, private artifact retention, and replaceable transcription;
+- fenced semantic-interpreter runtime with schema repair, fallback, bounded retry, and fail-closed
+  behavior;
+- persisted raw transcripts and immutable schema/prompt-versioned interpretation records;
+- 45-fixture versioned evaluation harness with zero-tolerance safety gates.
 
 ## Next action
 
-Start Step 05:
+Start Step 06:
 
-`docs/implementation/steps/05_voice_and_semantic_interpreter.md`
+`docs/implementation/steps/06_task_manager_and_workflow.md`
 
 ## Open decisions
 
-- first semantic-interpreter provider;
-- first transcription provider;
+- production semantic-interpreter profile and measured evaluation report;
+- production transcription profile;
 - initial numeric limits and targets: interpreter evaluation gates, task budgets, retention, shutdown deadline, RPO, and RTO.
 
 These choices must not delay repository initialization. They should remain replaceable configuration decisions.

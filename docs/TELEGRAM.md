@@ -40,8 +40,9 @@ topic. Multiple active tasks produce a persisted clarification state. Step 05 wi
 interpretation and explicit references.
 
 Attachment metadata is validated before download. Counts, declared sizes, media types, unsafe
-filenames, and archives are bounded or rejected. Durable quarantine download and content scanning
-are intentionally owned by Step 05 because voice/transcription introduces the first consumer.
+filenames, and archives are bounded or rejected. The Step 05 interpreter runtime owns durable
+`telegram_file` download, private artifact persistence, and voice transcription; Telegram delivery
+never claims those records.
 
 ## Controls and projections
 

@@ -50,7 +50,7 @@ def test_authorized_project_intake_is_atomic_and_duplicate_safe(
             assert await session.scalar(select(func.count()).select_from(Task)) == 1
             assert await session.scalar(select(func.count()).select_from(ExternalInbox)) == 1
             assert await session.scalar(select(func.count()).select_from(TopicMapping)) == 1
-            assert await session.scalar(select(func.count()).select_from(TransactionalOutbox)) == 1
+            assert await session.scalar(select(func.count()).select_from(TransactionalOutbox)) == 2
         await engine.dispose()
 
     asyncio.run(scenario())

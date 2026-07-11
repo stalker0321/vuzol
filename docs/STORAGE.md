@@ -66,3 +66,5 @@ The initial migration supports lossless downgrade for development verification. 
 - inbox duplicates produce one record;
 - projection deletion preserves canonical tasks;
 - artifacts and usage remain traceable.
+- Step 05 persists original intake, private attachment references, raw transcripts, immutable
+  schema-versioned interpretations, and the current TaskDraft projection without replacing input.

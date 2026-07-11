@@ -141,6 +141,18 @@ class TelegramIngressService:
                     "candidate_task_ids": [str(candidate) for candidate in candidates],
                 },
             )
+            has_voice = any(
+                attachment.kind.value in {"voice", "audio"} for attachment in update.attachments
+            )
+            if not has_voice:
+                await uow.outbox.enqueue(
+                    destination="interpretation",
+                    operation_type="interpret_intake",
+                    entity_type="telegram_intake",
+                    entity_id=intake_id,
+                    idempotency_key=f"interpretation:intake:{intake_id}",
+                    payload={},
+                )
             for attachment in update.attachments:
                 await uow.outbox.enqueue(
                     destination="telegram_file",
@@ -154,6 +166,7 @@ class TelegramIngressService:
                         "declared_size": attachment.file_size,
                         "media_type": attachment.media_type,
                         "filename": attachment.filename,
+                        "kind": attachment.kind.value,
                     },
                 )
 

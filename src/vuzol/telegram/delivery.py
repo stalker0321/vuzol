@@ -21,6 +21,7 @@ from vuzol.storage.leasing import (
     retry_outbox_item,
 )
 from vuzol.storage.models import (
+    Interpretation,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
@@ -75,6 +76,28 @@ async def prepare_delivery(session: AsyncSession, item: TransactionalOutbox) -> 
     if intake is None:
         raise PermanentDeliveryError("telegram_intake_missing")
     role = item.payload.get("role")
+    if role == "semantic_clarification":
+        raw_id = item.payload.get("interpretation_id")
+        try:
+            interpretation_id = uuid.UUID(str(raw_id))
+        except ValueError as error:
+            raise PermanentDeliveryError("invalid_interpretation_id") from error
+        interpretation = await session.get(Interpretation, interpretation_id)
+        if interpretation is None or interpretation.task_id != intake.task_id:
+            raise PermanentDeliveryError("interpretation_missing")
+        question = interpretation.task_draft.get("clarification_question")
+        title = interpretation.task_draft.get("normalized_title")
+        if not isinstance(question, str) or not question:
+            raise PermanentDeliveryError("clarification_question_missing")
+        html = f"<b>{telegram_html(title or 'Clarification required')}</b>\n"
+        html += telegram_html(question)
+        return PreparedDelivery(
+            DeliveryAction.SEND_CLARIFICATION,
+            chat_id=intake.chat_id,
+            thread_id=intake.message_thread_id,
+            html=html,
+            task_id=intake.task_id,
+        )
     if role == "clarification":
         try:
             candidate_ids = [uuid.UUID(value) for value in intake.ambiguous_task_ids]
@@ -239,6 +262,7 @@ class TelegramDeliveryService:
                         chat_id=prepared.chat_id,
                         message_thread_id=prepared.thread_id,
                         message_id=confirmed_message_id,
+                        task_id=prepared.task_id,
                         message_role="clarification",
                     )
                 )

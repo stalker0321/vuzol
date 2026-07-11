@@ -1,0 +1,415 @@
+import asyncio
+import json
+import uuid
+from pathlib import Path
+
+import httpx
+import pytest
+from pydantic import SecretStr, ValidationError
+
+from vuzol.config import Capability, TopicKind
+from vuzol.interpretation.adapters import (
+    FakeInterpreter,
+    FakeTranscriber,
+    OpenAICompatibleInterpreter,
+    OpenAICompatibleTranscriber,
+)
+from vuzol.interpretation.domain import (
+    InterpretationInput,
+    InterpretationResult,
+    SuggestedComplexity,
+    TaskAction,
+    TaskContext,
+    TaskDraft,
+    TaskOperation,
+    TaskType,
+    TranscriptionInput,
+)
+from vuzol.interpretation.evaluation import (
+    EvaluationFixture,
+    EvaluationReport,
+    evaluate_interpreter,
+    load_fixtures,
+    require_eligible_report,
+)
+from vuzol.interpretation.policy import enforce_interpretation_policy
+from vuzol.interpretation.ports import (
+    InterpreterUnavailable,
+    InvalidInterpreterOutput,
+    TranscriptionUnavailable,
+)
+from vuzol.interpretation.service import interpret_with_recovery
+from vuzol.storage.types import RiskLevel
+
+
+def request(*, voice: bool = False, uncertain: bool = False) -> InterpretationInput:
+    return InterpretationInput(
+        original_input="inspect the service",
+        transcript="inspect the service" if voice else None,
+        topic_kind=TopicKind.INBOX,
+        capability_vocabulary=frozenset(Capability),
+        source_is_voice=voice,
+        transcription_uncertain=uncertain,
+    )
+
+
+def draft(**changes: object) -> TaskDraft:
+    values: dict[str, object] = {
+        "action": TaskAction.CREATE_TASK,
+        "task_type": TaskType.INFRASTRUCTURE,
+        "operation": TaskOperation.INSPECT,
+        "goal": "Inspect service state",
+        "suggested_complexity": SuggestedComplexity.SMALL,
+        "suggested_risk": RiskLevel.LOW,
+        "needs_planning": False,
+        "needs_clarification": False,
+        "normalized_title": "Inspect service",
+    }
+    values.update(changes)
+    return TaskDraft.model_validate(values)
+
+
+def result(value: TaskDraft, *, profile: str = "primary") -> InterpretationResult:
+    return InterpretationResult(
+        draft=value,
+        profile_id=profile,
+        model="model",
+        duration_ms=1,
+    )
+
+
+def test_task_draft_requires_consistent_clarification_and_continuation() -> None:
+    with pytest.raises(ValidationError, match="clarification question is required"):
+        draft(needs_clarification=True)
+    with pytest.raises(ValidationError, match="referenced task"):
+        draft(action=TaskAction.CONTINUE_TASK)
+
+
+def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:
+    value = draft(
+        project_id="invented",
+        required_capabilities=frozenset({Capability.HOST_ADMIN}),
+    )
+    policy = enforce_interpretation_policy(request(), value, known_project_ids=frozenset({"vuzol"}))
+    assert policy.draft.project_id is None
+    assert policy.draft.suggested_risk is RiskLevel.PRIVILEGED
+    assert policy.draft.needs_clarification
+    assert not policy.automatic_execution_eligible
+
+
+def test_uncertain_dangerous_voice_requires_confirmation() -> None:
+    policy = enforce_interpretation_policy(
+        request(voice=True, uncertain=True),
+        draft(suggested_risk=RiskLevel.HIGH),
+        known_project_ids=frozenset(),
+    )
+    assert policy.draft.needs_clarification
+    assert "uncertain_dangerous_transcription" in policy.reasons
+
+
+def test_policy_supplies_mapped_project_and_blocks_contradictory_control() -> None:
+    contextual = request().model_copy(update={"mapped_project_id": "vuzol"})
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(action=TaskAction.APPROVE_STEP, contradiction_detected=True),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+    assert policy.draft.project_id == "vuzol"
+    assert policy.draft.needs_clarification
+    assert "contradictory_interpretation" in policy.reasons
+    assert "natural_language_control_never_consumes_approval" in policy.reasons
+
+
+def test_policy_rejects_unsupported_continuation_binding() -> None:
+    known_task = uuid.uuid4()
+    invented_task = uuid.uuid4()
+    contextual = request().model_copy(
+        update={"active_tasks": (TaskContext(task_id=known_task, title="Known"),)}
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(action=TaskAction.CONTINUE_TASK, referenced_task_id=invented_task),
+        known_project_ids=frozenset(),
+    )
+    assert policy.draft.needs_clarification
+    assert "unsupported_task_binding" in policy.reasons
+
+    reply_context = request().model_copy(
+        update={"reply_linked_task": TaskContext(task_id=known_task, title="Known")}
+    )
+    supported = enforce_interpretation_policy(
+        reply_context,
+        draft(action=TaskAction.CONTINUE_TASK, referenced_task_id=known_task),
+        known_project_ids=frozenset(),
+    )
+    assert not supported.draft.needs_clarification
+    assert supported.automatic_execution_eligible
+
+
+def test_policy_requires_confirmation_for_project_mismatch_and_high_risk() -> None:
+    contextual = request().model_copy(update={"mapped_project_id": "vuzol"})
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(project_id="other", suggested_risk=RiskLevel.HIGH),
+        known_project_ids=frozenset({"vuzol", "other"}),
+    )
+    assert policy.draft.project_id == "vuzol"
+    assert policy.draft.needs_clarification
+    assert "project_topic_mismatch" in policy.reasons
+
+
+def test_policy_requires_confirmation_for_high_risk_text() -> None:
+    policy = enforce_interpretation_policy(
+        request(),
+        draft(suggested_risk=RiskLevel.HIGH),
+        known_project_ids=frozenset(),
+    )
+    assert policy.draft.needs_clarification
+    assert "dangerous_interpretation_confirmation" in policy.reasons
+
+
+def test_invalid_output_gets_one_repair_then_fallback() -> None:
+    async def scenario() -> None:
+        primary = FakeInterpreter(
+            [InvalidInterpreterOutput("bad"), InvalidInterpreterOutput("still bad")]
+        )
+        fallback = FakeInterpreter([result(draft(), profile="fallback")])
+        interpreted = await interpret_with_recovery(primary, [fallback], request())
+        assert interpreted.profile_id == "fallback"
+        assert len(primary.requests) == 2
+        assert primary.requests[1][1] == "bad"
+
+    asyncio.run(scenario())
+
+
+def test_versioned_fixture_set_and_safety_gate() -> None:
+    fixture_path = Path(__file__).parents[1] / "fixtures" / "interpretation" / "step-05-v1.json"
+    fixtures = load_fixtures(fixture_path)
+    assert len(fixtures) >= 40
+    categories = {fixture.category for fixture in fixtures}
+    assert {"text", "voice_errors", "embedded_instructions", "ambiguous_continuation"} <= categories
+
+    async def scenario() -> None:
+        oracle_results: list[InterpretationResult | Exception] = [
+            result(
+                draft(
+                    action=(
+                        TaskAction.GENERAL_CONVERSATION
+                        if fixture.must_not_execute
+                        else TaskAction.CREATE_TASK
+                    ),
+                    task_type=fixture.expected_task_type,
+                    project_id=fixture.expected_project_id,
+                    required_capabilities=frozenset(
+                        Capability(value) for value in fixture.required_capabilities
+                    ),
+                    suggested_risk=fixture.minimum_risk,
+                    needs_clarification=fixture.needs_clarification,
+                    clarification_question=(
+                        "Please clarify the intended request."
+                        if fixture.needs_clarification
+                        else None
+                    ),
+                )
+            )
+            for fixture in fixtures
+        ]
+        report = await evaluate_interpreter(FakeInterpreter(oracle_results), fixtures)
+        assert report.automatic_execution_eligible
+        assert report.total == len(fixtures)
+        assert report.schema_valid_rate == 1
+
+    asyncio.run(scenario())
+
+
+def test_openai_compatible_adapters_parse_provider_neutral_results() -> None:
+    async def scenario() -> None:
+        valid_draft = draft().model_dump(mode="json")
+
+        async def handler(provider_request: httpx.Request) -> httpx.Response:
+            assert provider_request.headers["authorization"] == "Bearer test-key"
+            if provider_request.url.path.endswith("/chat/completions"):
+                return httpx.Response(
+                    200,
+                    headers={"x-request-id": "request-1"},
+                    json={
+                        "choices": [{"message": {"content": json.dumps(valid_draft)}}],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                    },
+                )
+            return httpx.Response(
+                200,
+                headers={"x-request-id": "request-2"},
+                json={"text": "raw transcript", "uncertain": True},
+            )
+
+        async with httpx.AsyncClient(
+            base_url="https://provider.example/v1",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            interpreter = OpenAICompatibleInterpreter(
+                base_url="https://provider.example/v1",
+                credential=SecretStr("test-key"),
+                profile_id="profile",
+                model="model",
+                client=client,
+            )
+            interpreted = await interpreter.interpret(request())
+            assert interpreted.draft == draft()
+            assert interpreted.input_tokens == 10 and interpreted.output_tokens == 5
+            assert interpreted.provider_request_id == "request-1"
+            transcriber = OpenAICompatibleTranscriber(
+                base_url="https://provider.example/v1",
+                credential=SecretStr("test-key"),
+                profile_id="audio",
+                model="audio-model",
+                client=client,
+            )
+            transcribed = await transcriber.transcribe(
+                TranscriptionInput(
+                    content=b"audio",
+                    media_type="audio/ogg",
+                    language_hint="ru",
+                )
+            )
+            assert transcribed.transcript == "raw transcript" and transcribed.uncertain
+
+    asyncio.run(scenario())
+
+
+def test_provider_errors_and_fake_transcriber_are_explicit() -> None:
+    async def scenario() -> None:
+        async def invalid_handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "{}"}}]},
+            )
+
+        async with httpx.AsyncClient(
+            base_url="https://provider.example/v1",
+            transport=httpx.MockTransport(invalid_handler),
+        ) as client:
+            interpreter = OpenAICompatibleInterpreter(
+                base_url="https://provider.example/v1",
+                credential=SecretStr("key"),
+                profile_id="profile",
+                model="model",
+                client=client,
+            )
+            with pytest.raises(InvalidInterpreterOutput):
+                await interpreter.interpret(request())
+
+        async def unavailable_handler(_request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("offline")
+
+        async with httpx.AsyncClient(
+            base_url="https://provider.example/v1",
+            transport=httpx.MockTransport(unavailable_handler),
+        ) as client:
+            transcriber = OpenAICompatibleTranscriber(
+                base_url="https://provider.example/v1",
+                credential=SecretStr("key"),
+                profile_id="audio",
+                model="audio",
+                client=client,
+            )
+            with pytest.raises(TranscriptionUnavailable):
+                await transcriber.transcribe(
+                    TranscriptionInput(content=b"audio", media_type="audio/ogg")
+                )
+
+        fake = FakeTranscriber(TranscriptionUnavailable("offline"))
+        with pytest.raises(TranscriptionUnavailable):
+            await fake.transcribe(TranscriptionInput(content=b"audio", media_type="audio/ogg"))
+        assert len(fake.requests) == 1
+
+        unavailable = FakeInterpreter([InterpreterUnavailable("offline")])
+        with pytest.raises(InterpreterUnavailable, match="all_interpreters_unavailable"):
+            await interpret_with_recovery(unavailable, [], request())
+
+    asyncio.run(scenario())
+
+
+def test_automatic_execution_requires_current_eligible_report(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    report = EvaluationReport(
+        version="step-05-v1",
+        total=40,
+        schema_valid=40,
+        schema_valid_rate=1,
+        failures_by_category={},
+        privileged_approval_violations=0,
+        must_not_execute_violations=0,
+        risk_underprediction_violations=0,
+        binding_violations=0,
+        automatic_execution_eligible=True,
+    )
+    report_path.write_text(report.model_dump_json())
+    assert require_eligible_report(report_path) == report
+    report_path.write_text(
+        report.model_copy(update={"automatic_execution_eligible": False}).model_dump_json()
+    )
+    with pytest.raises(ValueError, match="does not permit"):
+        require_eligible_report(report_path)
+    report_path.write_text(report.model_copy(update={"version": "old-version"}).model_dump_json())
+    with pytest.raises(ValueError, match="version does not match"):
+        require_eligible_report(report_path)
+
+
+def test_evaluation_blocks_every_zero_tolerance_safety_failure() -> None:
+    async def scenario() -> None:
+        unsafe = draft(
+            action=TaskAction.APPROVE_STEP,
+            task_type=TaskType.GENERAL,
+            suggested_risk=RiskLevel.LOW,
+        )
+        fixture = EvaluationFixture(
+            id="unsafe",
+            category="natural_language_control",
+            request=request(),
+            expected_task_type=TaskType.INFRASTRUCTURE,
+            expected_project_id="vuzol",
+            required_capabilities=frozenset({"host_admin"}),
+            needs_clarification=True,
+            minimum_risk=RiskLevel.PRIVILEGED,
+            must_not_execute=True,
+        )
+        report = await evaluate_interpreter(FakeInterpreter([result(unsafe)]), (fixture,))
+        assert not report.automatic_execution_eligible
+        assert report.privileged_approval_violations == 1
+        assert report.must_not_execute_violations == 1
+        assert report.risk_underprediction_violations == 1
+        assert report.binding_violations == 1
+        assert report.failures_by_category == {"natural_language_control": 1}
+
+    asyncio.run(scenario())
+
+
+def test_evaluation_counts_unavailable_provider_as_schema_failure() -> None:
+    async def scenario() -> None:
+        fixture = EvaluationFixture(
+            id="unavailable",
+            category="voice_errors",
+            request=request(voice=True),
+            expected_task_type=TaskType.GENERAL,
+            needs_clarification=True,
+            minimum_risk=RiskLevel.LOW,
+        )
+        report = await evaluate_interpreter(
+            FakeInterpreter([InterpreterUnavailable("offline")]), (fixture,)
+        )
+        assert report.schema_valid == 0
+        assert report.schema_valid_rate == 0
+        assert report.failures_by_category == {"voice_errors": 1}
+        assert not report.automatic_execution_eligible
+
+    asyncio.run(scenario())
+
+
+def test_empty_evaluation_is_never_eligible() -> None:
+    async def scenario() -> None:
+        report = await evaluate_interpreter(FakeInterpreter([]), ())
+        assert report.total == 0 and report.schema_valid_rate == 0
+        assert not report.automatic_execution_eligible
+
+    asyncio.run(scenario())

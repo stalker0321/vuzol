@@ -1,0 +1,98 @@
+"""Deterministic safety checks that can only tighten interpreter suggestions."""
+
+from dataclasses import dataclass
+
+from vuzol.config import Capability
+from vuzol.interpretation.domain import InterpretationInput, TaskAction, TaskDraft
+from vuzol.storage.types import RiskLevel
+
+_RISK_ORDER = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+    RiskLevel.PRIVILEGED: 3,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyResult:
+    draft: TaskDraft
+    automatic_execution_eligible: bool
+    reasons: tuple[str, ...]
+
+
+def enforce_interpretation_policy(
+    request: InterpretationInput,
+    draft: TaskDraft,
+    *,
+    known_project_ids: frozenset[str],
+) -> PolicyResult:
+    reasons: list[str] = []
+    updates: dict[str, object] = {}
+    risk = draft.suggested_risk
+    if draft.project_id is not None and draft.project_id not in known_project_ids:
+        updates.update(
+            project_id=None,
+            needs_clarification=True,
+            clarification_question="Which configured project should this request use?",
+        )
+        reasons.append("unknown_project")
+    if request.mapped_project_id is not None:
+        if draft.project_id is None:
+            updates["project_id"] = request.mapped_project_id
+        elif draft.project_id != request.mapped_project_id:
+            updates.update(
+                project_id=request.mapped_project_id,
+                needs_clarification=True,
+                clarification_question=(
+                    "The requested project differs from this topic. Which project is intended?"
+                ),
+            )
+            reasons.append("project_topic_mismatch")
+    privileged_capabilities = {Capability.HOST_ADMIN, Capability.SECRETS}
+    if draft.required_capabilities & privileged_capabilities and _RISK_ORDER[risk] < 3:
+        risk = RiskLevel.PRIVILEGED
+        updates["suggested_risk"] = risk
+        reasons.append("privileged_capability_risk_raised")
+    if draft.contradiction_detected:
+        updates.update(
+            needs_clarification=True,
+            clarification_question=(
+                "The original request conflicts with its interpretation. Which intent is correct?"
+            ),
+        )
+        reasons.append("contradictory_interpretation")
+    if request.source_is_voice and request.transcription_uncertain and _RISK_ORDER[risk] >= 2:
+        updates.update(
+            needs_clarification=True,
+            clarification_question=(
+                "Please confirm the potentially risky action transcribed from voice."
+            ),
+        )
+        reasons.append("uncertain_dangerous_transcription")
+    needs_clarification = bool(updates.get("needs_clarification", draft.needs_clarification))
+    if _RISK_ORDER[risk] >= 2 and not needs_clarification:
+        updates.update(
+            needs_clarification=True,
+            clarification_question="Please confirm this high-risk interpretation before execution.",
+        )
+        reasons.append("dangerous_interpretation_confirmation")
+    if draft.action is TaskAction.CONTINUE_TASK and draft.referenced_task_id is not None:
+        allowed_tasks = {task.task_id for task in request.active_tasks}
+        if request.reply_linked_task is not None:
+            allowed_tasks.add(request.reply_linked_task.task_id)
+        if draft.referenced_task_id not in allowed_tasks:
+            updates.update(
+                needs_clarification=True,
+                clarification_question="Which active task should this continue?",
+            )
+            reasons.append("unsupported_task_binding")
+    if draft.action in {TaskAction.APPROVE_STEP, TaskAction.REJECT_STEP}:
+        reasons.append("natural_language_control_never_consumes_approval")
+    tightened = draft.model_copy(update=updates)
+    eligible = not tightened.needs_clarification and tightened.action not in {
+        TaskAction.APPROVE_STEP,
+        TaskAction.REJECT_STEP,
+        TaskAction.GENERAL_CONVERSATION,
+    }
+    return PolicyResult(tightened, eligible, tuple(reasons))

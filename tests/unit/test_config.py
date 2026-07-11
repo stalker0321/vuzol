@@ -1,7 +1,7 @@
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
-from vuzol.config import Settings
+from vuzol.config import InterpretationSettings, Settings
 
 
 def test_settings_accept_valid_values() -> None:
@@ -31,3 +31,11 @@ def test_nested_settings_load_from_environment(monkeypatch: MonkeyPatch) -> None
     assert settings.concurrency.heavy == 2
     assert settings.limits.provider_attempts == 5
     assert settings.database.pool_size == 7
+
+
+def test_automatic_interpretation_requires_evaluation_report() -> None:
+    with raises(ValidationError, match="requires an evaluation report"):
+        InterpretationSettings(automatic_execution_enabled=True)
+
+    with raises(ValidationError, match="lease must exceed provider timeouts"):
+        InterpretationSettings(lease_seconds=30, provider_timeout_seconds=30)

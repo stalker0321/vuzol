@@ -80,6 +80,35 @@ class TelegramSettings(BaseModel):
         return self
 
 
+class InterpretationSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    fallback_profile_ids: tuple[str, ...] = ()
+    transcription_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=60)
+    lease_seconds: int = Field(default=300, ge=10, le=3_600)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    retry_min_seconds: float = Field(default=2.0, ge=0.1, le=300)
+    retry_max_seconds: float = Field(default=120.0, ge=0.1, le=3_600)
+    provider_timeout_seconds: float = Field(default=30, ge=1, le=300)
+    transcription_timeout_seconds: float = Field(default=120, ge=1, le=600)
+    language_hint: str | None = Field(default="ru", max_length=20)
+    automatic_execution_enabled: bool = False
+    evaluation_report_file: Path | None = None
+
+    @model_validator(mode="after")
+    def validate_retry_bounds(self) -> "InterpretationSettings":
+        if self.retry_min_seconds > self.retry_max_seconds:
+            raise ValueError("interpretation retry minimum must not exceed maximum")
+        if self.automatic_execution_enabled and self.evaluation_report_file is None:
+            raise ValueError("automatic interpretation execution requires an evaluation report")
+        longest_call = max(self.provider_timeout_seconds, self.transcription_timeout_seconds)
+        if self.lease_seconds <= longest_call + 5:
+            raise ValueError("interpretation lease must exceed provider timeouts")
+        return self
+
+
 class Settings(BaseSettings):
     """Process settings loaded at the composition boundary."""
 
@@ -109,6 +138,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = DatabaseSettings()
     retention: RetentionDefaults = RetentionDefaults()
     telegram: TelegramSettings = TelegramSettings()
+    interpretation: InterpretationSettings = InterpretationSettings()
     limits: HardLimits = HardLimits()
     redaction_patterns: tuple[str, ...] = ()
 

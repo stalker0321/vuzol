@@ -35,7 +35,7 @@ The plan is ordered so that every step produces a testable, runnable increment. 
 | 02 | Configuration and registries | complete | 01 | Validated configuration, secrets boundaries, project/provider registries |
 | 03 | PostgreSQL persistence model | complete | 01–02 | Migrations and repositories for tasks, steps, events, topics, profiles |
 | 04 | Telegram forum workspace | complete | 02–03 | Authorized forum-group ingress and reconstructable projections |
-| 05 | Voice and semantic interpretation | not started | 02–04 | Transcription, TaskDraft schema, cheap model interpreter, clarification flow |
+| 05 | Voice and semantic interpretation | complete | 02–04 | Transcription, TaskDraft schema, cheap model interpreter, clarification flow |
 | 06 | Task manager and workflow engine | not started | 03–05 | Persisted state machine, queue, leases, retries, pause/resume/cancel |
 | 07 | Provider adapters and routing | not started | 02, 05–06 | Replaceable model adapters, profile health, capability-based policy routing |
 | 08 | Worktrees and execution sandbox | not started | 06–07 | Isolated coding executor with process supervision and artifacts |

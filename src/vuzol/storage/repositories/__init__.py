@@ -9,6 +9,8 @@ from vuzol.storage.repositories.core import (
 from vuzol.storage.repositories.delivery import (
     InboxRepository,
     OutboxRepository,
+    TelegramControlActionRepository,
+    TelegramIntakeRepository,
     TelegramMessageLinkRepository,
     TopicMappingRepository,
 )
@@ -23,6 +25,8 @@ __all__ = [
     "RunRepository",
     "StepRepository",
     "TaskRepository",
+    "TelegramControlActionRepository",
+    "TelegramIntakeRepository",
     "TelegramMessageLinkRepository",
     "TopicMappingRepository",
 ]

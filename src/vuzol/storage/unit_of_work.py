@@ -13,6 +13,8 @@ from vuzol.storage.repositories import (
     RunRepository,
     StepRepository,
     TaskRepository,
+    TelegramControlActionRepository,
+    TelegramIntakeRepository,
     TelegramMessageLinkRepository,
     TopicMappingRepository,
 )
@@ -32,6 +34,8 @@ class UnitOfWork:
         self.evidence: ModelRepository
         self.topics: TopicMappingRepository
         self.telegram_links: TelegramMessageLinkRepository
+        self.telegram_intake: TelegramIntakeRepository
+        self.telegram_actions: TelegramControlActionRepository
 
     async def __aenter__(self) -> "UnitOfWork":
         self.session = self._session_factory()
@@ -46,6 +50,8 @@ class UnitOfWork:
         self.evidence = ModelRepository(self.session)
         self.topics = TopicMappingRepository(self.session)
         self.telegram_links = TelegramMessageLinkRepository(self.session)
+        self.telegram_intake = TelegramIntakeRepository(self.session)
+        self.telegram_actions = TelegramControlActionRepository(self.session)
         return self
 
     async def __aexit__(

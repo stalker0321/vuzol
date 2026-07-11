@@ -31,6 +31,7 @@ from vuzol.config.settings import (
     HardLimits,
     RetentionDefaults,
     Settings,
+    TelegramSettings,
     get_settings,
 )
 
@@ -60,6 +61,7 @@ __all__ = [
     "SecretResolutionError",
     "Settings",
     "SnapshotCompatibility",
+    "TelegramSettings",
     "TopicConfig",
     "TopicKind",
     "TopicRegistry",

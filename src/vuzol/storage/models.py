@@ -24,9 +24,11 @@ from sqlalchemy.orm import Mapped, mapped_column
 from vuzol.storage.base import Base
 from vuzol.storage.types import (
     ApprovalStatus,
+    ControlActionStatus,
     DeliveryStatus,
     IdempotencyClass,
     InboxStatus,
+    IntakeStatus,
     ProcessStatus,
     RetryClass,
     RiskLevel,
@@ -322,9 +324,71 @@ class TelegramMessageLink(IdentityMixin, Base):
         ForeignKey("approvals.id", ondelete="RESTRICT")
     )
     message_role: Mapped[str] = mapped_column(String(50), nullable=False)
+    projection_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class TelegramIntakeMessage(IdentityMixin, Base):
+    __tablename__ = "telegram_intake_messages"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="uq_intake_chat_message"),)
+
+    inbox_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("external_inbox.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), index=True
+    )
+    original_text: Mapped[str | None] = mapped_column(Text)
+    attachments: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
+    affinity_kind: Mapped[str | None] = mapped_column(String(50))
+    ambiguous_task_ids: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
+    status: Mapped[IntakeStatus] = mapped_column(
+        enum_type(IntakeStatus, "intake_status"),
+        nullable=False,
+        default=IntakeStatus.RECEIVED,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class TelegramControlAction(IdentityMixin, Base):
+    __tablename__ = "telegram_control_actions"
+
+    external_action_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    action_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    requested_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), index=True
+    )
+    step_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("steps.id", ondelete="RESTRICT"))
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("approvals.id", ondelete="RESTRICT")
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )
+    status: Mapped[ControlActionStatus] = mapped_column(
+        enum_type(ControlActionStatus, "control_action_status"),
+        nullable=False,
+        default=ControlActionStatus.QUEUED,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Artifact(IdentityMixin, TimestampMixin, Base):

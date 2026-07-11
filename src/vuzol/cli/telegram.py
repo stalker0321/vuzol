@@ -10,7 +10,7 @@ from vuzol.telegram.ingress import TelegramIngressService
 
 
 def main() -> None:
-    runtime = get_runtime_configuration()
+    runtime = get_runtime_configuration(validate_profile_credentials=False)
     settings = runtime.settings
     configure_logging(service=f"{settings.service_name}-telegram", level=settings.log_level)
     engine = create_engine(settings, resolve_database_dsn(settings))

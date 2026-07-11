@@ -90,6 +90,26 @@ def test_bundle_validates_required_profile_and_system_secrets(tmp_path: Path) ->
     assert bundle.profiles.get("profile-a").id == "profile-a"
 
 
+def test_process_can_validate_registry_without_resolving_unowned_profile_secret(
+    tmp_path: Path,
+) -> None:
+    configured = settings(
+        tmp_path,
+        database_dsn_reference="env:DATABASE_DSN",
+        telegram_bot_token_reference="env:TELEGRAM_TOKEN",  # noqa: S106
+    )
+    bundle = build_bundle(
+        RegistryDocument(profiles=(profile(),)),
+        configured,
+        environment={
+            "DATABASE_DSN": "database-secret",
+            "TELEGRAM_TOKEN": "telegram-secret",
+        },
+        validate_profile_credentials=False,
+    )
+    assert bundle.profiles.get("profile-a").credential_reference == "env:PROFILE_KEY"
+
+
 def test_bundle_revision_is_stable_and_contains_no_secret_value(tmp_path: Path) -> None:
     document = RegistryDocument(profiles=(profile(),))
     configured = settings(tmp_path)

@@ -13,7 +13,8 @@ COPY --from=uv /uv /uvx /bin/
 RUN groupadd --system --gid 10001 vuzol \
     && useradd --system --uid 10001 --gid vuzol --create-home vuzol \
     && mkdir -p /srv/vuzol/artifacts \
-    && chown -R vuzol:vuzol /srv/vuzol
+    && chown -R vuzol:vuzol /srv/vuzol \
+    && chmod 0770 /srv/vuzol/artifacts
 
 WORKDIR /app
 

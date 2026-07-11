@@ -237,6 +237,7 @@ def test_openai_compatible_adapters_parse_provider_neutral_results() -> None:
                         "usage": {"prompt_tokens": 10, "completion_tokens": 5},
                     },
                 )
+            assert b'filename="voice.ogg"' in provider_request.content
             return httpx.Response(
                 200,
                 headers={"x-request-id": "request-2"},

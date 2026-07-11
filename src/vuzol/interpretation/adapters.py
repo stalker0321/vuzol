@@ -117,7 +117,7 @@ class OpenAICompatibleTranscriber:
 
     async def transcribe(self, request: TranscriptionInput) -> TranscriptionResult:
         started = time.monotonic()
-        filename = request.filename or "voice.bin"
+        filename = request.filename or _default_audio_filename(request.media_type)
         data = {"model": self._model}
         if request.language_hint:
             data["language"] = request.language_hint
@@ -153,6 +153,21 @@ class OpenAICompatibleTranscriber:
 
 def _optional_int(value: object) -> int | None:
     return int(value) if isinstance(value, int | float) else None
+
+
+def _default_audio_filename(media_type: str) -> str:
+    extensions = {
+        "audio/flac": "flac",
+        "audio/m4a": "m4a",
+        "audio/mp4": "mp4",
+        "audio/mpeg": "mp3",
+        "audio/ogg": "ogg",
+        "audio/wav": "wav",
+        "audio/webm": "webm",
+        "audio/x-m4a": "m4a",
+        "audio/x-wav": "wav",
+    }
+    return f"voice.{extensions.get(media_type.lower(), 'bin')}"
 
 
 @dataclass(slots=True)

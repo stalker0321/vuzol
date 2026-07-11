@@ -46,3 +46,4 @@ def test_configure_logging_sets_json_handler() -> None:
     assert logger.name == "vuzol.test.configured"
     assert root.level == logging.WARNING
     assert isinstance(root.handlers[0].formatter, JsonFormatter)
+    assert logging.getLogger("httpx").level == logging.WARNING

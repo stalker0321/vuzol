@@ -55,6 +55,8 @@ def configure_logging(*, service: str, level: str) -> None:
     handler.setFormatter(JsonFormatter())
     handler.addFilter(ServiceFilter(service))
     logging.basicConfig(level=level, handlers=[handler], force=True)
+    # HTTP client request URLs can contain provider credentials (Telegram embeds the bot token).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:

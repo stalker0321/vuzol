@@ -15,7 +15,7 @@ from vuzol.telegram.delivery import TelegramDeliveryService, run_delivery_loop
 
 
 async def run() -> None:
-    runtime = get_runtime_configuration()
+    runtime = get_runtime_configuration(validate_profile_credentials=False)
     settings = runtime.settings
     configure_logging(
         service=f"{settings.service_name}-telegram-delivery", level=settings.log_level

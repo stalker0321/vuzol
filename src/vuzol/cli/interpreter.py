@@ -22,7 +22,7 @@ from vuzol.telegram.adapter import PythonTelegramClient, resolve_bot_token
 
 
 async def run() -> None:
-    runtime = get_runtime_configuration()
+    runtime = get_runtime_configuration(validate_profile_credentials=False)
     settings = runtime.settings
     configure_logging(service=f"{settings.service_name}-interpreter", level=settings.log_level)
     config = settings.interpretation

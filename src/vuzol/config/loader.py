@@ -57,6 +57,7 @@ def build_bundle(
     settings: Settings,
     *,
     environment: Mapping[str, str] | None = None,
+    validate_profile_credentials: bool = True,
 ) -> ConfigurationBundle:
     """Validate cross-references, paths, fallbacks, and required secrets."""
 
@@ -70,7 +71,7 @@ def build_bundle(
             environment=environment,
         )
         for profile in profiles.items():
-            if profile.enabled and profile.credential_required:
+            if validate_profile_credentials and profile.enabled and profile.credential_required:
                 assert profile.credential_reference is not None
                 resolver.get(profile.credential_reference, f"profile:{profile.id}")
         if settings.database_dsn_reference is not None:

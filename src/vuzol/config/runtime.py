@@ -17,8 +17,8 @@ class RuntimeConfiguration(BaseModel):
     registries: ConfigurationBundle
 
 
-@lru_cache(maxsize=1)
-def get_runtime_configuration() -> RuntimeConfiguration:
+@lru_cache(maxsize=2)
+def get_runtime_configuration(*, validate_profile_credentials: bool = True) -> RuntimeConfiguration:
     """Load and validate all startup configuration once per process."""
 
     settings = get_settings()
@@ -27,4 +27,11 @@ def get_runtime_configuration() -> RuntimeConfiguration:
         if settings.registry_file is not None
         else RegistryDocument()
     )
-    return RuntimeConfiguration(settings=settings, registries=build_bundle(document, settings))
+    return RuntimeConfiguration(
+        settings=settings,
+        registries=build_bundle(
+            document,
+            settings,
+            validate_profile_credentials=validate_profile_credentials,
+        ),
+    )

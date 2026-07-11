@@ -93,7 +93,7 @@ def test_interpreter_runtime_composes_and_stops_cleanly(
             return True
 
     monkeypatch.setenv("MODEL_KEY", "model-key")
-    monkeypatch.setattr(interpreter_cli, "get_runtime_configuration", lambda: configured)
+    monkeypatch.setattr(interpreter_cli, "get_runtime_configuration", lambda **_kwargs: configured)
     monkeypatch.setattr(interpreter_cli, "configure_logging", lambda **_kwargs: None)
     monkeypatch.setattr(interpreter_cli, "create_engine", lambda *_args: engine)
     monkeypatch.setattr(interpreter_cli, "create_session_factory", lambda _engine: object())

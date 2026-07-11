@@ -1,5 +1,7 @@
 # Vuzol
 
+[![CI](https://github.com/stalker0321/vuzol/actions/workflows/ci.yml/badge.svg)](https://github.com/stalker0321/vuzol/actions/workflows/ci.yml)
+
 Vuzol is a personal task-intake system controlled through a private Telegram forum group. It uses
 PostgreSQL as its source of truth and keeps Telegram messages as reconstructable projections of
 durable state.

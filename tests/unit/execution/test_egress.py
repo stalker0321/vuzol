@@ -1,0 +1,312 @@
+"""Unit tests for the pure controlled-egress policy contract.
+
+These tests enforce the strict, deterministic allowlist for the HTTPS proxy
+used by networked sandboxes. All checks are static (no DNS).
+"""
+
+import pytest
+from pydantic import HttpUrl, ValidationError
+
+from vuzol.config.models import EgressDestination, NetworkPolicy
+from vuzol.execution.egress import (
+    AllowedConnectTarget,
+    allowlist_stable_hash,
+    compile_proxy_allowlist,
+    _extract_host,
+    _normalize_hostname,
+)
+
+
+def _dest(url: str, purpose: str = "test") -> EgressDestination:
+    from pydantic import HttpUrl
+
+    return EgressDestination(url=HttpUrl(url), purpose=purpose)
+
+
+def test_compile_basic_https_hostname_and_implicit_port() -> None:
+    pol = NetworkPolicy(
+        enabled=True,
+        destinations=(_dest("https://api.example.com"),),
+    )
+    targets = compile_proxy_allowlist(pol)
+    assert len(targets) == 1
+    t = targets[0]
+    assert t.hostname == "api.example.com"
+    assert t.port == 443
+    assert t.purpose == "test"
+    assert isinstance(t, AllowedConnectTarget)
+
+
+def test_compile_canonicalizes_mixed_case_and_idna() -> None:
+    pol = NetworkPolicy(
+        enabled=True,
+        destinations=(_dest("https://API.Example.COM"),),
+    )
+    targets = compile_proxy_allowlist(pol)
+    assert targets[0].hostname == "api.example.com"
+
+
+def test_compile_explicit_443_is_normalized() -> None:
+    pol = NetworkPolicy(
+        enabled=True,
+        destinations=(_dest("https://api.example.com:443"),),
+    )
+    targets = compile_proxy_allowlist(pol)
+    assert targets[0].port == 443
+
+
+def test_compile_rejects_non_443_port() -> None:
+    pol = NetworkPolicy(
+        enabled=True,
+        destinations=(_dest("https://api.example.com:8443"),),
+    )
+    with pytest.raises(ValueError, match="443"):
+        compile_proxy_allowlist(pol)
+
+
+def test_compile_rejects_non_https_via_policy() -> None:
+    # http is rejected at NetworkPolicy / EgressDestination validation time
+    with pytest.raises(ValidationError, match="https"):
+        NetworkPolicy.model_validate(
+            {"enabled": True, "destinations": [{"url": "http://api.example.com", "purpose": "x"}]}
+        )
+
+
+def test_compile_rejects_ip_literals_at_egress_validation() -> None:
+    # IP rejection (including global) now happens at EgressDestination / NetworkPolicy level
+    for bad in ["https://8.8.8.8", "https://[2001:db8::1]"]:
+        with pytest.raises(ValidationError, match="IP literal"):
+            NetworkPolicy.model_validate(
+                {"enabled": True, "destinations": ({"url": bad, "purpose": "x"},)}
+            )
+
+
+def test_compile_rejects_forbidden_hosts_via_egress_validation() -> None:
+    for bad in ["localhost", "metadata.google.internal", "example.local"]:
+        with pytest.raises(ValidationError):
+            NetworkPolicy.model_validate(
+                {"enabled": True, "destinations": ({"url": f"https://{bad}", "purpose": "x"},)}
+            )
+
+
+def test_compile_rejects_bad_url_shapes_via_egress_validation() -> None:
+    for url in [
+        "https://user:pass@api.example.com",  # pragma: allowlist secret
+        "https://api.example.com?foo=bar",
+        "https://api.example.com#frag",
+        "https://api.example.com:443/path",
+    ]:
+        with pytest.raises(ValidationError):
+            NetworkPolicy.model_validate(
+                {"enabled": True, "destinations": ({"url": url, "purpose": "x"},)}
+            )
+
+
+def test_compile_disabled_policy_must_have_no_destinations() -> None:
+    with pytest.raises(ValueError, match=r"disabled.*cannot declare"):
+        compile_proxy_allowlist(
+            NetworkPolicy(enabled=False, destinations=(_dest("https://a.com"),))
+        )
+
+
+def test_compile_enabled_requires_destinations() -> None:
+    with pytest.raises(ValueError, match="requires at least one"):
+        compile_proxy_allowlist(NetworkPolicy(enabled=True, destinations=()))
+
+
+def test_compile_deduplicates_same_purpose_and_is_deterministic() -> None:
+    pol = NetworkPolicy(
+        enabled=True,
+        destinations=(
+            _dest("https://API.example.com", "provider API"),
+            _dest("https://api.example.com", "provider API"),
+        ),
+    )
+    t1 = compile_proxy_allowlist(pol)
+    t2 = compile_proxy_allowlist(pol)
+    assert t1 == t2
+    assert len(t1) == 1
+    assert t1[0].purpose == "provider API"
+
+
+def test_compile_rejects_conflicting_purpose_for_same_canonical() -> None:
+    pol = NetworkPolicy(
+        enabled=True,
+        destinations=(
+            _dest("https://api.example.com", "purpose one"),
+            _dest("https://API.example.com", "purpose two"),
+        ),
+    )
+    with pytest.raises(ValueError, match="conflicting purposes"):
+        compile_proxy_allowlist(pol)
+
+
+def test_compile_includes_provider_api_hosts() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://project.example.com"),))
+    targets = compile_proxy_allowlist(pol, provider_api_hosts=("api.provider.com",))
+    hosts = {t.hostname for t in targets}
+    assert "project.example.com" in hosts
+    assert "api.provider.com" in hosts
+
+
+def test_compile_rejects_bad_provider_host() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    with pytest.raises(ValueError, match=r"prohibited|IP literal"):
+        compile_proxy_allowlist(pol, provider_api_hosts=("*.bad.com",))
+
+
+def test_compile_rejects_ip_literal_provider_host() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    for bad in ["8.8.8.8", "2001:db8::1", "127.0.0.1", "::1"]:
+        with pytest.raises(ValueError, match="IP literal"):
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+
+
+def test_compile_rejects_trailing_dot_wildcard_and_invalid_hosts() -> None:
+    """Trailing dot, wildcards, and leading dot are rejected (exact host only)."""
+    # For dest: model accepts the URL, compile enforces
+    with pytest.raises(ValueError, match="wildcard or invalid"):
+        compile_proxy_allowlist(
+            NetworkPolicy(enabled=True, destinations=(_dest("https://example.com."),))
+        )
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    for bad in ["*.example.com", ".example.com", "example.com."]:
+        with pytest.raises(ValueError, match="wildcard or invalid"):
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+
+
+def test_compile_rejects_invalid_idna_hostname() -> None:
+    """Invalid for IDNA (e.g. double dot) is rejected during normalization."""
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    with pytest.raises(ValueError, match="IDNA normalization"):
+        compile_proxy_allowlist(pol, provider_api_hosts=("ex..com",))
+
+
+def test_normalize_and_extract_helpers_cover_branches() -> None:
+    """Direct exercise of helpers (used by compile) for coverage and correctness."""
+    # normalize
+    with pytest.raises(ValueError, match="must not be empty"):
+        _normalize_hostname("")
+    with pytest.raises(ValueError, match="trailing dot"):
+        _normalize_hostname("ex.com.")
+    with pytest.raises(ValueError, match="IDNA normalization"):
+        _normalize_hostname("ex..com")
+    assert _normalize_hostname("API.Example.COM") == "api.example.com"
+
+    # extract
+    assert _extract_host("api.com") == "api.com"
+    assert _extract_host("api.com:443") == "api.com"
+    assert _extract_host("[::1]") == "::1"
+    assert _extract_host("[2001:db8::1]:443") == "2001:db8::1"
+    assert _extract_host("2001:db8::1") == "2001:db8::1"
+    assert _extract_host("") == ""
+    assert _extract_host("  spaced  ") == "spaced"
+
+
+def test_compile_internal_checks_via_construct() -> None:
+    """Exercise compile policy checks even if model validators bypassed (defense)."""
+    # disabled with dests
+    bad_disabled = NetworkPolicy.model_construct(
+        enabled=False, destinations=(_dest("https://x.com"),)
+    )
+    with pytest.raises(ValueError, match="disabled network policy cannot declare"):
+        compile_proxy_allowlist(bad_disabled)
+
+    # enabled no dests
+    bad_empty = NetworkPolicy.model_construct(enabled=True, destinations=())
+    with pytest.raises(ValueError, match="requires at least one"):
+        compile_proxy_allowlist(bad_empty)
+
+    # also hit scheme recheck (construct http dest url)
+    # (HttpUrl construct may allow, but if reaches)
+    try:
+        bad_http = NetworkPolicy.model_construct(
+            enabled=True,
+            destinations=(
+                EgressDestination.model_construct(url=HttpUrl("http://x.com"), purpose="x"),
+            ),
+        )
+        with pytest.raises(ValueError, match="https"):
+            compile_proxy_allowlist(bad_http)
+    except Exception:
+        pass  # if construct fails validation internally, ok
+
+
+def test_target_str_and_provider_empty_skipped() -> None:
+    """Cover __str__ and provider empty-skip branch."""
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://api.example.com"),))
+    ts = compile_proxy_allowlist(pol, provider_api_hosts=("", "other.com"))
+    assert len(ts) == 2
+    s = str(ts[0])
+    assert "api.example.com:443" in s
+    assert "test" in s
+
+
+def test_compile_canonicalizes_provider_host() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    targets = compile_proxy_allowlist(pol, provider_api_hosts=("API.Provider.COM",))
+    assert any(
+        t.hostname == "api.provider.com" and t.purpose == "provider API endpoint" for t in targets
+    )
+
+
+def test_allowed_target_is_immutable() -> None:
+    t = AllowedConnectTarget(hostname="h.com", port=443, purpose="p")
+    with pytest.raises(Exception, match=r"frozen|immutable|assign|set"):
+        t.port = 80
+
+
+def test_allowed_target_only_443() -> None:
+    with pytest.raises(ValueError, match="443"):
+        AllowedConnectTarget(hostname="h.com", port=80, purpose="p")
+
+
+def test_compile_root_path_normalization() -> None:
+    """Equivalent origins with or without root path / normalize to same target."""
+    pol1 = NetworkPolicy(enabled=True, destinations=(_dest("https://api.example.com"),))
+    pol2 = NetworkPolicy(enabled=True, destinations=(_dest("https://api.example.com/"),))
+    t1 = compile_proxy_allowlist(pol1)
+    t2 = compile_proxy_allowlist(pol2)
+    assert t1 == t2
+    assert t1[0].hostname == "api.example.com"
+    assert t1[0].port == 443
+
+
+def test_compile_deterministic_ordering() -> None:
+    """Multiple distinct targets are returned in stable sorted order."""
+    pol = NetworkPolicy(
+        enabled=True,
+        destinations=(
+            _dest("https://z.example.com", "z"),
+            _dest("https://a.example.com", "a"),
+            _dest("https://m.example.com", "m"),
+        ),
+    )
+    targets = compile_proxy_allowlist(pol)
+    assert [t.hostname for t in targets] == ["a.example.com", "m.example.com", "z.example.com"]
+
+
+def test_allowlist_stable_hash_is_deterministic() -> None:
+    """Compiled allowlist has stable hash (for revisioning if used)."""
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://api.example.com"),))
+    ts = compile_proxy_allowlist(pol)
+    h1 = allowlist_stable_hash(ts)
+    h2 = allowlist_stable_hash(ts)
+    assert len(h1) == 64
+    assert h1 == h2
+    pol2 = NetworkPolicy(enabled=True, destinations=(_dest("https://other.example.com"),))
+    ts2 = compile_proxy_allowlist(pol2)
+    assert allowlist_stable_hash(ts) != allowlist_stable_hash(ts2)
+
+
+def test_compile_performs_no_dns_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[int] = []
+
+    def mock_get(*a: object, **k: object) -> list[object]:
+        called.append(1)
+        return []
+
+    monkeypatch.setattr("socket.getaddrinfo", mock_get)
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://example.com"),))
+    compile_proxy_allowlist(pol)
+    assert not called, "compile must not perform DNS"

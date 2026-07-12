@@ -76,6 +76,8 @@ def test_disabled_network_policy_rejects_destinations() -> None:
         "https://127.0.0.1",
         "https://169.254.169.254",
         "https://metadata.google.internal",
+        "https://8.8.8.8",  # even global IP literal rejected for proxy destinations
+        "https://[2001:4860:4860::8888]",
     ],
 )
 def test_egress_destination_rejects_credentials_metadata_and_local_hosts(url: str) -> None:

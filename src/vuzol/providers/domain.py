@@ -64,6 +64,7 @@ class ProviderRequest(FrozenProviderModel):
     run_id: uuid.UUID
     step_id: uuid.UUID
     provider_attempt: int = Field(ge=1)
+    lease_generation: int | None = Field(default=None, ge=1)
     role: ProviderRole
     required_capabilities: frozenset[Capability] = frozenset()
     original_input_reference: str | None = Field(default=None, max_length=500)

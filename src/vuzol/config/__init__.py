@@ -15,6 +15,8 @@ from vuzol.config.models import (
     ProviderProfileConfig,
     ProviderRole,
     RegistryDocument,
+    SandboxNetworkMode,
+    SandboxProfileConfig,
     TopicConfig,
     TopicKind,
 )
@@ -23,6 +25,7 @@ from vuzol.config.registries import (
     ProfileRegistry,
     ProjectRegistry,
     RegistryError,
+    SandboxRegistry,
     TopicRegistry,
 )
 from vuzol.config.revision import RunConfigurationSnapshot, SnapshotCompatibility
@@ -31,6 +34,7 @@ from vuzol.config.secrets import ScopedSecretResolver, SecretResolutionError
 from vuzol.config.settings import (
     ConcurrencyLimits,
     DatabaseSettings,
+    ExecutionSettings,
     HardLimits,
     InterpretationSettings,
     RetentionDefaults,
@@ -51,6 +55,7 @@ __all__ = [
     "DatabaseSettings",
     "DeliveryMode",
     "EgressDestination",
+    "ExecutionSettings",
     "GitDeliveryPolicy",
     "HardLimits",
     "InterpretationSettings",
@@ -66,6 +71,9 @@ __all__ = [
     "RetentionDefaults",
     "RunConfigurationSnapshot",
     "RuntimeConfiguration",
+    "SandboxNetworkMode",
+    "SandboxProfileConfig",
+    "SandboxRegistry",
     "ScopedSecretResolver",
     "SecretResolutionError",
     "Settings",

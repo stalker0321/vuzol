@@ -1,0 +1,131 @@
+"""Dedicated worktree and rootless sandbox execution worker."""
+
+import asyncio
+import os
+import signal
+import socket
+from contextlib import suppress
+
+from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
+from vuzol.execution.artifacts import ArtifactStore
+from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
+from vuzol.execution.git import LocalGit
+from vuzol.execution.handlers import PrepareWorktreeHandler
+from vuzol.execution.sandbox import RootlessDockerRuntime
+from vuzol.execution.worktrees import WorktreeService
+from vuzol.observability import configure_logging, get_logger
+from vuzol.providers.codex import CodexCliAdapter
+from vuzol.providers.handlers import ProviderStepHandler, executor_provider_handlers
+from vuzol.providers.health import synchronize_profiles
+from vuzol.providers.registry import AdapterRegistry
+from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
+from vuzol.storage.types import QueueClass
+from vuzol.workflows.worker import RoutedWorkflowWorker, WorkflowWorker
+
+
+class ExecutorChain:
+    def __init__(self, worktrees: WorkflowWorker, providers: RoutedWorkflowWorker) -> None:
+        self._worktrees = worktrees
+        self._providers = providers
+
+    async def process_one(self) -> bool:
+        return await self._worktrees.process_one() or await self._providers.process_one()
+
+
+def main() -> None:
+    asyncio.run(run())
+
+
+async def run() -> None:
+    runtime = get_runtime_configuration(validate_profile_credentials=False)
+    settings = runtime.settings
+    configure_logging(service=f"{settings.service_name}-executor", level=settings.log_level)
+    if not settings.execution.enabled:
+        raise RuntimeError("execution worker is disabled")
+    sandbox_runtime = RootlessDockerRuntime(settings.execution.rootless_docker_socket)
+    if settings.execution.require_preflight:
+        await sandbox_runtime.preflight()
+    engine = create_engine(settings, resolve_database_dsn(settings))
+    factory = create_session_factory(engine)
+    try:
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session,
+                runtime.registries.profiles.items(),
+                configuration_revision=runtime.registries.revision,
+            )
+        resolver = ScopedSecretResolver(
+            access_policy={
+                profile.credential_reference: frozenset({f"profile:{profile.id}"})
+                for profile in runtime.registries.profiles.items()
+                if profile.credential_reference is not None
+            },
+            secret_file_root=settings.secret_file_root,
+        )
+        artifact_store = ArtifactStore(
+            settings.artifact_root,
+            max_bytes=settings.limits.artifact_bytes,
+            retention_days=settings.retention.artifact_days,
+        )
+        envelope_factory = ExecutionEnvelopeFactory(factory, settings, runtime.registries)
+        transport = SandboxCodexTransport(sandbox_runtime, envelope_factory, artifact_store)
+        adapters = {
+            profile.id: CodexCliAdapter(transport)
+            for profile in runtime.registries.profiles.items()
+            if profile.enabled
+            and profile.provider == "codex"
+            and profile.launch_mode is LaunchMode.CLI
+        }
+        if not adapters:
+            raise RuntimeError("execution worker has no enabled Codex CLI profile")
+        adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver, adapters=adapters)
+        provider_handler = ProviderStepHandler(factory, runtime.registries, adapter_registry)
+        owner = f"{socket.gethostname()}:{os.getpid()}:executor"
+        worktree_handler = PrepareWorktreeHandler(
+            factory,
+            runtime.registries,
+            WorktreeService(
+                settings.worktree_root,
+                LocalGit(),
+                retention_days=settings.retention.failed_worktree_days,
+            ),
+            owner=owner,
+        )
+        worktree_worker = WorkflowWorker(
+            settings,
+            factory,
+            owner=f"{owner}:worktree",
+            handlers={"prepare_worktree": worktree_handler},
+            queue_classes=frozenset({QueueClass.HEAVY}),
+        )
+        provider_worker = RoutedWorkflowWorker(
+            settings,
+            factory,
+            registries=runtime.registries,
+            owner=f"{owner}:provider",
+            handlers=executor_provider_handlers(provider_handler),
+            queue_classes=frozenset({QueueClass.HEAVY}),
+        )
+        await _run_loop(
+            ExecutorChain(worktree_worker, provider_worker), settings.workflow.poll_interval_seconds
+        )
+    finally:
+        await engine.dispose()
+
+
+async def _run_loop(processor: ExecutorChain, poll_interval: float) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        with suppress(NotImplementedError):
+            loop.add_signal_handler(signum, stop.set)
+    get_logger(__name__).info("executor ready", extra={"event": "executor.ready"})
+    while not stop.is_set():
+        if not await processor.process_one():
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=poll_interval)
+    get_logger(__name__).info("executor stopped", extra={"event": "executor.stopped"})
+
+
+if __name__ == "__main__":
+    main()

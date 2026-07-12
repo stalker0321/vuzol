@@ -219,6 +219,56 @@ def test_route_reservation_and_fenced_claim_are_atomic(postgres_dsn: str, tmp_pa
 
 
 @pytest.mark.postgresql
+def test_execute_code_route_requires_cli_sandbox_profile(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        api = profile(
+            "api",
+            sandbox_required=True,
+            capabilities=frozenset({Capability.CODE_EDIT, Capability.PROJECT_SHELL}),
+        )
+        cli = profile(
+            "cli",
+            provider="codex",
+            api_base_url=None,
+            launch_mode="cli",
+            credential_reference=None,
+            credential_required=False,
+            runtime_identity="cli",
+            state_directory=tmp_path / "cli-state",
+            sandbox_required=True,
+            capabilities=frozenset({Capability.CODE_EDIT, Capability.PROJECT_SHELL}),
+        )
+        settings, registries = bundle(tmp_path, api, cli)
+        _task_id, _run_id, step_id = await seed_provider_step(
+            factory,
+            step_type="execute_code",
+            capabilities=[Capability.CODE_EDIT.value, Capability.PROJECT_SHELL.value],
+        )
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+        async with factory.begin() as session:
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="executor",
+                lease_seconds=60,
+                candidate_limit=20,
+                step_types=frozenset({"execute_code"}),
+            )
+        assert token is not None and token.step.id == step_id
+        async with factory() as session:
+            step = await session.get(Step, step_id)
+            assert step is not None and step.executor_profile_id == "cli"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_saturated_profile_does_not_block_or_starve_other_profile(
     postgres_dsn: str, tmp_path: Path
 ) -> None:

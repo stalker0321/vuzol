@@ -1,0 +1,26 @@
+"""Ports for Git and sandbox execution."""
+
+from pathlib import Path
+from typing import Protocol
+
+from vuzol.execution.domain import GitInspection, ProcessEnvelope
+from vuzol.providers.ports import CodexProcessResult
+from vuzol.workflows.ports import CancellationContext
+
+
+class GitPort(Protocol):
+    async def repository_identity(self, repository: Path) -> tuple[str, str | None]: ...
+    async def resolve_commit(self, repository: Path, ref: str) -> str: ...
+    async def require_clean_source(self, repository: Path) -> None: ...
+    async def add_worktree(
+        self, repository: Path, path: Path, branch: str, base_commit: str
+    ) -> None: ...
+    async def inspect(self, worktree: Path) -> GitInspection: ...
+    async def remove_worktree(self, repository: Path, path: Path) -> None: ...
+
+
+class SandboxRuntime(Protocol):
+    async def preflight(self) -> None: ...
+    async def run(
+        self, envelope: ProcessEnvelope, cancellation: CancellationContext
+    ) -> CodexProcessResult: ...

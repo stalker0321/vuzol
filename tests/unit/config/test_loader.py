@@ -9,6 +9,7 @@ from vuzol.config import (
     ProjectConfig,
     ProviderProfileConfig,
     RegistryDocument,
+    SandboxProfileConfig,
     Settings,
     TopicConfig,
     TopicKind,
@@ -179,6 +180,16 @@ def test_enabled_project_is_normalized_in_bundle(tmp_path: Path) -> None:
         sandbox_profile="project-default",
     )
     bundle = build_bundle(
-        RegistryDocument(projects=(configured_project,)), settings(tmp_path), environment={}
+        RegistryDocument(
+            projects=(configured_project,),
+            sandboxes=(
+                SandboxProfileConfig(
+                    id="project-default",
+                    image=f"example/sandbox@sha256:{'0' * 64}",
+                ),
+            ),
+        ),
+        settings(tmp_path),
+        environment={},
     )
     assert bundle.projects.get("project-a").repository_path == repository.resolve()

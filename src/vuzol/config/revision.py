@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from vuzol.config.models import ProjectConfig, ProviderProfileConfig
+from vuzol.config.models import ProjectConfig, ProviderProfileConfig, SandboxProfileConfig
 
 
 def content_revision(value: BaseModel | Mapping[str, Any]) -> str:
@@ -26,8 +26,10 @@ class RunConfigurationSnapshot(BaseModel):
     bundle_revision: str
     project: ProjectConfig | None
     profile: ProviderProfileConfig | None
+    sandbox: SandboxProfileConfig | None
     project_revision: str | None
     profile_revision: str | None
+    sandbox_revision: str | None
 
 
 class SnapshotCompatibility(BaseModel):

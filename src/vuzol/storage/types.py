@@ -125,6 +125,30 @@ class ProcessStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ProcessOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
+    UNKNOWN = "unknown"
+
+
+class TerminationStage(StrEnum):
+    NONE = "none"
+    INTERRUPT = "interrupt"
+    TERMINATE = "terminate"
+    KILL = "kill"
+
+
+class ArtifactStorageState(StrEnum):
+    STAGING = "staging"
+    AVAILABLE = "available"
+    QUARANTINED = "quarantined"
+    MISSING = "missing"
+    DELETED = "deleted"
+
+
 class IntakeStatus(StrEnum):
     RECEIVED = "received"
     AWAITING_INTERPRETATION = "awaiting_interpretation"

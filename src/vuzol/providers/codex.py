@@ -35,12 +35,12 @@ class CodexCliAdapter:
                 request_sent=False,
                 safe_summary="Codex profile isolation is incomplete",
             )
-        if request.sandbox_reference is not None:
+        if request.sandbox_reference is None:
             raise ProviderFailure(
                 ProviderErrorCategory.UNSUPPORTED_CAPABILITY,
                 retryable=False,
                 request_sent=False,
-                safe_summary="Step 08 sandbox transport is not installed",
+                safe_summary="Codex execution requires an isolated worktree sandbox",
             )
         envelope = {
             "schema_version": request.schema_version,
@@ -51,13 +51,42 @@ class CodexCliAdapter:
             "output_schema": request.output_json_schema,
         }
         invocation = CodexInvocation(
-            argv=("codex", "exec", "--json", "--sandbox", "read-only", "-"),
+            argv=(
+                "codex",
+                "exec",
+                "--json",
+                "--strict-config",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--sandbox",
+                "workspace-write",
+                "--cd",
+                "/workspace",
+                "-",
+            ),
             stdin=json.dumps(envelope, ensure_ascii=False),
             runtime_identity=profile.runtime_identity,
             state_directory=str(profile.state_directory),
             timeout_seconds=request.timeout_seconds,
+            sandbox_reference=request.sandbox_reference,
+            task_id=request.task_id,
+            run_id=request.run_id,
+            step_id=request.step_id,
+            profile_id=profile.id,
+            provider_attempt=request.provider_attempt,
+            lease_generation=request.lease_generation,
         )
-        result = await self._transport.run(invocation, cancellation)
+        try:
+            result = await self._transport.run(invocation, cancellation)
+        except ValueError:
+            raise
+        except RuntimeError as error:
+            raise ProviderFailure(
+                ProviderErrorCategory.PROVIDER_UNAVAILABLE,
+                retryable=True,
+                request_sent=True,
+                safe_summary="supervised Codex transport failed after launch was possible",
+            ) from error
         if result.exit_code != 0:
             raise ProviderFailure(
                 ProviderErrorCategory.PROVIDER_UNAVAILABLE,
@@ -66,11 +95,11 @@ class CodexCliAdapter:
                 safe_summary="Codex CLI invocation failed",
             )
         try:
-            body = json.loads(result.stdout)
+            body = _decode_output(result.stdout)
             text = body.get("text")
             structured = body.get("structured_output")
             usage = body.get("usage", {})
-        except (json.JSONDecodeError, AttributeError) as error:
+        except (json.JSONDecodeError, AttributeError, ValueError) as error:
             raise ProviderFailure(
                 ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
                 retryable=True,
@@ -109,3 +138,31 @@ def _usage_int(usage: object, key: str) -> int | None:
         return None
     value = usage.get(key)
     return int(value) if isinstance(value, int | float) and value >= 0 else None
+
+
+def _decode_output(stdout: str) -> dict[str, object]:
+    try:
+        decoded = json.loads(stdout)
+    except json.JSONDecodeError:
+        decoded = None
+    if isinstance(decoded, dict):
+        return decoded
+    final: dict[str, object] = {}
+    usage: dict[str, object] = {}
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "item.completed" and isinstance(event.get("item"), dict):
+            item = event["item"]
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                final["text"] = item["text"]
+        if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
+            usage = event["usage"]
+    if not final:
+        raise ValueError("Codex JSONL contains no final agent message")
+    final["usage"] = usage
+    return final

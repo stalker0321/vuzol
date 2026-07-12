@@ -192,3 +192,15 @@ def test_illegal_transition_is_rejected_before_mutation() -> None:
             RunStatus.RUNNING,
             workflow_transitions.RUN_TRANSITIONS,
         )
+
+
+def test_coding_workflow_and_heavy_queue():
+    """Test coding workflow (Step 08) has correct heavy queue and unknown effects (real behavior)."""
+    from vuzol.workflows.definitions import WORKFLOW_DEFINITIONS
+    from vuzol.storage.types import QueueClass, IdempotencyClass
+
+    coding = next(d for d in WORKFLOW_DEFINITIONS if d.workflow_type == "coding")
+    exec_step = next(s for s in coding.steps if s.key == "execute_code")
+    assert exec_step.queue_class == QueueClass.HEAVY
+    assert exec_step.idempotency_class == IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
+    # This exercises the definition validation and step properties.

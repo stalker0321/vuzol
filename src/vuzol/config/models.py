@@ -133,16 +133,24 @@ class EgressDestination(FrozenModel):
         if self.url.query is not None or self.url.fragment is not None:
             raise ValueError("egress destination must be an origin without query or fragment")
         host = self.url.host
-        if host in {"localhost", "metadata.google.internal"}:
-            raise ValueError("local and metadata endpoints are prohibited")
-        if host is not None:
+        if host:
+            h = host
+            if h.startswith("[") and h.endswith("]"):
+                h = h[1:-1]
+            if h.lower() in {"localhost", "metadata.google.internal"} or h.lower().endswith(
+                (".local", ".localhost")
+            ):
+                raise ValueError("local and metadata endpoints are prohibited")
             try:
-                parsed_address = ip_address(host)
-            except ValueError:
-                pass
-            else:
-                if not parsed_address.is_global:
-                    raise ValueError("non-global IP egress destinations are prohibited")
+                ip_address(h)
+                raise ValueError(
+                    "IP literal egress destinations are prohibited; use hostnames only"
+                )
+            except ValueError as e:
+                if "IP literal" in str(e):
+                    raise
+        if self.url.path and self.url.path not in ("", "/"):
+            raise ValueError("egress destination must be an origin without path")
         return self
 
 

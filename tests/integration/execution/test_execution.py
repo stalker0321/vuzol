@@ -50,6 +50,7 @@ async def seed(factory: object) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     return task.id, run_id, step.id
 
 
+@pytest.mark.postgresql
 def test_worktree_and_artifact_lifecycle_is_persisted(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
@@ -81,6 +82,15 @@ def test_worktree_and_artifact_lifecycle_is_persisted(postgres_dsn: str, tmp_pat
                 project=project,
                 owner="executor-a",
             )
+        async with factory.begin() as session:
+            repeated = await service.prepare(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                project=project,
+                owner="executor-a",
+            )
+        assert repeated == reference
         (reference.path / "tracked.txt").write_text("changed\n")
         art_store = ArtifactStore(tmp_path / "artifacts", max_bytes=10_000, retention_days=14)
         async with factory.begin() as session:
@@ -106,6 +116,18 @@ def test_worktree_and_artifact_lifecycle_is_persisted(postgres_dsn: str, tmp_pat
             assert stored is not None and stored.content_hash == manifest.content_hash
             artifact_path = tmp_path / "artifacts" / stored.content_uri.removeprefix("artifact:")
             assert artifact_path.read_bytes() == b'{"safe":true}'
+        async with factory.begin() as session:
+            await service.cleanup(
+                session,
+                worktree_id=reference.id,
+                repository=repository,
+                reason="test-complete",
+            )
+        assert not reference.path.exists()
+        async with factory() as session:
+            cleaned = await session.get(Worktree, reference.id)
+            assert cleaned is not None
+            assert cleaned.delivery_state.value == "cleaned"
         await engine.dispose()
 
     asyncio.run(scenario())

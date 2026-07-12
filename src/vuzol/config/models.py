@@ -92,8 +92,27 @@ class SandboxProfileConfig(FrozenModel):
     timeout_seconds: int = Field(default=3600, ge=1, le=86_400)
     stop_grace_seconds: int = Field(default=10, ge=1, le=300)
     network_mode: SandboxNetworkMode = SandboxNetworkMode.NONE
+    proxy_network: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+    https_proxy_url: HttpUrl | None = None
     inner_codex_sandbox_required: bool = True
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_network_transport(self) -> "SandboxProfileConfig":
+        configured = self.proxy_network is not None or self.https_proxy_url is not None
+        if self.network_mode is SandboxNetworkMode.NONE and configured:
+            raise ValueError("network-disabled sandbox cannot configure a proxy transport")
+        if self.network_mode is SandboxNetworkMode.HTTPS_PROXY:
+            if self.proxy_network is None or self.https_proxy_url is None:
+                raise ValueError("HTTPS proxy sandbox requires proxy network and URL")
+            if self.https_proxy_url.scheme != "http":
+                raise ValueError("sandbox proxy must use an internal HTTP endpoint")
+            if (
+                self.https_proxy_url.username is not None
+                or self.https_proxy_url.password is not None
+            ):
+                raise ValueError("sandbox proxy URL cannot contain credentials")
+        return self
 
 
 class CommandDefinition(FrozenModel):

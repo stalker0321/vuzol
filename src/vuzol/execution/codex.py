@@ -39,6 +39,7 @@ class ExecutionEnvelopeFactory:
 
     async def build(self, invocation: CodexInvocation) -> tuple[ProcessEnvelope, uuid.UUID]:
         _require_invocation_identity(invocation)
+        _require_codex_command(invocation.argv)
         assert invocation.sandbox_reference is not None
         assert invocation.task_id is not None
         assert invocation.run_id is not None
@@ -95,7 +96,7 @@ class ExecutionEnvelopeFactory:
                     SandboxMount(
                         source=state_path,
                         target=Path("/codex-home"),
-                        mode=MountMode.READ_WRITE,
+                        mode=MountMode.READ_ONLY,
                         purpose="provider-state",
                     ),
                 ),
@@ -108,6 +109,12 @@ class ExecutionEnvelopeFactory:
                 timeout_seconds=min(sandbox.timeout_seconds, int(invocation.timeout_seconds)),
                 stop_grace_seconds=sandbox.stop_grace_seconds,
                 network_disabled=sandbox.network_mode.value == "none",
+                proxy_network=sandbox.proxy_network,
+                https_proxy_url=(
+                    str(sandbox.https_proxy_url).rstrip("/")
+                    if sandbox.https_proxy_url is not None
+                    else None
+                ),
                 environment={
                     "CODEX_HOME": "/codex-home",
                     "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
@@ -252,3 +259,21 @@ def _require_invocation_identity(invocation: CodexInvocation) -> None:
     )
     if invocation.sandbox_reference is None or any(value is None for value in required):
         raise ValueError("Codex invocation lacks fenced execution identity")
+
+
+def _require_codex_command(argv: tuple[str, ...]) -> None:
+    expected = (
+        "codex",
+        "exec",
+        "--json",
+        "--strict-config",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--sandbox",
+        "workspace-write",
+        "--cd",
+        "/workspace",
+        "-",
+    )
+    if argv != expected:
+        raise ValueError("sandbox rejected a non-canonical Codex command")

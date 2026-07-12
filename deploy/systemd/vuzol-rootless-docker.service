@@ -3,7 +3,7 @@ Description=Dedicated rootless Docker daemon for Vuzol sandboxes
 After=network.target
 
 [Service]
-Type=notify
+Type=simple
 User=vuzol-executor
 Group=vuzol-executor
 Environment=HOME=/var/lib/vuzol-executor
@@ -11,6 +11,7 @@ Environment=XDG_RUNTIME_DIR=/run/vuzol-executor
 RuntimeDirectory=vuzol-executor
 RuntimeDirectoryMode=0700
 ExecStart=/usr/bin/dockerd-rootless.sh --host=unix:///run/vuzol-executor/docker.sock
+ExecStartPost=/bin/sh -c 'until /usr/bin/docker --host unix:///run/vuzol-executor/docker.sock info >/dev/null 2>&1; do sleep 0.2; done'
 Restart=always
 RestartSec=2
 Delegate=yes

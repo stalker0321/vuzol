@@ -29,8 +29,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      VUZOL_DATABASE_DSN_REFERENCE: env:VUZOL_DATABASE_DSN
-      VUZOL_DATABASE_DSN: postgresql+psycopg://vuzol:vuzol-ci-only@127.0.0.1:5432/vuzol_test
       VUZOL_TEST_DATABASE_DSN: postgresql://vuzol:vuzol-ci-only@127.0.0.1:5432/vuzol_test
     steps:
       - name: Check out repository
@@ -50,6 +48,9 @@ jobs:
 
       - name: Run migrations
         run: uv run alembic upgrade head
+        env:
+          VUZOL_DATABASE_DSN_REFERENCE: env:VUZOL_DATABASE_DSN
+          VUZOL_DATABASE_DSN: postgresql+psycopg://vuzol:vuzol-ci-only@127.0.0.1:5432/vuzol_test
 
       - name: Lint
         run: make lint

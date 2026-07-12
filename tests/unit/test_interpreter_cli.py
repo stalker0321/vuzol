@@ -8,6 +8,7 @@ from pytest import MonkeyPatch
 
 from vuzol.cli import interpreter as interpreter_cli
 from vuzol.config import (
+    CostClass,
     InterpretationSettings,
     LaunchMode,
     ProviderProfileConfig,
@@ -59,7 +60,7 @@ def runtime(tmp_path: Path) -> RuntimeConfiguration:
                 credential_reference="env:MODEL_KEY",
                 capabilities=frozenset(),
                 concurrency_limit=1,
-                cost_class="cheap",
+                cost_class=CostClass.CHEAP,
                 supported_task_types=frozenset({"general"}),
                 sandbox_required=False,
             ),

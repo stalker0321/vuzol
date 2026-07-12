@@ -18,16 +18,19 @@ Telegram text or voice message
 → semantic interpretation
 → validated, provider-neutral TaskDraft
 → versioned persisted workflow and explicit steps
-→ fenced capability/queue-class dispatch with restart recovery
+→ deterministic capability/health/budget-aware provider routing
+→ atomic budget reservation and fenced model-only execution
+→ restart recovery
 ```
 
 Ingress, Telegram delivery, interpretation, and workflow management run as separate processes.
 Their inbox/outbox, step, event, and fenced lease records make completed delivery, transcription,
 interpretation, controls, and workflow progress safe across process restarts.
 
-The current MVP foundation materializes and advances workflows but does **not** yet provide real
-model/tool task executors. Provider routing, Codex integration, Git worktrees, sandbox execution,
-automated validation, and deployment are not implemented or advertised as available behavior.
+The current MVP foundation can route and execute safe model-only OpenAI-compatible workflow steps.
+It does **not** yet execute repository edits or tools. Codex process execution, Git worktrees,
+sandbox execution, automated validation, approvals, and deployment are not implemented or
+advertised as available behavior.
 
 ## Requirements and setup
 
@@ -77,6 +80,7 @@ Compose services do not mount the Docker socket or use privileged mode.
 - [PostgreSQL storage](docs/STORAGE.md)
 - [Telegram workspace](docs/TELEGRAM.md)
 - [Voice and semantic interpretation](docs/INTERPRETATION.md)
+- [Provider routing and budgets](docs/PROVIDERS.md)
 - [Architecture invariants](docs/ARCHITECTURE_INVARIANTS.md)
 - [Accepted architecture decisions](docs/decisions/)
 - [Changelog](docs/CHANGELOG.md)

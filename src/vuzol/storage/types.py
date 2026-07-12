@@ -77,6 +77,13 @@ class QueueClass(StrEnum):
     PRIVILEGED = "privileged"
 
 
+class BudgetReservationStatus(StrEnum):
+    RESERVED = "reserved"
+    RECONCILED = "reconciled"
+    CONSERVATIVE = "conservative"
+    RELEASED = "released"
+
+
 class ApprovalStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"

@@ -129,6 +129,59 @@ def test_unknown_capability_is_rejected() -> None:
         )
 
 
+def test_cli_profile_requires_isolated_identity_and_absolute_state_directory() -> None:
+    with pytest.raises(ValidationError, match="requires runtime_identity"):
+        ProviderProfileConfig.model_validate(
+            {
+                "id": "codex-a",
+                "provider": "codex",
+                "model": "codex",
+                "launch_mode": "cli",
+                "credential_required": False,
+                "capabilities": ["repository_read"],
+                "concurrency_limit": 1,
+                "cost_class": "strong",
+                "supported_task_types": ["coding"],
+            }
+        )
+    with pytest.raises(ValidationError, match="must be absolute"):
+        ProviderProfileConfig.model_validate(
+            {
+                "id": "codex-a",
+                "provider": "codex",
+                "model": "codex",
+                "launch_mode": "cli",
+                "credential_required": False,
+                "capabilities": ["repository_read"],
+                "concurrency_limit": 1,
+                "cost_class": "strong",
+                "supported_task_types": ["coding"],
+                "runtime_identity": "codex-a",
+                "state_directory": "relative",
+            }
+        )
+
+
+def test_explicit_zero_pricing_requires_nonzero_quota_charge() -> None:
+    with pytest.raises(ValidationError, match="zero pricing"):
+        ProviderProfileConfig.model_validate(
+            {
+                "id": "free-api",
+                "provider": "openai-compatible",
+                "model": "model",
+                "api_base_url": "https://provider.example/v1",
+                "launch_mode": "api",
+                "credential_required": False,
+                "capabilities": [],
+                "concurrency_limit": 1,
+                "cost_class": "cheap",
+                "supported_task_types": ["general"],
+                "input_cost_units_per_million": 0,
+                "output_cost_units_per_million": 0,
+            }
+        )
+
+
 def test_topic_project_scope_is_strict() -> None:
     with pytest.raises(ValidationError, match="requires project_id"):
         TopicConfig.model_validate(

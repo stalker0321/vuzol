@@ -25,11 +25,14 @@ The committed credentials are local-development defaults only. Production suppli
 
 ## Schema
 
-The initial migration creates 20 application tables:
+The initial foundation and subsequent migrations currently expose 21 application tables:
 
 - canonical workflow: `tasks`, `runs`, `steps`, `events`;
 - delivery: `external_inbox`, `transactional_outbox`, `topic_mappings`, `telegram_message_links`;
-- decisions/evidence: `approvals`, `artifacts`, `usage_records`, `interpretations`, `clarification_decisions`, `validation_results`, `routing_decisions`, `profile_health_observations`, `configuration_revisions`, `provider_profiles`;
+- decisions/evidence: `approvals`, `artifacts`, `usage_records`,
+  `provider_budget_reservations`, `interpretations`, `clarification_decisions`,
+  `validation_results`, `routing_decisions`, `profile_health_observations`,
+  `configuration_revisions`, `provider_profiles`;
 - execution resources: `worktrees`, `supervised_processes`.
 
 Stable searchable concepts are columns; provider-neutral envelopes use JSONB. All timestamps are timezone-aware. Telegram IDs use signed `BIGINT`. All 27 foreign keys use `RESTRICT`; deleting a Telegram projection cannot cascade into canonical state.
@@ -45,6 +48,8 @@ Atomic operations include:
 - canonical state plus outbox insert;
 - single-use approval consumption;
 - step and outbox lease claim/completion.
+- provider route decision, hard-budget reservation, profile assignment, and fenced step claim;
+- idempotent usage reconciliation bound to the current fencing generation.
 
 Step and outbox claims use `FOR UPDATE SKIP LOCKED`, PostgreSQL `now()`, and monotonically increasing fencing generations. Heartbeat or completion with a stale owner/generation affects zero rows and raises `LeaseLost`.
 
@@ -77,3 +82,6 @@ The initial migration supports lossless downgrade for development verification. 
 - Step 06 persists versioned workflow graphs, audited task/run/step transitions, pause/resume/cancel
   controls, deterministic retry backoff, database-time heartbeat, safe/unknown-effect recovery,
   queue/profile concurrency, and shutdown uncertainty.
+- Step 07 persists configuration-revision health observations, per-attempt routing decisions,
+  decimal usage, and conservative budget reservations. Advisory transaction locks serialize shared
+  capacity and budget checks; stale leases cannot reconcile usage.

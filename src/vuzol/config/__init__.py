@@ -2,8 +2,10 @@
 
 from vuzol.config.loader import ConfigurationLoadError, build_bundle, load_document
 from vuzol.config.models import (
+    BudgetMode,
     Capability,
     CommandDefinition,
+    CostClass,
     DeliveryMode,
     EgressDestination,
     GitDeliveryPolicy,
@@ -11,6 +13,7 @@ from vuzol.config.models import (
     NetworkPolicy,
     ProjectConfig,
     ProviderProfileConfig,
+    ProviderRole,
     RegistryDocument,
     TopicConfig,
     TopicKind,
@@ -38,11 +41,13 @@ from vuzol.config.settings import (
 )
 
 __all__ = [
+    "BudgetMode",
     "Capability",
     "CommandDefinition",
     "ConcurrencyLimits",
     "ConfigurationBundle",
     "ConfigurationLoadError",
+    "CostClass",
     "DatabaseSettings",
     "DeliveryMode",
     "EgressDestination",
@@ -55,6 +60,7 @@ __all__ = [
     "ProjectConfig",
     "ProjectRegistry",
     "ProviderProfileConfig",
+    "ProviderRole",
     "RegistryDocument",
     "RegistryError",
     "RetentionDefaults",

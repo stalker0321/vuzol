@@ -37,6 +37,7 @@ def test_initial_migration_contains_complete_foundation(postgres_dsn: str) -> No
         "approvals",
         "artifacts",
         "usage_records",
+        "provider_budget_reservations",
         "topic_mappings",
         "telegram_message_links",
         "worktrees",

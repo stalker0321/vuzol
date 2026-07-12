@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, Settings
+from vuzol.config.registries import ConfigurationBundle
+from vuzol.providers.routing import claim_routed_step
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_step, heartbeat_step, start_step
 from vuzol.storage.models import Run, Step
@@ -46,17 +48,7 @@ class WorkflowWorker:
             QueueClass.PRIVILEGED: limits.privileged,
         }
         async with self._factory.begin() as session:
-            token = await claim_step(
-                session,
-                owner=self._owner,
-                lease_seconds=self._settings.workflow.lease_seconds,
-                capabilities=frozenset(value.value for value in self._capabilities),
-                queue_classes=self._queue_classes,
-                class_limits=class_limits,
-                profile_limits=self._profile_limits,
-                step_types=frozenset(self._handlers),
-                candidate_limit=self._settings.workflow.claim_candidate_limit,
-            )
+            token = await self._claim(session, class_limits)
         if token is None:
             return False
         async with self._factory.begin() as session:
@@ -109,6 +101,21 @@ class WorkflowWorker:
             )
         return True
 
+    async def _claim(
+        self, session: AsyncSession, class_limits: Mapping[QueueClass, int]
+    ) -> LeaseToken | None:
+        return await claim_step(
+            session,
+            owner=self._owner,
+            lease_seconds=self._settings.workflow.lease_seconds,
+            capabilities=frozenset(value.value for value in self._capabilities),
+            queue_classes=self._queue_classes,
+            class_limits=dict(class_limits),
+            profile_limits=self._profile_limits,
+            step_types=frozenset(self._handlers),
+            candidate_limit=self._settings.workflow.claim_candidate_limit,
+        )
+
     async def _request(self, step_id: uuid.UUID, token: LeaseToken) -> StepExecutionRequest:
         async with self._factory() as session:
             step = await session.get(Step, step_id)
@@ -157,5 +164,40 @@ class CompleteHandler:
 INTERNAL_HANDLERS: dict[str, StepHandler] = {
     "await_apply_or_complete": CompleteHandler(),
     "complete_or_block": CompleteHandler(),
+    "format_result": CompleteHandler(),
     "finalize": CompleteHandler(),
 }
+
+
+class RoutedWorkflowWorker(WorkflowWorker):
+    def __init__(
+        self,
+        settings: Settings,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        registries: ConfigurationBundle,
+        owner: str,
+        handlers: Mapping[str, StepHandler],
+    ) -> None:
+        super().__init__(
+            settings,
+            session_factory,
+            owner=owner,
+            handlers=handlers,
+            queue_classes=frozenset({QueueClass.LIGHT}),
+        )
+        self._registries = registries
+
+    async def _claim(
+        self, session: AsyncSession, class_limits: Mapping[QueueClass, int]
+    ) -> LeaseToken | None:
+        return await claim_routed_step(
+            session,
+            settings=self._settings,
+            registries=self._registries,
+            owner=self._owner,
+            lease_seconds=self._settings.workflow.lease_seconds,
+            candidate_limit=self._settings.workflow.claim_candidate_limit,
+            class_limits=dict(class_limits),
+            step_types=frozenset(self._handlers),
+        )

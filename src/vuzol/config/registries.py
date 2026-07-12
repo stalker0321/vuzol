@@ -75,12 +75,22 @@ class ProfileRegistry:
     def __init__(self, profiles: Iterable[ProviderProfileConfig]) -> None:
         self._profiles = _unique_by_id(profiles, kind="profile")
         self._validate_fallbacks()
+        self._validate_cli_isolation()
 
     def _validate_fallbacks(self) -> None:
         for profile in self._profiles.values():
             for fallback_id in profile.fallback_profile_ids:
                 if fallback_id not in self._profiles:
                     raise RegistryError(f"profile {profile.id} has unknown fallback: {fallback_id}")
+                fallback = self._profiles[fallback_id]
+                if not profile.roles.intersection(fallback.roles):
+                    raise RegistryError(
+                        f"profile {profile.id} fallback {fallback_id} has no overlapping role"
+                    )
+                if not profile.supported_task_types.intersection(fallback.supported_task_types):
+                    raise RegistryError(
+                        f"profile {profile.id} fallback {fallback_id} has no overlapping task type"
+                    )
 
         visiting: set[str] = set()
         visited: set[str] = set()
@@ -98,6 +108,32 @@ class ProfileRegistry:
 
         for profile_id in self._profiles:
             visit(profile_id)
+
+    def _validate_cli_isolation(self) -> None:
+        cli_profiles = [
+            profile
+            for profile in self._profiles.values()
+            if profile.enabled and profile.launch_mode.value == "cli"
+        ]
+        identities: dict[str, str] = {}
+        directories: dict[Path, str] = {}
+        for profile in cli_profiles:
+            assert profile.runtime_identity is not None
+            assert profile.state_directory is not None
+            if owner := identities.get(profile.runtime_identity):
+                raise RegistryError(f"CLI profiles {owner} and {profile.id} share runtime identity")
+            identities[profile.runtime_identity] = profile.id
+            normalized = profile.state_directory.resolve()
+            for directory, owner in directories.items():
+                if (
+                    normalized == directory
+                    or normalized in directory.parents
+                    or directory in normalized.parents
+                ):
+                    raise RegistryError(
+                        f"CLI profiles {owner} and {profile.id} have overlapping state directories"
+                    )
+            directories[normalized] = profile.id
 
     def get(self, profile_id: str) -> ProviderProfileConfig:
         try:
@@ -192,10 +228,28 @@ class ConfigurationBundle(BaseModel):
                 removed = snapshot.profile.capabilities - current_profile.capabilities
                 if removed:
                     reasons.append(f"profile capabilities revoked: {sorted(removed)}")
+                removed_roles = snapshot.profile.roles - current_profile.roles
+                if removed_roles:
+                    reasons.append(f"profile roles revoked: {sorted(removed_roles)}")
                 if current_profile.credential_reference != snapshot.profile.credential_reference:
                     reasons.append(f"profile credential reference changed: {current_profile.id}")
                 if current_profile.sandbox_required != snapshot.profile.sandbox_required:
                     reasons.append(f"profile sandbox policy changed: {current_profile.id}")
+                if current_profile.runtime_identity != snapshot.profile.runtime_identity:
+                    reasons.append(f"profile runtime identity changed: {current_profile.id}")
+                if current_profile.state_directory != snapshot.profile.state_directory:
+                    reasons.append(f"profile state directory changed: {current_profile.id}")
+                accounting_fields = (
+                    "input_cost_units_per_million",
+                    "output_cost_units_per_million",
+                    "quota_units_per_call",
+                    "minimum_unknown_usage_cost",
+                )
+                if any(
+                    getattr(current_profile, field) != getattr(snapshot.profile, field)
+                    for field in accounting_fields
+                ):
+                    reasons.append(f"profile accounting policy changed: {current_profile.id}")
             except RegistryError:
                 reasons.append(f"profile removed: {snapshot.profile.id}")
         return SnapshotCompatibility(allowed=not reasons, reasons=tuple(reasons))

@@ -16,6 +16,8 @@ Set `VUZOL_REGISTRY_FILE` to enable a registry document. Before app or worker st
 - enabled project paths under `VUZOL_REPOSITORY_ROOT`;
 - known capabilities and positive limits;
 - fallback references and cycles;
+- provider roles, cost classes, fallback compatibility, and API/CLI field separation;
+- unique CLI runtime identities and non-overlapping absolute state directories;
 - topic-to-project mappings;
 - network destination policy;
 - required scoped secret references.
@@ -41,11 +43,21 @@ Secret values are validated for presence but are not stored in configuration obj
 
 Every validated registry document has a deterministic SHA-256 revision over normalized non-secret content. A run snapshot can retain its project and profile revisions so ordinary display or validation-command changes do not mutate in-progress work.
 
-Security-sensitive changes take effect immediately. Removed or disabled projects and profiles, capability revocation, credential-reference changes, and repository, sandbox, network, or delivery-policy changes block an old snapshot until policy re-evaluates it.
+Security-sensitive changes take effect immediately. Removed or disabled projects and profiles,
+capability or role revocation, credential-reference, runtime-identity, state-directory, accounting,
+repository, sandbox, network, or delivery-policy changes block an old snapshot until policy
+re-evaluates it.
 
 ## Hard limits
 
-Typed settings define positive defaults for concurrency, retention, input and artifact sizes, provider attempts, token budgets, task cost units, and task duration. Later workflow steps enforce these values; budget modes may select lower limits but cannot bypass them.
+Typed settings define positive defaults for concurrency, retention, input and artifact sizes,
+provider attempts and fallback depth, provider-call/step/task token budgets, step/task/daily cost and
+quota units, and task duration. Provider routing reserves these limits atomically before each call.
+Known usage reconciles the reservation; unknown usage retains a conservative charge. Budget modes
+affect preference but cannot bypass hard limits or security policy.
+
+See [Provider routing](PROVIDERS.md) for profile fields, deterministic precedence, health, quota,
+fallback, and Codex isolation rules.
 
 ## Workflow runtime
 

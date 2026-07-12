@@ -20,5 +20,9 @@ This file records completed implementation changes, not plans or speculative ide
   interpretation disposition, audited task/run/step state machines, fenced handler outcomes,
   transactional queue/profile concurrency, durable controls, retry and expiry recovery policy, and
   drain-aware worker shutdown.
+- completed Step 07 with provider-neutral model contracts, deterministic capability/health/budget
+  routing, atomic routed claims and conservative budget reservations, decimal usage reconciliation,
+  revision-scoped profile health, bounded fallbacks, an OpenAI-compatible model-only adapter, and
+  structurally isolated Codex CLI profiles whose production execution remains gated on Step 08.
 
 - Initial architecture and MVP implementation documentation created.

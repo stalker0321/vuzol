@@ -78,6 +78,17 @@ Compose services do not mount the Docker socket or use privileged mode.
 
 - [Configuration](docs/CONFIGURATION.md)
 - [PostgreSQL storage](docs/STORAGE.md)
+
+## Execution (worktrees + sandbox)
+
+The dedicated `vuzol-executor` process (see `src/vuzol/cli/executor.py`) runs `prepare_worktree` and `execute_code` steps using per-task Git worktrees and a rootless Docker sandbox.
+
+Systemd units:
+
+- `deploy/systemd/vuzol-rootless-docker.service` — dedicated rootless daemon for the executor user.
+- `deploy/systemd/vuzol-executor.service` — depends on `vuzol-rootless-docker.service` (not the root `docker.service`).
+
+The executor must be started after its rootless daemon; the unit now correctly declares the dependency.
 - [Telegram workspace](docs/TELEGRAM.md)
 - [Voice and semantic interpretation](docs/INTERPRETATION.md)
 - [Provider routing and budgets](docs/PROVIDERS.md)

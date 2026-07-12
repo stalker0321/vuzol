@@ -1,6 +1,7 @@
 """Fail-closed rootless Docker runtime adapter."""
 
 import asyncio
+import contextlib
 import os
 import stat
 import time
@@ -68,7 +69,8 @@ class RootlessDockerRuntime:
             )
             if wait_task not in done:
                 await self._stop(name, envelope.sandbox.stop_grace_seconds)
-                process.kill()
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
                 await process.wait()
                 if cancel_task in done:
                     raise SandboxError("sandbox execution cancelled after start")
@@ -80,9 +82,16 @@ class RootlessDockerRuntime:
                 stderr=stderr.decode("utf-8", "replace"),
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
+        except asyncio.CancelledError:
+            await self._stop(name, envelope.sandbox.stop_grace_seconds)
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            raise
         except ArtifactOutputLimit as error:
             await self._stop(name, envelope.sandbox.stop_grace_seconds)
-            process.kill()
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
             await process.wait()
             raise SandboxError("sandbox output limit exceeded") from error
         finally:
@@ -92,6 +101,12 @@ class RootlessDockerRuntime:
             await asyncio.gather(
                 wait_task, cancel_task, stdout_task, stderr_task, return_exceptions=True
             )
+            # Ensure docker client process is reaped even on unusual exits
+            if process.returncode is None:
+                await self._stop(name, envelope.sandbox.stop_grace_seconds)
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
 
     async def _stop(self, name: str, grace_seconds: int) -> None:
         try:
@@ -139,6 +154,7 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         "--host",
         f"unix://{socket}",
         "run",
+        "-i",
         "--rm",
         "--name",
         name,

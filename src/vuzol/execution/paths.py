@@ -36,7 +36,7 @@ def contained(root: Path, candidate: Path, *, must_exist: bool = True) -> Path:
 
 
 def worktree_path(root: Path, project_id: str, run_id: uuid.UUID) -> Path:
-    allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+    allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"  # pragma: allowlist secret
     if not project_id or any(character not in allowed for character in project_id):
         raise PathViolation("invalid project ID for worktree path")
     return root / project_id / str(run_id)

@@ -79,16 +79,23 @@ async def run() -> None:
         if not adapters:
             raise RuntimeError("execution worker has no enabled Codex CLI profile")
         adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver, adapters=adapters)
-        provider_handler = ProviderStepHandler(factory, runtime.registries, adapter_registry)
+        worktree_service = WorktreeService(
+            settings.worktree_root,
+            LocalGit(),
+            retention_days=settings.retention.failed_worktree_days,
+        )
+        provider_handler = ProviderStepHandler(
+            factory,
+            runtime.registries,
+            adapter_registry,
+            worktrees=worktree_service,
+            artifacts=artifact_store,
+        )
         owner = f"{socket.gethostname()}:{os.getpid()}:executor"
         worktree_handler = PrepareWorktreeHandler(
             factory,
             runtime.registries,
-            WorktreeService(
-                settings.worktree_root,
-                LocalGit(),
-                retention_days=settings.retention.failed_worktree_days,
-            ),
+            worktree_service,
             owner=owner,
         )
         worktree_worker = WorkflowWorker(

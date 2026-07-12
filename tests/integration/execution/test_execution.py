@@ -10,7 +10,6 @@ from vuzol.config import Capability, ProjectConfig
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.git import LocalGit
 from vuzol.execution.worktrees import WorktreeService
-import uuid
 from vuzol.storage.models import Artifact, Worktree
 from vuzol.storage.types import IdempotencyClass, RetryClass, RunStatus, StepStatus
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -84,11 +83,11 @@ def test_worktree_and_artifact_lifecycle_is_persisted(postgres_dsn: str, tmp_pat
                 owner="executor-a",
             )
         (reference.path / "tracked.txt").write_text("changed\n")
-        art_store = ArtifactStore(
-            tmp_path / "artifacts", max_bytes=10_000, retention_days=14
-        )
+        art_store = ArtifactStore(tmp_path / "artifacts", max_bytes=10_000, retention_days=14)
         async with factory.begin() as session:
-            retained = await service.retain(session, worktree_id=reference.id, artifacts=art_store, step_id=step_id)
+            retained = await service.retain(
+                session, worktree_id=reference.id, artifacts=art_store, step_id=step_id
+            )
             manifest = await art_store.persist(
                 session,
                 task_id=task_id,
@@ -122,3 +121,21 @@ def _git(repository: Path, *args: str) -> str:
         text=True,
     )
     return result.stdout
+
+
+def test_docker_i_flag_passes_stdin_to_container() -> None:
+    """Real (non-mocked) Docker integration smoke test.
+
+    Proves that -i (interactive) in docker run allows stdin to reach the
+    process inside the container. A mocked executable is not used.
+    """
+    input_data = b"stdin-reaches-container-test-12345\n"
+    # Use a minimal image; alpine will be pulled if not present (test env supports it)
+    proc = subprocess.run(
+        ["docker", "run", "--rm", "-i", "alpine", "cat"],  # noqa: S607
+        input=input_data,
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, "docker run failed"
+    assert input_data in proc.stdout, "stdin not received inside container"

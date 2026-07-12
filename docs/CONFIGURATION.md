@@ -46,3 +46,15 @@ Security-sensitive changes take effect immediately. Removed or disabled projects
 ## Hard limits
 
 Typed settings define positive defaults for concurrency, retention, input and artifact sizes, provider attempts, token budgets, task cost units, and task duration. Later workflow steps enforce these values; budget modes may select lower limits but cannot bypass them.
+
+## Workflow runtime
+
+`VUZOL_WORKFLOW__*` settings bound polling, lease and heartbeat timing, retry backoff, recovery batch
+size, claim candidates, and graceful-shutdown deadline. Defaults are a 60-second lease, 15-second
+heartbeat, 30-second shutdown deadline, 2-120-second retry range, and 15-second recovery interval.
+Validation requires heartbeat to remain below one third of the lease.
+
+Control, light, heavy, and privileged concurrency use `VUZOL_CONCURRENCY__*`. Step claims enforce
+both the queue-class limit and any assigned provider-profile concurrency limit transactionally.
+`VUZOL_INTERPRETATION__AUTOMATIC_EXECUTION_ENABLED=false` materializes interpreted workflows but
+leaves them waiting for an authenticated `start` control.

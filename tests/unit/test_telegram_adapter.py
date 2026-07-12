@@ -1,14 +1,17 @@
 import asyncio
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from telegram import Update
 
 from vuzol.config import Settings
 from vuzol.telegram.adapter import (
     PythonTelegramClient,
     build_long_polling_application,
+    control_update,
     resolve_bot_token,
 )
 from vuzol.telegram.domain import ControlUpdate, MessageUpdate
@@ -47,9 +50,57 @@ def test_python_telegram_client_delegates_send_and_edit() -> None:
         bot = AsyncMock()
         bot.send_message.return_value = SimpleNamespace(message_id=17)
         client = PythonTelegramClient(bot)
-        assert await client.send_message(chat_id=-100, thread_id=10, html="<b>ok</b>") == 17
-        await client.edit_message(chat_id=-100, message_id=17, html="updated")
+        task_id = uuid.uuid4()
+        assert (
+            await client.send_message(
+                chat_id=-100,
+                thread_id=10,
+                html="<b>ok</b>",
+                buttons=("start",),
+                task_id=task_id,
+            )
+            == 17
+        )
+        await client.edit_message(
+            chat_id=-100,
+            message_id=17,
+            html="updated",
+            buttons=("pause", "cancel"),
+            task_id=task_id,
+        )
         bot.send_message.assert_awaited_once()
         bot.edit_message_text.assert_awaited_once()
+        send_markup = bot.send_message.await_args.kwargs["reply_markup"]
+        edit_markup = bot.edit_message_text.await_args.kwargs["reply_markup"]
+        assert send_markup.inline_keyboard[0][0].callback_data == f"v1:start:{task_id}"
+        assert [row[0].callback_data for row in edit_markup.inline_keyboard] == [
+            f"v1:pause:{task_id}",
+            f"v1:cancel:{task_id}",
+        ]
 
     asyncio.run(scenario())
+
+
+def test_start_callback_crosses_the_provider_boundary() -> None:
+    task_id = uuid.uuid4()
+    update = Update.de_json(
+        {
+            "update_id": 1,
+            "callback_query": {
+                "id": "callback",
+                "from": {"id": 7, "is_bot": False, "first_name": "User"},
+                "chat_instance": "instance",
+                "data": f"v1:start:{task_id}",
+                "message": {
+                    "message_id": 9,
+                    "date": 0,
+                    "chat": {"id": -100, "type": "supergroup"},
+                },
+            },
+        },
+        None,
+    )
+    converted = control_update(update, "main")
+    assert converted is not None
+    assert converted.action_kind == "start"
+    assert converted.task_id == task_id

@@ -282,6 +282,17 @@ class InterpretationPipeline:
                     intake=intake,
                     interpretation_id=interpretation.id,
                 )
+            else:
+                session.add(
+                    TransactionalOutbox(
+                        destination="workflow_dispatch",
+                        operation_type="dispatch_interpretation",
+                        linked_entity_type="interpretation",
+                        linked_entity_id=interpretation.id,
+                        idempotency_key=f"workflow:dispatch:{interpretation.id}",
+                        payload={"task_id": str(task.id)},
+                    )
+                )
             await complete_outbox_item(session, token)
 
     async def _build_input(

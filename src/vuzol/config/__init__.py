@@ -33,6 +33,7 @@ from vuzol.config.settings import (
     RetentionDefaults,
     Settings,
     TelegramSettings,
+    WorkflowSettings,
     get_settings,
 )
 
@@ -67,6 +68,7 @@ __all__ = [
     "TopicConfig",
     "TopicKind",
     "TopicRegistry",
+    "WorkflowSettings",
     "build_bundle",
     "get_runtime_configuration",
     "get_settings",

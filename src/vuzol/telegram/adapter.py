@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from pydantic import SecretStr
-from telegram import Bot, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -40,18 +40,39 @@ class PythonTelegramClient:
     def __init__(self, bot: Bot) -> None:
         self._bot = bot
 
-    async def send_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int:
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        html: str,
+        buttons: tuple[str, ...] = (),
+        task_id: uuid.UUID | None = None,
+    ) -> int:
         message = await self._bot.send_message(
             chat_id=chat_id,
             message_thread_id=thread_id,
             text=html,
             parse_mode=ParseMode.HTML,
+            reply_markup=_control_markup(buttons, task_id),
         )
         return message.message_id
 
-    async def edit_message(self, *, chat_id: int, message_id: int, html: str) -> None:
+    async def edit_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        html: str,
+        buttons: tuple[str, ...] = (),
+        task_id: uuid.UUID | None = None,
+    ) -> None:
         await self._bot.edit_message_text(
-            chat_id=chat_id, message_id=message_id, text=html, parse_mode=ParseMode.HTML
+            chat_id=chat_id,
+            message_id=message_id,
+            text=html,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_control_markup(buttons, task_id),
         )
 
     async def download(self, file_id: str) -> bytes:
@@ -111,7 +132,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
     if query is None or user is None or query.message is None or query.data is None:
         return None
     parts = query.data.split(":", maxsplit=2)
-    allowed_actions = {"approve", "reject", "pause", "resume", "cancel", "retry"}
+    allowed_actions = {"approve", "reject", "start", "pause", "resume", "cancel", "retry"}
     if len(parts) != 3 or parts[0] != "v1" or parts[1] not in allowed_actions:
         return None
     try:
@@ -129,6 +150,25 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
         user_id=user.id,
         action_kind=parts[1],
         **targets,
+    )
+
+
+def _control_markup(
+    actions: tuple[str, ...], task_id: uuid.UUID | None
+) -> InlineKeyboardMarkup | None:
+    if not actions or task_id is None:
+        return None
+    labels = {
+        "start": "Start",
+        "pause": "Pause",
+        "resume": "Resume",
+        "cancel": "Cancel",
+    }
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(labels[action], callback_data=f"v1:{action}:{task_id}")]
+            for action in actions
+        ]
     )
 
 

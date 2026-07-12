@@ -55,6 +55,7 @@ class PreparedDelivery:
     revision: int | None = None
     link_id: uuid.UUID | None = None
     message_id: int | None = None
+    buttons: tuple[str, ...] = ()
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -139,6 +140,7 @@ async def prepare_delivery(session: AsyncSession, item: TransactionalOutbox) -> 
             html=card.html,
             task_id=card.task_id,
             revision=card.revision,
+            buttons=card.buttons,
         )
     return PreparedDelivery(
         DeliveryAction.EDIT_STATUS,
@@ -149,6 +151,7 @@ async def prepare_delivery(session: AsyncSession, item: TransactionalOutbox) -> 
         revision=card.revision,
         link_id=link.id,
         message_id=link.message_id,
+        buttons=card.buttons,
     )
 
 
@@ -218,14 +221,22 @@ class TelegramDeliveryService:
     async def _call_telegram(self, prepared: PreparedDelivery) -> int | None:
         if prepared.action in {DeliveryAction.SEND_STATUS, DeliveryAction.SEND_CLARIFICATION}:
             message_id = await self._client.send_message(
-                chat_id=prepared.chat_id, thread_id=prepared.thread_id, html=prepared.html
+                chat_id=prepared.chat_id,
+                thread_id=prepared.thread_id,
+                html=prepared.html,
+                buttons=prepared.buttons,
+                task_id=prepared.task_id,
             )
             if not message_id:
                 raise LostTelegramResponse("Telegram returned no confirmed message ID")
             return message_id
         assert prepared.message_id is not None
         await self._client.edit_message(
-            chat_id=prepared.chat_id, message_id=prepared.message_id, html=prepared.html
+            chat_id=prepared.chat_id,
+            message_id=prepared.message_id,
+            html=prepared.html,
+            buttons=prepared.buttons,
+            task_id=prepared.task_id,
         )
         return None
 

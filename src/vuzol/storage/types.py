@@ -28,6 +28,7 @@ class TaskStatus(StrEnum):
 class RunStatus(StrEnum):
     CREATED = "created"
     RUNNING = "running"
+    AWAITING_USER = "awaiting_user"
     PAUSED = "paused"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -41,6 +42,7 @@ class StepStatus(StrEnum):
     LEASED = "leased"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
+    AWAITING_USER = "awaiting_user"
     BLOCKED = "blocked"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -66,6 +68,13 @@ class IdempotencyClass(StrEnum):
     ISOLATED_RETRYABLE = "isolated_retryable"
     NON_IDEMPOTENT = "non_idempotent"
     UNKNOWN_EFFECTS_POSSIBLE = "unknown_effects_possible"
+
+
+class QueueClass(StrEnum):
+    CONTROL = "control"
+    LIGHT = "light"
+    HEAVY = "heavy"
+    PRIVILEGED = "privileged"
 
 
 class ApprovalStatus(StrEnum):
@@ -122,7 +131,17 @@ class ControlActionStatus(StrEnum):
     REJECTED = "rejected"
 
 
-def enum_type(enum: type[StrEnum], name: str) -> SqlEnum:
+def enum_type(enum: type[StrEnum], name: str, *, length: int | None = None) -> SqlEnum:
+    if length is not None:
+        return SqlEnum(
+            enum,
+            name=name,
+            native_enum=False,
+            create_constraint=True,
+            length=length,
+            values_callable=lambda members: [member.value for member in members],
+            validate_strings=True,
+        )
     return SqlEnum(
         enum,
         name=name,

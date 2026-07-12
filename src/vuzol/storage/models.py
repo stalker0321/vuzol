@@ -30,6 +30,7 @@ from vuzol.storage.types import (
     InboxStatus,
     IntakeStatus,
     ProcessStatus,
+    QueueClass,
     RetryClass,
     RiskLevel,
     RunStatus,
@@ -92,10 +93,13 @@ class Run(IdentityMixin, TimestampMixin, Base):
     task_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    source_interpretation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("interpretations.id", ondelete="RESTRICT"), unique=True
+    )
     workflow_type: Mapped[str] = mapped_column(String(100), nullable=False)
     workflow_version: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[RunStatus] = mapped_column(
-        enum_type(RunStatus, "run_status"), nullable=False, default=RunStatus.CREATED
+        enum_type(RunStatus, "run_status", length=20), nullable=False, default=RunStatus.CREATED
     )
     selected_route: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
@@ -118,6 +122,7 @@ class Step(IdentityMixin, TimestampMixin, Base):
         UniqueConstraint("run_id", "ordinal", name="uq_steps_run_ordinal"),
         Index(
             "ix_steps_queue",
+            "queue_class",
             "priority",
             "available_at",
             "created_at",
@@ -138,6 +143,11 @@ class Step(IdentityMixin, TimestampMixin, Base):
         JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
     )
     step_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    queue_class: Mapped[QueueClass] = mapped_column(
+        enum_type(QueueClass, "queue_class", length=20),
+        nullable=False,
+        default=QueueClass.LIGHT,
+    )
     status: Mapped[StepStatus] = mapped_column(
         enum_type(StepStatus, "step_status"), nullable=False, default=StepStatus.PENDING
     )

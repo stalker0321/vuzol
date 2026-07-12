@@ -30,9 +30,6 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --frozen
 
-      - name: Prepare disposable PostgreSQL databases
-        run: make test-postgres
-
       - name: Lint
         run: make lint
 

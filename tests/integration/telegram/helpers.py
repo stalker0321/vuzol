@@ -5,6 +5,7 @@ from vuzol.config import (
     ProjectConfig,
     RegistryDocument,
     RuntimeConfiguration,
+    SandboxProfileConfig,
     Settings,
     TopicConfig,
     TopicKind,
@@ -42,6 +43,12 @@ def telegram_runtime(tmp_path: Path) -> RuntimeConfiguration:
                 kind=TopicKind.PROJECT,
                 project_id="vuzol",
                 default_workflow="coding_task",
+            ),
+        ),
+        sandboxes=(
+            SandboxProfileConfig(
+                id="project-default",
+                image=f"example/sandbox@sha256:{'0' * 64}",
             ),
         ),
     )

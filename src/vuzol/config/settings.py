@@ -139,6 +139,16 @@ class WorkflowSettings(BaseModel):
         return self
 
 
+class ExecutionSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    rootless_docker_socket: Path = Path("/run/user/1000/docker.sock")
+    require_preflight: bool = True
+    cleanup_interval_seconds: int = Field(default=300, ge=10, le=86_400)
+    recovery_batch_size: int = Field(default=50, ge=1, le=1000)
+
+
 class Settings(BaseSettings):
     """Process settings loaded at the composition boundary."""
 
@@ -162,6 +172,7 @@ class Settings(BaseSettings):
     allowed_user_ids: tuple[int, ...] = ()
     allowed_chat_ids: tuple[int, ...] = ()
     repository_root: Path = Path("/srv/vuzol/repositories")
+    worktree_root: Path = Path("/srv/vuzol/worktrees")
     artifact_root: Path = Path("/srv/vuzol/artifacts")
     secret_file_root: Path = Path("/run/secrets")
     concurrency: ConcurrencyLimits = ConcurrencyLimits()
@@ -170,15 +181,26 @@ class Settings(BaseSettings):
     telegram: TelegramSettings = TelegramSettings()
     interpretation: InterpretationSettings = InterpretationSettings()
     workflow: WorkflowSettings = WorkflowSettings()
+    execution: ExecutionSettings = ExecutionSettings()
     limits: HardLimits = HardLimits()
     redaction_patterns: tuple[str, ...] = ()
 
-    @field_validator("repository_root", "artifact_root", "secret_file_root")
+    @field_validator("repository_root", "worktree_root", "artifact_root", "secret_file_root")
     @classmethod
     def require_absolute_root(cls, value: Path) -> Path:
         if not value.is_absolute():
             raise ValueError("configured roots must be absolute")
         return value
+
+    @model_validator(mode="after")
+    def require_distinct_storage_roots(self) -> "Settings":
+        roots = (self.repository_root, self.worktree_root, self.artifact_root)
+        resolved = tuple(root.resolve() for root in roots)
+        for index, root in enumerate(resolved):
+            for other in resolved[index + 1 :]:
+                if root == other or root in other.parents or other in root.parents:
+                    raise ValueError("repository, worktree, and artifact roots must be distinct")
+        return self
 
 
 @lru_cache(maxsize=1)

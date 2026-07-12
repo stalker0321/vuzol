@@ -9,6 +9,7 @@ from vuzol.config.models import (
     BudgetMode,
     Capability,
     CostClass,
+    LaunchMode,
     ProviderProfileConfig,
     ProviderRole,
 )
@@ -30,6 +31,7 @@ class ExclusionReason(StrEnum):
     BUDGET = "budget"
     CONCURRENCY = "concurrency"
     NOT_CONFIGURED_FALLBACK = "not_configured_fallback"
+    LAUNCH_MODE = "launch_mode"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +48,7 @@ class RoutingRequest:
     failed_profile_id: str | None = None
     allowed_fallback_ids: tuple[str, ...] = ()
     requires_sandbox: bool = False
+    required_launch_mode: LaunchMode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +141,11 @@ def _exclusions(
         reasons.append(ExclusionReason.PROJECT_POLICY)
     if request.requires_sandbox and not profile.sandbox_required:
         reasons.append(ExclusionReason.SANDBOX)
+    if (
+        request.required_launch_mode is not None
+        and profile.launch_mode is not request.required_launch_mode
+    ):
+        reasons.append(ExclusionReason.LAUNCH_MODE)
     if not state.healthy and (state.unhealthy_until is None or state.unhealthy_until > now):
         reasons.append(ExclusionReason.UNHEALTHY)
     if state.rate_limit_until is not None and state.rate_limit_until > now:

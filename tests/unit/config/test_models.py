@@ -8,8 +8,17 @@ from vuzol.config import (
     GitDeliveryPolicy,
     NetworkPolicy,
     ProviderProfileConfig,
+    SandboxProfileConfig,
     TopicConfig,
 )
+
+
+def test_sandbox_requires_immutable_image_digest() -> None:
+    with pytest.raises(ValidationError, match="string_pattern_mismatch"):
+        SandboxProfileConfig(id="default", image="example/sandbox:latest")
+
+    configured = SandboxProfileConfig(id="default", image=f"example/sandbox@sha256:{'a' * 64}")
+    assert configured.uid != 0
 
 
 def test_network_policy_requires_https_destinations() -> None:

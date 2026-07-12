@@ -5,7 +5,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from vuzol.config.models import Capability, ProjectConfig, ProviderProfileConfig, TopicConfig
+from vuzol.config.models import (
+    Capability,
+    ProjectConfig,
+    ProviderProfileConfig,
+    SandboxProfileConfig,
+    TopicConfig,
+)
 from vuzol.config.revision import (
     RunConfigurationSnapshot,
     SnapshotCompatibility,
@@ -17,7 +23,7 @@ class RegistryError(ValueError):
     """Precise configuration validation failure."""
 
 
-def _unique_by_id[T: ProjectConfig | ProviderProfileConfig](
+def _unique_by_id[T: ProjectConfig | ProviderProfileConfig | SandboxProfileConfig](
     entries: Iterable[T], *, kind: str
 ) -> dict[str, T]:
     result: dict[str, T] = {}
@@ -154,6 +160,21 @@ class ProfileRegistry:
         return tuple(self._profiles.values())
 
 
+class SandboxRegistry:
+    def __init__(self, sandboxes: Iterable[SandboxProfileConfig]) -> None:
+        configured = _unique_by_id(sandboxes, kind="sandbox")
+        self._sandboxes = configured
+
+    def get(self, sandbox_id: str) -> SandboxProfileConfig:
+        try:
+            return self._sandboxes[sandbox_id]
+        except KeyError as error:
+            raise RegistryError(f"unknown sandbox ID: {sandbox_id}") from error
+
+    def items(self) -> tuple[SandboxProfileConfig, ...]:
+        return tuple(self._sandboxes.values())
+
+
 class TopicRegistry:
     def __init__(self, topics: Iterable[TopicConfig], *, projects: ProjectRegistry) -> None:
         self._topics: dict[tuple[int, int], TopicConfig] = {}
@@ -183,6 +204,7 @@ class ConfigurationBundle(BaseModel):
     projects: ProjectRegistry
     profiles: ProfileRegistry
     topics: TopicRegistry
+    sandboxes: SandboxRegistry
     revision: str
 
     def snapshot(
@@ -190,12 +212,15 @@ class ConfigurationBundle(BaseModel):
     ) -> RunConfigurationSnapshot:
         project = self.projects.get(project_id) if project_id is not None else None
         profile = self.profiles.get(profile_id) if profile_id is not None else None
+        sandbox = self.sandboxes.get(project.sandbox_profile) if project is not None else None
         return RunConfigurationSnapshot(
             bundle_revision=self.revision,
             project=project,
             profile=profile,
+            sandbox=sandbox,
             project_revision=content_revision(project) if project is not None else None,
             profile_revision=content_revision(profile) if profile is not None else None,
+            sandbox_revision=content_revision(sandbox) if sandbox is not None else None,
         )
 
     def evaluate(self, snapshot: RunConfigurationSnapshot) -> SnapshotCompatibility:
@@ -252,4 +277,13 @@ class ConfigurationBundle(BaseModel):
                     reasons.append(f"profile accounting policy changed: {current_profile.id}")
             except RegistryError:
                 reasons.append(f"profile removed: {snapshot.profile.id}")
+        if snapshot.sandbox is not None:
+            try:
+                current_sandbox = self.sandboxes.get(snapshot.sandbox.id)
+                if not current_sandbox.enabled:
+                    reasons.append(f"sandbox disabled: {current_sandbox.id}")
+                if current_sandbox != snapshot.sandbox:
+                    reasons.append(f"sandbox policy changed: {current_sandbox.id}")
+            except RegistryError:
+                reasons.append(f"sandbox removed: {snapshot.sandbox.id}")
         return SnapshotCompatibility(allowed=not reasons, reasons=tuple(reasons))

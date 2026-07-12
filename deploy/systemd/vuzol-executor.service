@@ -1,0 +1,31 @@
+[Unit]
+Description=Vuzol isolated coding executor
+After=network-online.target postgresql.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vuzol-executor
+Group=vuzol-executor
+EnvironmentFile=/etc/vuzol/executor.env
+ExecStart=/opt/vuzol/.venv/bin/vuzol-executor
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadWritePaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /var/lib/vuzol-provider-state
+ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol
+
+[Install]
+WantedBy=multi-user.target

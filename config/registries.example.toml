@@ -1,3 +1,20 @@
+[[sandboxes]]
+id = "project-default"
+image = "registry.example/vuzol-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+uid = 10001
+gid = 10001
+cpu_count = 1.0
+memory_bytes = 1073741824
+pids_limit = 128
+tmpfs_bytes = 134217728
+open_files_limit = 1024
+output_bytes = 10000000
+timeout_seconds = 3600
+stop_grace_seconds = 10
+network_mode = "none"
+inner_codex_sandbox_required = true
+enabled = false
+
 [[projects]]
 id = "example"
 display_name = "Example project"

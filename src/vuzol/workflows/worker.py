@@ -178,13 +178,15 @@ class RoutedWorkflowWorker(WorkflowWorker):
         registries: ConfigurationBundle,
         owner: str,
         handlers: Mapping[str, StepHandler],
+        queue_classes: frozenset[QueueClass] | None = None,
     ) -> None:
+        effective_queues = queue_classes or frozenset({QueueClass.LIGHT})
         super().__init__(
             settings,
             session_factory,
             owner=owner,
             handlers=handlers,
-            queue_classes=frozenset({QueueClass.LIGHT}),
+            queue_classes=effective_queues,
         )
         self._registries = registries
 

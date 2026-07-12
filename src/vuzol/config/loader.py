@@ -12,6 +12,7 @@ from vuzol.config.registries import (
     ProfileRegistry,
     ProjectRegistry,
     RegistryError,
+    SandboxRegistry,
     TopicRegistry,
 )
 from vuzol.config.revision import content_revision
@@ -64,6 +65,12 @@ def build_bundle(
     try:
         projects = ProjectRegistry(document.projects, repository_root=settings.repository_root)
         profiles = ProfileRegistry(document.profiles)
+        sandboxes = SandboxRegistry(document.sandboxes)
+        for project in projects.items():
+            if project.enabled:
+                sandbox = sandboxes.get(project.sandbox_profile)
+                if not sandbox.enabled:
+                    raise RegistryError(f"project {project.id} references disabled sandbox")
         topics = TopicRegistry(document.topics, projects=projects)
         resolver = ScopedSecretResolver(
             access_policy=_secret_access_policy(document, settings),
@@ -82,6 +89,7 @@ def build_bundle(
             projects=projects,
             profiles=profiles,
             topics=topics,
+            sandboxes=sandboxes,
             revision=content_revision(document),
         )
     except (RegistryError, SecretResolutionError) as error:

@@ -126,6 +126,29 @@ def test_policy_filters_and_orders_deterministically() -> None:
     )
 
 
+def test_code_execution_requires_cli_sandbox_profile() -> None:
+    api = profile("api", sandbox_required=True)
+    cli = profile(
+        "cli",
+        provider="codex",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="cli",
+        state_directory=Path("/var/lib/codex-cli"),
+        sandbox_required=True,
+    )
+    decision = select_profile(
+        routing_request(requires_sandbox=True, required_launch_mode=LaunchMode.CLI),
+        (api, cli),
+        {"api": EffectiveProfileState(), "cli": EffectiveProfileState()},
+    )
+    assert decision.selected_profile_id == "cli"
+    api_evaluation = next(item for item in decision.evaluations if item.profile_id == "api")
+    assert ExclusionReason.LAUNCH_MODE in api_evaluation.reasons
+
+
 def test_policy_honors_only_eligible_explicit_profile_and_fallback() -> None:
     primary = profile("primary", fallback_profile_ids=("fallback",))
     fallback = profile("fallback", routing_priority=999)
@@ -442,7 +465,11 @@ async def test_codex_adapter_uses_isolated_identity_without_auth_copy(tmp_path: 
     )
 
     result = await CodexCliAdapter(transport).execute(
-        provider_request(), configured, CancellationContext()
+        provider_request().model_copy(
+            update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+        ),
+        configured,
+        CancellationContext(),
     )
 
     assert result.text == "safe result"
@@ -450,7 +477,56 @@ async def test_codex_adapter_uses_isolated_identity_without_auth_copy(tmp_path: 
     assert invocation.runtime_identity == "vuzol-codex-a"
     assert invocation.state_directory == str(tmp_path / "codex-a")
     assert "auth.json" not in invocation.stdin
-    assert invocation.argv[-2:] == ("read-only", "-")
+    assert invocation.argv[-4:] == ("workspace-write", "--cd", "/workspace", "-")
+
+
+@pytest.mark.anyio
+async def test_codex_adapter_accepts_versioned_jsonl(tmp_path: Path) -> None:
+    class JsonlTransport:
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            return CodexProcessResult(
+                0,
+                "\n".join(
+                    (
+                        json.dumps(
+                            {
+                                "type": "item.completed",
+                                "item": {"type": "agent_message", "text": "done"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "turn.completed",
+                                "usage": {"input_tokens": 4, "output_tokens": 2},
+                            }
+                        ),
+                    )
+                ),
+                "",
+                2,
+            )
+
+    configured = profile(
+        "codex-a",
+        provider="codex",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="codex-a",
+        state_directory=tmp_path / "codex-a",
+    )
+    result = await CodexCliAdapter(JsonlTransport()).execute(
+        provider_request().model_copy(
+            update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+        ),
+        configured,
+        CancellationContext(),
+    )
+    assert result.text == "done" and result.usage.input_tokens == 4
 
 
 @pytest.mark.anyio
@@ -475,12 +551,8 @@ async def test_codex_adapter_rejects_missing_isolation_sandbox_and_bad_output(
             configured.model_copy(update={"runtime_identity": None}),
             CancellationContext(),
         )
-    with pytest.raises(ProviderFailure, match="Step 08"):
-        await adapter.execute(
-            provider_request().model_copy(update={"sandbox_reference": "sandbox:1"}),
-            configured,
-            CancellationContext(),
-        )
+    with pytest.raises(ProviderFailure, match="requires an isolated"):
+        await adapter.execute(provider_request(), configured, CancellationContext())
 
     class BadTransport:
         async def run(
@@ -491,7 +563,11 @@ async def test_codex_adapter_rejects_missing_isolation_sandbox_and_bad_output(
 
     with pytest.raises(ProviderFailure) as captured:
         await CodexCliAdapter(BadTransport()).execute(
-            provider_request(), configured, CancellationContext()
+            provider_request().model_copy(
+                update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+            ),
+            configured,
+            CancellationContext(),
         )
     assert captured.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
 

@@ -6,7 +6,13 @@ from datetime import timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.config.models import BudgetMode, Capability, ProviderProfileConfig, ProviderRole
+from vuzol.config.models import (
+    BudgetMode,
+    Capability,
+    LaunchMode,
+    ProviderProfileConfig,
+    ProviderRole,
+)
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
 from vuzol.providers.budgets import BudgetExceeded, estimate_reservation, reserve_budget
@@ -31,6 +37,7 @@ PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
     "synthesize": ProviderRole.SUMMARIZER,
     "plan": ProviderRole.PLANNER,
     "review": ProviderRole.REVIEWER,
+    "execute_code": ProviderRole.EXECUTOR,
 }
 
 
@@ -128,6 +135,10 @@ async def claim_routed_step(
             remaining_cost_units=settings.limits.task_cost_units,
             failed_profile_id=failed_profile_id,
             allowed_fallback_ids=allowed_fallbacks,
+            requires_sandbox=step.step_type == "execute_code",
+            required_launch_mode=(
+                LaunchMode.CLI if step.step_type == "execute_code" else LaunchMode.API
+            ),
         )
         decision = select_profile(policy_request, profiles, states)
         ordered = tuple(

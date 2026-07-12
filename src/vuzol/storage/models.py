@@ -25,12 +25,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from vuzol.storage.base import Base
 from vuzol.storage.types import (
     ApprovalStatus,
+    ArtifactStorageState,
     BudgetReservationStatus,
     ControlActionStatus,
     DeliveryStatus,
     IdempotencyClass,
     InboxStatus,
     IntakeStatus,
+    ProcessOutcome,
     ProcessStatus,
     QueueClass,
     RetryClass,
@@ -38,6 +40,7 @@ from vuzol.storage.types import (
     RunStatus,
     StepStatus,
     TaskStatus,
+    TerminationStage,
     WorktreeDeliveryState,
     enum_type,
 )
@@ -422,6 +425,22 @@ class Artifact(IdentityMixin, TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
     )
+    storage_state: Mapped[ArtifactStorageState] = mapped_column(
+        enum_type(ArtifactStorageState, "artifact_storage_state"),
+        nullable=False,
+        default=ArtifactStorageState.AVAILABLE,
+    )
+    storage_key: Mapped[str | None] = mapped_column(String(500), unique=True)
+    producer_process_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "supervised_processes.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_artifacts_producer_process_id",
+        ),
+    )
+    redaction_revision: Mapped[str | None] = mapped_column(String(64))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class UsageRecord(IdentityMixin, Base):
@@ -607,6 +626,12 @@ class ConfigurationRevision(IdentityMixin, Base):
 
 class Worktree(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "worktrees"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_worktrees_run_id"),
+        UniqueConstraint(
+            "project_id", "repository_identity_hash", "branch", name="uq_worktree_project_branch"
+        ),
+    )
 
     task_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -616,7 +641,11 @@ class Worktree(IdentityMixin, TimestampMixin, Base):
     )
     project_id: Mapped[str] = mapped_column(String(100), nullable=False)
     source_remote: Mapped[str | None] = mapped_column(String(1000))
+    source_remote_hash: Mapped[str | None] = mapped_column(String(64))
+    repository_identity_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     base_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    expected_target_head: Mapped[str] = mapped_column(String(64), nullable=False)
     branch: Mapped[str] = mapped_column(String(255), nullable=False)
     path: Mapped[str] = mapped_column(String(1000), nullable=False, unique=True)
     owner: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -626,6 +655,20 @@ class Worktree(IdentityMixin, TimestampMixin, Base):
         default=WorktreeDeliveryState.ACTIVE,
     )
     result_commit: Mapped[str | None] = mapped_column(String(64))
+    lifecycle_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    diff_hash: Mapped[str | None] = mapped_column(String(64))
+    changed_files_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT")
+    )
+    patch_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT")
+    )
+    retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_inspected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleanup_reason: Mapped[str | None] = mapped_column(String(100))
+    delivery_operation_hash: Mapped[str | None] = mapped_column(String(64))
+    delivered_remote: Mapped[str | None] = mapped_column(String(1000))
+    delivered_ref: Mapped[str | None] = mapped_column(String(500))
     cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -635,7 +678,24 @@ class SupervisedProcess(IdentityMixin, TimestampMixin, Base):
     step_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    worktree_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("worktrees.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    lease_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     command_envelope_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    command_envelope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    sandbox_spec_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    container_runtime: Mapped[str] = mapped_column(String(50), nullable=False)
+    image_digest: Mapped[str] = mapped_column(String(255), nullable=False)
     working_directory: Mapped[str] = mapped_column(String(1000), nullable=False)
     host_pid: Mapped[int | None] = mapped_column(BigInteger)
     container_id: Mapped[str | None] = mapped_column(String(200))
@@ -644,6 +704,16 @@ class SupervisedProcess(IdentityMixin, TimestampMixin, Base):
         nullable=False,
         default=ProcessStatus.STARTING,
     )
+    outcome: Mapped[ProcessOutcome | None] = mapped_column(
+        enum_type(ProcessOutcome, "process_outcome")
+    )
+    termination_stage: Mapped[TerminationStage] = mapped_column(
+        enum_type(TerminationStage, "termination_stage"),
+        nullable=False,
+        default=TerminationStage.NONE,
+    )
+    timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    resource_limited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     exit_code: Mapped[int | None] = mapped_column(Integer)
     signal_number: Mapped[int | None] = mapped_column(Integer)
     stdout_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -652,5 +722,18 @@ class SupervisedProcess(IdentityMixin, TimestampMixin, Base):
     stderr_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("artifacts.id", ondelete="RESTRICT")
     )
+    provider_events_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT")
+    )
+    provider_result_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT")
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    termination_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reaped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    runtime_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )

@@ -73,6 +73,29 @@ class DeliveryMode(StrEnum):
     PUSH = "push"
 
 
+class SandboxNetworkMode(StrEnum):
+    NONE = "none"
+    HTTPS_PROXY = "https_proxy"
+
+
+class SandboxProfileConfig(FrozenModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
+    image: str = Field(pattern=r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+    uid: int = Field(default=10001, ge=1, le=2_147_483_647)
+    gid: int = Field(default=10001, ge=1, le=2_147_483_647)
+    cpu_count: float = Field(default=1.0, gt=0, le=16)
+    memory_bytes: int = Field(default=1_073_741_824, ge=67_108_864)
+    pids_limit: int = Field(default=128, ge=16, le=4096)
+    tmpfs_bytes: int = Field(default=134_217_728, ge=1_048_576)
+    open_files_limit: int = Field(default=1024, ge=64, le=65_536)
+    output_bytes: int = Field(default=10_000_000, ge=1024)
+    timeout_seconds: int = Field(default=3600, ge=1, le=86_400)
+    stop_grace_seconds: int = Field(default=10, ge=1, le=300)
+    network_mode: SandboxNetworkMode = SandboxNetworkMode.NONE
+    inner_codex_sandbox_required: bool = True
+    enabled: bool = True
+
+
 class CommandDefinition(FrozenModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     argv: tuple[str, ...] = Field(min_length=1)
@@ -234,3 +257,4 @@ class RegistryDocument(FrozenModel):
     projects: tuple[ProjectConfig, ...] = ()
     profiles: tuple[ProviderProfileConfig, ...] = ()
     topics: tuple[TopicConfig, ...] = ()
+    sandboxes: tuple[SandboxProfileConfig, ...] = ()

@@ -10,6 +10,8 @@ from vuzol.config import (
     ProjectRegistry,
     ProviderProfileConfig,
     RegistryError,
+    SandboxProfileConfig,
+    SandboxRegistry,
     TopicConfig,
     TopicKind,
     TopicRegistry,
@@ -181,8 +183,20 @@ def test_snapshot_preserves_non_security_configuration_and_detects_revocation(
         projects = ProjectRegistry([configured_project], repository_root=tmp_path)
         profiles = ProfileRegistry([configured_profile])
         topics = TopicRegistry([], projects=projects)
+        sandboxes = SandboxRegistry(
+            [
+                SandboxProfileConfig(
+                    id="project-default",
+                    image=f"example/sandbox@sha256:{'0' * 64}",
+                )
+            ]
+        )
         return ConfigurationBundle(
-            projects=projects, profiles=profiles, topics=topics, revision="revision"
+            projects=projects,
+            profiles=profiles,
+            topics=topics,
+            sandboxes=sandboxes,
+            revision="revision",
         )
 
     original = bundle(original_project, original_profile)

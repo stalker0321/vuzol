@@ -3,6 +3,7 @@
 import uuid
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import Capability
@@ -13,7 +14,7 @@ from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.health import record_failure_observation, record_success_observation
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.providers.routing import PROVIDER_STEP_ROLES
-from vuzol.storage.models import ProviderBudgetReservation, Run, Step, Task
+from vuzol.storage.models import ProviderBudgetReservation, Run, Step, Task, Worktree
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
@@ -134,12 +135,18 @@ class ProviderStepHandler:
             if reservation is None:
                 raise LookupError("provider reservation is missing")
             profile = self._registries.profiles.get(step.executor_profile_id)
+            worktree = None
+            if step.step_type == "execute_code":
+                worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
+                if worktree is None:
+                    raise LookupError("execute_code requires a prepared worktree")
             return (
                 ProviderRequest(
                     task_id=task.id,
                     run_id=run.id,
                     step_id=step.id,
                     provider_attempt=attempt_value,
+                    lease_generation=request.lease.generation,
                     role=PROVIDER_STEP_ROLES[step.step_type],
                     required_capabilities=frozenset(
                         Capability(value) for value in step.required_capabilities
@@ -154,6 +161,7 @@ class ProviderStepHandler:
                     max_output_tokens=reservation.reserved_output_tokens,
                     reserved_cost_units=Decimal(reservation.reserved_cost_units),
                     reserved_quota_units=Decimal(reservation.reserved_quota_units),
+                    sandbox_reference=(f"worktree:{worktree.id}" if worktree is not None else None),
                 ),
                 profile.id,
                 reservation.id,
@@ -166,3 +174,7 @@ SAFE_PROVIDER_STEP_TYPES = frozenset({"execute_model", "research_execute", "synt
 
 def provider_handlers(handler: ProviderStepHandler) -> dict[str, ProviderStepHandler]:
     return {step_type: handler for step_type in SAFE_PROVIDER_STEP_TYPES}
+
+
+def executor_provider_handlers(handler: ProviderStepHandler) -> dict[str, ProviderStepHandler]:
+    return {"execute_code": handler}

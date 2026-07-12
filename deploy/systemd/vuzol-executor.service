@@ -1,13 +1,38 @@
 [Unit]
 Description=Vuzol isolated coding executor
-After=network-online.target postgresql.service vuzol-rootless-docker.service
-Wants=network-online.target vuzol-rootless-docker.service
+After=network-online.target postgresql.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=vuzol-executor
 Group=vuzol-executor
 EnvironmentFile=/etc/vuzol/executor.env
+
+# The rootless Docker daemon is deployed as a linger-enabled systemd USER unit
+# (see deploy/systemd/user/vuzol-rootless-docker.service).
+#
+# There is intentionally no After=/Wants= on "vuzol-rootless-docker.service"
+# because that name lives in a different systemd manager (the user's).
+# A direct cross-manager dependency would be incorrect.
+#
+# Readiness is fail-closed and enforced in two layers:
+# 1. This ExecStartPre waits for the socket path (from env or dynamic user
+#    runtime dir) to exist and be a Unix socket. The path is resolved
+#    without hard-coding any UID.
+# 2. The executor process itself calls RootlessDockerRuntime.preflight()
+#    (src/vuzol/execution/sandbox.py) which additionally verifies:
+#      - socket is owned by the current euid (vuzol-executor)
+#      - daemon reports rootless + seccomp
+#      - cgroup v2
+#      - no "No memory limit support" / "No cpu cfs quota support" warnings
+#    If any check fails the process exits and the unit restarts (on-failure).
+#
+# This preserves the strict "no rootful, no weak limits" contract.
+# The readiness probe is written as a single-line sh -c (with ; separators) so
+# that the unit file parser accepts it without quoting or continuation issues.
+ExecStartPre=/bin/sh -c "set -e; SOCKET=\"\${VUZOL_EXECUTION__ROOTLESS_DOCKER_SOCKET:-}\"; if [ -z \"\$SOCKET\" ]; then SOCKET=\"/run/user/\$(id -u)/docker.sock\"; fi; echo \"vuzol-executor: waiting for rootless Docker socket at \$SOCKET\"; until [ -S \"\$SOCKET\" ]; do sleep 0.2; done"
+
 ExecStart=/opt/vuzol/.venv/bin/vuzol-executor
 Restart=on-failure
 RestartSec=5

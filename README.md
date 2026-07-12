@@ -85,13 +85,10 @@ The dedicated `vuzol-executor` process (see `src/vuzol/cli/executor.py`) runs `p
 
 Systemd units:
 
-- `deploy/systemd/vuzol-rootless-docker.service` — dedicated rootless daemon for the executor user.
-- `deploy/systemd/vuzol-executor.service` — depends on `vuzol-rootless-docker.service` (not the root `docker.service`).
+- `deploy/systemd/user/vuzol-rootless-docker.service` — dedicated rootless Docker daemon as a linger-enabled systemd **user** unit (installed to `/etc/systemd/user/vuzol-rootless-docker.service`). Runs inside the `vuzol-executor` user's manager (with `loginctl enable-linger`). Uses `%t` for the socket path under the user's XDG_RUNTIME_DIR. No `User=`/`Group=` lines.
+- `deploy/systemd/vuzol-executor.service` — the system service (with `User=vuzol-executor`) that runs the dedicated executor worker. It no longer declares a direct systemd dependency on the docker unit (user units are in a separate manager). Readiness is provided by an `ExecStartPre` socket wait plus the strict `RootlessDockerRuntime.preflight()` gate inside the process.
 
-The executor must be started after its rootless daemon. The current system-service daemon unit is
-fail-closed by executor preflight when CPU or memory cgroup limits are unavailable. Production
-activation requires moving the daemon to the linger-enabled `vuzol-executor` user manager and
-re-running the live sandbox security probes described in the external Step 08 handoff.
+The executor process must not start until the user-managed rootless daemon is up, its socket is present and owned by the executor identity, and the daemon reports rootless mode + seccomp + cgroup v2 with enforceable CPU/memory limits. The preflight (and therefore the unit) fails closed on any violation and never falls back to the host root Docker socket. See `deploy/systemd/vuzol-executor.service` comments and the Step 08 handoff reports for the exact portable installation and verification steps.
 - [Telegram workspace](docs/TELEGRAM.md)
 - [Voice and semantic interpretation](docs/INTERPRETATION.md)
 - [Provider routing and budgets](docs/PROVIDERS.md)

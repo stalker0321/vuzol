@@ -5,18 +5,26 @@ After=network.target
 
 [Service]
 Type=simple
+Delegate=yes
 # USER UNIT: runs under the linger-enabled vuzol-executor user's systemd manager.
 # Do NOT include User= or Group= (user units inherit the user identity).
-# The user manager provides XDG_RUNTIME_DIR (exposed as %t) and the delegated
-# user slice for cgroup controllers (cpu, memory, pids, etc.).
-# This enables reliable enforcement of --cpus, --memory, --pids-limit etc.
+# Delegate=yes is required so the user slice delegates cpu/memory/pids controllers
+# to this service, allowing enforceable resource limits inside containers.
+# The user manager provides XDG_RUNTIME_DIR (exposed as %t) ...
 # Socket path uses %t for portability — never hard-code a numeric UID here.
 ExecStart=/usr/bin/dockerd-rootless.sh --host=unix://%t/docker.sock
-ExecStartPost=/bin/sh -c 'until /usr/bin/docker --host unix://%t/docker.sock info >/dev/null 2>&1; do sleep 0.2; done'
+ExecStartPost=/bin/sh -c "\
+  for i in \$(seq 1 150); do \
+    /usr/bin/docker --host unix://%t/docker.sock info >/dev/null 2>&1 && exit 0; \
+    sleep 0.2; \
+  done; \
+  echo 'timeout waiting for docker daemon readiness' >&2; exit 1 \
+"
 Restart=always
 RestartSec=2
 KillMode=mixed
 TimeoutStopSec=30
+TimeoutStartSec=60
 
 [Install]
 WantedBy=default.target

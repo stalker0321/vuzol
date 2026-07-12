@@ -50,7 +50,6 @@ async def seed(factory: object) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     return task.id, run_id, step.id
 
 
-@pytest.mark.postgresql
 def test_worktree_and_artifact_lifecycle_is_persisted(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

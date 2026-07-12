@@ -2,16 +2,17 @@
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -24,6 +25,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from vuzol.storage.base import Base
 from vuzol.storage.types import (
     ApprovalStatus,
+    BudgetReservationStatus,
     ControlActionStatus,
     DeliveryStatus,
     IdempotencyClass,
@@ -434,10 +436,13 @@ class UsageRecord(IdentityMixin, Base):
     input_tokens: Mapped[int | None] = mapped_column(BigInteger)
     output_tokens: Mapped[int | None] = mapped_column(BigInteger)
     cached_tokens: Mapped[int | None] = mapped_column(BigInteger)
-    cost_units: Mapped[float | None] = mapped_column(Float)
-    quota_units: Mapped[float | None] = mapped_column(Float)
+    cost_units: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    quota_units: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
     duration_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     provider_request_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    reservation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("provider_budget_reservations.id", ondelete="RESTRICT"), unique=True
+    )
     outcome: Mapped[str] = mapped_column(String(100), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
@@ -500,10 +505,24 @@ class ValidationResult(IdentityMixin, Base):
 
 class RoutingDecision(IdentityMixin, Base):
     __tablename__ = "routing_decisions"
+    __table_args__ = (
+        Index(
+            "uq_routing_decisions_step_attempt",
+            "step_id",
+            "provider_attempt",
+            unique=True,
+            postgresql_where=text("step_id IS NOT NULL"),
+        ),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), index=True
+    )
+    provider_attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    decision_kind: Mapped[str] = mapped_column(String(30), nullable=False, default="initial")
     role: Mapped[str] = mapped_column(String(50), nullable=False)
     selected_profile_id: Mapped[str | None] = mapped_column(String(100))
     alternatives: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
@@ -520,6 +539,7 @@ class ProfileHealthObservation(IdentityMixin, Base):
     profile_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("provider_profiles.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    configuration_revision: Mapped[str] = mapped_column(String(64), nullable=False)
     healthy: Mapped[bool] = mapped_column(Boolean, nullable=False)
     category: Mapped[str | None] = mapped_column(String(100))
     detail: Mapped[dict[str, Any]] = mapped_column(
@@ -530,6 +550,47 @@ class ProfileHealthObservation(IdentityMixin, Base):
     )
     unhealthy_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rate_limit_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quota_state: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    quota_remaining: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProviderBudgetReservation(IdentityMixin, Base):
+    __tablename__ = "provider_budget_reservations"
+    __table_args__ = (
+        UniqueConstraint("step_id", "provider_attempt", name="uq_budget_step_attempt"),
+    )
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    step_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    profile_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    provider_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    reserved_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reserved_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reserved_cost_units: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    reserved_quota_units: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    reconciled_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    reconciled_output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    reconciled_cost_units: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    reconciled_quota_units: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    status: Mapped[BudgetReservationStatus] = mapped_column(
+        enum_type(BudgetReservationStatus, "budget_reservation_status"),
+        nullable=False,
+        default=BudgetReservationStatus.RESERVED,
+    )
+    provider_request_id: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ConfigurationRevision(IdentityMixin, Base):

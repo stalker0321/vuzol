@@ -12,6 +12,7 @@ dependencies = [
   "alembic>=1.16,<2",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
+  "jsonschema>=4.25,<5",
   "psycopg[binary,pool]>=3.2,<4",
   "pydantic-settings>=2.10,<3",
   "python-telegram-bot>=22,<23",
@@ -35,6 +36,7 @@ dev = [
   "pytest>=9.0.3,<10",
   "pytest-cov>=6.2,<7",
   "ruff>=0.12,<1",
+  "types-jsonschema>=4.25,<5",
 ]
 
 [tool.hatch.build.targets.wheel]

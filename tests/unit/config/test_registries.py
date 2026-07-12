@@ -34,11 +34,13 @@ def profile(profile_id: str = "profile-a", **changes: object) -> ProviderProfile
         "id": profile_id,
         "provider": "provider",
         "model": "model",
+        "api_base_url": "https://provider.example/v1",
         "launch_mode": "api",
         "credential_reference": f"env:{profile_id.upper().replace('-', '_')}_KEY",
         "capabilities": frozenset({Capability.REPOSITORY_READ}),
         "concurrency_limit": 1,
         "cost_class": "balanced",
+        "roles": frozenset({"executor"}),
         "supported_task_types": frozenset({"general"}),
     }
     values.update(changes)
@@ -88,6 +90,35 @@ def test_fallbacks_reject_unknown_ids_and_cycles() -> None:
             [
                 profile("profile-a", fallback_profile_ids=("profile-b",)),
                 profile("profile-b", fallback_profile_ids=("profile-a",)),
+            ]
+        )
+
+
+def test_cli_profiles_require_distinct_identity_and_state_paths(tmp_path: Path) -> None:
+    def cli(profile_id: str, identity: str, directory: Path) -> ProviderProfileConfig:
+        return profile(
+            profile_id,
+            provider="codex",
+            api_base_url=None,
+            launch_mode="cli",
+            credential_reference=None,
+            credential_required=False,
+            runtime_identity=identity,
+            state_directory=directory,
+        )
+
+    with pytest.raises(RegistryError, match="share runtime identity"):
+        ProfileRegistry(
+            [
+                cli("codex-a", "codex", tmp_path / "a"),
+                cli("codex-b", "codex", tmp_path / "b"),
+            ]
+        )
+    with pytest.raises(RegistryError, match="overlapping state directories"):
+        ProfileRegistry(
+            [
+                cli("codex-a", "codex-a", tmp_path / "codex"),
+                cli("codex-b", "codex-b", tmp_path / "codex" / "nested"),
             ]
         )
 
@@ -167,9 +198,12 @@ def test_snapshot_preserves_non_security_configuration_and_detects_revocation(
         original_project.model_copy(
             update={"allowed_capabilities": frozenset(), "sandbox_profile": "restricted"}
         ),
-        original_profile.model_copy(update={"enabled": False, "sandbox_required": False}),
+        original_profile.model_copy(
+            update={"enabled": False, "sandbox_required": False, "roles": frozenset()}
+        ),
     ).evaluate(snapshot)
     assert not revoked.allowed
     assert any("capabilities revoked" in reason for reason in revoked.reasons)
     assert any("sandbox policy changed" in reason for reason in revoked.reasons)
     assert any("profile disabled" in reason for reason in revoked.reasons)
+    assert any("profile roles revoked" in reason for reason in revoked.reasons)

@@ -21,14 +21,52 @@ provider = "openai-compatible"
 model = "replace-me"
 api_base_url = "https://api.example.com/v1"
 launch_mode = "api"
-credential_reference = "env:VUZOL_EXAMPLE_API_KEY"
+credential_reference = "env:VUZOL_OPENAI_EXECUTOR_API_KEY"
 credential_required = true
 capabilities = ["repository_read"]
 concurrency_limit = 1
 cost_class = "balanced"
+roles = ["executor"]
+routing_priority = 100
 supported_task_types = ["general"]
 fallback_profile_ids = []
 sandbox_required = false
+enabled = false
+
+[[profiles]]
+id = "codex-account-a"
+provider = "codex"
+model = "codex"
+launch_mode = "cli"
+credential_required = false
+capabilities = ["repository_read", "code_edit", "git", "project_shell"]
+concurrency_limit = 1
+cost_class = "strong"
+roles = ["executor", "planner"]
+routing_priority = 200
+supported_task_types = ["coding"]
+fallback_profile_ids = []
+sandbox_required = true
+runtime_identity = "vuzol-codex-a"
+state_directory = "/var/lib/vuzol-codex-a"
+enabled = false
+
+[[profiles]]
+id = "codex-account-b"
+provider = "codex"
+model = "codex"
+launch_mode = "cli"
+credential_required = false
+capabilities = ["repository_read", "code_edit", "git", "project_shell"]
+concurrency_limit = 1
+cost_class = "strong"
+roles = ["executor", "planner"]
+routing_priority = 210
+supported_task_types = ["coding"]
+fallback_profile_ids = []
+sandbox_required = true
+runtime_identity = "vuzol-codex-b"
+state_directory = "/var/lib/vuzol-codex-b"
 enabled = false
 
 [[topics]]

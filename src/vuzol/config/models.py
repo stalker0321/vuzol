@@ -33,6 +33,27 @@ class LaunchMode(StrEnum):
     TOOL = "tool"
 
 
+class ProviderRole(StrEnum):
+    INTERPRETER = "interpreter"
+    PLANNER = "planner"
+    EXECUTOR = "executor"
+    REVIEWER = "reviewer"
+    SUMMARIZER = "summarizer"
+    TRANSCRIBER = "transcriber"
+
+
+class BudgetMode(StrEnum):
+    CHEAP = "cheap"
+    BALANCED = "balanced"
+    STRONG = "strong"
+
+
+class CostClass(StrEnum):
+    CHEAP = "cheap"
+    BALANCED = "balanced"
+    STRONG = "strong"
+
+
 class TopicKind(StrEnum):
     INBOX = "inbox"
     TASK_DASHBOARD = "task_dashboard"
@@ -135,10 +156,18 @@ class ProviderProfileConfig(FrozenModel):
     concurrency_limit: int = Field(ge=1, le=100)
     context_limit: int | None = Field(default=None, ge=1)
     output_limit: int | None = Field(default=None, ge=1)
-    cost_class: str = Field(min_length=1)
+    cost_class: CostClass
+    roles: frozenset[ProviderRole] = frozenset()
+    routing_priority: int = Field(default=100, ge=0, le=10_000)
     supported_task_types: frozenset[str]
     fallback_profile_ids: tuple[str, ...] = ()
     sandbox_required: bool = True
+    input_cost_units_per_million: float | None = Field(default=None, ge=0)
+    output_cost_units_per_million: float | None = Field(default=None, ge=0)
+    quota_units_per_call: float | None = Field(default=None, ge=0)
+    minimum_unknown_usage_cost: float = Field(default=0.01, gt=0)
+    runtime_identity: str | None = Field(default=None, min_length=1, max_length=100)
+    state_directory: Path | None = None
     enabled: bool = True
 
     @model_validator(mode="after")
@@ -161,6 +190,25 @@ class ProviderProfileConfig(FrozenModel):
                 else:
                     if not provider_address.is_global:
                         raise ValueError("provider API base URL must use a global address")
+        if self.launch_mode is LaunchMode.API and self.api_base_url is None:
+            raise ValueError("API profile requires api_base_url")
+        if self.launch_mode is LaunchMode.CLI:
+            if self.runtime_identity is None or self.state_directory is None:
+                raise ValueError("CLI profile requires runtime_identity and state_directory")
+            if not self.state_directory.is_absolute():
+                raise ValueError("CLI profile state_directory must be absolute")
+            home = Path.home().resolve()
+            state = self.state_directory.resolve()
+            if state in {home, home / ".codex"}:
+                raise ValueError("CLI profile cannot use the application user's default home")
+        elif self.runtime_identity is not None or self.state_directory is not None:
+            raise ValueError("runtime identity and state directory are CLI-only")
+        if (
+            self.input_cost_units_per_million == 0
+            and self.output_cost_units_per_million == 0
+            and not self.quota_units_per_call
+        ):
+            raise ValueError("explicit zero pricing requires a non-zero quota charge")
         return self
 
 

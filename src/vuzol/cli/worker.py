@@ -11,13 +11,21 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.config import get_runtime_configuration
+from vuzol.config import (
+    LaunchMode,
+    ProviderRole,
+    ScopedSecretResolver,
+    get_runtime_configuration,
+)
 from vuzol.observability import configure_logging, get_logger
+from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
+from vuzol.providers.health import synchronize_profiles
+from vuzol.providers.registry import AdapterRegistry
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.dispatch import WorkflowDispatcher
 from vuzol.workflows.recovery import recover_expired_steps
-from vuzol.workflows.worker import INTERNAL_HANDLERS, WorkflowWorker
+from vuzol.workflows.worker import INTERNAL_HANDLERS, RoutedWorkflowWorker, WorkflowWorker
 
 
 class Processor(Protocol):
@@ -26,6 +34,17 @@ class Processor(Protocol):
 
 class TransactionFactory(Protocol):
     def begin(self) -> AbstractAsyncContextManager[AsyncSession]: ...
+
+
+class ProcessorChain:
+    def __init__(self, *processors: Processor) -> None:
+        self._processors = processors
+
+    async def process_one(self) -> bool:
+        for processor in self._processors:
+            if await processor.process_one():
+                return True
+        return False
 
 
 def run_worker(*, poll_interval_seconds: float, stop_event: threading.Event) -> None:
@@ -61,10 +80,16 @@ async def run() -> None:
     signal.signal(signal.SIGINT, request_stop)
     engine = create_engine(settings, resolve_database_dsn(settings))
     factory = create_session_factory(engine)
+    async with factory.begin() as session:
+        await synchronize_profiles(
+            session,
+            runtime.registries.profiles.items(),
+            configuration_revision=runtime.registries.revision,
+        )
     owner = f"{socket.gethostname()}:{os.getpid()}"
     dispatcher = WorkflowDispatcher(runtime, factory, owner=f"{owner}:dispatch")
     controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
-    worker = WorkflowWorker(
+    internal_worker = WorkflowWorker(
         settings,
         factory,
         owner=f"{owner}:worker",
@@ -73,6 +98,35 @@ async def run() -> None:
             profile.id: profile.concurrency_limit for profile in runtime.registries.profiles.items()
         },
     )
+    model_roles = frozenset({ProviderRole.EXECUTOR, ProviderRole.PLANNER, ProviderRole.SUMMARIZER})
+    routable_profiles = tuple(
+        profile
+        for profile in runtime.registries.profiles.items()
+        if profile.enabled
+        and profile.provider == "openai-compatible"
+        and profile.launch_mode is LaunchMode.API
+        and profile.roles.intersection(model_roles)
+    )
+    worker: Processor = internal_worker
+    if routable_profiles:
+        resolver = ScopedSecretResolver(
+            access_policy={
+                profile.credential_reference: frozenset({f"profile:{profile.id}"})
+                for profile in runtime.registries.profiles.items()
+                if profile.credential_reference is not None
+            },
+            secret_file_root=settings.secret_file_root,
+        )
+        adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver)
+        provider_handler = ProviderStepHandler(factory, runtime.registries, adapter_registry)
+        routed_worker = RoutedWorkflowWorker(
+            settings,
+            factory,
+            registries=runtime.registries,
+            owner=f"{owner}:provider",
+            handlers=provider_handlers(provider_handler),
+        )
+        worker = ProcessorChain(internal_worker, routed_worker)
     get_logger(__name__).info("worker ready", extra={"event": "worker.ready"})
     try:
         await run_runtime(

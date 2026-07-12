@@ -33,11 +33,13 @@ def profile(**changes: object) -> ProviderProfileConfig:
         "id": "profile-a",
         "provider": "provider",
         "model": "model",
+        "api_base_url": "https://provider.example/v1",
         "launch_mode": "api",
         "credential_reference": "env:PROFILE_KEY",
         "capabilities": frozenset({Capability.REPOSITORY_READ}),
         "concurrency_limit": 1,
         "cost_class": "balanced",
+        "roles": frozenset({"executor"}),
         "supported_task_types": frozenset({"general"}),
     }
     values.update(changes)

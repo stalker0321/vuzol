@@ -57,7 +57,13 @@ WORKFLOW_DEFINITIONS: tuple[WorkflowDefinition, ...] = (
         task_types=frozenset({"coding"}),
         steps=(
             INTERPRET,
-            _step("plan", "interpret", optional="needs_planning"),
+            _step(
+                "plan",
+                "interpret",
+                retry=RetryClass.TRANSIENT,
+                attempts=3,
+                optional="needs_planning",
+            ),
             _step("prepare_context", "plan", capabilities=frozenset({Capability.REPOSITORY_READ})),
             _step(
                 "prepare_worktree",
@@ -99,7 +105,12 @@ WORKFLOW_DEFINITIONS: tuple[WorkflowDefinition, ...] = (
                 retry=RetryClass.TRANSIENT,
                 attempts=3,
             ),
-            _step("synthesize", "research_execute"),
+            _step(
+                "synthesize",
+                "research_execute",
+                retry=RetryClass.TRANSIENT,
+                attempts=3,
+            ),
             _step("finalize", "synthesize", queue=QueueClass.CONTROL, internal=True),
         ),
     ),
@@ -115,7 +126,7 @@ WORKFLOW_DEFINITIONS: tuple[WorkflowDefinition, ...] = (
                 queue=QueueClass.PRIVILEGED,
                 capabilities=frozenset({Capability.HOST_ADMIN}),
             ),
-            _step("plan", "inspect"),
+            _step("plan", "inspect", retry=RetryClass.TRANSIENT, attempts=3),
             _step("approval", "plan", queue=QueueClass.CONTROL, internal=True),
             _step(
                 "privileged_execute",

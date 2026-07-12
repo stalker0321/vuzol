@@ -1,0 +1,526 @@
+import hashlib
+import json
+import uuid
+from dataclasses import dataclass, field
+from decimal import Decimal
+from pathlib import Path
+
+import httpx
+import pytest
+from pydantic import SecretStr
+
+from vuzol.config import (
+    BudgetMode,
+    Capability,
+    LaunchMode,
+    ProfileRegistry,
+    ProviderProfileConfig,
+    ProviderRole,
+    ScopedSecretResolver,
+)
+from vuzol.providers.budgets import account_usage, estimate_reservation
+from vuzol.providers.codex import CodexCliAdapter
+from vuzol.providers.domain import (
+    ContextItem,
+    EffectiveProfileState,
+    NormalizedUsage,
+    ProviderErrorCategory,
+    ProviderRequest,
+    QuotaState,
+)
+from vuzol.providers.errors import ProviderFailure
+from vuzol.providers.openai import OpenAICompatibleAdapter
+from vuzol.providers.policy import ExclusionReason, RoutingRequest, select_profile
+from vuzol.providers.ports import CodexInvocation, CodexProcessResult
+from vuzol.providers.registry import AdapterRegistry
+from vuzol.routing import select_profile as public_select_profile
+from vuzol.workflows.ports import CancellationContext
+
+
+def profile(profile_id: str, **changes: object) -> ProviderProfileConfig:
+    values: dict[str, object] = {
+        "id": profile_id,
+        "provider": "openai-compatible",
+        "model": "model",
+        "api_base_url": "https://provider.example/v1",
+        "launch_mode": "api",
+        "credential_reference": f"env:{profile_id.upper()}_KEY",
+        "capabilities": frozenset({Capability.REPOSITORY_READ}),
+        "concurrency_limit": 1,
+        "cost_class": "balanced",
+        "roles": frozenset({ProviderRole.EXECUTOR}),
+        "supported_task_types": frozenset({"general"}),
+        "sandbox_required": False,
+    }
+    values.update(changes)
+    return ProviderProfileConfig.model_validate(values)
+
+
+def routing_request(**changes: object) -> RoutingRequest:
+    values: dict[str, object] = {
+        "role": ProviderRole.EXECUTOR,
+        "task_type": "general",
+        "required_capabilities": frozenset({Capability.REPOSITORY_READ}),
+        "project_allowed_capabilities": frozenset({Capability.REPOSITORY_READ}),
+        "budget_mode": BudgetMode.BALANCED,
+        "estimated_input_tokens": 100,
+        "max_output_tokens": 100,
+        "remaining_cost_units": 10.0,
+    }
+    values.update(changes)
+    return RoutingRequest(**values)  # type: ignore[arg-type]
+
+
+def provider_request(*, structured: bool = False) -> ProviderRequest:
+    return ProviderRequest(
+        task_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_id=uuid.uuid4(),
+        provider_attempt=1,
+        role=ProviderRole.EXECUTOR,
+        required_capabilities=frozenset(),
+        original_input="answer safely",
+        task_draft={"task_type": "general"},
+        context=(
+            ContextItem(
+                source="task",
+                reference="task:original",
+                content="bounded context",
+                content_hash=hashlib.sha256(b"bounded context").hexdigest(),
+            ),
+        ),
+        output_schema_name="answer" if structured else None,
+        output_schema_version="1" if structured else None,
+        output_json_schema={"type": "object"} if structured else None,
+        system_policy_revision="policy-v1",
+        prompt_revision="prompt-v1",
+        timeout_seconds=10,
+        max_input_tokens=1_000,
+        max_output_tokens=100,
+        reserved_cost_units=Decimal("0.1"),
+        reserved_quota_units=Decimal("1"),
+    )
+
+
+def test_policy_filters_and_orders_deterministically() -> None:
+    cheap = profile("cheap", cost_class="cheap", routing_priority=20)
+    preferred = profile("preferred", cost_class="balanced", routing_priority=10)
+    saturated = profile("saturated", routing_priority=1)
+    unhealthy = profile("unhealthy", routing_priority=0)
+    states = {
+        "cheap": EffectiveProfileState(),
+        "preferred": EffectiveProfileState(),
+        "saturated": EffectiveProfileState(active_leases=1),
+        "unhealthy": EffectiveProfileState(healthy=False),
+    }
+
+    decision = select_profile(routing_request(), (unhealthy, saturated, cheap, preferred), states)
+
+    assert decision.selected_profile_id == "preferred"
+    assert decision.alternatives == ("cheap",)
+    reasons = {item.profile_id: item.reasons for item in decision.evaluations}
+    assert ExclusionReason.CONCURRENCY in reasons["saturated"]
+    assert ExclusionReason.UNHEALTHY in reasons["unhealthy"]
+    assert decision == select_profile(
+        routing_request(), (preferred, cheap, saturated, unhealthy), states
+    )
+
+
+def test_policy_honors_only_eligible_explicit_profile_and_fallback() -> None:
+    primary = profile("primary", fallback_profile_ids=("fallback",))
+    fallback = profile("fallback", routing_priority=999)
+    forbidden = profile("forbidden", capabilities=frozenset())
+    states = {item.id: EffectiveProfileState() for item in (primary, fallback, forbidden)}
+
+    explicit = select_profile(
+        routing_request(trusted_profile_id="forbidden"),
+        (primary, fallback, forbidden),
+        states,
+    )
+    assert explicit.selected_profile_id == "primary"
+    fallback_decision = select_profile(
+        routing_request(
+            failed_profile_id="primary",
+            allowed_fallback_ids=("fallback",),
+        ),
+        (primary, fallback, forbidden),
+        states,
+    )
+    assert fallback_decision.selected_profile_id == "fallback"
+    assert all(
+        item.profile_id != "primary" or not item.eligible for item in fallback_decision.evaluations
+    )
+
+
+def test_policy_treats_quota_and_unknown_cost_conservatively() -> None:
+    configured = profile("profile", minimum_unknown_usage_cost=0.5)
+    quota = select_profile(
+        routing_request(),
+        (configured,),
+        {"profile": EffectiveProfileState(quota_state=QuotaState.EXHAUSTED)},
+    )
+    assert quota.selected_profile_id is None
+    budget = select_profile(
+        routing_request(remaining_cost_units=0.1),
+        (configured,),
+        {"profile": EffectiveProfileState()},
+    )
+    assert budget.selected_profile_id is None
+    estimate = estimate_reservation(configured, input_tokens=1, output_tokens=1)
+    assert estimate.cost_units == Decimal("0.500000")
+
+
+def test_policy_reports_every_static_security_exclusion() -> None:
+    incompatible = profile(
+        "incompatible",
+        roles=frozenset({ProviderRole.PLANNER}),
+        supported_task_types=frozenset({"coding"}),
+        capabilities=frozenset(),
+        sandbox_required=False,
+        context_limit=10,
+        output_limit=10,
+    )
+    request = routing_request(
+        project_allowed_capabilities=frozenset(),
+        estimated_input_tokens=100,
+        max_output_tokens=100,
+        requires_sandbox=True,
+    )
+    decision = public_select_profile(
+        request, (incompatible,), {"incompatible": EffectiveProfileState()}
+    )
+    reasons = set(decision.evaluations[0].reasons)
+    assert {
+        ExclusionReason.ROLE,
+        ExclusionReason.TASK_TYPE,
+        ExclusionReason.CAPABILITY,
+        ExclusionReason.PROJECT_POLICY,
+        ExclusionReason.SANDBOX,
+        ExclusionReason.CONTEXT_LIMIT,
+        ExclusionReason.OUTPUT_LIMIT,
+    }.issubset(reasons)
+
+
+def test_usage_accounting_uses_configured_rates_and_quota() -> None:
+    configured = profile(
+        "priced",
+        input_cost_units_per_million=2,
+        output_cost_units_per_million=4,
+        quota_units_per_call=3,
+    )
+    usage = account_usage(
+        configured,
+        NormalizedUsage(input_tokens=1_000, output_tokens=500, duration_ms=10),
+    )
+    assert usage.cost_units == Decimal("0.004000")
+    assert usage.quota_units == Decimal("3.000000")
+
+    supplied = account_usage(
+        configured,
+        NormalizedUsage(
+            input_tokens=1,
+            output_tokens=1,
+            cost_units=Decimal("9"),
+            quota_units=Decimal("8"),
+            duration_ms=1,
+        ),
+    )
+    assert supplied.cost_units == Decimal("9")
+    assert supplied.quota_units == Decimal("8")
+
+
+@pytest.mark.anyio
+async def test_openai_adapter_normalizes_structured_result_and_usage() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer test-key"
+        payload = json.loads(request.content)
+        assert payload["model"] == "model"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": '{"answer":"ok"}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 4,
+                    "prompt_tokens_details": {"cached_tokens": 2},
+                },
+            },
+            headers={"x-request-id": "request-1"},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://provider.example/v1"
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("test-key"), client=client)
+        result = await adapter.execute(
+            provider_request(structured=True), profile("profile"), CancellationContext()
+        )
+
+    assert result.structured_output == {"answer": "ok"}
+    assert result.provider_request_id == "request-1"
+    assert result.usage.input_tokens == 12
+    assert result.usage.cached_tokens == 2
+
+
+@pytest.mark.anyio
+async def test_openai_adapter_maps_errors_without_response_body() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(401, text="private provider response")
+        ),
+        base_url="https://provider.example/v1",
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("test-key"), client=client)
+        with pytest.raises(ProviderFailure) as captured:
+            await adapter.execute(provider_request(), profile("profile"), CancellationContext())
+
+    assert captured.value.category is ProviderErrorCategory.AUTHENTICATION
+    assert "private provider response" not in str(captured.value)
+
+
+@pytest.mark.anyio
+async def test_openai_adapter_rejects_unsafe_requests_before_send() -> None:
+    calls = 0
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://provider.example/v1"
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("key"), client=client)
+        cancelled = CancellationContext()
+        cancelled.request()
+        with pytest.raises(ProviderFailure) as captured:
+            await adapter.execute(provider_request(), profile("profile"), cancelled)
+        assert captured.value.category is ProviderErrorCategory.CANCELLED
+        assert not captured.value.request_sent
+
+        with pytest.raises(ProviderFailure, match="sandbox"):
+            await adapter.execute(
+                provider_request().model_copy(update={"sandbox_reference": "sandbox:1"}),
+                profile("profile"),
+                CancellationContext(),
+            )
+        with pytest.raises(ProviderFailure, match="schema"):
+            await adapter.execute(
+                provider_request(structured=True).model_copy(
+                    update={"output_json_schema": {"type": "not-a-json-schema-type"}}
+                ),
+                profile("profile"),
+                CancellationContext(),
+            )
+    assert calls == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "category", "retryable"),
+    [
+        (403, ProviderErrorCategory.AUTHENTICATION, False),
+        (429, ProviderErrorCategory.RATE_LIMITED, True),
+        (408, ProviderErrorCategory.TIMEOUT, True),
+        (503, ProviderErrorCategory.PROVIDER_UNAVAILABLE, True),
+        (413, ProviderErrorCategory.CONTEXT_TOO_LARGE, False),
+        (400, ProviderErrorCategory.PERMANENT_REQUEST, False),
+    ],
+)
+async def test_openai_adapter_normalizes_http_categories(
+    status: int, category: ProviderErrorCategory, retryable: bool
+) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(status, headers={"retry-after": "12"})
+        ),
+        base_url="https://provider.example/v1",
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("key"), client=client)
+        with pytest.raises(ProviderFailure) as captured:
+            await adapter.execute(provider_request(), profile("profile"), CancellationContext())
+    assert captured.value.category is category
+    assert captured.value.retryable is retryable
+    assert captured.value.request_sent
+    assert captured.value.retry_after_seconds == 12
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "content",
+    ["not-json", "[]", '{"wrong":true}'],
+)
+async def test_openai_adapter_rejects_invalid_structured_output(content: str) -> None:
+    required_schema = {
+        "type": "object",
+        "required": ["answer"],
+        "properties": {"answer": {"type": "string"}},
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"choices": [{"message": {"content": content}}]}
+            )
+        ),
+        base_url="https://provider.example/v1",
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("key"), client=client)
+        request = provider_request(structured=True).model_copy(
+            update={"output_json_schema": required_schema}
+        )
+        with pytest.raises(ProviderFailure) as captured:
+            await adapter.execute(request, profile("profile"), CancellationContext())
+    assert captured.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+
+
+@pytest.mark.anyio
+async def test_openai_adapter_normalizes_timeout_and_invalid_shape() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(httpx.ReadTimeout("timeout", request=request))
+        ),
+        base_url="https://provider.example/v1",
+    ) as client:
+        with pytest.raises(ProviderFailure) as captured:
+            await OpenAICompatibleAdapter(credential=SecretStr("key"), client=client).execute(
+                provider_request(), profile("profile"), CancellationContext()
+            )
+    assert captured.value.category is ProviderErrorCategory.TIMEOUT
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
+        base_url="https://provider.example/v1",
+    ) as client:
+        with pytest.raises(ProviderFailure) as captured:
+            await OpenAICompatibleAdapter(credential=SecretStr("key"), client=client).execute(
+                provider_request(), profile("profile"), CancellationContext()
+            )
+    assert captured.value.category is ProviderErrorCategory.UNKNOWN
+
+
+@dataclass
+class FakeCodexTransport:
+    invocations: list[CodexInvocation] = field(default_factory=list)
+
+    async def run(
+        self, invocation: CodexInvocation, cancellation: CancellationContext
+    ) -> CodexProcessResult:
+        assert not cancellation.requested
+        self.invocations.append(invocation)
+        return CodexProcessResult(
+            exit_code=0,
+            stdout=json.dumps(
+                {
+                    "text": "safe result",
+                    "request_id": "request",
+                    "session_id": "session",
+                    "usage": {"input_tokens": 3, "output_tokens": 2},
+                }
+            ),
+            stderr="",
+            duration_ms=25,
+        )
+
+
+@pytest.mark.anyio
+async def test_codex_adapter_uses_isolated_identity_without_auth_copy(tmp_path: Path) -> None:
+    transport = FakeCodexTransport()
+    configured = profile(
+        "codex-a",
+        provider="codex",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="vuzol-codex-a",
+        state_directory=tmp_path / "codex-a",
+    )
+
+    result = await CodexCliAdapter(transport).execute(
+        provider_request(), configured, CancellationContext()
+    )
+
+    assert result.text == "safe result"
+    invocation = transport.invocations[0]
+    assert invocation.runtime_identity == "vuzol-codex-a"
+    assert invocation.state_directory == str(tmp_path / "codex-a")
+    assert "auth.json" not in invocation.stdin
+    assert invocation.argv[-2:] == ("read-only", "-")
+
+
+@pytest.mark.anyio
+async def test_codex_adapter_rejects_missing_isolation_sandbox_and_bad_output(
+    tmp_path: Path,
+) -> None:
+    transport = FakeCodexTransport()
+    configured = profile(
+        "codex-a",
+        provider="codex",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="codex-a",
+        state_directory=tmp_path / "codex-a",
+    )
+    adapter = CodexCliAdapter(transport)
+    with pytest.raises(ProviderFailure, match="isolation"):
+        await adapter.execute(
+            provider_request(),
+            configured.model_copy(update={"runtime_identity": None}),
+            CancellationContext(),
+        )
+    with pytest.raises(ProviderFailure, match="Step 08"):
+        await adapter.execute(
+            provider_request().model_copy(update={"sandbox_reference": "sandbox:1"}),
+            configured,
+            CancellationContext(),
+        )
+
+    class BadTransport:
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            return CodexProcessResult(0, "not-json", "", 1)
+
+    with pytest.raises(ProviderFailure) as captured:
+        await CodexCliAdapter(BadTransport()).execute(
+            provider_request(), configured, CancellationContext()
+        )
+    assert captured.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+
+
+def test_adapter_registry_resolves_only_selected_api_profile(tmp_path: Path) -> None:
+    configured = profile(
+        "api",
+        credential_reference="env:API_KEY",
+    )
+    resolver = ScopedSecretResolver(
+        access_policy={"env:API_KEY": frozenset({"profile:api"})},
+        secret_file_root=tmp_path,
+        environment={"API_KEY": "scoped-value"},  # pragma: allowlist secret
+    )
+    registry = AdapterRegistry(ProfileRegistry((configured,)), resolver)
+    assert isinstance(registry.get("api"), OpenAICompatibleAdapter)
+    assert registry.get("api") is registry.get("api")
+
+    cli = configured.model_copy(
+        update={
+            "id": "cli",
+            "provider": "codex",
+            "api_base_url": None,
+            "launch_mode": LaunchMode.CLI,
+            "credential_reference": None,
+            "credential_required": False,
+            "runtime_identity": "codex",
+            "state_directory": tmp_path / "codex",
+        }
+    )
+    with pytest.raises(ValueError, match="Step 08"):
+        AdapterRegistry(ProfileRegistry((cli,)), resolver).get("cli")

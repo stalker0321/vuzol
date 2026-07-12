@@ -29,11 +29,24 @@ EnvironmentFile=/etc/vuzol/executor.env
 #    If any check fails the process exits and the unit restarts (on-failure).
 #
 # This preserves the strict "no rootful, no weak limits" contract.
-# The readiness probe is written as a single-line sh -c (with ; separators) so
-# that the unit file parser accepts it without quoting or continuation issues.
-ExecStartPre=/bin/sh -c "set -e; SOCKET=\"\${VUZOL_EXECUTION__ROOTLESS_DOCKER_SOCKET:-}\"; if [ -z \"\$SOCKET\" ]; then SOCKET=\"/run/user/\$(id -u)/docker.sock\"; fi; echo \"vuzol-executor: waiting for rootless Docker socket at \$SOCKET\"; until [ -S \"\$SOCKET\" ]; do sleep 0.2; done"
+# ExecStartPre performs a *bounded* wait (max ~30s) for the *socket to exist as Unix socket*.
+# It resolves the socket from the configured VUZOL_ env (populated from settings at deploy)
+# or dynamically via id -u (portable, no hard-coded UID, runs under User= context).
+# It does *not* perform owner check, rootless/seccomp/cgroupv2 validation or limit support
+# checks — those are done fail-closed by RootlessDockerRuntime.preflight() inside the
+# Python process (see src/vuzol/execution/sandbox.py). If preflight fails the process
+# exits and unit restarts.
+ExecStartPre=/bin/sh -c "\
+  set -e; \
+  SOCKET=\"\${VUZOL_EXECUTION__ROOTLESS_DOCKER_SOCKET:-}\"; \
+  if [ -z \"\$SOCKET\" ]; then SOCKET=\"/run/user/\$(id -u)/docker.sock\"; fi; \
+  echo \"vuzol-executor: waiting for rootless Docker socket at \$SOCKET\"; \
+  for i in \$(seq 1 150); do [ -S \"\$SOCKET\" ] && exit 0; sleep 0.2; done; \
+  echo 'timeout waiting for rootless docker socket' >&2; exit 1 \
+"
 
 ExecStart=/opt/vuzol/.venv/bin/vuzol-executor
+TimeoutStartSec=60
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

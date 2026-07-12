@@ -110,3 +110,66 @@ def test_no_rootful_socket_anywhere_in_units() -> None:
         text = _read(unit)
         assert "/var/run/docker.sock" not in text
         assert '"/var/run/docker.sock"' not in text
+
+
+def test_user_daemon_unit_has_delegate_yes_in_service_section() -> None:
+    text = _read(USER_DAEMON_UNIT)
+    lines = text.splitlines()
+
+    in_service = False
+    delegate_line = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "[Service]":
+            in_service = True
+            continue
+        if stripped.startswith("[") and stripped != "[Service]":
+            in_service = False
+            continue
+        if in_service and stripped == "Delegate=yes":
+            delegate_line = stripped
+            break
+
+    assert delegate_line is not None, (
+        "Delegate=yes must be present as active directive in [Service]"
+    )
+
+    # Also re-assert no User/Group in production user unit (from repair requirements)
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+        assert not stripped.startswith("User="), f"Found active User= in user unit: {stripped}"
+        assert not stripped.startswith("Group="), f"Found active Group= in user unit: {stripped}"
+
+    # No hard-coded numeric UID path
+    assert "/run/user/994" not in text
+    assert any(f"/run/user/{n}/" in text for n in range(100, 2000)) is False
+
+    # No rootful
+    assert "/var/run/docker.sock" not in text
+
+
+def test_readiness_loops_are_bounded_and_fail_closed() -> None:
+    for unit_path, name in [
+        (USER_DAEMON_UNIT, "user-daemon"),
+        (EXECUTOR_UNIT, "executor"),
+    ]:
+        text = _read(unit_path)
+        # Must contain a bounded loop (seq or for i + limit) instead of bare infinite until
+        has_bound = ("seq 1" in text) or ("for i in" in text and ("150" in text or "seq" in text))
+        has_timeout_sec = "TimeoutStartSec" in text
+        assert has_bound or has_timeout_sec, (
+            f"{name} readiness must be bounded (loop or TimeoutStartSec)"
+        )
+
+        # The until must not be the old infinite form without guard
+        if "until " in text and "do sleep 0.2; done" in text:
+            assert "for i in" in text or "seq" in text, (
+                f"{name} must not have unguarded infinite until"
+            )
+
+        # Must fail closed on timeout (exit 1 on fail)
+        assert "exit 1" in text or "exit 1" in text.replace(" ", ""), (
+            f"{name} must fail closed on timeout"
+        )

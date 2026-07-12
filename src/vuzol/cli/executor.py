@@ -66,6 +66,7 @@ async def run() -> None:
             settings.artifact_root,
             max_bytes=settings.limits.artifact_bytes,
             retention_days=settings.retention.artifact_days,
+            redaction_patterns=settings.redaction_patterns,
         )
         envelope_factory = ExecutionEnvelopeFactory(factory, settings, runtime.registries)
         transport = SandboxCodexTransport(sandbox_runtime, envelope_factory, artifact_store)

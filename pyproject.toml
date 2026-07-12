@@ -44,7 +44,7 @@ dev = [
 packages = ["src/vuzol"]
 
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers --cov=vuzol --cov-report=term-missing --cov-fail-under=86"
+addopts = "--strict-config --strict-markers --cov=vuzol --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
 markers = ["postgresql: requires the real PostgreSQL integration database"]
 

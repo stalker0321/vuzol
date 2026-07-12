@@ -2,7 +2,6 @@ import asyncio
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-import contextlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -13,6 +12,7 @@ from vuzol.telegram.adapter import (
     PythonTelegramClient,
     build_long_polling_application,
     control_update,
+    message_update,
     resolve_bot_token,
 )
 from vuzol.telegram.domain import ControlUpdate, MessageUpdate
@@ -71,6 +71,10 @@ def test_python_telegram_client_delegates_send_and_edit() -> None:
         )
         bot.send_message.assert_awaited_once()
         bot.edit_message_text.assert_awaited_once()
+        telegram_file = AsyncMock()
+        telegram_file.download_as_bytearray.return_value = bytearray(b"payload")
+        bot.get_file.return_value = telegram_file
+        assert await client.download("file-id") == b"payload"
         send_markup = bot.send_message.await_args.kwargs["reply_markup"]
         edit_markup = bot.edit_message_text.await_args.kwargs["reply_markup"]
         assert send_markup.inline_keyboard[0][0].callback_data == f"v1:start:{task_id}"
@@ -80,6 +84,45 @@ def test_python_telegram_client_delegates_send_and_edit() -> None:
         ]
 
     asyncio.run(scenario())
+
+
+def test_message_update_collects_document_and_voice() -> None:
+    update = Update.de_json(
+        {
+            "update_id": 7,
+            "message": {
+                "message_id": 11,
+                "date": 0,
+                "message_thread_id": 3,
+                "from": {"id": 9, "is_bot": False, "first_name": "User"},
+                "chat": {"id": -100, "type": "supergroup"},
+                "caption": "files",
+                "document": {
+                    "file_id": "doc",
+                    "file_unique_id": "doc-u",
+                    "file_name": "a.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 4,
+                },
+                "voice": {
+                    "file_id": "voice",
+                    "file_unique_id": "voice-u",
+                    "duration": 1,
+                    "file_size": 5,
+                },
+            },
+        },
+        None,
+    )
+    converted = message_update(update, "main")
+    assert converted is not None
+    assert converted.text == "files"
+    assert [item.file_id for item in converted.attachments] == ["doc", "voice"]
+
+
+def test_message_update_rejects_non_topic_update() -> None:
+    update = Update.de_json({"update_id": 8}, None)
+    assert message_update(update, "main") is None
 
 
 def test_start_callback_crosses_the_provider_boundary() -> None:
@@ -107,15 +150,10 @@ def test_start_callback_crosses_the_provider_boundary() -> None:
     assert converted.task_id == task_id
 
 
-def test_python_telegram_client_construction():
+def test_python_telegram_client_construction() -> None:
     """Additional coverage for telegram client (Step 08 overall cov)."""
     from vuzol.telegram.adapter import PythonTelegramClient
 
     mock_bot = MagicMock()
     c = PythonTelegramClient(mock_bot)
     assert c is not None
-    # Call methods to hit more lines
-    with contextlib.suppress(Exception):
-        c.send_message(1, "hi")
-        c.edit_message(1, 2, "hi")
-        c.delete_message(1, 2)

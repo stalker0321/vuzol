@@ -1,15 +1,17 @@
 import contextlib
 import os
+import signal
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from vuzol.config.models import ProjectConfig, SandboxProfileConfig
-from vuzol.execution.artifacts import ArtifactStore
-from vuzol.execution.codex import ExecutionEnvelopeFactory
+from vuzol.config.models import SandboxProfileConfig
+from vuzol.execution.artifacts import ArtifactSecretError, ArtifactStore
+from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
 from vuzol.execution.domain import (
     MountMode,
     ProcessEnvelope,
@@ -18,7 +20,13 @@ from vuzol.execution.domain import (
 )
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
-from vuzol.execution.paths import PathViolation, contained, trusted_root, worktree_branch, worktree_path
+from vuzol.execution.paths import (
+    PathViolation,
+    contained,
+    trusted_root,
+    worktree_branch,
+    worktree_path,
+)
 from vuzol.execution.sandbox import RootlessDockerRuntime, SandboxError, docker_run_argv
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
@@ -112,6 +120,10 @@ async def test_rootless_runtime_preflight_and_successful_bounded_run(
 
     async def fake_docker(*args: str) -> str:
         assert args[0] == "info"
+        if args[-1] == "{{.CgroupVersion}}":
+            return "2"
+        if args[-1] == "{{json .Warnings}}":
+            return "[]"
         return '["name=rootless","name=seccomp"]'
 
     monkeypatch.setattr(runtime, "_docker", fake_docker)
@@ -136,6 +148,88 @@ async def test_rootless_preflight_rejects_missing_and_non_socket(tmp_path: Path)
     regular.touch()
     with pytest.raises(SandboxError, match="not a Unix socket"):
         await RootlessDockerRuntime(regular).preflight()
+
+
+@pytest.mark.anyio
+async def test_rootless_preflight_rejects_incomplete_security_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    socket = tmp_path / "docker.sock"
+    socket.touch()
+    runtime = RootlessDockerRuntime(socket)
+    monkeypatch.setattr("vuzol.execution.sandbox.stat.S_ISSOCK", lambda _mode: True)
+    runtime._docker = AsyncMock(return_value='["name=rootless"]')  # type: ignore[method-assign]
+    with pytest.raises(SandboxError, match="seccomp"):
+        await runtime.preflight()
+    runtime._docker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=['["name=rootless","name=seccomp"]', "1"]
+    )
+    with pytest.raises(SandboxError, match="cgroup v2"):
+        await runtime.preflight()
+    runtime._docker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            '["name=rootless","name=seccomp"]',
+            "2",
+            '["WARNING: No memory limit support"]',
+        ]
+    )
+    with pytest.raises(SandboxError, match="required cgroup limits"):
+        await runtime.preflight()
+
+
+@pytest.mark.anyio
+async def test_rootless_docker_command_failure_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "docker"
+    executable.write_text("#!/bin/sh\necho denied >&2\nexit 2\n")
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    with pytest.raises(SandboxError, match="operation failed"):
+        await runtime._docker("info")
+
+
+@pytest.mark.anyio
+async def test_rootless_runtime_timeout_reaps_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "docker"
+    executable.write_text(
+        '#!/bin/sh\ncase " $* " in\n  *" run "*) exec sleep 10 ;;\n  *) exit 0 ;;\nesac\n'
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    base = envelope(tmp_path)
+    configured = base.model_copy(
+        update={"sandbox": base.sandbox.model_copy(update={"timeout_seconds": 1})}
+    )
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    with pytest.raises(SandboxError, match="timed out"):
+        await runtime.run(configured, CancellationContext())
+
+
+@pytest.mark.anyio
+async def test_rootless_runtime_output_limit_stops_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "docker"
+    executable.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in\n'
+        '  *" run "*) cat >/dev/null; exec head -c 2000 /dev/zero ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    base = envelope(tmp_path)
+    configured = base.model_copy(
+        update={"sandbox": base.sandbox.model_copy(update={"output_bytes": 100})}
+    )
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    with pytest.raises(SandboxError, match="output limit"):
+        await runtime.run(configured, CancellationContext())
 
 
 def test_path_containment_rejects_escape_and_symlink(tmp_path: Path) -> None:
@@ -230,6 +324,21 @@ def _git(repository: Path, *args: str) -> str:
 def test_artifact_store_construction(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path / "art", max_bytes=100, retention_days=1)
     assert store._max_bytes == 100
+
+
+def test_artifact_redaction_and_secret_rejection(tmp_path: Path) -> None:
+    store = ArtifactStore(
+        tmp_path / "artifacts",
+        max_bytes=1000,
+        retention_days=1,
+        redaction_patterns=(r"token-[a-z]+",),
+    )
+    redacted, revision = store.redact(b"value=token-secret")
+    assert redacted == b"value=[REDACTED]"
+    assert revision is not None
+    with pytest.raises(ArtifactSecretError):
+        store.reject_secrets(b"diff contains token-secret")
+    store.reject_secrets(b"safe content")
 
 
 def test_worktree_service_construction(tmp_path: Path) -> None:
@@ -429,28 +538,48 @@ async def test_prepare_worktree_handler_cancel_and_missing(tmp_path: Path) -> No
 
 @pytest.mark.anyio
 async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
-    """Test envelope factory + lifecycle (mark, complete, fail) paths with mocks."""
-    wt_dir = tmp_path / "wt"
+    """Test envelope factory and persisted process lifecycle."""
+    worktree_root = tmp_path / "worktrees"
+    artifact_root = tmp_path / "artifacts"
+    state_dir = tmp_path / "profile-state"
+    wt_dir = worktree_root / "p1" / str(uuid.uuid4())
     wt_dir.mkdir(parents=True, exist_ok=True)
+    artifact_root.mkdir()
+    state_dir.mkdir()
+    task_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    step_id = uuid.uuid4()
     mock_wt = MagicMock()
     mock_wt.id = uuid.uuid4()
     mock_wt.project_id = "p1"
     mock_wt.path = str(wt_dir)
+    mock_wt.task_id = task_id
+    mock_wt.run_id = run_id
 
     mock_step = MagicMock()
     mock_step.status = StepStatus.LEASED
     mock_step.lease_generation = 1
 
     mock_sess = AsyncMock()
+    stored_process: list[Any] = []
 
-    async def _get(model, _id, **_kw):
-        if "Worktree" in str(model):
+    async def _get(model: Any, _id: Any, **_kw: Any) -> Any:
+        if model is Worktree:
             return mock_wt
-        return mock_step
+        if model is Step:
+            return mock_step
+        if stored_process:
+            return stored_process[0]
+        return None
+
+    def _add(row: Any) -> None:
+        if row.__class__.__name__ == "SupervisedProcess":
+            row.id = uuid.uuid4()
+            stored_process.append(row)
 
     mock_sess.get.side_effect = _get
     mock_sess.scalar.return_value = None
-    mock_sess.add = MagicMock()
+    mock_sess.add = MagicMock(side_effect=_add)
     mock_sess.flush = AsyncMock()
 
     mock_factory = MagicMock()
@@ -458,38 +587,75 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_factory.begin.return_value.__aexit__.return_value = False
 
     mock_reg = MagicMock()
-    mock_reg.profiles.get.return_value = MagicMock(state_directory=tmp_path, enabled=True)
+    mock_reg.profiles.get.return_value = MagicMock(state_directory=state_dir, enabled=True)
     mock_reg.projects.get.return_value = MagicMock(sandbox_profile="def")
     mock_reg.sandboxes.get.return_value = SandboxProfileConfig(
         id="def", image="ex@sha256:" + "a" * 64, enabled=True
     )
 
     mock_settings = MagicMock()
-    mock_settings.worktree_root = tmp_path
-    mock_settings.artifact_root = tmp_path
+    mock_settings.worktree_root = worktree_root
+    mock_settings.artifact_root = artifact_root
 
     envf = ExecutionEnvelopeFactory(mock_factory, mock_settings, mock_reg)
 
     inv = MagicMock(spec=CodexInvocation)
     inv.sandbox_reference = f"worktree:{mock_wt.id}"
-    inv.task_id = uuid.uuid4()
-    inv.run_id = uuid.uuid4()
-    inv.step_id = uuid.uuid4()
+    inv.task_id = task_id
+    inv.run_id = run_id
+    inv.step_id = step_id
     inv.profile_id = "prof"
     inv.provider_attempt = 1
     inv.lease_generation = 1
-    inv.argv = ("codex",)
+    inv.argv = (
+        "codex",
+        "exec",
+        "--json",
+        "--strict-config",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--sandbox",
+        "workspace-write",
+        "--cd",
+        "/workspace",
+        "-",
+    )
     inv.stdin = "prompt"
     inv.timeout_seconds = 30
 
-    with contextlib.suppress(Exception):
-        envelope, pid = await envf.build(inv)
-        if 'envelope' in locals() and envelope is not None:
-            await envf.mark_running(pid, "vuzol-test-container")
-            mock_art = MagicMock()
-            mock_art.persist = AsyncMock(return_value=MagicMock(id=uuid.uuid4()))
-            await envf.complete(pid, CodexProcessResult(0, "ok", "", 10), mock_art)
-            await envf.fail_unknown(pid)
+    envelope, pid = await envf.build(inv)
+    assert envelope.sandbox.mounts[2].mode is MountMode.READ_ONLY
+    await envf.mark_running(pid, "vuzol-test-container")
+    mock_art = MagicMock()
+    mock_art.persist = AsyncMock(return_value=MagicMock(id=uuid.uuid4()))
+    await envf.complete(pid, CodexProcessResult(0, "ok", "", 10), mock_art)
+    assert stored_process[0].status.value == "exited"
+    await envf.fail_unknown(pid)
+    assert stored_process[0].status.value == "unknown"
+
+
+@pytest.mark.anyio
+async def test_sandbox_codex_transport_records_success_and_failure(tmp_path: Path) -> None:
+    configured = envelope(tmp_path)
+    process_id = uuid.uuid4()
+    envelopes = MagicMock()
+    envelopes.build = AsyncMock(return_value=(configured, process_id))
+    envelopes.mark_running = AsyncMock()
+    envelopes.complete = AsyncMock()
+    envelopes.fail_unknown = AsyncMock()
+    runtime = MagicMock()
+    runtime.run = AsyncMock(return_value=CodexProcessResult(0, "ok", "", 5))
+    transport = SandboxCodexTransport(runtime, envelopes, MagicMock())
+
+    result = await transport.run(MagicMock(), CancellationContext())
+    assert result.stdout == "ok"
+    envelopes.mark_running.assert_awaited_once()
+    envelopes.complete.assert_awaited_once()
+
+    runtime.run.side_effect = SandboxError("failed after start")
+    with pytest.raises(SandboxError):
+        await transport.run(MagicMock(), CancellationContext())
+    envelopes.fail_unknown.assert_awaited_once_with(process_id)
 
 
 @pytest.mark.anyio
@@ -521,6 +687,8 @@ async def test_sandbox_preflight_and_argv_edges(tmp_path: Path) -> None:
         timeout_seconds=5,
         stop_grace_seconds=1,
         network_disabled=False,  # to hit proxy branch? but default none
+        proxy_network="vuzol-egress",
+        https_proxy_url="http://proxy:3128",
         environment={"FOO": "bar"},
     )
     env = ProcessEnvelope(
@@ -570,7 +738,7 @@ async def test_worktree_cleanup_rejects_active(tmp_path: Path) -> None:
     # Path exercised for rejection
 
 
-def test_coding_workflow_execute_code_config():
+def test_coding_workflow_execute_code_config() -> None:
     """Test execute_code step has the Step 08 UNKNOWN_EFFECTS config (real definition)."""
     from vuzol.workflows.definitions import WORKFLOW_REGISTRY
 
@@ -580,10 +748,10 @@ def test_coding_workflow_execute_code_config():
     assert exec_step.idempotency_class == IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
 
 
-def test_step08_related_classes_construction():
+def test_step08_related_classes_construction() -> None:
     """Exercise construction of Step 08 related classes for coverage (real entry points)."""
-    from vuzol.workflows.dispatch import WorkflowDispatcher
     from vuzol.cli.executor import ExecutorChain
+    from vuzol.workflows.dispatch import WorkflowDispatcher
 
     # These are touched by Step 08
     d = WorkflowDispatcher(MagicMock(), MagicMock(), owner="t")
@@ -595,10 +763,26 @@ def test_step08_related_classes_construction():
 
 
 @pytest.mark.anyio
-async def test_executor_construction_and_run_path():
-    """Exercise the Step 08 executor (cli/executor.py) for coverage (real entry point with mocks)."""
-    from vuzol.cli.executor import run as executor_run, ExecutorChain
-    from vuzol.config import get_runtime_configuration
+async def test_executor_chain_short_circuits_between_workers() -> None:
+    from vuzol.cli.executor import ExecutorChain
+
+    worktrees = MagicMock()
+    worktrees.process_one = AsyncMock(return_value=True)
+    providers = MagicMock()
+    providers.process_one = AsyncMock(return_value=True)
+    assert await ExecutorChain(worktrees, providers).process_one() is True
+    providers.process_one.assert_not_awaited()
+
+    worktrees.process_one.return_value = False
+    assert await ExecutorChain(worktrees, providers).process_one() is True
+    providers.process_one.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_executor_construction_and_run_path() -> None:
+    """Exercise the Step 08 executor entry point with mocks."""
+    from vuzol.cli.executor import ExecutorChain
+    from vuzol.cli.executor import run as executor_run
 
     # Construction
     chain = ExecutorChain(MagicMock(), MagicMock())
@@ -617,9 +801,98 @@ async def test_executor_construction_and_run_path():
             await executor_run()  # executes the beginning of the run function
 
 
+@pytest.mark.anyio
+async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vuzol.cli import executor as executor_cli
+    from vuzol.config.models import LaunchMode
+
+    profile = MagicMock(
+        id="codex-a",
+        enabled=True,
+        provider="codex",
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+    )
+    settings = MagicMock()
+    settings.service_name = "vuzol"
+    settings.log_level = "INFO"
+    settings.execution.enabled = True
+    settings.execution.require_preflight = True
+    settings.execution.rootless_docker_socket = Path("/run/executor/docker.sock")
+    settings.workflow.poll_interval_seconds = 0.01
+    registries = MagicMock()
+    registries.profiles.items.return_value = (profile,)
+    registries.revision = "a" * 64
+    runtime = MagicMock(settings=settings, registries=registries)
+
+    session = MagicMock()
+    transaction = AsyncMock()
+    transaction.__aenter__.return_value = session
+    transaction.__aexit__.return_value = False
+    factory = MagicMock()
+    factory.begin.return_value = transaction
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    sandbox = MagicMock()
+    sandbox.preflight = AsyncMock()
+
+    monkeypatch.setattr(executor_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
+    monkeypatch.setattr(executor_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(executor_cli, "RootlessDockerRuntime", lambda _socket: sandbox)
+    monkeypatch.setattr(executor_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(executor_cli, "create_engine", lambda *_args: engine)
+    monkeypatch.setattr(executor_cli, "create_session_factory", lambda _engine: factory)
+    monkeypatch.setattr(executor_cli, "synchronize_profiles", AsyncMock())
+    for name in (
+        "ScopedSecretResolver",
+        "ArtifactStore",
+        "ExecutionEnvelopeFactory",
+        "SandboxCodexTransport",
+        "CodexCliAdapter",
+        "AdapterRegistry",
+        "WorktreeService",
+        "LocalGit",
+        "ProviderStepHandler",
+        "PrepareWorktreeHandler",
+        "WorkflowWorker",
+        "RoutedWorkflowWorker",
+    ):
+        monkeypatch.setattr(executor_cli, name, MagicMock())
+    run_loop = AsyncMock()
+    monkeypatch.setattr(executor_cli, "_run_loop", run_loop)
+
+    await executor_cli.run()
+    sandbox.preflight.assert_awaited_once()
+    run_loop.assert_awaited_once()
+    engine.dispose.assert_awaited_once()
+
 
 @pytest.mark.anyio
-async def test_dispatch_step08_paths():
+async def test_executor_loop_stops_on_registered_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vuzol.cli import executor as executor_cli
+
+    callbacks: dict[int, Any] = {}
+
+    class LoopProxy:
+        def add_signal_handler(self, signum: int, callback: Any) -> None:
+            callbacks[signum] = callback
+
+    processor = MagicMock()
+
+    async def process_one() -> bool:
+        callbacks[signal.SIGTERM]()
+        return False
+
+    processor.process_one = process_one
+    monkeypatch.setattr("vuzol.cli.executor.asyncio.get_running_loop", lambda: LoopProxy())
+    await executor_cli._run_loop(processor, 0.01)
+    assert set(callbacks) == {signal.SIGTERM, signal.SIGINT}
+
+
+@pytest.mark.anyio
+async def test_dispatch_step08_paths() -> None:
     """Exercise dispatch for coding/execute paths (Step 08 real code)."""
     from vuzol.workflows.dispatch import WorkflowDispatcher
 
@@ -633,10 +906,9 @@ async def test_dispatch_step08_paths():
         await d.process_one()
 
 
-def test_unknown_effects_step_outcome():
+def test_unknown_effects_step_outcome() -> None:
     """Test handling of UNKNOWN_EFFECTS_POSSIBLE (Step 08) leads to block (real transitions)."""
-    from vuzol.workflows.domain import StepOutcome, OutcomeKind
-    from vuzol.storage.types import IdempotencyClass
+    from vuzol.workflows.domain import OutcomeKind, StepOutcome
 
     # Real behavior: for unknown effects, we expect the outcome to be marked for review
     outcome = StepOutcome(
@@ -645,38 +917,5 @@ def test_unknown_effects_step_outcome():
         category="unknown_effects",
     )
     assert outcome.kind == OutcomeKind.BLOCKED
+    assert outcome.category is not None
     assert "unknown" in outcome.category
-
-
-@pytest.mark.anyio
-async def test_provider_handler_execute_code_path(tmp_path: Path) -> None:
-    """Test the execute_code path in ProviderStepHandler (Step 08 wiring, real behavior with mocks)."""
-    from vuzol.providers.handlers import ProviderStepHandler
-    from vuzol.providers.registry import AdapterRegistry
-
-    mock_factory = MagicMock()
-    mock_reg = MagicMock()
-    mock_adapter = AsyncMock()
-    mock_adapter.execute.return_value = MagicMock(
-        usage=None,
-        provider_request_id="req1",
-        text="done",
-        structured_output=None,
-        finish_reason="stop",
-        status=MagicMock(value="success"),
-    )
-    adapters = {"prof": mock_adapter}
-    reg = AdapterRegistry(mock_reg, MagicMock(), adapters=adapters)
-    handler = ProviderStepHandler(mock_factory, mock_reg, reg)
-
-    req = MagicMock()
-    req.step_type = "execute_code"
-    req.task_id = uuid.uuid4()
-    req.run_id = uuid.uuid4()
-    req.step_id = uuid.uuid4()
-    req.lease = MagicMock(generation=1)
-    req.timeout_seconds = 10
-
-    # The build will fail without full mock, but the execute path for execute_code is exercised in except/return
-    with contextlib.suppress(Exception):
-        await handler.execute(req, CancellationContext())

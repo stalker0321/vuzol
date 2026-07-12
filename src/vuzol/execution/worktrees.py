@@ -118,6 +118,8 @@ class WorktreeService:
             raise WorktreeError("unknown worktree")
         path = contained(self._root, Path(row.path))
         inspection = await self._git.inspect(path)
+        if artifacts is not None:
+            artifacts.reject_secrets(inspection.diff)
         row.diff_hash = inspection.diff_hash
         row.result_commit = inspection.head
         row.delivery_state = WorktreeDeliveryState.WORKTREE_RETAINED
@@ -194,8 +196,6 @@ class WorktreeService:
             contained(self._root, path, must_exist=False)
         except PathViolation:
             row.cleanup_reason = "path_violation"
-            row.delivery_state = WorktreeDeliveryState.CLEANED
-            row.cleaned_at = func.now()
             await session.flush()
             return
 

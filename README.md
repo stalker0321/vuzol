@@ -88,7 +88,10 @@ Systemd units:
 - `deploy/systemd/vuzol-rootless-docker.service` — dedicated rootless daemon for the executor user.
 - `deploy/systemd/vuzol-executor.service` — depends on `vuzol-rootless-docker.service` (not the root `docker.service`).
 
-The executor must be started after its rootless daemon; the unit now correctly declares the dependency.
+The executor must be started after its rootless daemon. The current system-service daemon unit is
+fail-closed by executor preflight when CPU or memory cgroup limits are unavailable. Production
+activation requires moving the daemon to the linger-enabled `vuzol-executor` user manager and
+re-running the live sandbox security probes described in the external Step 08 handoff.
 - [Telegram workspace](docs/TELEGRAM.md)
 - [Voice and semantic interpretation](docs/INTERPRETATION.md)
 - [Provider routing and budgets](docs/PROVIDERS.md)

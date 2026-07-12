@@ -59,6 +59,8 @@ class SandboxSpec(FrozenModel):
     timeout_seconds: int = Field(ge=1)
     stop_grace_seconds: int = Field(ge=1)
     network_disabled: bool = True
+    proxy_network: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+    https_proxy_url: str | None = None
     environment: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -71,6 +73,13 @@ class SandboxSpec(FrozenModel):
         forbidden_names = {"DOCKER_HOST", "DATABASE_URL", "VUZOL_DATABASE_DSN"}
         if forbidden_names.intersection(self.environment):
             raise ValueError("sandbox environment contains a prohibited variable")
+        proxy_configured = self.proxy_network is not None or self.https_proxy_url is not None
+        if self.network_disabled and proxy_configured:
+            raise ValueError("network-disabled sandbox cannot configure proxy egress")
+        if not self.network_disabled and not (
+            self.proxy_network is not None and self.https_proxy_url is not None
+        ):
+            raise ValueError("networked sandbox requires a controlled proxy transport")
         return self
 
     @property

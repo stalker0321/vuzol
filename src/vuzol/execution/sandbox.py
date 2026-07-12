@@ -25,20 +25,29 @@ class RootlessDockerRuntime:
         if self._socket == Path("/var/run/docker.sock"):
             raise SandboxError("rootful Docker socket is prohibited")
         try:
-            mode = self._socket.stat().st_mode
+            socket_stat = self._socket.stat()
         except OSError as error:
             raise SandboxError("rootless Docker socket is unavailable") from error
-        if not stat.S_ISSOCK(mode):
+        if not stat.S_ISSOCK(socket_stat.st_mode):
             raise SandboxError("configured Docker endpoint is not a Unix socket")
-        output = await self._docker("info", "--format", "{{json .SecurityOptions}}")
-        if "rootless" not in output:
+        if socket_stat.st_uid != os.geteuid():
+            raise SandboxError("rootless Docker socket is not owned by the executor identity")
+        security = await self._docker("info", "--format", "{{json .SecurityOptions}}")
+        if "rootless" not in security:
             raise SandboxError("Docker daemon does not report rootless mode")
+        if "seccomp" not in security:
+            raise SandboxError("Docker daemon does not report seccomp enforcement")
+        cgroup_version = await self._docker("info", "--format", "{{.CgroupVersion}}")
+        if cgroup_version.strip() != "2":
+            raise SandboxError("Docker daemon does not report cgroup v2")
+        warnings = await self._docker("info", "--format", "{{json .Warnings}}")
+        unsupported = ("No memory limit support", "No cpu cfs quota support")
+        if any(message in warnings for message in unsupported):
+            raise SandboxError("Docker daemon does not enforce required cgroup limits")
 
     async def run(
         self, envelope: ProcessEnvelope, cancellation: CancellationContext
     ) -> CodexProcessResult:
-        if not envelope.sandbox.network_disabled:
-            raise SandboxError("networked execution requires the controlled proxy runtime")
         name = f"vuzol-{str(envelope.step_id)[:12]}-{envelope.lease_generation}"
         argv = docker_run_argv(self._socket, name, envelope)
         started = time.monotonic()
@@ -161,7 +170,7 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         "--pull",
         "never",
         "--network",
-        "none",
+        "none" if spec.network_disabled else str(spec.proxy_network),
         "--read-only",
         "--user",
         f"{spec.uid}:{spec.gid}",
@@ -202,6 +211,10 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         )
     for key, value in sorted(spec.environment.items()):
         arguments.extend(("--env", f"{key}={value}"))
+    if spec.https_proxy_url is not None:
+        arguments.extend(("--env", f"HTTPS_PROXY={spec.https_proxy_url}"))
+        arguments.extend(("--env", f"HTTP_PROXY={spec.https_proxy_url}"))
+        arguments.extend(("--env", f"ALL_PROXY={spec.https_proxy_url}"))
     arguments.append(spec.image)
     arguments.extend(envelope.argv)
     return tuple(arguments)

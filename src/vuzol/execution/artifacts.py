@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import re
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -18,11 +19,40 @@ class ArtifactError(RuntimeError):
     """Artifact persistence failed a size or containment invariant."""
 
 
+class ArtifactSecretError(ArtifactError):
+    """Artifact content matched a configured secret pattern."""
+
+
 class ArtifactStore:
-    def __init__(self, root: Path, *, max_bytes: int, retention_days: int) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        max_bytes: int,
+        retention_days: int,
+        redaction_patterns: tuple[str, ...] = (),
+    ) -> None:
         self._root = trusted_root(root, create=True)
         self._max_bytes = max_bytes
         self._retention_days = retention_days
+        self._redactors = tuple(re.compile(pattern.encode()) for pattern in redaction_patterns)
+        self._redaction_revision = (
+            hashlib.sha256("\0".join(redaction_patterns).encode()).hexdigest()
+            if redaction_patterns
+            else None
+        )
+
+    def reject_secrets(self, content: bytes) -> None:
+        if any(pattern.search(content) for pattern in self._redactors):
+            raise ArtifactSecretError("artifact matched a configured secret pattern")
+
+    def redact(self, content: bytes) -> tuple[bytes, str | None]:
+        redacted = content
+        matched = False
+        for pattern in self._redactors:
+            redacted, substitutions = pattern.subn(b"[REDACTED]", redacted)
+            matched = matched or substitutions > 0
+        return redacted, self._redaction_revision if matched else None
 
     async def persist(
         self,
@@ -39,6 +69,9 @@ class ArtifactStore:
         redaction_revision: str | None = None,
         producer_process_id: uuid.UUID | None = None,
     ) -> Artifact:
+        content, applied_revision = self.redact(content)
+        if redaction_revision is None:
+            redaction_revision = applied_revision
         if len(content) > self._max_bytes:
             raise ArtifactError("artifact exceeds configured byte limit")
         digest = hashlib.sha256(content).hexdigest()

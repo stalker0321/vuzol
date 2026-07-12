@@ -22,8 +22,8 @@ from vuzol.execution.paths import (
     worktree_path,
 )
 from vuzol.execution.ports import GitPort
-from vuzol.storage.models import Worktree
-from vuzol.storage.types import WorktreeDeliveryState
+from vuzol.storage.models import SupervisedProcess, Worktree
+from vuzol.storage.types import ProcessStatus, WorktreeDeliveryState
 
 WORKTREE_LOCK_KEY = 8_946_527_102
 
@@ -172,6 +172,23 @@ class WorktreeService:
         if row.cleaned_at is not None or row.delivery_state == WorktreeDeliveryState.CLEANED:
             return
 
+        # Reject active or in-use worktrees
+        if row.delivery_state == WorktreeDeliveryState.ACTIVE:
+            return
+        # Check for any non-terminal supervised process
+        active = await session.scalar(
+            select(SupervisedProcess.id)
+            .where(
+                SupervisedProcess.worktree_id == worktree_id,
+                SupervisedProcess.status.in_(
+                    [ProcessStatus.STARTING, ProcessStatus.RUNNING, ProcessStatus.TERMINATING]
+                ),
+            )
+            .limit(1)
+        )
+        if active is not None:
+            return
+
         path = Path(row.path)
         try:
             contained(self._root, path, must_exist=False)
@@ -182,19 +199,38 @@ class WorktreeService:
             await session.flush()
             return
 
-        # Best effort git worktree remove (requires primary repo path)
+        # Remove from git metadata if possible
         if repository is not None:
             with contextlib.suppress(Exception):
                 await self._git.remove_worktree(repository, path)
 
-        # Safe removal: only the exact derived dir, after checks
+        # Remove fs
+        fs_removed = False
         if path.exists():  # noqa: ASYNC240
             with contextlib.suppress(Exception):
-                # remove contents then dir
                 for child in list(path.iterdir()):  # noqa: ASYNC240
                     if child.name == ".git":
-                        continue  # let git handle
+                        continue
                 shutil.rmtree(str(path), ignore_errors=True)
+            if not path.exists():  # noqa: ASYNC240
+                fs_removed = True
+        else:
+            fs_removed = True
+
+        # Verify git metadata gone if we had repo
+        git_meta_gone = True
+        if repository is not None:
+            try:
+                out = await self._git._run(repository, "worktree", "list", "--porcelain")  # type: ignore[attr-defined]
+                if str(path) in out.decode("utf-8", "ignore"):
+                    git_meta_gone = False
+            except Exception:
+                git_meta_gone = False  # conservative
+
+        if not (fs_removed and git_meta_gone):
+            row.cleanup_reason = "removal_incomplete"
+            await session.flush()
+            return
 
         row.delivery_state = WorktreeDeliveryState.CLEANED
         row.cleanup_reason = reason

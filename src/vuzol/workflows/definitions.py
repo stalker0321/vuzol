@@ -78,7 +78,7 @@ WORKFLOW_DEFINITIONS: tuple[WorkflowDefinition, ...] = (
                 queue=QueueClass.HEAVY,
                 capabilities=frozenset({Capability.CODE_EDIT, Capability.PROJECT_SHELL}),
                 retry=RetryClass.POLICY,
-                idempotency=IdempotencyClass.ISOLATED_RETRYABLE,
+                idempotency=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
                 timeout=3_600,
             ),
             _step(

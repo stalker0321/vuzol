@@ -111,6 +111,18 @@ def upgrade() -> None:
     ):
         op.alter_column("worktrees", column, server_default=None)
 
+    # Guarded invariant: supervised_processes table must be empty.
+    # This migration adds several NOT NULL columns without backfill/defaults
+    # for rows that would have been created by pre-Step-08 code. If any rows
+    # exist the upgrade will fail; the table is new to this step.
+    conn = op.get_bind()
+    count = conn.execute(sa.text("SELECT COUNT(*) FROM supervised_processes")).scalar()
+    if count and count > 0:
+        raise RuntimeError(
+            "supervised_processes must be empty to apply this migration "
+            "(added non-nullable columns without defaults or data migration)"
+        )
+
     additions = (
         sa.Column("task_id", sa.UUID(), nullable=False),
         sa.Column("run_id", sa.UUID(), nullable=False),

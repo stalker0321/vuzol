@@ -59,17 +59,30 @@ class LocalGit:
     async def inspect(self, worktree: Path) -> GitInspection:
         head = (await self._run(worktree, "rev-parse", "HEAD")).decode().strip()
         branch = (await self._run(worktree, "branch", "--show-current")).decode().strip()
-        names = await self._run(worktree, "diff", "--name-only", "-z", "--no-ext-diff", "HEAD")
-        changed = tuple(
-            item.decode("utf-8", "surrogateescape") for item in names.split(b"\0") if item
-        )
-        diff = await self._run(
-            worktree, "diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD"
-        )
+        # Use intent-to-add so untracked/new files, deletes, renames
+        # are included in evidence and patch.
+        await self._run(worktree, "add", "-N", ".")
+        try:
+            names = await self._run(worktree, "diff", "--name-only", "-z", "--no-ext-diff", "HEAD")
+            changed = tuple(
+                item.decode("utf-8", "surrogateescape") for item in names.split(b"\0") if item
+            )
+            diff = await self._run(
+                worktree,
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "HEAD",
+            )
+        finally:
+            # Clean intent-to-add without touching working tree contents
+            await self._run(worktree, "reset")
         return GitInspection(head=head, branch=branch, changed_files=changed, diff=diff)
 
     async def remove_worktree(self, repository: Path, path: Path) -> None:
-        await self._run(repository, "worktree", "remove", str(path))
+        await self._run(repository, "worktree", "remove", "--force", str(path))
 
     async def _optional(self, cwd: Path, *args: str) -> bytes | None:
         try:

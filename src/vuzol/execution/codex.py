@@ -157,6 +157,14 @@ class ExecutionEnvelopeFactory:
             await session.flush()
             return envelope, process.id
 
+    async def mark_running(self, process_id: uuid.UUID, container_name: str) -> None:
+        async with self._factory.begin() as session:
+            process = await session.get(SupervisedProcess, process_id, with_for_update=True)
+            if process is not None:
+                process.status = ProcessStatus.RUNNING
+                process.container_id = container_name
+                process.started_at = func.now()
+
     async def complete(
         self,
         process_id: uuid.UUID,
@@ -222,6 +230,8 @@ class SandboxCodexTransport:
         self, invocation: CodexInvocation, cancellation: CancellationContext
     ) -> CodexProcessResult:
         envelope, process_id = await self._envelopes.build(invocation)
+        container_name = f"vuzol-{str(envelope.step_id)[:12]}-{envelope.lease_generation}"
+        await self._envelopes.mark_running(process_id, container_name)
         try:
             result = await self._runtime.run(envelope, cancellation)
         except RuntimeError:

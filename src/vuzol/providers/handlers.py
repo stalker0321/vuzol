@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import Capability
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.execution.artifacts import ArtifactStore
+from vuzol.execution.worktrees import WorktreeService
 from vuzol.providers.budgets import account_usage, reconcile_usage, release_reservation
 from vuzol.providers.domain import ProviderRequest
 from vuzol.providers.errors import ProviderFailure
@@ -25,10 +27,15 @@ class ProviderStepHandler:
         factory: async_sessionmaker[AsyncSession],
         registries: ConfigurationBundle,
         adapters: AdapterRegistry,
+        *,
+        worktrees: WorktreeService | None = None,
+        artifacts: ArtifactStore | None = None,
     ) -> None:
         self._factory = factory
         self._registries = registries
         self._adapters = adapters
+        self._worktrees = worktrees
+        self._artifacts = artifacts
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -67,6 +74,16 @@ class ProviderStepHandler:
                     configuration_revision=configuration_revision,
                     failure=failure,
                 )
+            if request.step_type == "execute_code" and self._worktrees is not None:
+                async with self._factory.begin() as s2:
+                    wt = await s2.scalar(select(Worktree).where(Worktree.run_id == request.run_id))
+                    if wt is not None:
+                        await self._worktrees.retain(
+                            s2,
+                            worktree_id=wt.id,
+                            artifacts=self._artifacts,
+                            step_id=request.step_id,
+                        )
             return StepOutcome(
                 kind=(
                     OutcomeKind.TRANSIENT_FAILURE
@@ -106,6 +123,15 @@ class ProviderStepHandler:
                 profile,
                 configuration_revision=configuration_revision,
             )
+            if request.step_type == "execute_code" and self._worktrees is not None:
+                wt = await session.scalar(select(Worktree).where(Worktree.run_id == request.run_id))
+                if wt is not None:
+                    await self._worktrees.retain(
+                        session,
+                        worktree_id=wt.id,
+                        artifacts=self._artifacts,
+                        step_id=request.step_id,
+                    )
         return StepOutcome.succeeded(
             {
                 "profile_id": profile.id,

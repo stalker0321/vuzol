@@ -1,5 +1,22 @@
+# LEGACY / MIGRATION REFERENCE ONLY
+#
+# This was the former system-level unit definition:
+#   Type=simple + User=vuzol-executor + RuntimeDirectory + hard-coded XDG path.
+#
+# PRODUCTION DEPLOYMENTS MUST USE THE USER UNIT:
+#   deploy/systemd/user/vuzol-rootless-docker.service
+# installed to /etc/systemd/user/vuzol-rootless-docker.service
+# and managed via `systemctl --user` (under the vuzol-executor identity with linger).
+#
+# See README.md (Execution section) and the Step 08 handoff reports for the
+# exact installation, readiness, and rollback procedures.
+#
+# The original body is retained below strictly for reference and rollback.
+# Do not install or enable this file as the active daemon in new deployments.
+# It is no longer advertised as the production rootless daemon layout.
+
 [Unit]
-Description=Dedicated rootless Docker daemon for Vuzol sandboxes
+Description=LEGACY rootless Docker daemon (system unit form - see user/ unit)
 After=network.target
 
 [Service]

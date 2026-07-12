@@ -10,10 +10,10 @@ from pydantic import HttpUrl, ValidationError
 from vuzol.config.models import EgressDestination, NetworkPolicy
 from vuzol.execution.egress import (
     AllowedConnectTarget,
-    allowlist_stable_hash,
-    compile_proxy_allowlist,
     _extract_host,
     _normalize_hostname,
+    allowlist_stable_hash,
+    compile_proxy_allowlist,
 )
 
 
@@ -217,19 +217,7 @@ def test_compile_internal_checks_via_construct() -> None:
     with pytest.raises(ValueError, match="requires at least one"):
         compile_proxy_allowlist(bad_empty)
 
-    # also hit scheme recheck (construct http dest url)
-    # (HttpUrl construct may allow, but if reaches)
-    try:
-        bad_http = NetworkPolicy.model_construct(
-            enabled=True,
-            destinations=(
-                EgressDestination.model_construct(url=HttpUrl("http://x.com"), purpose="x"),
-            ),
-        )
-        with pytest.raises(ValueError, match="https"):
-            compile_proxy_allowlist(bad_http)
-    except Exception:
-        pass  # if construct fails validation internally, ok
+    # disabled/enabled checks exercised via construct to test compiler defense
 
 
 def test_target_str_and_provider_empty_skipped() -> None:
@@ -297,6 +285,104 @@ def test_allowlist_stable_hash_is_deterministic() -> None:
     pol2 = NetworkPolicy(enabled=True, destinations=(_dest("https://other.example.com"),))
     ts2 = compile_proxy_allowlist(pol2)
     assert allowlist_stable_hash(ts) != allowlist_stable_hash(ts2)
+
+
+# --- New focused tests for explicit provider port parsing and closed AllowedConnectTarget ---
+
+
+def test_provider_host_without_port_accepted() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    targets = compile_proxy_allowlist(pol, provider_api_hosts=("api.provider.com",))
+    assert any(t.hostname == "api.provider.com" and t.port == 443 for t in targets)
+
+
+def test_provider_host_explicit_443_accepted() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    targets = compile_proxy_allowlist(pol, provider_api_hosts=("api.provider.com:443",))
+    assert any(t.hostname == "api.provider.com" and t.port == 443 for t in targets)
+
+
+def test_provider_explicit_non_443_rejected() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    for bad in ["api.example.com:8443", "api.example.com:80"]:
+        with pytest.raises(ValueError, match="443"):
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+
+
+def test_provider_malformed_and_non_numeric_ports_rejected() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    for bad in ["api.example.com:", "api.example.com:notaport", "api.example.com:abc"]:
+        with pytest.raises(ValueError, match="malformed port"):
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+
+
+def test_provider_url_path_query_userinfo_forms_rejected() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    bads = [
+        "user@api.example.com",
+        "https://api.example.com",
+        "api.example.com/path",
+        "api.example.com?query=x",
+        "api.example.com#fragment",
+    ]
+    for bad in bads:
+        with pytest.raises(ValueError, match="hostname or hostname:443"):
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+
+
+def test_provider_ipv4_ipv6_literals_rejected() -> None:
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    for bad in ["8.8.8.8", "2001:4860:4860::8888", "[::1]", "[2001:db8::1]:443"]:
+        with pytest.raises(ValueError, match=r"IP literal|hostname or hostname:443"):
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+
+
+def test_allowed_connect_target_direct_rejects_ips() -> None:
+    for bad in ["8.8.8.8", "2001:4860:4860::8888", "127.0.0.1", "::1"]:
+        with pytest.raises(ValueError, match="IP literal"):
+            AllowedConnectTarget(hostname=bad, port=443, purpose="p")
+
+
+def test_allowed_connect_target_direct_rejects_wildcards_local_metadata_invalid() -> None:
+    bads = [
+        "*.example.com",
+        "localhost",
+        "example.local",
+        "metadata.google.internal",
+        ".example.com",
+        "example.com.",
+    ]
+    for bad in bads:
+        with pytest.raises(ValueError, match=r"prohibited|wildcard|invalid hostname"):
+            AllowedConnectTarget(hostname=bad, port=443, purpose="p")
+
+
+def test_allowed_connect_target_direct_produces_canonical_idna() -> None:
+    # mixed case becomes lowercase canonical
+    t = AllowedConnectTarget(hostname="API.Example.COM", port=443, purpose="p")
+    assert t.hostname == "api.example.com"
+    # whitespace/control rejected
+    with pytest.raises(ValueError, match="invalid hostname"):
+        AllowedConnectTarget(hostname="ex ample.com", port=443, purpose="p")
+
+
+def test_allowed_connect_target_port_must_be_443() -> None:
+    with pytest.raises(ValueError, match="443"):
+        AllowedConnectTarget(hostname="api.example.com", port=8443, purpose="p")
+
+
+def test_compile_rejects_non_https_destination_independently() -> None:
+    """Compiler's https check exercised via model_construct bypass.
+
+    Must raise; no exception swallowing.
+    """
+    bad_dest = EgressDestination.model_construct(
+        url=HttpUrl("http://api.example.com"),
+        purpose="x",
+    )
+    bad_pol = NetworkPolicy.model_construct(enabled=True, destinations=(bad_dest,))
+    with pytest.raises(ValueError, match="https"):
+        compile_proxy_allowlist(bad_pol)
 
 
 def test_compile_performs_no_dns_lookup(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -48,6 +48,12 @@ Atomic operations include:
 
 Step and outbox claims use `FOR UPDATE SKIP LOCKED`, PostgreSQL `now()`, and monotonically increasing fencing generations. Heartbeat or completion with a stale owner/generation affects zero rows and raises `LeaseLost`.
 
+The Step 06 migration links each run to its source interpretation, adds explicit
+control/light/heavy/privileged queue classes, and adds awaiting-user run/step states. Workflow
+definitions are fully materialized when a run is created; workers only advance existing rows and
+cannot create late successor steps. Queue and profile capacity checks are serialized with namespaced
+PostgreSQL advisory transaction locks.
+
 ## Migrations
 
 App and worker startup never run migrations. Operators run Alembic explicitly. Migration acquisition, DDL, and release are separated so the session-level advisory lock cannot accidentally roll back transactional DDL.
@@ -68,3 +74,6 @@ The initial migration supports lossless downgrade for development verification. 
 - artifacts and usage remain traceable.
 - Step 05 persists original intake, private attachment references, raw transcripts, immutable
   schema-versioned interpretations, and the current TaskDraft projection without replacing input.
+- Step 06 persists versioned workflow graphs, audited task/run/step transitions, pause/resume/cancel
+  controls, deterministic retry backoff, database-time heartbeat, safe/unknown-effect recovery,
+  queue/profile concurrency, and shutdown uncertainty.

@@ -33,6 +33,7 @@ class StatusCard:
     task_id: uuid.UUID
     revision: int
     html: str
+    buttons: tuple[str, ...] = ()
 
 
 async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> StatusCard:
@@ -70,13 +71,39 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     lines.append(f"Elapsed: {elapsed}s")
     if event is not None:
         lines.append(f"Latest: {telegram_html(event.event_type)}")
-    return StatusCard(task_id=task.id, revision=task.version, html="\n".join(lines))
+    buttons = (
+        ("start",)
+        if run is not None and run.status.value == "created"
+        else tuple(status_buttons(task.status.value))
+    )
+    return StatusCard(
+        task_id=task.id,
+        revision=task.version,
+        html="\n".join(lines),
+        buttons=buttons,
+    )
 
 
 class TelegramClient(Protocol):
-    async def send_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int: ...
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        html: str,
+        buttons: tuple[str, ...] = (),
+        task_id: uuid.UUID | None = None,
+    ) -> int: ...
 
-    async def edit_message(self, *, chat_id: int, message_id: int, html: str) -> None: ...
+    async def edit_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        html: str,
+        buttons: tuple[str, ...] = (),
+        task_id: uuid.UUID | None = None,
+    ) -> None: ...
 
 
 class LostTelegramResponse(RuntimeError):
@@ -90,7 +117,16 @@ class FakeTelegramClient:
     sent: list[tuple[int, int | None, str]] = field(default_factory=list, init=False)
     edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
 
-    async def send_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int:
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        html: str,
+        buttons: tuple[str, ...] = (),
+        task_id: uuid.UUID | None = None,
+    ) -> int:
+        del buttons, task_id
         if self.fail:
             raise self.fail
         self.sent.append((chat_id, thread_id, html))
@@ -98,7 +134,16 @@ class FakeTelegramClient:
         self.next_message_id += 1
         return message_id
 
-    async def edit_message(self, *, chat_id: int, message_id: int, html: str) -> None:
+    async def edit_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        html: str,
+        buttons: tuple[str, ...] = (),
+        task_id: uuid.UUID | None = None,
+    ) -> None:
+        del buttons, task_id
         if self.fail:
             raise self.fail
         self.edited.append((chat_id, message_id, html))
@@ -125,7 +170,13 @@ async def apply_status_projection(
     if link is not None and card.revision <= link.projection_revision:
         return False
     if link is None:
-        message_id = await client.send_message(chat_id=chat_id, thread_id=thread_id, html=card.html)
+        message_id = await client.send_message(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            html=card.html,
+            buttons=card.buttons,
+            task_id=card.task_id,
+        )
         session.add(
             TelegramMessageLink(
                 chat_id=chat_id,
@@ -137,7 +188,13 @@ async def apply_status_projection(
             )
         )
     else:
-        await client.edit_message(chat_id=chat_id, message_id=link.message_id, html=card.html)
+        await client.edit_message(
+            chat_id=chat_id,
+            message_id=link.message_id,
+            html=card.html,
+            buttons=card.buttons,
+            task_id=card.task_id,
+        )
         link.projection_revision = card.revision
     await session.flush()
     return True
@@ -159,4 +216,17 @@ class EditRateLimiter:
 
 
 def status_buttons(status: str) -> Sequence[str]:
-    return ("cancel",) if status in {"received", "running", "paused"} else ()
+    if status == "paused":
+        return ("resume", "cancel")
+    if status in {
+        "received",
+        "context_prepared",
+        "planned",
+        "waiting_approval",
+        "executing",
+        "validating",
+        "reviewing",
+        "retrying",
+    }:
+        return ("pause", "cancel")
+    return ()

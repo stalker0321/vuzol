@@ -10,7 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.storage.errors import EntityNotFound
 from vuzol.storage.models import Event, Run, Step, Task
 from vuzol.storage.records import StepRecord, TaskRecord
-from vuzol.storage.types import IdempotencyClass, RetryClass, RunStatus, StepStatus, TaskStatus
+from vuzol.storage.types import (
+    IdempotencyClass,
+    QueueClass,
+    RetryClass,
+    RunStatus,
+    StepStatus,
+    TaskStatus,
+)
 
 
 def task_record(task: Task) -> TaskRecord:
@@ -109,16 +116,19 @@ class RunRepository:
         budget_mode: str,
         configuration_revision: str,
         policy_revision: str,
+        source_interpretation_id: uuid.UUID | None = None,
+        status: RunStatus = RunStatus.CREATED,
     ) -> uuid.UUID:
         run = Run(
             task_id=task_id,
             workflow_type=workflow_type,
             workflow_version=workflow_version,
-            status=RunStatus.CREATED,
+            status=status,
             selected_route={},
             budget_mode=budget_mode,
             configuration_revision=configuration_revision,
             policy_revision=policy_revision,
+            source_interpretation_id=source_interpretation_id,
         )
         self._session.add(run)
         await self._session.flush()
@@ -138,18 +148,28 @@ class StepRepository:
         idempotency_class: IdempotencyClass,
         required_capabilities: list[str] | None = None,
         status: StepStatus = StepStatus.PENDING,
+        queue_class: QueueClass = QueueClass.LIGHT,
+        retry_class: RetryClass = RetryClass.NEVER,
+        max_attempts: int = 1,
+        timeout_seconds: int = 600,
+        dependency_metadata: Mapping[str, Any] | None = None,
+        payload: Mapping[str, Any] | None = None,
+        priority: int = 100,
     ) -> StepRecord:
         step = Step(
             run_id=run_id,
             ordinal=ordinal,
             step_type=step_type,
             status=status,
+            queue_class=queue_class,
             required_capabilities=required_capabilities or [],
-            payload={},
-            retry_class=RetryClass.NEVER,
+            dependency_metadata=dict(dependency_metadata or {}),
+            payload=dict(payload or {}),
+            retry_class=retry_class,
             idempotency_class=idempotency_class,
-            max_attempts=1,
-            timeout_seconds=600,
+            max_attempts=max_attempts,
+            timeout_seconds=timeout_seconds,
+            priority=priority,
         )
         self._session.add(step)
         await self._session.flush()

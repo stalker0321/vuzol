@@ -1,9 +1,7 @@
 import logging
 import signal
-import threading
 from collections.abc import Callable
 from types import FrameType
-from typing import cast
 
 import uvicorn
 from pytest import LogCaptureFixture, MonkeyPatch
@@ -42,54 +40,79 @@ def test_app_main_composes_server(monkeypatch: MonkeyPatch) -> None:
     assert calls["log_config"] is None
 
 
-def test_worker_main_registers_signals_and_runs(monkeypatch: MonkeyPatch) -> None:
-    settings = Settings(environment="test", worker_poll_interval_seconds=0.25)
-    handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
-    run_arguments: dict[str, object] = {}
-
-    monkeypatch.setattr(
-        worker_cli, "get_runtime_configuration", lambda: runtime_configuration(settings)
-    )
-    monkeypatch.setattr(worker_cli, "configure_logging", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        signal,
-        "signal",
-        lambda signum, handler: handlers.update({signum: handler}),
-    )
-    monkeypatch.setattr(
-        worker_cli,
-        "run_worker",
-        lambda **kwargs: run_arguments.update(kwargs),
-    )
-
-    worker_cli.main()
-
-    assert set(handlers) == {signal.SIGTERM, signal.SIGINT}
-    assert run_arguments["poll_interval_seconds"] == 0.25
-    stop_event = cast(threading.Event, run_arguments["stop_event"])
-    handlers[signal.SIGTERM](signal.SIGTERM, None)
-    assert stop_event.is_set()
-
-
-def test_worker_stop_handler_logs_signal(
+def test_worker_main_composes_runtime_and_handles_stop(
     monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
 ) -> None:
     settings = Settings(environment="test")
     handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
+    calls: dict[str, object] = {}
+
+    class Transaction:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class Factory:
+        def begin(self) -> Transaction:
+            return Transaction()
+
+    class Engine:
+        async def dispose(self) -> None:
+            calls["disposed"] = True
+
+    class Dispatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def process_one(self) -> bool:
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            return False
+
+    class Controls:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def process_one(self) -> bool:
+            return False
+
+    class WorkflowWorker:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def process_one(self) -> bool:
+            return False
 
     monkeypatch.setattr(
-        worker_cli, "get_runtime_configuration", lambda: runtime_configuration(settings)
+        worker_cli,
+        "get_runtime_configuration",
+        lambda **_kwargs: runtime_configuration(settings),
     )
-    monkeypatch.setattr(worker_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(worker_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
     monkeypatch.setattr(
         signal,
         "signal",
         lambda signum, handler: handlers.update({signum: handler}),
     )
-    monkeypatch.setattr(worker_cli, "run_worker", lambda **_kwargs: None)
+    monkeypatch.setattr(worker_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(worker_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(worker_cli, "create_session_factory", lambda _engine: Factory())
+    monkeypatch.setattr(worker_cli, "WorkflowDispatcher", Dispatcher)
+    monkeypatch.setattr(worker_cli, "WorkflowControlConsumer", Controls)
+    monkeypatch.setattr(worker_cli, "WorkflowWorker", WorkflowWorker)
+
+    async def recover(_session: object, *, batch_size: int) -> int:
+        calls["recovery_batch_size"] = batch_size
+        return 0
+
+    monkeypatch.setattr(worker_cli, "recover_expired_steps", recover)
 
     with caplog.at_level(logging.INFO):
         worker_cli.main()
-        handlers[signal.SIGINT](signal.SIGINT, None)
 
-    assert caplog.records[-1].__dict__["signal"] == signal.SIGINT
+    assert set(handlers) == {signal.SIGTERM, signal.SIGINT}
+    assert calls["service"] == "vuzol-worker"
+    assert calls["recovery_batch_size"] == 100
+    assert calls["disposed"] is True
+    assert any(record.__dict__.get("signal") == signal.SIGTERM for record in caplog.records)

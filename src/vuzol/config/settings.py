@@ -109,6 +109,28 @@ class InterpretationSettings(BaseModel):
         return self
 
 
+class WorkflowSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=60)
+    lease_seconds: int = Field(default=60, ge=15, le=3_600)
+    heartbeat_seconds: int = Field(default=15, ge=1, le=1_200)
+    shutdown_deadline_seconds: int = Field(default=30, ge=1, le=600)
+    retry_min_seconds: float = Field(default=2.0, ge=0.1, le=300)
+    retry_max_seconds: float = Field(default=120.0, ge=0.1, le=3_600)
+    recovery_interval_seconds: float = Field(default=15.0, ge=1, le=600)
+    recovery_batch_size: int = Field(default=100, ge=1, le=1_000)
+    claim_candidate_limit: int = Field(default=20, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> "WorkflowSettings":
+        if self.heartbeat_seconds * 3 >= self.lease_seconds:
+            raise ValueError("workflow heartbeat must be less than one third of lease")
+        if self.retry_min_seconds > self.retry_max_seconds:
+            raise ValueError("workflow retry minimum must not exceed maximum")
+        return self
+
+
 class Settings(BaseSettings):
     """Process settings loaded at the composition boundary."""
 
@@ -139,6 +161,7 @@ class Settings(BaseSettings):
     retention: RetentionDefaults = RetentionDefaults()
     telegram: TelegramSettings = TelegramSettings()
     interpretation: InterpretationSettings = InterpretationSettings()
+    workflow: WorkflowSettings = WorkflowSettings()
     limits: HardLimits = HardLimits()
     redaction_patterns: tuple[str, ...] = ()
 

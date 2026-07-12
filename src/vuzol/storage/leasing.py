@@ -7,10 +7,12 @@ from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import Step, TransactionalOutbox
+from vuzol.storage.models import Run, Step, TransactionalOutbox
 from vuzol.storage.records import LeaseToken, OutboxLeaseToken, StepRecord
 from vuzol.storage.repositories.core import step_record
-from vuzol.storage.types import DeliveryStatus, StepStatus
+from vuzol.storage.types import DeliveryStatus, QueueClass, RunStatus, StepStatus
+
+STEP_CLAIM_LOCK_KEY = 8_946_527_100
 
 
 async def claim_step(
@@ -19,30 +21,92 @@ async def claim_step(
     owner: str,
     lease_seconds: int,
     capabilities: frozenset[str],
+    queue_classes: frozenset[QueueClass] = frozenset(QueueClass),
+    class_limits: dict[QueueClass, int] | None = None,
+    profile_limits: dict[str, int] | None = None,
+    step_types: frozenset[str] | None = None,
+    candidate_limit: int = 20,
 ) -> LeaseToken | None:
+    if not queue_classes or candidate_limit < 1:
+        return None
+    await session.execute(select(func.pg_advisory_xact_lock(STEP_CLAIM_LOCK_KEY)))
     statement = (
         select(Step)
+        .join(Run, Run.id == Step.run_id)
         .where(
             Step.status == StepStatus.QUEUED,
             Step.available_at <= func.now(),
+            Step.attempt_count < Step.max_attempts,
+            Step.queue_class.in_(sorted(queue_classes)),
             Step.required_capabilities.contained_by(sorted(capabilities)),
+            Run.status == RunStatus.RUNNING,
         )
         .order_by(Step.priority, Step.available_at, Step.created_at)
         .with_for_update(skip_locked=True)
-        .limit(1)
+        .limit(candidate_limit)
     )
-    step = await session.scalar(statement)
-    if step is None:
-        return None
-    step.status = StepStatus.LEASED
-    step.lease_owner = owner
-    step.lease_generation += 1
-    step.heartbeat_at = func.now()
-    step.lease_expires_at = func.now() + timedelta(seconds=lease_seconds)
-    step.attempt_count += 1
-    await session.flush()
-    await session.refresh(step, attribute_names=["heartbeat_at", "lease_expires_at"])
-    return LeaseToken(step=step_record(step), owner=owner, generation=step.lease_generation)
+    if step_types is not None:
+        if not step_types:
+            return None
+        statement = statement.where(Step.step_type.in_(sorted(step_types)))
+    candidates = tuple((await session.scalars(statement)).all())
+    for step in candidates:
+        if class_limits is not None:
+            class_limit = class_limits.get(step.queue_class)
+            if class_limit is not None:
+                active = await session.scalar(
+                    select(func.count())
+                    .select_from(Step)
+                    .where(
+                        Step.queue_class == step.queue_class,
+                        Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
+                        Step.lease_expires_at >= func.now(),
+                    )
+                )
+                if int(active or 0) >= class_limit:
+                    continue
+        if step.executor_profile_id is not None and profile_limits is not None:
+            profile_limit = profile_limits.get(step.executor_profile_id)
+            if profile_limit is None:
+                continue
+            active_profile = await session.scalar(
+                select(func.count())
+                .select_from(Step)
+                .where(
+                    Step.executor_profile_id == step.executor_profile_id,
+                    Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
+                    Step.lease_expires_at >= func.now(),
+                )
+            )
+            if int(active_profile or 0) >= profile_limit:
+                continue
+        step.status = StepStatus.LEASED
+        step.lease_owner = owner
+        step.lease_generation += 1
+        step.heartbeat_at = func.now()
+        step.lease_expires_at = func.now() + timedelta(seconds=lease_seconds)
+        step.attempt_count += 1
+        await session.flush()
+        await session.refresh(step, attribute_names=["heartbeat_at", "lease_expires_at"])
+        return LeaseToken(step=step_record(step), owner=owner, generation=step.lease_generation)
+    return None
+
+
+async def start_step(session: AsyncSession, token: LeaseToken) -> None:
+    statement = (
+        update(Step)
+        .where(
+            Step.id == token.step.id,
+            Step.lease_owner == token.owner,
+            Step.lease_generation == token.generation,
+            Step.status == StepStatus.LEASED,
+            Step.run_id.in_(select(Run.id).where(Run.status == RunStatus.RUNNING)),
+        )
+        .values(status=StepStatus.RUNNING)
+    )
+    result = cast(CursorResult[Any], await session.execute(statement))
+    if result.rowcount != 1:
+        raise LeaseLost(f"step lease lost before start: {token.step.id}")
 
 
 async def heartbeat_step(
@@ -58,6 +122,11 @@ async def heartbeat_step(
             Step.lease_owner == token.owner,
             Step.lease_generation == token.generation,
             Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
+            Step.run_id.in_(
+                select(Run.id).where(
+                    Run.status.not_in((RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.COMPLETED))
+                )
+            ),
         )
         .values(
             heartbeat_at=func.now(),
@@ -82,6 +151,11 @@ async def complete_step(
             Step.lease_owner == token.owner,
             Step.lease_generation == token.generation,
             Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
+            Step.run_id.in_(
+                select(Run.id).where(
+                    Run.status.not_in((RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.COMPLETED))
+                )
+            ),
         )
         .values(
             status=StepStatus.COMPLETED,

@@ -17,15 +17,17 @@ Telegram text or voice message
 → private attachment storage and transcription when needed
 → semantic interpretation
 → validated, provider-neutral TaskDraft
+→ versioned persisted workflow and explicit steps
+→ fenced capability/queue-class dispatch with restart recovery
 ```
 
-Ingress, Telegram delivery, and interpretation run as separate processes. Their inbox/outbox and
-lease records make completed delivery, transcription, and interpretation safe across process
-restarts.
+Ingress, Telegram delivery, interpretation, and workflow management run as separate processes.
+Their inbox/outbox, step, event, and fenced lease records make completed delivery, transcription,
+interpretation, controls, and workflow progress safe across process restarts.
 
-The current MVP foundation does **not** execute tasks. Workflow management, executor routing,
-Codex integration, Git worktrees, sandbox execution, automated validation, and deployment are not
-implemented or advertised as available behavior.
+The current MVP foundation materializes and advances workflows but does **not** yet provide real
+model/tool task executors. Provider routing, Codex integration, Git worktrees, sandbox execution,
+automated validation, and deployment are not implemented or advertised as available behavior.
 
 ## Requirements and setup
 
@@ -48,7 +50,7 @@ references. See [Configuration](docs/CONFIGURATION.md).
 
 ```bash
 make run-app                  # HTTP health application on 127.0.0.1:8000
-make run-worker               # foundation worker process
+make run-worker               # workflow dispatch, recovery, controls, and registered handlers
 vuzol-telegram                # Telegram long-polling ingress
 vuzol-telegram-delivery       # Telegram outbox delivery
 vuzol-interpreter             # transcription and semantic interpretation

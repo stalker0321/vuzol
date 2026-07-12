@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from vuzol.config import Settings
 from vuzol.storage import create_engine, create_session_factory
 from vuzol.storage.records import StepRecord, TaskRecord
-from vuzol.storage.types import IdempotencyClass, StepStatus
+from vuzol.storage.types import IdempotencyClass, RunStatus, StepStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
 
@@ -36,6 +36,7 @@ async def seed_task_run_step(
             budget_mode="balanced",
             configuration_revision="a" * 64,
             policy_revision="b" * 64,
+            status=RunStatus.RUNNING,
         )
         step = await uow.steps.create(
             run_id=run_id,
@@ -44,5 +45,6 @@ async def seed_task_run_step(
             idempotency_class=IdempotencyClass.ISOLATED_RETRYABLE,
             required_capabilities=capabilities,
             status=step_status,
+            max_attempts=3,
         )
     return task, run_id, step

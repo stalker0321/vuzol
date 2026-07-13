@@ -478,7 +478,9 @@ def test_step09a_execute_code_receives_exact_worker_result_schema() -> None:
     assert name == "WorkerResultManifest"
     assert version == "step09a-worker-result.v1"
     assert schema is not None
-    assert set(schema["required"]) >= {
+    required = schema["required"]
+    assert isinstance(required, list)
+    assert set(required) >= {
         "result_commit",
         "branch",
         "claimed_complete",

@@ -666,6 +666,66 @@ async def test_grok_adapter_fails_closed_for_invalid_execution(tmp_path: Path) -
 
 
 @pytest.mark.anyio
+async def test_grok_adapter_classifies_structured_provider_cancellation(tmp_path: Path) -> None:
+    class CancelledTransport:
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            return CodexProcessResult(
+                0,
+                "\n".join(
+                    (
+                        '{"type":"thought","data":"sensitive model output"}',
+                        '{"type":"end","stopReason":"Cancelled","requestId":"request"}',
+                    )
+                ),
+                "",
+                75_700,
+            )
+
+    configured = profile(
+        "grok-a",
+        provider="grok",
+        model="grok-build",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="grok-a",
+        state_directory=tmp_path / "grok-a",
+    )
+    fenced = provider_request().model_copy(
+        update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+    )
+    with pytest.raises(ProviderFailure) as captured:
+        await GrokCliAdapter(CancelledTransport()).execute(
+            fenced, configured, CancellationContext()
+        )
+    assert captured.value.category is ProviderErrorCategory.CANCELLED
+    assert captured.value.retryable is False
+
+
+def test_grok_event_summary_contains_only_safe_protocol_metadata() -> None:
+    from vuzol.providers.grok import summarize_grok_events
+
+    summary = summarize_grok_events(
+        "\n".join(
+            (
+                '{"type":"thought","data":"private prompt and output"}',
+                '{"type":"end","stopReason":"Cancelled","requestId":"secret-id"}',
+            )
+        )
+    )
+    serialized = json.dumps(summary)
+    assert summary["event_count"] == 2
+    assert summary["last_event_type"] == "end"
+    assert summary["last_stop_reason"] == "Cancelled"
+    assert "private prompt" not in serialized
+    assert "secret-id" not in serialized
+
+
+@pytest.mark.anyio
 async def test_codex_adapter_rejects_missing_isolation_sandbox_and_bad_output(
     tmp_path: Path,
 ) -> None:

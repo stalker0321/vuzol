@@ -1,5 +1,6 @@
 """Grok Build CLI adapter for subscription-backed sandbox execution."""
 
+import hashlib
 import json
 
 from vuzol.config.models import ProviderProfileConfig
@@ -122,6 +123,13 @@ class GrokCliAdapter:
         try:
             body = _decode_output(result.stdout)
             usage = body.get("usage", {})
+        except GrokProviderCancelled as error:
+            raise ProviderFailure(
+                ProviderErrorCategory.CANCELLED,
+                retryable=False,
+                request_sent=True,
+                safe_summary="Grok CLI reported provider-originated cancellation",
+            ) from error
         except (json.JSONDecodeError, ValueError) as error:
             raise ProviderFailure(
                 ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
@@ -160,6 +168,8 @@ def _decode_output(stdout: str) -> dict[str, object]:
             chunks.append(event["data"])
         elif event.get("type") == "end":
             final = event
+    if final is not None and final.get("stopReason") == "Cancelled":
+        raise GrokProviderCancelled("Grok JSONL ended with provider cancellation")
     if final is None or not chunks:
         raise ValueError("Grok JSONL contains no completed response")
     return {
@@ -168,6 +178,43 @@ def _decode_output(stdout: str) -> dict[str, object]:
         "session_id": final.get("sessionId"),
         "finish_reason": final.get("stopReason"),
         "usage": final.get("usage", {}),
+    }
+
+
+class GrokProviderCancelled(ValueError):
+    """The CLI completed normally but its structured protocol reported cancellation."""
+
+
+def summarize_grok_events(stdout: str) -> dict[str, object]:
+    """Return a prompt- and output-free diagnostic summary of Grok JSONL."""
+    events: list[dict[str, object]] = []
+    for sequence, line in enumerate(stdout.splitlines(), start=1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if not isinstance(event_type, str):
+            continue
+        encoded = line.encode()
+        events.append(
+            {
+                "sequence": sequence,
+                "type": event_type,
+                "byte_count": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "stop_reason": event.get("stopReason") if event_type == "end" else None,
+            }
+        )
+    final = events[-1] if events else None
+    return {
+        "schema_version": "grok-event-summary.v1",
+        "event_count": len(events),
+        "events": events,
+        "last_event_type": final["type"] if final else None,
+        "last_stop_reason": final["stop_reason"] if final else None,
     }
 
 

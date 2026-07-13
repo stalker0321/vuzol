@@ -208,6 +208,7 @@ class ProviderProfileConfig(FrozenModel):
     minimum_unknown_usage_cost: float = Field(default=0.01, gt=0)
     runtime_identity: str | None = Field(default=None, min_length=1, max_length=100)
     state_directory: Path | None = None
+    runtime_network: NetworkPolicy = NetworkPolicy()
     enabled: bool = True
 
     @model_validator(mode="after")
@@ -243,6 +244,8 @@ class ProviderProfileConfig(FrozenModel):
                 raise ValueError("CLI profile cannot use the application user's default home")
         elif self.runtime_identity is not None or self.state_directory is not None:
             raise ValueError("runtime identity and state directory are CLI-only")
+        elif self.runtime_network.enabled:
+            raise ValueError("runtime network policy is CLI-only")
         if (
             self.input_cost_units_per_million == 0
             and self.output_cost_units_per_million == 0

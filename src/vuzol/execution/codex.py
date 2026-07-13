@@ -23,6 +23,7 @@ from vuzol.execution.paths import contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
 from vuzol.providers.codex import canonical_codex_argv
+from vuzol.providers.grok import canonical_grok_argv
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
@@ -62,12 +63,14 @@ class ExecutionEnvelopeFactory:
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
             if sandbox.network_mode is SandboxNetworkMode.NONE:
                 return ()
-            provider_hosts = (
-                (profile.api_base_url.host,)
-                if profile.api_base_url is not None and profile.api_base_url.host is not None
-                else ()
-            )
-            return compile_proxy_allowlist(project.network, provider_hosts)
+            project_targets = compile_proxy_allowlist(project.network)
+            profile_targets = compile_proxy_allowlist(profile.runtime_network)
+            project_keys = {(target.hostname, target.port) for target in project_targets}
+            if any(
+                (target.hostname, target.port) not in project_keys for target in profile_targets
+            ):
+                raise ValueError("CLI profile egress exceeds the project network policy")
+            return profile_targets
 
     async def build(
         self,
@@ -77,7 +80,6 @@ class ExecutionEnvelopeFactory:
         https_proxy_url: str | None = None,
     ) -> tuple[ProcessEnvelope, uuid.UUID]:
         _require_invocation_identity(invocation)
-        _require_codex_command(invocation.argv)
         assert invocation.sandbox_reference is not None
         assert invocation.task_id is not None
         assert invocation.run_id is not None
@@ -93,6 +95,7 @@ class ExecutionEnvelopeFactory:
                 raise LookupError("sandbox worktree or step is missing")
             _validate_fenced_binding(invocation, worktree, step)
             profile = self._registries.profiles.get(invocation.profile_id)
+            _require_provider_command(invocation.argv, profile.provider, profile.model)
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
             if not sandbox.enabled or profile.state_directory is None:
@@ -114,6 +117,7 @@ class ExecutionEnvelopeFactory:
             )
             staging.mkdir(parents=True, exist_ok=True)
             contained(self._artifact_root, staging)
+            state_target, environment = _provider_state_runtime(profile.provider)
             spec = SandboxSpec(
                 image=sandbox.image,
                 uid=sandbox.uid,
@@ -136,7 +140,7 @@ class ExecutionEnvelopeFactory:
                     ),
                     SandboxMount(
                         source=state_path,
-                        target=Path("/codex-home"),
+                        target=state_target,
                         mode=MountMode.READ_WRITE,
                         purpose="provider-state",
                     ),
@@ -152,10 +156,7 @@ class ExecutionEnvelopeFactory:
                 network_disabled=not networked,
                 proxy_network=proxy_network,
                 https_proxy_url=https_proxy_url,
-                environment={
-                    "CODEX_HOME": "/codex-home",
-                    "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
-                },
+                environment=environment,
             )
             envelope = ProcessEnvelope(
                 task_id=invocation.task_id,
@@ -370,7 +371,21 @@ def _validate_fenced_binding(invocation: CodexInvocation, worktree: Worktree, st
         raise ValueError("sandbox invocation is not bound to the current fenced lease")
 
 
-def _require_codex_command(argv: tuple[str, ...]) -> None:
-    expected = canonical_codex_argv()
-    if argv != expected:
-        raise ValueError("sandbox rejected a non-canonical Codex command")
+def _require_provider_command(argv: tuple[str, ...], provider: str, model: str) -> None:
+    expected = {
+        "codex": canonical_codex_argv(),
+        "grok": canonical_grok_argv(model),
+    }.get(provider)
+    if expected is None or argv != expected:
+        raise ValueError("sandbox rejected a non-canonical provider command")
+
+
+def _provider_state_runtime(provider: str) -> tuple[Path, dict[str, str]]:
+    if provider == "codex":
+        return Path("/codex-home"), {
+            "CODEX_HOME": "/codex-home",
+            "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
+        }
+    if provider == "grok":
+        return Path("/grok-home"), {"HOME": "/grok-home"}
+    raise ValueError("sandbox rejected an unsupported CLI provider")

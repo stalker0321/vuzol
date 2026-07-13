@@ -193,11 +193,17 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         "--workdir",
         str(spec.working_directory),
         "--label",
+        "vuzol.managed=true",
+        "--label",
+        "vuzol.resource=sandbox-container",
+        "--label",
         f"vuzol.task_id={envelope.task_id}",
         "--label",
         f"vuzol.run_id={envelope.run_id}",
         "--label",
         f"vuzol.step_id={envelope.step_id}",
+        "--label",
+        f"vuzol.lease_generation={envelope.lease_generation}",
     ]
     for mount in spec.mounts:
         try:
@@ -212,9 +218,18 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
     for key, value in sorted(spec.environment.items()):
         arguments.extend(("--env", f"{key}={value}"))
     if spec.https_proxy_url is not None:
-        arguments.extend(("--env", f"HTTPS_PROXY={spec.https_proxy_url}"))
-        arguments.extend(("--env", f"HTTP_PROXY={spec.https_proxy_url}"))
-        arguments.extend(("--env", f"ALL_PROXY={spec.https_proxy_url}"))
+        proxy_environment = {
+            "HTTPS_PROXY": spec.https_proxy_url,
+            "HTTP_PROXY": spec.https_proxy_url,
+            "https_proxy": spec.https_proxy_url,
+            "http_proxy": spec.https_proxy_url,
+            "ALL_PROXY": "",
+            "NO_PROXY": "",
+            "all_proxy": "",
+            "no_proxy": "",
+        }
+        for key, value in sorted(proxy_environment.items()):
+            arguments.extend(("--env", f"{key}={value}"))
     arguments.append(spec.image)
     arguments.extend(envelope.argv)
     return tuple(arguments)

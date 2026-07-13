@@ -100,18 +100,8 @@ class SandboxProfileConfig(FrozenModel):
     @model_validator(mode="after")
     def validate_network_transport(self) -> "SandboxProfileConfig":
         configured = self.proxy_network is not None or self.https_proxy_url is not None
-        if self.network_mode is SandboxNetworkMode.NONE and configured:
-            raise ValueError("network-disabled sandbox cannot configure a proxy transport")
-        if self.network_mode is SandboxNetworkMode.HTTPS_PROXY:
-            if self.proxy_network is None or self.https_proxy_url is None:
-                raise ValueError("HTTPS proxy sandbox requires proxy network and URL")
-            if self.https_proxy_url.scheme != "http":
-                raise ValueError("sandbox proxy must use an internal HTTP endpoint")
-            if (
-                self.https_proxy_url.username is not None
-                or self.https_proxy_url.password is not None
-            ):
-                raise ValueError("sandbox proxy URL cannot contain credentials")
+        if configured:
+            raise ValueError("proxy network and URL are materialized only by the execution runtime")
         return self
 
 

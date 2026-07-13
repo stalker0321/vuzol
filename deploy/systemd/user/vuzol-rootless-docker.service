@@ -4,6 +4,7 @@ Documentation=man:dockerd-rootless(1)
 After=network.target
 
 [Service]
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 Type=simple
 Delegate=yes
 # USER UNIT: runs under the linger-enabled vuzol-executor user's systemd manager.
@@ -14,7 +15,7 @@ Delegate=yes
 # Socket path uses %t for portability — never hard-code a numeric UID here.
 ExecStart=/usr/bin/dockerd-rootless.sh --host=unix://%t/docker.sock
 ExecStartPost=/bin/sh -c "\
-  for i in \$(seq 1 150); do \
+  for i in $$(seq 1 150); do \
     /usr/bin/docker --host unix://%t/docker.sock info >/dev/null 2>&1 && exit 0; \
     sleep 0.2; \
   done; \

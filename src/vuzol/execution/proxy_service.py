@@ -45,6 +45,20 @@ class ProxyServiceLease:
         return f"http://{PROXY_ALIAS}:{PROXY_PORT}"
 
 
+@dataclass(frozen=True)
+class ProxyRecoveryManifest:
+    directory: Path
+    task_id: UUID
+    run_id: UUID
+    step_id: UUID
+    lease_generation: int
+    policy_hash: str
+
+    @property
+    def identity(self) -> tuple[UUID, UUID, UUID, int]:
+        return self.task_id, self.run_id, self.step_id, self.lease_generation
+
+
 class ProxyServiceManager:
     def __init__(
         self,
@@ -186,18 +200,12 @@ class ProxyServiceManager:
         await self._networks.cleanup(lease.networks)
         self._remove_private_policy(runtime_dir, policy_path, expected_hash=lease.policy_hash)
 
-    async def reconcile_startup(self) -> int:
-        """Remove crash leftovers described by executor-owned durable manifests.
-
-        A manifest is written before the first Docker mutation.  Recovery never
-        discovers resources by a name prefix: names are recomputed from the
-        fenced identity and every existing container/network must carry the
-        complete expected ownership labels before it is removed.
-        """
+    def recovery_manifests(self) -> tuple[ProxyRecoveryManifest, ...]:
+        """Discover exact private manifests without deciding whether cleanup is safe."""
         if not self._runtime_root.exists():
-            return 0
+            return ()
         self._validate_runtime_root()
-        recovered = 0
+        manifests: list[ProxyRecoveryManifest] = []
         for directory in sorted(self._runtime_root.iterdir()):
             if not directory.is_dir() or directory.is_symlink():
                 raise ProxyServiceError("ambiguous entry in proxy runtime root")
@@ -211,28 +219,70 @@ class ProxyServiceManager:
             )
             if directory != self._runtime_directory(*identity):
                 raise ProxyServiceError("proxy recovery manifest path is inconsistent")
-            task_id, run_id, step_id, generation = identity
-            await self._remove_owned_sandbox(task_id, run_id, step_id, generation)
-            await self._remove_owned_container(
-                _make_proxy_name(*identity), task_id, run_id, step_id, generation
+            manifests.append(
+                ProxyRecoveryManifest(
+                    directory=directory,
+                    task_id=identity[0],
+                    run_id=identity[1],
+                    step_id=identity[2],
+                    lease_generation=identity[3],
+                    policy_hash=state["policy_hash"],
+                )
             )
-            networks = ProxyNetworkLease(
-                internal_name=_make_network_name(*identity, "internal"),
-                egress_name=_make_network_name(*identity, "egress"),
-                task_id=task_id,
-                run_id=run_id,
-                step_id=step_id,
-                lease_generation=generation,
-            )
-            await self._networks.cleanup(networks)
-            self._remove_private_policy(
-                directory,
-                directory / "policy.json",
-                expected_hash=state["policy_hash"],
-                state_path=state_path,
-            )
-            recovered += 1
-        return recovered
+        return tuple(manifests)
+
+    async def validate_recovery_resources(self, manifest: ProxyRecoveryManifest) -> None:
+        """Fail closed unless every present runtime resource has the exact ownership identity."""
+        identity = manifest.identity
+        sandbox_name = f"vuzol-{str(manifest.step_id)[:12]}-{manifest.lease_generation}"
+        if await self._container_exists(sandbox_name):
+            sandbox = await self._inspect_container(sandbox_name)
+            config = _dict(sandbox, "Config", sandbox_name)
+            if config.get("Labels") != _sandbox_ownership_labels(*identity):
+                raise ProxyServiceError(f"foreign sandbox container {sandbox_name}")
+        proxy_name = _make_proxy_name(*identity)
+        if await self._container_exists(proxy_name):
+            proxy = await self._inspect_container(proxy_name)
+            config = _dict(proxy, "Config", proxy_name)
+            if config.get("Labels") != _ownership_labels(*identity):
+                raise ProxyServiceError(f"foreign proxy container {proxy_name}")
+        await self._networks.validate_owned(self._recovery_networks(manifest))
+
+    async def cleanup_recovery_manifest(self, manifest: ProxyRecoveryManifest) -> None:
+        """Revalidate one exact manifest and remove only its proven-owned resources."""
+        state_path = manifest.directory / STATE_FILE
+        state = self._read_state(state_path)
+        current = (
+            UUID(state["task_id"]),
+            UUID(state["run_id"]),
+            UUID(state["step_id"]),
+            state["lease_generation"],
+        )
+        if current != manifest.identity or state["policy_hash"] != manifest.policy_hash:
+            raise ProxyServiceError("proxy recovery manifest changed before cleanup")
+        if manifest.directory != self._runtime_directory(*current):
+            raise ProxyServiceError("proxy recovery manifest identity changed before cleanup")
+        await self.validate_recovery_resources(manifest)
+        await self._remove_owned_sandbox(*manifest.identity)
+        await self._remove_owned_container(_make_proxy_name(*manifest.identity), *manifest.identity)
+        await self._networks.cleanup(self._recovery_networks(manifest))
+        self._remove_private_policy(
+            manifest.directory,
+            manifest.directory / "policy.json",
+            expected_hash=manifest.policy_hash,
+            state_path=state_path,
+        )
+
+    @staticmethod
+    def _recovery_networks(manifest: ProxyRecoveryManifest) -> ProxyNetworkLease:
+        return ProxyNetworkLease(
+            internal_name=_make_network_name(*manifest.identity, "internal"),
+            egress_name=_make_network_name(*manifest.identity, "egress"),
+            task_id=manifest.task_id,
+            run_id=manifest.run_id,
+            step_id=manifest.step_id,
+            lease_generation=manifest.lease_generation,
+        )
 
     async def wait_until_dead(self, lease: ProxyServiceLease) -> None:
         expected_name = _make_proxy_name(

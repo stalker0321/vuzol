@@ -469,6 +469,26 @@ def test_stable_experiment_identity_and_empty_context_ratio() -> None:
         telemetry(egress_bytes=None, egress_unavailable_reason=None)
 
 
+def test_step09a_execute_code_receives_exact_worker_result_schema() -> None:
+    from vuzol.providers.handlers import _step09a_result_schema
+
+    name, version, schema = _step09a_result_schema(
+        "execute_code", {"step09a_capsule": {"schema_version": "step09a-task-capsule.v1"}}
+    )
+    assert name == "WorkerResultManifest"
+    assert version == "step09a-worker-result.v1"
+    assert schema is not None
+    assert set(schema["required"]) >= {
+        "result_commit",
+        "branch",
+        "claimed_complete",
+        "total_worker_duration_ms",
+        "usage",
+    }
+    assert _step09a_result_schema("execute_code", {}) == (None, None, None)
+    assert _step09a_result_schema("plan", {"step09a_capsule": {}}) == (None, None, None)
+
+
 def test_no_automatic_merge_deploy_or_direct_grok_host_path_exists() -> None:
     package = Path(__file__).parents[2] / "src" / "vuzol" / "experiments"
     source = "\n".join(path.read_text() for path in package.glob("*.py"))

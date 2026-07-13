@@ -8,6 +8,7 @@ The test is intentionally bounded and cleans up all resources.
 It does NOT test egress, DNS, rebinding, or sandbox integration.
 """
 
+import json
 import subprocess
 import tempfile
 import time
@@ -110,6 +111,14 @@ def test_hardened_proxy_image_builds_and_runs_with_rendered_policy() -> None:
                 uout = user_inspect.stdout.strip()
                 assert "true 10002:10002" in uout, f"user: {uout}"
 
+                # process 1 effective ids from /proc/1/status (exact 10002 for all relevant)
+                proc_status = _docker("exec", container_name, "cat", "/proc/1/status")
+                assert proc_status.returncode == 0
+                for line in proc_status.stdout.splitlines():
+                    if line.startswith("Uid:") or line.startswith("Gid:"):
+                        vals = line.split()[1:5]
+                        assert all(v == "10002" for v in vals), f"{line}"
+
                 # 7. Verify still running (not crashed)
                 ps = _docker("ps", "--filter", f"name={container_name}", "--format", "{{.Status}}")
                 assert ps.returncode == 0
@@ -118,8 +127,6 @@ def test_hardened_proxy_image_builds_and_runs_with_rendered_policy() -> None:
                 # Full hardening inspect from docker inspect (not just constructed cmd)
                 full_inspect = _docker("inspect", container_name)
                 assert full_inspect.returncode == 0
-                import json
-
                 insp = json.loads(full_inspect.stdout)[0]
                 hc = insp.get("HostConfig", {})
                 cfg = insp.get("Config", {})
@@ -152,22 +159,35 @@ def test_hardened_proxy_image_builds_and_runs_with_rendered_policy() -> None:
                 assert hc.get("PidsLimit") == 32
                 # network
                 assert hc.get("NetworkMode") == "none"
-                # mounts: only config+filter ro, no sock, no unexpected
+                # mounts: exact config+filter as bind ro, no extra, no sock
                 mounts = insp.get("Mounts", [])
-                ro_mounts = [m for m in mounts if m.get("RW") is False]
-                assert len(ro_mounts) == 2
-                mount_paths = {m.get("Destination") for m in ro_mounts}
-                assert "/etc/tinyproxy/tinyproxy.conf" in mount_paths
-                assert "/etc/tinyproxy/filter" in mount_paths
-                # no docker sock or other host paths
+                binds = [m for m in mounts if m.get("Type") == "bind"]
+                assert len(binds) == 2
+                for b in binds:
+                    assert b.get("RW") is False
+                    assert b.get("Type") == "bind"
+                    dest = b.get("Destination")
+                    src = b.get("Source", "")
+                    if dest == "/etc/tinyproxy/tinyproxy.conf":
+                        assert src == str(full_conf)
+                    elif dest == "/etc/tinyproxy/filter":
+                        assert src == str(filter_file)
+                # no docker sock or unexpected
                 for m in mounts:
                     src = (m.get("Source") or "").lower()
                     assert "docker.sock" not in src
-                    # tmpfs have no Source or type tmpfs
-                # tmpfs present
+                # tmpfs with exact options from inspect
                 tmpfs = hc.get("Tmpfs") or {}
-                assert any("/run/tinyproxy" in k for k in tmpfs)
-                assert any("/var/log" in k for k in tmpfs)
+                for p, opts in tmpfs.items():
+                    if "/run/tinyproxy" in p or "/var/log" in p:
+                        assert "rw" in opts and "noexec" in opts and "nosuid" in opts
+                        assert "uid=10002" in opts and "gid=10002" in opts
+                        assert "size=10m" in opts
+                # ulimit nofile from inspect
+                ulims = hc.get("Ulimits") or []
+                nofile = next((u for u in ulims if u.get("Name") == "nofile"), None)
+                assert nofile is not None
+                assert nofile.get("Soft") == 1024 and nofile.get("Hard") == 1024
 
                 # 8. Verify effective config contains the rendered whitelist
                 # Exec into container (or use cat of mounted, but since ro, check process or logs)
@@ -208,7 +228,7 @@ def test_hardened_proxy_image_builds_and_runs_with_rendered_policy() -> None:
                 )
                 assert "NOSOCK" in sock_test.stdout
 
-                # 12. Verify --network none via inspect
+                # 12. Verify --network none via inspect + no non-lo default route
                 net_mode = _docker(
                     "inspect", container_name, "--format", "{{.HostConfig.NetworkMode}}"
                 )
@@ -220,68 +240,87 @@ def test_hardened_proxy_image_builds_and_runs_with_rendered_policy() -> None:
                 )
                 assert net_nets.returncode == 0
                 nets = net_nets.stdout.strip()
-                # none mode should have empty or no non-loopback attachment
+                # none mode: either empty or shows the 'none' network
                 assert nets in ("map[]", "{}", "null", "") or "none" in nets.lower(), (
-                    f"nets: {nets}"
+                    f"nets for none: {nets}"
                 )
 
-                # Also check no default route for external (proc may vary, but mode confirms)
+                route = _docker("exec", container_name, "cat", "/proc/net/route")
+                assert route.returncode == 0
+                route_lines = route.stdout.strip().splitlines()
+                has_non_lo_default = False
+                for ln in route_lines[1:]:
+                    cols = ln.split()
+                    if len(cols) > 2 and cols[1] == "00000000" and cols[0].lower() != "lo":
+                        has_non_lo_default = True
+                assert not has_non_lo_default
 
             finally:
-                # Cleanup container
-                _docker("rm", "-f", container_name, timeout=10)
+                # Cleanup container (check rc)
+                rm_c = _docker("rm", "-f", container_name, timeout=10)
+                assert rm_c.returncode == 0
+                post_c = _docker("inspect", container_name)
+                assert post_c.returncode != 0, "container still exists after rm"
 
     finally:
-        # Cleanup image
-        _docker("rmi", "-f", tag, timeout=10)
-
-    # Verify no leftovers for this test's resources (collision resistant names)
-    left_containers = _docker(
-        "ps", "-a", "--filter", "name=vuzol-proxy-smoke", "--format", "{{.ID}}"
-    )
-    assert left_containers.returncode == 0
-    assert not left_containers.stdout.strip(), f"leftover containers: {left_containers.stdout}"
-
-    left_images = _docker(
-        "images", "--filter", f"reference={tag.split(':')[0]}*", "--format", "{{.ID}}"
-    )
-    assert left_images.returncode == 0
-    # image may be gone, but if any with prefix, should be none after rmi -f
-    assert not left_images.stdout.strip() or tag not in left_images.stdout, "leftover images"
+        # Cleanup image (check rc)
+        rm_i = _docker("rmi", "-f", tag, timeout=10)
+        assert rm_i.returncode == 0
+        post_i = _docker("image", "inspect", tag)
+        assert post_i.returncode != 0, "image still exists after rmi"
 
     # Success if no assert failed and cleanup happened
 
 
 def test_proxy_image_fails_without_config() -> None:
-    """Negative: missing complete config (normal entrypoint) causes non-zero exit."""
+    """Negative: missing config - foreground normal CMD, non-zero exit, diagnostic."""
     tag = f"vuzol-proxy-smoke-neg-{uuid.uuid4().hex[:8]}"
     build = _docker("build", "-t", tag, "-f", "Dockerfile.proxy", ".")
     assert build.returncode == 0
 
     try:
         name = f"vuzol-neg-misscfg-{uuid.uuid4().hex[:6]}"
+        # foreground --rm , normal entry/cmd ; client timeout wrapper to bound
         run = _run(
             [
                 "timeout",
                 "5s",
-                "sh",
-                "-c",
-                "docker run -d --name "
-                + name
-                + " --network none --read-only --cap-drop ALL "
-                + "--security-opt no-new-privileges:true --memory 32m "
-                + f"--memory-swap 32m {tag} ; sleep 2 ; exit 42",
+                "docker",
+                "run",
+                "--rm",
+                "--name",
+                name,
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges:true",
+                "--memory",
+                "32m",
+                "--memory-swap",
+                "32m",
+                tag,
             ],
             timeout=15,
         )
-        _docker("rm", "-f", name, timeout=5)
+        combined = (run.stdout or "") + (run.stderr or "")
         assert run.returncode != 0
+        assert (
+            "config" in combined.lower()
+            or "no such file" in combined.lower()
+            or "error" in combined.lower()
+        )
+        # verify exact cleanup
+        post = _docker("inspect", name)
+        assert post.returncode != 0
     finally:
         _docker("rmi", "-f", tag, timeout=10)
 
 
 def test_proxy_image_fails_without_filter() -> None:
-    """Negative: missing filter (with valid config) causes non-zero exit, using normal entry."""
+    """Negative: missing filter - foreground, non-zero, diagnostic."""
     tag = f"vuzol-proxy-smoke-missfilter-{uuid.uuid4().hex[:8]}"
     build = _docker("build", "-t", tag, "-f", "Dockerfile.proxy", ".")
     assert build.returncode == 0
@@ -292,20 +331,20 @@ def test_proxy_image_fails_without_filter() -> None:
             conf_dir = ptd / "conf"
             conf_dir.mkdir()
             full_conf = conf_dir / "tinyproxy.conf"
-            # render but DO NOT create the filter file on host
+            # render config, but DO NOT create filter file, no mount for it
             target = AllowedConnectTarget(
                 hostname="api.example.com", port=443, purpose="missfilter"
             )
             policy = render_tinyproxy_policy((target,))
             base = Path("deploy/proxy/tinyproxy-base.conf").read_text()
             full_conf.write_text(base + "\n" + policy.config_text)
-            # mount ONLY conf, no filter mount
+            # mount ONLY conf (filter path will be missing)
             name = f"vuzol-neg-missf-{uuid.uuid4().hex[:6]}"
             run = _run(
                 [
                     "docker",
                     "run",
-                    "-d",
+                    "--rm",
                     "--name",
                     name,
                     "--network",
@@ -325,41 +364,41 @@ def test_proxy_image_fails_without_filter() -> None:
                 ],
                 timeout=15,
             )
-            time.sleep(2)
-            insp = _docker("inspect", "--format", "{{.State.ExitCode}}", name)
-            exitc = insp.stdout.strip() if insp.returncode == 0 else "1"
-            _ = _docker("logs", name)
-            _docker("rm", "-f", name, timeout=5)
-            logs2 = _docker("logs", name)
-            comb2 = (logs2.stdout or "") + (logs2.stderr or "")
+            combined = (run.stdout or "") + (run.stderr or "")
+            assert run.returncode != 0
             assert (
-                run.returncode != 0
-                or exitc != "0"
-                or "error" in comb2.lower()
-                or "fail" in comb2.lower()
-                or "config" in comb2.lower()
-                or "no such" in comb2.lower()
+                "filter" in combined.lower()
+                or "no such file" in combined.lower()
+                or "error" in combined.lower()
             )
+            post = _docker("inspect", name)
+            assert post.returncode != 0
     finally:
         _docker("rmi", "-f", tag, timeout=10)
 
 
 def test_proxy_image_fails_with_malformed_config() -> None:
-    """Negative: malformed config causes non-zero exit (normal entry)."""
+    """Negative: malformed config (with filter) - foreground normal, non-zero, parse diagnostic."""
     tag = f"vuzol-proxy-smoke-mal-{uuid.uuid4().hex[:8]}"
     build = _docker("build", "-t", tag, "-f", "Dockerfile.proxy", ".")
     assert build.returncode == 0
 
     try:
         with tempfile.TemporaryDirectory() as td:
-            conf = Path(td) / "bad.conf"
-            conf.write_text("This is not a valid tinyproxy config\nUser 10002\nPort 8888\n")
+            ptd = Path(td)
+            conf_dir = ptd / "conf"
+            conf_dir.mkdir()
+            bad_conf = conf_dir / "bad.conf"
+            dummy_filter = conf_dir / "filter"
+            bad_conf.write_text("This is not a valid tinyproxy config\nUser 10002\nPort 8888\n")
+            dummy_filter.write_text("^example\\.com$\n")  # harmless
+            # mount both, but config is bad
             name = f"vuzol-neg-mal-{uuid.uuid4().hex[:6]}"
             run = _run(
                 [
                     "docker",
                     "run",
-                    "-d",
+                    "--rm",
                     "--name",
                     name,
                     "--network",
@@ -374,25 +413,22 @@ def test_proxy_image_fails_with_malformed_config() -> None:
                     "--memory-swap",
                     "32m",
                     "-v",
-                    f"{conf}:/etc/tinyproxy/tinyproxy.conf:ro",
+                    f"{bad_conf}:/etc/tinyproxy/tinyproxy.conf:ro",
+                    "-v",
+                    f"{dummy_filter}:/etc/tinyproxy/filter:ro",
                     tag,
                 ],
                 timeout=15,
             )
-            time.sleep(2)
-            insp = _docker("inspect", "--format", "{{.State.ExitCode}}", name)
-            exitc = insp.stdout.strip() if insp.returncode == 0 else "1"
-            _ = _docker("logs", name)
-            _docker("rm", "-f", name, timeout=5)
-            logs2 = _docker("logs", name)
-            comb2 = (logs2.stdout or "") + (logs2.stderr or "")
+            combined = (run.stdout or "") + (run.stderr or "")
+            assert run.returncode != 0
             assert (
-                run.returncode != 0
-                or exitc != "0"
-                or "error" in comb2.lower()
-                or "fail" in comb2.lower()
-                or "config" in comb2.lower()
-                or "no such" in comb2.lower()
+                "error" in combined.lower()
+                or "config" in combined.lower()
+                or "parse" in combined.lower()
+                or "invalid" in combined.lower()
             )
+            post = _docker("inspect", name)
+            assert post.returncode != 0
     finally:
         _docker("rmi", "-f", tag, timeout=10)

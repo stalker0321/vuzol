@@ -762,6 +762,37 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_art.persist = AsyncMock(return_value=MagicMock(id=uuid.uuid4()))
     await envf.complete(pid, CodexProcessResult(0, "ok", "", 10), mock_art)
     assert stored_process[0].status.value == "exited"
+    stored_process[0].command_envelope = {"argv": ["grok"]}
+    stored_process[0].runtime_metadata = {
+        "configured_deadline_seconds": 30,
+        "cancellation_classification": None,
+        "cancellation_initiator": None,
+        "cleanup_initiator": "sandbox_transport_finally",
+    }
+    await envf.complete(
+        pid,
+        CodexProcessResult(
+            0,
+            '\n'.join(
+                (
+                    '{"type":"thought","data":"private output"}',
+                    '{"type":"end","stopReason":"Cancelled"}',
+                )
+            ),
+            "",
+            75_700,
+        ),
+        mock_art,
+    )
+    metadata = stored_process[0].runtime_metadata
+    assert metadata["actual_elapsed_ms"] == 75_700
+    assert metadata["last_provider_event_type"] == "end"
+    assert metadata["cancellation_classification"] == "PROVIDER_CANCELLED"
+    assert metadata["cancellation_initiator"] == "grok_cli_or_provider"
+    assert stored_process[0].provider_events_artifact_id is not None
+    event_call = mock_art.persist.await_args_list[-1]
+    assert event_call.kwargs["artifact_type"] == "provider-event-summary"
+    assert b"private output" not in event_call.kwargs["content"]
     await envf.fail_unknown(pid)
     assert stored_process[0].status.value == "unknown"
 

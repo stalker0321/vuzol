@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import (
@@ -687,6 +687,40 @@ def test_profile_health_is_revision_scoped_and_snapshot_sync_is_idempotent(
         async with factory() as session:
             recovered = await effective_health(session, configured, configuration_revision="a" * 64)
             assert recovered.healthy
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_concurrent_executor_startup_upserts_one_profile_snapshot(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        _settings, registries = bundle(tmp_path, profile("shared"))
+
+        async def synchronize(revision: str) -> None:
+            async with factory.begin() as session:
+                await synchronize_profiles(
+                    session,
+                    registries.profiles.items(),
+                    configuration_revision=revision,
+                )
+
+        await asyncio.gather(synchronize("a" * 64), synchronize("b" * 64))
+        async with factory() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(ProviderProfile)
+                .where(ProviderProfile.stable_id == "shared")
+            )
+            snapshot = await session.scalar(
+                select(ProviderProfile).where(ProviderProfile.stable_id == "shared")
+            )
+            assert count == 1
+            assert snapshot is not None
+            assert snapshot.configuration_revision in {"a" * 64, "b" * 64}
         await engine.dispose()
 
     asyncio.run(scenario())

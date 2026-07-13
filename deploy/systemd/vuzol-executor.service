@@ -40,10 +40,10 @@ RuntimeDirectoryMode=0700
 # exits and unit restarts.
 ExecStartPre=/bin/sh -c "\
   set -e; \
-  SOCKET=\"\${VUZOL_EXECUTION__ROOTLESS_DOCKER_SOCKET:-}\"; \
-  if [ -z \"\$SOCKET\" ]; then SOCKET=\"/run/user/\$(id -u)/docker.sock\"; fi; \
-  echo \"vuzol-executor: waiting for rootless Docker socket at \$SOCKET\"; \
-  for i in \$(seq 1 150); do [ -S \"\$SOCKET\" ] && exit 0; sleep 0.2; done; \
+  SOCKET=\"$${VUZOL_EXECUTION__ROOTLESS_DOCKER_SOCKET:-}\"; \
+  if [ -z \"$$SOCKET\" ]; then SOCKET=\"/run/user/$$(id -u)/docker.sock\"; fi; \
+  echo \"vuzol-executor: waiting for rootless Docker socket at $$SOCKET\"; \
+  for i in $$(seq 1 150); do [ -S \"$$SOCKET\" ] && exit 0; sleep 0.2; done; \
   echo 'timeout waiting for rootless docker socket' >&2; exit 1 \
 "
 

@@ -1,3 +1,4 @@
+# mypy: allow-untyped-defs
 """Unit tests for per-task proxy network lifecycle.
 
 All tests assert observable public behavior or exact injected runner calls.
@@ -8,6 +9,7 @@ that ignore results.
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -208,7 +210,7 @@ def test_exactly_one_docker_executable_and_socket_boundary(monkeypatch):
     m = ProxyNetworkManager(sock)
     captured: list[tuple[str, ...]] = []
 
-    async def spy_exec(*argv: str, **_kw: object):
+    async def spy_exec(*argv: str, **_kw: object) -> Any:
         captured.append(argv)
 
         class P:
@@ -257,7 +259,7 @@ def test_subprocess_timeout_raises_and_reaps(monkeypatch):
     m = ProxyNetworkManager(sock)
 
     class MockProc:
-        def __init__(self):
+        def __init__(self) -> None:
             self.killed = False
 
         async def communicate(self):
@@ -281,6 +283,7 @@ def test_subprocess_timeout_raises_and_reaps(monkeypatch):
 
     async def immediate_timeout(coro, timeout=None):  # noqa: ASYNC109
         # force timeout path without real sleep
+        coro.close()
         raise TimeoutError()
 
     monkeypatch.setattr(asyncio, "wait_for", immediate_timeout)
@@ -318,7 +321,7 @@ def test_empty_exact_network_list_result_means_absent(monkeypatch):
 def test_existing_internal_collision_prevents_all_creation(monkeypatch):
     sock = Path("/run/user/1000/docker.sock")
     m = ProxyNetworkManager(sock)
-    calls: list[tuple] = []
+    calls: list[tuple[Any, ...]] = []
 
     async def fake(*a: str) -> str:
         calls.append(a)
@@ -340,7 +343,7 @@ def test_existing_internal_collision_prevents_all_creation(monkeypatch):
 def test_existing_egress_collision_prevents_internal_creation(monkeypatch):
     sock = Path("/run/user/1000/docker.sock")
     m = ProxyNetworkManager(sock)
-    calls: list[tuple] = []
+    calls: list[tuple[Any, ...]] = []
     ls_count = {"n": 0}
 
     async def fake(*a: str) -> str:
@@ -373,7 +376,7 @@ def test_successful_production_create_validates_both_inspect_responses(monkeypat
         return fixed_int if a[4] == "internal" else fixed_eg
 
     monkeypatch.setattr("vuzol.execution.proxy_networks._make_network_name", _fixed_name)
-    good_int = {
+    good_int: dict[str, Any] = {
         "Name": fixed_int,
         "Driver": "bridge",
         "Internal": True,
@@ -685,7 +688,7 @@ def test_unexpected_vuzol_label_rejected(monkeypatch):
                 "vuzol.run_id": str(r),
                 "vuzol.step_id": str(s),
                 "vuzol.lease_generation": "1",
-                "vuzol.secret": "oops",
+                "vuzol.secret": "oops",  # pragma: allowlist secret
             }
             d = {
                 "Name": n,
@@ -1006,7 +1009,7 @@ def test_cleanup_uses_reverse_order(monkeypatch):
 def test_cleanup_already_absent_is_idempotent(monkeypatch):
     sock = Path("/run/user/1000/docker.sock")
     m = ProxyNetworkManager(sock)
-    calls: list[tuple] = []
+    calls: list[tuple[Any, ...]] = []
     t, r, s = uuid4(), uuid4(), uuid4()
     int_n = _make_network_name(t, r, s, 1, "internal")
     eg_n = _make_network_name(t, r, s, 1, "egress")
@@ -1027,9 +1030,9 @@ def test_cleanup_already_absent_is_idempotent(monkeypatch):
         lease_generation=1,
     )
     asyncio.run(m.cleanup(lease))
-    # only ls calls, no rm (tolerate if fake ls returned present in some env)
-    rms = any("rm" in " ".join(map(str, c)) for c in calls)
-    assert not rms  # or True relaxed for lint; no rm expected
+    # only ls calls, no rm (precise: check for rm subcommand, not substring "rm" in "format")
+    rm_calls = [c for c in calls if c and len(c) > 1 and c[0] == "network" and c[1] == "rm"]
+    assert len(rm_calls) == 0
 
 
 def test_cleanup_refuses_foreign_labels(monkeypatch):
@@ -1169,7 +1172,7 @@ def test_cleanup_verifies_exact_disappearance(monkeypatch):
 def test_no_prune_command(monkeypatch):
     sock = Path("/run/user/1000/docker.sock")
     m = ProxyNetworkManager(sock)
-    calls: list[tuple] = []
+    calls: list[tuple[Any, ...]] = []
     t, r, s = uuid4(), uuid4(), uuid4()
     int_n = _make_network_name(t, r, s, 1, "internal")
     eg_n = _make_network_name(t, r, s, 1, "egress")

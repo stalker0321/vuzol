@@ -22,10 +22,44 @@ pytestmark = pytest.mark.docker
 
 def _rootless_socket() -> Path:
     """Obtain migrated rootless socket without hard-coding any UID."""
+    configured = os.environ.get("VUZOL_ROOTLESS_DOCKER_SOCKET")
+    if configured:
+        return Path(configured)
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if xdg:
         return Path(xdg) / "docker.sock"
     return Path(f"/run/user/{os.getuid()}") / "docker.sock"
+
+
+@pytest.fixture(autouse=True)
+def _require_rootless_socket() -> None:
+    """Keep the default suite portable; the explicit rootless gate must provide a socket."""
+    socket = _rootless_socket()
+    if not socket.is_socket():
+        if os.environ.get("VUZOL_ROOTLESS_DOCKER_SOCKET"):
+            pytest.fail(f"configured rootless Docker socket is unavailable: {socket}")
+        pytest.skip(
+            "rootless Docker socket unavailable; run make test-rootless with "
+            "VUZOL_ROOTLESS_DOCKER_SOCKET"
+        )
+    result = subprocess.run(
+        [
+            "docker",
+            "--host",
+            f"unix://{socket}",
+            "info",
+            "--format",
+            "{{json .SecurityOptions}}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        pytest.fail("configured rootless Docker daemon is unreachable")
+    security_options = json.loads(result.stdout)
+    if "name=rootless" not in security_options:
+        pytest.fail("configured Docker daemon is not rootless")
 
 
 def _docker_cli(*args: str, timeout: int = 30) -> "subprocess.CompletedProcess[str]":
@@ -82,14 +116,14 @@ def test_real_production_network_lifecycle() -> None:
 
         # full label set
         for d, role in [(int_data, "internal"), (eg_data, "egress")]:
-            labs = d["Labels"]  # type: ignore[index]
-            assert labs["vuzol.managed"] == "true"  # type: ignore[index]
-            assert labs["vuzol.resource"] == "proxy-network"  # type: ignore[index]
-            assert labs["vuzol.network_role"] == role  # type: ignore[index]
-            assert labs["vuzol.task_id"] == str(task_id)  # type: ignore[index]
-            assert labs["vuzol.run_id"] == str(run_id)  # type: ignore[index]
-            assert labs["vuzol.step_id"] == str(step_id)  # type: ignore[index]
-            assert labs["vuzol.lease_generation"] == str(gen)  # type: ignore[index]
+            labs = d["Labels"]
+            assert labs["vuzol.managed"] == "true"
+            assert labs["vuzol.resource"] == "proxy-network"
+            assert labs["vuzol.network_role"] == role
+            assert labs["vuzol.task_id"] == str(task_id)
+            assert labs["vuzol.run_id"] == str(run_id)
+            assert labs["vuzol.step_id"] == str(step_id)
+            assert labs["vuzol.lease_generation"] == str(gen)
 
         # Driver, Internal, Attachable, EnableIPv6, zero endpoints
         assert int_data["Driver"] == "bridge"

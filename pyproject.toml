@@ -76,7 +76,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "ASYNC", "S"]
 ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["ANN", "S603"]
+"tests/**" = ["ANN", "S603", "S607"]
 "alembic/**" = ["ANN"]
 
 [tool.ruff.format]

@@ -124,3 +124,33 @@ setTimeout(()=>process.exit(connected?21:0),3000);
     assert _docker(socket, "network", "inspect", lease.networks.internal_name).returncode != 0
     assert _docker(socket, "network", "inspect", lease.networks.egress_name).returncode != 0
     assert not runtime_root.exists() or not any(runtime_root.iterdir())
+
+
+def test_real_proxy_startup_reconciliation_removes_crash_leftovers() -> None:
+    socket = _required_path("VUZOL_ROOTLESS_DOCKER_SOCKET")
+    runtime_root = _required_path("VUZOL_PROXY_RUNTIME_ROOT")
+    image = os.environ.get("VUZOL_PROXY_IMAGE")
+    if image is None:
+        pytest.skip("VUZOL_PROXY_IMAGE is required for explicit rootless proxy acceptance")
+    assert socket.stat().st_uid == os.geteuid(), "test must run as the rootless daemon identity"
+
+    manager = ProxyServiceManager(socket, runtime_root, image)
+    task_id, run_id, step_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    lease = asyncio.run(
+        manager.create(
+            task_id,
+            run_id,
+            step_id,
+            1,
+            (AllowedConnectTarget(hostname="api.openai.com", port=443, purpose="acceptance"),),
+        )
+    )
+    # Deliberately do not call lease cleanup: this is the state left by a
+    # killed executor. A fresh production manager must recover it from disk.
+    restarted = ProxyServiceManager(socket, runtime_root, image)
+    assert asyncio.run(restarted.reconcile_startup()) == 1
+    assert asyncio.run(restarted.reconcile_startup()) == 0
+    assert _docker(socket, "inspect", lease.container_name).returncode != 0
+    assert _docker(socket, "network", "inspect", lease.networks.internal_name).returncode != 0
+    assert _docker(socket, "network", "inspect", lease.networks.egress_name).returncode != 0
+    assert not runtime_root.exists() or not any(runtime_root.iterdir())

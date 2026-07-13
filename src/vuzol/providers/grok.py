@@ -41,6 +41,8 @@ def canonical_grok_argv(model: str) -> tuple[str, ...]:
         "--allow",
         "Bash(./verify.sh*)",
         "--allow",
+        "Bash(tail -n 1 README.md)",
+        "--allow",
         "Edit(**)",
         "--allow",
         "Read(**)",
@@ -101,7 +103,8 @@ class GrokCliAdapter:
                     "shell_invocation": (
                         "Invoke each allowed shell command separately; do not use cd, chains, "
                         "wrappers, or command substitution. Commands must begin exactly with "
-                        "git, make, or ./verify.sh."
+                        "git, make, or ./verify.sh. The only additional read command allowed "
+                        "for the smoke repository is exactly: tail -n 1 README.md."
                     ),
                     "file_edits": "Use the Edit tool for workspace file changes.",
                 },

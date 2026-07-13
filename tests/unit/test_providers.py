@@ -598,6 +598,7 @@ async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> Non
     assert "Read(/grok-home/**)" in invocation.argv
     assert "Edit(/grok-home/**)" in invocation.argv
     assert "Bash(git *)" in invocation.argv
+    assert "Bash(tail -n 1 README.md)" in invocation.argv
     assert "Bash(*)" not in invocation.argv
     assert "auth.json" not in invocation.stdin
     assert "do not use cd" in invocation.stdin

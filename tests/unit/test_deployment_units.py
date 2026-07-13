@@ -105,6 +105,19 @@ def test_executor_readiness_resolves_identity_dynamically() -> None:
     assert "/run/user/994" not in text
 
 
+def test_executor_readiness_uses_systemd_literal_dollar_escaping() -> None:
+    text = _read(EXECUTOR_UNIT)
+    readiness = text.split("ExecStartPre=", 1)[1].split("\n\nExecStart=", 1)[0]
+    # systemd uses $$ to pass one literal dollar to /bin/sh. Backslash-dollar
+    # is an unknown systemd escape and previously made the deployed preflight
+    # exit with status 2 before it could inspect the socket.
+    assert "\\$" not in readiness
+    assert "$${VUZOL_EXECUTION__ROOTLESS_DOCKER_SOCKET:-}" in readiness
+    assert "$$(id -u)" in readiness
+    assert "$$(seq 1 150)" in readiness
+    assert "$$SOCKET" in readiness
+
+
 def test_no_rootful_socket_anywhere_in_units() -> None:
     for unit in (USER_DAEMON_UNIT, LEGACY_DAEMON_UNIT, EXECUTOR_UNIT):
         text = _read(unit)

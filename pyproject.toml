@@ -46,7 +46,10 @@ packages = ["src/vuzol"]
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers --cov=vuzol --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
-markers = ["postgresql: requires the real PostgreSQL integration database"]
+markers = [
+    "postgresql: requires the real PostgreSQL integration database",
+    "docker: requires a working Docker daemon (rootless in target setup)",
+]
 
 [tool.coverage.run]
 branch = true
@@ -66,6 +69,7 @@ files = ["src", "tests"]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+exclude = ["**/tinyproxy-base.conf", "Dockerfile*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "ASYNC", "S"]

@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import os
 import signal
 import subprocess
@@ -35,12 +36,26 @@ from vuzol.execution.paths import (
 )
 from vuzol.execution.proxy_networks import ProxyNetworkLease
 from vuzol.execution.proxy_service import ProxyServiceError, ProxyServiceLease
-from vuzol.execution.sandbox import RootlessDockerRuntime, SandboxError, docker_run_argv
+from vuzol.execution.sandbox import (
+    RootlessDockerRuntime,
+    SandboxError,
+    docker_run_argv,
+    validate_seccomp_profile,
+)
 from vuzol.execution.worktrees import WorktreeService
+from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, Worktree
 from vuzol.storage.types import IdempotencyClass, StepStatus
 from vuzol.workflows.ports import CancellationContext
+
+
+def _seccomp_profile(tmp_path: Path) -> tuple[Path, str]:
+    profile = tmp_path / "seccomp.json"
+    if not profile.exists():
+        profile.write_text('{"defaultAction":"SCMP_ACT_ERRNO"}\n')
+        profile.chmod(0o600)
+    return profile, hashlib.sha256(profile.read_bytes()).hexdigest()
 
 
 def sandbox_spec(tmp_path: Path) -> SandboxSpec:
@@ -48,10 +63,13 @@ def sandbox_spec(tmp_path: Path) -> SandboxSpec:
     artifacts = tmp_path / "artifacts"
     worktree.mkdir()
     artifacts.mkdir()
+    seccomp_profile, seccomp_digest = _seccomp_profile(tmp_path)
     return SandboxSpec(
         image=f"example/sandbox@sha256:{'a' * 64}",
         uid=10001,
         gid=10001,
+        seccomp_profile=seccomp_profile,
+        seccomp_profile_sha256=seccomp_digest,
         working_directory=Path("/workspace"),
         mounts=(
             SandboxMount(
@@ -110,6 +128,52 @@ def test_docker_argv_enforces_outer_isolation(tmp_path: Path) -> None:
     assert "no-new-privileges:true" in argv
     assert "/var/run/docker.sock" not in rendered
     assert configured.sandbox.image in argv
+    mount_specs = [argv[index + 1] for index, item in enumerate(argv) if item == "--mount"]
+    assert len(mount_specs) == 2
+    assert all(not spec.endswith((",ro", ",rw", ",readonly")) for spec in mount_specs)
+
+    readonly_source = tmp_path / "state"
+    readonly_source.mkdir()
+    readonly_mount = SandboxMount(
+        source=readonly_source,
+        target=Path("/state"),
+        mode=MountMode.READ_ONLY,
+        purpose="provider-state",
+    )
+    readonly_envelope = configured.model_copy(
+        update={
+            "sandbox": configured.sandbox.model_copy(
+                update={"mounts": (*configured.sandbox.mounts, readonly_mount)}
+            )
+        }
+    )
+    readonly_argv = docker_run_argv(tmp_path / "docker.sock", "task", readonly_envelope)
+    assert f"type=bind,src={readonly_source},dst=/state,readonly" in readonly_argv
+
+
+def test_seccomp_profile_validation_fails_closed(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.json"
+    with pytest.raises(SandboxError, match="unavailable"):
+        validate_seccomp_profile(missing, "0" * 64)
+
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    with pytest.raises(SandboxError, match="regular file"):
+        validate_seccomp_profile(directory, "0" * 64)
+
+    profile, digest = _seccomp_profile(tmp_path)
+    symlink = tmp_path / "seccomp-link.json"
+    symlink.symlink_to(profile)
+    with pytest.raises(SandboxError, match="symlinks"):
+        validate_seccomp_profile(symlink, digest)
+
+    profile.chmod(0o622)
+    with pytest.raises(SandboxError, match="mode is unsafe"):
+        validate_seccomp_profile(profile, digest)
+
+    profile.chmod(0o600)
+    with pytest.raises(SandboxError, match="digest mismatch"):
+        validate_seccomp_profile(profile, "0" * 64)
 
 
 @pytest.mark.anyio
@@ -608,6 +672,9 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_settings = MagicMock()
     mock_settings.worktree_root = worktree_root
     mock_settings.artifact_root = artifact_root
+    seccomp_profile, seccomp_digest = _seccomp_profile(tmp_path)
+    mock_settings.execution.sandbox_seccomp_profile = seccomp_profile
+    mock_settings.execution.sandbox_seccomp_profile_sha256 = seccomp_digest
 
     envf = ExecutionEnvelopeFactory(mock_factory, mock_settings, mock_reg)
 
@@ -619,19 +686,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     inv.profile_id = "prof"
     inv.provider_attempt = 1
     inv.lease_generation = 1
-    inv.argv = (
-        "codex",
-        "exec",
-        "--json",
-        "--strict-config",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--sandbox",
-        "workspace-write",
-        "--cd",
-        "/workspace",
-        "-",
-    )
+    inv.argv = canonical_codex_argv()
     inv.stdin = "prompt"
     inv.timeout_seconds = 30
 
@@ -667,7 +722,8 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_reg.profiles.get.return_value = MagicMock(state_directory=state_dir, enabled=True)
 
     envelope, pid = await envf.build(inv)
-    assert envelope.sandbox.mounts[2].mode is MountMode.READ_ONLY
+    assert envelope.sandbox.mounts[2].mode is MountMode.READ_WRITE
+    assert '"/codex-home"="none"' in " ".join(envelope.argv)
     await envf.mark_running(pid, "vuzol-test-container")
     mock_art = MagicMock()
     mock_art.persist = AsyncMock(return_value=MagicMock(id=uuid.uuid4()))
@@ -866,6 +922,8 @@ async def test_sandbox_preflight_and_argv_edges(tmp_path: Path) -> None:
         image="ex@sha256:" + "b" * 64,
         uid=10001,
         gid=10001,
+        seccomp_profile=_seccomp_profile(tmp_path)[0],
+        seccomp_profile_sha256=_seccomp_profile(tmp_path)[1],
         working_directory=Path("/ws"),
         mounts=(
             SandboxMount(source=work, target=Path("/ws"), mode=MountMode.READ_WRITE, purpose="w"),
@@ -1017,6 +1075,8 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     settings.execution.enabled = True
     settings.execution.require_preflight = True
     settings.execution.rootless_docker_socket = Path("/run/executor/docker.sock")
+    settings.execution.sandbox_seccomp_profile = Path("/etc/vuzol/sandbox-seccomp.json")
+    settings.execution.sandbox_seccomp_profile_sha256 = "a" * 64
     settings.workflow.poll_interval_seconds = 0.01
     registries = MagicMock()
     registries.profiles.items.return_value = (profile,)
@@ -1037,6 +1097,7 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(executor_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
     monkeypatch.setattr(executor_cli, "configure_logging", lambda **_kwargs: None)
     monkeypatch.setattr(executor_cli, "RootlessDockerRuntime", lambda _socket: sandbox)
+    monkeypatch.setattr(executor_cli, "validate_seccomp_profile", MagicMock())
     monkeypatch.setattr(executor_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(executor_cli, "create_engine", lambda *_args: engine)
     monkeypatch.setattr(executor_cli, "create_session_factory", lambda _engine: factory)

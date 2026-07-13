@@ -1,7 +1,9 @@
+from pathlib import Path
+
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
-from vuzol.config import InterpretationSettings, Settings
+from vuzol.config import ExecutionSettings, InterpretationSettings, Settings
 
 
 def test_settings_accept_valid_values() -> None:
@@ -39,3 +41,18 @@ def test_automatic_interpretation_requires_evaluation_report() -> None:
 
     with raises(ValidationError, match="lease must exceed provider timeouts"):
         InterpretationSettings(lease_seconds=30, provider_timeout_seconds=30)
+
+
+def test_enabled_execution_requires_paired_seccomp_path_and_digest() -> None:
+    with raises(ValidationError, match="requires a pinned sandbox seccomp profile"):
+        ExecutionSettings(enabled=True)
+
+    with raises(ValidationError, match="path and digest must be configured together"):
+        ExecutionSettings(sandbox_seccomp_profile=Path("/etc/vuzol/sandbox-seccomp.json"))
+
+    configured = ExecutionSettings(
+        enabled=True,
+        sandbox_seccomp_profile=Path("/etc/vuzol/sandbox-seccomp.json"),
+        sandbox_seccomp_profile_sha256="a" * 64,
+    )
+    assert configured.sandbox_seccomp_profile_sha256 == "a" * 64

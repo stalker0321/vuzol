@@ -477,7 +477,12 @@ async def test_codex_adapter_uses_isolated_identity_without_auth_copy(tmp_path: 
     assert invocation.runtime_identity == "vuzol-codex-a"
     assert invocation.state_directory == str(tmp_path / "codex-a")
     assert "auth.json" not in invocation.stdin
-    assert invocation.argv[-4:] == ("workspace-write", "--cd", "/workspace", "-")
+    assert "--sandbox" not in invocation.argv
+    assert "--ignore-rules" in invocation.argv
+    assert 'approval_policy="never"' in invocation.argv
+    assert 'default_permissions="vuzol-executor"' in invocation.argv
+    assert '"/codex-home"="none"' in " ".join(invocation.argv)
+    assert invocation.argv[-3:] == ("--cd", "/workspace", "-")
 
 
 @pytest.mark.anyio

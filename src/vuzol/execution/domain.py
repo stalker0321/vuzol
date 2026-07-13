@@ -48,6 +48,8 @@ class SandboxSpec(FrozenModel):
     image: str = Field(pattern=r"^[^\s@]+@sha256:[0-9a-f]{64}$")
     uid: int = Field(ge=1)
     gid: int = Field(ge=1)
+    seccomp_profile: Path
+    seccomp_profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     working_directory: Path
     mounts: tuple[SandboxMount, ...]
     cpu_count: float = Field(gt=0)
@@ -67,6 +69,8 @@ class SandboxSpec(FrozenModel):
     def validate_isolation(self) -> "SandboxSpec":
         if not self.working_directory.is_absolute():
             raise ValueError("sandbox working directory must be absolute")
+        if not self.seccomp_profile.is_absolute():
+            raise ValueError("sandbox seccomp profile must be absolute")
         targets = [mount.target for mount in self.mounts]
         if len(set(targets)) != len(targets):
             raise ValueError("sandbox mount targets must be unique")

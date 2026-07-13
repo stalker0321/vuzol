@@ -22,6 +22,7 @@ from vuzol.execution.egress import AllowedConnectTarget, compile_proxy_allowlist
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
+from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
@@ -96,6 +97,10 @@ class ExecutionEnvelopeFactory:
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
             if not sandbox.enabled or profile.state_directory is None:
                 raise ValueError("sandbox or CLI profile is disabled")
+            seccomp_profile = self._settings.execution.sandbox_seccomp_profile
+            seccomp_digest = self._settings.execution.sandbox_seccomp_profile_sha256
+            if seccomp_profile is None or seccomp_digest is None:
+                raise ValueError("sandbox seccomp profile is not configured")
             networked = sandbox.network_mode is SandboxNetworkMode.HTTPS_PROXY
             if networked != (proxy_network is not None and https_proxy_url is not None):
                 raise ValueError("sandbox proxy materialization does not match network policy")
@@ -113,6 +118,8 @@ class ExecutionEnvelopeFactory:
                 image=sandbox.image,
                 uid=sandbox.uid,
                 gid=sandbox.gid,
+                seccomp_profile=seccomp_profile,
+                seccomp_profile_sha256=seccomp_digest,
                 working_directory=Path("/workspace"),
                 mounts=(
                     SandboxMount(
@@ -130,7 +137,7 @@ class ExecutionEnvelopeFactory:
                     SandboxMount(
                         source=state_path,
                         target=Path("/codex-home"),
-                        mode=MountMode.READ_ONLY,
+                        mode=MountMode.READ_WRITE,
                         purpose="provider-state",
                     ),
                 ),
@@ -364,18 +371,6 @@ def _validate_fenced_binding(invocation: CodexInvocation, worktree: Worktree, st
 
 
 def _require_codex_command(argv: tuple[str, ...]) -> None:
-    expected = (
-        "codex",
-        "exec",
-        "--json",
-        "--strict-config",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--sandbox",
-        "workspace-write",
-        "--cd",
-        "/workspace",
-        "-",
-    )
+    expected = canonical_codex_argv()
     if argv != expected:
         raise ValueError("sandbox rejected a non-canonical Codex command")

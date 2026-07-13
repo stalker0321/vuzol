@@ -23,11 +23,7 @@ def test_sandbox_requires_immutable_image_digest() -> None:
 
 def test_sandbox_proxy_transport_is_closed_and_complete() -> None:
     image = f"example/sandbox@sha256:{'a' * 64}"
-    with pytest.raises(ValidationError, match="requires proxy network and URL"):
-        SandboxProfileConfig.model_validate(
-            {"id": "proxy", "image": image, "network_mode": "https_proxy"}
-        )
-    with pytest.raises(ValidationError, match="cannot configure a proxy"):
+    with pytest.raises(ValidationError, match="materialized only"):
         SandboxProfileConfig.model_validate(
             {
                 "id": "none",
@@ -37,15 +33,9 @@ def test_sandbox_proxy_transport_is_closed_and_complete() -> None:
             }
         )
     configured = SandboxProfileConfig.model_validate(
-        {
-            "id": "proxy",
-            "image": image,
-            "network_mode": "https_proxy",
-            "proxy_network": "egress",
-            "https_proxy_url": "http://proxy:3128",
-        }
+        {"id": "proxy", "image": image, "network_mode": "https_proxy"}
     )
-    assert configured.proxy_network == "egress"
+    assert configured.proxy_network is None and configured.https_proxy_url is None
 
 
 def test_network_policy_requires_https_destinations() -> None:

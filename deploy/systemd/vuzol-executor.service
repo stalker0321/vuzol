@@ -8,6 +8,8 @@ Type=simple
 User=vuzol-executor
 Group=vuzol-executor
 EnvironmentFile=/etc/vuzol/executor.env
+RuntimeDirectory=vuzol/proxy
+RuntimeDirectoryMode=0700
 
 # The rootless Docker daemon is deployed as a linger-enabled systemd USER unit
 # (see deploy/systemd/user/vuzol-rootless-docker.service).

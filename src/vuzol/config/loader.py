@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from vuzol.config.models import RegistryDocument
+from vuzol.config.models import RegistryDocument, SandboxNetworkMode
 from vuzol.config.registries import (
     ConfigurationBundle,
     ProfileRegistry,
@@ -71,6 +71,11 @@ def build_bundle(
                 sandbox = sandboxes.get(project.sandbox_profile)
                 if not sandbox.enabled:
                     raise RegistryError(f"project {project.id} references disabled sandbox")
+                networked = sandbox.network_mode is SandboxNetworkMode.HTTPS_PROXY
+                if project.network.enabled != networked:
+                    raise RegistryError(
+                        f"project {project.id} network policy does not match its sandbox"
+                    )
         topics = TopicRegistry(document.topics, projects=projects)
         resolver = ScopedSecretResolver(
             access_policy=_secret_access_policy(document, settings),

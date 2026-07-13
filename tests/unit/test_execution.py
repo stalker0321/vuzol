@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import os
 import signal
@@ -9,7 +10,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from vuzol.config.models import SandboxProfileConfig
+from vuzol.config.models import (
+    EgressDestination,
+    NetworkPolicy,
+    SandboxNetworkMode,
+    SandboxProfileConfig,
+)
 from vuzol.execution.artifacts import ArtifactSecretError, ArtifactStore
 from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
 from vuzol.execution.domain import (
@@ -27,6 +33,8 @@ from vuzol.execution.paths import (
     worktree_branch,
     worktree_path,
 )
+from vuzol.execution.proxy_networks import ProxyNetworkLease
+from vuzol.execution.proxy_service import ProxyServiceError, ProxyServiceLease
 from vuzol.execution.sandbox import RootlessDockerRuntime, SandboxError, docker_run_argv
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
@@ -386,6 +394,8 @@ async def test_execution_coding_paths_with_mocks(tmp_path: Path) -> None:
     mock_factory = MagicMock()
     mock_factory.begin.return_value.__aenter__.return_value = mock_sess
     mock_factory.begin.return_value.__aexit__.return_value = False
+    mock_factory.return_value.__aenter__.return_value = mock_sess
+    mock_factory.return_value.__aexit__.return_value = False
 
     mock_reg = MagicMock()
     mock_reg.profiles.get.return_value = MagicMock(state_directory=tmp_path, enabled=True)
@@ -585,6 +595,8 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_factory = MagicMock()
     mock_factory.begin.return_value.__aenter__.return_value = mock_sess
     mock_factory.begin.return_value.__aexit__.return_value = False
+    mock_factory.return_value.__aenter__.return_value = mock_sess
+    mock_factory.return_value.__aexit__.return_value = False
 
     mock_reg = MagicMock()
     mock_reg.profiles.get.return_value = MagicMock(state_directory=state_dir, enabled=True)
@@ -623,6 +635,37 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     inv.stdin = "prompt"
     inv.timeout_seconds = 30
 
+    assert await envf.proxy_targets(inv) == ()
+
+    mock_reg.projects.get.return_value = MagicMock(
+        sandbox_profile="proxy",
+        network=NetworkPolicy(
+            enabled=True,
+            destinations=(
+                EgressDestination.model_validate(
+                    {"url": "https://api.openai.com", "purpose": "runtime API"}
+                ),
+            ),
+        ),
+    )
+    mock_reg.sandboxes.get.return_value = SandboxProfileConfig(
+        id="proxy",
+        image="ex@sha256:" + "a" * 64,
+        enabled=True,
+        network_mode=SandboxNetworkMode.HTTPS_PROXY,
+    )
+    mock_reg.profiles.get.return_value = MagicMock(
+        state_directory=state_dir, enabled=True, api_base_url=None
+    )
+    targets = await envf.proxy_targets(inv)
+    assert [(target.hostname, target.port) for target in targets] == [("api.openai.com", 443)]
+
+    mock_reg.projects.get.return_value = MagicMock(sandbox_profile="def")
+    mock_reg.sandboxes.get.return_value = SandboxProfileConfig(
+        id="def", image="ex@sha256:" + "a" * 64, enabled=True
+    )
+    mock_reg.profiles.get.return_value = MagicMock(state_directory=state_dir, enabled=True)
+
     envelope, pid = await envf.build(inv)
     assert envelope.sandbox.mounts[2].mode is MountMode.READ_ONLY
     await envf.mark_running(pid, "vuzol-test-container")
@@ -639,6 +682,7 @@ async def test_sandbox_codex_transport_records_success_and_failure(tmp_path: Pat
     configured = envelope(tmp_path)
     process_id = uuid.uuid4()
     envelopes = MagicMock()
+    envelopes.proxy_targets = AsyncMock(return_value=())
     envelopes.build = AsyncMock(return_value=(configured, process_id))
     envelopes.mark_running = AsyncMock()
     envelopes.complete = AsyncMock()
@@ -656,6 +700,155 @@ async def test_sandbox_codex_transport_records_success_and_failure(tmp_path: Pat
     with pytest.raises(SandboxError):
         await transport.run(MagicMock(), CancellationContext())
     envelopes.fail_unknown.assert_awaited_once_with(process_id)
+
+
+@pytest.mark.anyio
+async def test_sandbox_transport_materializes_and_cleans_controlled_proxy(
+    tmp_path: Path,
+) -> None:
+    configured = envelope(tmp_path)
+    process_id = uuid.uuid4()
+    invocation = MagicMock(
+        task_id=configured.task_id,
+        run_id=configured.run_id,
+        step_id=configured.step_id,
+        lease_generation=configured.lease_generation,
+    )
+    target = MagicMock()
+    envelopes = MagicMock()
+    envelopes.proxy_targets = AsyncMock(return_value=(target,))
+    envelopes.build = AsyncMock(return_value=(configured, process_id))
+    envelopes.mark_running = AsyncMock()
+    envelopes.complete = AsyncMock()
+    envelopes.fail_unknown = AsyncMock()
+    runtime = MagicMock()
+    runtime.run = AsyncMock(return_value=CodexProcessResult(0, "ok", "", 5))
+    networks = ProxyNetworkLease(
+        internal_name="vuzol-internal",
+        egress_name="vuzol-egress",
+        task_id=configured.task_id,
+        run_id=configured.run_id,
+        step_id=configured.step_id,
+        lease_generation=configured.lease_generation,
+    )
+    lease = ProxyServiceLease(
+        container_name="vuzol-proxy",
+        networks=networks,
+        task_id=configured.task_id,
+        run_id=configured.run_id,
+        step_id=configured.step_id,
+        lease_generation=configured.lease_generation,
+        policy_hash="a" * 64,
+    )
+    proxy = MagicMock()
+    proxy.create = AsyncMock(return_value=lease)
+    never_dead = asyncio.Event()
+
+    async def wait_until_dead(_lease: ProxyServiceLease) -> None:
+        await never_dead.wait()
+
+    proxy.wait_until_dead = AsyncMock(side_effect=wait_until_dead)
+    proxy.cleanup = AsyncMock()
+
+    result = await SandboxCodexTransport(runtime, envelopes, MagicMock(), proxy).run(
+        invocation, CancellationContext()
+    )
+    assert result.stdout == "ok"
+    proxy.create.assert_awaited_once_with(
+        configured.task_id,
+        configured.run_id,
+        configured.step_id,
+        configured.lease_generation,
+        (target,),
+    )
+    envelopes.build.assert_awaited_once_with(
+        invocation,
+        proxy_network="vuzol-internal",
+        https_proxy_url="http://vuzol-proxy:8888",
+    )
+    proxy.cleanup.assert_awaited_once_with(lease)
+
+
+@pytest.mark.anyio
+async def test_proxy_death_cancels_sandbox_and_fails_closed(tmp_path: Path) -> None:
+    configured = envelope(tmp_path)
+    process_id = uuid.uuid4()
+    invocation = MagicMock(
+        task_id=configured.task_id,
+        run_id=configured.run_id,
+        step_id=configured.step_id,
+        lease_generation=configured.lease_generation,
+    )
+    envelopes = MagicMock()
+    envelopes.proxy_targets = AsyncMock(return_value=(MagicMock(),))
+    envelopes.build = AsyncMock(return_value=(configured, process_id))
+    envelopes.mark_running = AsyncMock()
+    envelopes.complete = AsyncMock()
+    envelopes.fail_unknown = AsyncMock()
+    runtime = MagicMock()
+    runtime_started = asyncio.Event()
+
+    async def running(*_args: object) -> CodexProcessResult:
+        runtime_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("cancelled sandbox must not return")
+
+    runtime.run = AsyncMock(side_effect=running)
+    networks = ProxyNetworkLease(
+        internal_name="vuzol-internal",
+        egress_name="vuzol-egress",
+        task_id=configured.task_id,
+        run_id=configured.run_id,
+        step_id=configured.step_id,
+        lease_generation=configured.lease_generation,
+    )
+    lease = ProxyServiceLease(
+        container_name="vuzol-proxy",
+        networks=networks,
+        task_id=configured.task_id,
+        run_id=configured.run_id,
+        step_id=configured.step_id,
+        lease_generation=configured.lease_generation,
+        policy_hash="a" * 64,
+    )
+    proxy = MagicMock()
+    proxy.create = AsyncMock(return_value=lease)
+
+    async def dies(_lease: ProxyServiceLease) -> None:
+        await runtime_started.wait()
+
+    proxy.wait_until_dead = AsyncMock(side_effect=dies)
+    proxy.cleanup = AsyncMock()
+    with pytest.raises(RuntimeError, match="proxy exited"):
+        await SandboxCodexTransport(runtime, envelopes, MagicMock(), proxy).run(
+            invocation, CancellationContext()
+        )
+    proxy.cleanup.assert_awaited_once_with(lease)
+    envelopes.fail_unknown.assert_awaited_once_with(process_id)
+
+
+@pytest.mark.anyio
+async def test_proxy_start_failure_prevents_sandbox_build_and_start(tmp_path: Path) -> None:
+    configured = envelope(tmp_path)
+    invocation = MagicMock(
+        task_id=configured.task_id,
+        run_id=configured.run_id,
+        step_id=configured.step_id,
+        lease_generation=configured.lease_generation,
+    )
+    envelopes = MagicMock()
+    envelopes.proxy_targets = AsyncMock(return_value=(MagicMock(),))
+    envelopes.build = AsyncMock()
+    proxy = MagicMock()
+    proxy.create = AsyncMock(side_effect=ProxyServiceError("startup failed"))
+    runtime = MagicMock()
+    runtime.run = AsyncMock()
+    with pytest.raises(ProxyServiceError, match="startup failed"):
+        await SandboxCodexTransport(runtime, envelopes, MagicMock(), proxy).run(
+            invocation, CancellationContext()
+        )
+    envelopes.build.assert_not_awaited()
+    runtime.run.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -686,9 +879,9 @@ async def test_sandbox_preflight_and_argv_edges(tmp_path: Path) -> None:
         output_bytes=1000,
         timeout_seconds=5,
         stop_grace_seconds=1,
-        network_disabled=False,  # to hit proxy branch? but default none
-        proxy_network="vuzol-egress",
-        https_proxy_url="http://proxy:3128",
+        network_disabled=False,
+        proxy_network="vuzol-internal",
+        https_proxy_url="http://vuzol-proxy:8888",
         environment={"FOO": "bar"},
     )
     env = ProcessEnvelope(
@@ -710,6 +903,11 @@ async def test_sandbox_preflight_and_argv_edges(tmp_path: Path) -> None:
     assert "--mount" in argv_str
     assert "FOO=bar" in argv_str
     assert spec.image in argv
+    assert "--network vuzol-internal" in argv_str
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        assert f"{key}=http://vuzol-proxy:8888" in argv
+    for key in ("ALL_PROXY", "NO_PROXY", "all_proxy", "no_proxy"):
+        assert f"{key}=" in argv
 
 
 @pytest.mark.anyio

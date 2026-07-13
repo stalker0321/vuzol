@@ -70,7 +70,19 @@ class SandboxSpec(FrozenModel):
         targets = [mount.target for mount in self.mounts]
         if len(set(targets)) != len(targets):
             raise ValueError("sandbox mount targets must be unique")
-        forbidden_names = {"DOCKER_HOST", "DATABASE_URL", "VUZOL_DATABASE_DSN"}
+        forbidden_names = {
+            "DOCKER_HOST",
+            "DATABASE_URL",
+            "VUZOL_DATABASE_DSN",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        }
         if forbidden_names.intersection(self.environment):
             raise ValueError("sandbox environment contains a prohibited variable")
         proxy_configured = self.proxy_network is not None or self.https_proxy_url is not None

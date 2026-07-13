@@ -147,6 +147,18 @@ class ExecutionSettings(BaseModel):
     require_preflight: bool = True
     cleanup_interval_seconds: int = Field(default=300, ge=10, le=86_400)
     recovery_batch_size: int = Field(default=50, ge=1, le=1000)
+    proxy_image: str | None = Field(
+        default=None,
+        pattern=r"^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$",
+    )
+    proxy_runtime_root: Path = Path("/run/vuzol/proxy")
+
+    @field_validator("rootless_docker_socket", "proxy_runtime_root")
+    @classmethod
+    def require_absolute_execution_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("execution paths must be absolute")
+        return value
 
 
 class Settings(BaseSettings):

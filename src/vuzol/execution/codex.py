@@ -1,5 +1,6 @@
 """Codex process transport over the externally enforced sandbox runtime."""
 
+import asyncio
 import hashlib
 import uuid
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vuzol.config.models import SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
 from vuzol.execution.artifacts import ArtifactStore
@@ -16,8 +18,10 @@ from vuzol.execution.domain import (
     SandboxMount,
     SandboxSpec,
 )
+from vuzol.execution.egress import AllowedConnectTarget, compile_proxy_allowlist
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
+from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
@@ -37,7 +41,40 @@ class ExecutionEnvelopeFactory:
         self._worktree_root = trusted_root(settings.worktree_root, create=True)
         self._artifact_root = trusted_root(settings.artifact_root, create=True)
 
-    async def build(self, invocation: CodexInvocation) -> tuple[ProcessEnvelope, uuid.UUID]:
+    async def proxy_targets(self, invocation: CodexInvocation) -> tuple[AllowedConnectTarget, ...]:
+        _require_invocation_identity(invocation)
+        assert invocation.step_id is not None
+        assert invocation.run_id is not None
+        assert invocation.task_id is not None
+        assert invocation.lease_generation is not None
+        assert invocation.profile_id is not None
+        assert invocation.sandbox_reference is not None
+        async with self._factory() as session:
+            worktree_id = uuid.UUID(invocation.sandbox_reference.removeprefix("worktree:"))
+            worktree = await session.get(Worktree, worktree_id)
+            step = await session.get(Step, invocation.step_id)
+            if worktree is None or step is None:
+                raise LookupError("sandbox worktree or step is missing")
+            _validate_fenced_binding(invocation, worktree, step)
+            profile = self._registries.profiles.get(invocation.profile_id)
+            project = self._registries.projects.get(worktree.project_id)
+            sandbox = self._registries.sandboxes.get(project.sandbox_profile)
+            if sandbox.network_mode is SandboxNetworkMode.NONE:
+                return ()
+            provider_hosts = (
+                (profile.api_base_url.host,)
+                if profile.api_base_url is not None and profile.api_base_url.host is not None
+                else ()
+            )
+            return compile_proxy_allowlist(project.network, provider_hosts)
+
+    async def build(
+        self,
+        invocation: CodexInvocation,
+        *,
+        proxy_network: str | None = None,
+        https_proxy_url: str | None = None,
+    ) -> tuple[ProcessEnvelope, uuid.UUID]:
         _require_invocation_identity(invocation)
         _require_codex_command(invocation.argv)
         assert invocation.sandbox_reference is not None
@@ -53,18 +90,15 @@ class ExecutionEnvelopeFactory:
             step = await session.get(Step, invocation.step_id)
             if worktree is None or step is None:
                 raise LookupError("sandbox worktree or step is missing")
-            if (
-                step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
-                or step.lease_generation != invocation.lease_generation
-                or worktree.run_id != invocation.run_id
-                or worktree.task_id != invocation.task_id
-            ):
-                raise ValueError("sandbox invocation is not bound to the current fenced lease")
+            _validate_fenced_binding(invocation, worktree, step)
             profile = self._registries.profiles.get(invocation.profile_id)
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
             if not sandbox.enabled or profile.state_directory is None:
                 raise ValueError("sandbox or CLI profile is disabled")
+            networked = sandbox.network_mode is SandboxNetworkMode.HTTPS_PROXY
+            if networked != (proxy_network is not None and https_proxy_url is not None):
+                raise ValueError("sandbox proxy materialization does not match network policy")
             worktree_path = contained(self._worktree_root, Path(worktree.path))
             state_path = profile.state_directory.resolve(strict=True)
             staging = (
@@ -108,13 +142,9 @@ class ExecutionEnvelopeFactory:
                 output_bytes=sandbox.output_bytes,
                 timeout_seconds=min(sandbox.timeout_seconds, int(invocation.timeout_seconds)),
                 stop_grace_seconds=sandbox.stop_grace_seconds,
-                network_disabled=sandbox.network_mode.value == "none",
-                proxy_network=sandbox.proxy_network,
-                https_proxy_url=(
-                    str(sandbox.https_proxy_url).rstrip("/")
-                    if sandbox.https_proxy_url is not None
-                    else None
-                ),
+                network_disabled=not networked,
+                proxy_network=proxy_network,
+                https_proxy_url=https_proxy_url,
                 environment={
                     "CODEX_HOME": "/codex-home",
                     "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
@@ -228,24 +258,86 @@ class SandboxCodexTransport:
         runtime: SandboxRuntime,
         envelopes: ExecutionEnvelopeFactory,
         artifacts: ArtifactStore,
+        proxy: ProxyServiceManager | None = None,
     ) -> None:
         self._runtime = runtime
         self._envelopes = envelopes
         self._artifacts = artifacts
+        self._proxy = proxy
 
     async def run(
         self, invocation: CodexInvocation, cancellation: CancellationContext
     ) -> CodexProcessResult:
-        envelope, process_id = await self._envelopes.build(invocation)
-        container_name = f"vuzol-{str(envelope.step_id)[:12]}-{envelope.lease_generation}"
-        await self._envelopes.mark_running(process_id, container_name)
+        targets = await self._envelopes.proxy_targets(invocation)
+        proxy_lease: ProxyServiceLease | None = None
+        process_id: uuid.UUID | None = None
+        primary: BaseException | None = None
         try:
-            result = await self._runtime.run(envelope, cancellation)
-        except RuntimeError:
-            await self._envelopes.fail_unknown(process_id)
+            if targets:
+                if self._proxy is None:
+                    raise RuntimeError("controlled proxy runtime is unavailable")
+                assert invocation.task_id is not None
+                assert invocation.run_id is not None
+                assert invocation.step_id is not None
+                assert invocation.lease_generation is not None
+                proxy_lease = await self._proxy.create(
+                    invocation.task_id,
+                    invocation.run_id,
+                    invocation.step_id,
+                    invocation.lease_generation,
+                    targets,
+                )
+            envelope, process_id = await self._envelopes.build(
+                invocation,
+                proxy_network=(proxy_lease.networks.internal_name if proxy_lease else None),
+                https_proxy_url=(proxy_lease.proxy_url if proxy_lease else None),
+            )
+            container_name = f"vuzol-{str(envelope.step_id)[:12]}-{envelope.lease_generation}"
+            await self._envelopes.mark_running(process_id, container_name)
+            result = await self._run_monitored(envelope, cancellation, proxy_lease)
+            await self._envelopes.complete(process_id, result, self._artifacts)
+            return result
+        except BaseException as error:
+            primary = error
+            if process_id is not None and isinstance(error, RuntimeError):
+                await self._envelopes.fail_unknown(process_id)
             raise
-        await self._envelopes.complete(process_id, result, self._artifacts)
-        return result
+        finally:
+            if proxy_lease is not None:
+                try:
+                    assert self._proxy is not None
+                    await self._proxy.cleanup(proxy_lease)
+                except BaseException:
+                    if primary is None:
+                        raise
+                    raise RuntimeError(
+                        "execution failed and proxy cleanup was incomplete"
+                    ) from primary
+
+    async def _run_monitored(
+        self,
+        envelope: ProcessEnvelope,
+        cancellation: CancellationContext,
+        proxy_lease: ProxyServiceLease | None,
+    ) -> CodexProcessResult:
+        run_task = asyncio.create_task(self._runtime.run(envelope, cancellation))
+        if proxy_lease is None:
+            return await run_task
+        assert self._proxy is not None
+        proxy_task = asyncio.create_task(self._proxy.wait_until_dead(proxy_lease))
+        try:
+            done, _pending = await asyncio.wait(
+                {run_task, proxy_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if proxy_task in done and run_task not in done:
+                run_task.cancel()
+                await asyncio.gather(run_task, return_exceptions=True)
+                raise RuntimeError("controlled proxy exited during sandbox execution")
+            return await run_task
+        finally:
+            if not proxy_task.done():
+                proxy_task.cancel()
+            await asyncio.gather(proxy_task, return_exceptions=True)
 
 
 def _require_invocation_identity(invocation: CodexInvocation) -> None:
@@ -259,6 +351,16 @@ def _require_invocation_identity(invocation: CodexInvocation) -> None:
     )
     if invocation.sandbox_reference is None or any(value is None for value in required):
         raise ValueError("Codex invocation lacks fenced execution identity")
+
+
+def _validate_fenced_binding(invocation: CodexInvocation, worktree: Worktree, step: Step) -> None:
+    if (
+        step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
+        or step.lease_generation != invocation.lease_generation
+        or worktree.run_id != invocation.run_id
+        or worktree.task_id != invocation.task_id
+    ):
+        raise ValueError("sandbox invocation is not bound to the current fenced lease")
 
 
 def _require_codex_command(argv: tuple[str, ...]) -> None:

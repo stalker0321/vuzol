@@ -7,10 +7,12 @@ import socket
 from contextlib import suppress
 
 from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
+from vuzol.config.models import SandboxNetworkMode
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
+from vuzol.execution.proxy_service import ProxyServiceManager
 from vuzol.execution.sandbox import RootlessDockerRuntime
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
@@ -69,7 +71,24 @@ async def run() -> None:
             redaction_patterns=settings.redaction_patterns,
         )
         envelope_factory = ExecutionEnvelopeFactory(factory, settings, runtime.registries)
-        transport = SandboxCodexTransport(sandbox_runtime, envelope_factory, artifact_store)
+        networked = any(
+            sandbox.enabled and sandbox.network_mode is SandboxNetworkMode.HTTPS_PROXY
+            for sandbox in runtime.registries.sandboxes.items()
+        )
+        if networked and settings.execution.proxy_image is None:
+            raise RuntimeError("networked execution requires a pinned proxy image")
+        proxy_manager = (
+            ProxyServiceManager(
+                settings.execution.rootless_docker_socket,
+                settings.execution.proxy_runtime_root,
+                settings.execution.proxy_image,
+            )
+            if networked and settings.execution.proxy_image is not None
+            else None
+        )
+        transport = SandboxCodexTransport(
+            sandbox_runtime, envelope_factory, artifact_store, proxy_manager
+        )
         adapters = {
             profile.id: CodexCliAdapter(transport)
             for profile in runtime.registries.profiles.items()

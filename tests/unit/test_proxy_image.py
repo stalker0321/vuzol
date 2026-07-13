@@ -35,11 +35,13 @@ def test_tinyproxy_version_pinned() -> None:
 
 def test_non_root_numeric_user() -> None:
     content = DOCKERFILE.read_text()
-    assert "USER 65534:65534" in content
-    assert "adduser" in content and "65534" in content
-    # Not running as root
-    assert "USER root" not in content
+    assert "USER 10002:10002" in content
+    assert "addgroup -S -g 10002 tproxy" in content
+    assert "adduser -S -D -H -u 10002 -G tproxy -s /sbin/nologin tproxy" in content
+    # Not 0 or 65534
     assert "USER 0" not in content
+    assert "USER 65534" not in content
+    assert "USER root" not in content
 
 
 def test_exec_form_entrypoint_and_cmd_no_sh_c() -> None:
@@ -93,9 +95,9 @@ def test_static_base_conf_has_no_permissive_or_conflicting_policy() -> None:
         assert not line.startswith("FilterDefaultDeny"), f"active FilterDefaultDeny in base: {line}"
         assert not line.startswith("FilterType"), f"active FilterType in base: {line}"
     # Has the process settings
-    assert "User 65534" in text
+    assert "User 10002" in text
     assert "Port 8888" in text
-    assert 'LogFile "/dev/stdout"' in text
+    assert "LogLevel Info" in text
 
 
 def test_base_conf_does_not_duplicate_renderer_directives() -> None:
@@ -133,3 +135,14 @@ def test_image_expects_mounted_complete_config() -> None:
     assert "tinyproxy.conf" in content
     # The COPY is only the base, not the active full policy
     assert "COPY deploy/proxy/tinyproxy-base.conf" in content
+
+
+def test_no_swallow_on_user_creation_and_dedicated_identity() -> None:
+    content = DOCKERFILE.read_text()
+    non_comment = "\n".join(ln for ln in content.splitlines() if not ln.strip().startswith("#"))
+    # No || true to swallow failures (in actual commands)
+    assert "|| true" not in non_comment
+    assert "2>/dev/null" not in non_comment
+    # Dedicated 10002, not colliding with nobody 65534
+    assert "10002" in content
+    assert "65534" not in content

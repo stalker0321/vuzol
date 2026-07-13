@@ -69,7 +69,6 @@ files = ["src", "tests"]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
-exclude = ["**/tinyproxy-base.conf", "Dockerfile*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "ASYNC", "S"]

@@ -5,7 +5,7 @@
 #
 # Base image pinned by digest.
 # Tinyproxy version pinned.
-# Runs as non-root numeric user (no root at any point).
+# Final runtime runs as dedicated non-root numeric user (build may use root).
 # Expects complete read-only config and filter mounted at fixed paths.
 # No secrets, no source, no bootstrap, no Docker socket.
 # Direct exec startup.
@@ -18,12 +18,14 @@ FROM alpine:3.20.3@sha256:beefdbd8a1da6d2915566fde36db9db0b524eb737fc57cd1367eff
 
 ARG TINYPROXY_VERSION=1.11.2-r0
 
-# Install pinned tinyproxy, create dedicated non-root user/group,
+# Install pinned tinyproxy, create dedicated non-root user/group (10002),
 # prepare runtime dirs (will be overlaid by tmpfs at runtime).
+# Build fails if user/group creation fails (no || true).
 RUN apk add --no-cache tinyproxy=${TINYPROXY_VERSION} \
-    && adduser -S -u 65534 -G nobody -D -H -s /sbin/nologin tinyproxy 2>/dev/null || true \
+    && addgroup -S -g 10002 tproxy \
+    && adduser -S -D -H -u 10002 -G tproxy -s /sbin/nologin tproxy \
     && mkdir -p /etc/tinyproxy /run/tinyproxy /var/log/tinyproxy \
-    && chown -R 65534:65534 /etc/tinyproxy /run/tinyproxy /var/log/tinyproxy \
+    && chown -R 10002:10002 /etc/tinyproxy /run/tinyproxy /var/log/tinyproxy \
     && chmod 755 /etc/tinyproxy
 
 # Immutable static base configuration (process settings only).
@@ -35,8 +37,8 @@ COPY deploy/proxy/tinyproxy-base.conf /etc/tinyproxy/tinyproxy-base.conf
 # It must be mounted read-only at the path expected by the config.
 # Filter path: /etc/tinyproxy/filter
 
-# Run as numeric non-root.
-USER 65534:65534
+# Run as dedicated numeric non-root (10002:10002).
+USER 10002:10002
 
 # Direct exec form, foreground mode (-d), no shell.
 # Expects complete config to be present; tinyproxy will exit non-zero otherwise.

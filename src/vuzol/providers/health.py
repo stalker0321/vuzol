@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import ProviderProfileConfig
@@ -21,25 +22,27 @@ async def synchronize_profiles(
     if not profiles:
         return
     for configured in profiles:
-        stored = await session.scalar(
-            select(ProviderProfile).where(ProviderProfile.stable_id == configured.id)
-        )
         metadata = configured.model_dump(mode="json", exclude={"credential_reference"})
         metadata["profile_revision"] = content_revision(configured)
-        if stored is None:
-            session.add(
-                ProviderProfile(
-                    stable_id=configured.id,
-                    configuration_revision=configuration_revision,
-                    enabled=configured.enabled,
-                    metadata_json=metadata,
-                )
+        statement = (
+            insert(ProviderProfile)
+            .values(
+                stable_id=configured.id,
+                configuration_revision=configuration_revision,
+                enabled=configured.enabled,
+                metadata_json=metadata,
             )
-        else:
-            stored.configuration_revision = configuration_revision
-            stored.enabled = configured.enabled
-            stored.metadata_json = metadata
-    await session.flush()
+            .on_conflict_do_update(
+                index_elements=[ProviderProfile.stable_id],
+                set_={
+                    "configuration_revision": configuration_revision,
+                    "enabled": configured.enabled,
+                    "metadata": metadata,
+                    "updated_at": func.now(),
+                },
+            )
+        )
+        await session.execute(statement)
 
 
 async def effective_health(

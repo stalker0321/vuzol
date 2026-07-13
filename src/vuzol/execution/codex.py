@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import uuid
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from vuzol.execution.paths import contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
 from vuzol.providers.codex import canonical_codex_argv
-from vuzol.providers.grok import canonical_grok_argv
+from vuzol.providers.grok import canonical_grok_argv, summarize_grok_events
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
@@ -197,6 +198,12 @@ class ExecutionEnvelopeFactory:
                 working_directory="/workspace",
                 status=ProcessStatus.STARTING,
                 termination_stage=TerminationStage.NONE,
+                runtime_metadata={
+                    "configured_deadline_seconds": spec.timeout_seconds,
+                    "cancellation_classification": None,
+                    "cancellation_initiator": None,
+                    "cleanup_initiator": "sandbox_transport_finally",
+                },
             )
             session.add(process)
             await session.flush()
@@ -242,6 +249,41 @@ class ExecutionEnvelopeFactory:
             )
             process.stdout_artifact_id = stdout.id
             process.stderr_artifact_id = stderr.id
+            argv = process.command_envelope.get("argv", [])
+            if isinstance(argv, list) and argv[:1] == ["grok"]:
+                event_summary = summarize_grok_events(result.stdout)
+                provider_events = await artifacts.persist(
+                    session,
+                    task_id=process.task_id,
+                    run_id=process.run_id,
+                    step_id=process.step_id,
+                    artifact_type="provider-event-summary",
+                    content=(
+                        json.dumps(event_summary, sort_keys=True, separators=(",", ":")) + "\n"
+                    ).encode(),
+                    media_type="application/json",
+                    producer_process_id=process.id,
+                )
+                process.provider_events_artifact_id = provider_events.id
+                stop_reason = event_summary["last_stop_reason"]
+                metadata = dict(process.runtime_metadata)
+                metadata.update(
+                    {
+                        "actual_elapsed_ms": result.duration_ms,
+                        "process_exit_code": result.exit_code,
+                        "process_signal": None,
+                        "last_provider_event_type": event_summary["last_event_type"],
+                        "last_provider_stop_reason": stop_reason,
+                    }
+                )
+                if stop_reason == "Cancelled":
+                    metadata.update(
+                        {
+                            "cancellation_classification": "PROVIDER_CANCELLED",
+                            "cancellation_initiator": "grok_cli_or_provider",
+                        }
+                    )
+                process.runtime_metadata = metadata
             process.exit_code = result.exit_code
             process.outcome = (
                 ProcessOutcome.SUCCEEDED if result.exit_code == 0 else ProcessOutcome.FAILED

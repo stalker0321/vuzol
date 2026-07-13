@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from collections.abc import Iterable
 from ipaddress import ip_address
 
@@ -41,7 +42,8 @@ class AllowedConnectTarget(BaseModel):
 
     model_config = {"frozen": True}
 
-    hostname: str = Field(min_length=1, max_length=253)
+    hostname: str = Field(min_length=1, max_length=1024)
+    # Note: final canonical hostname after IDNA must still be <=253 (enforced in _validate_dns...)
     port: int = Field(443, ge=1, le=65535)
     purpose: str = Field(min_length=1, max_length=200)
 
@@ -73,36 +75,85 @@ def _is_ip_literal(host: str) -> bool:
         return False
 
 
+def _contains_disallowed_char(s: str) -> bool:
+    """True if s contains any whitespace or control/format character.
+
+    Covers: space, tab, CR, LF, NUL, non-breaking space (\xa0), zero-width
+    space (\u200b), and all Cc/Cf/Z* categories.
+    """
+    for c in s:
+        if c.isspace():
+            return True
+        cat = unicodedata.category(c)
+        if cat.startswith("C"):
+            return True
+    return False
+
+
+def _is_valid_dns_label(label: str) -> bool:
+    if not (1 <= len(label) <= 63):
+        return False
+    if not label[0].isalnum() or not label[-1].isalnum():
+        return False
+    return all(c.isalnum() or c == "-" for c in label)
+
+
+def _validate_dns_hostname_structure(hostname: str) -> None:
+    """Post-IDNA DNS hostname rules (ASCII lowercase labels).
+
+    - labels separated by dots, no empty labels
+    - each label 1-63 chars, a-z0-9- only, no lead/trail hyphen
+    - total length <= 253
+    - not a single-label hostname (public targets must be FQDN-like)
+    """
+    if not hostname or len(hostname) > 253:
+        raise ValueError(f"invalid hostname length: {hostname}")
+    if hostname.endswith(".") or hostname.startswith("."):
+        raise ValueError("invalid hostname characters or trailing dot")
+    labels = hostname.split(".")
+    if len(labels) < 2:
+        raise ValueError(f"single-label hostnames are not permitted: {hostname}")
+    if any(not label for label in labels):
+        raise ValueError(f"invalid hostname (empty label): {hostname}")
+    for label in labels:
+        if not _is_valid_dns_label(label):
+            raise ValueError(f"invalid DNS label in hostname: {hostname}")
+
+
 def _normalize_hostname(host: str) -> str:
-    """Lowercase and IDNA encode for stable canonical form. No DNS."""
+    """Lowercase and IDNA encode for stable canonical form. No DNS.
+
+    After IDNA, enforces full DNS hostname structure rules (labels, lengths,
+    chars, no single-label for public targets).
+    """
     if not host:
         raise ValueError("hostname must not be empty")
-    # Reject obvious bad
-    if host.endswith(".") or host.startswith(".") or " " in host or "\n" in host:
+    if _contains_disallowed_char(host) or host.endswith(".") or host.startswith("."):
         raise ValueError("invalid hostname characters or trailing dot")
     try:
         # Use lower and punycode for determinism
-        return host.encode("idna").decode("ascii").lower()
+        canon = host.encode("idna").decode("ascii").lower()
     except Exception as e:
         raise ValueError(f"invalid hostname for IDNA normalization: {host}") from e
+    _validate_dns_hostname_structure(canon)
+    return canon
 
 
 def _validate_hostname(host: str) -> str:
     """Validate hostname and return canonical lowercase IDNA form.
 
-    Shared pure helper: rejects IP literals, forbidden names (localhost,
-    metadata, .local), wildcards, leading/trailing dots, whitespace/control.
+    Shared pure helper: rejects IP literals, forbidden names (localhost and
+    subdomains, .local names, metadata.google.internal), wildcards, leading/
+    trailing dots, any whitespace/control chars. After IDNA enforces full
+    DNS label rules and rejects single-label names.
     No DNS. Used by both compiler and direct AllowedConnectTarget construction.
     """
     if _is_ip_literal(host):
         raise ValueError(f"IP literal egress destinations are prohibited: {host}")
-    forbidden = {
-        "localhost",
-        "metadata.google.internal",
-    }
-    if host.lower() in forbidden or host.lower().endswith(".local"):
+    h = host.lower()
+    if h in {"localhost", "metadata.google.internal"} or h.endswith((".localhost", ".local")):
         raise ValueError(f"prohibited hostname for egress: {host}")
-    if "*" in host or host.startswith(".") or host.endswith(".") or " " in host or "\n" in host:
+    if "*" in host or host.startswith(".") or host.endswith(".") or _contains_disallowed_char(host):
         raise ValueError(f"wildcard or invalid hostname prohibited for egress: {host}")
     return _normalize_hostname(host)
 
@@ -156,9 +207,14 @@ def _parse_provider_target(raw: str) -> tuple[str, int]:
     Delegates hostname invariant to _validate_hostname.
     No DNS.
     """
-    if not raw or not raw.strip():
+    if not raw:
         raise ValueError("provider host must not be empty")
+    # Reject surrounding whitespace explicitly (do not silently strip and accept)
+    if raw != raw.strip():
+        raise ValueError(f"provider host must not contain surrounding whitespace: {raw!r}")
     raw = raw.strip()
+    if not raw:
+        raise ValueError("provider host must not be empty")
 
     # Reject full authority/URL forms early (no silent strip)
     if (

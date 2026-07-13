@@ -347,7 +347,10 @@ def test_allowed_connect_target_direct_rejects_wildcards_local_metadata_invalid(
     bads = [
         "*.example.com",
         "localhost",
+        "foo.localhost",
+        "bar.foo.localhost",
         "example.local",
+        "sub.example.local",
         "metadata.google.internal",
         ".example.com",
         "example.com.",
@@ -361,9 +364,18 @@ def test_allowed_connect_target_direct_produces_canonical_idna() -> None:
     # mixed case becomes lowercase canonical
     t = AllowedConnectTarget(hostname="API.Example.COM", port=443, purpose="p")
     assert t.hostname == "api.example.com"
-    # whitespace/control rejected
-    with pytest.raises(ValueError, match="invalid hostname"):
-        AllowedConnectTarget(hostname="ex ample.com", port=443, purpose="p")
+    # whitespace/control rejected (space, tab, cr, lf, nul, nbsp, zwsp etc.)
+    for bad in [
+        "ex ample.com",
+        "ex\tample.com",
+        "ex\r.com",
+        "ex\n.com",
+        "ex\x00.com",
+        "ex\xa0.com",
+        "ex\u200b.com",
+    ]:
+        with pytest.raises(ValueError, match="invalid hostname"):
+            AllowedConnectTarget(hostname=bad, port=443, purpose="p")
 
 
 def test_allowed_connect_target_port_must_be_443() -> None:
@@ -396,3 +408,63 @@ def test_compile_performs_no_dns_lookup(monkeypatch: pytest.MonkeyPatch) -> None
     pol = NetworkPolicy(enabled=True, destinations=(_dest("https://example.com"),))
     compile_proxy_allowlist(pol)
     assert not called, "compile must not perform DNS"
+
+
+# --- Additional focused tests for full hostname canonicalization rules ---
+
+
+def test_rejects_surrounding_whitespace_in_provider_api_hosts() -> None:
+    """Surrounding ws in provider_api_hosts must be rejected, not stripped+accepted."""
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    for bad in [" api.example.com", "api.example.com ", "  api.example.com  ", "\tapi.example.com"]:
+        with pytest.raises(ValueError, match="surrounding whitespace"):
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+
+
+def test_rejects_single_label_hostnames() -> None:
+    """Single-label (no dot) hostnames rejected for public targets."""
+    bads = ["myhost", "internal", "localhost-but-no", "ex"]
+    for bad in bads:
+        with pytest.raises(ValueError, match="single-label hostnames are not permitted"):
+            AllowedConnectTarget(hostname=bad, port=443, purpose="p")
+        with pytest.raises(ValueError, match="single-label"):
+            pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+
+
+def test_rejects_invalid_dns_labels_structure() -> None:
+    """Post-IDNA: no empty labels, label len, lead/trail hyphen, only alnum-."""
+    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://p.example.com"),))
+    bads = [
+        "ex..com",  # empty label
+        "ex-.com",  # trailing hyphen in label
+        "-ex.com",  # leading hyphen
+        "ex.-com",  # empty
+        "a" * 64 + ".com",  # label >63
+    ]
+    for bad in bads:
+        with pytest.raises(
+            ValueError, match=r"invalid DNS|empty label|single-label|invalid hostname"
+        ):
+            compile_proxy_allowlist(pol, provider_api_hosts=(bad,))
+        with pytest.raises(
+            ValueError, match=r"invalid DNS|empty label|single-label|invalid hostname"
+        ):
+            AllowedConnectTarget(hostname=bad, port=443, purpose="p")
+
+
+def test_rejects_overlong_hostname() -> None:
+    # total >253 after canon (use long valid labels)
+    long_host = ("x" * 63 + ".") * 4 + "com"
+    assert len(long_host) > 253
+    with pytest.raises(ValueError, match=r"invalid hostname length|too long"):
+        AllowedConnectTarget(hostname=long_host, port=443, purpose="p")
+
+
+def test_valid_mixed_case_and_unicode_idna_still_canonical() -> None:
+    t = AllowedConnectTarget(hostname="API.Example.COM", port=443, purpose="p")
+    assert t.hostname == "api.example.com"
+    t2 = AllowedConnectTarget(hostname="café.example.com", port=443, purpose="p")
+    assert t2.hostname == "xn--caf-dma.example.com"
+    t3 = AllowedConnectTarget(hostname="München.de", port=443, purpose="p")
+    assert t3.hostname == "xn--mnchen-3ya.de"

@@ -710,7 +710,16 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
         network_mode=SandboxNetworkMode.HTTPS_PROXY,
     )
     mock_reg.profiles.get.return_value = MagicMock(
-        state_directory=state_dir, enabled=True, api_base_url=None
+        state_directory=state_dir,
+        enabled=True,
+        runtime_network=NetworkPolicy(
+            enabled=True,
+            destinations=(
+                EgressDestination.model_validate(
+                    {"url": "https://api.openai.com", "purpose": "runtime API"}
+                ),
+            ),
+        ),
     )
     targets = await envf.proxy_targets(inv)
     assert [(target.hostname, target.port) for target in targets] == [("api.openai.com", 443)]
@@ -719,7 +728,12 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_reg.sandboxes.get.return_value = SandboxProfileConfig(
         id="def", image="ex@sha256:" + "a" * 64, enabled=True
     )
-    mock_reg.profiles.get.return_value = MagicMock(state_directory=state_dir, enabled=True)
+    mock_reg.profiles.get.return_value = MagicMock(
+        state_directory=state_dir,
+        enabled=True,
+        provider="codex",
+        model="codex",
+    )
 
     envelope, pid = await envf.build(inv)
     assert envelope.sandbox.mounts[2].mode is MountMode.READ_WRITE
@@ -1016,6 +1030,21 @@ def test_step08_related_classes_construction() -> None:
     # ExecutorChain
     c = ExecutorChain(MagicMock(), MagicMock())
     assert c is not None
+
+
+def test_grok_execution_boundary_accepts_only_canonical_runtime() -> None:
+    from vuzol.execution.codex import _provider_state_runtime, _require_provider_command
+    from vuzol.providers.grok import canonical_grok_argv
+
+    argv = canonical_grok_argv("grok-build")
+    _require_provider_command(argv, "grok", "grok-build")
+    target, environment = _provider_state_runtime("grok")
+    assert target == Path("/grok-home")
+    assert environment == {"HOME": "/grok-home"}
+    with pytest.raises(ValueError, match="non-canonical"):
+        _require_provider_command(("grok",), "grok", "grok-build")
+    with pytest.raises(ValueError, match="unsupported"):
+        _provider_state_runtime("unknown")
 
 
 @pytest.mark.anyio

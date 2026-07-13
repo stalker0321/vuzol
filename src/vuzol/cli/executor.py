@@ -17,8 +17,10 @@ from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_prof
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
 from vuzol.providers.codex import CodexCliAdapter
+from vuzol.providers.grok import GrokCliAdapter
 from vuzol.providers.handlers import ProviderStepHandler, executor_provider_handlers
 from vuzol.providers.health import synchronize_profiles
+from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.types import QueueClass
@@ -101,15 +103,16 @@ async def run() -> None:
         transport = SandboxCodexTransport(
             sandbox_runtime, envelope_factory, artifact_store, proxy_manager
         )
-        adapters = {
-            profile.id: CodexCliAdapter(transport)
-            for profile in runtime.registries.profiles.items()
-            if profile.enabled
-            and profile.provider == "codex"
-            and profile.launch_mode is LaunchMode.CLI
-        }
+        adapters: dict[str, ProviderAdapter] = {}
+        for profile in runtime.registries.profiles.items():
+            if not profile.enabled or profile.launch_mode is not LaunchMode.CLI:
+                continue
+            if profile.provider == "codex":
+                adapters[profile.id] = CodexCliAdapter(transport)
+            elif profile.provider == "grok":
+                adapters[profile.id] = GrokCliAdapter(transport)
         if not adapters:
-            raise RuntimeError("execution worker has no enabled Codex CLI profile")
+            raise RuntimeError("execution worker has no enabled CLI profile")
         adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver, adapters=adapters)
         worktree_service = WorktreeService(
             settings.worktree_root,

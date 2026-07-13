@@ -29,6 +29,7 @@ from vuzol.providers.domain import (
     QuotaState,
 )
 from vuzol.providers.errors import ProviderFailure
+from vuzol.providers.grok import GrokCliAdapter
 from vuzol.providers.openai import OpenAICompatibleAdapter
 from vuzol.providers.policy import ExclusionReason, RoutingRequest, select_profile
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
@@ -532,6 +533,136 @@ async def test_codex_adapter_accepts_versioned_jsonl(tmp_path: Path) -> None:
         CancellationContext(),
     )
     assert result.text == "done" and result.usage.input_tokens == 4
+
+
+@pytest.mark.anyio
+async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> None:
+    class GrokTransport(FakeCodexTransport):
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            self.invocations.append(invocation)
+            return CodexProcessResult(
+                0,
+                "\n".join(
+                    (
+                        json.dumps([]),
+                        json.dumps({"type": "thought", "data": "private reasoning"}),
+                        json.dumps({"type": "text", "data": "safe "}),
+                        json.dumps({"type": "text", "data": "result"}),
+                        json.dumps(
+                            {
+                                "type": "end",
+                                "stopReason": "EndTurn",
+                                "sessionId": "session",
+                                "requestId": "request",
+                                "usage": {
+                                    "input_tokens": 7,
+                                    "output_tokens": 2,
+                                    "cache_read_input_tokens": 3,
+                                },
+                            }
+                        ),
+                    )
+                ),
+                "",
+                12,
+            )
+
+    transport = GrokTransport()
+    configured = profile(
+        "grok-a",
+        provider="grok",
+        model="grok-build",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="grok-a",
+        state_directory=tmp_path / "grok-a",
+    )
+    result = await GrokCliAdapter(transport).execute(
+        provider_request().model_copy(
+            update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+        ),
+        configured,
+        CancellationContext(),
+    )
+    invocation = transport.invocations[0]
+    assert result.text == "safe result"
+    assert result.provider_request_id == "request"
+    assert result.usage.cached_tokens == 3
+    assert invocation.argv[:2] == ("grok", "--no-auto-update")
+    assert invocation.argv[2:4] == ("--prompt-file", "/dev/stdin")
+    assert "dontAsk" in invocation.argv and "strict" in invocation.argv
+    assert "Read(/grok-home/**)" in invocation.argv
+    assert "auth.json" not in invocation.stdin
+    assert (await GrokCliAdapter(transport).health(configured)).healthy
+    from vuzol.providers.grok import _usage_int
+
+    assert _usage_int([], "input_tokens") is None
+
+
+@pytest.mark.anyio
+async def test_grok_adapter_fails_closed_for_invalid_execution(tmp_path: Path) -> None:
+    configured = profile(
+        "grok-a",
+        provider="grok",
+        model="grok-build",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="grok-a",
+        state_directory=tmp_path / "grok-a",
+    )
+    request = provider_request()
+    adapter = GrokCliAdapter(FakeCodexTransport())
+    with pytest.raises(ProviderFailure, match="isolation"):
+        await adapter.execute(
+            request.model_copy(
+                update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+            ),
+            configured.model_copy(update={"runtime_identity": None}),
+            CancellationContext(),
+        )
+    with pytest.raises(ProviderFailure, match="requires an isolated"):
+        await adapter.execute(request, configured, CancellationContext())
+
+    class FailedTransport:
+        def __init__(self, result: CodexProcessResult | None = None) -> None:
+            self.result = result
+
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            if self.result is None:
+                raise RuntimeError("transport unavailable")
+            return self.result
+
+    fenced = request.model_copy(
+        update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+    )
+    for transport in (
+        FailedTransport(),
+        FailedTransport(CodexProcessResult(1, "", "failed", 1)),
+        FailedTransport(CodexProcessResult(0, '{"type":"text","data":"partial"}', "", 1)),
+    ):
+        with pytest.raises(ProviderFailure):
+            await GrokCliAdapter(transport).execute(fenced, configured, CancellationContext())
+
+    class InvalidInvocationTransport(FailedTransport):
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            raise ValueError("invalid invocation")
+
+    with pytest.raises(ValueError, match="invalid invocation"):
+        await GrokCliAdapter(InvalidInvocationTransport()).execute(
+            fenced, configured, CancellationContext()
+        )
 
 
 @pytest.mark.anyio

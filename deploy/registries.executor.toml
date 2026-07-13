@@ -1,6 +1,6 @@
 [[sandboxes]]
 id = "project-default"
-image = "vuzol-sandbox@sha256:d5d6331d50b9d4d3a53f74b47195b5bea0215d42434e34ba3e51318b5ace7526"
+image = "vuzol-sandbox@sha256:608384bad9e900e0e85dfcdcd2763a0c81c27ed4190a0b0c6ad6ff0a483700df"
 uid = 10001
 gid = 10001
 cpu_count = 1.0
@@ -32,6 +32,8 @@ approval_required = []
 enabled = true
 destinations = [
   { url = "https://chatgpt.com", purpose = "Codex subscription runtime" },
+  { url = "https://cli-chat-proxy.grok.com", purpose = "Grok subscription inference" },
+  { url = "https://auth.x.ai", purpose = "Grok subscription authentication" },
 ]
 
 [[profiles]]
@@ -46,8 +48,64 @@ cost_class = "strong"
 roles = ["executor", "planner"]
 routing_priority = 200
 supported_task_types = ["coding"]
-fallback_profile_ids = []
+fallback_profile_ids = ["grok-subscription-a", "grok-subscription-b"]
 sandbox_required = true
 runtime_identity = "vuzol-executor"
 state_directory = "/var/lib/vuzol-provider-state/codex-subscription-prod"
 enabled = true
+
+[profiles.runtime_network]
+enabled = true
+destinations = [
+  { url = "https://chatgpt.com", purpose = "Codex subscription runtime" },
+]
+
+[[profiles]]
+id = "grok-subscription-a"
+provider = "grok"
+model = "grok-build"
+launch_mode = "cli"
+credential_required = false
+capabilities = ["repository_read", "code_edit", "git", "project_shell"]
+concurrency_limit = 1
+cost_class = "strong"
+roles = ["executor", "planner"]
+routing_priority = 210
+supported_task_types = ["coding"]
+fallback_profile_ids = ["grok-subscription-b"]
+sandbox_required = true
+runtime_identity = "vuzol-grok-a"
+state_directory = "/var/lib/vuzol-provider-state/grok-subscription-a"
+enabled = true
+
+[profiles.runtime_network]
+enabled = true
+destinations = [
+  { url = "https://cli-chat-proxy.grok.com", purpose = "Grok subscription inference" },
+  { url = "https://auth.x.ai", purpose = "Grok subscription authentication" },
+]
+
+[[profiles]]
+id = "grok-subscription-b"
+provider = "grok"
+model = "grok-build"
+launch_mode = "cli"
+credential_required = false
+capabilities = ["repository_read", "code_edit", "git", "project_shell"]
+concurrency_limit = 1
+cost_class = "strong"
+roles = ["executor", "planner"]
+routing_priority = 220
+supported_task_types = ["coding"]
+fallback_profile_ids = []
+sandbox_required = true
+runtime_identity = "vuzol-grok-b"
+state_directory = "/var/lib/vuzol-provider-state/grok-subscription-b"
+enabled = true
+
+[profiles.runtime_network]
+enabled = true
+destinations = [
+  { url = "https://cli-chat-proxy.grok.com", purpose = "Grok subscription inference" },
+  { url = "https://auth.x.ai", purpose = "Grok subscription authentication" },
+]

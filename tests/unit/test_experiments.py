@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from vuzol.cli.experiment import _write_csv
 from vuzol.experiments.domain import (
     BoundedLevel,
     ContextEntry,
@@ -25,6 +26,8 @@ from vuzol.experiments.domain import (
     TaskClassification,
     WorkerResultManifest,
     WorkerTaskCapsule,
+    new_experiment_id,
+    stable_json_hash,
 )
 from vuzol.experiments.policy import (
     classify_execution_mode,
@@ -38,7 +41,10 @@ from vuzol.experiments.review import (
     scan_suspicious_patterns,
     shadow_auto_accept,
 )
+from vuzol.experiments.service import TrialSeedRequest, render_worker_prompt
 from vuzol.experiments.telemetry import aggregate_trials
+from vuzol.providers.routing import _trusted_profile_id
+from vuzol.storage.models import Run
 
 
 def classification(**updates: object) -> TaskClassification:
@@ -93,6 +99,23 @@ def usage() -> ReportedUsage:
     return ReportedUsage(input_tokens=100, output_tokens=20)
 
 
+def seed_request() -> TrialSeedRequest:
+    return TrialSeedRequest(
+        experiment_id="step09a-test",
+        task_id="t1",
+        worker_profile="grok-subscription-a",
+        project_id="vuzol",
+        base_commit="a" * 40,
+        goal="Add a pure validator.",
+        classification=classification(),
+        allowed_paths=("src/example.py", "tests/test_example.py"),
+        acceptance_criteria=("Reject malformed input",),
+        forbidden_changes=("Do not relax tests",),
+        required_gates=(RequiredGate(name="focused", command_id="pytest-focused"),),
+        context_manifest=worker_context(),
+    )
+
+
 def test_capsule_is_immutable_versioned_and_rejects_secrets() -> None:
     item = capsule("a" * 40)
     assert item.schema_version == "step09a-task-capsule.v1"
@@ -102,6 +125,24 @@ def test_capsule_is_immutable_versioned_and_rejects_secrets() -> None:
         capsule("a" * 40).model_copy(
             update={"goal": "Read auth.json"},
         ).model_validate(capsule("a" * 40).model_dump() | {"goal": "Read auth.json"})
+
+
+def test_worker_prompt_contains_exact_boundary_and_structured_result_requirement() -> None:
+    prompt = render_worker_prompt(capsule("a" * 40), repository_id="vuzol")
+    assert "Sandbox worktree: /workspace" in prompt
+    assert "Exact base SHA: " + "a" * 40 in prompt
+    assert "Stop on any mismatch" in prompt
+    assert "Do not touch another VPS project" in prompt
+    assert "one focused commit" in prompt
+    assert "step09a-worker-result.v1" in prompt
+    assert "/home/vodkolyan" not in prompt
+
+
+def test_trial_seed_request_bounds_repairs_and_context_role() -> None:
+    request = seed_request()
+    assert request.maximum_repair_count == 2
+    with pytest.raises(ValidationError):
+        TrialSeedRequest.model_validate(request.model_dump() | {"maximum_repair_count": 3})
 
 
 def test_mode_policy_is_explicit_and_security_cannot_be_lowered() -> None:
@@ -116,6 +157,19 @@ def test_mode_policy_is_explicit_and_security_cannot_be_lowered() -> None:
         classify_execution_mode(classification(testability=BoundedLevel.LOW))
         is ExecutionMode.SOL_SOLO
     )
+    assert (
+        classify_execution_mode(classification(task_class=TaskClass.SECURITY))
+        is ExecutionMode.SOL_SOLO
+    )
+
+
+def test_profile_pin_only_accepts_internal_versioned_route() -> None:
+    run = Run(selected_route={"schema_version": "step09a-route.v1", "trusted_profile_id": "grok-a"})
+    assert _trusted_profile_id(run) == "grok-a"
+    run.selected_route = {"trusted_profile_id": "grok-a"}
+    assert _trusted_profile_id(run) is None
+    run.selected_route = {"schema_version": "step09a-route.v1", "trusted_profile_id": 7}
+    assert _trusted_profile_id(run) is None
 
 
 def test_context_hashing_and_repeated_measurement() -> None:
@@ -133,6 +187,25 @@ def test_context_hashing_and_repeated_measurement() -> None:
     assert manifest.total_bytes == 6
     assert manifest.repeated_bytes == 3
     assert manifest.estimated_tokens == 2
+    with pytest.raises(ValidationError, match="both endpoints"):
+        ContextEntry(
+            source_type="file",
+            reference="a",
+            content_hash="a" * 64,
+            line_start=1,
+            byte_count=0,
+            estimated_tokens=0,
+        )
+    with pytest.raises(ValidationError, match="reversed"):
+        ContextEntry(
+            source_type="file",
+            reference="a",
+            content_hash="a" * 64,
+            line_start=2,
+            line_end=1,
+            byte_count=0,
+            estimated_tokens=0,
+        )
 
 
 def test_missing_usage_is_never_fabricated() -> None:
@@ -157,6 +230,11 @@ def test_capsule_repair_limit_and_override_reason() -> None:
         WorkerTaskCapsule.model_validate(
             data | {"actual_mode": ExecutionMode.SOL_SOLO, "override_reason": None}
         )
+    with pytest.raises(ValidationError, match="repository-relative"):
+        WorkerTaskCapsule.model_validate(data | {"allowed_paths": ("/etc/passwd",)})
+    wrong_context = ContextManifest(role="reviewer")
+    with pytest.raises(ValidationError, match="worker context"):
+        WorkerTaskCapsule.model_validate(data | {"context_manifest": wrong_context})
 
 
 def test_scope_conflict_and_allowed_file_enforcement() -> None:
@@ -240,6 +318,10 @@ def test_worker_result_is_verified_against_real_git(tmp_path: Path) -> None:
     verified = GitWorkerResultVerifier().verify(repo, capsule(base, branch), manifest)
     assert verified.passed
     assert not verified.findings
+    stale = manifest.model_copy(update={"result_commit": base, "changed_files": ()})
+    stale_verification = GitWorkerResultVerifier().verify(repo, capsule(base, branch), stale)
+    assert not stale_verification.commit_exists
+    assert "worktree HEAD differs from result commit" in stale_verification.findings
 
 
 def test_result_verification_rejects_false_gate_and_scope_claim(tmp_path: Path) -> None:
@@ -363,6 +445,28 @@ def test_telemetry_aggregation_pricing_revision_and_secret_rejection() -> None:
         telemetry(environment_variable_names=("DATABASE_URL",))
     with pytest.raises(ValidationError, match="lineage"):
         telemetry(worker_attempts=1, repair_count=1)
+
+
+def test_machine_readable_csv_export_preserves_measured_fields(tmp_path: Path) -> None:
+    trial = telemetry()
+    target = tmp_path / "results.csv"
+    _write_csv(target, (trial,))
+    lines = target.read_text().splitlines()
+    assert "repeated_context_ratio" in lines[0]
+    assert "step09a-test" in lines[1]
+    assert "accepted_first_pass" in lines[1]
+    assert "0.01" in lines[1]
+
+
+def test_stable_experiment_identity_and_empty_context_ratio() -> None:
+    trial = telemetry(invocations=())
+    assert trial.repeated_context_ratio == 0.0
+    assert stable_json_hash(trial) == stable_json_hash(trial)
+    assert new_experiment_id().startswith("step09a-")
+    with pytest.raises(ValidationError, match="unavailable cost"):
+        telemetry(estimated_cost=None, cost_unavailable_reason=None)
+    with pytest.raises(ValidationError, match="unavailable egress"):
+        telemetry(egress_bytes=None, egress_unavailable_reason=None)
 
 
 def test_no_automatic_merge_deploy_or_direct_grok_host_path_exists() -> None:

@@ -166,6 +166,9 @@ class ProviderStepHandler:
                 worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
                 if worktree is None:
                     raise LookupError("execute_code requires a prepared worktree")
+            output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
+                step.step_type, task.task_draft
+            )
             return (
                 ProviderRequest(
                     task_id=task.id,
@@ -182,6 +185,9 @@ class ProviderStepHandler:
                     task_draft=task.task_draft,
                     system_policy_revision=run.policy_revision,
                     prompt_revision=run.prompt_revision or "provider-step-v1",
+                    output_schema_name=output_schema_name,
+                    output_schema_version=output_schema_version,
+                    output_json_schema=output_json_schema,
                     timeout_seconds=step.timeout_seconds,
                     max_input_tokens=reservation.reserved_input_tokens,
                     max_output_tokens=reservation.reserved_output_tokens,
@@ -204,3 +210,17 @@ def provider_handlers(handler: ProviderStepHandler) -> dict[str, ProviderStepHan
 
 def executor_provider_handlers(handler: ProviderStepHandler) -> dict[str, ProviderStepHandler]:
     return {"execute_code": handler}
+
+
+def _step09a_result_schema(
+    step_type: str, task_draft: dict[str, object]
+) -> tuple[str | None, str | None, dict[str, object] | None]:
+    if step_type != "execute_code" or "step09a_capsule" not in task_draft:
+        return None, None, None
+    from vuzol.experiments.domain import WorkerResultManifest
+
+    return (
+        "WorkerResultManifest",
+        "step09a-worker-result.v1",
+        WorkerResultManifest.model_json_schema(),
+    )

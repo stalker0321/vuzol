@@ -712,6 +712,87 @@ async def test_grok_adapter_classifies_structured_provider_cancellation(tmp_path
     assert captured.value.retryable is False
 
 
+@pytest.mark.anyio
+async def test_grok_adapter_validates_and_persists_step09a_manifest(tmp_path: Path) -> None:
+    manifest = {
+        "schema_version": "step09a-worker-result.v1",
+        "experiment_id": "experiment",
+        "task_id": "task",
+        "worker_profile": "grok-a",
+        "base_commit": "a" * 40,
+        "result_commit": "b" * 40,
+        "branch": "worker/task",
+        "changed_files": ["README.md"],
+        "claimed_complete": True,
+        "gates": [
+            {"name": "focused", "command_id": "./verify.sh", "exit_code": 0, "duration_ms": 1}
+        ],
+        "total_worker_duration_ms": 10,
+        "usage": {
+            "input_tokens": None,
+            "cached_input_tokens": None,
+            "output_tokens": None,
+            "reasoning_tokens": None,
+            "unavailable_reason": "The worker does not receive provider accounting.",
+        },
+        "failure_classification": None,
+        "limitations": [],
+        "scope_exceeded": False,
+        "attempt": 1,
+    }
+
+    class ManifestTransport:
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            return CodexProcessResult(
+                0,
+                "\n".join(
+                    (
+                        json.dumps({"type": "text", "data": json.dumps(manifest)}),
+                        json.dumps({"type": "end", "stopReason": "EndTurn"}),
+                    )
+                ),
+                "",
+                10,
+            )
+
+    configured = profile(
+        "grok-a",
+        provider="grok",
+        model="grok-build",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="grok-a",
+        state_directory=tmp_path / "grok-a",
+    )
+    request = provider_request().model_copy(
+        update={
+            "sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001",
+            "output_schema_version": "step09a-worker-result.v1",
+        }
+    )
+    result = await GrokCliAdapter(ManifestTransport()).execute(
+        request, configured, CancellationContext()
+    )
+    assert result.structured_output == manifest
+
+    usage = manifest["usage"]
+    assert isinstance(usage, dict)
+    invalid = {**manifest, "usage": {**usage, "unavailable_reason": None}}
+    manifest.clear()
+    manifest.update(invalid)
+    with pytest.raises(ProviderFailure) as captured:
+        await GrokCliAdapter(ManifestTransport()).execute(
+            request, configured, CancellationContext()
+        )
+    assert captured.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+    assert captured.value.retryable is False
+
+
 def test_grok_event_summary_contains_only_safe_protocol_metadata() -> None:
     from vuzol.providers.grok import summarize_grok_events
 

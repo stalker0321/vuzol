@@ -110,6 +110,11 @@ class GrokCliAdapter:
                         "manifest durations, use only the exact command: date +%s%3N."
                     ),
                     "file_edits": "Use the Edit tool for workspace file changes.",
+                    "result_manifest": (
+                        "When every provider usage value is unavailable, set unavailable_reason "
+                        "to a concise non-empty explanation. Return a manifest that validates "
+                        "against the complete requested schema."
+                    ),
                 },
             },
             ensure_ascii=False,
@@ -163,9 +168,11 @@ class GrokCliAdapter:
                 request_sent=True,
                 safe_summary="Grok CLI returned invalid output",
             ) from error
+        structured_output = _step09a_structured_output(request, str(body["text"]))
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,
             text=str(body["text"]),
+            structured_output=structured_output,
             provider_request_id=_optional_string(body.get("request_id")),
             provider_session_id=_optional_string(body.get("session_id")),
             usage=NormalizedUsage(
@@ -209,6 +216,25 @@ def _decode_output(stdout: str) -> dict[str, object]:
 
 class GrokProviderCancelled(ValueError):
     """The CLI completed normally but its structured protocol reported cancellation."""
+
+
+def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str, object] | None:
+    if request.output_schema_version != "step09a-worker-result.v1":
+        return None
+    from pydantic import ValidationError
+
+    from vuzol.experiments.domain import WorkerResultManifest
+
+    try:
+        manifest = WorkerResultManifest.model_validate_json(value)
+    except ValidationError as error:
+        raise ProviderFailure(
+            ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+            retryable=False,
+            request_sent=True,
+            safe_summary="Grok CLI returned an invalid worker result manifest",
+        ) from error
+    return manifest.model_dump(mode="json")
 
 
 def summarize_grok_events(stdout: str) -> dict[str, object]:

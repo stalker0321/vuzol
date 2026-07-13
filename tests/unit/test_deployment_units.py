@@ -103,6 +103,7 @@ def test_executor_readiness_resolves_identity_dynamically() -> None:
     assert "-S " in text or '[ -S "$SOCKET" ]' in text or "-S" in text
     # No numeric UID literal in the readiness logic
     assert "/run/user/994" not in text
+    assert "ProtectHome=read-only" in text
 
 
 def test_executor_readiness_uses_systemd_literal_dollar_escaping() -> None:
@@ -116,6 +117,13 @@ def test_executor_readiness_uses_systemd_literal_dollar_escaping() -> None:
     assert "$$(id -u)" in readiness
     assert "$$(seq 1 150)" in readiness
     assert "$$SOCKET" in readiness
+
+
+def test_user_daemon_readiness_uses_systemd_literal_dollar_escaping() -> None:
+    text = _read(USER_DAEMON_UNIT)
+    readiness = text.split("ExecStartPost=", 1)[1].split("\nRestart=", 1)[0]
+    assert "\\$" not in readiness
+    assert "$$(seq 1 150)" in readiness
 
 
 def test_no_rootful_socket_anywhere_in_units() -> None:

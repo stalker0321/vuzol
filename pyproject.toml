@@ -49,6 +49,7 @@ testpaths = ["tests"]
 markers = [
     "postgresql: requires the real PostgreSQL integration database",
     "docker: requires a working Docker daemon (rootless in target setup)",
+    "asyncio: tests using asyncio",
 ]
 
 [tool.coverage.run]

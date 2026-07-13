@@ -133,6 +133,7 @@ async def claim_routed_step(
             estimated_input_tokens=estimated_input,
             max_output_tokens=requested_output,
             remaining_cost_units=settings.limits.task_cost_units,
+            trusted_profile_id=_trusted_profile_id(run),
             failed_profile_id=failed_profile_id,
             allowed_fallback_ids=allowed_fallbacks,
             requires_sandbox=step.step_type == "execute_code",
@@ -219,6 +220,14 @@ async def claim_routed_step(
         await session.refresh(step, attribute_names=["heartbeat_at", "lease_expires_at"])
         return LeaseToken(step=step_record(step), owner=owner, generation=step.lease_generation)
     return None
+
+
+def _trusted_profile_id(run: Run) -> str | None:
+    """Read only the bounded internal Step 09A route pin, never model task output."""
+    if run.selected_route.get("schema_version") != "step09a-route.v1":
+        return None
+    value = run.selected_route.get("trusted_profile_id")
+    return value if isinstance(value, str) else None
 
 
 async def _states(

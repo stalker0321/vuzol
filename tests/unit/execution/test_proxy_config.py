@@ -98,6 +98,41 @@ def test_config_contains_exactly_one_connectport_and_it_is_443() -> None:
     assert "ConnectPort 8443" not in policy.config_text
 
 
+def test_config_uses_explicit_filter_type_ere() -> None:
+    policy = render_tinyproxy_policy((_target("api.example.com"),))
+    assert policy.config_text.count("FilterType ere") == 1
+    assert "FilterExtended" not in policy.config_text
+    # ensure it is active (not commented)
+    assert "FilterType ere" in policy.config_text
+
+
+def test_config_has_no_active_filterextended() -> None:
+    policy = render_tinyproxy_policy((_target("api.example.com"),))
+    # no FilterExtended directive at all (deprecated)
+    assert "FilterExtended" not in policy.config_text
+
+
+def test_no_conflicting_duplicate_filter_mode_directives() -> None:
+    policy = render_tinyproxy_policy((_target("api.example.com"),))
+    text = policy.config_text
+    # exactly the expected modes, no dups or conflicts
+    assert text.count("FilterType ere") == 1
+    assert text.count("FilterDefaultDeny Yes") == 1
+    assert text.count("FilterURLs Off") == 1
+    assert text.count("FilterCaseSensitive On") == 1
+    assert "FilterExtended" not in text
+
+
+def test_anchored_filter_rules_remain_valid_for_ere() -> None:
+    # ^host$ with escaped dots are valid ERE (and BRE)
+    policy = render_tinyproxy_policy((_target("api.example.com"), _target("sub.domain.test")))
+    assert "^api\\.example\\.com$" in policy.filter_text
+    assert "^sub\\.domain\\.test$" in policy.filter_text
+    # still exactly anchored, no wildcards
+    assert policy.filter_text.count("^") == 2
+    assert policy.filter_text.count("$") == 2
+
+
 def test_config_has_no_unrestricted_or_default_allow() -> None:
     policy = render_tinyproxy_policy((_target("api.example.com"),))
     # no blanket allow

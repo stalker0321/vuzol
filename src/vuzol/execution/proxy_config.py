@@ -7,6 +7,7 @@ It performs no DNS, no I/O, and produces only deterministic UTF-8 text.
 
 See STEP_08_PROXY_EGRESS_DESIGN.md for the selected Tinyproxy
 configuration style and filter semantics.
+FilterType ere is used (FilterExtended is deprecated).
 
 Client access control (Allow rules) is deliberately omitted: the design
 uses Docker network isolation (sandbox attached only to internal net)
@@ -28,7 +29,8 @@ class RenderedTinyproxyPolicy(BaseModel):
     """Immutable result of rendering a fail-closed Tinyproxy policy.
 
     config_text: security-critical fragment with ConnectPort, Filter,
-                 FilterDefaultDeny, FilterExtended, FilterURLs, etc.
+                 FilterType ere, FilterDefaultDeny, FilterURLs, etc.
+                 (FilterExtended is deprecated; use explicit FilterType.)
     filter_text: domain filter file with one exact ^host$ rule per target.
     """
 
@@ -82,20 +84,21 @@ def render_tinyproxy_policy(
     # Deduplicate and sort deterministically by hostname
     unique_hosts = sorted({t.hostname for t in targets})
 
-    # Exact anchored domain rules for FilterExtended
+    # Exact anchored domain rules (valid as ERE for FilterType ere)
     filter_lines = [f"^{re.escape(h)}$" for h in unique_hosts]
     filter_text = "\n".join(filter_lines) + "\n"
 
     validated_path = _validate_filter_path(filter_path)
 
-    # Security-critical fragment (fail-closed, domain filter, 443 only)
+    # Security-critical fragment (fail-closed, domain filter, 443 only).
+    # Uses explicit FilterType ere (FilterExtended is deprecated per Tinyproxy docs).
     # Follows directives from STEP_08_PROXY_EGRESS_DESIGN.md and
     # the vimagick/tinyproxy image.
     config_lines = [
         "ConnectPort 443",
         f'Filter "{validated_path}"',
         "FilterDefaultDeny Yes",
-        "FilterExtended On",
+        "FilterType ere",
         "FilterURLs Off",
         "FilterCaseSensitive On",
     ]

@@ -86,6 +86,13 @@ async def run() -> None:
             if networked and settings.execution.proxy_image is not None
             else None
         )
+        if proxy_manager is not None:
+            recovered = await proxy_manager.reconcile_startup()
+            if recovered:
+                get_logger(__name__).warning(
+                    "recovered interrupted controlled-egress executions",
+                    extra={"event": "executor.proxy_recovered", "count": recovered},
+                )
         transport = SandboxCodexTransport(
             sandbox_runtime, envelope_factory, artifact_store, proxy_manager
         )

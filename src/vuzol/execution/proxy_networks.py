@@ -299,15 +299,15 @@ class ProxyNetworkManager:
         labels = data.get("Labels") or {}
         if not isinstance(labels, dict):
             return False
-        return (
-            labels.get("vuzol.managed") == "true"
-            and labels.get("vuzol.resource") == "proxy-network"
-            and labels.get("vuzol.network_role") == role
-            and labels.get("vuzol.task_id") == str(task_id)
-            and labels.get("vuzol.run_id") == str(run_id)
-            and labels.get("vuzol.step_id") == str(step_id)
-            and labels.get("vuzol.lease_generation") == str(lease_generation)
-        )
+        return labels == {
+            "vuzol.managed": "true",
+            "vuzol.resource": "proxy-network",
+            "vuzol.network_role": role,
+            "vuzol.task_id": str(task_id),
+            "vuzol.run_id": str(run_id),
+            "vuzol.step_id": str(step_id),
+            "vuzol.lease_generation": str(lease_generation),
+        }
 
     async def _rollback_owned(
         self,

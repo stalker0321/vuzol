@@ -1169,6 +1169,121 @@ def test_cleanup_verifies_exact_disappearance(monkeypatch):
     asyncio.run(m.cleanup(lease))
 
 
+def test_recovery_validation_accepts_exact_owned_networks_without_mutation(monkeypatch):
+    m = ProxyNetworkManager(Path("/run/user/1000/docker.sock"))
+    t, r, s = uuid4(), uuid4(), uuid4()
+    lease = ProxyNetworkLease(
+        internal_name=_make_network_name(t, r, s, 1, "internal"),
+        egress_name=_make_network_name(t, r, s, 1, "egress"),
+        task_id=t,
+        run_id=r,
+        step_id=s,
+        lease_generation=1,
+    )
+    inspected: list[str] = []
+
+    async def exists(_name: str) -> bool:
+        return True
+
+    async def inspect(name: str) -> dict[str, Any]:
+        inspected.append(name)
+        role = "internal" if name == lease.internal_name else "egress"
+        return {
+            "Internal": role == "internal",
+            "Labels": {
+                "vuzol.managed": "true",
+                "vuzol.resource": "proxy-network",
+                "vuzol.network_role": role,
+                "vuzol.task_id": str(t),
+                "vuzol.run_id": str(r),
+                "vuzol.step_id": str(s),
+                "vuzol.lease_generation": "1",
+            },
+        }
+
+    monkeypatch.setattr(m, "_network_exists", exists)
+    monkeypatch.setattr(m, "_inspect_network", inspect)
+    asyncio.run(m.validate_owned(lease))
+    assert inspected == [lease.internal_name, lease.egress_name]
+
+
+def test_recovery_validation_fails_closed_for_tampered_or_foreign_network(monkeypatch):
+    m = ProxyNetworkManager(Path("/run/user/1000/docker.sock"))
+    t, r, s = uuid4(), uuid4(), uuid4()
+    lease = ProxyNetworkLease(
+        internal_name=_make_network_name(t, r, s, 1, "internal"),
+        egress_name=_make_network_name(t, r, s, 1, "egress"),
+        task_id=t,
+        run_id=r,
+        step_id=s,
+        lease_generation=1,
+    )
+
+    async def exists(_name: str) -> bool:
+        return True
+
+    async def foreign(_name: str) -> dict[str, Any]:
+        return {"Internal": True, "Labels": {"vuzol.managed": "true"}}
+
+    monkeypatch.setattr(m, "_network_exists", exists)
+    monkeypatch.setattr(m, "_inspect_network", foreign)
+    with pytest.raises(ProxyNetworkError, match="foreign recovery network"):
+        asyncio.run(m.validate_owned(lease))
+
+    tampered = ProxyNetworkLease(
+        internal_name="foreign-name",
+        egress_name=lease.egress_name,
+        task_id=t,
+        run_id=r,
+        step_id=s,
+        lease_generation=1,
+    )
+    with pytest.raises(ProxyNetworkError, match="inconsistent"):
+        asyncio.run(m.validate_owned(tampered))
+
+
+@pytest.mark.parametrize(
+    ("internal_value", "error"),
+    [(False, "internal network"), (True, "egress network")],
+)
+def test_recovery_validation_rejects_wrong_network_boundary(
+    monkeypatch: pytest.MonkeyPatch, internal_value: bool, error: str
+) -> None:
+    m = ProxyNetworkManager(Path("/run/user/1000/docker.sock"))
+    t, r, s = uuid4(), uuid4(), uuid4()
+    lease = ProxyNetworkLease(
+        internal_name=_make_network_name(t, r, s, 1, "internal"),
+        egress_name=_make_network_name(t, r, s, 1, "egress"),
+        task_id=t,
+        run_id=r,
+        step_id=s,
+        lease_generation=1,
+    )
+
+    async def exists(_name: str) -> bool:
+        return True
+
+    async def inspect(name: str) -> dict[str, Any]:
+        role = "internal" if name == lease.internal_name else "egress"
+        return {
+            "Internal": internal_value,
+            "Labels": {
+                "vuzol.managed": "true",
+                "vuzol.resource": "proxy-network",
+                "vuzol.network_role": role,
+                "vuzol.task_id": str(t),
+                "vuzol.run_id": str(r),
+                "vuzol.step_id": str(s),
+                "vuzol.lease_generation": "1",
+            },
+        }
+
+    monkeypatch.setattr(m, "_network_exists", exists)
+    monkeypatch.setattr(m, "_inspect_network", inspect)
+    with pytest.raises(ProxyNetworkError, match=error):
+        asyncio.run(m.validate_owned(lease))
+
+
 def test_no_prune_command(monkeypatch):
     sock = Path("/run/user/1000/docker.sock")
     m = ProxyNetworkManager(sock)

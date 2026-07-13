@@ -175,6 +175,39 @@ class ProxyNetworkManager:
             "internal",
         )
 
+    async def validate_owned(self, lease: ProxyNetworkLease) -> None:
+        """Validate exact network identity and labels without mutating resources."""
+        expected = (
+            (lease.internal_name, "internal"),
+            (lease.egress_name, "egress"),
+        )
+        for name, role in expected:
+            recomputed = _make_network_name(
+                lease.task_id,
+                lease.run_id,
+                lease.step_id,
+                lease.lease_generation,
+                role,
+            )
+            if name != recomputed:
+                raise ProxyNetworkError("lease network names are inconsistent with identifiers")
+            if not await self._network_exists(name):
+                continue
+            data = await self._inspect_network(name)
+            if not self._matches_ownership(
+                data,
+                lease.task_id,
+                lease.run_id,
+                lease.step_id,
+                lease.lease_generation,
+                role,
+            ):
+                raise ProxyNetworkError(f"refusing foreign recovery network {name}")
+            if role == "internal" and data.get("Internal") is not True:
+                raise ProxyNetworkError(f"recovery internal network {name} is not Internal")
+            if role == "egress" and data.get("Internal") is True:
+                raise ProxyNetworkError(f"recovery egress network {name} is Internal")
+
     # --- internal helpers ---
 
     def _make_labels(self, base: dict[str, str], role: str) -> list[str]:

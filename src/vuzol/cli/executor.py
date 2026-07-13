@@ -13,6 +13,7 @@ from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTranspor
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.proxy_service import ProxyServiceManager
+from vuzol.execution.reconciliation import ProxyStartupReconciler
 from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
@@ -56,6 +57,7 @@ async def run() -> None:
         await sandbox_runtime.preflight()
     engine = create_engine(settings, resolve_database_dsn(settings))
     factory = create_session_factory(engine)
+    owner = f"{socket.gethostname()}:{os.getpid()}:executor"
     try:
         async with factory.begin() as session:
             await synchronize_profiles(
@@ -94,11 +96,23 @@ async def run() -> None:
             else None
         )
         if proxy_manager is not None:
-            recovered = await proxy_manager.reconcile_startup()
-            if recovered:
+            report = await ProxyStartupReconciler(
+                factory,
+                proxy_manager,
+                owner=owner,
+            ).reconcile_startup()
+            if not report.lock_acquired:
+                get_logger(__name__).warning(
+                    "startup reconciliation lock was unavailable; cleanup skipped",
+                    extra={"event": "executor.proxy_reconciliation_lock_timeout"},
+                )
+            if report.removed_count:
                 get_logger(__name__).warning(
                     "recovered interrupted controlled-egress executions",
-                    extra={"event": "executor.proxy_recovered", "count": recovered},
+                    extra={
+                        "event": "executor.proxy_recovered",
+                        "count": report.removed_count,
+                    },
                 )
         transport = SandboxCodexTransport(
             sandbox_runtime, envelope_factory, artifact_store, proxy_manager
@@ -126,7 +140,6 @@ async def run() -> None:
             worktrees=worktree_service,
             artifacts=artifact_store,
         )
-        owner = f"{socket.gethostname()}:{os.getpid()}:executor"
         worktree_handler = PrepareWorktreeHandler(
             factory,
             runtime.registries,

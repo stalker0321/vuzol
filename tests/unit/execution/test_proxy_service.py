@@ -13,6 +13,7 @@ from vuzol.execution.proxy_service import (
     POLICY_CONTAINER_PATH,
     PROXY_ALIAS,
     STATE_FILE,
+    ProxyRecoveryManifest,
     ProxyServiceError,
     ProxyServiceLease,
     ProxyServiceManager,
@@ -47,6 +48,9 @@ class FakeNetworks:
 
     async def cleanup(self, lease: ProxyNetworkLease) -> None:
         self.cleaned.append(lease)
+
+    async def validate_owned(self, lease: ProxyNetworkLease) -> None:
+        del lease
 
 
 def _target(hostname: str = "api.openai.com") -> AllowedConnectTarget:
@@ -291,6 +295,9 @@ async def test_startup_reconciliation_uses_manifest_and_exact_cleanup_order(
         assert seen == identity
         events.append("proxy")
 
+    async def container_absent(_name: str) -> bool:
+        return False
+
     async def cleanup(lease: ProxyNetworkLease) -> None:
         assert lease.task_id == identity[0]
         assert lease.run_id == identity[1]
@@ -302,8 +309,11 @@ async def test_startup_reconciliation_uses_manifest_and_exact_cleanup_order(
 
     monkeypatch.setattr(manager, "_remove_owned_sandbox", remove_sandbox)
     monkeypatch.setattr(manager, "_remove_owned_container", remove_proxy)
+    monkeypatch.setattr(manager, "_container_exists", container_absent)
     networks.cleanup = cleanup  # type: ignore[method-assign]
-    assert await manager.reconcile_startup() == 1
+    manifests = manager.recovery_manifests()
+    assert len(manifests) == 1
+    await manager.cleanup_recovery_manifest(manifests[0])
     assert events == ["sandbox", "proxy", "networks"]
     assert not directory.exists()
 
@@ -322,7 +332,7 @@ async def test_startup_reconciliation_refuses_ambiguous_or_foreign_state(
     state_path.chmod(0o600)
     monkeypatch.setattr(manager, "_remove_owned_sandbox", pytest.fail)
     with pytest.raises(ProxyServiceError, match="malformed"):
-        await manager.reconcile_startup()
+        manager.recovery_manifests()
 
 
 @pytest.mark.anyio
@@ -330,11 +340,11 @@ async def test_startup_reconciliation_is_empty_and_refuses_untracked_entries(
     tmp_path: Path,
 ) -> None:
     manager = _manager(tmp_path, FakeNetworks())
-    assert await manager.reconcile_startup() == 0
+    assert manager.recovery_manifests() == ()
     manager._runtime_root.mkdir(mode=0o700)
     (manager._runtime_root / "untracked").write_text("foreign")
     with pytest.raises(ProxyServiceError, match="ambiguous entry"):
-        await manager.reconcile_startup()
+        manager.recovery_manifests()
 
 
 @pytest.mark.anyio
@@ -343,7 +353,7 @@ async def test_startup_reconciliation_sanitizes_missing_manifest(tmp_path: Path)
     manager._runtime_root.mkdir(mode=0o700)
     (manager._runtime_root / "owned-looking-directory").mkdir(mode=0o700)
     with pytest.raises(ProxyServiceError, match="manifest is unavailable"):
-        await manager.reconcile_startup()
+        manager.recovery_manifests()
 
 
 @pytest.mark.anyio
@@ -355,7 +365,7 @@ async def test_startup_reconciliation_binds_manifest_to_directory(tmp_path: Path
     manager._runtime_root.chmod(0o700)
     manager._write_state(directory, *identity, "a" * 64)
     with pytest.raises(ProxyServiceError, match="path is inconsistent"):
-        await manager.reconcile_startup()
+        manager.recovery_manifests()
 
 
 def test_runtime_root_must_remain_private(tmp_path: Path) -> None:
@@ -388,6 +398,44 @@ async def test_recovery_refuses_foreign_sandbox_labels(
     with pytest.raises(ProxyServiceError, match="foreign sandbox"):
         await manager._remove_owned_sandbox(*identity)
     assert _sandbox_ownership_labels(*identity)["vuzol.resource"] == "sandbox-container"
+
+
+@pytest.mark.anyio
+async def test_recovery_validation_accepts_only_exact_container_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _manager(tmp_path, FakeNetworks())
+    identity = _identity()
+    sandbox_name = f"vuzol-{str(identity[2])[:12]}-{identity[3]}"
+    proxy_name = _make_proxy_name(*identity)
+    manifest = ProxyRecoveryManifest(
+        directory=manager._runtime_directory(*identity),
+        task_id=identity[0],
+        run_id=identity[1],
+        step_id=identity[2],
+        lease_generation=identity[3],
+        policy_hash="a" * 64,
+    )
+    inspected: list[str] = []
+
+    async def exists(name: str) -> bool:
+        return name in {sandbox_name, proxy_name}
+
+    async def inspect(name: str) -> dict[str, Any]:
+        inspected.append(name)
+        labels = (
+            _sandbox_ownership_labels(*identity)
+            if name == sandbox_name
+            else _ownership_labels(*identity)
+        )
+        return _inspect(name, tmp_path / "policy.json", identity, running=True, labels=labels)
+
+    monkeypatch.setattr(manager, "_container_exists", exists)
+    monkeypatch.setattr(manager, "_inspect_container", inspect)
+
+    await manager.validate_recovery_resources(manifest)
+
+    assert inspected == [sandbox_name, proxy_name]
 
 
 @pytest.mark.anyio

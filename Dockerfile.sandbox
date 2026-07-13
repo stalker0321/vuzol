@@ -6,7 +6,7 @@ ARG GROK_VERSION=0.2.99
 ARG GROK_SHA256=9fccba400d3808ec34a991892096b34c6f5846b2b118d355001601fd5428445c
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && curl --fail --silent --show-error --location \

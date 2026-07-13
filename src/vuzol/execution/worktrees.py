@@ -101,6 +101,8 @@ class WorktreeService:
             return _reference(row)
         except BaseException:
             await self._git.remove_worktree(repository, path)
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
             raise
 
     async def retain(
@@ -117,7 +119,7 @@ class WorktreeService:
         if row is None:
             raise WorktreeError("unknown worktree")
         path = contained(self._root, Path(row.path))
-        inspection = await self._git.inspect(path)
+        inspection = await self._git.inspect(path, row.base_commit)
         if artifacts is not None:
             artifacts.reject_secrets(inspection.diff)
         row.diff_hash = inspection.diff_hash

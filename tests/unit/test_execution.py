@@ -347,6 +347,11 @@ async def test_typed_git_creates_isolated_worktree_and_collects_diff(tmp_path: P
     new_primary = _git(repository, "rev-parse", "HEAD").strip()
 
     await git.add_worktree(repository, worktree, branch, new_primary)
+    assert (worktree / ".git").is_dir()
+    assert _git(worktree, "rev-parse", "--is-shallow-repository").strip() == "true"
+    assert _git(worktree, "remote").strip() == ""
+    assert str(repository) not in (worktree / ".git" / "config").read_text()
+    assert str(worktree) not in _git(repository, "worktree", "list", "--porcelain")
 
     # Now changes in worktree (tracked mod, new untracked, delete, rename)
     (worktree / "tracked.txt").write_text("changed\n")
@@ -368,7 +373,21 @@ async def test_typed_git_creates_isolated_worktree_and_collects_diff(tmp_path: P
 
     assert _git(repository, "rev-parse", "HEAD").strip() == new_primary
     assert (repository / "tracked.txt").read_text() == "base\n"
-    (worktree / "tracked.txt").write_text("base\n")
+    _git(worktree, "add", ".")
+    _git(
+        worktree,
+        "-c",
+        "user.name=Worker",
+        "-c",
+        "user.email=worker@example.invalid",
+        "commit",
+        "-m",
+        "worker commit",
+    )
+    assert _git(worktree, "rev-parse", "HEAD").strip() != new_primary
+    committed = await git.inspect(worktree, new_primary)
+    assert set(committed.changed_files) == names
+    assert b"changed" in committed.diff
     await git.remove_worktree(repository, worktree)
 
 

@@ -152,13 +152,29 @@ class ExecutionSettings(BaseModel):
         pattern=r"^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$",
     )
     proxy_runtime_root: Path = Path("/run/vuzol/proxy")
+    sandbox_seccomp_profile: Path | None = None
+    sandbox_seccomp_profile_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
-    @field_validator("rootless_docker_socket", "proxy_runtime_root")
+    @field_validator("rootless_docker_socket", "proxy_runtime_root", "sandbox_seccomp_profile")
     @classmethod
-    def require_absolute_execution_path(cls, value: Path) -> Path:
+    def require_absolute_execution_path(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return value
         if not value.is_absolute():
             raise ValueError("execution paths must be absolute")
         return value
+
+    @model_validator(mode="after")
+    def validate_seccomp_configuration(self) -> "ExecutionSettings":
+        configured = self.sandbox_seccomp_profile is not None
+        if configured != (self.sandbox_seccomp_profile_sha256 is not None):
+            raise ValueError("sandbox seccomp path and digest must be configured together")
+        if self.enabled and not configured:
+            raise ValueError("enabled execution requires a pinned sandbox seccomp profile")
+        return self
 
 
 class Settings(BaseSettings):

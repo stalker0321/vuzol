@@ -1,6 +1,7 @@
 """Real migrated-rootless acceptance for the production proxy service manager."""
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -26,6 +27,11 @@ def _required_path(name: str) -> Path:
     if value is None:
         pytest.skip(f"{name} is required for explicit rootless proxy acceptance")
     return Path(value)
+
+
+def _seccomp_profile() -> tuple[Path, str]:
+    path = _required_path("VUZOL_SANDBOX_SECCOMP_PROFILE")
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _docker(socket: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
@@ -172,6 +178,7 @@ def test_real_production_sandbox_negative_network_matrix() -> None:
     assert sandbox_inspect.returncode == 0, sandbox_inspect.stderr
     sandbox_id = json.loads(sandbox_inspect.stdout)[0]["Id"]
     sandbox_image = f"vuzol-sandbox@{sandbox_id}"
+    seccomp_profile, seccomp_digest = _seccomp_profile()
 
     manager = ProxyServiceManager(socket, runtime_root, image)
     identity = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), 1
@@ -242,6 +249,8 @@ function noAlternateDns() { return new Promise((resolve,reject) => {
         image=sandbox_image,
         uid=10001,
         gid=10001,
+        seccomp_profile=seccomp_profile,
+        seccomp_profile_sha256=seccomp_digest,
         working_directory=Path("/workspace"),
         mounts=(),
         cpu_count=0.25,
@@ -294,6 +303,7 @@ def test_real_controlled_egress_abnormal_exit_cleans_every_resource(termination:
     assert sandbox_inspect.returncode == 0, sandbox_inspect.stderr
     sandbox_id = json.loads(sandbox_inspect.stdout)[0]["Id"]
     sandbox_image = f"vuzol-sandbox@{sandbox_id}"
+    seccomp_profile, seccomp_digest = _seccomp_profile()
     identity = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), 1
     process_id = uuid.uuid4()
     invocation = MagicMock(
@@ -316,6 +326,8 @@ def test_real_controlled_egress_abnormal_exit_cleans_every_resource(termination:
             image=sandbox_image,
             uid=10001,
             gid=10001,
+            seccomp_profile=seccomp_profile,
+            seccomp_profile_sha256=seccomp_digest,
             working_directory=Path("/workspace"),
             mounts=(),
             cpu_count=0.25,

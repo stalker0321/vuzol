@@ -2,12 +2,13 @@
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import stat
 import time
 from pathlib import Path
 
-from vuzol.execution.domain import ProcessEnvelope
+from vuzol.execution.domain import MountMode, ProcessEnvelope
 from vuzol.execution.paths import PathViolation
 from vuzol.providers.ports import CodexProcessResult
 from vuzol.workflows.ports import CancellationContext
@@ -143,6 +144,27 @@ class ArtifactOutputLimit(RuntimeError):
     pass
 
 
+def validate_seccomp_profile(path: Path, expected_sha256: str) -> Path:
+    try:
+        path_stat = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise SandboxError("sandbox seccomp profile is unavailable") from error
+    if path.is_symlink() or resolved != path:
+        raise SandboxError("sandbox seccomp profile must not use symlinks")
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise SandboxError("sandbox seccomp profile is not a regular file")
+    if path_stat.st_uid not in {0, os.geteuid()} or path_stat.st_mode & 0o022:
+        raise SandboxError("sandbox seccomp profile ownership or mode is unsafe")
+    try:
+        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise SandboxError("sandbox seccomp profile is unreadable") from error
+    if actual_sha256 != expected_sha256:
+        raise SandboxError("sandbox seccomp profile digest mismatch")
+    return resolved
+
+
 async def _bounded_read(stream: asyncio.StreamReader | None, maximum: int) -> bytes:
     if stream is None:
         return b""
@@ -158,6 +180,7 @@ async def _bounded_read(stream: asyncio.StreamReader | None, maximum: int) -> by
 
 def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple[str, ...]:
     spec = envelope.sandbox
+    seccomp_profile = validate_seccomp_profile(spec.seccomp_profile, spec.seccomp_profile_sha256)
     arguments = [
         "docker",
         "--host",
@@ -178,6 +201,8 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         "ALL",
         "--security-opt",
         "no-new-privileges:true",
+        "--security-opt",
+        f"seccomp={seccomp_profile}",
         "--memory",
         str(spec.memory_bytes),
         "--memory-swap",
@@ -212,9 +237,10 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
             raise PathViolation("sandbox mount source is unavailable") from error
         if source == Path("/var/run/docker.sock") or source.name == "docker.sock":
             raise PathViolation("Docker socket mount is prohibited")
-        arguments.extend(
-            ("--mount", f"type=bind,src={source},dst={mount.target},{mount.mode.value}")
-        )
+        mount_spec = f"type=bind,src={source},dst={mount.target}"
+        if mount.mode is MountMode.READ_ONLY:
+            mount_spec += ",readonly"
+        arguments.extend(("--mount", mount_spec))
     for key, value in sorted(spec.environment.items()):
         arguments.extend(("--env", f"{key}={value}"))
     if spec.https_proxy_url is not None:

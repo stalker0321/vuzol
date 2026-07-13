@@ -13,7 +13,7 @@ from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTranspor
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.proxy_service import ProxyServiceManager
-from vuzol.execution.sandbox import RootlessDockerRuntime
+from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
 from vuzol.providers.codex import CodexCliAdapter
@@ -44,6 +44,11 @@ async def run() -> None:
     configure_logging(service=f"{settings.service_name}-executor", level=settings.log_level)
     if not settings.execution.enabled:
         raise RuntimeError("execution worker is disabled")
+    seccomp_profile = settings.execution.sandbox_seccomp_profile
+    seccomp_digest = settings.execution.sandbox_seccomp_profile_sha256
+    if seccomp_profile is None or seccomp_digest is None:
+        raise RuntimeError("execution worker has no pinned sandbox seccomp profile")
+    validate_seccomp_profile(seccomp_profile, seccomp_digest)
     sandbox_runtime = RootlessDockerRuntime(settings.execution.rootless_docker_socket)
     if settings.execution.require_preflight:
         await sandbox_runtime.preflight()

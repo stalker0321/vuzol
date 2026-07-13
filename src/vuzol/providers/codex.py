@@ -15,6 +15,35 @@ from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.ports import CodexInvocation, CodexProcessTransport
 from vuzol.workflows.ports import CancellationContext
 
+CODEX_PERMISSION_PROFILE = "vuzol-executor"
+CODEX_PERMISSION_CONFIG = (
+    'permissions.vuzol-executor={filesystem={":minimal"="read",'
+    '"/workspace"="write","/artifacts"="write","/codex-home"="none"},'
+    "network={enabled=false}}"
+)
+
+
+def canonical_codex_argv() -> tuple[str, ...]:
+    """Return the only Codex command accepted by the production sandbox transport."""
+    return (
+        "codex",
+        "exec",
+        "--json",
+        "--strict-config",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--config",
+        'approval_policy="never"',
+        "--config",
+        f'default_permissions="{CODEX_PERMISSION_PROFILE}"',
+        "--config",
+        CODEX_PERMISSION_CONFIG,
+        "--cd",
+        "/workspace",
+        "-",
+    )
+
 
 class CodexCliAdapter:
     adapter_version = "codex-cli.v1"
@@ -51,19 +80,7 @@ class CodexCliAdapter:
             "output_schema": request.output_json_schema,
         }
         invocation = CodexInvocation(
-            argv=(
-                "codex",
-                "exec",
-                "--json",
-                "--strict-config",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--sandbox",
-                "workspace-write",
-                "--cd",
-                "/workspace",
-                "-",
-            ),
+            argv=canonical_codex_argv(),
             stdin=json.dumps(envelope, ensure_ascii=False),
             runtime_identity=profile.runtime_identity,
             state_directory=str(profile.state_directory),

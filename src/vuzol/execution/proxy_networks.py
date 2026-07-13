@@ -15,6 +15,8 @@ See STEP_08_PROXY_EGRESS_DESIGN.md for topology.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -50,6 +52,10 @@ class ProxyNetworkManager:
     """
 
     def __init__(self, socket: Path) -> None:
+        if not socket.is_absolute():
+            raise ProxyNetworkError("Docker socket path must be absolute")
+        if socket in (Path("/var/run/docker.sock"), Path("/run/docker.sock")):
+            raise ProxyNetworkError("rootful Docker socket is prohibited")
         self._socket = socket
 
     async def create(
@@ -62,13 +68,17 @@ class ProxyNetworkManager:
         """Create and validate both networks for the lease.
 
         Returns a lease only after both networks pass full inspection.
-        On partial failure the first network is removed (if owned) before
-        propagating the error.
+        Creation order: internal then egress.
+        On partial failure only owned resources from this call are removed
+        after ownership/attachment verification; pre-existing resources are
+        never touched.
         """
-        internal_name = _make_network_name(step_id, lease_generation, "internal")
-        egress_name = _make_network_name(step_id, lease_generation, "egress")
+        if lease_generation < 1:
+            raise ProxyNetworkError("lease_generation must be >= 1")
+        internal_name = _make_network_name(task_id, run_id, step_id, lease_generation, "internal")
+        egress_name = _make_network_name(task_id, run_id, step_id, lease_generation, "egress")
 
-        base_labels = {
+        base_labels: dict[str, str] = {
             "vuzol.managed": "true",
             "vuzol.resource": "proxy-network",
             "vuzol.task_id": str(task_id),
@@ -77,39 +87,27 @@ class ProxyNetworkManager:
             "vuzol.lease_generation": str(lease_generation),
         }
 
-        internal_labels = {**base_labels, "vuzol.network_role": "internal"}
-        egress_labels = {**base_labels, "vuzol.network_role": "egress"}
+        # Strict rejection: any pre-existing name collides; no adoption.
+        if await self._network_exists(internal_name):
+            raise ProxyNetworkError(f"network name collision for internal network {internal_name}")
+        if await self._network_exists(egress_name):
+            raise ProxyNetworkError(f"network name collision for egress network {egress_name}")
 
-        # Check for pre-existing names (strict collision handling)
-        for name, role in [(internal_name, "internal"), (egress_name, "egress")]:
-            if await self._network_exists(name):
-                data = await self._inspect_network(name)
-                if not self._matches_ownership(data, task_id, run_id, step_id, lease_generation, role):
-                    raise ProxyNetworkError(
-                        f"network name collision for {role} network {name} with foreign ownership"
-                    )
-                # If it matches exactly and has no endpoints we can adopt (idempotent for same lease)
-                if data.get("Containers"):
-                    raise ProxyNetworkError(
-                        f"existing {role} network {name} has unexpected attachments"
-                    )
-                # For safety in this slice we still validate structure below after create path
-
-        # Create internal first
+        created: list[tuple[str, str]] = []
         try:
-            await self._create_bridge_network(internal_name, internal=True, labels=internal_labels)
+            # 1. create internal
+            await self._create_bridge_network(internal_name, internal=True, base_labels=base_labels)
+            created.append(("internal", internal_name))
             internal_data = await self._inspect_network(internal_name)
+            internal_labels = {**base_labels, "vuzol.network_role": "internal"}
             self._validate_internal_network(internal_data, internal_name, internal_labels)
 
-            # Create egress
-            try:
-                await self._create_bridge_network(egress_name, internal=False, labels=egress_labels)
-                egress_data = await self._inspect_network(egress_name)
-                self._validate_egress_network(egress_data, egress_name, egress_labels)
-            except Exception:
-                # Rollback internal only if we still own it
-                await self._safe_remove_if_owned(internal_name, task_id, run_id, step_id, lease_generation, "internal")
-                raise
+            # 2. create egress
+            await self._create_bridge_network(egress_name, internal=False, base_labels=base_labels)
+            created.append(("egress", egress_name))
+            egress_data = await self._inspect_network(egress_name)
+            egress_labels = {**base_labels, "vuzol.network_role": "egress"}
+            self._validate_egress_network(egress_data, egress_name, egress_labels)
 
             return ProxyNetworkLease(
                 internal_name=internal_name,
@@ -119,102 +117,169 @@ class ProxyNetworkManager:
                 step_id=step_id,
                 lease_generation=lease_generation,
             )
-        except Exception:
-            # Best effort rollback if internal was created but we are here
-            await self._safe_remove_if_owned(internal_name, task_id, run_id, step_id, lease_generation, "internal")
+        except Exception as primary_err:
+            # Partial rollback only for networks created in this invocation.
+            # Re-raise combined if rollback itself fails.
+            for role, name in reversed(created):
+                try:
+                    await self._rollback_owned(
+                        name,
+                        task_id,
+                        run_id,
+                        step_id,
+                        lease_generation,
+                        role,
+                    )
+                except Exception:
+                    combined = ProxyNetworkError(
+                        f"proxy network {role} creation failed and rollback failed for {name}"
+                    )
+                    raise combined from primary_err
             raise
 
     async def cleanup(self, lease: ProxyNetworkLease) -> None:
         """Idempotent exact cleanup of the lease's networks.
 
         Removes in reverse creation order (egress then internal).
-        Never removes a network that fails ownership or attachment checks.
+        Validates lease name integrity first (recomputes from identifiers).
+        Tolerates exact absence. Inspects ownership and zero attachments before rm.
+        Verifies exact disappearance after rm. Fails closed on any Docker error.
+        If egress cleanup fails, does not proceed to internal.
         """
-        for name, role in [
-            (lease.egress_name, "egress"),
-            (lease.internal_name, "internal"),
-        ]:
-            if not await self._network_exists(name):
-                continue
-            data = await self._inspect_network(name)
-            if not self._matches_ownership(
-                data, lease.task_id, lease.run_id, lease.step_id, lease.lease_generation, role
-            ):
-                raise ProxyNetworkError(f"refusing to remove foreign network {name}")
-            containers = data.get("Containers") or {}
-            if containers:
-                raise ProxyNetworkError(f"refusing to remove network {name} with attachments")
-            await self._docker("network", "rm", name)
-            # Verify gone
-            if await self._network_exists(name):
-                raise ProxyNetworkError(f"network {name} still present after rm")
+        exp_internal = _make_network_name(
+            lease.task_id, lease.run_id, lease.step_id, lease.lease_generation, "internal"
+        )
+        exp_egress = _make_network_name(
+            lease.task_id, lease.run_id, lease.step_id, lease.lease_generation, "egress"
+        )
+        if lease.internal_name != exp_internal or lease.egress_name != exp_egress:
+            raise ProxyNetworkError("lease network names are inconsistent with identifiers")
+
+        # egress first
+        await self._cleanup_one(
+            lease.egress_name,
+            lease.task_id,
+            lease.run_id,
+            lease.step_id,
+            lease.lease_generation,
+            "egress",
+        )
+        # then internal
+        await self._cleanup_one(
+            lease.internal_name,
+            lease.task_id,
+            lease.run_id,
+            lease.step_id,
+            lease.lease_generation,
+            "internal",
+        )
 
     # --- internal helpers ---
 
     def _make_labels(self, base: dict[str, str], role: str) -> list[str]:
+        """Return deterministic ordered --label flags. Role added once."""
         labels = {**base, "vuzol.network_role": role}
         out: list[str] = []
-        for k, v in labels.items():
-            out.extend(["--label", f"{k}={v}"])
+        for k in sorted(labels.keys()):
+            out.extend(["--label", f"{k}={labels[k]}"])
         return out
 
     async def _create_bridge_network(
-        self, name: str, *, internal: bool, labels: dict[str, str]
+        self, name: str, *, internal: bool, base_labels: dict[str, str]
     ) -> None:
-        args = [
-            "docker",
-            "--host",
-            f"unix://{self._socket}",
+        """Pass ONLY subcommand args to _docker. _docker alone adds executable + --host."""
+        role = "internal" if internal else "egress"
+        label_args = self._make_labels(base_labels, role)
+        subargs: list[str] = [
             "network",
             "create",
             "--driver",
             "bridge",
         ]
-        args.extend(self._make_labels(labels, "internal" if internal else "egress"))
+        subargs.extend(label_args)
         if internal:
-            args.append("--internal")
-        args.append(name)
-        await self._docker(*args)
+            subargs.append("--internal")
+        subargs.append(name)
+        await self._docker(*subargs)
 
     async def _network_exists(self, name: str) -> bool:
-        try:
-            await self._docker("network", "inspect", name, "--format", "{{.Name}}")
-            return True
-        except ProxyNetworkError:
-            return False
+        """Reliable existence via filtered ls.
+
+        Command failure (e.g. daemon unavailable) raises.
+        Empty result = absent.
+        Exact name match = present.
+        Multiple ambiguous = fail closed.
+        """
+        out = await self._docker(
+            "network",
+            "ls",
+            "--filter",
+            f"name={name}",
+            "--format",
+            "{{.Name}}",
+        )
+        lines = [line.strip() for line in out.splitlines() if line.strip()]
+        exact = [nm for nm in lines if nm == name]
+        if len(exact) > 1:
+            raise ProxyNetworkError(f"ambiguous network list result for {name}")
+        return len(exact) == 1
 
     async def _inspect_network(self, name: str) -> dict:
         out = await self._docker("network", "inspect", name, "--format", "{{json .}}")
         try:
-            return json.loads(out)
-        except json.JSONDecodeError as e:
+            data = json.loads(out)
+        except (json.JSONDecodeError, TypeError) as e:
             raise ProxyNetworkError(f"malformed network inspect for {name}") from e
+        if not isinstance(data, dict):
+            raise ProxyNetworkError(f"malformed network inspect for {name}")
+        return data
 
-    def _validate_common(self, data: dict, expected_name: str, expected_labels: dict[str, str]) -> None:
+    def _validate_common(
+        self, data: dict, expected_name: str, expected_labels: dict[str, str]
+    ) -> None:
+        if not isinstance(data, dict):
+            raise ProxyNetworkError(f"malformed inspect JSON for {expected_name}")
         if data.get("Name") != expected_name:
             raise ProxyNetworkError(f"name mismatch: {data.get('Name')} != {expected_name}")
         if data.get("Driver") != "bridge":
             raise ProxyNetworkError(f"unexpected driver for {expected_name}")
-        if data.get("Attachable") is True:
+        if data.get("Attachable") is not False:
             raise ProxyNetworkError(f"unexpected Attachable for {expected_name}")
-        labels = data.get("Labels") or {}
+        ingress = data.get("Ingress")
+        if ingress is not None and ingress is not False:
+            raise ProxyNetworkError(f"unexpected Ingress for {expected_name}")
+        if data.get("EnableIPv6") is not False:
+            raise ProxyNetworkError(f"unexpected EnableIPv6 for {expected_name}")
+        labels = data.get("Labels")
+        if not isinstance(labels, dict):
+            raise ProxyNetworkError(f"malformed Labels for {expected_name}")
         for k, v in expected_labels.items():
             if labels.get(k) != v:
                 raise ProxyNetworkError(f"missing or wrong label {k} on {expected_name}")
-        # containers/endpoints must be empty for fresh lease
-        containers = data.get("Containers") or {}
+        # no unexpected vuzol.* ownership labels
+        for k in list(labels.keys()):
+            if k.startswith("vuzol.") and k not in expected_labels:
+                raise ProxyNetworkError(f"unexpected vuzol label {k} on {expected_name}")
+        # zero attached containers/endpoints
+        containers = data.get("Containers")
+        if containers is None:
+            containers = {}
+        if not isinstance(containers, dict):
+            raise ProxyNetworkError(f"malformed Containers for {expected_name}")
         if containers:
-            raise ProxyNetworkError(f"unexpected containers on {expected_name}: {list(containers.keys())}")
+            keys = list(containers.keys())
+            raise ProxyNetworkError(f"unexpected containers on {expected_name}: {keys}")
+        if expected_name in {"bridge", "host", "none"}:
+            raise ProxyNetworkError(f"reserved network name {expected_name}")
 
     def _validate_internal_network(self, data: dict, name: str, labels: dict[str, str]) -> None:
         self._validate_common(data, name, labels)
-        if not data.get("Internal"):
+        if data.get("Internal") is not True:
             raise ProxyNetworkError(f"internal network {name} is not Internal")
-        # IPAM etc left to Docker defaults; no host exposure expected
 
     def _validate_egress_network(self, data: dict, name: str, labels: dict[str, str]) -> None:
         self._validate_common(data, name, labels)
-        if data.get("Internal"):
+        if data.get("Internal") is True:
             raise ProxyNetworkError(f"egress network {name} must not be Internal")
 
     def _matches_ownership(
@@ -227,6 +292,8 @@ class ProxyNetworkManager:
         role: str,
     ) -> bool:
         labels = data.get("Labels") or {}
+        if not isinstance(labels, dict):
+            return False
         return (
             labels.get("vuzol.managed") == "true"
             and labels.get("vuzol.resource") == "proxy-network"
@@ -237,7 +304,31 @@ class ProxyNetworkManager:
             and labels.get("vuzol.lease_generation") == str(lease_generation)
         )
 
-    async def _safe_remove_if_owned(
+    async def _rollback_owned(
+        self,
+        name: str,
+        task_id: UUID,
+        run_id: UUID,
+        step_id: UUID,
+        lease_generation: int,
+        role: str,
+    ) -> None:
+        """Inspect, verify exact ownership+role+no attachments, rm, verify absent.
+        Raises on any failure to ensure no owned partial remains.
+        """
+        if not await self._network_exists(name):
+            return
+        data = await self._inspect_network(name)
+        if not self._matches_ownership(data, task_id, run_id, step_id, lease_generation, role):
+            raise ProxyNetworkError(f"rollback refused to touch non-owned network {name}")
+        containers = data.get("Containers") or {}
+        if containers:
+            raise ProxyNetworkError(f"rollback refused to remove network {name} with attachments")
+        await self._docker("network", "rm", name)
+        if await self._network_exists(name):
+            raise ProxyNetworkError(f"rollback: network {name} still present after rm")
+
+    async def _cleanup_one(
         self,
         name: str,
         task_id: UUID,
@@ -248,38 +339,64 @@ class ProxyNetworkManager:
     ) -> None:
         if not await self._network_exists(name):
             return
-        try:
-            data = await self._inspect_network(name)
-            if self._matches_ownership(data, task_id, run_id, step_id, lease_generation, role):
-                containers = data.get("Containers") or {}
-                if not containers:
-                    await self._docker("network", "rm", name)
-        except Exception:
-            # best effort; do not mask original error
-            pass
+        data = await self._inspect_network(name)
+        if not self._matches_ownership(data, task_id, run_id, step_id, lease_generation, role):
+            raise ProxyNetworkError(f"refusing to remove foreign network {name}")
+        containers = data.get("Containers") or {}
+        if containers:
+            raise ProxyNetworkError(f"refusing to remove network {name} with attachments")
+        await self._docker("network", "rm", name)
+        if await self._network_exists(name):
+            raise ProxyNetworkError(f"network {name} still present after rm")
 
     async def _docker(self, *args: str) -> str:
-        process = await asyncio.create_subprocess_exec(
-            "docker",
-            "--host",
-            f"unix://{self._socket}",
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent"},
-        )
-        stdout, _stderr = await process.communicate()
+        """Single boundary for executable, host, socket, minimal env, timeout, reaping.
+        Callers MUST pass only subcommand args (e.g. 'network', 'create', ...).
+        """
+        socket_str = f"unix://{self._socket}"
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "--host",
+                socket_str,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "HOME": "/nonexistent",
+                },
+            )
+        except Exception as e:
+            raise ProxyNetworkError("rootless Docker network operation failed") from e
+
+        try:
+            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=30.0)
+        except TimeoutError:
+            with contextlib.suppress(Exception):
+                process.kill()
+            await process.wait()
+            raise ProxyNetworkError("rootless Docker network operation timed out") from None
+
         if process.returncode != 0:
-            # Fail closed without leaking raw command/env details
-            raise ProxyNetworkError(f"rootless Docker network operation failed: {args[0] if args else 'unknown'}")
+            # sanitized: no raw stderr, no full command, no env, no socket in message
+            raise ProxyNetworkError("rootless Docker network operation failed")
         return stdout.decode("utf-8", "replace")
 
 
-def _make_network_name(step_id: UUID, lease_generation: int, role: str) -> str:
-    """Deterministic short name.
+def _make_network_name(
+    task_id: UUID, run_id: UUID, step_id: UUID, lease_generation: int, role: str
+) -> str:
+    """Deterministic SHA-256 derived name from complete lease identity.
 
-    Uses first 12 chars of step_id (trusted) + generation + role.
-    Must stay well under Docker name limits.
+    Includes task_id, run_id, step_id, lease_generation, role.
+    Distinguishes internal/egress. Collision resistant short id.
+    No user text, paths, or arbitrary content.
     """
-    short = str(step_id)[:12]
-    return f"vuzol-{short}-{lease_generation}-{role}"
+    if lease_generation < 1:
+        raise ProxyNetworkError("lease_generation must be >= 1")
+    if role not in ("internal", "egress"):
+        raise ProxyNetworkError(f"invalid network role {role}")
+    material = f"{task_id}:{run_id}:{step_id}:{lease_generation}:{role}".encode()
+    digest = hashlib.sha256(material).hexdigest()[:12]
+    return f"vuzol-{digest}-{role}"

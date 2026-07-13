@@ -773,7 +773,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
         pid,
         CodexProcessResult(
             0,
-            '\n'.join(
+            "\n".join(
                 (
                     '{"type":"thought","data":"private output"}',
                     '{"type":"end","stopReason":"Cancelled"}',

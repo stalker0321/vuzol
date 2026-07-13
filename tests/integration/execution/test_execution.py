@@ -153,7 +153,7 @@ def test_docker_i_flag_passes_stdin_to_container() -> None:
     input_data = b"stdin-reaches-container-test-12345\n"
     # Use a minimal image; alpine will be pulled if not present (test env supports it)
     proc = subprocess.run(
-        ["docker", "run", "--rm", "-i", "alpine", "cat"],  # noqa: S607
+        ["docker", "run", "--rm", "-i", "alpine", "cat"],
         input=input_data,
         capture_output=True,
         timeout=60,

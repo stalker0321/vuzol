@@ -21,6 +21,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 
@@ -224,7 +225,7 @@ class ProxyNetworkManager:
             raise ProxyNetworkError(f"ambiguous network list result for {name}")
         return len(exact) == 1
 
-    async def _inspect_network(self, name: str) -> dict:
+    async def _inspect_network(self, name: str) -> dict[str, Any]:
         out = await self._docker("network", "inspect", name, "--format", "{{json .}}")
         try:
             data = json.loads(out)
@@ -235,7 +236,7 @@ class ProxyNetworkManager:
         return data
 
     def _validate_common(
-        self, data: dict, expected_name: str, expected_labels: dict[str, str]
+        self, data: dict[str, Any], expected_name: str, expected_labels: dict[str, str]
     ) -> None:
         if not isinstance(data, dict):
             raise ProxyNetworkError(f"malformed inspect JSON for {expected_name}")
@@ -272,19 +273,23 @@ class ProxyNetworkManager:
         if expected_name in {"bridge", "host", "none"}:
             raise ProxyNetworkError(f"reserved network name {expected_name}")
 
-    def _validate_internal_network(self, data: dict, name: str, labels: dict[str, str]) -> None:
+    def _validate_internal_network(
+        self, data: dict[str, Any], name: str, labels: dict[str, str]
+    ) -> None:
         self._validate_common(data, name, labels)
         if data.get("Internal") is not True:
             raise ProxyNetworkError(f"internal network {name} is not Internal")
 
-    def _validate_egress_network(self, data: dict, name: str, labels: dict[str, str]) -> None:
+    def _validate_egress_network(
+        self, data: dict[str, Any], name: str, labels: dict[str, str]
+    ) -> None:
         self._validate_common(data, name, labels)
         if data.get("Internal") is True:
             raise ProxyNetworkError(f"egress network {name} must not be Internal")
 
     def _matches_ownership(
         self,
-        data: dict,
+        data: dict[str, Any],
         task_id: UUID,
         run_id: UUID,
         step_id: UUID,

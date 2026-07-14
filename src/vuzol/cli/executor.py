@@ -8,6 +8,7 @@ from contextlib import suppress
 
 from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
 from vuzol.config.models import SandboxNetworkMode
+from vuzol.execution.access import RootlessIdentityResolver, WorktreeAccessManager
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
 from vuzol.execution.finalization import TrustedGateRunner, WorkerFinalizer
@@ -56,6 +57,21 @@ async def run() -> None:
     sandbox_runtime = RootlessDockerRuntime(settings.execution.rootless_docker_socket)
     if settings.execution.require_preflight:
         await sandbox_runtime.preflight()
+    worktree_access = WorktreeAccessManager(
+        settings.worktree_root,
+        RootlessIdentityResolver(settings.execution.rootless_docker_socket),
+    )
+    await worktree_access.preflight(
+        tuple(
+            sorted(
+                {
+                    (sandbox.uid, sandbox.gid)
+                    for sandbox in runtime.registries.sandboxes.items()
+                    if sandbox.enabled
+                }
+            )
+        )
+    )
     engine = create_engine(settings, resolve_database_dsn(settings))
     factory = create_session_factory(engine)
     owner = f"{socket.gethostname()}:{os.getpid()}:executor"
@@ -147,6 +163,7 @@ async def run() -> None:
             worktrees=worktree_service,
             artifacts=artifact_store,
             finalizer=finalizer,
+            worktree_access=worktree_access,
         )
         worktree_handler = PrepareWorktreeHandler(
             factory,

@@ -10,6 +10,7 @@ from typing import Protocol
 from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.execution.access import WorktreeAccessError, WorktreeAccessLease
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.domain import ProcessEnvelope
 from vuzol.execution.git import GitError
@@ -243,6 +244,7 @@ class WorkerFinalizer:
         provider_attempt: int,
         gate_context: GateExecutionContext | None = None,
         cancellation: CancellationContext | None = None,
+        access: WorktreeAccessLease | None = None,
     ) -> FinalizedWorkerResult:
         inspection = await self._git.inspect(worktree, capsule.base_commit)
         evidence = FinalizationEvidence(
@@ -257,33 +259,47 @@ class WorkerFinalizer:
             ),
             gates=(),
         )
-        if inspection.head != capsule.base_commit:
-            self._fail("worker_precommitted", "provider changed worktree HEAD", evidence)
-        if inspection.branch != capsule.target_branch:
-            self._fail("worker_branch_mismatch", "worktree branch differs from capsule", evidence)
+        gate_runs: tuple[GateRun, ...] = ()
         try:
-            await self._git.require_no_remotes(worktree)
-        except GitError as error:
-            self._fail("worker_git_isolation", str(error), evidence)
-        if not inspection.changed_files:
-            self._fail("worker_empty_change", "implementation produced no changes", evidence)
-        if not all(
-            path_is_allowed(path, capsule.allowed_paths) for path in inspection.changed_files
-        ):
-            self._fail("worker_scope_violation", "implementation exceeded allowed paths", evidence)
-        try:
-            gate_runs = await self._gates.run(
-                worktree,
-                capsule.required_gates,
-                timeout_seconds=capsule.maximum_execution_seconds,
-                context=gate_context,
-                cancellation=cancellation,
+            if inspection.head != capsule.base_commit:
+                self._fail("worker_precommitted", "provider changed worktree HEAD", evidence)
+            if inspection.branch != capsule.target_branch:
+                self._fail(
+                    "worker_branch_mismatch", "worktree branch differs from capsule", evidence
+                )
+            try:
+                await self._git.require_no_remotes(worktree)
+            except GitError as error:
+                self._fail("worker_git_isolation", str(error), evidence)
+            if not inspection.changed_files:
+                self._fail("worker_empty_change", "implementation produced no changes", evidence)
+            if not all(
+                path_is_allowed(path, capsule.allowed_paths) for path in inspection.changed_files
+            ):
+                self._fail(
+                    "worker_scope_violation", "implementation exceeded allowed paths", evidence
+                )
+            try:
+                gate_runs = await self._gates.run(
+                    worktree,
+                    capsule.required_gates,
+                    timeout_seconds=capsule.maximum_execution_seconds,
+                    context=gate_context,
+                    cancellation=cancellation,
+                )
+            except ValueError as error:
+                self._fail("worker_gate_registry", str(error), evidence)
+            except RuntimeError as error:
+                self._fail("worker_gate_execution", type(error).__name__, evidence)
+            evidence = evidence.model_copy(
+                update={"gates": tuple(run.evidence for run in gate_runs)}
             )
-        except ValueError as error:
-            self._fail("worker_gate_registry", str(error), evidence)
-        except RuntimeError as error:
-            self._fail("worker_gate_execution", type(error).__name__, evidence)
-        evidence = evidence.model_copy(update={"gates": tuple(run.evidence for run in gate_runs)})
+        finally:
+            if access is not None:
+                try:
+                    await access.revoke()
+                except WorktreeAccessError as error:
+                    self._fail("worker_access_revoke", str(error), evidence, gate_runs)
         if any(run.evidence.exit_code != 0 for run in gate_runs):
             self._fail(
                 "worker_gate_failed",

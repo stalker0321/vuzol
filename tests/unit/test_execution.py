@@ -1,10 +1,12 @@
 import asyncio
 import contextlib
+import errno
 import hashlib
 import io
 import json
 import os
 import signal
+import stat
 import subprocess
 import tarfile
 import uuid
@@ -19,6 +21,20 @@ from vuzol.config.models import (
     NetworkPolicy,
     SandboxNetworkMode,
     SandboxProfileConfig,
+)
+from vuzol.execution.access import (
+    RootlessIdentity,
+    RootlessIdentityResolver,
+    WorktreeAccessError,
+    WorktreeAccessManager,
+    _acl_has_named_user,
+    _base_acl_mode,
+    _collect_entries,
+    _get_xattr,
+    _map_id,
+    _read_id_map,
+    _require_trusted_command,
+    _set_xattr,
 )
 from vuzol.execution.artifacts import ArtifactSecretError, ArtifactStore
 from vuzol.execution.codex import (
@@ -969,6 +985,8 @@ async def test_worker_finalizer_measures_gates_and_creates_exactly_one_commit(
     artifacts.persist = AsyncMock()
     gate_runner, envelopes, runtime = _sandbox_gate_runner()
     finalizer = WorkerFinalizer(LocalGit(), gate_runner=gate_runner, artifacts=artifacts)
+    access = MagicMock()
+    access.revoke = AsyncMock()
     result = await finalizer.finalize(
         worktree=repository,
         capsule=_finalizer_capsule(base, branch),
@@ -978,6 +996,7 @@ async def test_worker_finalizer_measures_gates_and_creates_exactly_one_commit(
         provider_attempt=1,
         gate_context=_gate_context(),
         cancellation=CancellationContext(),
+        access=access,
     )
 
     manifest = result.manifest
@@ -1010,6 +1029,7 @@ async def test_worker_finalizer_measures_gates_and_creates_exactly_one_commit(
     assert all(run.evidence.argv[0] == "/usr/bin/make" for run in result.gate_runs)
     assert envelopes.build_gate.await_count == 4
     assert runtime.run.await_count == 4
+    access.revoke.assert_awaited_once()
 
     await finalizer.persist(
         AsyncMock(),
@@ -1030,6 +1050,383 @@ async def test_worker_finalizer_measures_gates_and_creates_exactly_one_commit(
         step_id=uuid.uuid4(),
         result=result,
     )
+
+
+class _FixedIdentityResolver:
+    def __init__(self, host_uid: int = 60_001, host_gid: int = 60_002) -> None:
+        self.host_uid = host_uid
+        self.host_gid = host_gid
+
+    def resolve(self, sandbox_uid: int, sandbox_gid: int) -> RootlessIdentity:
+        return RootlessIdentity(
+            namespace_pid=os.getpid(),
+            namespace_inode=os.stat("/proc/self/ns/user").st_ino,
+            sandbox_uid=sandbox_uid,
+            sandbox_gid=sandbox_gid,
+            host_uid=self.host_uid,
+            host_gid=self.host_gid,
+        )
+
+
+class _TestAccessManager(WorktreeAccessManager):
+    async def _run(self, *argv: object, capture: bool = False) -> str:
+        if Path(str(argv[0])).name == "nsenter":
+            return ""
+        return await super()._run(*argv, capture=capture)
+
+
+def _numeric_acl(path: Path) -> str:
+    return subprocess.run(
+        ("/usr/bin/getfacl", "-ncp", str(path)),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+async def _set_numeric_acl(path: Path, entry: str) -> None:
+    process = await asyncio.create_subprocess_exec(
+        "/usr/bin/setfacl",
+        "-m",
+        entry,
+        str(path),
+    )
+    assert await process.wait() == 0
+
+
+@pytest.mark.anyio
+async def test_worktree_acl_is_bounded_inherited_and_revoked(tmp_path: Path) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "task"
+    other = root / "other"
+    worktree.mkdir(parents=True)
+    other.mkdir()
+    _git(worktree, "init", "-b", "main")
+    existing = worktree / "existing.txt"
+    existing.write_text("before\n")
+    await _set_numeric_acl(existing, "u:60003:r--")
+    other_file = other / "unrelated.txt"
+    other_file.write_text("unrelated\n")
+    other_acl = _numeric_acl(other_file)
+    resolver = _FixedIdentityResolver()
+    manager = _TestAccessManager(root, resolver)  # type: ignore[arg-type]
+    await manager.preflight(((10_001, 10_001),))
+
+    lease = await manager.grant(worktree, sandbox_uid=10_001, sandbox_gid=10_001)
+    uid = resolver.host_uid
+    assert f"user:{uid}:rw-" in _numeric_acl(existing)
+    root_acl = _numeric_acl(worktree)
+    assert f"user:{uid}:rwx" in root_acl
+    assert f"default:user:{uid}:rwx" in root_acl
+    assert f"user:{uid}:" not in _numeric_acl(worktree / ".git")
+    assert os.access(existing, os.R_OK | os.W_OK)
+    assert existing.stat().st_mode & stat.S_IWOTH == 0
+
+    created_directory = worktree / "created"
+    created_directory.mkdir()
+    created_file = created_directory / "new.txt"
+    created_file.write_text("new\n")
+    assert f"user:{uid}:" in _numeric_acl(created_directory)
+    assert f"default:user:{uid}:rwx" in _numeric_acl(created_directory)
+    assert f"user:{uid}:rwx" in _numeric_acl(created_file)
+    assert _numeric_acl(other_file) == other_acl
+
+    await lease.revoke()
+    await lease.revoke()
+    assert lease.revoked
+    assert f"user:{uid}:" not in _numeric_acl(existing)
+    assert "user:60003:r--" in _numeric_acl(existing)
+    assert f"user:{uid}:" not in _numeric_acl(created_file)
+    assert f"default:user:{uid}:" not in _numeric_acl(created_directory)
+    assert existing.read_text() == "before\n"
+    assert created_file.read_text() == "new\n"
+    assert _numeric_acl(other_file) == other_acl
+
+
+@pytest.mark.anyio
+async def test_worktree_acl_rejects_symlinks_and_unavailable_support(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "task"
+    worktree.mkdir(parents=True)
+    _git(worktree, "init", "-b", "main")
+    (worktree / "escape").symlink_to(tmp_path)
+    manager = _TestAccessManager(root, _FixedIdentityResolver())  # type: ignore[arg-type]
+    with pytest.raises(WorktreeAccessError, match="symbolic link"):
+        await manager.grant(worktree, sandbox_uid=10_001, sandbox_gid=10_001)
+    with pytest.raises(PathViolation):
+        await manager.grant(tmp_path, sandbox_uid=10_001, sandbox_gid=10_001)
+
+    manager._setfacl = tmp_path / "missing-setfacl"
+    with pytest.raises(WorktreeAccessError, match="unavailable"):
+        await manager.preflight(((10_001, 10_001),))
+
+
+@pytest.mark.anyio
+async def test_worktree_acl_reclaims_entries_before_rejecting_new_symlink(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "task"
+    worktree.mkdir(parents=True)
+    _git(worktree, "init", "-b", "main")
+    existing = worktree / "existing.txt"
+    existing.write_text("before\n")
+    resolver = _FixedIdentityResolver()
+    verifying_manager = _TestAccessManager(root, resolver)  # type: ignore[arg-type]
+    lease = await verifying_manager.grant(worktree, sandbox_uid=10_001, sandbox_gid=10_001)
+    (worktree / "escape").symlink_to(tmp_path)
+    with pytest.raises(WorktreeAccessError, match="introduced a symbolic link"):
+        await lease.revoke()
+    assert f"user:{resolver.host_uid}:" not in _numeric_acl(existing)
+    assert (worktree / ".git").exists()
+
+
+@pytest.mark.anyio
+async def test_worktree_acl_rejects_changed_mapping_then_revokes_with_original_mapping(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "task"
+    worktree.mkdir(parents=True)
+    _git(worktree, "init", "-b", "main")
+    (worktree / "file.txt").write_text("value\n")
+    resolver = _FixedIdentityResolver()
+    verifying_manager = _TestAccessManager(root, resolver)  # type: ignore[arg-type]
+    lease = await verifying_manager.grant(worktree, sandbox_uid=10_001, sandbox_gid=10_001)
+    original_uid = resolver.host_uid
+    resolver.host_uid += 1
+    with pytest.raises(WorktreeAccessError, match="mapping changed"):
+        await lease.revoke()
+    resolver.host_uid = original_uid
+    await lease.revoke()
+    assert lease.revoked
+
+
+def test_rootless_identity_mapping_uses_active_namespace_files(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    socket = root / "docker.sock"
+    socket.touch()
+    pid_file = root / "docker.pid"
+    pid_file.write_text("42")
+    pid_file.chmod(0o600)
+    process = root / "proc" / "42"
+    (process / "ns").mkdir(parents=True)
+    (process / "cmdline").write_bytes(b"dockerd\0" + os.fsencode(f"--host=unix://{socket}") + b"\0")
+    (process / "uid_map").write_text(f"0 {os.geteuid()} 1\n1 100000 65536\n")
+    (process / "gid_map").write_text(f"0 {os.getegid()} 1\n1 100000 65536\n")
+    (process / "ns" / "user").touch()
+    resolver = RootlessIdentityResolver(
+        socket,
+        proc_root=root / "proc",
+        pid_file=pid_file,
+    )
+    identity = resolver.resolve(10_001, 10_001)
+    assert identity.host_uid == 110_000
+    assert identity.host_gid == 110_000
+    assert identity.namespace_pid == 42
+    with pytest.raises(WorktreeAccessError, match="non-root"):
+        resolver.resolve(0, 10_001)
+    with pytest.raises(WorktreeAccessError, match="PID file is unavailable"):
+        RootlessIdentityResolver(socket, pid_file=root / "missing.pid").resolve(10_001, 10_001)
+    pid_file.write_text("0")
+    with pytest.raises(WorktreeAccessError, match="PID is invalid"):
+        resolver.resolve(10_001, 10_001)
+    pid_file.write_text("42")
+    (process / "cmdline").write_bytes(b"python\0")
+    with pytest.raises(WorktreeAccessError, match="does not identify dockerd"):
+        resolver.resolve(10_001, 10_001)
+    (process / "cmdline").write_bytes(b"dockerd\0--host=unix:///wrong.sock\0")
+    with pytest.raises(WorktreeAccessError, match="does not own"):
+        resolver.resolve(10_001, 10_001)
+    (process / "cmdline").write_bytes(b"dockerd\0" + os.fsencode(f"--host=unix://{socket}") + b"\0")
+    (process / "uid_map").write_text("0 99999 1\n1 100000 65536\n")
+    with pytest.raises(WorktreeAccessError, match="root does not map"):
+        resolver.resolve(10_001, 10_001)
+    (process / "uid_map").write_text(f"0 {os.geteuid()} 1\n10001 {os.geteuid()} 1\n")
+    with pytest.raises(WorktreeAccessError, match="unexpectedly maps"):
+        resolver.resolve(10_001, 10_001)
+    (process / "cmdline").unlink()
+    with pytest.raises(WorktreeAccessError, match="namespace is unavailable"):
+        resolver.resolve(10_001, 10_001)
+    pid_file.chmod(0o666)
+    with pytest.raises(WorktreeAccessError, match="PID file is unsafe"):
+        resolver.resolve(10_001, 10_001)
+
+
+def test_rootless_mapping_and_acl_helpers_fail_closed(tmp_path: Path) -> None:
+    mapping = tmp_path / "mapping"
+    mapping.write_text("")
+    with pytest.raises(WorktreeAccessError, match="empty"):
+        _read_id_map(mapping)
+    mapping.write_text("not a mapping\n")
+    with pytest.raises(WorktreeAccessError, match="malformed"):
+        _read_id_map(mapping)
+    mapping.write_text("0 1000 0\n")
+    with pytest.raises(WorktreeAccessError, match="empty range"):
+        _read_id_map(mapping)
+    with pytest.raises(WorktreeAccessError, match="no unique"):
+        _map_id(((0, 1000, 1),), 10_001)
+    with pytest.raises(WorktreeAccessError, match="malformed"):
+        _acl_has_named_user(b"bad", 60_001)
+
+    missing = tmp_path / "missing-command"
+    with pytest.raises(WorktreeAccessError, match="unavailable"):
+        _require_trusted_command(missing)
+    unsafe = tmp_path / "unsafe-command"
+    unsafe.write_text("binary")
+    unsafe.chmod(0o777)
+    with pytest.raises(WorktreeAccessError, match="unsafe"):
+        _require_trusted_command(unsafe)
+    with pytest.raises(WorktreeAccessError, match="unavailable"):
+        _collect_entries(tmp_path / "missing-worktree")
+    link = tmp_path / "root-link"
+    link.symlink_to(tmp_path)
+    with pytest.raises(WorktreeAccessError, match="contained regular directory"):
+        _collect_entries(link)
+
+
+def test_acl_xattr_errors_are_safe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.touch()
+
+    def denied_getxattr(*_args: Any, **_kwargs: Any) -> bytes:
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(os, "getxattr", denied_getxattr)
+    with pytest.raises(WorktreeAccessError, match="inspection failed"):
+        _get_xattr(target, "system.posix_acl_access")
+    monkeypatch.undo()
+
+    def denied_setxattr(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(os, "setxattr", denied_setxattr)
+    with pytest.raises(WorktreeAccessError, match="restoration failed"):
+        _set_xattr(target, "system.posix_acl_access", b"value")
+
+
+@pytest.mark.anyio
+async def test_worktree_access_additional_fail_closed_boundaries(tmp_path: Path) -> None:
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    resolver = _FixedIdentityResolver()
+    manager = _TestAccessManager(root, resolver)  # type: ignore[arg-type]
+    with pytest.raises(WorktreeAccessError, match="no sandbox identities"):
+        await manager.preflight(())
+
+    no_git = root / "no-git"
+    no_git.mkdir()
+    with pytest.raises(WorktreeAccessError, match="Git metadata is missing"):
+        await manager.grant(no_git, sandbox_uid=10_001, sandbox_gid=10_001)
+
+    unsafe_file = root / "unsafe-file"
+    unsafe_file.mkdir()
+    _git(unsafe_file, "init", "-b", "main")
+    tracked = unsafe_file / "tracked.txt"
+    tracked.write_text("tracked\n")
+    await _set_numeric_acl(tracked, f"u:{resolver.host_uid}:rw-")
+    with pytest.raises(WorktreeAccessError, match="pre-existing ACL"):
+        await manager.grant(unsafe_file, sandbox_uid=10_001, sandbox_gid=10_001)
+
+    unsafe_acl = root / "unsafe-acl"
+    unsafe_acl.mkdir()
+    _git(unsafe_acl, "init", "-b", "main")
+    await _set_numeric_acl(unsafe_acl / ".git", f"u:{resolver.host_uid}:rw-")
+    with pytest.raises(WorktreeAccessError, match="Git metadata already grants"):
+        await manager.grant(unsafe_acl, sandbox_uid=10_001, sandbox_gid=10_001)
+
+    special = root / "special"
+    special.mkdir()
+    _git(special, "init", "-b", "main")
+    os.mkfifo(special / "pipe")
+    with pytest.raises(WorktreeAccessError, match="non-regular"):
+        await manager.grant(special, sandbox_uid=10_001, sandbox_gid=10_001)
+
+    with pytest.raises(WorktreeAccessError, match="command failed"):
+        await manager._run("/usr/bin/false")
+
+    plain = tmp_path / "plain"
+    plain.write_text("plain\n")
+    assert _base_acl_mode(plain) == stat.S_IMODE(plain.stat().st_mode)
+
+
+@pytest.mark.anyio
+async def test_worktree_access_rolls_back_partial_grant_and_detects_git_change(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "task"
+    worktree.mkdir(parents=True)
+    _git(worktree, "init", "-b", "main")
+    source = worktree / "source.txt"
+    source.write_text("source\n")
+    resolver = _FixedIdentityResolver()
+
+    class FailingGrant(_TestAccessManager):
+        async def _grant_entries(self, lease: Any) -> None:
+            await super()._grant_entries(lease)
+            raise WorktreeAccessError("simulated partial grant")
+
+    manager = FailingGrant(root, resolver)  # type: ignore[arg-type]
+    with pytest.raises(WorktreeAccessError, match="partial grant"):
+        await manager.grant(worktree, sandbox_uid=10_001, sandbox_gid=10_001)
+    assert f"user:{resolver.host_uid}:" not in _numeric_acl(source)
+
+    verifying_manager = _TestAccessManager(root, resolver)  # type: ignore[arg-type]
+    lease = await verifying_manager.grant(worktree, sandbox_uid=10_001, sandbox_gid=10_001)
+    (worktree / ".git").chmod(0o700)
+    with pytest.raises(WorktreeAccessError, match="Git metadata changed"):
+        await lease.revoke()
+
+
+@pytest.mark.anyio
+async def test_worktree_preflight_rejects_unverified_acl_result(tmp_path: Path) -> None:
+    root = tmp_path / "worktrees"
+    root.mkdir()
+
+    class MissingAclResult(_TestAccessManager):
+        async def _run(self, *argv: object, capture: bool = False) -> str:
+            if Path(str(argv[0])).name == "getfacl":
+                return ""
+            return await super()._run(*argv, capture=capture)
+
+    manager = MissingAclResult(root, _FixedIdentityResolver())  # type: ignore[arg-type]
+    with pytest.raises(WorktreeAccessError, match="did not retain"):
+        await manager.preflight(((10_001, 10_001),))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ("provider_failure", "cancellation"))
+async def test_provider_handler_revokes_acl_on_provider_failure_or_cancellation(
+    failure: str,
+) -> None:
+    from vuzol.providers.handlers import ProviderStepHandler
+
+    access = MagicMock()
+    access.revoke = AsyncMock()
+    handler = ProviderStepHandler(
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        worktrees=MagicMock(),
+        finalizer=MagicMock(),
+        worktree_access=MagicMock(),
+    )
+    provider_request = MagicMock(task_draft={"step09a_capsule": {}})
+    handler._build_request = AsyncMock(  # type: ignore[method-assign]
+        return_value=(provider_request, "grok-a", uuid.uuid4(), "revision")
+    )
+    handler._grant_worktree_access = AsyncMock(return_value=access)  # type: ignore[method-assign]
+    error: BaseException = (
+        asyncio.CancelledError() if failure == "cancellation" else RuntimeError("provider failure")
+    )
+    handler._execute_built = AsyncMock(side_effect=error)  # type: ignore[method-assign]
+    request = MagicMock(step_type="execute_code")
+    with pytest.raises(type(error)):
+        await handler.execute(request, CancellationContext())
+    access.revoke.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -1088,6 +1485,8 @@ async def test_failed_gate_prevents_system_commit_and_retains_measured_evidence(
     )
     gates = MagicMock()
     gates.run = AsyncMock(return_value=(gate,))
+    access = MagicMock()
+    access.revoke = AsyncMock()
     capsule = _finalizer_capsule(
         base,
         branch,
@@ -1101,12 +1500,14 @@ async def test_failed_gate_prevents_system_commit_and_retains_measured_evidence(
             worker_profile="grok-a",
             provider_usage=_normalized_usage(),
             provider_attempt=1,
+            access=access,
         )
     assert captured.value.category == "worker_gate_failed"
     assert captured.value.result.evidence.gates[0].exit_code == 2
     assert captured.value.result.gate_runs == (gate,)
     assert _git(repository, "rev-parse", "HEAD").strip() == base
     assert "src/example.py" in _git(repository, "status", "--short")
+    access.revoke.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -1386,6 +1787,7 @@ async def test_execution_coding_paths_with_mocks(tmp_path: Path) -> None:
 
     wt_dir = tmp_path / "wroot" / "p" / "run123"
     wt_dir.mkdir(parents=True, exist_ok=True)
+    (wt_dir / ".git").write_text("gitdir: /unmounted/metadata\n")
     mock_wt = MagicMock(spec=Worktree)
     mock_wt.id = uuid.uuid4()
     mock_wt.project_id = "p"
@@ -1566,6 +1968,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     state_dir = tmp_path / "profile-state"
     wt_dir = worktree_root / "p1" / str(uuid.uuid4())
     wt_dir.mkdir(parents=True, exist_ok=True)
+    (wt_dir / ".git").write_text("gitdir: /unmounted/metadata\n")
     artifact_root.mkdir()
     state_dir.mkdir()
     task_id = uuid.uuid4()
@@ -1685,7 +2088,9 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     )
 
     envelope, pid = await envf.build(inv)
-    assert envelope.sandbox.mounts[2].mode is MountMode.READ_WRITE
+    assert envelope.sandbox.mounts[1].target == Path("/workspace/.git")
+    assert envelope.sandbox.mounts[1].mode is MountMode.READ_ONLY
+    assert envelope.sandbox.mounts[3].mode is MountMode.READ_WRITE
     assert '"/codex-home"="none"' in " ".join(envelope.argv)
     gate_context = GateExecutionContext(
         task_id=task_id,
@@ -1702,9 +2107,11 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     assert gate_envelope.argv == ("/usr/bin/make", "test")
     assert gate_envelope.sandbox.image == "ex@sha256:" + "a" * 64
     assert gate_envelope.sandbox.network_disabled is True
-    assert len(gate_envelope.sandbox.mounts) == 1
+    assert len(gate_envelope.sandbox.mounts) == 2
     assert gate_envelope.sandbox.mounts[0].source == wt_dir
     assert gate_envelope.sandbox.mounts[0].target == Path("/workspace")
+    assert gate_envelope.sandbox.mounts[1].source == wt_dir / ".git"
+    assert gate_envelope.sandbox.mounts[1].mode is MountMode.READ_ONLY
     with pytest.raises(ValueError, match="trusted registry"):
         await envf.build_gate(
             gate_context,
@@ -2223,10 +2630,18 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     engine.dispose = AsyncMock()
     sandbox = MagicMock()
     sandbox.preflight = AsyncMock()
+    worktree_access = MagicMock()
+    worktree_access.preflight = AsyncMock()
 
     monkeypatch.setattr(executor_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
     monkeypatch.setattr(executor_cli, "configure_logging", lambda **_kwargs: None)
     monkeypatch.setattr(executor_cli, "RootlessDockerRuntime", lambda _socket: sandbox)
+    monkeypatch.setattr(executor_cli, "RootlessIdentityResolver", MagicMock())
+    monkeypatch.setattr(
+        executor_cli,
+        "WorktreeAccessManager",
+        lambda *_args: worktree_access,
+    )
     monkeypatch.setattr(executor_cli, "validate_seccomp_profile", MagicMock())
     monkeypatch.setattr(executor_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(executor_cli, "create_engine", lambda *_args: engine)
@@ -2252,6 +2667,7 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
 
     await executor_cli.run()
     sandbox.preflight.assert_awaited_once()
+    worktree_access.preflight.assert_awaited_once()
     run_loop.assert_awaited_once()
     engine.dispose.assert_awaited_once()
 

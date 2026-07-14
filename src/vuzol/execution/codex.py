@@ -118,6 +118,7 @@ class ExecutionEnvelopeFactory:
             if networked != (proxy_network is not None and https_proxy_url is not None):
                 raise ValueError("sandbox proxy materialization does not match network policy")
             worktree_path = contained(self._worktree_root, Path(worktree.path))
+            git_metadata_path = _worktree_git_metadata(worktree_path)
             state_path = profile.state_directory.resolve(strict=True)
             staging = (
                 self._artifact_root
@@ -141,6 +142,12 @@ class ExecutionEnvelopeFactory:
                         target=Path("/workspace"),
                         mode=MountMode.READ_WRITE,
                         purpose="task-worktree",
+                    ),
+                    SandboxMount(
+                        source=git_metadata_path,
+                        target=Path("/workspace/.git"),
+                        mode=MountMode.READ_ONLY,
+                        purpose="worktree-git-metadata",
                     ),
                     SandboxMount(
                         source=staging,
@@ -249,6 +256,7 @@ class ExecutionEnvelopeFactory:
             if seccomp_profile is None or seccomp_digest is None:
                 raise ValueError("sandbox seccomp profile is not configured")
             worktree_path = contained(self._worktree_root, Path(worktree.path))
+            git_metadata_path = _worktree_git_metadata(worktree_path)
             spec = SandboxSpec(
                 image=sandbox.image,
                 uid=sandbox.uid,
@@ -262,6 +270,12 @@ class ExecutionEnvelopeFactory:
                         target=Path("/workspace"),
                         mode=MountMode.READ_WRITE,
                         purpose="finalizer-worktree",
+                    ),
+                    SandboxMount(
+                        source=git_metadata_path,
+                        target=Path("/workspace/.git"),
+                        mode=MountMode.READ_ONLY,
+                        purpose="worktree-git-metadata",
                     ),
                 ),
                 cpu_count=sandbox.cpu_count,
@@ -522,6 +536,17 @@ def _validate_fenced_binding(invocation: CodexInvocation, worktree: Worktree, st
         or worktree.task_id != invocation.task_id
     ):
         raise ValueError("sandbox invocation is not bound to the current fenced lease")
+
+
+def _worktree_git_metadata(worktree: Path) -> Path:
+    path = worktree / ".git"
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise PathViolation("worktree Git metadata is unavailable") from error
+    if path.is_symlink() or not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+        raise PathViolation("worktree Git metadata is unsafe")
+    return path
 
 
 def _require_provider_command(argv: tuple[str, ...], provider: str, model: str) -> None:

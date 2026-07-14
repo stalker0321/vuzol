@@ -2,6 +2,7 @@
 
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -9,6 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import Capability
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.execution.access import (
+    WorktreeAccessError,
+    WorktreeAccessLease,
+    WorktreeAccessManager,
+)
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.finalization import (
     FinalizedWorkerResult,
@@ -38,6 +44,7 @@ class ProviderStepHandler:
         worktrees: WorktreeService | None = None,
         artifacts: ArtifactStore | None = None,
         finalizer: WorkerFinalizer | None = None,
+        worktree_access: WorktreeAccessManager | None = None,
     ) -> None:
         self._factory = factory
         self._registries = registries
@@ -45,20 +52,23 @@ class ProviderStepHandler:
         self._worktrees = worktrees
         self._artifacts = artifacts
         self._finalizer = finalizer
+        self._worktree_access = worktree_access
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
     ) -> StepOutcome:
-        (
+        built = (
             provider_request,
-            profile_id,
+            _profile_id,
             reservation_id,
-            configuration_revision,
+            _configuration_revision,
         ) = await self._build_request(request)
         requires_finalizer = (
             request.step_type == "execute_code" and "step09a_capsule" in provider_request.task_draft
         )
-        if requires_finalizer and (self._finalizer is None or self._worktrees is None):
+        if requires_finalizer and (
+            self._finalizer is None or self._worktrees is None or self._worktree_access is None
+        ):
             async with self._factory.begin() as session:
                 await release_reservation(
                     session, reservation_id=reservation_id, token=request.lease
@@ -69,6 +79,42 @@ class ProviderStepHandler:
                 category="worker_finalizer_unavailable",
                 summary="deterministic worker finalizer is unavailable",
             )
+        access: WorktreeAccessLease | None = None
+        if requires_finalizer:
+            assert self._worktree_access is not None
+            try:
+                access = await self._grant_worktree_access(request)
+            except (LookupError, ValueError, WorktreeAccessError) as error:
+                async with self._factory.begin() as session:
+                    await release_reservation(
+                        session, reservation_id=reservation_id, token=request.lease
+                    )
+                return StepOutcome(
+                    kind=OutcomeKind.PERMANENT_FAILURE,
+                    result={},
+                    category="worker_access_unavailable",
+                    summary=type(error).__name__,
+                )
+        try:
+            return await self._execute_built(
+                request,
+                cancellation,
+                built=built,
+                access=access,
+            )
+        finally:
+            if access is not None:
+                await access.revoke()
+
+    async def _execute_built(
+        self,
+        request: StepExecutionRequest,
+        cancellation: CancellationContext,
+        *,
+        built: tuple[ProviderRequest, str, uuid.UUID, str],
+        access: WorktreeAccessLease | None,
+    ) -> StepOutcome:
+        provider_request, profile_id, reservation_id, configuration_revision = built
         profile = self._registries.profiles.get(profile_id)
         try:
             adapter = self._adapters.get(profile_id)
@@ -146,6 +192,7 @@ class ProviderStepHandler:
                     profile_id=profile.id,
                     result=result,
                     cancellation=cancellation,
+                    access=access,
                 )
             except WorkerFinalizationError as error:
                 finalization_failure = error
@@ -232,6 +279,7 @@ class ProviderStepHandler:
         profile_id: str,
         result: ProviderResult,
         cancellation: CancellationContext,
+        access: WorktreeAccessLease | None,
     ) -> FinalizedWorkerResult:
         from vuzol.experiments.domain import WorkerEditReport, WorkerTaskCapsule
 
@@ -258,6 +306,22 @@ class ProviderStepHandler:
                 lease_generation=request.lease.generation,
             ),
             cancellation=cancellation,
+            access=access,
+        )
+
+    async def _grant_worktree_access(self, request: StepExecutionRequest) -> WorktreeAccessLease:
+        if self._worktree_access is None:
+            raise RuntimeError("worktree access manager is unavailable")
+        async with self._factory() as session:
+            worktree = await session.scalar(
+                select(Worktree).where(Worktree.run_id == request.run_id)
+            )
+            if worktree is None:
+                raise LookupError("execute_code requires a prepared worktree")
+            project = self._registries.projects.get(worktree.project_id)
+            sandbox = self._registries.sandboxes.get(project.sandbox_profile)
+        return await self._worktree_access.grant(
+            Path(worktree.path), sandbox_uid=sandbox.uid, sandbox_gid=sandbox.gid
         )
 
     async def _build_request(

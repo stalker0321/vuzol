@@ -8,10 +8,22 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.experiments.domain import ExperimentTelemetry, ReviewOutcome, stable_json_hash
+from vuzol.experiments.domain import (
+    ExperimentTelemetry,
+    InvocationTelemetry,
+    ReviewOutcome,
+    stable_json_hash,
+)
 from vuzol.storage.models import Event
 
 EVENT_TYPE = "step09a.trial_recorded"
+INVOCATION_ROLES = ("planner", "worker", "reviewer")
+USAGE_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+)
 
 
 async def record_trial(session: AsyncSession, telemetry: ExperimentTelemetry) -> uuid.UUID:
@@ -43,12 +55,10 @@ async def load_trials(session: AsyncSession, experiment_id: str) -> tuple[Experi
 
 def aggregate_trials(trials: Sequence[ExperimentTelemetry]) -> dict[str, Any]:
     outcomes = Counter(trial.final_outcome.value for trial in trials)
-    provider_input = sum(
-        invocation.usage.input_tokens or 0 for trial in trials for invocation in trial.invocations
-    )
-    provider_output = sum(
-        invocation.usage.output_tokens or 0 for trial in trials for invocation in trial.invocations
-    )
+    invocations = tuple(invocation for trial in trials for invocation in trial.invocations)
+    usage_by_role = aggregate_usage_by_role(invocations)
+    provider_input = sum(invocation.usage.input_tokens or 0 for invocation in invocations)
+    provider_output = sum(invocation.usage.output_tokens or 0 for invocation in invocations)
     total_context = sum(trial.total_context_bytes for trial in trials)
     repeated_context = sum(trial.repeated_context_bytes for trial in trials)
     false_accepts = sum(
@@ -62,6 +72,12 @@ def aggregate_trials(trials: Sequence[ExperimentTelemetry]) -> dict[str, Any]:
         "outcomes": dict(outcomes),
         "provider_input_tokens": provider_input,
         "provider_output_tokens": provider_output,
+        "provider_cached_input_tokens": _measured_total(invocations, "cached_input_tokens"),
+        "provider_reasoning_tokens": _measured_total(invocations, "reasoning_tokens"),
+        "provider_usage_unavailable_invocations": sum(
+            role_usage["unavailable_invocation_count"] for role_usage in usage_by_role.values()
+        ),
+        "usage_by_role": usage_by_role,
         "context_bytes": total_context,
         "repeated_context_bytes": repeated_context,
         "repeated_context_ratio": repeated_context / total_context if total_context else 0.0,
@@ -69,3 +85,33 @@ def aggregate_trials(trials: Sequence[ExperimentTelemetry]) -> dict[str, Any]:
         "shadow_false_rejects": false_rejects,
         "accepted_first_pass": outcomes[ReviewOutcome.ACCEPTED_FIRST_PASS.value],
     }
+
+
+def aggregate_usage_by_role(
+    invocations: Sequence[InvocationTelemetry],
+) -> dict[str, dict[str, int | None]]:
+    """Aggregate measured provider usage while preserving unavailable role metrics."""
+    result: dict[str, dict[str, int | None]] = {}
+    for role in INVOCATION_ROLES:
+        role_invocations = tuple(item for item in invocations if item.role == role)
+        reported = tuple(
+            item
+            for item in role_invocations
+            if any(getattr(item.usage, field) is not None for field in USAGE_TOKEN_FIELDS)
+        )
+        result[role] = {
+            "invocation_count": len(role_invocations),
+            "reported_invocation_count": len(reported),
+            "unavailable_invocation_count": len(role_invocations) - len(reported),
+            **{field: _measured_total(role_invocations, field) for field in USAGE_TOKEN_FIELDS},
+        }
+    return result
+
+
+def _measured_total(invocations: Sequence[InvocationTelemetry], field: str) -> int | None:
+    measured = tuple(
+        value
+        for invocation in invocations
+        if (value := getattr(invocation.usage, field)) is not None
+    )
+    return sum(measured) if measured else None

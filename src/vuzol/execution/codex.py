@@ -248,9 +248,14 @@ class ExecutionEnvelopeFactory:
             ):
                 raise ValueError("gate sandbox is not bound to the current fenced lease")
             project = self._registries.projects.get(worktree.project_id)
-            sandbox = self._registries.sandboxes.get(project.sandbox_profile)
+            validation_profile = project.validation_sandbox_profile
+            if validation_profile is None:
+                raise ValueError(f"project {project.id} has no validation sandbox profile")
+            sandbox = self._registries.sandboxes.get(validation_profile)
             if not sandbox.enabled:
                 raise ValueError("gate sandbox is disabled")
+            if sandbox.network_mode is not SandboxNetworkMode.NONE:
+                raise ValueError("gate sandbox must disable networking")
             seccomp_profile = self._settings.execution.sandbox_seccomp_profile
             seccomp_digest = self._settings.execution.sandbox_seccomp_profile_sha256
             if seccomp_profile is None or seccomp_digest is None:
@@ -290,8 +295,22 @@ class ExecutionEnvelopeFactory:
                 environment={
                     "HOME": "/tmp/home",  # noqa: S108 - container-scoped tmpfs
                     "CI": "1",
+                    "PATH": "/opt/vuzol-validation/bin:/usr/local/bin:/usr/bin:/bin",
+                    "VIRTUAL_ENV": "/opt/vuzol-validation",
+                    "UV_PROJECT_ENVIRONMENT": "/opt/vuzol-validation",
+                    "UV_NO_SYNC": "1",
+                    "UV_OFFLINE": "1",
+                    "UV_CACHE_DIR": "/tmp/uv-cache",  # noqa: S108
+                    "PYTHONPATH": "/workspace/src",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "COVERAGE_FILE": "/tmp/.coverage",  # noqa: S108
+                    "RUFF_CACHE_DIR": "/tmp/ruff-cache",  # noqa: S108
+                    "MYPY_CACHE_DIR": "/tmp/mypy-cache",  # noqa: S108
                     "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_TERMINAL_PROMPT": "0",
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "safe.directory",
+                    "GIT_CONFIG_VALUE_0": "/workspace",
                 },
             )
             return ProcessEnvelope(

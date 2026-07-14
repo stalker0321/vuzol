@@ -14,7 +14,11 @@ run-telegram:
 	$(UV) run vuzol-telegram
 
 test:
-	$(UV) run pytest
+	@if command -v vuzol-offline-test >/dev/null 2>&1; then \
+		vuzol-offline-test; \
+	else \
+		$(UV) run pytest; \
+	fi
 
 test-rootless:
 	@test -n "$(VUZOL_ROOTLESS_DOCKER_SOCKET)" || (echo "VUZOL_ROOTLESS_DOCKER_SOCKET is required" >&2; exit 2)
@@ -43,7 +47,11 @@ type-check:
 	$(UV) run mypy
 
 dependency-audit:
-	$(UV) run pip-audit
+	@if command -v vuzol-offline-dependency-audit >/dev/null 2>&1; then \
+		vuzol-offline-dependency-audit; \
+	else \
+		$(UV) run pip-audit; \
+	fi
 
 secret-scan:
 	$(UV) run detect-secrets-hook $$(git ls-files -co --exclude-standard)

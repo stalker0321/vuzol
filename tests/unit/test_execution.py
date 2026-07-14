@@ -959,7 +959,9 @@ def _gate_context() -> GateExecutionContext:
 
 def _sandbox_gate_runner() -> tuple[TrustedGateRunner, AsyncMock, AsyncMock]:
     envelopes = AsyncMock()
-    envelopes.build_gate.return_value = MagicMock(spec=ProcessEnvelope)
+    envelope = MagicMock(spec=ProcessEnvelope)
+    envelope.sandbox = MagicMock(image="validation@sha256:" + "b" * 64)
+    envelopes.build_gate.return_value = envelope
     runtime = AsyncMock()
     runtime.run.return_value = CodexProcessResult(0, "gate passed\n", "", 2)
     return TrustedGateRunner(envelopes, runtime), envelopes, runtime
@@ -1430,6 +1432,45 @@ async def test_provider_handler_revokes_acl_on_provider_failure_or_cancellation(
 
 
 @pytest.mark.anyio
+async def test_missing_validation_sandbox_prevents_provider_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vuzol.providers import handlers as provider_handlers
+    from vuzol.providers.handlers import ProviderStepHandler
+
+    monkeypatch.setattr(provider_handlers, "release_reservation", AsyncMock())
+
+    factory = MagicMock()
+    transaction = AsyncMock()
+    session = AsyncMock()
+    session.scalar.return_value = None
+    transaction.__aenter__.return_value = session
+    transaction.__aexit__.return_value = False
+    factory.begin.return_value = transaction
+    handler = ProviderStepHandler(
+        factory,
+        MagicMock(),
+        MagicMock(),
+        worktrees=MagicMock(),
+        finalizer=MagicMock(),
+        worktree_access=MagicMock(),
+    )
+    provider_request = MagicMock(task_draft={"step09a_capsule": {}})
+    handler._build_request = AsyncMock(  # type: ignore[method-assign]
+        return_value=(provider_request, "grok-a", uuid.uuid4(), "revision")
+    )
+    handler._grant_worktree_access = AsyncMock(  # type: ignore[method-assign]
+        side_effect=WorktreeAccessError("project has no validation sandbox profile")
+    )
+    handler._execute_built = AsyncMock()  # type: ignore[method-assign]
+
+    outcome = await handler.execute(MagicMock(step_type="execute_code"), CancellationContext())
+
+    assert outcome.category == "worker_access_unavailable"
+    handler._execute_built.assert_not_awaited()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("edit_path", "expected_category"),
     ((None, "worker_empty_change"), ("outside.txt", "worker_scope_violation")),
@@ -1526,6 +1567,24 @@ async def test_trusted_gate_registry_rejects_arbitrary_text_before_execution(
             cancellation=CancellationContext(),
         )
     execute.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_trusted_gate_registry_resolves_offline_security_preflight(
+    tmp_path: Path,
+) -> None:
+    runner, envelopes, runtime = _sandbox_gate_runner()
+    result = await runner.run(
+        tmp_path,
+        (RequiredGate(name="security", command_id="make security"),),
+        timeout_seconds=10,
+        context=_gate_context(),
+        cancellation=CancellationContext(),
+    )
+    assert result[0].evidence.argv == ("/usr/bin/make", "security")
+    assert result[0].evidence.exit_code == 0
+    envelopes.build_gate.assert_awaited_once()
+    runtime.run.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -1813,7 +1872,9 @@ async def test_execution_coding_paths_with_mocks(tmp_path: Path) -> None:
 
     mock_reg = MagicMock()
     mock_reg.profiles.get.return_value = MagicMock(state_directory=tmp_path, enabled=True)
-    mock_reg.projects.get.return_value = MagicMock(sandbox_profile="def")
+    mock_reg.projects.get.return_value = MagicMock(
+        sandbox_profile="def", validation_sandbox_profile="validation"
+    )
     mock_reg.sandboxes.get.return_value = SandboxProfileConfig(
         id="def", image="ex@sha256:" + "0" * 64, enabled=True
     )
@@ -2016,7 +2077,9 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
 
     mock_reg = MagicMock()
     mock_reg.profiles.get.return_value = MagicMock(state_directory=state_dir, enabled=True)
-    mock_reg.projects.get.return_value = MagicMock(sandbox_profile="def")
+    mock_reg.projects.get.return_value = MagicMock(
+        sandbox_profile="def", validation_sandbox_profile="validation"
+    )
     mock_reg.sandboxes.get.return_value = SandboxProfileConfig(
         id="def", image="ex@sha256:" + "a" * 64, enabled=True
     )
@@ -2076,9 +2139,20 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     targets = await envf.proxy_targets(inv)
     assert [(target.hostname, target.port) for target in targets] == [("api.openai.com", 443)]
 
-    mock_reg.projects.get.return_value = MagicMock(sandbox_profile="def")
-    mock_reg.sandboxes.get.return_value = SandboxProfileConfig(
-        id="def", image="ex@sha256:" + "a" * 64, enabled=True
+    mock_reg.projects.get.return_value = MagicMock(
+        sandbox_profile="def", validation_sandbox_profile="validation"
+    )
+    provider_sandbox = SandboxProfileConfig(
+        id="def", image="provider@sha256:" + "a" * 64, enabled=True
+    )
+    validation_sandbox = SandboxProfileConfig(
+        id="validation",
+        image="validation@sha256:" + "b" * 64,
+        enabled=True,
+        inner_codex_sandbox_required=False,
+    )
+    mock_reg.sandboxes.get.side_effect = lambda profile: (
+        validation_sandbox if profile == "validation" else provider_sandbox
     )
     mock_reg.profiles.get.return_value = MagicMock(
         state_directory=state_dir,
@@ -2088,6 +2162,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     )
 
     envelope, pid = await envf.build(inv)
+    assert envelope.sandbox.image == "provider@sha256:" + "a" * 64
     assert envelope.sandbox.mounts[1].target == Path("/workspace/.git")
     assert envelope.sandbox.mounts[1].mode is MountMode.READ_ONLY
     assert envelope.sandbox.mounts[3].mode is MountMode.READ_WRITE
@@ -2105,8 +2180,12 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
         gate_context, ("/usr/bin/make", "test"), timeout_seconds=30
     )
     assert gate_envelope.argv == ("/usr/bin/make", "test")
-    assert gate_envelope.sandbox.image == "ex@sha256:" + "a" * 64
+    assert gate_envelope.sandbox.image == "validation@sha256:" + "b" * 64
     assert gate_envelope.sandbox.network_disabled is True
+    assert gate_envelope.sandbox.environment["UV_NO_SYNC"] == "1"
+    assert gate_envelope.sandbox.environment["UV_OFFLINE"] == "1"
+    assert gate_envelope.sandbox.environment["PYTHONPATH"] == "/workspace/src"
+    assert all("provider-state" not in mount.purpose for mount in gate_envelope.sandbox.mounts)
     assert len(gate_envelope.sandbox.mounts) == 2
     assert gate_envelope.sandbox.mounts[0].source == wt_dir
     assert gate_envelope.sandbox.mounts[0].target == Path("/workspace")
@@ -2129,6 +2208,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="fenced lease"):
         await envf.build_gate(wrong_run, ("/usr/bin/make", "test"), timeout_seconds=30)
+    mock_reg.sandboxes.get.side_effect = None
     mock_reg.sandboxes.get.return_value = SandboxProfileConfig(
         id="def", image="ex@sha256:" + "a" * 64, enabled=False
     )
@@ -2670,6 +2750,49 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     worktree_access.preflight.assert_awaited_once()
     run_loop.assert_awaited_once()
     engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_validation_image_preflight_uses_fixed_offline_commands_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    from vuzol.cli.executor import (
+        VALIDATION_IMAGE_PREFLIGHT_COMMANDS,
+        _preflight_validation_images,
+    )
+
+    sandbox = SandboxProfileConfig(
+        id="validation",
+        image="validation@sha256:" + "c" * 64,
+        network_mode=SandboxNetworkMode.NONE,
+    )
+    registries = MagicMock()
+    registries.projects.items.return_value = (
+        MagicMock(enabled=True, validation_sandbox_profile="validation"),
+    )
+    registries.sandboxes.get.return_value = sandbox
+    runtime = MagicMock()
+    runtime.run = AsyncMock(return_value=CodexProcessResult(0, "version", "", 1))
+    seccomp, digest = _seccomp_profile(tmp_path)
+
+    await _preflight_validation_images(
+        runtime, registries, seccomp_profile=seccomp, seccomp_digest=digest
+    )
+
+    assert runtime.run.await_count == 3
+    envelopes = [call.args[0] for call in runtime.run.await_args_list]
+    assert tuple(envelope.argv for envelope in envelopes) == VALIDATION_IMAGE_PREFLIGHT_COMMANDS
+    assert all(envelope.sandbox.image == sandbox.image for envelope in envelopes)
+    assert all(envelope.sandbox.network_disabled for envelope in envelopes)
+    assert all(not envelope.sandbox.mounts for envelope in envelopes)
+
+    runtime.run.reset_mock()
+    runtime.run.return_value = CodexProcessResult(127, "", "missing", 1)
+    with pytest.raises(RuntimeError, match="failed toolchain preflight"):
+        await _preflight_validation_images(
+            runtime, registries, seccomp_profile=seccomp, seccomp_digest=digest
+        )
+    assert runtime.run.await_count == 1
 
 
 @pytest.mark.anyio

@@ -178,6 +178,7 @@ class ProjectConfig(FrozenModel):
     allowed_capabilities: frozenset[Capability]
     validation_commands: tuple[CommandDefinition, ...] = ()
     sandbox_profile: str = Field(min_length=1)
+    validation_sandbox_profile: str | None = Field(default=None, min_length=1)
     summary_path: Path | None = None
     enabled: bool = True
     git_delivery: GitDeliveryPolicy = GitDeliveryPolicy()

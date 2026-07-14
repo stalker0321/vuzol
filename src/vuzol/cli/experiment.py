@@ -22,7 +22,7 @@ from vuzol.experiments.telemetry import (
     record_trial,
 )
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
-from vuzol.storage.models import Run, Step, UsageRecord, Worktree
+from vuzol.storage.models import Artifact, Run, Step, SupervisedProcess, UsageRecord, Worktree
 
 
 def main() -> None:
@@ -98,13 +98,46 @@ async def _inspect(factory: async_sessionmaker[AsyncSession], experiment_id: str
         for run in selected:
             steps = (
                 await session.scalars(
-                    select(Step).where(Step.run_id == run.id).order_by(Step.ordinal)
+                    select(Step).where(Step.run_id == run.id).order_by(Step.ordinal, Step.id)
                 )
             ).all()
             worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
             usage = (
                 await session.scalars(select(UsageRecord).where(UsageRecord.run_id == run.id))
             ).all()
+            processes = (
+                await session.scalars(
+                    select(SupervisedProcess)
+                    .where(SupervisedProcess.run_id == run.id)
+                    .order_by(SupervisedProcess.created_at, SupervisedProcess.id)
+                )
+            ).all()
+            artifacts = (
+                await session.scalars(
+                    select(Artifact)
+                    .where(Artifact.run_id == run.id)
+                    .order_by(Artifact.created_at, Artifact.artifact_type, Artifact.id)
+                )
+            ).all()
+            steps = sorted(
+                (step for step in steps if step.run_id == run.id),
+                key=lambda step: (step.ordinal, str(step.id)),
+            )
+            if worktree is not None and worktree.run_id != run.id:
+                worktree = None
+            usage = [item for item in usage if item.run_id == run.id]
+            processes = sorted(
+                (process for process in processes if process.run_id == run.id),
+                key=lambda process: (process.created_at, str(process.id)),
+            )
+            artifacts = sorted(
+                (artifact for artifact in artifacts if artifact.run_id == run.id),
+                key=lambda artifact: (
+                    artifact.created_at,
+                    artifact.artifact_type,
+                    str(artifact.id),
+                ),
+            )
             result.append(
                 {
                     "task_id": run.selected_route.get("experiment_task_id"),
@@ -114,6 +147,8 @@ async def _inspect(factory: async_sessionmaker[AsyncSession], experiment_id: str
                     "profile_id": run.selected_route.get("trusted_profile_id"),
                     "steps": [
                         {
+                            "step_uuid": str(step.id),
+                            "ordinal": step.ordinal,
                             "type": step.step_type,
                             "status": step.status.value,
                             "attempt_count": step.attempt_count,
@@ -127,6 +162,11 @@ async def _inspect(factory: async_sessionmaker[AsyncSession], experiment_id: str
                             "base_commit": worktree.base_commit,
                             "result_commit": worktree.result_commit,
                             "delivery_state": worktree.delivery_state.value,
+                            "diff_hash": worktree.diff_hash,
+                            "patch_artifact_id": _uuid_or_none(worktree.patch_artifact_id),
+                            "changed_files_artifact_id": _uuid_or_none(
+                                worktree.changed_files_artifact_id
+                            ),
                         }
                         if worktree is not None
                         else None
@@ -145,9 +185,54 @@ async def _inspect(factory: async_sessionmaker[AsyncSession], experiment_id: str
                         }
                         for item in usage
                     ],
+                    "processes": [_serialize_process(process) for process in processes],
+                    "artifacts": [_serialize_artifact(artifact) for artifact in artifacts],
                 }
             )
     return {"experiment_id": experiment_id, "runs": result}
+
+
+def _serialize_process(process: SupervisedProcess) -> dict[str, Any]:
+    return {
+        "process_uuid": str(process.id),
+        "step_uuid": str(process.step_id),
+        "profile_id": process.profile_id,
+        "provider_attempt": process.provider_attempt,
+        "status": process.status.value,
+        "outcome": process.outcome.value if process.outcome is not None else None,
+        "image_digest": process.image_digest,
+        "exit_code": process.exit_code,
+        "duration_ms": _safe_duration_ms(process.runtime_metadata),
+        "provider_events_artifact_id": _uuid_or_none(process.provider_events_artifact_id),
+        "provider_result_artifact_id": _uuid_or_none(process.provider_result_artifact_id),
+    }
+
+
+def _serialize_artifact(artifact: Artifact) -> dict[str, Any]:
+    return {
+        "artifact_uuid": str(artifact.id),
+        "step_uuid": _uuid_or_none(artifact.step_id),
+        "producer_process_uuid": _uuid_or_none(artifact.producer_process_id),
+        "type": artifact.artifact_type,
+        "size_bytes": artifact.size_bytes,
+        "content_hash": artifact.content_hash,
+        "media_type": artifact.media_type,
+        "storage_state": artifact.storage_state.value,
+        "verified_at": artifact.verified_at.isoformat() if artifact.verified_at else None,
+    }
+
+
+def _safe_duration_ms(runtime_metadata: object) -> int | None:
+    if not isinstance(runtime_metadata, dict):
+        return None
+    value = runtime_metadata.get("actual_elapsed_ms")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _uuid_or_none(value: object) -> str | None:
+    return str(value) if value is not None else None
 
 
 def _write_csv(path: Path, trials: tuple[ExperimentTelemetry, ...]) -> None:

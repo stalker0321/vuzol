@@ -76,6 +76,21 @@ def build_bundle(
                     raise RegistryError(
                         f"project {project.id} network policy does not match its sandbox"
                     )
+                if project.validation_sandbox_profile is not None:
+                    validation = sandboxes.get(project.validation_sandbox_profile)
+                    if not validation.enabled:
+                        raise RegistryError(
+                            f"project {project.id} references disabled validation sandbox"
+                        )
+                    if validation.network_mode is not SandboxNetworkMode.NONE:
+                        raise RegistryError(
+                            f"project {project.id} validation sandbox must disable networking"
+                        )
+                    if (validation.uid, validation.gid) != (sandbox.uid, sandbox.gid):
+                        raise RegistryError(
+                            f"project {project.id} validation sandbox identity "
+                            "must match its sandbox"
+                        )
         topics = TopicRegistry(document.topics, projects=projects)
         resolver = ScopedSecretResolver(
             access_policy=_secret_access_policy(document, settings),

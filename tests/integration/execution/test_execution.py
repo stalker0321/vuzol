@@ -144,6 +144,7 @@ def _git(repository: Path, *args: str) -> str:
     return result.stdout
 
 
+@pytest.mark.docker
 def test_docker_i_flag_passes_stdin_to_container() -> None:
     """Real (non-mocked) Docker integration smoke test.
 

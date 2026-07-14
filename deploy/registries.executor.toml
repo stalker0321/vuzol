@@ -15,6 +15,23 @@ network_mode = "https_proxy"
 inner_codex_sandbox_required = true
 enabled = true
 
+[[sandboxes]]
+id = "vuzol-validation"
+image = "vuzol-validation@sha256:ede9a61702caded0f74832c35b14e9988f43dea1ae6577405b8b70337934f191"
+uid = 10001
+gid = 10001
+cpu_count = 1.0
+memory_bytes = 1073741824
+pids_limit = 128
+tmpfs_bytes = 134217728
+open_files_limit = 1024
+output_bytes = 10000000
+timeout_seconds = 3600
+stop_grace_seconds = 10
+network_mode = "none"
+inner_codex_sandbox_required = false
+enabled = true
+
 [[projects]]
 id = "vuzol"
 display_name = "Vuzol"
@@ -22,6 +39,7 @@ repository_path = "vuzol"
 default_branch = "main"
 allowed_capabilities = ["repository_read", "code_edit", "git", "project_shell"]
 sandbox_profile = "project-default"
+validation_sandbox_profile = "vuzol-validation"
 enabled = true
 
 [projects.git_delivery]

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 DOCKERFILE = Path(__file__).parents[2] / "Dockerfile.sandbox"
+VALIDATION_DOCKERFILE = Path(__file__).parents[2] / "Dockerfile.validation"
 
 
 def test_sandbox_image_installs_tls_ca_bundle() -> None:
@@ -27,3 +28,23 @@ def test_sandbox_image_pins_and_verifies_grok_binary() -> None:
         in content
     )
     assert "sha256sum --check --strict" in content
+
+
+def test_validation_image_is_lock_driven_and_contains_no_project_source() -> None:
+    content = VALIDATION_DOCKERFILE.read_text()
+    from_lines = [line for line in content.splitlines() if line.startswith("FROM ")]
+    assert all("@sha256:" in line for line in from_lines)
+    assert "ghcr.io/astral-sh/uv:0.11.28@sha256:" in content
+    assert "python:3.12.11-slim-bookworm@sha256:" in content
+    assert "apt-get install --yes --no-install-recommends acl git make postgresql-15" in content
+    assert "COPY pyproject.toml uv.lock ./" in content
+    assert "--no-install-project" in content
+    assert "vuzol-offline-dependency-audit" in content
+    assert "pip-audit.json" in content
+    assert "sha256sum pyproject.toml uv.lock" in content
+    assert "COPY src" not in content
+    assert "COPY tests" not in content
+    assert "UV_NO_SYNC=1" in content
+    assert "UV_OFFLINE=1" in content
+    assert "vuzol-offline-test" in content
+    assert "/opt/vuzol-postgres-template" in content

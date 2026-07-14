@@ -234,6 +234,11 @@ class ConfigurationBundle(BaseModel):
                     reasons.append(f"project repository changed: {current_project.id}")
                 if current_project.sandbox_profile != snapshot.project.sandbox_profile:
                     reasons.append(f"project sandbox policy changed: {current_project.id}")
+                if (
+                    current_project.validation_sandbox_profile
+                    != snapshot.project.validation_sandbox_profile
+                ):
+                    reasons.append(f"project validation sandbox changed: {current_project.id}")
                 if current_project.network != snapshot.project.network:
                     reasons.append(f"project network policy changed: {current_project.id}")
                 if current_project.git_delivery != snapshot.project.git_delivery:

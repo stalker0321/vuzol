@@ -319,6 +319,11 @@ class ProviderStepHandler:
             if worktree is None:
                 raise LookupError("execute_code requires a prepared worktree")
             project = self._registries.projects.get(worktree.project_id)
+            if project.validation_sandbox_profile is None:
+                raise WorktreeAccessError(f"project {project.id} has no validation sandbox profile")
+            validation = self._registries.sandboxes.get(project.validation_sandbox_profile)
+            if not validation.enabled:
+                raise WorktreeAccessError(f"project {project.id} validation sandbox is disabled")
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
         return await self._worktree_access.grant(
             Path(worktree.path), sandbox_uid=sandbox.uid, sandbox_gid=sandbox.gid

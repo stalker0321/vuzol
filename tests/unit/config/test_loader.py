@@ -9,6 +9,7 @@ from vuzol.config import (
     ProjectConfig,
     ProviderProfileConfig,
     RegistryDocument,
+    SandboxNetworkMode,
     SandboxProfileConfig,
     Settings,
     TopicConfig,
@@ -193,3 +194,69 @@ def test_enabled_project_is_normalized_in_bundle(tmp_path: Path) -> None:
         environment={},
     )
     assert bundle.projects.get("project-a").repository_path == repository.resolve()
+
+
+def test_project_validation_sandbox_is_optional_for_historical_configuration(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repositories" / "project-a"
+    repository.mkdir(parents=True)
+    project = ProjectConfig(
+        id="project-a",
+        display_name="Project A",
+        repository_path=Path("project-a"),
+        default_branch="main",
+        allowed_capabilities=frozenset({Capability.REPOSITORY_READ}),
+        sandbox_profile="provider",
+    )
+    bundle = build_bundle(
+        RegistryDocument(
+            projects=(project,),
+            sandboxes=(
+                SandboxProfileConfig(id="provider", image=f"example/provider@sha256:{'1' * 64}"),
+            ),
+        ),
+        settings(tmp_path),
+        environment={},
+    )
+    assert bundle.projects.get("project-a").validation_sandbox_profile is None
+
+
+@pytest.mark.parametrize("failure", ("missing", "networked", "identity"))
+def test_project_validation_sandbox_fails_closed_on_unsafe_reference(
+    tmp_path: Path, failure: str
+) -> None:
+    repository = tmp_path / "repositories" / "project-a"
+    repository.mkdir(parents=True)
+    project = ProjectConfig(
+        id="project-a",
+        display_name="Project A",
+        repository_path=Path("project-a"),
+        default_branch="main",
+        allowed_capabilities=frozenset({Capability.REPOSITORY_READ}),
+        sandbox_profile="provider",
+        validation_sandbox_profile="validation",
+    )
+    validation = SandboxProfileConfig(
+        id="validation",
+        image=f"example/validation@sha256:{'2' * 64}",
+        uid=10002 if failure == "identity" else 10001,
+        network_mode=(
+            SandboxNetworkMode.HTTPS_PROXY if failure == "networked" else SandboxNetworkMode.NONE
+        ),
+    )
+    sandboxes = (
+        SandboxProfileConfig(id="provider", image=f"example/provider@sha256:{'1' * 64}"),
+        *((validation,) if failure != "missing" else ()),
+    )
+    expected = {
+        "missing": "unknown sandbox ID",
+        "networked": "must disable networking",
+        "identity": "identity must match",
+    }
+    with pytest.raises(ConfigurationLoadError, match=expected[failure]):
+        build_bundle(
+            RegistryDocument(projects=(project,), sandboxes=sandboxes),
+            settings(tmp_path),
+            environment={},
+        )

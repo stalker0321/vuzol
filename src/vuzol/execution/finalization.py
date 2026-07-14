@@ -39,6 +39,7 @@ TRUSTED_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
     "make format-check": ("/usr/bin/make", "format-check"),
     "make lint": ("/usr/bin/make", "lint"),
     "make type-check": ("/usr/bin/make", "type-check"),
+    "make security": ("/usr/bin/make", "security"),
 }
 
 
@@ -64,6 +65,9 @@ class GateEvidence(FrozenModel):
     stderr_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     stderr_bytes: int = Field(ge=0)
     stderr_truncated: bool
+    validation_image_digest: str | None = Field(
+        default=None, pattern=r"^[^\s@]+@sha256:[0-9a-f]{64}$"
+    )
 
 
 class FinalizationEvidence(FrozenModel):
@@ -213,6 +217,7 @@ class TrustedGateRunner:
             stderr_sha256=stderr.sha256,
             stderr_bytes=stderr.byte_count,
             stderr_truncated=stderr.truncated,
+            validation_image_digest=envelope.sandbox.image,
         )
         return GateRun(evidence=evidence, stdout=stdout, stderr=stderr)
 

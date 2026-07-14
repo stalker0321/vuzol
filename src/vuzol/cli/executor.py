@@ -4,13 +4,17 @@ import asyncio
 import os
 import signal
 import socket
+import uuid
 from contextlib import suppress
+from pathlib import Path
 
 from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
 from vuzol.config.models import SandboxNetworkMode
+from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.access import RootlessIdentityResolver, WorktreeAccessManager
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
+from vuzol.execution.domain import ProcessEnvelope, SandboxSpec
 from vuzol.execution.finalization import TrustedGateRunner, WorkerFinalizer
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
@@ -27,7 +31,14 @@ from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.types import QueueClass
+from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.worker import RoutedWorkflowWorker, WorkflowWorker
+
+VALIDATION_IMAGE_PREFLIGHT_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("/usr/bin/make", "--version"),
+    ("python", "--version"),
+    ("uv", "--version"),
+)
 
 
 class ExecutorChain:
@@ -57,6 +68,12 @@ async def run() -> None:
     sandbox_runtime = RootlessDockerRuntime(settings.execution.rootless_docker_socket)
     if settings.execution.require_preflight:
         await sandbox_runtime.preflight()
+        await _preflight_validation_images(
+            sandbox_runtime,
+            runtime.registries,
+            seccomp_profile=seccomp_profile,
+            seccomp_digest=seccomp_digest,
+        )
     worktree_access = WorktreeAccessManager(
         settings.worktree_root,
         RootlessIdentityResolver(settings.execution.rootless_docker_socket),
@@ -205,6 +222,64 @@ async def _run_loop(processor: ExecutorChain, poll_interval: float) -> None:
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval)
     get_logger(__name__).info("executor stopped", extra={"event": "executor.stopped"})
+
+
+async def _preflight_validation_images(
+    runtime: RootlessDockerRuntime,
+    registries: ConfigurationBundle,
+    *,
+    seccomp_profile: Path,
+    seccomp_digest: str,
+) -> None:
+    profile_ids = {
+        project.validation_sandbox_profile
+        for project in registries.projects.items()
+        if project.enabled and project.validation_sandbox_profile is not None
+    }
+    for profile_id in sorted(profile_ids):
+        sandbox = registries.sandboxes.get(profile_id)
+        for argv in VALIDATION_IMAGE_PREFLIGHT_COMMANDS:
+            identity = uuid.uuid4()
+            envelope = ProcessEnvelope(
+                task_id=identity,
+                run_id=uuid.uuid4(),
+                step_id=uuid.uuid4(),
+                worktree_id=uuid.uuid4(),
+                profile_id="validation-preflight",
+                provider_attempt=1,
+                lease_generation=1,
+                argv=argv,
+                stdin="",
+                sandbox=SandboxSpec(
+                    image=sandbox.image,
+                    uid=sandbox.uid,
+                    gid=sandbox.gid,
+                    seccomp_profile=seccomp_profile,
+                    seccomp_profile_sha256=seccomp_digest,
+                    working_directory=Path("/workspace"),
+                    mounts=(),
+                    cpu_count=sandbox.cpu_count,
+                    memory_bytes=sandbox.memory_bytes,
+                    pids_limit=sandbox.pids_limit,
+                    tmpfs_bytes=sandbox.tmpfs_bytes,
+                    open_files_limit=sandbox.open_files_limit,
+                    output_bytes=sandbox.output_bytes,
+                    timeout_seconds=min(sandbox.timeout_seconds, 60),
+                    stop_grace_seconds=sandbox.stop_grace_seconds,
+                    network_disabled=True,
+                    environment={
+                        "HOME": "/tmp/home",  # noqa: S108
+                        "PATH": "/opt/vuzol-validation/bin:/usr/local/bin:/usr/bin:/bin",
+                        "UV_NO_SYNC": "1",
+                        "UV_OFFLINE": "1",
+                    },
+                ),
+            )
+            result = await runtime.run(envelope, CancellationContext())
+            if result.exit_code != 0:
+                raise RuntimeError(
+                    f"validation sandbox {profile_id} failed toolchain preflight: {argv[0]}"
+                )
 
 
 if __name__ == "__main__":

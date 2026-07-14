@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import signal
 import subprocess
@@ -787,12 +788,81 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     metadata = stored_process[0].runtime_metadata
     assert metadata["actual_elapsed_ms"] == 75_700
     assert metadata["last_provider_event_type"] == "end"
-    assert metadata["cancellation_classification"] == "PROVIDER_CANCELLED"
+    assert metadata["cancellation_classification"] == "PROVIDER_CANCELLED_UNATTRIBUTED"
     assert metadata["cancellation_initiator"] == "grok_cli_or_provider"
+    assert metadata["cancellation_evidence_completeness"] == "unavailable"
     assert stored_process[0].provider_events_artifact_id is not None
     event_call = mock_art.persist.await_args_list[-1]
     assert event_call.kwargs["artifact_type"] == "provider-event-summary"
     assert b"private output" not in event_call.kwargs["content"]
+
+    session_id = "019f5e8d-d90b-7e40-a698-8a71fa87eff8"
+    session_dir = state_dir / ".grok" / "sessions" / "%2Fworkspace" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "events.jsonl").write_text(
+        "\n".join(
+            (
+                '{"type":"turn_started","schema_version":"1.0"}',
+                '{"type":"tool_started","tool_name":"run_terminal_command"}',
+                '{"type":"permission_requested","tool_name":"run_terminal_command"}',
+                (
+                    '{"type":"permission_resolved","tool_name":"run_terminal_command",'
+                    '"decision":"cancelled"}'
+                ),
+                (
+                    '{"type":"turn_ended","outcome":"cancelled",'
+                    '"cancellation_category":"permission_cancelled"}'
+                ),
+            )
+        )
+    )
+    (session_dir / "updates.jsonl").write_text(
+        json.dumps(
+            {
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "call-1aa3af3d-e549-4c73-ac4e-fc0c08302ed2-31",
+                        "title": "SECRET_NATIVE_TITLE",
+                        "rawInput": {"command": "make test", "description": "SECRET_TASK"},
+                        "_meta": {"x.ai/tool": {"name": "run_terminal_command"}},
+                    }
+                },
+            }
+        )
+    )
+    stored_process[0].runtime_metadata = {
+        "configured_deadline_seconds": 30,
+        "cancellation_classification": None,
+        "cancellation_initiator": None,
+        "cleanup_initiator": "sandbox_transport_finally",
+    }
+    await envf.complete(
+        pid,
+        CodexProcessResult(
+            0,
+            "\n".join(
+                (
+                    '{"type":"thought","data":"SECRET_REASONING"}',
+                    (f'{{"type":"end","stopReason":"Cancelled","sessionId":"{session_id}"}}'),
+                )
+            ),
+            "",
+            76_000,
+        ),
+        mock_art,
+    )
+    proven = stored_process[0].runtime_metadata
+    assert proven["cancellation_classification"] == "PROVIDER_PERMISSION_CANCELLED"
+    assert proven["cancellation_initiator"] == "grok_permission_engine"
+    assert proven["last_permission_decision"] == "cancelled"
+    assert proven["last_native_tool_request_sequence"] == 2
+    assert proven["last_native_tool_result_sequence"] is None
+    assert proven["cancellation_evidence_completeness"] == "complete"
+    proven_artifact = mock_art.persist.await_args_list[-1].kwargs["content"]
+    assert b"make test" in proven_artifact
+    assert b"SECRET" not in proven_artifact
     await envf.fail_unknown(pid)
     assert stored_process[0].status.value == "unknown"
 

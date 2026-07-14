@@ -793,7 +793,97 @@ async def test_grok_adapter_validates_and_persists_step09a_manifest(tmp_path: Pa
     assert captured.value.retryable is False
 
 
-def test_grok_event_summary_contains_only_safe_protocol_metadata() -> None:
+def _grok_diagnostic_events(
+    *, decision: str = "allow", completed: bool = True, category: str | None = None
+) -> str:
+    events: list[dict[str, object]] = [
+        {
+            "ts": "2026-07-14T02:58:31.700Z",
+            "type": "turn_started",
+            "schema_version": "1.0",
+            "session_id": "019f5e8d-d90b-7e40-a698-8a71fa87eff8",
+            "turn_number": 0,
+        },
+        {
+            "ts": "2026-07-14T02:58:31.701Z",
+            "type": "tool_started",
+            "tool_name": "run_terminal_command",
+        },
+        {
+            "ts": "2026-07-14T02:58:31.702Z",
+            "type": "permission_requested",
+            "tool_name": "run_terminal_command",
+        },
+        {
+            "ts": "2026-07-14T02:58:31.703Z",
+            "type": "permission_resolved",
+            "tool_name": "run_terminal_command",
+            "decision": decision,
+            "wait_ms": 0,
+        },
+    ]
+    if completed:
+        events.append(
+            {
+                "ts": "2026-07-14T02:58:31.704Z",
+                "type": "tool_completed",
+                "tool_name": "run_terminal_command",
+                "outcome": "success",
+                "duration_ms": 1,
+            }
+        )
+    if category is not None:
+        events.append(
+            {
+                "ts": "2026-07-14T02:58:31.705Z",
+                "type": "turn_ended",
+                "outcome": "cancelled",
+                "cancellation_category": category,
+            }
+        )
+    return "\n".join(json.dumps(event) for event in events)
+
+
+def _grok_tool_updates(command: str, *, completed: bool) -> str:
+    call_id = "call-1aa3af3d-e549-4c73-ac4e-fc0c08302ed2-31"
+    updates: list[dict[str, object]] = [
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "019f5e8d-d90b-7e40-a698-8a71fa87eff8",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": call_id,
+                    "title": "unsafe display title",
+                    "rawInput": {"command": command, "description": "private task detail"},
+                    "_meta": {
+                        "x.ai/tool": {
+                            "name": "run_terminal_command",
+                            "kind": "execute",
+                            "input": {"command": command},
+                        }
+                    },
+                },
+            },
+            "timestamp": "2026-07-14T02:58:31.701Z",
+        },
+        {
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": call_id,
+                    "status": "completed" if completed else "failed",
+                    "rawOutput": {"stdout": ["private tool output"]},
+                }
+            },
+            "timestamp": "2026-07-14T02:58:31.704Z",
+        },
+    ]
+    return "\n".join(json.dumps(update) for update in updates)
+
+
+def test_grok_event_summary_is_content_free_for_completed_response() -> None:
     from vuzol.providers.grok import summarize_grok_events
 
     summary = summarize_grok_events(
@@ -808,8 +898,222 @@ def test_grok_event_summary_contains_only_safe_protocol_metadata() -> None:
     assert summary["event_count"] == 2
     assert summary["last_event_type"] == "end"
     assert summary["last_stop_reason"] == "Cancelled"
+    assert summary["schema_version"] == "grok-event-summary.v2"
+    assert summary["cancellation_evidence_category"] == "PROVIDER_CANCELLED_UNATTRIBUTED"
+    assert summary["evidence_completeness"] == "unavailable"
     assert "private prompt" not in serialized
     assert "secret-id" not in serialized
+
+    completed = summarize_grok_events(
+        "\n".join(
+            (
+                '{"type":"text","data":"private final response"}',
+                '{"type":"end","stopReason":"EndTurn"}',
+            )
+        )
+    )
+    assert completed["cancellation_evidence_category"] is None
+    assert completed["final_text_generation_began"] is True
+    assert "private final response" not in json.dumps(completed)
+
+
+def test_grok_event_summary_proves_permission_cancellation_and_correlates_sequences() -> None:
+    from vuzol.providers.grok import summarize_grok_events
+
+    stdout = "\n".join(
+        (
+            '{"type":"thought","data":"SECRET_THOUGHT_PAYLOAD"}',
+            (
+                '{"type":"end","stopReason":"Cancelled",'
+                '"sessionId":"019f5e8d-d90b-7e40-a698-8a71fa87eff8",'
+                '"requestId":"019f5e8d-d90b-7e40-a698-8a71fa87eff9"}'
+            ),
+        )
+    )
+    summary = summarize_grok_events(
+        stdout,
+        diagnostic_events=_grok_diagnostic_events(
+            decision="cancelled", completed=False, category="permission_cancelled"
+        ).splitlines(),
+        session_updates=_grok_tool_updates("make test", completed=False).splitlines(),
+    )
+    serialized = json.dumps(summary, sort_keys=True)
+    assert summary["cancellation_evidence_category"] == "PROVIDER_PERMISSION_CANCELLED"
+    assert summary["last_permission_decision"] == "cancelled"
+    assert summary["last_safe_command_identity"] == "make test"
+    assert summary["last_tool_kind"] == "Bash"
+    assert summary["last_native_tool_request_sequence"] == 2
+    assert summary["last_permission_event_sequence"] == 4
+    assert summary["last_native_tool_result_sequence"] is None
+    assert summary["last_tool_result_received"] is False
+    assert summary["cancellation_stage"] == "after_permission_cancellation_before_execution"
+    assert summary["evidence_completeness"] == "complete"
+    assert summary["provider_session_id"] == "019f5e8d-d90b-7e40-a698-8a71fa87eff8"
+    for unsafe in (
+        "SECRET_THOUGHT_PAYLOAD",
+        "private task detail",
+        "private tool output",
+        "unsafe display title",
+    ):
+        assert unsafe not in serialized
+
+
+@pytest.mark.parametrize(
+    ("category", "classification"),
+    (
+        ("invalid_tool", "INVALID_TOOL_INVOCATION"),
+        ("cancelled", "PROVIDER_INTERNAL_CANCELLED"),
+    ),
+)
+def test_grok_event_summary_uses_first_party_cancellation_category(
+    category: str, classification: str
+) -> None:
+    from vuzol.providers.grok import summarize_grok_events
+
+    summary = summarize_grok_events(
+        '{"type":"end","stopReason":"Cancelled"}',
+        diagnostic_events=_grok_diagnostic_events(
+            decision="allow", completed=False, category=category
+        ).splitlines(),
+        session_updates=_grok_tool_updates("make type-check", completed=False).splitlines(),
+    )
+    assert summary["cancellation_evidence_category"] == classification
+    assert summary["last_permission_decision"] == "allowed"
+    assert summary["cancellation_stage"] == "during_tool_execution"
+
+
+@pytest.mark.parametrize(
+    ("decision", "completed", "expected_decision", "expected_result"),
+    (("allow", True, "allowed", True), ("deny", False, "denied", False)),
+)
+def test_grok_event_summary_tracks_permission_and_tool_result(
+    decision: str, completed: bool, expected_decision: str, expected_result: bool
+) -> None:
+    from vuzol.providers.grok import summarize_grok_events
+
+    summary = summarize_grok_events(
+        '{"type":"end","stopReason":"EndTurn"}',
+        diagnostic_events=_grok_diagnostic_events(
+            decision=decision, completed=completed
+        ).splitlines(),
+        session_updates=_grok_tool_updates("make lint", completed=completed).splitlines(),
+    )
+    assert summary["last_permission_decision"] == expected_decision
+    assert summary["last_tool_result_received"] is expected_result
+    assert summary["last_native_tool_result_sequence"] == (5 if completed else None)
+    if completed:
+        assert summary["last_completed_tool_action"] is not None
+    else:
+        assert summary["last_completed_tool_action"] is None
+
+
+@pytest.mark.parametrize(
+    ("command", "family", "flag"),
+    (
+        ("custom-tool --password SECRET_COMMAND_VALUE", "unknown", "unknown_command_family"),
+        ("cd /private && make test", "cd", "shell_chain_operators"),
+        ("/bin/sh -c 'make test'", "shell", "shell_wrapper"),
+        ("TOKEN=SECRET make test", "unknown", "environment_prefix"),
+        ("uv run pytest", "uv", "direct_tool_invocation"),
+    ),
+)
+def test_grok_event_summary_hashes_unsafe_commands_without_retaining_them(
+    command: str, family: str, flag: str
+) -> None:
+    from vuzol.providers.grok import summarize_grok_events
+
+    summary = summarize_grok_events(
+        '{"type":"end","stopReason":"Cancelled"}',
+        diagnostic_events=_grok_diagnostic_events(
+            decision="cancelled", completed=False, category="permission_cancelled"
+        ).splitlines(),
+        session_updates=_grok_tool_updates(command, completed=False).splitlines(),
+    )
+    serialized = json.dumps(summary)
+    assert summary["last_safe_command_identity"] is None
+    assert summary["last_command_family"] == family
+    assert summary["last_command_byte_length"] == len(command.encode())
+    assert summary["last_command_sha256"] == hashlib.sha256(command.encode()).hexdigest()
+    flags = summary["last_command_structural_flags"]
+    assert isinstance(flags, dict)
+    assert flags[flag] is True
+    assert command not in serialized
+    assert "SECRET" not in serialized
+
+
+def test_grok_event_summary_drops_edit_read_grep_paths_and_payloads() -> None:
+    from vuzol.providers.grok import summarize_grok_events
+
+    diagnostic = "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "turn_started", "schema_version": "1.0"},
+            {"type": "tool_started", "tool_name": "read_file"},
+            {"type": "tool_completed", "tool_name": "read_file", "outcome": "success"},
+            {"type": "tool_started", "tool_name": "grep"},
+            {"type": "tool_completed", "tool_name": "grep", "outcome": "success"},
+            {"type": "tool_started", "tool_name": "search_replace"},
+            {
+                "type": "tool_completed",
+                "tool_name": "search_replace",
+                "outcome": "success",
+            },
+        )
+    )
+    updates = "\n".join(
+        json.dumps(
+            {
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": f"call-1aa3af3d-e549-4c73-ac4e-fc0c08302ed{i}-3{i}",
+                        "rawInput": {
+                            "path": f"/SECRET/PATH/{name}",
+                            "pattern": "SECRET_GREP_PATTERN",
+                            "new_string": "SECRET_EDIT_CONTENT",
+                        },
+                        "_meta": {"x.ai/tool": {"name": name}},
+                    }
+                },
+            }
+        )
+        for i, name in enumerate(("read_file", "grep", "search_replace"))
+    )
+    summary = summarize_grok_events(
+        '{"type":"end","stopReason":"EndTurn"}',
+        diagnostic_events=diagnostic.splitlines(),
+        session_updates=updates.splitlines(),
+    )
+    serialized = json.dumps(summary)
+    assert summary["last_tool_kind"] == "Edit"
+    assert summary["diagnostic_tool_count"] == 3
+    assert "SECRET" not in serialized
+    assert "/PATH/" not in serialized
+
+
+def test_grok_event_summary_is_malformed_safe_and_bounded() -> None:
+    from vuzol.providers.grok import summarize_grok_events
+
+    stdout = "\n".join(["not-json", *('{"type":"thought","data":"hidden"}' for _ in range(140))])
+    diagnostic = [
+        '{"type":"turn_started","schema_version":"1.0"}',
+        "malformed",
+        *(
+            json.dumps({"type": "phase_changed", "phase": "streaming_reasoning"})
+            for _ in range(140)
+        ),
+    ]
+    summary = summarize_grok_events(stdout, diagnostic_events=diagnostic, session_updates=[])
+    assert summary["event_count"] == 140
+    assert summary["retained_event_count"] == 128
+    assert summary["events_truncated"] is True
+    assert summary["malformed_event_count"] == 1
+    assert summary["diagnostic_event_count"] == 142
+    assert summary["retained_diagnostic_event_count"] == 128
+    assert summary["diagnostic_events_truncated"] is True
+    assert summary["malformed_diagnostic_event_count"] == 1
+    assert summary["evidence_completeness"] == "partial"
 
 
 @pytest.mark.anyio

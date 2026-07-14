@@ -1,6 +1,7 @@
 """Codex process transport over the externally enforced sandbox runtime."""
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import uuid
@@ -20,7 +21,7 @@ from vuzol.execution.domain import (
     SandboxSpec,
 )
 from vuzol.execution.egress import AllowedConnectTarget, compile_proxy_allowlist
-from vuzol.execution.paths import contained, trusted_root
+from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
 from vuzol.providers.codex import canonical_codex_argv
@@ -251,7 +252,11 @@ class ExecutionEnvelopeFactory:
             process.stderr_artifact_id = stderr.id
             argv = process.command_envelope.get("argv", [])
             if isinstance(argv, list) and argv[:1] == ["grok"]:
-                event_summary = summarize_grok_events(result.stdout)
+                profile = self._registries.profiles.get(process.profile_id)
+                event_summary = _summarize_grok_process(
+                    result.stdout,
+                    profile.state_directory,
+                )
                 provider_events = await artifacts.persist(
                     session,
                     task_id=process.task_id,
@@ -277,10 +282,28 @@ class ExecutionEnvelopeFactory:
                     }
                 )
                 if stop_reason == "Cancelled":
+                    classification = event_summary["cancellation_evidence_category"]
                     metadata.update(
                         {
-                            "cancellation_classification": "PROVIDER_CANCELLED",
-                            "cancellation_initiator": "grok_cli_or_provider",
+                            "cancellation_classification": classification,
+                            "cancellation_initiator": _cancellation_initiator(classification),
+                            "cancellation_stage": event_summary["cancellation_stage"],
+                            "cancellation_evidence_completeness": event_summary[
+                                "evidence_completeness"
+                            ],
+                            "cancellation_missing_evidence_reason": event_summary[
+                                "missing_evidence_reason"
+                            ],
+                            "last_native_tool_request_sequence": event_summary[
+                                "last_native_tool_request_sequence"
+                            ],
+                            "last_native_tool_result_sequence": event_summary[
+                                "last_native_tool_result_sequence"
+                            ],
+                            "last_permission_event_sequence": event_summary[
+                                "last_permission_event_sequence"
+                            ],
+                            "last_permission_decision": event_summary["last_permission_decision"],
                         }
                     )
                 process.runtime_metadata = metadata
@@ -431,3 +454,47 @@ def _provider_state_runtime(provider: str) -> tuple[Path, dict[str, str]]:
     if provider == "grok":
         return Path("/grok-home"), {"HOME": "/grok-home"}
     raise ValueError("sandbox rejected an unsupported CLI provider")
+
+
+def _summarize_grok_process(stdout: str, state_directory: Path | None) -> dict[str, object]:
+    protocol_summary = summarize_grok_events(stdout)
+    session_id = protocol_summary["provider_session_id"]
+    if not isinstance(session_id, str) or state_directory is None:
+        return protocol_summary
+    try:
+        state_root = trusted_root(state_directory)
+        session_root = contained(
+            state_root,
+            state_root / ".grok" / "sessions" / "%2Fworkspace" / session_id,
+        )
+        diagnostic_path = contained(state_root, session_root / "events.jsonl")
+    except (OSError, PathViolation, ValueError):
+        return protocol_summary
+    try:
+        with contextlib.ExitStack() as stack:
+            diagnostic_stream = stack.enter_context(
+                diagnostic_path.open(encoding="utf-8", errors="replace")
+            )
+            update_stream = None
+            try:
+                update_path = contained(state_root, session_root / "updates.jsonl")
+                update_stream = stack.enter_context(
+                    update_path.open(encoding="utf-8", errors="replace")
+                )
+            except (OSError, PathViolation):
+                pass
+            return summarize_grok_events(
+                stdout,
+                diagnostic_events=diagnostic_stream,
+                session_updates=update_stream,
+            )
+    except OSError:
+        return protocol_summary
+
+
+def _cancellation_initiator(classification: object) -> str:
+    if classification == "PROVIDER_PERMISSION_CANCELLED":
+        return "grok_permission_engine"
+    if classification in {"PROVIDER_INTERNAL_CANCELLED", "INVALID_TOOL_INVOCATION"}:
+        return "grok_cli"
+    return "grok_cli_or_provider"

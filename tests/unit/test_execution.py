@@ -1,10 +1,12 @@
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import os
 import signal
 import subprocess
+import tarfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,11 @@ from vuzol.config.models import (
     SandboxProfileConfig,
 )
 from vuzol.execution.artifacts import ArtifactSecretError, ArtifactStore
-from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
+from vuzol.execution.codex import (
+    ExecutionEnvelopeFactory,
+    SandboxCodexTransport,
+    _summarize_grok_process,
+)
 from vuzol.execution.domain import (
     MountMode,
     ProcessEnvelope,
@@ -40,11 +46,20 @@ from vuzol.execution.proxy_service import ProxyServiceError, ProxyServiceLease
 from vuzol.execution.sandbox import (
     RootlessDockerRuntime,
     SandboxError,
+    _artifact_staging,
+    _atomic_write_diagnostic,
+    _bounded_read,
+    _prepare_diagnostic_destinations,
+    _single_regular_tar_file,
     docker_run_argv,
     validate_seccomp_profile,
 )
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.providers.codex import canonical_codex_argv
+from vuzol.providers.grok import (
+    GROK_DIAGNOSTIC_FILE_MAX_BYTES,
+    staged_grok_diagnostic_paths,
+)
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, Worktree
 from vuzol.storage.types import IdempotencyClass, StepStatus
@@ -125,6 +140,7 @@ def test_docker_argv_enforces_outer_isolation(tmp_path: Path) -> None:
     rendered = " ".join(argv)
     assert "--network none" in rendered
     assert "--read-only" in argv
+    assert "--rm" not in argv
     assert "--cap-drop ALL" in rendered
     assert "no-new-privileges:true" in argv
     assert "/var/run/docker.sock" not in rendered
@@ -208,8 +224,10 @@ async def test_rootless_runtime_preflight_and_successful_bounded_run(
     executable.write_text("#!/bin/sh\ncat\n")
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", f"{executable.parent}:{os.environ['PATH']}")
+    runtime._remove_owned_container = AsyncMock()  # type: ignore[method-assign]
     result = await runtime.run(envelope(tmp_path), CancellationContext())
     assert result.exit_code == 0 and result.stdout == "bounded prompt"
+    runtime._remove_owned_container.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -278,8 +296,11 @@ async def test_rootless_runtime_timeout_reaps_client(
         update={"sandbox": base.sandbox.model_copy(update={"timeout_seconds": 1})}
     )
     runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    runtime._stop_owned_container = AsyncMock()  # type: ignore[method-assign]
+    runtime._remove_owned_container = AsyncMock()  # type: ignore[method-assign]
     with pytest.raises(SandboxError, match="timed out"):
         await runtime.run(configured, CancellationContext())
+    runtime._remove_owned_container.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -301,8 +322,406 @@ async def test_rootless_runtime_output_limit_stops_container(
         update={"sandbox": base.sandbox.model_copy(update={"output_bytes": 100})}
     )
     runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    runtime._stop_owned_container = AsyncMock()  # type: ignore[method-assign]
+    runtime._remove_owned_container = AsyncMock()  # type: ignore[method-assign]
     with pytest.raises(SandboxError, match="output limit"):
         await runtime.run(configured, CancellationContext())
+    runtime._remove_owned_container.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_rootless_runtime_external_task_cancellation_always_cleans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "docker"
+    executable.write_text(
+        '#!/bin/sh\ncase " $* " in\n  *" run "*) exec sleep 10 ;;\n  *) exit 0 ;;\nesac\n'
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    runtime._stop_owned_container = AsyncMock()  # type: ignore[method-assign]
+    runtime._remove_owned_container = AsyncMock()  # type: ignore[method-assign]
+    task = asyncio.create_task(runtime.run(envelope(tmp_path), CancellationContext()))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    runtime._stop_owned_container.assert_awaited_once()
+    runtime._remove_owned_container.assert_awaited_once()
+
+
+def _tar_file(name: str, content: bytes, *, symlink: bool = False) -> bytes:
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:") as archive:
+        member = tarfile.TarInfo(name)
+        if symlink:
+            member.type = tarfile.SYMTYPE
+            member.linkname = "unsafe"
+            archive.addfile(member)
+        else:
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+    return payload.getvalue()
+
+
+def _reader(content: bytes) -> asyncio.StreamReader:
+    reader = asyncio.StreamReader()
+    reader.feed_data(content)
+    reader.feed_eof()
+    return reader
+
+
+def test_grok_diagnostic_tar_accepts_one_bounded_regular_file() -> None:
+    assert (
+        _single_regular_tar_file(
+            _tar_file("events.jsonl", b"safe"), expected_name="events.jsonl", maximum=4
+        )
+        == b"safe"
+    )
+    assert (
+        _single_regular_tar_file(
+            _tar_file("events.jsonl", b"unsafe", symlink=True),
+            expected_name="events.jsonl",
+            maximum=100,
+        )
+        is None
+    )
+    assert (
+        _single_regular_tar_file(
+            _tar_file("events.jsonl", b"large"), expected_name="events.jsonl", maximum=4
+        )
+        is None
+    )
+    assert (
+        _single_regular_tar_file(
+            _tar_file("auth.json", b"secret"), expected_name="events.jsonl", maximum=100
+        )
+        is None
+    )
+    assert _single_regular_tar_file(b"not a tar", expected_name="events.jsonl", maximum=100) is None
+
+
+@pytest.mark.anyio
+async def test_bounded_read_handles_absent_stream() -> None:
+    assert await _bounded_read(None, 1) == b""
+
+
+@pytest.mark.anyio
+async def test_container_copy_accepts_only_bounded_exact_tar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    good = MagicMock(
+        stdout=_reader(_tar_file("events.jsonl", b"safe")),
+        stderr=_reader(b""),
+    )
+    good.wait = AsyncMock(return_value=0)
+    missing = MagicMock(stdout=_reader(b""), stderr=_reader(b"missing"))
+    missing.wait = AsyncMock(return_value=1)
+    oversized = MagicMock(
+        stdout=_reader(b"x" * (GROK_DIAGNOSTIC_FILE_MAX_BYTES + 1_048_577)),
+        stderr=_reader(b""),
+    )
+    oversized.wait = AsyncMock(return_value=0)
+    oversized.kill = MagicMock()
+    create = AsyncMock(side_effect=(good, missing, oversized))
+    monkeypatch.setattr("vuzol.execution.sandbox.asyncio.create_subprocess_exec", create)
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+
+    assert await runtime._copy_container_regular_file("a" * 64, "/exact/events.jsonl") == b"safe"
+    assert await runtime._copy_container_regular_file("a" * 64, "/exact/events.jsonl") is None
+    assert await runtime._copy_container_regular_file("a" * 64, "/exact/events.jsonl") is None
+    oversized.kill.assert_called_once()
+
+
+def test_diagnostic_staging_rejects_invalid_mounts_and_destinations(tmp_path: Path) -> None:
+    configured = envelope(tmp_path)
+    assert _artifact_staging(configured) == tmp_path / "artifacts"
+    no_artifacts = configured.model_copy(
+        update={
+            "sandbox": configured.sandbox.model_copy(
+                update={"mounts": configured.sandbox.mounts[:1]}
+            )
+        }
+    )
+    assert _artifact_staging(no_artifacts) is None
+    missing_source = tmp_path / "missing-artifacts"
+    missing_mount = configured.sandbox.mounts[1].model_copy(update={"source": missing_source})
+    missing = configured.model_copy(
+        update={
+            "sandbox": configured.sandbox.model_copy(
+                update={"mounts": (configured.sandbox.mounts[0], missing_mount)}
+            )
+        }
+    )
+    assert _artifact_staging(missing) is None
+
+    session_id = "019f6149-44c0-7520-932c-5e0f41c99351"
+    paths = staged_grok_diagnostic_paths(tmp_path / "artifacts", session_id)
+    assert paths is not None
+    with pytest.raises(ValueError, match="bounded limit"):
+        _atomic_write_diagnostic(
+            tmp_path / "artifacts",
+            paths[0],
+            b"x" * (GROK_DIAGNOSTIC_FILE_MAX_BYTES + 1),
+        )
+    with pytest.raises(ValueError, match="destination is invalid"):
+        _atomic_write_diagnostic(tmp_path / "artifacts", tmp_path / "other", b"safe")
+
+    paths[0].parent.mkdir(parents=True)
+    paths[0].symlink_to(tmp_path / "outside")
+    with pytest.raises(ValueError, match="destination is unsafe"):
+        _prepare_diagnostic_destinations(tmp_path / "artifacts", paths)
+
+
+def test_atomic_diagnostic_write_cleans_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "019f6149-44c0-7520-932c-5e0f41c99351"
+    paths = staged_grok_diagnostic_paths(tmp_path, session_id)
+    assert paths is not None
+    monkeypatch.setattr("vuzol.execution.sandbox.os.write", lambda _fd, _content: 0)
+    with pytest.raises(OSError, match="no progress"):
+        _atomic_write_diagnostic(tmp_path, paths[0], b"safe")
+    assert not list(paths[0].parent.glob("*.tmp"))
+
+
+@pytest.mark.anyio
+async def test_grok_staging_degrades_for_missing_identity_or_session(tmp_path: Path) -> None:
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    configured = envelope(tmp_path).model_copy(update={"argv": ("grok",)})
+    runtime._owned_container_id = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    runtime._copy_container_regular_file = AsyncMock()  # type: ignore[method-assign]
+    session_id = "019f6149-44c0-7520-932c-5e0f41c99351"
+    await runtime._stage_grok_diagnostics(
+        "missing", configured, f'{{"type":"end","sessionId":"{session_id}"}}'
+    )
+    await runtime._stage_grok_diagnostics("missing", configured, '{"type":"end"}')
+    runtime._copy_container_regular_file.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_rootless_runtime_stages_exact_grok_session_and_always_removes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "019f6149-44c0-7520-932c-5e0f41c99351"
+    executable = tmp_path / "docker"
+    executable.write_text(
+        "#!/bin/sh\ncat >/dev/null\n"
+        f'printf \'%s\\n\' \'{{"type":"end","stopReason":"EndTurn",'
+        f'"sessionId":"{session_id}"}}\'\n'
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    base = envelope(tmp_path)
+    configured = base.model_copy(update={"argv": ("grok",)})
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    runtime._owned_container_id = AsyncMock(return_value="a" * 64)  # type: ignore[method-assign]
+    runtime._copy_container_regular_file = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[b'{"type":"turn_started","schema_version":"1.0"}\n', b""]
+    )
+    runtime._remove_owned_container = AsyncMock()  # type: ignore[method-assign]
+
+    result = await runtime.run(configured, CancellationContext())
+
+    assert result.exit_code == 0
+    staged = staged_grok_diagnostic_paths(tmp_path / "artifacts", session_id)
+    assert staged is not None
+    assert staged[0].read_bytes().startswith(b'{"type"')
+    assert staged[1].read_bytes() == b""
+    requested = [call.args[1] for call in runtime._copy_container_regular_file.await_args_list]
+    assert requested == [
+        f"/grok-home/.grok/sessions/%2Fworkspace/{session_id}/events.jsonl",
+        f"/grok-home/.grok/sessions/%2Fworkspace/{session_id}/updates.jsonl",
+    ]
+    runtime._remove_owned_container.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_grok_extraction_failure_preserves_result_and_removes_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "019f6149-44c0-7520-932c-5e0f41c99351"
+    executable = tmp_path / "docker"
+    executable.write_text(
+        "#!/bin/sh\ncat >/dev/null\n"
+        f'printf \'%s\\n\' \'{{"type":"end","stopReason":"EndTurn",'
+        f'"sessionId":"{session_id}"}}\'\n'
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    configured = envelope(tmp_path).model_copy(update={"argv": ("grok",)})
+    stale_paths = staged_grok_diagnostic_paths(tmp_path / "artifacts", session_id)
+    assert stale_paths is not None
+    stale_paths[0].parent.mkdir(parents=True)
+    stale_paths[0].write_text("stale evidence")
+    stale_paths[1].write_text("stale evidence")
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    runtime._owned_container_id = AsyncMock(return_value="a" * 64)  # type: ignore[method-assign]
+    runtime._copy_container_regular_file = AsyncMock(  # type: ignore[method-assign]
+        side_effect=SandboxError("copy failed")
+    )
+    runtime._remove_owned_container = AsyncMock()  # type: ignore[method-assign]
+
+    result = await runtime.run(configured, CancellationContext())
+
+    assert result.exit_code == 0
+    assert not stale_paths[0].exists()
+    assert not stale_paths[1].exists()
+    runtime._remove_owned_container.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_foreign_container_is_never_removed(tmp_path: Path) -> None:
+    configured = envelope(tmp_path)
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+    runtime._owned_container_id = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    runtime._docker = AsyncMock()  # type: ignore[method-assign]
+
+    await runtime._remove_owned_container("foreign", configured)
+    runtime._docker.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_owned_container_lookup_requires_name_and_all_identity_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = envelope(tmp_path)
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(("a" * 64 + "\n").encode(), b""))
+    create = AsyncMock(return_value=process)
+    monkeypatch.setattr("vuzol.execution.sandbox.asyncio.create_subprocess_exec", create)
+
+    container_id = await RootlessDockerRuntime(tmp_path / "docker.sock")._owned_container_id(
+        "expected-name", configured
+    )
+
+    assert container_id == "a" * 64
+    call = create.await_args
+    assert call is not None
+    arguments = call.args
+    rendered = " ".join(str(value) for value in arguments)
+    assert "name=^/expected-name$" in rendered
+    for key, value in (
+        ("task_id", configured.task_id),
+        ("run_id", configured.run_id),
+        ("step_id", configured.step_id),
+        ("lease_generation", configured.lease_generation),
+    ):
+        assert f"label=vuzol.{key}={value}" in rendered
+
+
+@pytest.mark.anyio
+async def test_owned_container_lookup_and_cleanup_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = envelope(tmp_path)
+    failed = MagicMock(returncode=1)
+    failed.communicate = AsyncMock(return_value=(b"", b"failed"))
+    absent = MagicMock(returncode=0)
+    absent.communicate = AsyncMock(return_value=(b"", b""))
+    malformed = MagicMock(returncode=0)
+    malformed.communicate = AsyncMock(return_value=(b"short\n", b""))
+    create = AsyncMock(side_effect=(failed, absent, malformed))
+    monkeypatch.setattr("vuzol.execution.sandbox.asyncio.create_subprocess_exec", create)
+    runtime = RootlessDockerRuntime(tmp_path / "docker.sock")
+
+    with pytest.raises(SandboxError, match="lookup failed"):
+        await runtime._owned_container_id("expected", configured)
+    assert await runtime._owned_container_id("expected", configured) is None
+    with pytest.raises(SandboxError, match="identity is malformed"):
+        await runtime._owned_container_id("expected", configured)
+
+    runtime._owned_container_id = AsyncMock(  # type: ignore[method-assign]
+        side_effect=("a" * 64, "a" * 64)
+    )
+    runtime._docker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=(SandboxError("stop failed"), "", "")
+    )
+    await runtime._stop_owned_container("expected", configured)
+    await runtime._remove_owned_container("expected", configured)
+    assert [call.args[0] for call in runtime._docker.await_args_list] == [
+        "stop",
+        "kill",
+        "rm",
+    ]
+
+
+def test_grok_summary_uses_only_exact_bounded_staged_session(tmp_path: Path) -> None:
+    session_id = "019f6149-44c0-7520-932c-5e0f41c99351"
+    stale_id = "019f5e8d-d90b-7e40-a698-8a71fa87eff8"
+    for current, decision in ((session_id, "allow"), (stale_id, "cancelled")):
+        paths = staged_grok_diagnostic_paths(tmp_path, current)
+        assert paths is not None
+        paths[0].parent.mkdir(parents=True)
+        paths[0].write_text(
+            "\n".join(
+                (
+                    '{"type":"turn_started","schema_version":"1.0"}',
+                    '{"type":"tool_started","tool_name":"run_terminal_command"}',
+                    '{"type":"permission_requested","tool_name":"run_terminal_command"}',
+                    f'{{"type":"permission_resolved","decision":"{decision}"}}',
+                    '{"type":"tool_completed","outcome":"success"}',
+                )
+            )
+        )
+        paths[1].write_text(
+            json.dumps(
+                {
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": f"call-{current}-31",
+                            "rawInput": {"command": "make test"},
+                            "_meta": {"x.ai/tool": {"name": "run_terminal_command"}},
+                        }
+                    },
+                }
+            )
+        )
+    stdout = f'{{"type":"end","stopReason":"EndTurn","sessionId":"{session_id}"}}'
+    summary = _summarize_grok_process(stdout, tmp_path)
+    assert summary["last_permission_decision"] == "allowed"
+    assert summary["last_safe_command_identity"] == "make test"
+    assert summary["last_tool_result_received"] is True
+    assert summary["evidence_completeness"] == "complete"
+
+    exact_paths = staged_grok_diagnostic_paths(tmp_path, session_id)
+    assert exact_paths is not None
+    assert not exact_paths[0].exists() and not exact_paths[1].exists()
+    exact_paths[0].parent.mkdir(parents=True)
+    exact_paths[0].write_text(
+        "\n".join(
+            (
+                '{"type":"turn_started","schema_version":"1.0"}',
+                '{"type":"tool_started","tool_name":"run_terminal_command"}',
+            )
+        )
+    )
+    partial = _summarize_grok_process(stdout, tmp_path)
+    assert partial["evidence_completeness"] == "partial"
+    exact_paths[0].parent.mkdir(parents=True)
+    exact_paths[1].write_text("{}")
+    missing_events = _summarize_grok_process(stdout, tmp_path)
+    assert missing_events["evidence_completeness"] == "unavailable"
+    unavailable = _summarize_grok_process(stdout, tmp_path)
+    assert unavailable["evidence_completeness"] == "unavailable"
+
+
+def test_grok_summary_rejects_oversized_or_symlinked_staged_diagnostics(
+    tmp_path: Path,
+) -> None:
+    session_id = "019f6149-44c0-7520-932c-5e0f41c99351"
+    paths = staged_grok_diagnostic_paths(tmp_path, session_id)
+    assert paths is not None
+    paths[0].parent.mkdir(parents=True)
+    paths[0].write_bytes(b"x" * (GROK_DIAGNOSTIC_FILE_MAX_BYTES + 1))
+    paths[1].symlink_to(paths[0])
+    stdout = f'{{"type":"end","stopReason":"Cancelled","sessionId":"{session_id}"}}'
+    summary = _summarize_grok_process(stdout, tmp_path)
+    assert summary["evidence_completeness"] == "unavailable"
+    assert summary["cancellation_evidence_category"] == "PROVIDER_CANCELLED_UNATTRIBUTED"
 
 
 def test_path_containment_rejects_escape_and_symlink(tmp_path: Path) -> None:
@@ -797,9 +1216,12 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     assert b"private output" not in event_call.kwargs["content"]
 
     session_id = "019f5e8d-d90b-7e40-a698-8a71fa87eff8"
-    session_dir = state_dir / ".grok" / "sessions" / "%2Fworkspace" / session_id
-    session_dir.mkdir(parents=True)
-    (session_dir / "events.jsonl").write_text(
+    state_dir.chmod(0o000)
+    staging = artifact_root / "execution" / str(step_id) / "1"
+    staged_paths = staged_grok_diagnostic_paths(staging, session_id)
+    assert staged_paths is not None
+    staged_paths[0].parent.mkdir(parents=True)
+    staged_paths[0].write_text(
         "\n".join(
             (
                 '{"type":"turn_started","schema_version":"1.0"}',
@@ -816,7 +1238,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
             )
         )
     )
-    (session_dir / "updates.jsonl").write_text(
+    staged_paths[1].write_text(
         json.dumps(
             {
                 "method": "session/update",
@@ -863,8 +1285,10 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     proven_artifact = mock_art.persist.await_args_list[-1].kwargs["content"]
     assert b"make test" in proven_artifact
     assert b"SECRET" not in proven_artifact
+    assert not staged_paths[0].exists() and not staged_paths[1].exists()
     await envf.fail_unknown(pid)
     assert stored_process[0].status.value == "unknown"
+    state_dir.chmod(0o700)
 
 
 @pytest.mark.anyio

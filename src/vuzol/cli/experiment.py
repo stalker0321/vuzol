@@ -14,7 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import get_runtime_configuration
 from vuzol.experiments.domain import ExperimentTelemetry
 from vuzol.experiments.service import TrialSeedRequest, seed_trial
-from vuzol.experiments.telemetry import aggregate_trials, load_trials, record_trial
+from vuzol.experiments.telemetry import (
+    INVOCATION_ROLES,
+    aggregate_trials,
+    aggregate_usage_by_role,
+    load_trials,
+    record_trial,
+)
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.models import Run, Step, UsageRecord, Worktree
 
@@ -145,7 +151,7 @@ async def _inspect(factory: async_sessionmaker[AsyncSession], experiment_id: str
 
 
 def _write_csv(path: Path, trials: tuple[ExperimentTelemetry, ...]) -> None:
-    fields = (
+    existing_fields = (
         "experiment_id",
         "task_id",
         "task_class",
@@ -166,33 +172,58 @@ def _write_csv(path: Path, trials: tuple[ExperimentTelemetry, ...]) -> None:
         "shadow_decision_correct",
         "estimated_cost",
     )
+    role_fields = tuple(
+        field
+        for role in INVOCATION_ROLES
+        for field in (
+            f"{role}_invocation_count",
+            f"{role}_usage_unavailable_invocations",
+            f"{role}_input_tokens",
+            f"{role}_cached_input_tokens",
+            f"{role}_output_tokens",
+            f"{role}_reasoning_tokens",
+        )
+    )
+    fields = (*existing_fields, *role_fields)
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for trial in trials:
-            writer.writerow(
-                {
-                    "experiment_id": trial.experiment_id,
-                    "task_id": trial.task_id,
-                    "task_class": trial.task_class.value,
-                    "predicted_mode": trial.predicted_mode.value,
-                    "actual_mode": trial.actual_mode.value,
-                    "worker_profile": trial.worker_profile,
-                    "final_outcome": trial.final_outcome.value,
-                    "worker_attempts": trial.worker_attempts,
-                    "repair_count": trial.repair_count,
-                    "repair_severity": trial.repair_severity.value,
-                    "execution_duration_ms": trial.execution_duration_ms,
-                    "review_duration_ms": trial.review_duration_ms,
-                    "total_wall_time_ms": trial.total_wall_time_ms,
-                    "context_bytes": trial.total_context_bytes,
-                    "repeated_context_bytes": trial.repeated_context_bytes,
-                    "repeated_context_ratio": trial.repeated_context_ratio,
-                    "shadow_would_accept": trial.shadow_would_accept,
-                    "shadow_decision_correct": trial.shadow_decision_correct,
-                    "estimated_cost": trial.estimated_cost,
-                }
-            )
+            row: dict[str, object] = {
+                "experiment_id": trial.experiment_id,
+                "task_id": trial.task_id,
+                "task_class": trial.task_class.value,
+                "predicted_mode": trial.predicted_mode.value,
+                "actual_mode": trial.actual_mode.value,
+                "worker_profile": trial.worker_profile,
+                "final_outcome": trial.final_outcome.value,
+                "worker_attempts": trial.worker_attempts,
+                "repair_count": trial.repair_count,
+                "repair_severity": trial.repair_severity.value,
+                "execution_duration_ms": trial.execution_duration_ms,
+                "review_duration_ms": trial.review_duration_ms,
+                "total_wall_time_ms": trial.total_wall_time_ms,
+                "context_bytes": trial.total_context_bytes,
+                "repeated_context_bytes": trial.repeated_context_bytes,
+                "repeated_context_ratio": trial.repeated_context_ratio,
+                "shadow_would_accept": trial.shadow_would_accept,
+                "shadow_decision_correct": trial.shadow_decision_correct,
+                "estimated_cost": trial.estimated_cost,
+            }
+            for role, usage in aggregate_usage_by_role(trial.invocations).items():
+                row.update(
+                    {
+                        f"{role}_invocation_count": usage["invocation_count"],
+                        f"{role}_usage_unavailable_invocations": usage[
+                            "unavailable_invocation_count"
+                        ],
+                        f"{role}_input_tokens": usage["input_tokens"],
+                        f"{role}_cached_input_tokens": usage["cached_input_tokens"],
+                        f"{role}_output_tokens": usage["output_tokens"],
+                        f"{role}_reasoning_tokens": usage["reasoning_tokens"],
+                    }
+                )
+            writer.writerow(row)
 
 
 def _print_json(value: object) -> None:

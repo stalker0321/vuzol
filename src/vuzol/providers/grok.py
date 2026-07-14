@@ -6,6 +6,7 @@ import re
 import uuid
 from collections import deque
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from vuzol.config.models import ProviderProfileConfig
@@ -245,6 +246,8 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
 _SUMMARY_EVENT_LIMIT = 128
 _SUMMARY_TOOL_LIMIT = 64
 _SUMMARY_LINE_BYTE_LIMIT = 262_144
+GROK_DIAGNOSTIC_FILE_MAX_BYTES = 2_000_000
+GROK_STAGED_DIAGNOSTIC_DIRECTORY = "grok-session-diagnostics"
 _SAFE_STOP_REASONS = {"Cancelled", "EndTurn", "Error", "MaxTurns", "StopSequence"}
 _SAFE_DIAGNOSTIC_SCHEMA_VERSIONS = {"1.0"}
 _SAFE_PROTOCOL_TYPES = {
@@ -294,6 +297,30 @@ _SAFE_TOOL_KINDS = {
 }
 _SAFE_PROVIDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SAFE_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+
+
+def grok_session_id_from_stdout(stdout: str) -> str | None:
+    """Extract only a strictly safe session ID from the final Grok protocol events."""
+    session_id: str | None = None
+    for line in stdout.splitlines():
+        encoded = line.encode()
+        if len(encoded) > _SUMMARY_LINE_BYTE_LIMIT:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "end":
+            session_id = _safe_provider_id(event.get("sessionId"))
+    return session_id
+
+
+def staged_grok_diagnostic_paths(staging: Path, session_id: str) -> tuple[Path, Path] | None:
+    """Resolve the two exact staged files for a validated Grok session ID."""
+    if _safe_provider_id(session_id) != session_id:
+        return None
+    session = staging / GROK_STAGED_DIAGNOSTIC_DIRECTORY / session_id
+    return session / "events.jsonl", session / "updates.jsonl"
 
 
 def summarize_grok_events(

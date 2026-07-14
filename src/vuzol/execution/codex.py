@@ -4,8 +4,10 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import stat
 import uuid
 from pathlib import Path
+from typing import TextIO
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,7 +27,12 @@ from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
 from vuzol.providers.codex import canonical_codex_argv
-from vuzol.providers.grok import canonical_grok_argv, summarize_grok_events
+from vuzol.providers.grok import (
+    GROK_DIAGNOSTIC_FILE_MAX_BYTES,
+    canonical_grok_argv,
+    staged_grok_diagnostic_paths,
+    summarize_grok_events,
+)
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
@@ -252,10 +259,9 @@ class ExecutionEnvelopeFactory:
             process.stderr_artifact_id = stderr.id
             argv = process.command_envelope.get("argv", [])
             if isinstance(argv, list) and argv[:1] == ["grok"]:
-                profile = self._registries.profiles.get(process.profile_id)
                 event_summary = _summarize_grok_process(
                     result.stdout,
-                    profile.state_directory,
+                    self._attempt_staging(process),
                 )
                 provider_events = await artifacts.persist(
                     session,
@@ -314,6 +320,12 @@ class ExecutionEnvelopeFactory:
             process.status = ProcessStatus.EXITED
             process.ended_at = func.now()
             process.reaped_at = func.now()
+
+    def _attempt_staging(self, process: SupervisedProcess) -> Path:
+        staging = (
+            self._artifact_root / "execution" / str(process.step_id) / str(process.provider_attempt)
+        )
+        return contained(self._artifact_root, staging)
 
     async def fail_unknown(self, process_id: uuid.UUID) -> None:
         async with self._factory.begin() as session:
@@ -456,40 +468,53 @@ def _provider_state_runtime(provider: str) -> tuple[Path, dict[str, str]]:
     raise ValueError("sandbox rejected an unsupported CLI provider")
 
 
-def _summarize_grok_process(stdout: str, state_directory: Path | None) -> dict[str, object]:
+def _summarize_grok_process(stdout: str, staging: Path) -> dict[str, object]:
     protocol_summary = summarize_grok_events(stdout)
     session_id = protocol_summary["provider_session_id"]
-    if not isinstance(session_id, str) or state_directory is None:
+    if not isinstance(session_id, str):
         return protocol_summary
-    try:
-        state_root = trusted_root(state_directory)
-        session_root = contained(
-            state_root,
-            state_root / ".grok" / "sessions" / "%2Fworkspace" / session_id,
-        )
-        diagnostic_path = contained(state_root, session_root / "events.jsonl")
-    except (OSError, PathViolation, ValueError):
+    paths = staged_grok_diagnostic_paths(staging, session_id)
+    if paths is None:
         return protocol_summary
     try:
         with contextlib.ExitStack() as stack:
-            diagnostic_stream = stack.enter_context(
-                diagnostic_path.open(encoding="utf-8", errors="replace")
-            )
-            update_stream = None
-            try:
-                update_path = contained(state_root, session_root / "updates.jsonl")
-                update_stream = stack.enter_context(
-                    update_path.open(encoding="utf-8", errors="replace")
-                )
-            except (OSError, PathViolation):
-                pass
+            diagnostic_stream = _open_staged_diagnostic(stack, staging, paths[0])
+            update_stream = _open_staged_diagnostic(stack, staging, paths[1])
             return summarize_grok_events(
                 stdout,
                 diagnostic_events=diagnostic_stream,
                 session_updates=update_stream,
             )
-    except OSError:
-        return protocol_summary
+    finally:
+        _remove_staged_diagnostics(paths)
+
+
+def _open_staged_diagnostic(
+    stack: contextlib.ExitStack, staging: Path, path: Path
+) -> TextIO | None:
+    try:
+        contained(staging, path)
+        path_stat = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(path_stat.st_mode):
+            return None
+        if path_stat.st_size > GROK_DIAGNOSTIC_FILE_MAX_BYTES:
+            return None
+        return stack.enter_context(path.open(encoding="utf-8", errors="replace"))
+    except (OSError, PathViolation):
+        return None
+
+
+def _remove_staged_diagnostics(paths: tuple[Path, Path]) -> None:
+    for path in paths:
+        try:
+            path_stat = path.lstat()
+            if stat.S_ISREG(path_stat.st_mode) or path.is_symlink():
+                path.unlink()
+        except OSError:
+            continue
+    for directory in (paths[0].parent, paths[0].parent.parent):
+        with contextlib.suppress(OSError):
+            directory.rmdir()
 
 
 def _cancellation_initiator(classification: object) -> str:

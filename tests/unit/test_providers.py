@@ -917,6 +917,33 @@ def test_grok_event_summary_is_content_free_for_completed_response() -> None:
     assert "private final response" not in json.dumps(completed)
 
 
+@pytest.mark.parametrize(
+    "session_id",
+    ("../escape", "nested/session", "session\\name", "", "space value"),
+)
+def test_grok_session_id_rejects_traversal_and_malformed_values(session_id: str) -> None:
+    from vuzol.providers.grok import grok_session_id_from_stdout, staged_grok_diagnostic_paths
+
+    stdout = json.dumps({"type": "end", "stopReason": "EndTurn", "sessionId": session_id})
+    assert grok_session_id_from_stdout(stdout) is None
+    assert staged_grok_diagnostic_paths(Path("/safe/staging"), session_id) is None
+
+
+def test_grok_session_id_selects_only_the_final_exact_protocol_session() -> None:
+    from vuzol.providers.grok import grok_session_id_from_stdout
+
+    older = "019f5e8d-d90b-7e40-a698-8a71fa87eff8"
+    exact = "019f6149-44c0-7520-932c-5e0f41c99351"
+    stdout = "\n".join(
+        (
+            f'{{"type":"end","sessionId":"{older}"}}',
+            '{"type":"thought","sessionId":"019f0000-0000-7000-8000-000000000000"}',
+            f'{{"type":"end","sessionId":"{exact}"}}',
+        )
+    )
+    assert grok_session_id_from_stdout(stdout) == exact
+
+
 def test_grok_event_summary_proves_permission_cancellation_and_correlates_sequences() -> None:
     from vuzol.providers.grok import summarize_grok_events
 

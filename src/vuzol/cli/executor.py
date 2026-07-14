@@ -10,6 +10,7 @@ from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configura
 from vuzol.config.models import SandboxNetworkMode
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
+from vuzol.execution.finalization import TrustedGateRunner, WorkerFinalizer
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.proxy_service import ProxyServiceManager
@@ -128,10 +129,16 @@ async def run() -> None:
         if not adapters:
             raise RuntimeError("execution worker has no enabled CLI profile")
         adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver, adapters=adapters)
+        local_git = LocalGit()
         worktree_service = WorktreeService(
             settings.worktree_root,
-            LocalGit(),
+            local_git,
             retention_days=settings.retention.failed_worktree_days,
+        )
+        finalizer = WorkerFinalizer(
+            local_git,
+            gate_runner=TrustedGateRunner(envelope_factory, sandbox_runtime),
+            artifacts=artifact_store,
         )
         provider_handler = ProviderStepHandler(
             factory,
@@ -139,6 +146,7 @@ async def run() -> None:
             adapter_registry,
             worktrees=worktree_service,
             artifacts=artifact_store,
+            finalizer=finalizer,
         )
         worktree_handler = PrepareWorktreeHandler(
             factory,

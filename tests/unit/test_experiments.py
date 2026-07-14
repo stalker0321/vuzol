@@ -132,10 +132,12 @@ def test_worker_prompt_contains_exact_boundary_and_structured_result_requirement
     prompt = render_worker_prompt(capsule("a" * 40), repository_id="vuzol")
     assert "Sandbox worktree: /workspace" in prompt
     assert "Exact base SHA: " + "a" * 40 in prompt
-    assert "Stop on any mismatch" in prompt
-    assert "Do not touch another VPS project" in prompt
-    assert "one focused commit" in prompt
-    assert "step09a-worker-result.v1" in prompt
+    assert "Vuzol has already prepared and verified" in prompt
+    assert "do not touch another VPS project" in prompt
+    assert "Do not invoke Git" in prompt
+    assert "Vuzol will inspect the real diff" in prompt
+    assert "step09a-worker-edit-report.v1" in prompt
+    assert "Do not claim changed files" in prompt
     assert "/home/vodkolyan" not in prompt
 
 
@@ -654,24 +656,29 @@ def test_stable_experiment_identity_and_empty_context_ratio() -> None:
         telemetry(egress_bytes=None, egress_unavailable_reason=None)
 
 
-def test_step09a_execute_code_receives_exact_worker_result_schema() -> None:
+def test_step09a_execute_code_receives_non_authoritative_edit_report_schema() -> None:
     from vuzol.providers.handlers import _step09a_result_schema
 
     name, version, schema = _step09a_result_schema(
         "execute_code", {"step09a_capsule": {"schema_version": "step09a-task-capsule.v1"}}
     )
-    assert name == "WorkerResultManifest"
-    assert version == "step09a-worker-result.v1"
+    assert name == "WorkerEditReport"
+    assert version == "step09a-worker-edit-report.v1"
     assert schema is not None
     required = schema["required"]
     assert isinstance(required, list)
     assert set(required) >= {
-        "result_commit",
-        "branch",
+        "experiment_id",
+        "task_id",
         "claimed_complete",
-        "total_worker_duration_ms",
-        "usage",
     }
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    assert "attempt" in properties
+    assert "result_commit" not in properties
+    assert "changed_files" not in properties
+    assert "gates" not in properties
+    assert "branch" not in properties
     assert _step09a_result_schema("execute_code", {}) == (None, None, None)
     assert _step09a_result_schema("plan", {"step09a_capsule": {}}) == (None, None, None)
 

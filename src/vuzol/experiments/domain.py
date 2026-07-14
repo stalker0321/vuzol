@@ -190,6 +190,7 @@ class WorkerTaskCapsule(FrozenModel):
     maximum_repair_count: int = Field(default=2, ge=0, le=2)
     context_manifest: ContextManifest
     expected_result_manifest_version: str = "step09a-worker-result.v1"
+    expected_edit_report_version: str = "step09a-worker-edit-report.v1"
     parent_attempt: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
@@ -239,6 +240,19 @@ class ReportedUsage(FrozenModel):
         if all(value is None for value in values) and not self.unavailable_reason:
             raise ValueError("entirely unavailable usage requires an explanation")
         return self
+
+
+class WorkerEditReport(FrozenModel):
+    """Bounded, non-authoritative facts returned by an implementation provider."""
+
+    schema_version: str = "step09a-worker-edit-report.v1"
+    experiment_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$")
+    task_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$")
+    attempt: int = Field(default=1, ge=1, le=3)
+    claimed_complete: bool
+    limitations: tuple[str, ...] = Field(default=(), max_length=30)
+    failure_classification: str | None = Field(default=None, max_length=200)
+    usage: ReportedUsage | None = None
 
 
 class WorkerResultManifest(FrozenModel):

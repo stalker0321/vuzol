@@ -23,6 +23,7 @@ from vuzol.execution.domain import (
     SandboxSpec,
 )
 from vuzol.execution.egress import AllowedConnectTarget, compile_proxy_allowlist
+from vuzol.execution.finalization import TRUSTED_GATE_COMMANDS, GateExecutionContext
 from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
@@ -216,6 +217,81 @@ class ExecutionEnvelopeFactory:
             session.add(process)
             await session.flush()
             return envelope, process.id
+
+    async def build_gate(
+        self,
+        context: GateExecutionContext,
+        argv: tuple[str, ...],
+        *,
+        timeout_seconds: int,
+    ) -> ProcessEnvelope:
+        if argv not in TRUSTED_GATE_COMMANDS.values():
+            raise ValueError("gate command is absent from the trusted registry")
+        async with self._factory() as session:
+            worktree = await session.get(Worktree, context.worktree_id)
+            step = await session.get(Step, context.step_id)
+            if worktree is None or step is None:
+                raise LookupError("sandbox worktree or step is missing")
+            if (
+                step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
+                or step.lease_generation != context.lease_generation
+                or step.run_id != context.run_id
+                or worktree.run_id != context.run_id
+                or worktree.task_id != context.task_id
+            ):
+                raise ValueError("gate sandbox is not bound to the current fenced lease")
+            project = self._registries.projects.get(worktree.project_id)
+            sandbox = self._registries.sandboxes.get(project.sandbox_profile)
+            if not sandbox.enabled:
+                raise ValueError("gate sandbox is disabled")
+            seccomp_profile = self._settings.execution.sandbox_seccomp_profile
+            seccomp_digest = self._settings.execution.sandbox_seccomp_profile_sha256
+            if seccomp_profile is None or seccomp_digest is None:
+                raise ValueError("sandbox seccomp profile is not configured")
+            worktree_path = contained(self._worktree_root, Path(worktree.path))
+            spec = SandboxSpec(
+                image=sandbox.image,
+                uid=sandbox.uid,
+                gid=sandbox.gid,
+                seccomp_profile=seccomp_profile,
+                seccomp_profile_sha256=seccomp_digest,
+                working_directory=Path("/workspace"),
+                mounts=(
+                    SandboxMount(
+                        source=worktree_path,
+                        target=Path("/workspace"),
+                        mode=MountMode.READ_WRITE,
+                        purpose="finalizer-worktree",
+                    ),
+                ),
+                cpu_count=sandbox.cpu_count,
+                memory_bytes=sandbox.memory_bytes,
+                pids_limit=sandbox.pids_limit,
+                tmpfs_bytes=sandbox.tmpfs_bytes,
+                open_files_limit=sandbox.open_files_limit,
+                output_bytes=sandbox.output_bytes,
+                timeout_seconds=min(sandbox.timeout_seconds, timeout_seconds),
+                stop_grace_seconds=sandbox.stop_grace_seconds,
+                network_disabled=True,
+                environment={
+                    "HOME": "/tmp/home",  # noqa: S108 - container-scoped tmpfs
+                    "CI": "1",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_TERMINAL_PROMPT": "0",
+                },
+            )
+            return ProcessEnvelope(
+                task_id=context.task_id,
+                run_id=context.run_id,
+                step_id=context.step_id,
+                worktree_id=context.worktree_id,
+                profile_id=context.profile_id,
+                provider_attempt=context.provider_attempt,
+                lease_generation=context.lease_generation,
+                argv=argv,
+                stdin="",
+                sandbox=spec,
+            )
 
     async def mark_running(self, process_id: uuid.UUID, container_name: str) -> None:
         async with self._factory.begin() as session:

@@ -3,15 +3,22 @@
 import uuid
 from decimal import Decimal
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import Capability
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.artifacts import ArtifactStore
+from vuzol.execution.finalization import (
+    FinalizedWorkerResult,
+    GateExecutionContext,
+    WorkerFinalizationError,
+    WorkerFinalizer,
+)
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.providers.budgets import account_usage, reconcile_usage, release_reservation
-from vuzol.providers.domain import ProviderRequest
+from vuzol.providers.domain import ProviderRequest, ProviderResult
 from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.health import record_failure_observation, record_success_observation
 from vuzol.providers.registry import AdapterRegistry
@@ -30,12 +37,14 @@ class ProviderStepHandler:
         *,
         worktrees: WorktreeService | None = None,
         artifacts: ArtifactStore | None = None,
+        finalizer: WorkerFinalizer | None = None,
     ) -> None:
         self._factory = factory
         self._registries = registries
         self._adapters = adapters
         self._worktrees = worktrees
         self._artifacts = artifacts
+        self._finalizer = finalizer
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -46,6 +55,20 @@ class ProviderStepHandler:
             reservation_id,
             configuration_revision,
         ) = await self._build_request(request)
+        requires_finalizer = (
+            request.step_type == "execute_code" and "step09a_capsule" in provider_request.task_draft
+        )
+        if requires_finalizer and (self._finalizer is None or self._worktrees is None):
+            async with self._factory.begin() as session:
+                await release_reservation(
+                    session, reservation_id=reservation_id, token=request.lease
+                )
+            return StepOutcome(
+                kind=OutcomeKind.PERMANENT_FAILURE,
+                result={},
+                category="worker_finalizer_unavailable",
+                summary="deterministic worker finalizer is unavailable",
+            )
         profile = self._registries.profiles.get(profile_id)
         try:
             adapter = self._adapters.get(profile_id)
@@ -106,6 +129,28 @@ class ProviderStepHandler:
                 category="provider_configuration",
                 summary=type(error).__name__,
             )
+
+        finalized: FinalizedWorkerResult | None = None
+        finalization_failure: WorkerFinalizationError | None = None
+        invalid_edit_report = False
+        if (
+            request.step_type == "execute_code"
+            and "step09a_capsule" in provider_request.task_draft
+            and self._finalizer is not None
+            and self._worktrees is not None
+        ):
+            try:
+                finalized = await self._finalize_worker_result(
+                    request=request,
+                    provider_request=provider_request,
+                    profile_id=profile.id,
+                    result=result,
+                    cancellation=cancellation,
+                )
+            except WorkerFinalizationError as error:
+                finalization_failure = error
+            except ValidationError:
+                invalid_edit_report = True
         async with self._factory.begin() as session:
             accounted_usage = account_usage(profile, result.usage)
             await reconcile_usage(
@@ -123,6 +168,21 @@ class ProviderStepHandler:
                 profile,
                 configuration_revision=configuration_revision,
             )
+            finalization_result = (
+                finalized
+                if finalized is not None
+                else finalization_failure.result
+                if finalization_failure is not None
+                else None
+            )
+            if finalization_result is not None and self._finalizer is not None:
+                await self._finalizer.persist(
+                    session,
+                    task_id=request.task_id,
+                    run_id=request.run_id,
+                    step_id=request.step_id,
+                    result=finalization_result,
+                )
             if request.step_type == "execute_code" and self._worktrees is not None:
                 wt = await session.scalar(select(Worktree).where(Worktree.run_id == request.run_id))
                 if wt is not None:
@@ -132,15 +192,72 @@ class ProviderStepHandler:
                         artifacts=self._artifacts,
                         step_id=request.step_id,
                     )
+        if finalization_failure is not None:
+            return StepOutcome(
+                kind=OutcomeKind.PERMANENT_FAILURE,
+                result={},
+                category=finalization_failure.category,
+                summary=finalization_failure.safe_summary,
+                unknown_effects=False,
+            )
+        if invalid_edit_report:
+            return StepOutcome(
+                kind=OutcomeKind.PERMANENT_FAILURE,
+                result={},
+                category="invalid_worker_edit_report",
+                summary="provider returned an invalid worker edit report",
+                unknown_effects=False,
+            )
+        structured_output = (
+            finalized.manifest.model_dump(mode="json")
+            if finalized is not None
+            else result.structured_output
+        )
         return StepOutcome.succeeded(
             {
                 "profile_id": profile.id,
                 "model": profile.model,
                 "provider_request_id": result.provider_request_id,
                 "text": result.text,
-                "structured_output": result.structured_output,
+                "structured_output": structured_output,
                 "finish_reason": result.finish_reason,
             }
+        )
+
+    async def _finalize_worker_result(
+        self,
+        *,
+        request: StepExecutionRequest,
+        provider_request: ProviderRequest,
+        profile_id: str,
+        result: ProviderResult,
+        cancellation: CancellationContext,
+    ) -> FinalizedWorkerResult:
+        from vuzol.experiments.domain import WorkerEditReport, WorkerTaskCapsule
+
+        if self._finalizer is None or self._worktrees is None:
+            raise RuntimeError("deterministic worker finalizer is unavailable")
+        capsule = WorkerTaskCapsule.model_validate(provider_request.task_draft["step09a_capsule"])
+        edit_report = WorkerEditReport.model_validate(result.structured_output)
+        async with self._factory() as session:
+            worktree = await self._worktrees.reference_for_run(session, run_id=request.run_id)
+        return await self._finalizer.finalize(
+            worktree=worktree.path,
+            capsule=capsule,
+            edit_report=edit_report,
+            worker_profile=profile_id,
+            provider_usage=result.usage,
+            provider_attempt=provider_request.provider_attempt,
+            gate_context=GateExecutionContext(
+                task_id=request.task_id,
+                run_id=request.run_id,
+                step_id=request.step_id,
+                worktree_id=worktree.id,
+                profile_id=profile_id,
+                provider_attempt=provider_request.provider_attempt,
+                lease_generation=request.lease.generation,
+            ),
+            cancellation=cancellation,
         )
 
     async def _build_request(
@@ -217,10 +334,10 @@ def _step09a_result_schema(
 ) -> tuple[str | None, str | None, dict[str, object] | None]:
     if step_type != "execute_code" or "step09a_capsule" not in task_draft:
         return None, None, None
-    from vuzol.experiments.domain import WorkerResultManifest
+    from vuzol.experiments.domain import WorkerEditReport
 
     return (
-        "WorkerResultManifest",
-        "step09a-worker-result.v1",
-        WorkerResultManifest.model_json_schema(),
+        "WorkerEditReport",
+        "step09a-worker-edit-report.v1",
+        WorkerEditReport.model_json_schema(),
     )

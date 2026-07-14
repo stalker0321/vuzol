@@ -105,6 +105,15 @@ class WorktreeService:
                 shutil.rmtree(path, ignore_errors=True)
             raise
 
+    async def reference_for_run(
+        self, session: AsyncSession, *, run_id: uuid.UUID
+    ) -> WorktreeReference:
+        row = await session.scalar(select(Worktree).where(Worktree.run_id == run_id))
+        if row is None:
+            raise WorktreeError("unknown worktree")
+        contained(self._root, Path(row.path))
+        return _reference(row)
+
     async def retain(
         self,
         session: AsyncSession,

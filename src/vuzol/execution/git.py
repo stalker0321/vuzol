@@ -4,13 +4,22 @@ import asyncio
 import hashlib
 import os
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from vuzol.execution.domain import GitInspection
 
 
 class GitError(RuntimeError):
     """A bounded system-controlled Git operation failed."""
+
+
+SYSTEM_GIT_CONFIG = (
+    "core.hooksPath=/dev/null",
+    "core.pager=cat",
+    "diff.external=",
+    "credential.helper=",
+    "commit.gpgSign=false",
+)
 
 
 class LocalGit:
@@ -84,29 +93,92 @@ class LocalGit:
         head = (await self._run(worktree, "rev-parse", "HEAD")).decode().strip()
         branch = (await self._run(worktree, "branch", "--show-current")).decode().strip()
         comparison = base_commit or "HEAD"
-        # Use intent-to-add so untracked/new files, deletes, renames
-        # are included in evidence and patch.
-        await self._run(worktree, "add", "-N", ".")
-        try:
-            names = await self._run(
-                worktree, "diff", "--name-only", "-z", "--no-ext-diff", comparison
+        names = await self._run(
+            worktree,
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "--no-renames",
+            comparison,
+        )
+        untracked = await self._run(worktree, "ls-files", "--others", "--exclude-standard", "-z")
+        changed = tuple(
+            sorted(
+                {
+                    item.decode("utf-8", "surrogateescape")
+                    for item in (*names.split(b"\0"), *untracked.split(b"\0"))
+                    if item
+                }
             )
-            changed = tuple(
-                item.decode("utf-8", "surrogateescape") for item in names.split(b"\0") if item
-            )
-            diff = await self._run(
+        )
+        diff = await self._run(
+            worktree,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            comparison,
+        )
+        for path in (
+            item.decode("utf-8", "surrogateescape") for item in untracked.split(b"\0") if item
+        ):
+            _require_safe_path(path)
+            addition = await self._run_allowed(
                 worktree,
+                {0, 1},
                 "diff",
+                "--no-index",
                 "--binary",
                 "--no-ext-diff",
                 "--no-textconv",
                 "--no-color",
-                comparison,
+                "--",
+                "/dev/null",
+                path,
             )
-        finally:
-            # Clean intent-to-add without touching working tree contents
-            await self._run(worktree, "reset")
+            diff += addition
         return GitInspection(head=head, branch=branch, changed_files=changed, diff=diff)
+
+    async def stage_paths(self, worktree: Path, paths: tuple[str, ...]) -> None:
+        if not paths:
+            raise GitError("cannot stage an empty path set")
+        for path in paths:
+            _require_safe_path(path)
+        await self._run(worktree, "add", "--all", "--", *paths)
+
+    async def create_commit(self, worktree: Path, message: str) -> str:
+        if not message or len(message) > 200 or "\n" in message or "\r" in message:
+            raise GitError("commit message is invalid")
+        await self._run(
+            worktree,
+            "commit",
+            "--no-verify",
+            "--no-gpg-sign",
+            "-m",
+            message,
+            extra_environment={
+                "GIT_AUTHOR_NAME": "Vuzol Worker Finalizer",
+                "GIT_AUTHOR_EMAIL": "vuzol-worker@localhost.invalid",
+                "GIT_COMMITTER_NAME": "Vuzol Worker Finalizer",
+                "GIT_COMMITTER_EMAIL": "vuzol-worker@localhost.invalid",
+            },
+        )
+        return await self.resolve_commit(worktree, "HEAD")
+
+    async def commit_parent(self, worktree: Path, commit: str) -> str:
+        return await self.resolve_commit(worktree, f"{commit}^")
+
+    async def require_no_remotes(self, worktree: Path) -> None:
+        if await self._run(worktree, "remote"):
+            raise GitError("isolated worktree unexpectedly has a remote")
+
+    async def require_clean_worktree(self, worktree: Path) -> None:
+        status = await self._run(worktree, "status", "--porcelain=v2", "--untracked-files=all")
+        if status:
+            raise GitError("finalized worktree is dirty")
 
     async def remove_worktree(self, repository: Path, path: Path) -> None:
         if (path / ".git").is_dir():
@@ -122,27 +194,31 @@ class LocalGit:
         except GitError:
             return None
 
-    async def _run(self, cwd: Path, *args: str) -> bytes:
+    async def _run(
+        self, cwd: Path, *args: str, extra_environment: dict[str, str] | None = None
+    ) -> bytes:
+        return await self._run_allowed(cwd, {0}, *args, extra_environment=extra_environment)
+
+    async def _run_allowed(
+        self,
+        cwd: Path,
+        allowed_returncodes: set[int],
+        *args: str,
+        extra_environment: dict[str, str] | None = None,
+    ) -> bytes:
         environment = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": "/nonexistent",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "/bin/false",
+            "SSH_ASKPASS": "/bin/false",
             "GIT_PAGER": "cat",
             "GIT_OPTIONAL_LOCKS": "0",
         }
-        command = (
-            "git",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.pager=cat",
-            "-c",
-            "diff.external=",
-            "-c",
-            "credential.helper=",
-            *args,
-        )
+        environment.update(extra_environment or {})
+        configuration = tuple(value for item in SYSTEM_GIT_CONFIG for value in ("-c", item))
+        command = ("/usr/bin/git", *configuration, *args)
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
@@ -156,6 +232,12 @@ class LocalGit:
             process.kill()
             await process.wait()
             raise GitError("Git operation timed out") from error
-        if process.returncode != 0:
+        if process.returncode not in allowed_returncodes:
             raise GitError(f"Git operation failed: {args[0]}")
         return stdout
+
+
+def _require_safe_path(path: str) -> None:
+    candidate = PurePosixPath(path)
+    if not path or candidate.is_absolute() or ".." in candidate.parts:
+        raise GitError("Git path is not repository-relative")

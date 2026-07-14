@@ -5,6 +5,7 @@ from vuzol.experiments.domain import (
     ExecutionMode,
     ReviewOutcome,
     TaskClassification,
+    WorkerEditReport,
     WorkerResultManifest,
     WorkerTaskCapsule,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "ExecutionMode",
     "ReviewOutcome",
     "TaskClassification",
+    "WorkerEditReport",
     "WorkerResultManifest",
     "WorkerTaskCapsule",
     "classify_execution_mode",

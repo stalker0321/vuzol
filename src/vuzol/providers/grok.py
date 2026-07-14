@@ -108,19 +108,9 @@ class GrokCliAdapter:
                 "context": [item.model_dump(mode="json") for item in request.context],
                 "output_schema": request.output_json_schema,
                 "execution_policy": {
-                    "shell_invocation": (
-                        "Invoke each allowed shell command separately; do not use cd, chains, "
-                        "wrappers, or command substitution. Commands must begin exactly with "
-                        "git, make, or ./verify.sh. The only additional read command allowed "
-                        "for the smoke repository is exactly: tail -n 1 README.md. To measure "
-                        "manifest durations, use only the exact command: date +%s%3N."
-                    ),
+                    "shell_invocation": _shell_contract_instruction(request),
                     "file_edits": "Use the Edit tool for workspace file changes.",
-                    "result_manifest": (
-                        "When every provider usage value is unavailable, set unavailable_reason "
-                        "to a concise non-empty explanation. Return a manifest that validates "
-                        "against the complete requested schema."
-                    ),
+                    "result_manifest": _result_contract_instruction(request),
                 },
             },
             ensure_ascii=False,
@@ -225,14 +215,22 @@ class GrokProviderCancelled(ValueError):
 
 
 def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str, object] | None:
-    if request.output_schema_version != "step09a-worker-result.v1":
+    if request.output_schema_version not in {
+        "step09a-worker-edit-report.v1",
+        "step09a-worker-result.v1",
+    }:
         return None
     from pydantic import ValidationError
 
-    from vuzol.experiments.domain import WorkerResultManifest
+    from vuzol.experiments.domain import WorkerEditReport, WorkerResultManifest
 
     try:
-        manifest = WorkerResultManifest.model_validate_json(value)
+        contract = (
+            WorkerEditReport
+            if request.output_schema_version == "step09a-worker-edit-report.v1"
+            else WorkerResultManifest
+        )
+        manifest = contract.model_validate_json(value)
     except ValidationError as error:
         raise ProviderFailure(
             ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
@@ -241,6 +239,34 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
             safe_summary="Grok CLI returned an invalid worker result manifest",
         ) from error
     return manifest.model_dump(mode="json")
+
+
+def _result_contract_instruction(request: ProviderRequest) -> str:
+    if request.output_schema_version == "step09a-worker-edit-report.v1":
+        return (
+            "Do not invoke shell commands, Git, or project gates. Vuzol owns inspection, gates, "
+            "staging, commit creation, and the authoritative result manifest. Return only the "
+            "small requested edit report; when all provider usage is unavailable, include a "
+            "concise non-empty unavailable_reason."
+        )
+    return (
+        "When every provider usage value is unavailable, set unavailable_reason to a concise "
+        "non-empty explanation. Return an object that validates against the requested schema."
+    )
+
+
+def _shell_contract_instruction(request: ProviderRequest) -> str:
+    if request.output_schema_version == "step09a-worker-edit-report.v1":
+        return (
+            "Do not invoke native shell tools. Use repository read, search, and edit tools only; "
+            "the deterministic Vuzol finalizer owns all Git and gate commands."
+        )
+    return (
+        "Invoke each allowed shell command separately; do not use cd, chains, wrappers, or "
+        "command substitution. Commands must begin exactly with git, make, or ./verify.sh. The "
+        "only additional read command allowed for the smoke repository is exactly: tail -n 1 "
+        "README.md. To measure manifest durations, use only: date +%s%3N."
+    )
 
 
 _SUMMARY_EVENT_LIMIT = 128

@@ -713,21 +713,12 @@ async def test_grok_adapter_classifies_structured_provider_cancellation(tmp_path
 
 
 @pytest.mark.anyio
-async def test_grok_adapter_validates_and_persists_step09a_manifest(tmp_path: Path) -> None:
+async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> None:
     manifest = {
-        "schema_version": "step09a-worker-result.v1",
+        "schema_version": "step09a-worker-edit-report.v1",
         "experiment_id": "experiment",
         "task_id": "task",
-        "worker_profile": "grok-a",
-        "base_commit": "a" * 40,
-        "result_commit": "b" * 40,
-        "branch": "worker/task",
-        "changed_files": ["README.md"],
         "claimed_complete": True,
-        "gates": [
-            {"name": "focused", "command_id": "./verify.sh", "exit_code": 0, "duration_ms": 1}
-        ],
-        "total_worker_duration_ms": 10,
         "usage": {
             "input_tokens": None,
             "cached_input_tokens": None,
@@ -737,15 +728,17 @@ async def test_grok_adapter_validates_and_persists_step09a_manifest(tmp_path: Pa
         },
         "failure_classification": None,
         "limitations": [],
-        "scope_exceeded": False,
         "attempt": 1,
     }
+
+    invocations: list[CodexInvocation] = []
 
     class ManifestTransport:
         async def run(
             self, invocation: CodexInvocation, cancellation: CancellationContext
         ) -> CodexProcessResult:
-            del invocation, cancellation
+            del cancellation
+            invocations.append(invocation)
             return CodexProcessResult(
                 0,
                 "\n".join(
@@ -772,13 +765,20 @@ async def test_grok_adapter_validates_and_persists_step09a_manifest(tmp_path: Pa
     request = provider_request().model_copy(
         update={
             "sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001",
-            "output_schema_version": "step09a-worker-result.v1",
+            "output_schema_version": "step09a-worker-edit-report.v1",
         }
     )
     result = await GrokCliAdapter(ManifestTransport()).execute(
         request, configured, CancellationContext()
     )
     assert result.structured_output == manifest
+    prompt = json.loads(invocations[-1].stdin)
+    instruction = prompt["execution_policy"]["result_manifest"]
+    assert "Do not invoke shell commands, Git, or project gates" in instruction
+    assert "Vuzol owns inspection, gates, staging, commit creation" in instruction
+    shell_instruction = prompt["execution_policy"]["shell_invocation"]
+    assert "Do not invoke native shell tools" in shell_instruction
+    assert "git, make, or ./verify.sh" not in shell_instruction
 
     usage = manifest["usage"]
     assert isinstance(usage, dict)

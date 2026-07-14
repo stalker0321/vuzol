@@ -113,7 +113,7 @@ async def seed_trial(
         task_draft=draft.model_dump(mode="json"),
         draft_schema_version="1.0",
         interpreter_profile="step09a-admin-trigger",
-        prompt_version="step09a-worker-v1",
+        prompt_version="step09a-worker-v2",
         status=TaskStatus.INTERPRETED,
         risk=RiskLevel(request.classification.risk.value),
         task_type="coding",
@@ -127,7 +127,7 @@ async def seed_trial(
         task_draft=draft.model_dump(mode="json"),
         profile_id="step09a-admin-trigger",
         model="deterministic",
-        prompt_version="step09a-worker-v1",
+        prompt_version="step09a-worker-v2",
         schema_version="1.0",
     )
     session.add(interpretation)
@@ -139,7 +139,7 @@ async def seed_trial(
         workflow=workflow,
         configuration_revision=registries.revision,
         policy_revision=TRIAL_POLICY_REVISION,
-        prompt_revision="step09a-worker-v1",
+        prompt_revision="step09a-worker-v2",
         automatic_start=True,
         budget_mode="strong",
     )
@@ -190,18 +190,20 @@ def render_worker_prompt(capsule: WorkerTaskCapsule, *, repository_id: str) -> s
         "You are a bounded implementation worker, not the technical lead or reviewer.\n"
         f"Repository logical identity: {repository_id}. Sandbox worktree: /workspace.\n"
         f"Expected branch: {capsule.target_branch}. Exact base SHA: {capsule.base_commit}.\n"
-        "Before editing, verify HEAD, branch, and a clean worktree. Stop on any mismatch or "
-        "unknown change. Do not touch another VPS project.\n"
+        "Vuzol has already prepared and verified the isolated worktree. Do not invoke Git, "
+        "shell commands, or required gates. Use only repository read/search/edit tools and do "
+        "not touch another VPS project.\n"
         "The complete immutable task capsule follows as JSON:\n"
         f"{capsule.model_dump_json()}\n"
         "Only change allowed paths. Do not modify forbidden files. Do not relax, skip, fake, or "
-        "swallow tests; do not use forced-success assertions or exit codes. Run every required "
-        "gate with its real exit code. Make one focused commit using an explicit non-secret Git "
-        "identity if needed.\n"
+        "swallow tests; do not use forced-success assertions. Vuzol will inspect the real diff, "
+        "enforce scope, run trusted gates, stage exact paths, create the commit, and construct the "
+        "authoritative result manifest after you exit.\n"
         "Your final response must be only one JSON object conforming to "
-        f"{capsule.expected_result_manifest_version}; include the actual commit, changed files, "
-        "gate commands/identifiers, exit codes and durations, total duration, provider usage only "
-        "when reliably exposed, limitations, failure classification, and scope_exceeded."
+        f"{capsule.expected_edit_report_version}; include only the experiment ID, task ID, "
+        "attempt, claimed completion, limitations, failure classification, and provider usage "
+        "only when reliably exposed. Do not claim changed files, gate results, branch identity, "
+        "or a result commit."
     )
 
 

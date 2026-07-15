@@ -41,6 +41,7 @@ TRUSTED_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
     "make type-check": ("/usr/bin/make", "type-check"),
     "make security": ("/usr/bin/make", "security"),
 }
+TRUSTED_PYTHON_FORMATTER = ("/opt/vuzol-validation/bin/ruff", "format", "--")
 
 
 class WorkerFinalizationError(RuntimeError):
@@ -70,6 +71,22 @@ class GateEvidence(FrozenModel):
     )
 
 
+class CanonicalizationEvidence(FrozenModel):
+    schema_version: str = "worker-canonicalization-evidence.v1"
+    formatter_id: str = "ruff-format-python"
+    input_files: tuple[str, ...]
+    changed_files: tuple[str, ...]
+    exit_code: int
+    duration_ms: int = Field(ge=0)
+    stdout_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stdout_bytes: int = Field(ge=0)
+    stderr_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stderr_bytes: int = Field(ge=0)
+    validation_image_digest: str | None = Field(
+        default=None, pattern=r"^[^\s@]+@sha256:[0-9a-f]{64}$"
+    )
+
+
 class FinalizationEvidence(FrozenModel):
     schema_version: str = "worker-finalization-evidence.v1"
     provider_edit_report: WorkerEditReport
@@ -79,6 +96,7 @@ class FinalizationEvidence(FrozenModel):
     changed_files: tuple[str, ...]
     diff_sha256: str
     suspicious_signals: tuple[SuspiciousSignal, ...]
+    canonicalization: CanonicalizationEvidence | None = None
     gates: tuple[GateEvidence, ...]
     result_manifest: WorkerResultManifest | None = None
     verification: VerificationResult | None = None
@@ -129,6 +147,14 @@ class GateEnvelopePort(Protocol):
         self,
         context: GateExecutionContext,
         argv: tuple[str, ...],
+        *,
+        timeout_seconds: int,
+    ) -> ProcessEnvelope: ...
+
+    async def build_canonicalizer(
+        self,
+        context: GateExecutionContext,
+        paths: tuple[str, ...],
         *,
         timeout_seconds: int,
     ) -> ProcessEnvelope: ...
@@ -221,6 +247,50 @@ class TrustedGateRunner:
         )
         return GateRun(evidence=evidence, stdout=stdout, stderr=stderr)
 
+    async def canonicalize(
+        self,
+        worktree: Path,
+        changed_files: tuple[str, ...],
+        *,
+        timeout_seconds: int,
+        context: GateExecutionContext | None,
+        cancellation: CancellationContext | None,
+    ) -> CanonicalizationEvidence:
+        python_files = tuple(sorted(path for path in changed_files if path.endswith(".py")))
+        before = {path: _file_digest(worktree, path) for path in python_files}
+        if not python_files:
+            empty = hashlib.sha256(b"").hexdigest()
+            return CanonicalizationEvidence(
+                input_files=(),
+                changed_files=(),
+                exit_code=0,
+                duration_ms=0,
+                stdout_sha256=empty,
+                stdout_bytes=0,
+                stderr_sha256=empty,
+                stderr_bytes=0,
+            )
+        if context is None or cancellation is None:
+            raise ValueError("canonicalization sandbox execution context is unavailable")
+        envelope = await self._envelopes.build_canonicalizer(
+            context, python_files, timeout_seconds=timeout_seconds
+        )
+        result = await self._runtime.run(envelope, cancellation)
+        stdout = _captured(result.stdout)
+        stderr = _captured(result.stderr)
+        after = {path: _file_digest(worktree, path) for path in python_files}
+        return CanonicalizationEvidence(
+            input_files=python_files,
+            changed_files=tuple(path for path in python_files if before[path] != after[path]),
+            exit_code=result.exit_code,
+            duration_ms=result.duration_ms,
+            stdout_sha256=stdout.sha256,
+            stdout_bytes=stdout.byte_count,
+            stderr_sha256=stderr.sha256,
+            stderr_bytes=stderr.byte_count,
+            validation_image_digest=envelope.sandbox.image,
+        )
+
 
 class WorkerFinalizer:
     def __init__(
@@ -283,6 +353,43 @@ class WorkerFinalizer:
             ):
                 self._fail(
                     "worker_scope_violation", "implementation exceeded allowed paths", evidence
+                )
+            if isinstance(self._gates, TrustedGateRunner):
+                try:
+                    canonicalization = await self._gates.canonicalize(
+                        worktree,
+                        inspection.changed_files,
+                        timeout_seconds=capsule.maximum_execution_seconds,
+                        context=gate_context,
+                        cancellation=cancellation,
+                    )
+                except (ValueError, RuntimeError) as error:
+                    self._fail("worker_canonicalization", type(error).__name__, evidence)
+                evidence = evidence.model_copy(update={"canonicalization": canonicalization})
+                if canonicalization.exit_code != 0:
+                    self._fail(
+                        "worker_canonicalization_failed",
+                        "trusted project canonicalization failed",
+                        evidence,
+                    )
+                inspection = await self._git.inspect(worktree, capsule.base_commit)
+                if not all(
+                    path_is_allowed(path, capsule.allowed_paths)
+                    for path in inspection.changed_files
+                ):
+                    self._fail(
+                        "worker_canonicalization_scope",
+                        "canonicalization exceeded allowed paths",
+                        evidence,
+                    )
+                evidence = evidence.model_copy(
+                    update={
+                        "changed_files": inspection.changed_files,
+                        "diff_sha256": inspection.diff_hash,
+                        "suspicious_signals": scan_suspicious_patterns(
+                            {"worker.diff": inspection.diff.decode("utf-8", "replace")}
+                        ),
+                    }
                 )
             try:
                 gate_runs = await self._gates.run(
@@ -365,6 +472,11 @@ class WorkerFinalizer:
                 for run in gate_runs
             ),
             total_worker_duration_ms=provider_usage.duration_ms
+            + (
+                evidence.canonicalization.duration_ms
+                if evidence.canonicalization is not None
+                else 0
+            )
             + sum(run.evidence.duration_ms for run in gate_runs),
             usage=_reported_usage(provider_usage),
             failure_classification=None,
@@ -446,6 +558,19 @@ def _captured(value: str) -> CapturedOutput:
         byte_count=len(content),
         truncated=False,
     )
+
+
+def _file_digest(worktree: Path, relative_path: str) -> str:
+    root = worktree.resolve()
+    candidate = worktree / relative_path
+    if candidate.is_symlink():
+        raise ValueError("canonicalization input cannot be a symlink")
+    resolved = candidate.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as error:
+        raise ValueError("canonicalization input escapes the worktree") from error
+    return hashlib.sha256(resolved.read_bytes()).hexdigest()
 
 
 def _reported_usage(usage: NormalizedUsage) -> ReportedUsage:

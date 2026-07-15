@@ -164,6 +164,47 @@ class ContextManifest(FrozenModel):
         return sum(entry.byte_count for entry in self.entries if entry.repeated_from_roles)
 
 
+class RepairSymbolContext(FrozenModel):
+    reference: str = Field(min_length=1, max_length=500)
+    content: str = Field(min_length=1, max_length=16_000)
+
+
+class RepairGateDiagnostic(FrozenModel):
+    command_id: str = Field(min_length=1, max_length=200)
+    exit_code: int
+    sanitized_output: str = Field(min_length=1, max_length=8_000)
+
+
+class BoundedRepairContext(FrozenModel):
+    """Only the measured code facts a linked repair is allowed to receive."""
+
+    schema_version: str = "bounded-repair-context.v1"
+    current_diff: str = Field(min_length=1, max_length=64_000)
+    changed_files: tuple[str, ...] = Field(min_length=1, max_length=20)
+    failed_gates: tuple[RepairGateDiagnostic, ...] = Field(min_length=1, max_length=8)
+    required_symbols: tuple[RepairSymbolContext, ...] = Field(default=(), max_length=12)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> Self:
+        if any(path.startswith("/") or ".." in path.split("/") for path in self.changed_files):
+            raise ValueError("repair changed files must be repository-relative")
+        total = len(self.current_diff.encode())
+        total += sum(len(item.sanitized_output.encode()) for item in self.failed_gates)
+        total += sum(len(item.content.encode()) for item in self.required_symbols)
+        if total > 96_000:
+            raise ValueError("bounded repair context exceeds 96000 bytes")
+        serialized = self.model_dump_json().lower()
+        forbidden = (
+            "/home/vodkolyan/vuzol-local",
+            "private handoff",
+            "systemd journal",
+            "infrastructure history",
+        )
+        if any(marker in serialized for marker in forbidden):
+            raise ValueError("repair context contains prohibited operational history")
+        return self
+
+
 class RequiredGate(FrozenModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     command_id: str = Field(min_length=1, max_length=200)
@@ -192,6 +233,8 @@ class WorkerTaskCapsule(FrozenModel):
     expected_result_manifest_version: str = "step09a-worker-result.v1"
     expected_edit_report_version: str = "step09a-worker-edit-report.v1"
     parent_attempt: int | None = Field(default=None, ge=1)
+    repair_context: BoundedRepairContext | None = None
+    runtime_certification: bool = False
 
     @model_validator(mode="after")
     def validate_safety(self) -> Self:
@@ -212,6 +255,8 @@ class WorkerTaskCapsule(FrozenModel):
             raise ValueError("execution-mode override requires a reason")
         if self.context_manifest.role != "worker":
             raise ValueError("task capsule requires a worker context manifest")
+        if self.parent_attempt is None and self.repair_context is not None:
+            raise ValueError("initial attempts cannot contain repair context")
         return self
 
 

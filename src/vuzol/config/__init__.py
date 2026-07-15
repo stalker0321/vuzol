@@ -2,6 +2,8 @@
 
 from vuzol.config.loader import ConfigurationLoadError, build_bundle, load_document
 from vuzol.config.models import (
+    AgentEditMechanism,
+    AgentRuntimeContract,
     BudgetMode,
     Capability,
     CommandDefinition,
@@ -9,6 +11,7 @@ from vuzol.config.models import (
     DeliveryMode,
     EgressDestination,
     GitDeliveryPolicy,
+    InnerSandboxMode,
     LaunchMode,
     NetworkPolicy,
     ProjectConfig,
@@ -17,6 +20,7 @@ from vuzol.config.models import (
     RegistryDocument,
     SandboxNetworkMode,
     SandboxProfileConfig,
+    StructuredOutputSource,
     TopicConfig,
     TopicKind,
 )
@@ -45,6 +49,8 @@ from vuzol.config.settings import (
 )
 
 __all__ = [
+    "AgentEditMechanism",
+    "AgentRuntimeContract",
     "BudgetMode",
     "Capability",
     "CommandDefinition",
@@ -58,6 +64,7 @@ __all__ = [
     "ExecutionSettings",
     "GitDeliveryPolicy",
     "HardLimits",
+    "InnerSandboxMode",
     "InterpretationSettings",
     "LaunchMode",
     "NetworkPolicy",
@@ -78,6 +85,7 @@ __all__ = [
     "SecretResolutionError",
     "Settings",
     "SnapshotCompatibility",
+    "StructuredOutputSource",
     "TelegramSettings",
     "TopicConfig",
     "TopicKind",

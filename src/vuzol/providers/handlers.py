@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config.models import Capability, ProviderProfileConfig
+from vuzol.config.models import AgentRuntimeContract, Capability, ProviderProfileConfig
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.access import (
     WorktreeAccessError,
@@ -22,6 +22,7 @@ from vuzol.execution.finalization import (
     WorkerFinalizationError,
     WorkerFinalizer,
 )
+from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import get_logger
 from vuzol.providers.budgets import account_usage, reconcile_usage, release_reservation
@@ -56,6 +57,7 @@ class ProviderStepHandler:
         artifacts: ArtifactStore | None = None,
         finalizer: WorkerFinalizer | None = None,
         worktree_access: WorktreeAccessManager | None = None,
+        agent_certificates: AgentCertificateStore | None = None,
     ) -> None:
         self._factory = factory
         self._registries = registries
@@ -64,6 +66,7 @@ class ProviderStepHandler:
         self._artifacts = artifacts
         self._finalizer = finalizer
         self._worktree_access = worktree_access
+        self._agent_certificates = agent_certificates
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -103,6 +106,20 @@ class ProviderStepHandler:
                 category="worker_finalizer_unavailable",
                 summary="deterministic worker finalizer is unavailable",
             )
+        if (
+            requires_finalizer
+            and isinstance(profile.agent_runtime_contract, AgentRuntimeContract)
+            and not _is_runtime_certification(provider_request.task_draft)
+        ):
+            try:
+                await self._require_agent_certificate(request, profile)
+            except (LookupError, ValueError) as error:
+                return await self._pre_provider_failure(
+                    request,
+                    reservation_id=reservation_id,
+                    category="agent_runtime_uncertified",
+                    error=error,
+                )
         access: WorktreeAccessLease | None = None
         if requires_finalizer:
             assert self._worktree_access is not None
@@ -332,6 +349,26 @@ class ProviderStepHandler:
             cancellation=cancellation,
             access=access,
         )
+
+    async def _require_agent_certificate(
+        self, request: StepExecutionRequest, profile: ProviderProfileConfig
+    ) -> None:
+        if profile.agent_runtime_contract is None:
+            raise ValueError(f"profile {profile.id} has no agent runtime contract")
+        if self._agent_certificates is None:
+            raise ValueError("agent certificate store is unavailable")
+        async with self._factory() as session:
+            worktree = await session.scalar(
+                select(Worktree).where(
+                    Worktree.run_id == request.run_id,
+                    Worktree.task_id == request.task_id,
+                )
+            )
+        if worktree is None:
+            raise LookupError("certified worker execution has no worktree")
+        project = self._registries.projects.get(worktree.project_id)
+        sandbox = self._registries.sandboxes.get(project.sandbox_profile)
+        self._agent_certificates.require(profile, sandbox)
 
     async def _pre_provider_failure(
         self,
@@ -725,4 +762,21 @@ def _step09a_result_schema(
         "WorkerEditReport",
         "step09a-worker-edit-report.v1",
         WorkerEditReport.model_json_schema(),
+    )
+
+
+def _is_runtime_certification(task_draft: dict[str, object]) -> bool:
+    capsule = task_draft.get("step09a_capsule")
+    if not isinstance(capsule, dict) or capsule.get("runtime_certification") is not True:
+        return False
+    task_id = capsule.get("task_id")
+    required_gates = capsule.get("required_gates")
+    return (
+        isinstance(task_id, str)
+        and task_id.startswith("agent-certification-")
+        and capsule.get("allowed_paths") == ["certification/agent-runtime-probe.txt"]
+        and capsule.get("maximum_repair_count") == 0
+        and capsule.get("parent_attempt") is None
+        and required_gates
+        == [{"name": "format-check", "command_id": "make format-check"}]
     )

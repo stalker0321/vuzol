@@ -23,7 +23,11 @@ from vuzol.execution.domain import (
     SandboxSpec,
 )
 from vuzol.execution.egress import AllowedConnectTarget, compile_proxy_allowlist
-from vuzol.execution.finalization import TRUSTED_GATE_COMMANDS, GateExecutionContext
+from vuzol.execution.finalization import (
+    TRUSTED_GATE_COMMANDS,
+    TRUSTED_PYTHON_FORMATTER,
+    GateExecutionContext,
+)
 from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
@@ -240,6 +244,37 @@ class ExecutionEnvelopeFactory:
     ) -> ProcessEnvelope:
         if argv not in TRUSTED_GATE_COMMANDS.values():
             raise ValueError("gate command is absent from the trusted registry")
+        return await self._build_validation_envelope(context, argv, timeout_seconds)
+
+    async def build_canonicalizer(
+        self,
+        context: GateExecutionContext,
+        paths: tuple[str, ...],
+        *,
+        timeout_seconds: int,
+    ) -> ProcessEnvelope:
+        if not paths or len(paths) > 100:
+            raise ValueError("canonicalization requires a bounded file set")
+        normalized: list[str] = []
+        for path in paths:
+            candidate = Path(path)
+            if (
+                candidate.is_absolute()
+                or ".." in candidate.parts
+                or candidate.suffix != ".py"
+                or str(candidate) != path
+            ):
+                raise ValueError("canonicalization path is unsafe")
+            normalized.append(f"/workspace/{path}")
+        argv = (*TRUSTED_PYTHON_FORMATTER, *normalized)
+        return await self._build_validation_envelope(context, argv, timeout_seconds)
+
+    async def _build_validation_envelope(
+        self,
+        context: GateExecutionContext,
+        argv: tuple[str, ...],
+        timeout_seconds: int,
+    ) -> ProcessEnvelope:
         async with self._factory() as session:
             worktree = await session.get(Worktree, context.worktree_id)
             step = await session.get(Step, context.step_id)

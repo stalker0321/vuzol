@@ -4,7 +4,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config import Capability
@@ -12,6 +12,7 @@ from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.git import LocalGit
 from vuzol.execution.paths import worktree_branch
 from vuzol.experiments.domain import (
+    BoundedRepairContext,
     ContextManifest,
     ExecutionMode,
     FrozenModel,
@@ -61,6 +62,16 @@ class TrialSeedRequest(FrozenModel):
     maximum_repair_count: int = Field(default=2, ge=0, le=2)
     context_manifest: ContextManifest
     attempt: int = Field(default=1, ge=1, le=3)
+    repair_context: BoundedRepairContext | None = None
+    runtime_certification: bool = False
+
+    @model_validator(mode="after")
+    def validate_attempt_context(self) -> "TrialSeedRequest":
+        if self.attempt > 1 and self.repair_context is None:
+            raise ValueError("linked repair requires bounded measured repair context")
+        if self.attempt == 1 and self.repair_context is not None:
+            raise ValueError("initial trial cannot contain repair context")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +174,8 @@ async def seed_trial(
         maximum_repair_count=request.maximum_repair_count,
         context_manifest=request.context_manifest,
         parent_attempt=request.attempt - 1 or None,
+        repair_context=request.repair_context,
+        runtime_certification=request.runtime_certification,
     )
     task.original_text = render_worker_prompt(capsule, repository_id=request.project_id)
     task.task_draft = {

@@ -210,6 +210,52 @@ def test_explicit_zero_pricing_requires_nonzero_quota_charge() -> None:
         )
 
 
+def test_codex_agent_runtime_contract_matches_operational_boundary() -> None:
+    contract_values: dict[str, object] = {
+        "cli_version": "codex-cli 0.144.1",
+        "edit_mechanism": "shell_backed_repository_tools",
+        "working_directory": "/workspace",
+        "writable_roots": ["/workspace"],
+        "protected_roots": ["/workspace/.git"],
+        "structured_output_source": "final_agent_message_json",
+        "inner_sandbox_mode": "provider_managed",
+        "supports_read": True,
+        "supports_search": True,
+        "supports_edit": True,
+        "supports_git": False,
+        "supports_network": False,
+        "supports_local_checks": False,
+    }
+    values: dict[str, object] = {
+        "id": "codex-a",
+        "provider": "codex",
+        "model": "codex",
+        "launch_mode": "cli",
+        "credential_required": False,
+        "capabilities": ["repository_read", "code_edit", "project_shell"],
+        "concurrency_limit": 1,
+        "cost_class": "strong",
+        "supported_task_types": ["coding"],
+        "runtime_identity": "codex-a",
+        "state_directory": "/var/lib/vuzol-provider-state/codex-a",
+        "agent_runtime_contract": contract_values,
+    }
+    profile = ProviderProfileConfig.model_validate(values)
+    contract = profile.agent_runtime_contract
+    assert contract is not None
+    assert contract.writable_roots == (Path("/workspace"),)
+    assert Path("/workspace/.git") in contract.protected_roots
+    assert contract.supports_git is False
+
+    invalid = dict(values)
+    invalid["agent_runtime_contract"] = {
+        **contract_values,
+        "writable_roots": ["/workspace", "/artifacts"],
+    }
+    with pytest.raises(ValidationError, match=r"writable roots|artifacts"):
+        ProviderProfileConfig.model_validate(invalid)
+
+
 def test_topic_project_scope_is_strict() -> None:
     with pytest.raises(ValidationError, match="requires project_id"):
         TopicConfig.model_validate(

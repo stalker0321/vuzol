@@ -72,6 +72,21 @@ runtime_identity = "vuzol-executor"
 state_directory = "/var/lib/vuzol-provider-state/codex-subscription-prod"
 enabled = true
 
+[profiles.agent_runtime_contract]
+cli_version = "codex-cli 0.144.1"
+edit_mechanism = "shell_backed_repository_tools"
+working_directory = "/workspace"
+writable_roots = ["/workspace"]
+protected_roots = ["/workspace/.git"]
+structured_output_source = "final_agent_message_json"
+inner_sandbox_mode = "provider_managed"
+supports_read = true
+supports_search = true
+supports_edit = true
+supports_git = false
+supports_network = false
+supports_local_checks = false
+
 [profiles.runtime_network]
 enabled = true
 destinations = [

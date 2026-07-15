@@ -33,6 +33,50 @@ class LaunchMode(StrEnum):
     TOOL = "tool"
 
 
+class AgentEditMechanism(StrEnum):
+    SHELL_BACKED_REPOSITORY_TOOLS = "shell_backed_repository_tools"
+
+
+class StructuredOutputSource(StrEnum):
+    FINAL_AGENT_MESSAGE_JSON = "final_agent_message_json"
+    TRANSPORT_OBJECT = "transport_object"
+
+
+class InnerSandboxMode(StrEnum):
+    PROVIDER_MANAGED = "provider_managed"
+    OUTER_SANDBOX_ONLY = "outer_sandbox_only"
+
+
+class AgentRuntimeContract(FrozenModel):
+    """Versioned operational facts for one provider agent runtime."""
+
+    schema_version: str = "agent-runtime-contract.v1"
+    cli_version: str = Field(min_length=1, max_length=100)
+    edit_mechanism: AgentEditMechanism
+    working_directory: Path
+    writable_roots: tuple[Path, ...] = Field(min_length=1, max_length=8)
+    protected_roots: tuple[Path, ...] = Field(default=(), max_length=8)
+    structured_output_source: StructuredOutputSource
+    inner_sandbox_mode: InnerSandboxMode
+    supports_read: bool
+    supports_search: bool
+    supports_edit: bool
+    supports_git: bool
+    supports_network: bool
+    supports_local_checks: bool
+
+    @model_validator(mode="after")
+    def validate_paths(self) -> "AgentRuntimeContract":
+        paths = (self.working_directory, *self.writable_roots, *self.protected_roots)
+        if any(not path.is_absolute() for path in paths):
+            raise ValueError("agent runtime paths must be absolute")
+        if len(set(self.writable_roots)) != len(self.writable_roots):
+            raise ValueError("agent writable roots must be unique")
+        if set(self.writable_roots).intersection(self.protected_roots):
+            raise ValueError("agent protected roots cannot also be writable roots")
+        return self
+
+
 class ProviderRole(StrEnum):
     INTERPRETER = "interpreter"
     PLANNER = "planner"
@@ -210,6 +254,7 @@ class ProviderProfileConfig(FrozenModel):
     runtime_identity: str | None = Field(default=None, min_length=1, max_length=100)
     state_directory: Path | None = None
     runtime_network: NetworkPolicy = NetworkPolicy()
+    agent_runtime_contract: AgentRuntimeContract | None = None
     enabled: bool = True
 
     @model_validator(mode="after")
@@ -253,6 +298,27 @@ class ProviderProfileConfig(FrozenModel):
             and not self.quota_units_per_call
         ):
             raise ValueError("explicit zero pricing requires a non-zero quota charge")
+        if self.provider == "codex" and self.agent_runtime_contract is not None:
+            contract = self.agent_runtime_contract
+            if contract.working_directory != Path("/workspace"):
+                raise ValueError("Codex runtime contract must use /workspace")
+            if contract.writable_roots != (Path("/workspace"),):
+                raise ValueError("Codex writable roots must be exactly /workspace")
+            if Path("/workspace/.git") not in contract.protected_roots:
+                raise ValueError("Codex runtime contract must protect /workspace/.git")
+            if Path("/artifacts") in contract.writable_roots:
+                raise ValueError("Codex runtime contract cannot make /artifacts writable")
+            if not (contract.supports_read and contract.supports_search and contract.supports_edit):
+                raise ValueError("Codex runtime contract must support repository read/search/edit")
+            if contract.supports_git or contract.supports_network or contract.supports_local_checks:
+                raise ValueError(
+                    "Codex worker runtime cannot support Git, network, or local checks"
+                )
+            if (
+                contract.structured_output_source
+                is not StructuredOutputSource.FINAL_AGENT_MESSAGE_JSON
+            ):
+                raise ValueError("Codex structured output must use final agent-message JSON")
         return self
 
 

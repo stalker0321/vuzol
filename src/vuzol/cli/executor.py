@@ -20,6 +20,7 @@ from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.proxy_service import ProxyServiceManager
 from vuzol.execution.reconciliation import ProxyStartupReconciler
+from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
@@ -69,6 +70,12 @@ async def run() -> None:
     if settings.execution.require_preflight:
         await sandbox_runtime.preflight()
         await _preflight_validation_images(
+            sandbox_runtime,
+            runtime.registries,
+            seccomp_profile=seccomp_profile,
+            seccomp_digest=seccomp_digest,
+        )
+        await _preflight_agent_contracts(
             sandbox_runtime,
             runtime.registries,
             seccomp_profile=seccomp_profile,
@@ -181,6 +188,7 @@ async def run() -> None:
             artifacts=artifact_store,
             finalizer=finalizer,
             worktree_access=worktree_access,
+            agent_certificates=AgentCertificateStore(settings.artifact_root / "agent-certificates"),
         )
         worktree_handler = PrepareWorktreeHandler(
             factory,
@@ -279,6 +287,59 @@ async def _preflight_validation_images(
             if result.exit_code != 0:
                 raise RuntimeError(
                     f"validation sandbox {profile_id} failed toolchain preflight: {argv[0]}"
+                )
+
+
+async def _preflight_agent_contracts(
+    runtime: RootlessDockerRuntime,
+    registries: ConfigurationBundle,
+    *,
+    seccomp_profile: Path,
+    seccomp_digest: str,
+) -> None:
+    projects = tuple(project for project in registries.projects.items() if project.enabled)
+    for profile in registries.profiles.items():
+        contract = profile.agent_runtime_contract
+        if not profile.enabled or contract is None:
+            continue
+        sandbox_ids = sorted({project.sandbox_profile for project in projects})
+        for sandbox_id in sandbox_ids:
+            sandbox = registries.sandboxes.get(sandbox_id)
+            identity = uuid.uuid4()
+            envelope = ProcessEnvelope(
+                task_id=identity,
+                run_id=uuid.uuid4(),
+                step_id=uuid.uuid4(),
+                worktree_id=uuid.uuid4(),
+                profile_id=profile.id,
+                provider_attempt=1,
+                lease_generation=1,
+                argv=(profile.provider, "--version"),
+                stdin="",
+                sandbox=SandboxSpec(
+                    image=sandbox.image,
+                    uid=sandbox.uid,
+                    gid=sandbox.gid,
+                    seccomp_profile=seccomp_profile,
+                    seccomp_profile_sha256=seccomp_digest,
+                    working_directory=contract.working_directory,
+                    mounts=(),
+                    cpu_count=sandbox.cpu_count,
+                    memory_bytes=sandbox.memory_bytes,
+                    pids_limit=sandbox.pids_limit,
+                    tmpfs_bytes=sandbox.tmpfs_bytes,
+                    open_files_limit=sandbox.open_files_limit,
+                    output_bytes=sandbox.output_bytes,
+                    timeout_seconds=min(sandbox.timeout_seconds, 60),
+                    stop_grace_seconds=sandbox.stop_grace_seconds,
+                    network_disabled=True,
+                    environment={"HOME": "/tmp/home"},  # noqa: S108
+                ),
+            )
+            result = await runtime.run(envelope, CancellationContext())
+            if result.exit_code != 0 or result.stdout.strip() != contract.cli_version:
+                raise RuntimeError(
+                    f"agent runtime contract preflight failed for {profile.id}/{sandbox_id}"
                 )
 
 

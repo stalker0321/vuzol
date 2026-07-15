@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.cli.experiment import _inspect, _serialize_artifact, _serialize_process, _write_csv
 from vuzol.experiments.domain import (
     BoundedLevel,
+    BoundedRepairContext,
     ContextEntry,
     ContextManifest,
     DefectCategory,
@@ -22,7 +23,9 @@ from vuzol.experiments.domain import (
     GateResult,
     InvocationTelemetry,
     PricingRevision,
+    RepairGateDiagnostic,
     RepairSeverity,
+    RepairSymbolContext,
     ReportedUsage,
     RequiredGate,
     ReviewOutcome,
@@ -127,6 +130,44 @@ def seed_request() -> TrialSeedRequest:
         required_gates=(RequiredGate(name="focused", command_id="pytest-focused"),),
         context_manifest=worker_context(),
     )
+
+
+def test_bounded_repair_context_accepts_only_measured_code_evidence() -> None:
+    repair = BoundedRepairContext(
+        current_diff="diff --git a/src/example.py b/src/example.py\n+VALUE = 2\n",
+        changed_files=("src/example.py",),
+        failed_gates=(
+            RepairGateDiagnostic(
+                command_id="make type-check",
+                exit_code=2,
+                sanitized_output="src/example.py:10: incompatible assignment",
+            ),
+        ),
+        required_symbols=(
+            RepairSymbolContext(reference="src/example.py:1-20", content="def example(): ..."),
+        ),
+    )
+    request = seed_request().model_copy(update={"attempt": 2, "repair_context": repair})
+    validated = TrialSeedRequest.model_validate(request.model_dump(mode="json"))
+    assert validated.repair_context == repair
+    assert validated.repair_context.changed_files == ("src/example.py",)
+
+
+def test_repair_context_rejects_oversized_or_operational_history() -> None:
+    with pytest.raises(ValidationError, match="prohibited operational history"):
+        BoundedRepairContext(
+            current_diff="private handoff contents",
+            changed_files=("src/example.py",),
+            failed_gates=(
+                RepairGateDiagnostic(
+                    command_id="make lint", exit_code=1, sanitized_output="failure"
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="linked repair requires"):
+        TrialSeedRequest.model_validate(
+            seed_request().model_copy(update={"attempt": 2}).model_dump(mode="json")
+        )
 
 
 def test_capsule_is_immutable_versioned_and_rejects_secrets() -> None:

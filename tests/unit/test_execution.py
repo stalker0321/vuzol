@@ -12,7 +12,7 @@ import tarfile
 import uuid
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -69,6 +69,11 @@ from vuzol.execution.paths import (
 )
 from vuzol.execution.proxy_networks import ProxyNetworkLease
 from vuzol.execution.proxy_service import ProxyServiceError, ProxyServiceLease
+from vuzol.execution.runtime_contract import (
+    AgentCertificateStore,
+    certification_key,
+    new_certificate,
+)
 from vuzol.execution.sandbox import (
     RootlessDockerRuntime,
     SandboxError,
@@ -963,9 +968,219 @@ def _sandbox_gate_runner() -> tuple[TrustedGateRunner, AsyncMock, AsyncMock]:
     envelope = MagicMock(spec=ProcessEnvelope)
     envelope.sandbox = MagicMock(image="validation@sha256:" + "b" * 64)
     envelopes.build_gate.return_value = envelope
+    envelopes.build_canonicalizer.return_value = envelope
     runtime = AsyncMock()
     runtime.run.return_value = CodexProcessResult(0, "gate passed\n", "", 2)
     return TrustedGateRunner(envelopes, runtime), envelopes, runtime
+
+
+def _certified_codex_profile() -> Any:
+    from vuzol.config.models import ProviderProfileConfig
+
+    return ProviderProfileConfig.model_validate(
+        {
+            "id": "codex-certified",
+            "provider": "codex",
+            "model": "codex",
+            "launch_mode": "cli",
+            "credential_required": False,
+            "capabilities": ["repository_read", "code_edit", "project_shell"],
+            "concurrency_limit": 1,
+            "cost_class": "strong",
+            "supported_task_types": ["coding"],
+            "runtime_identity": "codex-certified",
+            "state_directory": "/var/lib/vuzol-provider-state/codex-certified",
+            "agent_runtime_contract": {
+                "cli_version": "codex-cli 0.144.1",
+                "edit_mechanism": "shell_backed_repository_tools",
+                "working_directory": "/workspace",
+                "writable_roots": ["/workspace"],
+                "protected_roots": ["/workspace/.git"],
+                "structured_output_source": "final_agent_message_json",
+                "inner_sandbox_mode": "provider_managed",
+                "supports_read": True,
+                "supports_search": True,
+                "supports_edit": True,
+                "supports_git": False,
+                "supports_network": False,
+                "supports_local_checks": False,
+            },
+        }
+    )
+
+
+def test_agent_certificate_is_keyed_to_exact_runtime_tuple(tmp_path: Path) -> None:
+    profile = _certified_codex_profile()
+    sandbox = SandboxProfileConfig(
+        id="provider",
+        image=f"provider@sha256:{'a' * 64}",
+        network_mode=SandboxNetworkMode.HTTPS_PROXY,
+    )
+    key = certification_key(profile, sandbox)
+    store = AgentCertificateStore(tmp_path / "certificates")
+    issued = new_certificate(
+        key=key,
+        profile_id=profile.id,
+        task_uuid=str(uuid.uuid4()),
+        run_uuid=str(uuid.uuid4()),
+    )
+    store.issue(issued)
+    assert store.require(profile, sandbox) == issued
+
+    stale_sandbox = sandbox.model_copy(update={"image": f"provider@sha256:{'b' * 64}"})
+    with pytest.raises(ValueError, match="uncertified"):
+        store.require(profile, stale_sandbox)
+
+
+def test_agent_certificate_rejects_invalid_and_incomplete_evidence(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+
+    from vuzol.execution.runtime_contract import AgentRuntimeCertificate
+
+    profile = _certified_codex_profile()
+    sandbox = SandboxProfileConfig(id="provider", image=f"provider@sha256:{'a' * 64}")
+    key = certification_key(profile, sandbox)
+    with pytest.raises(ValidationError, match="every runtime invariant"):
+        AgentRuntimeCertificate.model_validate(
+            {
+                "key": key,
+                "profile_id": profile.id,
+                "certified_at": "2026-07-15T00:00:00Z",
+                "ordinary_file_read": True,
+                "ordinary_file_edited": True,
+                "git_protected": False,
+                "structured_output_valid": True,
+                "cleanup_succeeded": True,
+                "task_uuid": "task",
+                "run_uuid": "run",
+            }
+        )
+
+    store = AgentCertificateStore(tmp_path / "certificates")
+    path = store._path(key)
+    path.parent.mkdir()
+    path.write_text("not-json")
+    with pytest.raises(ValueError, match="invalid"):
+        store.require(profile, sandbox)
+
+    uncertified_profile = profile.model_copy(update={"agent_runtime_contract": None})
+    with pytest.raises(ValueError, match="no agent runtime contract"):
+        certification_key(uncertified_profile, sandbox)
+
+    unsafe_root = tmp_path / "unsafe-certificates"
+    unsafe_root.symlink_to(tmp_path / "certificates", target_is_directory=True)
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        AgentCertificateStore(unsafe_root).issue(
+            new_certificate(
+                key=key,
+                profile_id=profile.id,
+                task_uuid="task",
+                run_uuid="run",
+            )
+        )
+
+
+@pytest.mark.anyio
+async def test_trusted_canonicalizer_handles_no_python_and_missing_context(
+    tmp_path: Path,
+) -> None:
+    runner = TrustedGateRunner(AsyncMock(), AsyncMock())
+    empty = await runner.canonicalize(
+        tmp_path,
+        ("README.md",),
+        timeout_seconds=30,
+        context=None,
+        cancellation=None,
+    )
+    assert empty.input_files == ()
+    assert empty.changed_files == ()
+
+    source = tmp_path / "changed.py"
+    source.write_text("VALUE=1\n")
+    with pytest.raises(ValueError, match="context is unavailable"):
+        await runner.canonicalize(
+            tmp_path,
+            ("changed.py",),
+            timeout_seconds=30,
+            context=None,
+            cancellation=None,
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ("formatter_exit", "scope"))
+async def test_finalizer_fails_closed_on_canonicalization_failure(
+    tmp_path: Path, failure: str
+) -> None:
+    repository, base, branch = _finalizer_repository(tmp_path)
+    (repository / "src" / "example.py").write_text("VALUE=2\n")
+    runner, envelopes, runtime = _sandbox_gate_runner()
+    if failure == "formatter_exit":
+        runtime.run.side_effect = [CodexProcessResult(2, "", "formatter failed", 1)]
+        expected = "worker_canonicalization_failed"
+    else:
+
+        async def escape_scope(*_args: object) -> CodexProcessResult:
+            extra = repository / "outside.py"
+            extra.write_text("OUTSIDE = True\n")
+            return CodexProcessResult(0, "formatted", "", 1)
+
+        runtime.run.side_effect = escape_scope
+        expected = "worker_canonicalization_scope"
+    envelopes.build_canonicalizer.return_value.sandbox.image = "validation@sha256:" + "b" * 64
+
+    with pytest.raises(WorkerFinalizationError) as captured:
+        await WorkerFinalizer(LocalGit(), gate_runner=runner).finalize(
+            worktree=repository,
+            capsule=_finalizer_capsule(base, branch),
+            edit_report=_edit_report(claimed_complete=True),
+            worker_profile="codex",
+            provider_usage=_normalized_usage(),
+            provider_attempt=1,
+            gate_context=_gate_context(),
+            cancellation=CancellationContext(),
+        )
+    assert captured.value.category == expected
+
+
+@pytest.mark.anyio
+async def test_trusted_canonicalizer_formats_only_measured_python_files(tmp_path: Path) -> None:
+    source = tmp_path / "changed.py"
+    source.write_text('VALUE={"b":2,"a":1}\n')
+    untouched = tmp_path / "notes.txt"
+    untouched.write_text("not python\n")
+    envelopes = AsyncMock()
+    envelope = MagicMock(spec=ProcessEnvelope)
+    envelope.sandbox = MagicMock(image="validation@sha256:" + "c" * 64)
+    envelopes.build_canonicalizer.return_value = envelope
+    runtime = AsyncMock()
+
+    async def format_file(*_args: object) -> CodexProcessResult:
+        source.write_text('VALUE = {"b": 2, "a": 1}\n')
+        return CodexProcessResult(0, "1 file reformatted\n", "", 7)
+
+    runtime.run.side_effect = format_file
+    runner = TrustedGateRunner(envelopes, runtime)
+    evidence = await runner.canonicalize(
+        tmp_path,
+        ("changed.py", "notes.txt"),
+        timeout_seconds=30,
+        context=_gate_context(),
+        cancellation=CancellationContext(),
+    )
+    assert evidence.input_files == ("changed.py",)
+    assert evidence.changed_files == ("changed.py",)
+    assert evidence.validation_image_digest == "validation@sha256:" + "c" * 64
+    envelopes.build_canonicalizer.assert_awaited_once_with(ANY, ("changed.py",), timeout_seconds=30)
+    assert untouched.read_text() == "not python\n"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", ("../escape.py", "/absolute.py", "not-python.txt"))
+async def test_canonicalizer_rejects_untrusted_paths_before_envelope_build(path: str) -> None:
+    factory = object.__new__(ExecutionEnvelopeFactory)
+    with pytest.raises(ValueError, match="unsafe"):
+        await factory.build_canonicalizer(_gate_context(), (path,), timeout_seconds=30)
 
 
 @pytest.mark.anyio
@@ -1030,8 +1245,11 @@ async def test_worker_finalizer_measures_gates_and_creates_exactly_one_commit(
         "make type-check",
     ]
     assert all(run.evidence.argv[0] == "/usr/bin/make" for run in result.gate_runs)
+    assert result.evidence.canonicalization is not None
+    assert result.evidence.canonicalization.input_files == ("src/example.py",)
+    envelopes.build_canonicalizer.assert_awaited_once()
     assert envelopes.build_gate.await_count == 4
-    assert runtime.run.await_count == 4
+    assert runtime.run.await_count == 5
     access.revoke.assert_awaited_once()
 
     await finalizer.persist(
@@ -1478,6 +1696,62 @@ async def test_missing_validation_sandbox_prevents_provider_execution(
 
     assert outcome.category == "worker_access_unavailable"
     handler._execute_built.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_uncertified_exact_runtime_fails_before_provider_invocation() -> None:
+    from vuzol.providers.handlers import ProviderStepHandler
+
+    profile = _certified_codex_profile()
+    registries = MagicMock()
+    registries.profiles.get.return_value = profile
+    handler = ProviderStepHandler(
+        MagicMock(),
+        registries,
+        MagicMock(),
+        worktrees=MagicMock(),
+        finalizer=MagicMock(),
+        worktree_access=MagicMock(),
+        agent_certificates=MagicMock(),
+    )
+    provider_request = MagicMock(task_draft={"step09a_capsule": {}})
+    handler._build_request = AsyncMock(  # type: ignore[method-assign]
+        return_value=(provider_request, profile.id, uuid.uuid4(), "revision")
+    )
+    handler._require_agent_certificate = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ValueError("agent runtime is uncertified")
+    )
+    handler._unwind_pre_provider = AsyncMock()  # type: ignore[method-assign]
+    handler._grant_worktree_access = AsyncMock()  # type: ignore[method-assign]
+    handler._execute_built = AsyncMock()  # type: ignore[method-assign]
+
+    outcome = await handler.execute(MagicMock(step_type="execute_code"), CancellationContext())
+
+    assert outcome.category == "agent_runtime_uncertified"
+    handler._grant_worktree_access.assert_not_awaited()
+    handler._execute_built.assert_not_awaited()
+
+
+def test_runtime_certificate_bypass_is_limited_to_fixed_probe_shape() -> None:
+    from vuzol.providers.handlers import _is_runtime_certification
+
+    capsule = {
+        "runtime_certification": True,
+        "task_id": "agent-certification-123",
+        "allowed_paths": ["certification/agent-runtime-probe.txt"],
+        "maximum_repair_count": 0,
+        "parent_attempt": None,
+        "required_gates": [
+            {"name": "format-check", "command_id": "make format-check"}
+        ],
+    }
+    assert _is_runtime_certification({"step09a_capsule": capsule}) is True
+    assert (
+        _is_runtime_certification(
+            {"step09a_capsule": {**capsule, "allowed_paths": ["src/vuzol/app.py"]}}
+        )
+        is False
+    )
 
 
 @pytest.mark.anyio
@@ -3013,6 +3287,43 @@ async def test_validation_image_preflight_uses_fixed_offline_commands_and_fails_
             runtime, registries, seccomp_profile=seccomp, seccomp_digest=digest
         )
     assert runtime.run.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_agent_contract_preflight_verifies_exact_cli_version_and_image(
+    tmp_path: Path,
+) -> None:
+    from vuzol.cli.executor import _preflight_agent_contracts
+
+    profile = _certified_codex_profile()
+    sandbox = SandboxProfileConfig(
+        id="provider",
+        image="provider@sha256:" + "d" * 64,
+        network_mode=SandboxNetworkMode.HTTPS_PROXY,
+    )
+    registries = MagicMock()
+    registries.profiles.items.return_value = (profile,)
+    registries.projects.items.return_value = (MagicMock(enabled=True, sandbox_profile="provider"),)
+    registries.sandboxes.get.return_value = sandbox
+    runtime = MagicMock()
+    runtime.run = AsyncMock(return_value=CodexProcessResult(0, "codex-cli 0.144.1\n", "", 1))
+    seccomp, digest = _seccomp_profile(tmp_path)
+
+    await _preflight_agent_contracts(
+        runtime, registries, seccomp_profile=seccomp, seccomp_digest=digest
+    )
+
+    envelope = runtime.run.await_args.args[0]
+    assert envelope.argv == ("codex", "--version")
+    assert envelope.sandbox.image == sandbox.image
+    assert envelope.sandbox.network_disabled is True
+    assert envelope.sandbox.mounts == ()
+
+    runtime.run.return_value = CodexProcessResult(0, "codex-cli stale\n", "", 1)
+    with pytest.raises(RuntimeError, match="contract preflight failed"):
+        await _preflight_agent_contracts(
+            runtime, registries, seccomp_profile=seccomp, seccomp_digest=digest
+        )
 
 
 @pytest.mark.anyio

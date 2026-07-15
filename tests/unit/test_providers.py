@@ -18,6 +18,7 @@ from vuzol.config import (
     ProviderRole,
     ScopedSecretResolver,
 )
+from vuzol.experiments.domain import WorkerEditReport
 from vuzol.providers.budgets import account_usage, estimate_reservation
 from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.domain import (
@@ -451,6 +452,72 @@ class FakeCodexTransport:
         )
 
 
+@dataclass
+class StaticCodexTransport:
+    stdout: str
+    duration_ms: int = 37
+    invocations: list[CodexInvocation] = field(default_factory=list)
+
+    async def run(
+        self, invocation: CodexInvocation, cancellation: CancellationContext
+    ) -> CodexProcessResult:
+        assert not cancellation.requested
+        self.invocations.append(invocation)
+        return CodexProcessResult(0, self.stdout, "", self.duration_ms)
+
+
+def codex_jsonl(final_text: str) -> str:
+    """Sanitized shape retained from the production Codex MVP session."""
+    return "\n".join(
+        (
+            json.dumps({"type": "thread.started", "thread_id": "session-safe"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "intermediate status"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": final_text},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 143,
+                        "cached_tokens": 21,
+                        "output_tokens": 17,
+                    },
+                }
+            ),
+        )
+    )
+
+
+def codex_profile(tmp_path: Path) -> ProviderProfileConfig:
+    return profile(
+        "codex-a",
+        provider="codex",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="codex-a",
+        state_directory=tmp_path / "codex-a",
+    )
+
+
+def codex_request(*, schema: dict[str, object] | None = None) -> ProviderRequest:
+    request = provider_request(structured=schema is not None).model_copy(
+        update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+    )
+    return request.model_copy(update={"output_json_schema": schema})
+
+
 @pytest.mark.anyio
 async def test_codex_adapter_uses_isolated_identity_without_auth_copy(tmp_path: Path) -> None:
     transport = FakeCodexTransport()
@@ -533,6 +600,129 @@ async def test_codex_adapter_accepts_versioned_jsonl(tmp_path: Path) -> None:
         CancellationContext(),
     )
     assert result.text == "done" and result.usage.input_tokens == 4
+
+
+@pytest.mark.anyio
+async def test_codex_structured_jsonl_promotes_final_typed_object(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": "step09a-worker-edit-report.v1",
+        "experiment_id": "mvp-canary",
+        "task_id": "latest-inspect",
+        "attempt": 1,
+        "claimed_complete": True,
+        "limitations": [],
+        "failure_classification": None,
+        "usage": {
+            "input_tokens": None,
+            "cached_input_tokens": None,
+            "output_tokens": None,
+            "reasoning_tokens": None,
+            "unavailable_reason": "provider report is non-authoritative",
+        },
+    }
+    transport = StaticCodexTransport(codex_jsonl(json.dumps(payload)), duration_ms=73)
+    result = await CodexCliAdapter(transport).execute(
+        codex_request(schema=WorkerEditReport.model_json_schema()),
+        codex_profile(tmp_path),
+        CancellationContext(),
+    )
+
+    assert result.text is None
+    assert result.structured_output == payload
+    assert result.provider_session_id == "session-safe"
+    assert result.usage.input_tokens == 143
+    assert result.usage.cached_tokens == 21
+    assert result.usage.output_tokens == 17
+    assert result.usage.duration_ms == 73
+
+
+@pytest.mark.anyio
+async def test_codex_unstructured_json_looking_text_is_not_promoted(tmp_path: Path) -> None:
+    text = '{"looks":"structured"}'
+    result = await CodexCliAdapter(StaticCodexTransport(codex_jsonl(text))).execute(
+        codex_request(), codex_profile(tmp_path), CancellationContext()
+    )
+    assert result.text == text
+    assert result.structured_output is None
+
+
+@pytest.mark.anyio
+async def test_codex_rejects_invalid_requested_schema_before_transport(tmp_path: Path) -> None:
+    transport = StaticCodexTransport(codex_jsonl("{}"))
+    with pytest.raises(ProviderFailure) as captured:
+        await CodexCliAdapter(transport).execute(
+            codex_request(schema={"type": "not-a-json-schema-type"}),
+            codex_profile(tmp_path),
+            CancellationContext(),
+        )
+    assert captured.value.category is ProviderErrorCategory.PERMANENT_REQUEST
+    assert captured.value.retryable is False
+    assert captured.value.request_sent is False
+    assert captured.value.__cause__ is None
+    assert transport.invocations == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "returned",
+    (
+        "not-json SECRET_RETURNED_VALUE",
+        '```json\n{"value":"ok"}\n```',
+        'result: {"value":"ok"}',
+        '[{"value":"ok"}]',
+        '"scalar"',
+        '{"unexpected":"field"}',
+    ),
+)
+async def test_codex_structured_output_failures_are_safe(tmp_path: Path, returned: str) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    with pytest.raises(ProviderFailure) as captured:
+        await CodexCliAdapter(StaticCodexTransport(codex_jsonl(returned))).execute(
+            codex_request(schema=schema), codex_profile(tmp_path), CancellationContext()
+        )
+    failure = captured.value
+    assert failure.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+    assert failure.retryable is True
+    assert failure.request_sent is True
+    assert failure.__cause__ is None
+    assert returned not in str(failure)
+    assert "SECRET_RETURNED_VALUE" not in str(failure)
+
+
+@pytest.mark.anyio
+async def test_codex_full_object_structured_output_is_validated_and_preferred(
+    tmp_path: Path,
+) -> None:
+    body = {
+        "text": '{"value":"text"}',
+        "structured_output": {"value": "direct"},
+        "request_id": "request-safe",
+        "session_id": "session-safe",
+        "finish_reason": "stop",
+        "usage": {"input_tokens": 9, "cached_tokens": 4, "output_tokens": 3},
+    }
+    schema = {
+        "type": "object",
+        "properties": {"value": {"const": "direct"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    result = await CodexCliAdapter(StaticCodexTransport(json.dumps(body), 41)).execute(
+        codex_request(schema=schema), codex_profile(tmp_path), CancellationContext()
+    )
+    assert result.structured_output == {"value": "direct"}
+    assert result.text is None
+    assert result.provider_request_id == "request-safe"
+    assert result.provider_session_id == "session-safe"
+    assert result.finish_reason == "stop"
+    assert result.usage == NormalizedUsage(
+        input_tokens=9, cached_tokens=4, output_tokens=3, duration_ms=41
+    )
 
 
 @pytest.mark.anyio

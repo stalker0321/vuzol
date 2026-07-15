@@ -2,6 +2,10 @@
 
 import json
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
+
 from vuzol.config.models import ProviderProfileConfig
 from vuzol.providers.domain import (
     EffectiveProfileState,
@@ -71,6 +75,18 @@ class CodexCliAdapter:
                 request_sent=False,
                 safe_summary="Codex execution requires an isolated worktree sandbox",
             )
+        validator: Draft202012Validator | None = None
+        if request.output_json_schema is not None:
+            try:
+                Draft202012Validator.check_schema(request.output_json_schema)
+                validator = Draft202012Validator(request.output_json_schema)
+            except SchemaError:
+                raise ProviderFailure(
+                    ProviderErrorCategory.PERMANENT_REQUEST,
+                    retryable=False,
+                    request_sent=False,
+                    safe_summary="required output schema is invalid",
+                ) from None
         envelope = {
             "schema_version": request.schema_version,
             "role": request.role.value,
@@ -113,20 +129,25 @@ class CodexCliAdapter:
             )
         try:
             body = _decode_output(result.stdout)
-            text = body.get("text")
-            structured = body.get("structured_output")
+            text, structured = _normalize_output(body, validator)
             usage = body.get("usage", {})
-        except (json.JSONDecodeError, AttributeError, ValueError) as error:
+        except (
+            json.JSONDecodeError,
+            JsonSchemaValidationError,
+            AttributeError,
+            TypeError,
+            ValueError,
+        ):
             raise ProviderFailure(
                 ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
                 retryable=True,
                 request_sent=True,
-                safe_summary="Codex CLI returned invalid output",
-            ) from error
+                safe_summary="Codex CLI returned invalid structured output",
+            ) from None
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,
-            text=str(text) if text is not None else None,
-            structured_output=structured if isinstance(structured, dict) else None,
+            text=text,
+            structured_output=structured,
             provider_request_id=(
                 str(body["request_id"]) if isinstance(body.get("request_id"), str) else None
             ),
@@ -157,6 +178,27 @@ def _usage_int(usage: object, key: str) -> int | None:
     return int(value) if isinstance(value, int | float) and value >= 0 else None
 
 
+def _normalize_output(
+    body: dict[str, object], validator: Draft202012Validator | None
+) -> tuple[str | None, dict[str, object] | None]:
+    """Normalize the final response without heuristic JSON extraction."""
+    text = body.get("text")
+    if validator is None:
+        return (str(text) if text is not None else None), None
+
+    direct = body.get("structured_output")
+    if direct is not None:
+        decoded = direct
+    else:
+        if not isinstance(text, str):
+            raise ValueError("structured Codex response has no final text")
+        decoded = json.loads(text)
+    if not isinstance(decoded, dict):
+        raise ValueError("structured Codex response is not an object")
+    validator.validate(decoded)
+    return None, decoded
+
+
 def _decode_output(stdout: str) -> dict[str, object]:
     try:
         decoded = json.loads(stdout)
@@ -173,6 +215,8 @@ def _decode_output(stdout: str) -> dict[str, object]:
             continue
         if not isinstance(event, dict):
             continue
+        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
+            final["session_id"] = event["thread_id"]
         if event.get("type") == "item.completed" and isinstance(event.get("item"), dict):
             item = event["item"]
             if item.get("type") == "agent_message" and isinstance(item.get("text"), str):

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import uuid
 from decimal import Decimal
@@ -14,6 +15,7 @@ from vuzol.config import (
     ConfigurationBundle,
     ProjectConfig,
     ProviderProfileConfig,
+    ProviderRole,
     RegistryDocument,
     ScopedSecretResolver,
     Settings,
@@ -21,12 +23,14 @@ from vuzol.config import (
 )
 from vuzol.execution.git import LocalGit
 from vuzol.execution.worktrees import WorktreeService
+from vuzol.experiments.domain import WorkerEditReport
 from vuzol.providers.budgets import (
     BudgetExceeded,
     estimate_reservation,
     reconcile_usage,
     reserve_budget,
 )
+from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.domain import (
     EffectiveProfileState,
     NormalizedUsage,
@@ -47,6 +51,7 @@ from vuzol.providers.health import (
     record_success_observation,
     synchronize_profiles,
 )
+from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.providers.routing import claim_routed_step
 from vuzol.storage.errors import LeaseLost
@@ -530,6 +535,184 @@ class FailingAdapter:
     async def health(self, profile: ProviderProfileConfig) -> EffectiveProfileState:
         del profile
         return EffectiveProfileState()
+
+
+@pytest.mark.postgresql
+def test_codex_typed_report_reaches_handler_finalization(postgres_dsn: str, tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(("git", "init", "-b", "main"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "test@example.invalid"), cwd=repository, check=True
+    )
+    subprocess.run(("git", "config", "user.name", "Test"), cwd=repository, check=True)
+    (repository / "tracked.txt").write_text("base\n")
+    subprocess.run(("git", "add", "tracked.txt"), cwd=repository, check=True)
+    subprocess.run(("git", "commit", "-m", "base"), cwd=repository, check=True)
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        configured = profile(
+            "codex-test",
+            provider="codex",
+            api_base_url=None,
+            launch_mode="cli",
+            credential_reference=None,
+            credential_required=False,
+            sandbox_required=True,
+            runtime_identity="codex-test",
+            state_directory=tmp_path / "provider-state",
+        )
+        settings, registries = bundle(tmp_path, configured)
+        task_id, run_id, step_id = await seed_provider_step(factory, step_type="execute_code")
+        worktrees = WorktreeService(tmp_path / "worktrees", LocalGit(), retention_days=3)
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+            worktree = await worktrees.prepare(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                project=ProjectConfig(
+                    id="project",
+                    display_name="Project",
+                    repository_path=repository,
+                    default_branch="main",
+                    allowed_capabilities=frozenset(),
+                    sandbox_profile="default",
+                ),
+                owner="provider-worker",
+            )
+        async with factory.begin() as session:
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="provider-worker",
+                lease_seconds=60,
+                candidate_limit=20,
+            )
+        assert token is not None
+        async with factory.begin() as session:
+            await start_step(session, token)
+
+        capsule = {
+            "experiment_id": "codex-handler-test",
+            "task_id": "typed-report",
+            "worker_profile": "codex-test",
+            "base_commit": worktree.base_commit,
+            "target_branch": worktree.branch,
+            "goal": "Edit the bounded file.",
+            "classification": {
+                "task_class": "bounded_feature",
+                "complexity": "low",
+                "risk": "low",
+                "testability": "high",
+                "blast_radius": "low",
+                "coupling": "low",
+                "novelty": "low",
+                "expected_file_count": 1,
+            },
+            "predicted_mode": "sol_solo",
+            "actual_mode": "sol_solo",
+            "allowed_paths": ["tracked.txt"],
+            "acceptance_criteria": ["The bounded edit is measured."],
+            "required_gates": [{"name": "tests", "command_id": "make test"}],
+            "maximum_execution_seconds": 30,
+            "context_manifest": {"role": "worker", "entries": []},
+        }
+        edit_report = {
+            "schema_version": "step09a-worker-edit-report.v1",
+            "experiment_id": "codex-handler-test",
+            "task_id": "typed-report",
+            "attempt": 1,
+            "claimed_complete": True,
+            "limitations": [],
+            "failure_classification": None,
+            "usage": None,
+        }
+
+        class Transport:
+            async def run(
+                self, invocation: CodexInvocation, cancellation: CancellationContext
+            ) -> CodexProcessResult:
+                del invocation, cancellation
+                return CodexProcessResult(
+                    0,
+                    "\n".join(
+                        (
+                            json.dumps({"type": "thread.started", "thread_id": "session"}),
+                            json.dumps(
+                                {
+                                    "type": "item.completed",
+                                    "item": {
+                                        "type": "agent_message",
+                                        "text": json.dumps(edit_report),
+                                    },
+                                }
+                            ),
+                            json.dumps({"type": "turn.completed", "usage": {}}),
+                        )
+                    ),
+                    "",
+                    5,
+                )
+
+        provider_request = ProviderRequest(
+            task_id=task_id,
+            run_id=run_id,
+            step_id=step_id,
+            provider_attempt=1,
+            lease_generation=token.generation,
+            role=ProviderRole.EXECUTOR,
+            original_input="bounded task",
+            task_draft={"step09a_capsule": capsule},
+            output_schema_name="WorkerEditReport",
+            output_schema_version="step09a-worker-edit-report.v1",
+            output_json_schema=WorkerEditReport.model_json_schema(),
+            system_policy_revision="policy",
+            prompt_revision="prompt",
+            timeout_seconds=30,
+            max_input_tokens=1000,
+            max_output_tokens=1000,
+            reserved_cost_units=Decimal("1"),
+            reserved_quota_units=Decimal("1"),
+            sandbox_reference=f"worktree:{worktree.id}",
+        )
+        provider_result = await CodexCliAdapter(Transport()).execute(
+            provider_request, configured, CancellationContext()
+        )
+        finalized = MagicMock()
+        finalizer = MagicMock()
+        finalizer.finalize = AsyncMock(return_value=finalized)
+        handler = ProviderStepHandler(
+            factory, registries, MagicMock(), worktrees=worktrees, finalizer=finalizer
+        )
+        step_request = StepExecutionRequest(
+            task_id=task_id,
+            run_id=run_id,
+            step_id=step_id,
+            step_type="execute_code",
+            payload={},
+            timeout_seconds=30,
+            lease=token,
+        )
+        result = await handler._finalize_worker_result(
+            request=step_request,
+            provider_request=provider_request,
+            profile_id="codex-test",
+            result=provider_result,
+            cancellation=CancellationContext(),
+            access=None,
+        )
+        assert result is finalized
+        finalized_report = finalizer.finalize.await_args.kwargs["edit_report"]
+        assert isinstance(finalized_report, WorkerEditReport)
+        assert finalized_report.claimed_complete is True
+        await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.postgresql

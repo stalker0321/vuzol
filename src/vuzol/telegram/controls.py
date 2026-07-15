@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
 from vuzol.storage.errors import EntityNotFound
-from vuzol.storage.models import TelegramControlAction
+from vuzol.storage.models import Approval, TelegramControlAction
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import ControlUpdate, IngressResult, IngressStatus
 from vuzol.telegram.policy import TelegramPolicyError, authorize
@@ -30,7 +30,7 @@ class TelegramControlService:
             )
             if update.task_id is None and update.approval_id is None:
                 raise TelegramPolicyError("control action requires a persisted target")
-            if update.action_kind in {"approve", "reject"} and update.approval_id is None:
+            if update.action_kind in {"approve", "redo", "reject"} and update.approval_id is None:
                 raise TelegramPolicyError("approval action requires approval_id")
         except TelegramPolicyError as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
@@ -48,6 +48,11 @@ class TelegramControlService:
                     return IngressResult(status=IngressStatus.DUPLICATE)
                 if update.task_id is not None:
                     await uow.tasks.get(update.task_id, for_update=True)
+                elif update.approval_id is not None:
+                    assert uow.session is not None
+                    approval = await uow.session.get(Approval, update.approval_id)
+                    if approval is None:
+                        raise EntityNotFound(f"approval not found: {update.approval_id}")
                 action = TelegramControlAction(
                     external_action_id=update.callback_query_id,
                     action_kind=update.action_kind,

@@ -1,6 +1,7 @@
 """Persisted workflow control semantics."""
 
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import Settings
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item
 from vuzol.storage.models import (
+    Approval,
     Event,
     Run,
     Step,
@@ -15,8 +17,20 @@ from vuzol.storage.models import (
     TelegramControlAction,
     TransactionalOutbox,
 )
-from vuzol.storage.types import ControlActionStatus, RunStatus, StepStatus, TaskStatus
-from vuzol.workflows.service import activate_ready_steps, derive_task_status, start_run
+from vuzol.storage.types import (
+    ApprovalStatus,
+    ControlActionStatus,
+    RunStatus,
+    StepStatus,
+    TaskStatus,
+)
+from vuzol.workflows.result_approval import verified_envelope
+from vuzol.workflows.service import (
+    _enqueue_telegram_projection,
+    activate_ready_steps,
+    derive_task_status,
+    start_run,
+)
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
 RUN_TERMINAL = {RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.COMPLETED}
@@ -69,6 +83,16 @@ class WorkflowControlConsumer:
 
     async def _apply(self, session: AsyncSession, action: TelegramControlAction) -> None:
         actor_id = str(action.requested_by_user_id)
+        if action.action_kind in {"approve", "redo", "reject"}:
+            if action.approval_id is None:
+                raise ValueError("result decision requires an approval target")
+            await decide_result(
+                session,
+                action.approval_id,
+                decision=action.action_kind,
+                deciding_user_id=action.requested_by_user_id,
+            )
+            return
         if action.action_kind == "retry":
             if action.step_id is None:
                 raise ValueError("retry requires a step target")
@@ -87,6 +111,79 @@ class WorkflowControlConsumer:
             await start_run(session, run, task=task, actor_type="user", actor_id=actor_id)
         else:
             raise ValueError(f"unsupported workflow control: {action.action_kind}")
+
+
+async def decide_result(
+    session: AsyncSession,
+    approval_id: uuid.UUID,
+    *,
+    decision: str,
+    deciding_user_id: int,
+) -> None:
+    approval = await session.scalar(
+        select(Approval).where(Approval.id == approval_id).with_for_update()
+    )
+    if approval is None or approval.status is not ApprovalStatus.PENDING:
+        raise ValueError("result approval is missing or already decided")
+    if approval.expires_at <= datetime.now(UTC):
+        raise ValueError("result approval has expired")
+    step = await session.scalar(select(Step).where(Step.id == approval.step_id).with_for_update())
+    if step is None or step.status is not StepStatus.WAITING_APPROVAL:
+        raise ValueError("result approval step is not waiting for a decision")
+    verified_envelope(step, approval)
+    run = await session.scalar(select(Run).where(Run.id == step.run_id).with_for_update())
+    assert run is not None
+    task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
+    assert task is not None
+    approval.deciding_user_id = deciding_user_id
+    approval.decided_at = func.now()
+    actor_id = str(deciding_user_id)
+    if decision == "approve":
+        approval.status = ApprovalStatus.APPROVED
+        await transition_step(
+            session, step, StepStatus.QUEUED, actor_type="user", actor_id=actor_id
+        )
+        await transition_task(
+            session, task, TaskStatus.EXECUTING, actor_type="user", actor_id=actor_id
+        )
+        event_type = "result.approved"
+    elif decision == "redo":
+        approval.status = ApprovalStatus.REJECTED
+        await transition_step(
+            session, step, StepStatus.CANCELLED, actor_type="user", actor_id=actor_id
+        )
+        await transition_run(
+            session, run, RunStatus.CANCELLED, actor_type="user", actor_id=actor_id
+        )
+        await transition_task(
+            session, task, TaskStatus.CANCELLED, actor_type="user", actor_id=actor_id
+        )
+        event_type = "result.redo_requested"
+    elif decision == "reject":
+        approval.status = ApprovalStatus.REJECTED
+        await transition_step(
+            session, step, StepStatus.CANCELLED, actor_type="user", actor_id=actor_id
+        )
+        await transition_run(
+            session, run, RunStatus.CANCELLED, actor_type="user", actor_id=actor_id
+        )
+        await transition_task(
+            session, task, TaskStatus.CANCELLED, actor_type="user", actor_id=actor_id
+        )
+        event_type = "result.rejected"
+    else:
+        raise ValueError(f"unsupported result decision: {decision}")
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type=event_type,
+            actor_type="user",
+            actor_id=actor_id,
+            payload={"approval_id": str(approval.id)},
+        )
+    )
+    await _enqueue_telegram_projection(session, task, run)
 
 
 async def pause_task(

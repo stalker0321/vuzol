@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from pytest import LogCaptureFixture, MonkeyPatch
 
 from vuzol.cli import app as app_cli
+from vuzol.cli import applier as applier_cli
 from vuzol.cli import telegram as telegram_cli
 from vuzol.cli import telegram_delivery as delivery_cli
 from vuzol.cli import worker as worker_cli
@@ -121,6 +122,67 @@ def test_worker_main_composes_runtime_and_handles_stop(
     assert calls["recovery_batch_size"] == 100
     assert calls["disposed"] is True
     assert any(record.__dict__.get("signal") == signal.SIGTERM for record in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_applier_composes_narrow_control_and_privileged_worker(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    settings = Settings(environment="test")
+    runtime = runtime_configuration(settings)
+    calls: dict[str, object] = {}
+
+    class Engine:
+        async def dispose(self) -> None:
+            calls["disposed"] = True
+
+    class Stop:
+        checks = 0
+
+        def is_set(self) -> bool:
+            self.checks += 1
+            return self.checks > 1
+
+        def set(self) -> None:
+            self.checks = 2
+
+        async def wait(self) -> None:
+            return None
+
+    controls = MagicMock()
+    controls.process_one = AsyncMock(return_value=False)
+    worker = MagicMock()
+    worker.process_one = AsyncMock(return_value=False)
+    monkeypatch.setattr(applier_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
+    monkeypatch.setattr(applier_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
+    monkeypatch.setattr(applier_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(applier_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(applier_cli, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr(applier_cli, "WorkflowControlConsumer", lambda *_args, **_kwargs: controls)
+    monkeypatch.setattr(applier_cli, "ResultApplyHandler", MagicMock())
+    monkeypatch.setattr(applier_cli, "WorkflowWorker", lambda *_args, **_kwargs: worker)
+    monkeypatch.setattr("vuzol.cli.applier.asyncio.Event", Stop)
+
+    await applier_cli.run()
+
+    assert calls["service"] == "vuzol-applier"
+    assert calls["disposed"] is True
+    controls.process_one.assert_awaited_once()
+    worker.process_one.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_applier_chain_prioritizes_controls() -> None:
+    controls = MagicMock()
+    controls.process_one = AsyncMock(return_value=True)
+    worker = MagicMock()
+    worker.process_one = AsyncMock(return_value=True)
+    chain = applier_cli.ApplierChain(controls, worker)
+    assert await chain.process_one()
+    worker.process_one.assert_not_awaited()
+    controls.process_one.return_value = False
+    assert await chain.process_one()
+    worker.process_one.assert_awaited_once()
 
 
 @pytest.mark.anyio

@@ -48,13 +48,14 @@ class PythonTelegramClient:
         html: str,
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
+        approval_id: uuid.UUID | None = None,
     ) -> int:
         message = await self._bot.send_message(
             chat_id=chat_id,
             message_thread_id=thread_id,
             text=html,
             parse_mode=ParseMode.HTML,
-            reply_markup=_control_markup(buttons, task_id),
+            reply_markup=_control_markup(buttons, task_id=task_id, approval_id=approval_id),
         )
         return message.message_id
 
@@ -66,13 +67,14 @@ class PythonTelegramClient:
         html: str,
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
+        approval_id: uuid.UUID | None = None,
     ) -> None:
         await self._bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=html,
             parse_mode=ParseMode.HTML,
-            reply_markup=_control_markup(buttons, task_id),
+            reply_markup=_control_markup(buttons, task_id=task_id, approval_id=approval_id),
         )
 
     async def download(self, file_id: str) -> bytes:
@@ -132,7 +134,16 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
     if query is None or user is None or query.message is None or query.data is None:
         return None
     parts = query.data.split(":", maxsplit=2)
-    allowed_actions = {"approve", "reject", "start", "pause", "resume", "cancel", "retry"}
+    allowed_actions = {
+        "approve",
+        "redo",
+        "reject",
+        "start",
+        "pause",
+        "resume",
+        "cancel",
+        "retry",
+    }
     if len(parts) != 3 or parts[0] != "v1" or parts[1] not in allowed_actions:
         return None
     try:
@@ -140,7 +151,9 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
     except ValueError:
         return None
     targets = (
-        {"approval_id": target_id} if parts[1] in {"approve", "reject"} else {"task_id": target_id}
+        {"approval_id": target_id}
+        if parts[1] in {"approve", "redo", "reject"}
+        else {"task_id": target_id}
     )
     return ControlUpdate(
         bot_id=bot_id,
@@ -154,19 +167,29 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
 
 
 def _control_markup(
-    actions: tuple[str, ...], task_id: uuid.UUID | None
+    actions: tuple[str, ...],
+    *,
+    task_id: uuid.UUID | None,
+    approval_id: uuid.UUID | None,
 ) -> InlineKeyboardMarkup | None:
-    if not actions or task_id is None:
+    if not actions:
         return None
     labels = {
         "start": "Start",
         "pause": "Pause",
         "resume": "Resume",
         "cancel": "Cancel",
+        "approve": "Approve",
+        "redo": "Redo",
+        "reject": "Reject",
     }
+    approval_actions = {"approve", "redo", "reject"}
+    targets = {action: approval_id if action in approval_actions else task_id for action in actions}
+    if any(target is None for target in targets.values()):
+        return None
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(labels[action], callback_data=f"v1:{action}:{task_id}")]
+            [InlineKeyboardButton(labels[action], callback_data=f"v1:{action}:{targets[action]}")]
             for action in actions
         ]
     )

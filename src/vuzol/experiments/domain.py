@@ -295,6 +295,7 @@ class WorkerEditReport(FrozenModel):
     task_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$")
     attempt: int = Field(default=1, ge=1, le=3)
     claimed_complete: bool
+    implementation_summary: str = Field(min_length=1, max_length=2_000)
     limitations: tuple[str, ...] = Field(default=(), max_length=30)
     failure_classification: str | None = Field(default=None, max_length=200)
     usage: ReportedUsage | None = None

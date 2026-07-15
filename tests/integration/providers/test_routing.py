@@ -628,6 +628,7 @@ def test_codex_typed_report_reaches_handler_finalization(postgres_dsn: str, tmp_
             "task_id": "typed-report",
             "attempt": 1,
             "claimed_complete": True,
+            "implementation_summary": "Implemented the requested bounded edit.",
             "limitations": [],
             "failure_classification": None,
             "usage": None,

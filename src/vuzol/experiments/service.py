@@ -226,7 +226,9 @@ def render_worker_prompt(capsule: WorkerTaskCapsule, *, repository_id: str) -> s
         "authoritative result manifest after you exit.\n"
         "Your final response must be only one JSON object conforming to "
         f"{capsule.expected_edit_report_version}; include only the experiment ID, task ID, "
-        "attempt, claimed completion, limitations, failure classification, and provider usage "
+        "attempt, claimed completion, a concise user-facing implementation_summary describing "
+        "what was done without quoting code, limitations, failure classification, and provider "
+        "usage "
         "only when reliably exposed. Set claimed_complete=true only after making the intended "
         "changes. Set claimed_complete=false only for a genuine inability or unresolved task "
         "limitation. Do not claim changed files, gate results, branch identity, or a result "
@@ -308,6 +310,20 @@ def _trial_workflow(interpretation_id: uuid.UUID, timeout: int) -> MaterializedW
                 timeout_seconds=timeout,
                 max_attempts=1,
                 priority=100,
+            ),
+            MaterializedStep(
+                ordinal=3,
+                key="approve_result",
+                step_type="approval",
+                predecessor_ordinals=(2,),
+                queue_class=QueueClass.PRIVILEGED,
+                capabilities=frozenset({Capability.GIT}),
+                retry_class=RetryClass.NEVER,
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                timeout_seconds=120,
+                max_attempts=2,
+                priority=100,
+                payload={"requested_action": "apply_result"},
             ),
         ),
     )

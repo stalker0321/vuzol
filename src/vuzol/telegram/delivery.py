@@ -56,6 +56,7 @@ class PreparedDelivery:
     link_id: uuid.UUID | None = None
     message_id: int | None = None
     buttons: tuple[str, ...] = ()
+    approval_id: uuid.UUID | None = None
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -141,6 +142,7 @@ async def prepare_delivery(session: AsyncSession, item: TransactionalOutbox) -> 
             task_id=card.task_id,
             revision=card.revision,
             buttons=card.buttons,
+            approval_id=card.approval_id,
         )
     return PreparedDelivery(
         DeliveryAction.EDIT_STATUS,
@@ -152,6 +154,7 @@ async def prepare_delivery(session: AsyncSession, item: TransactionalOutbox) -> 
         link_id=link.id,
         message_id=link.message_id,
         buttons=card.buttons,
+        approval_id=card.approval_id,
     )
 
 
@@ -226,6 +229,7 @@ class TelegramDeliveryService:
                 html=prepared.html,
                 buttons=prepared.buttons,
                 task_id=prepared.task_id,
+                approval_id=prepared.approval_id,
             )
             if not message_id:
                 raise LostTelegramResponse("Telegram returned no confirmed message ID")
@@ -237,6 +241,7 @@ class TelegramDeliveryService:
             html=prepared.html,
             buttons=prepared.buttons,
             task_id=prepared.task_id,
+            approval_id=prepared.approval_id,
         )
         return None
 

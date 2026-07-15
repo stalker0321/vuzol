@@ -44,7 +44,7 @@ class ControlUpdate(TelegramModel):
     callback_query_id: str = Field(min_length=1, max_length=255)
     chat_id: int
     user_id: int
-    action_kind: str = Field(pattern=r"^(approve|reject|start|pause|resume|cancel|retry)$")
+    action_kind: str = Field(pattern=r"^(approve|redo|reject|start|pause|resume|cancel|retry)$")
     task_id: uuid.UUID | None = None
     step_id: uuid.UUID | None = None
     approval_id: uuid.UUID | None = None

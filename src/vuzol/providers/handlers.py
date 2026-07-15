@@ -777,6 +777,5 @@ def _is_runtime_certification(task_draft: dict[str, object]) -> bool:
         and capsule.get("allowed_paths") == ["certification/agent-runtime-probe.txt"]
         and capsule.get("maximum_repair_count") == 0
         and capsule.get("parent_attempt") is None
-        and required_gates
-        == [{"name": "format-check", "command_id": "make format-check"}]
+        and required_gates == [{"name": "format-check", "command_id": "make format-check"}]
     )

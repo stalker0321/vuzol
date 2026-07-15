@@ -75,13 +75,18 @@ def test_canary_uses_running_service_without_stop_or_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _module("mvp_canary", ROOT / "deploy/mvp/canary.py")
+    interpreter = tmp_path / "bin" / "python"
+    companion = interpreter.with_name("vuzol-experiment")
+    companion.parent.mkdir()
+    companion.touch(mode=0o700)
+    monkeypatch.setattr(module.sys, "executable", str(interpreter))
     request = tmp_path / "request.json"
     request.write_text(json.dumps({"experiment_id": "mvp-canary-test"}))
     calls: list[tuple[str, ...]] = []
 
     def fake_run(argv: tuple[str, ...]) -> str:
         calls.append(argv)
-        if argv[0] == "systemctl":
+        if argv[0] == "/usr/bin/systemctl":
             return "ActiveState=active\nSubState=running\nMainPID=123\nNRestarts=0\n"
         if argv[1] == "seed":
             return '{"run_uuid":"run"}'
@@ -91,12 +96,13 @@ def test_canary_uses_running_service_without_stop_or_restart(
     result = module.run(request, timeout_seconds=1)
     flattened = " ".join(part for call in calls for part in call)
     assert result["excluded_from_worker_quality"] is True
+    assert result["experiment_executable"] == str(companion)
     assert " stop " not in f" {flattened} "
     assert " restart " not in f" {flattened} "
     assert (
         calls.count(
             (
-                "systemctl",
+                "/usr/bin/systemctl",
                 "show",
                 "vuzol-executor.service",
                 "--property=ActiveState,SubState,MainPID,NRestarts",
@@ -104,6 +110,128 @@ def test_canary_uses_running_service_without_stop_or_restart(
         )
         == 2
     )
+    assert all(Path(call[0]).is_absolute() for call in calls)
+
+
+def test_canary_resolves_companion_beside_interpreter_and_ignores_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module("mvp_canary_resolution", ROOT / "deploy/mvp/canary.py")
+    sibling = tmp_path / "venv" / "bin" / "vuzol-experiment"
+    sibling.parent.mkdir(parents=True)
+    sibling.touch(mode=0o700)
+    unrelated = tmp_path / "unrelated" / "vuzol-experiment"
+    unrelated.parent.mkdir()
+    unrelated.touch(mode=0o700)
+    monkeypatch.setattr(module.sys, "executable", str(sibling.with_name("python")))
+    monkeypatch.setenv("PATH", "")
+    assert module._experiment_cli() == sibling
+    monkeypatch.setenv("PATH", str(unrelated.parent))
+    assert module._experiment_cli() == sibling
+
+
+def test_canary_missing_companion_fails_before_service_or_seeding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module("mvp_canary_missing", ROOT / "deploy/mvp/canary.py")
+    monkeypatch.setattr(module.sys, "executable", str(tmp_path / "bin" / "python"))
+    service = MagicMock()
+    run = MagicMock()
+    monkeypatch.setattr(module, "_service", service)
+    monkeypatch.setattr(module, "_run", run)
+    request = tmp_path / "request.json"
+    request.write_text('{"experiment_id":"mvp-canary-test"}')
+    with pytest.raises(RuntimeError, match="companion executable is absent or not executable"):
+        module.run(request, timeout_seconds=1)
+    service.assert_not_called()
+    run.assert_not_called()
+
+
+def test_canary_subprocess_uses_argv_without_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _module("mvp_canary_subprocess", ROOT / "deploy/mvp/canary.py")
+    invoked: dict[str, object] = {}
+
+    def run(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        invoked.update({"argv": argv, **kwargs})
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    assert module._run(("/exact/vuzol-experiment", "seed", "/request.json")) == "ok"
+    assert invoked["argv"] == ("/exact/vuzol-experiment", "seed", "/request.json")
+    assert "shell" not in invoked
+
+
+def test_agent_certification_keeps_production_runtime_loading_unchanged() -> None:
+    content = (ROOT / "src/vuzol/cli/agent_certify.py").read_text()
+    assert "get_runtime_configuration(validate_profile_credentials=False)" in content
+    assert "VUZOL_REGISTRY_FILE" not in content
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "blocked"])
+def test_mvp_check_rejects_active_worktree_for_terminal_run(
+    status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module(f"mvp_check_terminal_worktree_{status}", ROOT / "deploy/mvp/check.py")
+    monkeypatch.setattr(
+        module,
+        "_run",
+        lambda *_args, **_kwargs: f"terminal_active_worktree|worktree-id|run-id|{status}",
+    )
+    with pytest.raises(module.MvpCheckError, match=f"worktree-id\\|run-id\\|{status}"):
+        module._durable_state()
+
+
+def test_mvp_check_allows_active_worktree_for_running_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("mvp_check_running_worktree", ROOT / "deploy/mvp/check.py")
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> str:
+        calls.append(argv)
+        return ""
+
+    monkeypatch.setattr(module, "_run", run)
+    module._durable_state()
+    sql = calls[0][-1]
+    assert "x.status IN ('completed', 'failed', 'cancelled', 'blocked')" in sql
+    assert "w.delivery_state='active'" in sql
+
+
+def test_mvp_check_rejects_terminal_reserved_budget_independent_of_experiment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("mvp_check_terminal_budget", ROOT / "deploy/mvp/check.py")
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> str:
+        calls.append(argv)
+        return "terminal_reserved_budget|reservation-id|run-id|completed"
+
+    monkeypatch.setattr(module, "_run", run)
+    with pytest.raises(module.MvpCheckError, match="terminal_reserved_budget"):
+        module._durable_state()
+    sql = calls[0][-1]
+    terminal_query = sql.split("SELECT 'terminal_reserved_budget'", 1)[1].split("UNION ALL", 1)[0]
+    assert "experiment_id" not in terminal_query
+
+
+def test_mvp_check_clean_durable_state_passes_and_preserves_qualification_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("mvp_check_clean_durable", ROOT / "deploy/mvp/check.py")
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> str:
+        calls.append(argv)
+        return ""
+
+    monkeypatch.setattr(module, "_run", run)
+    module._durable_state()
+    sql = calls[0][-1]
+    assert "qualification_reserved_budget" in sql
+    assert "LIKE '%qual%'" in sql
+    assert "LIMIT 10" in sql
 
 
 def test_mvp_check_inspects_protected_runtime_without_direct_traversal(

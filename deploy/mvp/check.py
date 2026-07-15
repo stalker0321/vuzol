@@ -240,11 +240,24 @@ def _validation_gates(image: str) -> None:
 
 def _durable_state() -> None:
     sql = """
-SELECT
-  (SELECT count(*) FROM provider_budget_reservations r JOIN runs x ON x.id=r.run_id
-   WHERE r.status='reserved' AND x.selected_route->>'experiment_id' LIKE '%qual%'),
-  (SELECT count(*) FROM worktrees w JOIN runs x ON x.id=w.run_id
-   WHERE w.delivery_state='active' AND x.selected_route->>'experiment_id' LIKE '%qual%');
+SELECT violation_type, object_id, run_id, run_status
+FROM (
+  SELECT 'qualification_reserved_budget' AS violation_type,
+         r.id::text AS object_id, x.id::text AS run_id, x.status::text AS run_status
+  FROM provider_budget_reservations r JOIN runs x ON x.id=r.run_id
+  WHERE r.status='reserved' AND x.selected_route->>'experiment_id' LIKE '%qual%'
+  UNION ALL
+  SELECT 'terminal_reserved_budget', r.id::text, x.id::text, x.status::text
+  FROM provider_budget_reservations r JOIN runs x ON x.id=r.run_id
+  WHERE r.status='reserved' AND x.status IN ('completed', 'failed', 'cancelled', 'blocked')
+  UNION ALL
+  SELECT 'terminal_active_worktree', w.id::text, x.id::text, x.status::text
+  FROM worktrees w JOIN runs x ON x.id=w.run_id
+  WHERE w.delivery_state='active'
+    AND x.status IN ('completed', 'failed', 'cancelled', 'blocked')
+) AS violations
+ORDER BY violation_type, object_id
+LIMIT 10;
 """
     output = _run(
         (
@@ -265,8 +278,9 @@ SELECT
             sql,
         )
     )
-    if output.strip() != "0,0":
-        raise MvpCheckError("qualification reservation or worktree state is unresolved")
+    if violations := output.strip():
+        bounded = "; ".join(violations.splitlines())
+        raise MvpCheckError(f"durable state invariant violated: {bounded}")
 
 
 def _proxy_runtime_is_empty() -> bool:

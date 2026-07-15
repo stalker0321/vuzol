@@ -17,7 +17,7 @@ enabled = true
 
 [[sandboxes]]
 id = "vuzol-validation"
-image = "vuzol-validation@sha256:ede9a61702caded0f74832c35b14e9988f43dea1ae6577405b8b70337934f191"
+image = "vuzol-validation@sha256:300849329a05fd8ddf048dc1748d17663754b072454f61ff115fc134d221ebf2"
 uid = 10001
 gid = 10001
 cpu_count = 1.0

@@ -16,6 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 USER_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/user/vuzol-rootless-docker.service"
 LEGACY_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/vuzol-rootless-docker.service"
 EXECUTOR_UNIT = REPO_ROOT / "deploy/systemd/vuzol-executor.service"
+TELEGRAM_UNITS = (
+    REPO_ROOT / "deploy/systemd/vuzol-telegram.service",
+    REPO_ROOT / "deploy/systemd/vuzol-telegram-delivery.service",
+)
 
 
 def _read(p: Path) -> str:
@@ -194,3 +198,16 @@ def test_readiness_loops_are_bounded_and_fail_closed() -> None:
         assert "exit 1" in text or "exit 1" in text.replace(" ", ""), (
             f"{name} must fail closed on timeout"
         )
+
+
+def test_telegram_units_use_dedicated_unprivileged_identity() -> None:
+    for unit in TELEGRAM_UNITS:
+        text = _read(unit)
+        assert "User=vuzol-telegram" in text
+        assert "Group=vuzol-telegram" in text
+        assert "EnvironmentFile=/etc/vuzol/telegram.env" in text
+        assert "NoNewPrivileges=true" in text
+        assert "ProtectSystem=strict" in text
+        assert "ProtectHome=true" in text
+        assert "docker.sock" not in text
+        assert "/var/lib/vuzol-provider-state" not in text

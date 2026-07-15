@@ -138,6 +138,20 @@ def seed_request() -> TrialSeedRequest:
     )
 
 
+def test_trial_seed_request_accepts_bounded_telegram_source_metadata() -> None:
+    request = seed_request().model_copy(
+        update={
+            "source_user_id": 42,
+            "source_chat_id": -100,
+            "source_thread_id": 11,
+        }
+    )
+    validated = TrialSeedRequest.model_validate(request.model_dump(mode="json"))
+    assert validated.source_user_id == 42
+    assert validated.source_chat_id == -100
+    assert validated.source_thread_id == 11
+
+
 def test_bounded_repair_context_accepts_only_measured_code_evidence() -> None:
     repair = BoundedRepairContext(
         current_diff="diff --git a/src/example.py b/src/example.py\n+VALUE = 2\n",

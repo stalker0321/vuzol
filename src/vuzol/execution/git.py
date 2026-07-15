@@ -217,7 +217,8 @@ class LocalGit:
             "GIT_OPTIONAL_LOCKS": "0",
         }
         environment.update(extra_environment or {})
-        configuration = tuple(value for item in SYSTEM_GIT_CONFIG for value in ("-c", item))
+        trusted_configuration = (*SYSTEM_GIT_CONFIG, f"safe.directory={cwd}")
+        configuration = tuple(value for item in trusted_configuration for value in ("-c", item))
         command = ("/usr/bin/git", *configuration, *args)
         process = await asyncio.create_subprocess_exec(
             *command,

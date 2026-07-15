@@ -64,6 +64,9 @@ class TrialSeedRequest(FrozenModel):
     attempt: int = Field(default=1, ge=1, le=3)
     repair_context: BoundedRepairContext | None = None
     runtime_certification: bool = False
+    source_user_id: int = 0
+    source_chat_id: int = 0
+    source_thread_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_attempt_context(self) -> "TrialSeedRequest":
@@ -117,8 +120,9 @@ async def seed_trial(
     draft = _draft(request)
     task = Task(
         id=task_uuid,
-        user_id=0,
-        source_chat_id=0,
+        user_id=request.source_user_id,
+        source_chat_id=request.source_chat_id,
+        source_thread_id=request.source_thread_id,
         project_id=request.project_id,
         original_text="pending bounded worker capsule",
         task_draft=draft.model_dump(mode="json"),

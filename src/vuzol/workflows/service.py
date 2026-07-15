@@ -9,7 +9,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.errors import EntityNotFound, LeaseLost
-from vuzol.storage.models import Event, Run, Step, Task
+from vuzol.storage.models import (
+    Event,
+    Run,
+    Step,
+    Task,
+    TelegramIntakeMessage,
+    TransactionalOutbox,
+)
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import RunStatus, StepStatus, TaskStatus
 from vuzol.workflows.domain import MaterializedWorkflow, OutcomeKind, StepOutcome
@@ -215,6 +222,36 @@ async def commit_step_outcome(
     target = derive_task_status(await _steps_for_run(session, run.id), run.status)
     if target is not task.status:
         await transition_task(session, task, target, actor_type="workflow_manager")
+        await _enqueue_telegram_projection(session, task, run)
+
+
+async def _enqueue_telegram_projection(session: AsyncSession, task: Task, run: Run) -> None:
+    if not task.source_chat_id or task.source_thread_id is None:
+        return
+    intake = await session.scalar(
+        select(TelegramIntakeMessage)
+        .where(TelegramIntakeMessage.task_id == task.id)
+        .order_by(TelegramIntakeMessage.created_at.desc())
+        .limit(1)
+    )
+    if intake is None:
+        return
+    session.add(
+        TransactionalOutbox(
+            destination="telegram",
+            operation_type="send_message",
+            linked_entity_type="telegram_intake",
+            linked_entity_id=intake.id,
+            idempotency_key=f"telegram:task:{task.id}:revision:{task.version}",
+            payload={
+                "chat_id": task.source_chat_id,
+                "message_thread_id": task.source_thread_id,
+                "role": "intake_ack",
+                "task_id": str(task.id),
+                "run_id": str(run.id),
+            },
+        )
+    )
 
 
 async def finalize_if_complete(session: AsyncSession, run: Run) -> bool:

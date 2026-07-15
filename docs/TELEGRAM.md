@@ -93,3 +93,19 @@ configuration, run `docker compose --profile telegram up`.
 7. Temporarily break network access, restore it, and confirm bounded retry. Simulate an unknown
    send outcome only in a controlled environment and confirm the row remains `ambiguous` without
    automatic resend.
+
+## Bounded coding dogfood
+
+The first production coding slice is deliberately explicit. In a project topic configured with
+`default_workflow = "adaptive_worker_trial"`, an allowlisted user may submit:
+
+```text
+/sol src/vuzol/example.py tests/unit/test_example.py
+Implement the bounded task described here.
+```
+
+The first line is the complete allowed-file scope; one to ten contained repository-relative paths
+are accepted. The remaining lines are the goal. Vuzol fixes the worker profile to
+`codex-subscription-prod`, uses the current managed project revision, runs every trusted repository
+gate, permits no LLM repair, retains the result, and never merges or deploys it. Ordinary messages
+and non-project topics do not enter this coding path.

@@ -4,7 +4,10 @@ Vuzol separates process settings, non-secret registries, and secret values.
 
 ## Format
 
-Process settings use `VUZOL_` environment variables with `__` for nested fields. Project, provider-profile, and Telegram-topic registries use TOML. TOML was selected because Python 3.12 parses it without a runtime dependency, it supports typed tables and arrays, and application modules never need to parse it directly.
+Process settings use `VUZOL_` environment variables with `__` for nested fields. Static project,
+provider-profile, and Telegram-topic registries use TOML. TOML was selected because Python 3.12
+parses it without a runtime dependency, it supports typed tables and arrays, and application modules
+never need to parse it directly.
 
 See `.env.example` and `config/registries.example.toml`.
 
@@ -23,6 +26,12 @@ Set `VUZOL_REGISTRY_FILE` to enable a registry document. Before app or worker st
 - required scoped secret references.
 
 Invalid configuration stops the process before it starts accepting work.
+
+`VUZOL_REGISTRY_OVERLAY_FILE` optionally points to the JSON registry fragment owned by the bounded
+project provisioner. Static configuration is loaded first and the overlay is appended before the
+same cross-registry validation and revision calculation. The provisioner writes the overlay with an
+atomic replace only after the new repository and Telegram thread exist. Duplicate IDs, path escapes,
+or an invalid inherited project policy prevent activation.
 
 ## Registry interfaces
 

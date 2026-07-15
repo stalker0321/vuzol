@@ -34,6 +34,27 @@ class LocalGit:
         identity = hashlib.sha256(common.decode().strip().encode()).hexdigest()
         return identity, remote.decode().strip() if remote else None
 
+    async def initialize_repository(self, repository: Path, *, readme: str) -> str:
+        """Create or finish one contained repository with a deterministic initial commit."""
+
+        if repository.exists() and not repository.is_dir():  # noqa: ASYNC240
+            raise GitError("project repository path is not a directory")
+        repository.mkdir(parents=False, exist_ok=True)  # noqa: ASYNC240
+        if not (repository / ".git").is_dir():
+            if any(repository.iterdir()):  # noqa: ASYNC240
+                raise GitError("project repository path is not empty")
+            await self._run(repository, "init", "--initial-branch", "main")
+        existing = await self._optional(repository, "rev-parse", "HEAD")
+        if existing is not None:
+            await self.require_clean_source(repository)
+            return existing.decode().strip()
+        readme_path = repository / "README.md"
+        if readme_path.exists() and readme_path.read_text() != readme:
+            raise GitError("unfinished project README differs from the requested project")
+        readme_path.write_text(readme)
+        await self.stage_paths(repository, ("README.md",))
+        return await self.create_commit(repository, "chore: initialize project")
+
     async def resolve_commit(self, repository: Path, ref: str) -> str:
         value = await self._run(repository, "rev-parse", "--verify", f"{ref}^{{commit}}")
         commit = value.decode().strip()
@@ -179,6 +200,38 @@ class LocalGit:
         status = await self._run(worktree, "status", "--porcelain=v2", "--untracked-files=all")
         if status:
             raise GitError("finalized worktree is dirty")
+
+    async def apply_result(
+        self,
+        repository: Path,
+        worktree: Path,
+        *,
+        target_branch: str,
+        expected_head: str,
+        result_commit: str,
+    ) -> bool:
+        """Atomically advance an un-checked-out target ref to one verified result."""
+
+        await self.require_clean_worktree(worktree)
+        await self.require_no_remotes(worktree)
+        if await self.commit_parent(worktree, result_commit) != expected_head:
+            raise GitError("result commit is not a direct child of the approved base")
+        target_ref = f"refs/heads/{target_branch}"
+        checked_out = await self._optional(repository, "symbolic-ref", "--quiet", "HEAD")
+        if checked_out is not None and checked_out.decode().strip() == target_ref:
+            raise GitError("target branch is checked out in the managed repository")
+        current = await self.resolve_commit(repository, target_ref)
+        if current == result_commit:
+            return False
+        if current != expected_head:
+            raise GitError("target branch changed after the result was produced")
+        await self._run(repository, "fetch", "--no-tags", str(worktree), result_commit)
+        if await self.resolve_commit(repository, "FETCH_HEAD") != result_commit:
+            raise GitError("fetched result identity does not match the approval")
+        await self._run(repository, "update-ref", target_ref, result_commit, expected_head)
+        if await self.resolve_commit(repository, target_ref) != result_commit:
+            raise GitError("target branch did not advance to the approved result")
+        return True
 
     async def remove_worktree(self, repository: Path, path: Path) -> None:
         if (path / ".git").is_dir():

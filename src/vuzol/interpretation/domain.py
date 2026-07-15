@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from vuzol.config import Capability, TopicKind
 from vuzol.storage.types import RiskLevel
 
-TASK_DRAFT_SCHEMA_VERSION = "1.0"
-INTERPRETER_PROMPT_VERSION = "step-05-v1"
+TASK_DRAFT_SCHEMA_VERSION = "1.1"
+INTERPRETER_PROMPT_VERSION = "project-intake-v1"
 
 
 class FrozenModel(BaseModel):
@@ -18,6 +18,7 @@ class FrozenModel(BaseModel):
 
 class TaskAction(StrEnum):
     CREATE_TASK = "create_task"
+    CREATE_PROJECT = "create_project"
     CONTINUE_TASK = "continue_task"
     ANSWER_QUESTION = "answer_question"
     APPROVE_STEP = "approve_step"
@@ -57,6 +58,8 @@ class TaskDraft(FrozenModel):
     task_type: TaskType
     operation: TaskOperation
     project_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    new_project_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,62}$")
+    new_project_name: str | None = Field(default=None, min_length=1, max_length=100)
     goal: str = Field(min_length=1, max_length=4_000)
     requested_outcomes: tuple[str, ...] = Field(default=(), max_length=20)
     constraints: tuple[str, ...] = Field(default=(), max_length=20)
@@ -80,6 +83,12 @@ class TaskDraft(FrozenModel):
             raise ValueError("clarification question requires needs_clarification")
         if self.action is TaskAction.CONTINUE_TASK and self.referenced_task_id is None:
             raise ValueError("continuation requires a referenced task")
+        if self.action is TaskAction.CREATE_PROJECT and self.project_id is not None:
+            raise ValueError("project creation cannot target an existing project")
+        if self.action is not TaskAction.CREATE_PROJECT and (
+            self.new_project_id is not None or self.new_project_name is not None
+        ):
+            raise ValueError("new project fields require create_project")
         return self
 
 

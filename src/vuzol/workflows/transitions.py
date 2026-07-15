@@ -235,7 +235,12 @@ STEP_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
         }
     ),
     StepStatus.WAITING_APPROVAL: frozenset(
-        {StepStatus.QUEUED, StepStatus.BLOCKED, StepStatus.FAILED, StepStatus.CANCELLED}
+        {
+            StepStatus.QUEUED,
+            StepStatus.BLOCKED,
+            StepStatus.FAILED,
+            StepStatus.CANCELLED,
+        }
     ),
     StepStatus.AWAITING_USER: frozenset(
         {StepStatus.QUEUED, StepStatus.BLOCKED, StepStatus.FAILED, StepStatus.CANCELLED}

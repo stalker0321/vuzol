@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
 
+from vuzol.config import TopicKind, TopicRegistry
 from vuzol.observability import get_logger
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
@@ -22,6 +23,7 @@ from vuzol.storage.leasing import (
 )
 from vuzol.storage.models import (
     Interpretation,
+    ProjectProvisioning,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
@@ -31,6 +33,7 @@ from vuzol.storage.records import OutboxLeaseToken
 from vuzol.telegram.projections import (
     LostTelegramResponse,
     TelegramClient,
+    build_approval_card,
     build_status_card,
     telegram_html,
 )
@@ -42,6 +45,7 @@ class DeliveryAction(StrEnum):
     SEND_STATUS = "send_status"
     EDIT_STATUS = "edit_status"
     SEND_CLARIFICATION = "send_clarification"
+    SEND_PROJECT_WELCOME = "send_project_welcome"
     NOOP = "noop"
 
 
@@ -56,6 +60,8 @@ class PreparedDelivery:
     link_id: uuid.UUID | None = None
     message_id: int | None = None
     buttons: tuple[str, ...] = ()
+    approval_id: uuid.UUID | None = None
+    message_role: str | None = None
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -70,8 +76,33 @@ class DeliveryRunner(Protocol):
     async def deliver_one(self) -> bool: ...
 
 
-async def prepare_delivery(session: AsyncSession, item: TransactionalOutbox) -> PreparedDelivery:
-    if item.operation_type != "send_message" or item.linked_entity_type != "telegram_intake":
+async def prepare_delivery(
+    session: AsyncSession,
+    item: TransactionalOutbox,
+    topics: TopicRegistry | None = None,
+) -> PreparedDelivery:
+    if item.operation_type != "send_message":
+        raise PermanentDeliveryError("unsupported_telegram_operation")
+    if item.linked_entity_type == "project_provisioning":
+        if item.payload.get("role") != "project_created":
+            raise PermanentDeliveryError("invalid_project_delivery_payload")
+        provisioning = await session.get(ProjectProvisioning, item.linked_entity_id)
+        if provisioning is None or provisioning.topic_thread_id is None:
+            raise PermanentDeliveryError("project_provisioning_missing")
+        html = (
+            f"<b>{telegram_html(provisioning.display_name)}</b>\n"
+            f"Проект создан: <code>{telegram_html(provisioning.project_id)}</code>\n\n"
+            f"{telegram_html(provisioning.description)}"
+        )
+        return PreparedDelivery(
+            DeliveryAction.SEND_PROJECT_WELCOME,
+            chat_id=provisioning.chat_id,
+            thread_id=provisioning.topic_thread_id,
+            html=html,
+            task_id=provisioning.task_id,
+            message_role="project_welcome",
+        )
+    if item.linked_entity_type != "telegram_intake":
         raise PermanentDeliveryError("unsupported_telegram_operation")
     intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
     if intake is None:
@@ -117,30 +148,50 @@ async def prepare_delivery(session: AsyncSession, item: TransactionalOutbox) -> 
             thread_id=intake.message_thread_id,
             html=html,
         )
-    if role != "intake_ack" or intake.task_id is None:
+    if role not in {"intake_ack", "approval_card"} or intake.task_id is None:
         raise PermanentDeliveryError("invalid_telegram_payload")
-    card = await build_status_card(session, intake.task_id)
+    approval_projection = role == "approval_card"
+    card = (
+        await build_approval_card(session, intake.task_id)
+        if approval_projection
+        else await build_status_card(session, intake.task_id)
+    )
+    message_role = "approval_card" if approval_projection else "task_status"
+    chat_id = intake.chat_id
+    thread_id = intake.message_thread_id
+    if approval_projection:
+        destination = topics.system_topic(chat_id, TopicKind.APPROVALS) if topics else None
+        if destination is None or not destination.enabled:
+            raise PermanentDeliveryError("approval_topic_missing")
+        thread_id = destination.message_thread_id
     link = await session.scalar(
         select(TelegramMessageLink).where(
             TelegramMessageLink.task_id == card.task_id,
-            TelegramMessageLink.message_role == "task_status",
+            TelegramMessageLink.message_role == message_role,
+            *(
+                (TelegramMessageLink.approval_id == card.approval_id,)
+                if approval_projection
+                else ()
+            ),
         )
     )
     if link is not None and card.revision <= link.projection_revision:
         return PreparedDelivery(
             DeliveryAction.NOOP,
-            chat_id=intake.chat_id,
-            thread_id=intake.message_thread_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
         )
     if link is None:
         return PreparedDelivery(
             DeliveryAction.SEND_STATUS,
-            chat_id=intake.chat_id,
-            thread_id=intake.message_thread_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
             html=card.html,
             task_id=card.task_id,
             revision=card.revision,
             buttons=card.buttons,
+            approval_id=card.approval_id,
+            message_role=message_role,
         )
     return PreparedDelivery(
         DeliveryAction.EDIT_STATUS,
@@ -152,6 +203,8 @@ async def prepare_delivery(session: AsyncSession, item: TransactionalOutbox) -> 
         link_id=link.id,
         message_id=link.message_id,
         buttons=card.buttons,
+        approval_id=card.approval_id,
+        message_role=message_role,
     )
 
 
@@ -166,6 +219,7 @@ class TelegramDeliveryService:
         max_attempts: int,
         retry_min_seconds: float,
         retry_max_seconds: float,
+        topics: TopicRegistry | None = None,
     ) -> None:
         self._factory = session_factory
         self._client = client
@@ -174,6 +228,7 @@ class TelegramDeliveryService:
         self._max_attempts = max_attempts
         self._retry_min = retry_min_seconds
         self._retry_max = retry_max_seconds
+        self._topics = topics
         self._logger = get_logger(__name__)
 
     async def deliver_one(self) -> bool:
@@ -191,7 +246,7 @@ class TelegramDeliveryService:
                 item = await session.get(TransactionalOutbox, token.item_id)
                 assert item is not None
                 attempt_count = item.attempt_count
-                prepared = await prepare_delivery(session, item)
+                prepared = await prepare_delivery(session, item, self._topics)
             if prepared.action == DeliveryAction.NOOP:
                 await self._complete(token, prepared, None)
                 return True
@@ -219,13 +274,18 @@ class TelegramDeliveryService:
         return True
 
     async def _call_telegram(self, prepared: PreparedDelivery) -> int | None:
-        if prepared.action in {DeliveryAction.SEND_STATUS, DeliveryAction.SEND_CLARIFICATION}:
+        if prepared.action in {
+            DeliveryAction.SEND_STATUS,
+            DeliveryAction.SEND_CLARIFICATION,
+            DeliveryAction.SEND_PROJECT_WELCOME,
+        }:
             message_id = await self._client.send_message(
                 chat_id=prepared.chat_id,
                 thread_id=prepared.thread_id,
                 html=prepared.html,
                 buttons=prepared.buttons,
                 task_id=prepared.task_id,
+                approval_id=prepared.approval_id,
             )
             if not message_id:
                 raise LostTelegramResponse("Telegram returned no confirmed message ID")
@@ -237,6 +297,7 @@ class TelegramDeliveryService:
             html=prepared.html,
             buttons=prepared.buttons,
             task_id=prepared.task_id,
+            approval_id=prepared.approval_id,
         )
         return None
 
@@ -256,7 +317,8 @@ class TelegramDeliveryService:
                         message_thread_id=prepared.thread_id,
                         message_id=confirmed_message_id,
                         task_id=prepared.task_id,
-                        message_role="task_status",
+                        approval_id=prepared.approval_id,
+                        message_role=prepared.message_role or "task_status",
                         projection_revision=prepared.revision,
                     )
                 )
@@ -275,6 +337,17 @@ class TelegramDeliveryService:
                         message_id=confirmed_message_id,
                         task_id=prepared.task_id,
                         message_role="clarification",
+                    )
+                )
+            elif prepared.action == DeliveryAction.SEND_PROJECT_WELCOME:
+                assert confirmed_message_id is not None
+                session.add(
+                    TelegramMessageLink(
+                        chat_id=prepared.chat_id,
+                        message_thread_id=prepared.thread_id,
+                        message_id=confirmed_message_id,
+                        task_id=prepared.task_id,
+                        message_role=prepared.message_role or "project_welcome",
                     )
                 )
             await complete_outbox_item(session, token)

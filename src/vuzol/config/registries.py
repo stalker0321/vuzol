@@ -11,6 +11,7 @@ from vuzol.config.models import (
     ProviderProfileConfig,
     SandboxProfileConfig,
     TopicConfig,
+    TopicKind,
 )
 from vuzol.config.revision import (
     RunConfigurationSnapshot,
@@ -178,6 +179,7 @@ class SandboxRegistry:
 class TopicRegistry:
     def __init__(self, topics: Iterable[TopicConfig], *, projects: ProjectRegistry) -> None:
         self._topics: dict[tuple[int, int], TopicConfig] = {}
+        self._system_topics: dict[tuple[int, TopicKind], TopicConfig] = {}
         for topic in topics:
             key = (topic.chat_id, topic.message_thread_id)
             if key in self._topics:
@@ -185,6 +187,13 @@ class TopicRegistry:
             if topic.project_id is not None:
                 projects.get(topic.project_id)
             self._topics[key] = topic
+            if topic.kind is not TopicKind.PROJECT:
+                system_key = (topic.chat_id, topic.kind)
+                if system_key in self._system_topics:
+                    raise RegistryError(
+                        f"duplicate {topic.kind.value} topic for chat: {topic.chat_id}"
+                    )
+                self._system_topics[system_key] = topic
 
     def resolve(self, chat_id: int, message_thread_id: int) -> TopicConfig:
         try:
@@ -194,6 +203,13 @@ class TopicRegistry:
 
     def items(self) -> tuple[TopicConfig, ...]:
         return tuple(self._topics.values())
+
+    def system_topic(self, chat_id: int, kind: TopicKind) -> TopicConfig | None:
+        """Return the one configured global topic of a kind for a chat, if present."""
+
+        if kind is TopicKind.PROJECT:
+            raise RegistryError("project topics must be resolved by stable thread ID")
+        return self._system_topics.get((chat_id, kind))
 
 
 class ConfigurationBundle(BaseModel):

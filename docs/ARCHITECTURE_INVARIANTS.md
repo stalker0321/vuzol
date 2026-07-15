@@ -33,35 +33,37 @@ These rules are non-negotiable unless explicitly changed through an ADR.
 21. Ambiguous continuation must ask for clarification rather than silently attaching to the wrong task.
 22. Only allowlisted users and chats may create executable tasks.
 23. Approval callbacks are single-use and tied to one persisted step.
+24. Unknown projects may be created only through the dedicated allowlisted project-intake topic;
+    ordinary natural-language tasks cannot provision projects.
 
 ## Execution safety
 
-24. Coding tasks use per-task Git worktrees.
-25. Default execution is non-root.
-26. Sandboxes must not receive the Docker socket.
-27. Credentials are scoped to the worker or provider profile that needs them.
-28. Review execution is read-only and receives no production secrets.
-29. Host-privileged operations require explicit action-specific approval.
-30. Actual commands, diffs, and deployment targets are re-evaluated for risk at runtime.
-31. Repository content, attachments, retrieved content, and model output are untrusted input.
-32. Sandbox network access is deny-by-default and enabled only by explicit policy.
-33. Host safety cannot depend on parsing or classifying arbitrary shell syntax correctly.
-34. Approval covers an immutable action envelope; any material change invalidates it.
+25. Coding tasks use per-task Git worktrees.
+26. Default execution is non-root.
+27. Sandboxes must not receive the Docker socket.
+28. Credentials are scoped to the worker or provider profile that needs them.
+29. Review execution is read-only and receives no production secrets.
+30. Host-privileged operations require explicit action-specific approval.
+31. Actual commands, diffs, and deployment targets are re-evaluated for risk at runtime.
+32. Repository content, attachments, retrieved content, and model output are untrusted input.
+33. Sandbox network access is deny-by-default and enabled only by explicit policy.
+34. Host safety cannot depend on parsing or classifying arbitrary shell syntax correctly.
+35. Approval covers an immutable action envelope; any material change invalidates it.
 
 ## Context
 
-35. Full Telegram topic history is never sent by default.
-36. Large instruction or memory files are not repeatedly injected as a single prompt blob.
-37. Context assembly is budgeted, source-linked, and task-scoped.
-38. Unchanged summaries and indexes are reused by content hash.
-39. Git and the filesystem remain the source of truth for repository content.
-40. Every run records the workflow, policy, configuration, prompt, and repository revisions needed to explain its behavior.
+36. Full Telegram topic history is never sent by default.
+37. Large instruction or memory files are not repeatedly injected as a single prompt blob.
+38. Context assembly is budgeted, source-linked, and task-scoped.
+39. Unchanged summaries and indexes are reused by content hash.
+40. Git and the filesystem remain the source of truth for repository content.
+41. Every run records the workflow, policy, configuration, prompt, and repository revisions needed to explain its behavior.
 
 ## Scope and operations
 
-41. The MVP runs as a modular monolith plus workers and PostgreSQL.
-42. Logical component boundaries do not require separate services.
-43. One heavy execution slot is the default on the current VPS.
-44. Vector search, graph storage, formal durable runtimes, and web dashboards require measured justification.
-45. An implementation step must not silently implement later roadmap items.
-46. Cost, token, attempt, duration, storage, and concurrency limits are enforceable policy, not advisory metadata.
+42. The MVP runs as a modular monolith plus workers and PostgreSQL.
+43. Logical component boundaries do not require separate services.
+44. One heavy execution slot is the default on the current VPS.
+45. Vector search, graph storage, formal durable runtimes, and web dashboards require measured justification.
+46. An implementation step must not silently implement later roadmap items.
+47. Cost, token, attempt, duration, storage, and concurrency limits are enforceable policy, not advisory metadata.

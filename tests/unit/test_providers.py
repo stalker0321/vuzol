@@ -613,6 +613,7 @@ async def test_codex_structured_jsonl_promotes_final_typed_object(tmp_path: Path
         "task_id": "latest-inspect",
         "attempt": 1,
         "claimed_complete": True,
+        "implementation_summary": "Implemented the requested change.",
         "limitations": [],
         "failure_classification": None,
         "usage": {
@@ -912,6 +913,7 @@ async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> Non
         "experiment_id": "experiment",
         "task_id": "task",
         "claimed_complete": True,
+        "implementation_summary": "Implemented the requested change.",
         "usage": {
             "input_tokens": None,
             "cached_input_tokens": None,

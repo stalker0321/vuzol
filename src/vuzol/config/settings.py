@@ -195,6 +195,8 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65535)
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
     registry_file: Path | None = None
+    registry_overlay_file: Path | None = None
+    project_template_id: str = Field(default="vuzol", pattern=r"^[a-z][a-z0-9_-]*$")
     database_dsn_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
     telegram_bot_token_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
     allowed_user_ids: tuple[int, ...] = ()
@@ -213,9 +215,17 @@ class Settings(BaseSettings):
     limits: HardLimits = HardLimits()
     redaction_patterns: tuple[str, ...] = ()
 
-    @field_validator("repository_root", "worktree_root", "artifact_root", "secret_file_root")
+    @field_validator(
+        "repository_root",
+        "worktree_root",
+        "artifact_root",
+        "secret_file_root",
+        "registry_overlay_file",
+    )
     @classmethod
-    def require_absolute_root(cls, value: Path) -> Path:
+    def require_absolute_root(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
         if not value.is_absolute():
             raise ValueError("configured roots must be absolute")
         return value

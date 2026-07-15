@@ -1,9 +1,23 @@
 # Changelog
 
+## 2026-07-15 — Telegram forum workspace routing
+
+- Declared stable display names for global and per-project forum topics and synchronized configured
+  mappings at bot startup.
+- Routed retained-result decisions into a dedicated global approvals topic while preserving the
+  project status projection and removing approval controls after a persisted decision.
+- Added explicit text/voice project intake, persisted bounded provisioning, initial Git repository
+  and Telegram-topic creation, validated dynamic registry overlays, and fail-closed handling for an
+  unknown non-idempotent topic-creation outcome.
+
 This file records completed implementation changes, not plans or speculative ideas.
 
 ## Unreleased
 
+- added the narrow retained-result decision loop: semantic Telegram completion summaries, trusted
+  gate results, immutable exact-result Approve/Redo/Reject callbacks, and a separate policy-gated
+  local applier with atomic target-drift protection; diffs remain private audit artifacts and no
+  push or deployment is performed;
 - completed and production-qualified the Step 08 execution boundary with a dedicated rootless
   Docker daemon, task-specific standalone Git worktrees, pinned sandbox and seccomp identities,
   controlled proxy egress, supervised processes, bounded artifacts, cleanup/reconciliation, and

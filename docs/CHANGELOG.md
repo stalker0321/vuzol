@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-15 — Telegram forum workspace routing
+
+- Declared stable display names for global and per-project forum topics and synchronized configured
+  mappings at bot startup.
+- Routed retained-result decisions into a dedicated global approvals topic while preserving the
+  project status projection and removing approval controls after a persisted decision.
+
 This file records completed implementation changes, not plans or speculative ideas.
 
 ## Unreleased

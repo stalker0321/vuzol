@@ -141,6 +141,58 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     )
 
 
+async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> StatusCard:
+    """Build the global approval projection for the latest exact result."""
+
+    task = await session.get(Task, task_id)
+    if task is None:
+        raise LookupError(f"task not found: {task_id}")
+    approval = await session.scalar(
+        select(Approval)
+        .join(Step, Approval.step_id == Step.id)
+        .join(Run, Step.run_id == Run.id)
+        .where(Run.task_id == task_id)
+        .order_by(Approval.requested_at.desc())
+        .limit(1)
+    )
+    if approval is None:
+        raise LookupError(f"approval not found for task: {task_id}")
+    step = await session.get(Step, approval.step_id)
+    assert step is not None
+    envelope = verified_envelope(step, approval)
+    title = str(
+        task.task_draft.get("normalized_title")
+        or task.task_draft.get("title")
+        or task.original_text
+    ).strip()[:120]
+    lines = [
+        f"<b>{telegram_html(task.project_id or 'personal')} · {telegram_html(title)}</b>",
+        f"<code>{task.id}</code>",
+        "",
+        "<b>Что сделано</b>",
+        telegram_html(approval.human_summary),
+        "",
+        "<b>Проверки</b>",
+    ]
+    for gate in envelope["gates"]:
+        duration = int(gate.get("duration_ms", 0)) / 1000
+        lines.append(f"✅ {telegram_html(gate.get('name', 'check'))} — {duration:.1f}s")
+    buttons: tuple[str, ...]
+    if approval.status is ApprovalStatus.PENDING:
+        lines.extend(("", "Применить этот результат локально?"))
+        buttons = ("approve", "redo", "reject")
+    else:
+        lines.extend(("", f"Решение: <b>{telegram_html(approval.status.value)}</b>"))
+        buttons = ()
+    return StatusCard(
+        task_id=task.id,
+        revision=task.version,
+        html="\n".join(lines),
+        buttons=buttons,
+        approval_id=approval.id,
+    )
+
+
 class TelegramClient(Protocol):
     async def send_message(
         self,

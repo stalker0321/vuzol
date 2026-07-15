@@ -1741,9 +1741,7 @@ def test_runtime_certificate_bypass_is_limited_to_fixed_probe_shape() -> None:
         "allowed_paths": ["certification/agent-runtime-probe.txt"],
         "maximum_repair_count": 0,
         "parent_attempt": None,
-        "required_gates": [
-            {"name": "format-check", "command_id": "make format-check"}
-        ],
+        "required_gates": [{"name": "format-check", "command_id": "make format-check"}],
     }
     assert _is_runtime_certification({"step09a_capsule": capsule}) is True
     assert (

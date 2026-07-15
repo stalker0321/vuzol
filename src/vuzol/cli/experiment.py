@@ -26,6 +26,11 @@ from vuzol.storage.models import Artifact, Run, Step, SupervisedProcess, UsageRe
 
 
 def main() -> None:
+    args = _parse_args()
+    asyncio.run(_run(args))
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bounded Step 09A experiment administration")
     subparsers = parser.add_subparsers(dest="command", required=True)
     seed = subparsers.add_parser("seed")
@@ -34,12 +39,12 @@ def main() -> None:
     record.add_argument("telemetry", type=Path)
     inspect = subparsers.add_parser("inspect")
     inspect.add_argument("experiment_id")
+    inspect.add_argument("--latest", action="store_true")
     export = subparsers.add_parser("export")
     export.add_argument("experiment_id")
     export.add_argument("--json", type=Path, required=True)
     export.add_argument("--csv", type=Path, required=True)
-    args = parser.parse_args()
-    asyncio.run(_run(args))
+    return parser.parse_args(argv)
 
 
 async def _run(args: argparse.Namespace) -> None:
@@ -65,7 +70,7 @@ async def _run(args: argparse.Namespace) -> None:
                 event_id = await record_trial(session, telemetry)
             _print_json({"event_id": str(event_id)})
         elif args.command == "inspect":
-            _print_json(await _inspect(factory, args.experiment_id))
+            _print_json(await _inspect(factory, args.experiment_id, latest=args.latest))
         elif args.command == "export":
             async with factory() as session:
                 trials = await load_trials(session, args.experiment_id)
@@ -84,7 +89,12 @@ async def _run(args: argparse.Namespace) -> None:
         await engine.dispose()
 
 
-async def _inspect(factory: async_sessionmaker[AsyncSession], experiment_id: str) -> dict[str, Any]:
+async def _inspect(
+    factory: async_sessionmaker[AsyncSession],
+    experiment_id: str,
+    *,
+    latest: bool = False,
+) -> dict[str, Any]:
     async with factory() as session:
         runs = (
             await session.scalars(
@@ -94,6 +104,8 @@ async def _inspect(factory: async_sessionmaker[AsyncSession], experiment_id: str
             )
         ).all()
         selected = [run for run in runs if run.selected_route.get("experiment_id") == experiment_id]
+        if latest and selected:
+            selected = [max(selected, key=lambda run: (run.created_at, str(run.id)))]
         result: list[dict[str, Any]] = []
         for run in selected:
             steps = (

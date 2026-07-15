@@ -308,6 +308,11 @@ class ProviderStepHandler:
                 "provider_request_id": result.provider_request_id,
                 "text": result.text,
                 "structured_output": structured_output,
+                "implementation_summary": (
+                    finalized.evidence.provider_edit_report.implementation_summary
+                    if finalized is not None
+                    else None
+                ),
                 "finish_reason": result.finish_reason,
             }
         )

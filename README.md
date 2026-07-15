@@ -21,7 +21,9 @@ Telegram text or voice message
 → deterministic capability/health/budget-aware provider routing
 → atomic budget reservation and fenced execution
 → for explicit bounded coding tasks: isolated worktree and Codex sandbox
-→ measured diff, trusted validation, retained result commit, and Telegram status
+→ measured diff, trusted validation, and retained result commit
+→ Telegram summary plus trusted gate results
+→ exact-result approval and drift-safe local apply
 → restart recovery
 ```
 
@@ -34,11 +36,16 @@ supports one deliberately narrow production coding path: an allowlisted user may
 explicit `/sol` command with a closed file scope in a configured project topic. Vuzol executes
 Codex in an isolated rootless sandbox and standalone Git worktree, measures the resulting diff,
 runs the configured trusted gates in a separate pinned validation image, retains the verified
-result commit, and reports durable status through Telegram.
+result commit, and reports a semantic completion summary plus trusted gate results through
+Telegram. Approve is bound to the exact base, result, diff identity, gates, and policy revisions;
+a separate trusted applier may then advance only the configured local branch with an atomic
+target-head check.
 
-This coding path does not merge, push, deploy, perform privileged host actions, or grant broad
-repository scope. General natural-language coding intake, automatic trust promotion, independent
-review policy, and approval-gated application or deployment remain outside the supported boundary.
+This coding path does not push, deploy, perform general privileged host actions, or grant broad
+repository scope. Redo closes the result and asks for a corrected bounded `/sol` request, Reject
+leaves the retained result unapplied, and no decision exposes the code diff in Telegram. General natural-language coding
+intake, automatic trust promotion, independent review policy, merge, push, and deployment remain
+outside the supported boundary.
 
 ## Requirements and setup
 
@@ -65,6 +72,7 @@ make run-worker               # workflow dispatch, recovery, controls, and regis
 vuzol-telegram                # Telegram long-polling ingress
 vuzol-telegram-delivery       # Telegram outbox delivery
 vuzol-interpreter             # transcription and semantic interpretation
+vuzol-applier                 # controls and approval-gated local result apply
 make check                    # lint, format, types, tests, and security checks
 make test-postgres            # PostgreSQL migration and concurrency tests
 ```
@@ -95,6 +103,9 @@ Systemd units:
 
 - `deploy/systemd/user/vuzol-rootless-docker.service` — dedicated rootless Docker daemon as a linger-enabled systemd **user** unit (installed to `/etc/systemd/user/vuzol-rootless-docker.service`). Runs inside the `vuzol-executor` user's manager (with `loginctl enable-linger`). Uses `%t` for the socket path under the user's XDG_RUNTIME_DIR. No `User=`/`Group=` lines.
 - `deploy/systemd/vuzol-executor.service` — the system service (with `User=vuzol-executor`) that runs the dedicated executor worker. It no longer declares a direct systemd dependency on the docker unit (user units are in a separate manager). Readiness is provided by an `ExecStartPre` socket wait plus the strict `RootlessDockerRuntime.preflight()` gate inside the process.
+- `deploy/systemd/vuzol-applier.service` — the narrow control/apply service. It can read retained
+  worktrees and write managed repository refs, but it has no provider, Docker, secret-state, push,
+  or deployment capability.
 
 The executor process must not start until the user-managed rootless daemon is up, its socket is present and owned by the executor identity, and the daemon reports rootless mode + seccomp + cgroup v2 with enforceable CPU/memory limits. A root-owned, digest-pinned sandbox seccomp profile from `deploy/seccomp/` is also mandatory; it preserves Moby's allowlist while permitting the trusted Codex `bwrap` launcher to create its nested sandbox. The preflight (and therefore the unit) fails closed on any violation and never falls back to the host root Docker socket. See `deploy/systemd/vuzol-executor.service` comments and the Step 08 handoff reports for the exact portable installation and verification steps.
 - [Telegram workspace](docs/TELEGRAM.md)

@@ -173,10 +173,12 @@ def test_trial_seed_uses_existing_workflow_records_and_profile_pin(
                 "interpret",
                 "prepare_worktree",
                 "execute_code",
+                "approval",
             ]
             assert [step.status for step in steps] == [
                 StepStatus.COMPLETED,
                 StepStatus.QUEUED,
+                StepStatus.PENDING,
                 StepStatus.PENDING,
             ]
             assert "/home/" not in task.original_text

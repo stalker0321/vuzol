@@ -161,6 +161,15 @@ async def activate_ready_steps(session: AsyncSession, run: Run) -> tuple[Step, .
             continue
         target = StepStatus.WAITING_APPROVAL if step.step_type == "approval" else StepStatus.QUEUED
         await transition_step(session, step, target, actor_type="workflow_manager")
+        if target is StepStatus.WAITING_APPROVAL:
+            from vuzol.workflows.result_approval import ensure_result_approval
+
+            await ensure_result_approval(
+                session,
+                run=run,
+                approval_step=step,
+                steps_by_ordinal=by_ordinal,
+            )
         activated.append(step)
     return tuple(activated)
 

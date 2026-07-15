@@ -150,6 +150,54 @@ def test_start_callback_crosses_the_provider_boundary() -> None:
     assert converted.task_id == task_id
 
 
+def test_result_decision_callback_targets_the_exact_approval() -> None:
+    approval_id = uuid.uuid4()
+    update = Update.de_json(
+        {
+            "update_id": 2,
+            "callback_query": {
+                "id": "decision",
+                "from": {"id": 7, "is_bot": False, "first_name": "User"},
+                "chat_instance": "instance",
+                "data": f"v1:redo:{approval_id}",
+                "message": {
+                    "message_id": 10,
+                    "date": 0,
+                    "chat": {"id": -100, "type": "supergroup"},
+                },
+            },
+        },
+        None,
+    )
+    converted = control_update(update, "main")
+    assert converted is not None
+    assert converted.action_kind == "redo"
+    assert converted.approval_id == approval_id
+    assert converted.task_id is None
+
+
+def test_python_telegram_client_builds_result_decision_markup() -> None:
+    async def scenario() -> None:
+        bot = AsyncMock()
+        bot.send_message.return_value = SimpleNamespace(message_id=18)
+        approval_id = uuid.uuid4()
+        await PythonTelegramClient(bot).send_message(
+            chat_id=-100,
+            thread_id=10,
+            html="result",
+            buttons=("approve", "redo", "reject"),
+            approval_id=approval_id,
+        )
+        markup = bot.send_message.await_args.kwargs["reply_markup"]
+        assert [row[0].callback_data for row in markup.inline_keyboard] == [
+            f"v1:approve:{approval_id}",
+            f"v1:redo:{approval_id}",
+            f"v1:reject:{approval_id}",
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_python_telegram_client_construction() -> None:
     """Additional coverage for telegram client (Step 08 overall cov)."""
     from vuzol.telegram.adapter import PythonTelegramClient

@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added the narrow retained-result decision loop: semantic Telegram completion summaries, trusted
+  gate results, immutable exact-result Approve/Redo/Reject callbacks, and a separate policy-gated
+  local applier with atomic target-drift protection; diffs remain private audit artifacts and no
+  push or deployment is performed;
 - completed and production-qualified the Step 08 execution boundary with a dedicated rootless
   Docker daemon, task-specific standalone Git worktrees, pinned sandbox and seccomp identities,
   controlled proxy egress, supervised processes, bounded artifacts, cleanup/reconciliation, and

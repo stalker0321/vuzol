@@ -50,6 +50,18 @@ Callbacks resolve a persisted target, verify authorization and current existence
 callback identity, and enqueue a workflow-control outbox record. They do not perform transitions or
 dangerous work in the Telegram handler.
 
+After bounded coding succeeds, the status card shows the worker's concise semantic description and
+the independently measured trusted gate names, results, and durations. It deliberately does not
+show source code, a commit identity, or the diff. Approve, Redo, and Reject callbacks target the
+persisted approval ID, not a mutable task label. The canonical approval envelope binds the target
+head, base and result commits, diff hash, gate evidence, and configuration/policy revisions.
+
+Approve queues the exact result for the separate `vuzol-applier` process. The applier revalidates
+project policy and repository identity, fetches the retained commit locally, and advances the
+configured branch with Git compare-and-swap. Target drift blocks the step; it never falls back to a
+merge, push, or deployment. Redo rejects and closes the current result, then asks for a new bounded
+`/sol` request with corrected instructions. Reject cancels the result without applying it.
+
 Status cards are rebuilt from tasks, runs, steps, and events in PostgreSQL. External text is escaped
 centrally for Telegram HTML and bounded to Telegram message limits. Each message link stores the
 last applied projection revision; stale edits are ignored. Per-task edit reservations coalesce rapid
@@ -107,5 +119,6 @@ Implement the bounded task described here.
 The first line is the complete allowed-file scope; one to ten contained repository-relative paths
 are accepted. The remaining lines are the goal. Vuzol fixes the worker profile to
 `codex-subscription-prod`, uses the current managed project revision, runs every trusted repository
-gate, permits no LLM repair, retains the result, and never merges or deploys it. Ordinary messages
-and non-project topics do not enter this coding path.
+gate, permits no automatic LLM repair, retains the result, and requests the exact-result Telegram
+decision described above. An approved result may advance only the local managed branch; it is never
+pushed or deployed. Ordinary messages and non-project topics do not enter this coding path.

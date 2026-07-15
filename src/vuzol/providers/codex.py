@@ -22,7 +22,7 @@ from vuzol.workflows.ports import CancellationContext
 CODEX_PERMISSION_PROFILE = "vuzol-executor"
 CODEX_PERMISSION_CONFIG = (
     'permissions.vuzol-executor={filesystem={":minimal"="read",'
-    '"/workspace"="write","/artifacts"="write","/codex-home"="none"},'
+    '"/workspace"="write","/codex-home"="none"},'
     "network={enabled=false}}"
 )
 

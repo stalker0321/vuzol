@@ -120,15 +120,46 @@ class ExecutionEnvelopeFactory:
             worktree_path = contained(self._worktree_root, Path(worktree.path))
             git_metadata_path = _worktree_git_metadata(worktree_path)
             state_path = profile.state_directory.resolve(strict=True)
-            staging = (
-                self._artifact_root
-                / "execution"
-                / str(invocation.step_id)
-                / str(invocation.provider_attempt)
-            )
-            staging.mkdir(parents=True, exist_ok=True)
-            contained(self._artifact_root, staging)
             state_target, environment = _provider_state_runtime(profile.provider)
+            mounts = [
+                SandboxMount(
+                    source=worktree_path,
+                    target=Path("/workspace"),
+                    mode=MountMode.READ_WRITE,
+                    purpose="task-worktree",
+                ),
+                SandboxMount(
+                    source=git_metadata_path,
+                    target=Path("/workspace/.git"),
+                    mode=MountMode.READ_ONLY,
+                    purpose="worktree-git-metadata",
+                ),
+            ]
+            if profile.provider == "grok":
+                staging = (
+                    self._artifact_root
+                    / "execution"
+                    / str(invocation.step_id)
+                    / str(invocation.provider_attempt)
+                )
+                staging.mkdir(parents=True, exist_ok=True)
+                contained(self._artifact_root, staging)
+                mounts.append(
+                    SandboxMount(
+                        source=staging,
+                        target=Path("/artifacts"),
+                        mode=MountMode.READ_WRITE,
+                        purpose="task-artifacts",
+                    )
+                )
+            mounts.append(
+                SandboxMount(
+                    source=state_path,
+                    target=state_target,
+                    mode=MountMode.READ_WRITE,
+                    purpose="provider-state",
+                )
+            )
             spec = SandboxSpec(
                 image=sandbox.image,
                 uid=sandbox.uid,
@@ -136,32 +167,7 @@ class ExecutionEnvelopeFactory:
                 seccomp_profile=seccomp_profile,
                 seccomp_profile_sha256=seccomp_digest,
                 working_directory=Path("/workspace"),
-                mounts=(
-                    SandboxMount(
-                        source=worktree_path,
-                        target=Path("/workspace"),
-                        mode=MountMode.READ_WRITE,
-                        purpose="task-worktree",
-                    ),
-                    SandboxMount(
-                        source=git_metadata_path,
-                        target=Path("/workspace/.git"),
-                        mode=MountMode.READ_ONLY,
-                        purpose="worktree-git-metadata",
-                    ),
-                    SandboxMount(
-                        source=staging,
-                        target=Path("/artifacts"),
-                        mode=MountMode.READ_WRITE,
-                        purpose="task-artifacts",
-                    ),
-                    SandboxMount(
-                        source=state_path,
-                        target=state_target,
-                        mode=MountMode.READ_WRITE,
-                        purpose="provider-state",
-                    ),
-                ),
+                mounts=tuple(mounts),
                 cpu_count=sandbox.cpu_count,
                 memory_bytes=sandbox.memory_bytes,
                 pids_limit=sandbox.pids_limit,

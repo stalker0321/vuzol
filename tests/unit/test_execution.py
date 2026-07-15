@@ -98,6 +98,7 @@ from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.providers.grok import (
     GROK_DIAGNOSTIC_FILE_MAX_BYTES,
+    canonical_grok_argv,
     staged_grok_diagnostic_paths,
 )
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
@@ -2337,10 +2338,50 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
 
     envelope, pid = await envf.build(inv)
     assert envelope.sandbox.image == "provider@sha256:" + "a" * 64
+    assert len(envelope.sandbox.mounts) == 3
+    assert envelope.sandbox.mounts[0].target == Path("/workspace")
+    assert envelope.sandbox.mounts[0].mode is MountMode.READ_WRITE
     assert envelope.sandbox.mounts[1].target == Path("/workspace/.git")
     assert envelope.sandbox.mounts[1].mode is MountMode.READ_ONLY
-    assert envelope.sandbox.mounts[3].mode is MountMode.READ_WRITE
+    assert envelope.sandbox.mounts[2].target == Path("/codex-home")
+    assert envelope.sandbox.mounts[2].mode is MountMode.READ_WRITE
+    assert envelope.sandbox.mounts[2].source == state_dir
+    assert all(mount.target != Path("/artifacts") for mount in envelope.sandbox.mounts)
+    assert all("docker.sock" not in str(mount.source) for mount in envelope.sandbox.mounts)
     assert '"/codex-home"="none"' in " ".join(envelope.argv)
+    assert '"/workspace"="write"' in " ".join(envelope.argv)
+    assert '"/artifacts"' not in " ".join(envelope.argv)
+    assert "network={enabled=false}" in " ".join(envelope.argv)
+
+    grok_inv = MagicMock(spec=CodexInvocation)
+    grok_inv.sandbox_reference = f"worktree:{mock_wt.id}"
+    grok_inv.task_id = task_id
+    grok_inv.run_id = run_id
+    grok_inv.step_id = uuid.uuid4()
+    grok_inv.profile_id = "grok-prof"
+    grok_inv.provider_attempt = 1
+    grok_inv.lease_generation = 1
+    grok_inv.argv = canonical_grok_argv("grok-build")
+    grok_inv.stdin = "prompt"
+    grok_inv.timeout_seconds = 30
+    mock_reg.profiles.get.return_value = MagicMock(
+        state_directory=state_dir,
+        enabled=True,
+        provider="grok",
+        model="grok-build",
+    )
+    grok_envelope, _grok_pid = await envf.build(grok_inv)
+    assert [mount.target for mount in grok_envelope.sandbox.mounts] == [
+        Path("/workspace"),
+        Path("/workspace/.git"),
+        Path("/artifacts"),
+        Path("/grok-home"),
+    ]
+    assert grok_envelope.sandbox.mounts[2].mode is MountMode.READ_WRITE
+    assert grok_envelope.sandbox.mounts[2].source == (
+        artifact_root / "execution" / str(grok_inv.step_id) / "1"
+    )
+    assert grok_envelope.sandbox.mounts[2].source.is_dir()
     gate_context = GateExecutionContext(
         task_id=task_id,
         run_id=run_id,
@@ -2400,6 +2441,12 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_art.persist = AsyncMock(return_value=MagicMock(id=uuid.uuid4()))
     await envf.complete(pid, CodexProcessResult(0, "ok", "", 10), mock_art)
     assert stored_process[0].status.value == "exited"
+    assert [call.kwargs["artifact_type"] for call in mock_art.persist.await_args_list[:2]] == [
+        "stdout",
+        "stderr",
+    ]
+    staging = artifact_root / "execution" / str(step_id) / "1"
+    staging.mkdir(parents=True)
     stored_process[0].command_envelope = {"argv": ["grok"]}
     stored_process[0].runtime_metadata = {
         "configured_deadline_seconds": 30,
@@ -2435,7 +2482,6 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
 
     session_id = "019f5e8d-d90b-7e40-a698-8a71fa87eff8"
     state_dir.chmod(0o000)
-    staging = artifact_root / "execution" / str(step_id) / "1"
     staged_paths = staged_grok_diagnostic_paths(staging, session_id)
     assert staged_paths is not None
     staged_paths[0].parent.mkdir(parents=True)

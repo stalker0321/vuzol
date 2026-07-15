@@ -1,7 +1,9 @@
 import asyncio
+import subprocess
 import uuid
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import func, select
@@ -10,12 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import (
     Capability,
     ConfigurationBundle,
+    ProjectConfig,
     ProviderProfileConfig,
     RegistryDocument,
     ScopedSecretResolver,
     Settings,
     build_bundle,
 )
+from vuzol.execution.git import LocalGit
+from vuzol.execution.worktrees import WorktreeService
 from vuzol.providers.budgets import (
     BudgetExceeded,
     estimate_reservation,
@@ -31,7 +36,11 @@ from vuzol.providers.domain import (
     ProviderResultStatus,
 )
 from vuzol.providers.errors import ProviderFailure
-from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
+from vuzol.providers.handlers import (
+    ProviderStepHandler,
+    executor_provider_handlers,
+    provider_handlers,
+)
 from vuzol.providers.health import (
     effective_health,
     record_failure_observation,
@@ -40,16 +49,21 @@ from vuzol.providers.health import (
 )
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.providers.routing import claim_routed_step
+from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import start_step
 from vuzol.storage.models import (
+    ProfileHealthObservation,
     ProviderBudgetReservation,
     ProviderProfile,
     RoutingDecision,
     Run,
     Step,
+    SupervisedProcess,
     Task,
     UsageRecord,
+    Worktree,
 )
+from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import (
     BudgetReservationStatus,
     IdempotencyClass,
@@ -57,9 +71,10 @@ from vuzol.storage.types import (
     RunStatus,
     StepStatus,
     TaskStatus,
+    WorktreeDeliveryState,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.workflows.ports import CancellationContext
+from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.worker import RoutedWorkflowWorker
 
 from ..storage.helpers import storage
@@ -632,6 +647,185 @@ def test_provider_failure_release_or_conservative_charge(
                 else BudgetReservationStatus.RELEASED
             )
             assert reservation.status is expected_reservation
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_pre_provider_failure_unwinds_reservation_and_worktree(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(("git", "init", "-b", "main"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "test@example.invalid"),
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(("git", "config", "user.name", "Test"), cwd=repository, check=True)
+    (repository / "tracked.txt").write_text("base\n")
+    subprocess.run(("git", "add", "tracked.txt"), cwd=repository, check=True)
+    subprocess.run(("git", "commit", "-m", "base"), cwd=repository, check=True)
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        configured = profile(
+            "cli",
+            launch_mode="cli",
+            sandbox_required=True,
+            runtime_identity="test-cli",
+            state_directory=tmp_path / "provider-state",
+        )
+        settings, registries = bundle(tmp_path, configured)
+        task_id, run_id, step_id = await seed_provider_step(factory, step_type="execute_code")
+        worktrees = WorktreeService(tmp_path / "worktrees", LocalGit(), retention_days=3)
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+            await worktrees.prepare(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                project=ProjectConfig(
+                    id="project",
+                    display_name="Project",
+                    repository_path=repository,
+                    default_branch="main",
+                    allowed_capabilities=frozenset(),
+                    sandbox_profile="default",
+                ),
+                owner="provider-worker",
+            )
+
+        adapter = FakeAdapter()
+        adapter.execute = AsyncMock(side_effect=AssertionError("provider must not be called"))  # type: ignore[method-assign]
+        adapters = AdapterRegistry(
+            registries.profiles,
+            ScopedSecretResolver(access_policy={}, secret_file_root=tmp_path, environment={}),
+            adapters={"cli": adapter},
+        )
+        handler = ProviderStepHandler(factory, registries, adapters, worktrees=worktrees)
+        handler._build_request = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ValueError("injected pre-provider preparation failure")
+        )
+        worker = RoutedWorkflowWorker(
+            settings,
+            factory,
+            registries=registries,
+            owner="provider-worker",
+            handlers=executor_provider_handlers(handler),
+        )
+
+        assert await worker.process_one()
+
+        async with factory() as session:
+            step = await session.get(Step, step_id)
+            run = await session.get(Run, run_id)
+            reservation = await session.scalar(
+                select(ProviderBudgetReservation).where(
+                    ProviderBudgetReservation.step_id == step_id
+                )
+            )
+            worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run_id))
+            process_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(SupervisedProcess)
+                    .where(SupervisedProcess.run_id == run_id)
+                )
+                or 0
+            )
+            usage_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(UsageRecord)
+                    .where(UsageRecord.run_id == run_id)
+                )
+                or 0
+            )
+            health_count = int(
+                await session.scalar(select(func.count()).select_from(ProfileHealthObservation))
+                or 0
+            )
+            assert step is not None and step.status is StepStatus.FAILED
+            assert step.failure_category == "provider_request_invalid"
+            assert step.failure_summary == "ValueError"
+            assert run is not None and run.failure_category == "provider_request_invalid"
+            assert reservation is not None
+            assert reservation.status is BudgetReservationStatus.RELEASED
+            assert worktree is not None
+            assert worktree.delivery_state is WorktreeDeliveryState.WORKTREE_RETAINED
+            assert process_count == usage_count == health_count == 0
+        adapter.execute.assert_not_awaited()
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_pre_provider_unwind_is_idempotent_and_fenced(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        configured = profile("api")
+        settings, registries = bundle(tmp_path, configured)
+        task_id, run_id, step_id = await seed_provider_step(factory)
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="provider-worker",
+                lease_seconds=60,
+                candidate_limit=20,
+            )
+        assert token is not None
+        async with factory.begin() as session:
+            await start_step(session, token)
+        request = StepExecutionRequest(
+            task_id=task_id,
+            run_id=run_id,
+            step_id=step_id,
+            step_type="execute_model",
+            payload={"budget_reservation_id": "malformed", "provider_attempt": 1},
+            timeout_seconds=60,
+            lease=token,
+        )
+        handler = ProviderStepHandler(factory, registries, MagicMock())
+
+        await handler._unwind_pre_provider(request, reservation_id=None)
+        await handler._unwind_pre_provider(request, reservation_id=None)
+
+        mismatched = StepExecutionRequest(
+            task_id=request.task_id,
+            run_id=request.run_id,
+            step_id=request.step_id,
+            step_type=request.step_type,
+            payload=request.payload,
+            timeout_seconds=request.timeout_seconds,
+            lease=LeaseToken(
+                step=token.step,
+                owner=token.owner,
+                generation=token.generation + 1,
+            ),
+        )
+        with pytest.raises(LeaseLost):
+            await handler._unwind_pre_provider(mismatched, reservation_id=None)
+
+        async with factory() as session:
+            reservation = await session.scalar(
+                select(ProviderBudgetReservation).where(
+                    ProviderBudgetReservation.step_id == step_id
+                )
+            )
+            assert reservation is not None
+            assert reservation.status is BudgetReservationStatus.RELEASED
+            assert await session.scalar(select(func.count()).select_from(UsageRecord)) == 0
         await engine.dispose()
 
     asyncio.run(scenario())

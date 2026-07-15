@@ -143,13 +143,36 @@ def test_capsule_is_immutable_versioned_and_rejects_secrets() -> None:
 def test_worker_prompt_contains_exact_boundary_and_structured_result_requirement() -> None:
     prompt = render_worker_prompt(capsule("a" * 40), repository_id="vuzol")
     assert "Sandbox worktree: /workspace" in prompt
+    assert "/workspace is writable" in prompt
     assert "Exact base SHA: " + "a" * 40 in prompt
     assert "Vuzol has already prepared and verified" in prompt
-    assert "do not touch another VPS project" in prompt
-    assert "Do not invoke Git" in prompt
+    assert "shell-backed repository tools" in prompt
+    assert "read files, search repository contents" in prompt
+    assert "create and edit ordinary files" in prompt
+    assert "inspect the result of your edits without Git" in prompt
+    assert "Do not invoke Git, shell commands" not in prompt
+    assert "Do not touch another VPS project" in prompt
+    assert "Do not invoke any Git command" in prompt
+    assert "read or write .git" in prompt
+    assert "Do not run required gates or tests" in prompt
+    assert "install packages" in prompt
+    assert "synchronize dependencies" in prompt
+    assert "access the network" in prompt
+    assert "access paths outside /workspace" in prompt
     assert "Vuzol will inspect the real diff" in prompt
+    assert "run trusted gates, stage exact paths, create the commit" in prompt
+    assert "authoritative result manifest" in prompt
+    assert "actually inspect and edit those files" in prompt
+    assert "claimed_complete=true only after making the intended changes" in prompt
+    assert "claimed_complete=false only for a genuine inability" in prompt
+    assert "lack of permission to run Git or tests does not prevent" in prompt
     assert "step09a-worker-edit-report.v1" in prompt
     assert "Do not claim changed files" in prompt
+    assert "gate results, branch identity, or a result commit" in prompt
+    assert '"goal":"Add a pure validator."' in prompt
+    assert '"allowed_paths":["src/example.py","tests/test_example.py"]' in prompt
+    assert '"acceptance_criteria":["Reject malformed input"]' in prompt
+    assert '"forbidden_changes":["Do not relax tests"]' in prompt
     assert "/home/vodkolyan" not in prompt
 
 

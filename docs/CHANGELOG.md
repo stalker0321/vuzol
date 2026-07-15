@@ -9,6 +9,8 @@
 - Added explicit text/voice project intake, persisted bounded provisioning, initial Git repository
   and Telegram-topic creation, validated dynamic registry overlays, and fail-closed handling for an
   unknown non-idempotent topic-creation outcome.
+- Added the persistent production workflow-worker unit required to move interpreted intake into
+  dispatch and provisioning after host restarts.
 
 This file records completed implementation changes, not plans or speculative ideas.
 

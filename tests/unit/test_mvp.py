@@ -135,6 +135,23 @@ def test_mvp_check_inspects_protected_runtime_without_direct_traversal(
     ]
 
 
+def test_mvp_check_ignores_processes_that_exit_during_proc_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module("mvp_check_proc_race", ROOT / "deploy/mvp/check.py")
+    process = tmp_path / "123"
+    process.mkdir()
+    original_stat = Path.stat
+
+    def disappearing_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path == process:
+            raise FileNotFoundError(path)
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", disappearing_stat)
+    assert module._is_executor_dockerd(process, os.getuid()) is False
+
+
 def test_validation_clone_uses_the_verified_operator_checkout() -> None:
     content = (ROOT / "deploy/mvp/check.py").read_text()
     assert '"--no-hardlinks", str(ROOT), str(checkout)' in content

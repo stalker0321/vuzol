@@ -198,6 +198,25 @@ SELECT
         raise MvpCheckError("qualification reservation or worktree state is unresolved")
 
 
+def _proxy_runtime_is_empty() -> bool:
+    """Inspect the protected RuntimeDirectory without weakening its mode."""
+    output = _run(
+        (
+            "sudo",
+            "-n",
+            "find",
+            "/run/vuzol/proxy",
+            "-mindepth",
+            "1",
+            "-maxdepth",
+            "1",
+            "-print",
+            "-quit",
+        )
+    )
+    return not output
+
+
 def check(expected_sha: str) -> dict[str, object]:
     if _git(ROOT, "status", "--short"):
         raise MvpCheckError("public checkout is dirty")
@@ -227,8 +246,7 @@ def check(expected_sha: str) -> dict[str, object]:
     acl = _run(("sudo", "-n", "getfacl", "-R", "-cp", "/srv/vuzol/worktrees"))
     if f"user:{mapped_uid}:" in acl:
         raise MvpCheckError("stale sandbox ACL exists")
-    proxy_entries = tuple(Path("/run/vuzol/proxy").iterdir())
-    if proxy_entries:
+    if not _proxy_runtime_is_empty():
         raise MvpCheckError("stale proxy runtime entry exists")
     _durable_state()
     _validation_gates(validation_image)

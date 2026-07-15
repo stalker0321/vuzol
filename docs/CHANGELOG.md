@@ -18,8 +18,9 @@ This file records completed implementation changes, not plans or speculative ide
 - added fail-closed MVP readiness checks and canaries that verify the deployed revision, managed
   mirror, service health, rootless isolation, image identities, cleanup, and the full trusted gate
   set without silently weakening validation;
-- closed a sub-threshold coverage rounding escape by evaluating the configured 90% gate at six
-  decimal places and covering both Telegram dogfood/fallback composition branches;
+- closed a sub-threshold coverage rounding escape with a separate six-decimal raw coverage check,
+  without changing the validation image's attested dependency inputs, and covered both Telegram
+  dogfood/fallback composition branches;
 - added an explicit bounded `/sol` Telegram coding path that persists intake, fixes the production
   Codex profile, executes only within one to ten declared paths, retains verified result commits,
   projects usage and delivery state, and never merges or deploys automatically;

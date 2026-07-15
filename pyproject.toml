@@ -57,7 +57,7 @@ markers = [
 branch = true
 
 [tool.coverage.report]
-precision = 6
+precision = 2
 exclude_also = [
   "if TYPE_CHECKING:",
   "if __name__ == .__main__.:",

@@ -28,7 +28,6 @@ vuzol-telegram-delivery = "vuzol.cli.telegram_delivery:main"
 vuzol-interpreter = "vuzol.cli.interpreter:main"
 vuzol-executor = "vuzol.cli.executor:main"
 vuzol-experiment = "vuzol.cli.experiment:main"
-vuzol-agent-certify = "vuzol.cli.agent_certify:main"
 
 [dependency-groups]
 dev = [

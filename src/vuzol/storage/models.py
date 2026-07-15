@@ -34,6 +34,7 @@ from vuzol.storage.types import (
     IntakeStatus,
     ProcessOutcome,
     ProcessStatus,
+    ProjectProvisioningStatus,
     QueueClass,
     RetryClass,
     RiskLevel,
@@ -287,6 +288,29 @@ class TopicMapping(IdentityMixin, TimestampMixin, Base):
     accepts_new_tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     default_workflow: Mapped[str] = mapped_column(String(100), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class ProjectProvisioning(IdentityMixin, TimestampMixin, Base):
+    __tablename__ = "project_provisioning"
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    requested_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    project_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    repository_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    topic_thread_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
+    status: Mapped[ProjectProvisioningStatus] = mapped_column(
+        enum_type(ProjectProvisioningStatus, "project_provisioning_status"),
+        nullable=False,
+        default=ProjectProvisioningStatus.PENDING,
+    )
+    configuration_revision: Mapped[str | None] = mapped_column(String(64))
+    last_error_category: Mapped[str | None] = mapped_column(String(100))
 
 
 class ProviderProfile(IdentityMixin, TimestampMixin, Base):

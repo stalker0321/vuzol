@@ -6,6 +6,9 @@
   mappings at bot startup.
 - Routed retained-result decisions into a dedicated global approvals topic while preserving the
   project status projection and removing approval controls after a persisted decision.
+- Added explicit text/voice project intake, persisted bounded provisioning, initial Git repository
+  and Telegram-topic creation, validated dynamic registry overlays, and fail-closed handling for an
+  unknown non-idempotent topic-creation outcome.
 
 This file records completed implementation changes, not plans or speculative ideas.
 

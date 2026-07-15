@@ -60,6 +60,14 @@ The initial workspace uses these roles:
 - `История` (`changelog`) for the future append-only cross-project history;
 - one `<project>` (`project`) topic for each active project.
 
+`Новый проект` is an explicit provisioning boundary. An allowlisted text or voice message is
+transcribed and interpreted into a bounded project ID, display name, and description. It creates a
+persisted provisioning request rather than an ordinary model task. The project provisioner then
+creates an initial Git repository and one project topic, validates and atomically writes the dynamic
+registry overlay, reloads registry-caching services, and posts the project description into the new
+topic. It never creates a remote, pushes, deploys, installs dependencies, or executes user-supplied
+commands. An unknown Telegram topic-creation outcome blocks for reconciliation instead of retrying.
+
 An exact-result approval has its own message link in the global approvals topic. It does not replace
 the task status message in the project topic. After a decision, Vuzol edits the approval card to
 remove its buttons and show the persisted outcome, then separately refreshes the project card.

@@ -136,7 +136,7 @@ chat_id = -1003950752781
 message_thread_id = 3
 kind = "inbox"
 display_name = "Новый проект"
-accepts_new_tasks = false
+accepts_new_tasks = true
 default_workflow = "simple_model_task"
 enabled = true
 

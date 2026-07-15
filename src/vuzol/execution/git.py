@@ -34,6 +34,27 @@ class LocalGit:
         identity = hashlib.sha256(common.decode().strip().encode()).hexdigest()
         return identity, remote.decode().strip() if remote else None
 
+    async def initialize_repository(self, repository: Path, *, readme: str) -> str:
+        """Create or finish one contained repository with a deterministic initial commit."""
+
+        if repository.exists() and not repository.is_dir():  # noqa: ASYNC240
+            raise GitError("project repository path is not a directory")
+        repository.mkdir(parents=False, exist_ok=True)  # noqa: ASYNC240
+        if not (repository / ".git").is_dir():
+            if any(repository.iterdir()):  # noqa: ASYNC240
+                raise GitError("project repository path is not empty")
+            await self._run(repository, "init", "--initial-branch", "main")
+        existing = await self._optional(repository, "rev-parse", "HEAD")
+        if existing is not None:
+            await self.require_clean_source(repository)
+            return existing.decode().strip()
+        readme_path = repository / "README.md"
+        if readme_path.exists() and readme_path.read_text() != readme:
+            raise GitError("unfinished project README differs from the requested project")
+        readme_path.write_text(readme)
+        await self.stage_paths(repository, ("README.md",))
+        return await self.create_commit(repository, "chore: initialize project")
+
     async def resolve_commit(self, repository: Path, ref: str) -> str:
         value = await self._run(repository, "rev-parse", "--verify", f"{ref}^{{commit}}")
         commit = value.decode().strip()

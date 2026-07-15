@@ -1,5 +1,6 @@
 """TOML parsing and validated registry composition boundary."""
 
+import json
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -28,11 +29,25 @@ def load_document(path: Path) -> RegistryDocument:
     """Parse TOML into strict provider-neutral models."""
 
     try:
-        with path.open("rb") as config_file:
-            raw = tomllib.load(config_file)
+        if path.suffix == ".json":
+            raw = json.loads(path.read_text())
+        else:
+            with path.open("rb") as config_file:
+                raw = tomllib.load(config_file)
         return RegistryDocument.model_validate(raw)
-    except (OSError, tomllib.TOMLDecodeError, ValidationError) as error:
+    except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError, ValidationError) as error:
         raise ConfigurationLoadError(f"invalid registry file {path}: {error}") from error
+
+
+def merge_documents(base: RegistryDocument, overlay: RegistryDocument) -> RegistryDocument:
+    """Merge an append-only dynamic project/topic overlay into static configuration."""
+
+    return RegistryDocument(
+        projects=(*base.projects, *overlay.projects),
+        profiles=(*base.profiles, *overlay.profiles),
+        topics=(*base.topics, *overlay.topics),
+        sandboxes=(*base.sandboxes, *overlay.sandboxes),
+    )
 
 
 def _secret_access_policy(

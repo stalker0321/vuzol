@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram import Update
+from telegram.error import BadRequest, TimedOut
 
 from vuzol.config import Settings
 from vuzol.telegram.adapter import (
@@ -16,6 +17,7 @@ from vuzol.telegram.adapter import (
     resolve_bot_token,
 )
 from vuzol.telegram.domain import ControlUpdate, MessageUpdate
+from vuzol.telegram.workspace import TopicCreationOutcomeUnknown, TopicSynchronizationError
 
 
 def test_bot_token_is_resolved_only_from_telegram_scope(tmp_path: Path) -> None:
@@ -82,6 +84,36 @@ def test_python_telegram_client_delegates_send_and_edit() -> None:
             f"v1:pause:{task_id}",
             f"v1:cancel:{task_id}",
         ]
+
+    asyncio.run(scenario())
+
+
+def test_python_telegram_client_creates_topic_and_fails_closed_on_unknown_outcome() -> None:
+    async def scenario() -> None:
+        bot = AsyncMock()
+        bot.create_forum_topic.return_value = SimpleNamespace(message_thread_id=41)
+        client = PythonTelegramClient(bot)
+        assert await client.create_topic(chat_id=-100, name="Notes") == 41
+        bot.create_forum_topic.side_effect = TimedOut("unknown")
+        with pytest.raises(TopicCreationOutcomeUnknown):
+            await client.create_topic(chat_id=-100, name="Notes")
+
+    asyncio.run(scenario())
+
+
+def test_python_telegram_client_renames_topic_idempotently_and_categorizes_errors() -> None:
+    async def scenario() -> None:
+        bot = AsyncMock()
+        client = PythonTelegramClient(bot)
+        await client.rename_topic(chat_id=-100, thread_id=41, name="Notes")
+        bot.edit_forum_topic.side_effect = BadRequest("Topic_not_modified")
+        await client.rename_topic(chat_id=-100, thread_id=41, name="Notes")
+        bot.edit_forum_topic.side_effect = BadRequest("topic closed")
+        with pytest.raises(TopicSynchronizationError):
+            await client.rename_topic(chat_id=-100, thread_id=41, name="Notes")
+        bot.edit_forum_topic.side_effect = TimedOut("network")
+        with pytest.raises(TopicSynchronizationError):
+            await client.rename_topic(chat_id=-100, thread_id=41, name="Notes")
 
     asyncio.run(scenario())
 

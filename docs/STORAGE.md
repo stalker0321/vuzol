@@ -25,7 +25,7 @@ The committed credentials are local-development defaults only. Production suppli
 
 ## Schema
 
-The initial foundation and subsequent migrations currently expose 21 application tables:
+The initial foundation and subsequent migrations currently expose 22 application tables:
 
 - canonical workflow: `tasks`, `runs`, `steps`, `events`;
 - delivery: `external_inbox`, `transactional_outbox`, `topic_mappings`, `telegram_message_links`;
@@ -34,6 +34,7 @@ The initial foundation and subsequent migrations currently expose 21 application
   `validation_results`, `routing_decisions`, `profile_health_observations`,
   `configuration_revisions`, `provider_profiles`;
 - execution resources: `worktrees`, `supervised_processes`.
+- project lifecycle: `project_provisioning`.
 
 Stable searchable concepts are columns; provider-neutral envelopes use JSONB. All timestamps are timezone-aware. Telegram IDs use signed `BIGINT`. All 27 foreign keys use `RESTRICT`; deleting a Telegram projection cannot cascade into canonical state.
 
@@ -50,6 +51,7 @@ Atomic operations include:
 - step and outbox lease claim/completion.
 - provider route decision, hard-budget reservation, profile assignment, and fenced step claim;
 - idempotent usage reconciliation bound to the current fencing generation.
+- project identity reservation plus a fenced provisioning outbox request.
 
 Step and outbox claims use `FOR UPDATE SKIP LOCKED`, PostgreSQL `now()`, and monotonically increasing fencing generations. Heartbeat or completion with a stale owner/generation affects zero rows and raises `LeaseLost`.
 

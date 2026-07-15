@@ -1,0 +1,35 @@
+[Unit]
+Description=Vuzol bounded project provisioning worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/vuzol/project-provisioner.env
+ExecStart=/opt/vuzol/.venv/bin/vuzol-project-provisioner
+StateDirectory=vuzol/registry
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/srv/vuzol/repositories /var/lib/vuzol/registry
+ReadOnlyPaths=/etc/vuzol
+
+[Install]
+WantedBy=multi-user.target

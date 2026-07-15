@@ -19,7 +19,9 @@ Telegram text or voice message
 → validated, provider-neutral TaskDraft
 → versioned persisted workflow and explicit steps
 → deterministic capability/health/budget-aware provider routing
-→ atomic budget reservation and fenced model-only execution
+→ atomic budget reservation and fenced execution
+→ for explicit bounded coding tasks: isolated worktree and Codex sandbox
+→ measured diff, trusted validation, retained result commit, and Telegram status
 → restart recovery
 ```
 
@@ -27,10 +29,16 @@ Ingress, Telegram delivery, interpretation, and workflow management run as separ
 Their inbox/outbox, step, event, and fenced lease records make completed delivery, transcription,
 interpretation, controls, and workflow progress safe across process restarts.
 
-The current MVP foundation can route and execute safe model-only OpenAI-compatible workflow steps.
-It does **not** yet execute repository edits or tools. Codex process execution, Git worktrees,
-sandbox execution, automated validation, approvals, and deployment are not implemented or
-advertised as available behavior.
+The current MVP can route and execute safe model-only OpenAI-compatible workflow steps. It also
+supports one deliberately narrow production coding path: an allowlisted user may submit an
+explicit `/sol` command with a closed file scope in a configured project topic. Vuzol executes
+Codex in an isolated rootless sandbox and standalone Git worktree, measures the resulting diff,
+runs the configured trusted gates in a separate pinned validation image, retains the verified
+result commit, and reports durable status through Telegram.
+
+This coding path does not merge, push, deploy, perform privileged host actions, or grant broad
+repository scope. General natural-language coding intake, automatic trust promotion, independent
+review policy, and approval-gated application or deployment remain outside the supported boundary.
 
 ## Requirements and setup
 

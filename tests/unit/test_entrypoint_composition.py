@@ -123,10 +123,15 @@ def test_worker_main_composes_runtime_and_handles_stop(
     assert any(record.__dict__.get("signal") == signal.SIGTERM for record in caplog.records)
 
 
-def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
+@pytest.mark.anyio
+async def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     settings = Settings(environment="test")
     application = MagicMock()
     callbacks: dict[str, object] = {}
+    ingress = MagicMock()
+    ingress.accept_message = AsyncMock()
+    dogfood = MagicMock()
+    dogfood.accept_message = AsyncMock(return_value=None)
     monkeypatch.setattr(
         telegram_cli,
         "get_runtime_configuration",
@@ -136,7 +141,8 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(telegram_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(telegram_cli, "create_engine", lambda *_args: object())
     monkeypatch.setattr(telegram_cli, "create_session_factory", lambda _engine: object())
-    monkeypatch.setattr(telegram_cli, "TelegramIngressService", MagicMock())
+    monkeypatch.setattr(telegram_cli, "TelegramIngressService", lambda *_args: ingress)
+    monkeypatch.setattr(telegram_cli, "TelegramDogfoodIngressService", lambda *_args: dogfood)
     monkeypatch.setattr(telegram_cli, "TelegramControlService", MagicMock())
     monkeypatch.setattr(telegram_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
 
@@ -148,6 +154,18 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     telegram_cli.main()
     application.run_polling.assert_called_once()
     assert callbacks["bot_id"] == "main"
+    on_message = callbacks["on_message"]
+    assert callable(on_message)
+    update = MagicMock()
+    await on_message(update)
+    dogfood.accept_message.assert_awaited_once_with(update)
+    ingress.accept_message.assert_awaited_once_with(update)
+
+    dogfood.accept_message.reset_mock(return_value=True)
+    dogfood.accept_message.return_value = object()
+    ingress.accept_message.reset_mock()
+    await on_message(update)
+    ingress.accept_message.assert_not_awaited()
 
 
 @pytest.mark.anyio

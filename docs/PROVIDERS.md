@@ -64,6 +64,16 @@ provider response bodies and exceptions do not enter task state, events, Telegra
 The worker can execute safe, model-only OpenAI-compatible steps such as simple answers, planning,
 research synthesis, and summarization. Automatic workflow start remains disabled by default.
 
-The Codex CLI contract and account-isolation validation exist, but no production Codex process
-transport is registered. Repository editing, tools, worktrees, and real Codex execution remain
-blocked until the Step 08 sandbox and supervised-process boundary are implemented.
+The dedicated executor also registers isolated Codex and Grok CLI transports behind the Step 08
+worktree, supervised-process, rootless-sandbox, and controlled-egress boundary. Provider state,
+worktrees, containers, proxies, credentials, and concurrency are separated by profile and task.
+Provider output is typed and untrusted; the host-side finalizer independently measures scope and
+Git facts, runs trusted gates in a separate pinned validation image, and creates a result commit
+only after verification succeeds.
+
+Production user intake exposes only the explicit bounded `/sol` Telegram path documented in
+`TELEGRAM.md`. It fixes the profile to `codex-subscription-prod`, accepts one to ten contained
+repository-relative paths, permits no model repair, and retains rather than integrates the result.
+Grok execution and multi-worker modes remain experimental evidence, not an automatically trusted
+production route. Merge, push, deployment, privileged execution, and automatic trust promotion
+remain unavailable.

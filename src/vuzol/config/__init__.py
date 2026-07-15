@@ -1,6 +1,6 @@
 """Typed configuration, registry, and secret-resolution boundary."""
 
-from vuzol.config.loader import ConfigurationLoadError, build_bundle, load_document
+from vuzol.config.loader import ConfigurationLoadError, build_bundle, load_document, merge_documents
 from vuzol.config.models import (
     AgentEditMechanism,
     AgentRuntimeContract,
@@ -95,4 +95,5 @@ __all__ = [
     "get_runtime_configuration",
     "get_settings",
     "load_document",
+    "merge_documents",
 ]

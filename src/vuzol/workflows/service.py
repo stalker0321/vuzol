@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.errors import EntityNotFound, LeaseLost
 from vuzol.storage.models import (
+    Approval,
     Event,
     Run,
     Step,
@@ -18,7 +19,7 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.records import LeaseToken
-from vuzol.storage.types import RunStatus, StepStatus, TaskStatus
+from vuzol.storage.types import ApprovalStatus, RunStatus, StepStatus, TaskStatus
 from vuzol.workflows.domain import MaterializedWorkflow, OutcomeKind, StepOutcome
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
@@ -161,6 +162,15 @@ async def activate_ready_steps(session: AsyncSession, run: Run) -> tuple[Step, .
             continue
         target = StepStatus.WAITING_APPROVAL if step.step_type == "approval" else StepStatus.QUEUED
         await transition_step(session, step, target, actor_type="workflow_manager")
+        if target is StepStatus.WAITING_APPROVAL:
+            from vuzol.workflows.result_approval import ensure_result_approval
+
+            await ensure_result_approval(
+                session,
+                run=run,
+                approval_step=step,
+                steps_by_ordinal=by_ordinal,
+            )
         activated.append(step)
     return tuple(activated)
 
@@ -225,7 +235,13 @@ async def commit_step_outcome(
         await _enqueue_telegram_projection(session, task, run)
 
 
-async def _enqueue_telegram_projection(session: AsyncSession, task: Task, run: Run) -> None:
+async def _enqueue_telegram_projection(
+    session: AsyncSession,
+    task: Task,
+    run: Run,
+    *,
+    role: str | None = None,
+) -> None:
     if not task.source_chat_id or task.source_thread_id is None:
         return
     intake = await session.scalar(
@@ -236,17 +252,28 @@ async def _enqueue_telegram_projection(session: AsyncSession, task: Task, run: R
     )
     if intake is None:
         return
+    if role is None:
+        pending_approval = await session.scalar(
+            select(Approval.id)
+            .join(Step, Approval.step_id == Step.id)
+            .where(
+                Step.run_id == run.id,
+                Approval.status == ApprovalStatus.PENDING,
+            )
+            .limit(1)
+        )
+        role = "approval_card" if pending_approval is not None else "intake_ack"
     session.add(
         TransactionalOutbox(
             destination="telegram",
             operation_type="send_message",
             linked_entity_type="telegram_intake",
             linked_entity_id=intake.id,
-            idempotency_key=f"telegram:task:{task.id}:revision:{task.version}",
+            idempotency_key=f"telegram:{role}:task:{task.id}:revision:{task.version}",
             payload={
                 "chat_id": task.source_chat_id,
                 "message_thread_id": task.source_thread_id,
-                "role": "intake_ack",
+                "role": role,
                 "task_id": str(task.id),
                 "run_id": str(run.id),
             },

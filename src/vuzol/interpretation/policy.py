@@ -2,8 +2,14 @@
 
 from dataclasses import dataclass
 
-from vuzol.config import Capability
-from vuzol.interpretation.domain import InterpretationInput, TaskAction, TaskDraft
+from vuzol.config import Capability, TopicKind
+from vuzol.interpretation.domain import (
+    InterpretationInput,
+    TaskAction,
+    TaskDraft,
+    TaskOperation,
+    TaskType,
+)
 from vuzol.storage.types import RiskLevel
 
 _RISK_ORDER = {
@@ -30,6 +36,30 @@ def enforce_interpretation_policy(
     reasons: list[str] = []
     updates: dict[str, object] = {}
     risk = draft.suggested_risk
+    if request.topic_kind is TopicKind.INBOX:
+        updates.update(
+            action=TaskAction.CREATE_PROJECT,
+            task_type=TaskType.INFRASTRUCTURE,
+            operation=TaskOperation.CREATE,
+            project_id=None,
+            required_capabilities=frozenset(
+                {Capability.FILESYSTEM_WRITE, Capability.GIT, Capability.TELEGRAM_SEND}
+            ),
+        )
+        if draft.new_project_id is None or draft.new_project_name is None:
+            updates.update(
+                needs_clarification=True,
+                clarification_question="What short name should this new project use?",
+            )
+            reasons.append("project_identity_missing")
+        elif draft.new_project_id in known_project_ids:
+            updates.update(
+                needs_clarification=True,
+                clarification_question=(
+                    "A project with that short name already exists. Choose another."
+                ),
+            )
+            reasons.append("project_identity_conflict")
     if draft.project_id is not None and draft.project_id not in known_project_ids:
         updates.update(
             project_id=None,

@@ -767,6 +767,7 @@ def test_step09a_execute_code_receives_non_authoritative_edit_report_schema() ->
         "experiment_id",
         "task_id",
         "claimed_complete",
+        "implementation_summary",
     }
     properties = schema["properties"]
     assert isinstance(properties, dict)

@@ -162,6 +162,17 @@ class ControlActionStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class ProjectProvisioningStatus(StrEnum):
+    PENDING = "pending"
+    REPOSITORY_CREATED = "repository_created"
+    TOPIC_CREATING = "topic_creating"
+    TOPIC_CREATED = "topic_created"
+    CONFIGURED = "configured"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
 def enum_type(enum: type[StrEnum], name: str, *, length: int | None = None) -> SqlEnum:
     if length is not None:
         return SqlEnum(

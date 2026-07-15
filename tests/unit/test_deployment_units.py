@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 USER_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/user/vuzol-rootless-docker.service"
 LEGACY_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/vuzol-rootless-docker.service"
 EXECUTOR_UNIT = REPO_ROOT / "deploy/systemd/vuzol-executor.service"
+APPLIER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-applier.service"
 TELEGRAM_UNITS = (
     REPO_ROOT / "deploy/systemd/vuzol-telegram.service",
     REPO_ROOT / "deploy/systemd/vuzol-telegram-delivery.service",
@@ -211,3 +212,14 @@ def test_telegram_units_use_dedicated_unprivileged_identity() -> None:
         assert "ProtectHome=true" in text
         assert "docker.sock" not in text
         assert "/var/lib/vuzol-provider-state" not in text
+
+
+def test_applier_has_only_the_managed_repository_write_boundary() -> None:
+    text = _read(APPLIER_UNIT)
+    assert "ExecStart=/opt/vuzol/.venv/bin/vuzol-applier" in text
+    assert "ReadWritePaths=/srv/vuzol/repositories" in text
+    assert "ReadOnlyPaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /etc/vuzol" in text
+    assert "/var/lib/vuzol-provider-state" not in text
+    assert "docker.sock" not in text
+    assert "NoNewPrivileges=true" in text
+    assert "ProtectSystem=strict" in text

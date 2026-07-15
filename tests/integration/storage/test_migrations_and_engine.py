@@ -42,6 +42,7 @@ def test_initial_migration_contains_complete_foundation(postgres_dsn: str) -> No
         "telegram_message_links",
         "worktrees",
         "supervised_processes",
+        "project_provisioning",
     }.issubset(tables)
 
 

@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import SecretStr
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -17,9 +18,11 @@ from telegram.ext import (
 
 from vuzol.config import ScopedSecretResolver, Settings
 from vuzol.telegram.domain import AttachmentKind, ControlUpdate, MessageUpdate, TelegramAttachment
+from vuzol.telegram.workspace import TopicCreationOutcomeUnknown, TopicSynchronizationError
 
 MessageHandlerFn = Callable[[MessageUpdate], Awaitable[None]]
 ControlHandlerFn = Callable[[ControlUpdate], Awaitable[None]]
+StartupHandlerFn = Callable[[Bot], Awaitable[None]]
 
 
 def resolve_bot_token(
@@ -48,13 +51,14 @@ class PythonTelegramClient:
         html: str,
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
+        approval_id: uuid.UUID | None = None,
     ) -> int:
         message = await self._bot.send_message(
             chat_id=chat_id,
             message_thread_id=thread_id,
             text=html,
             parse_mode=ParseMode.HTML,
-            reply_markup=_control_markup(buttons, task_id),
+            reply_markup=_control_markup(buttons, task_id=task_id, approval_id=approval_id),
         )
         return message.message_id
 
@@ -66,19 +70,40 @@ class PythonTelegramClient:
         html: str,
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
+        approval_id: uuid.UUID | None = None,
     ) -> None:
         await self._bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=html,
             parse_mode=ParseMode.HTML,
-            reply_markup=_control_markup(buttons, task_id),
+            reply_markup=_control_markup(buttons, task_id=task_id, approval_id=approval_id),
         )
 
     async def download(self, file_id: str) -> bytes:
         telegram_file = await self._bot.get_file(file_id)
         content = await telegram_file.download_as_bytearray()
         return bytes(content)
+
+    async def rename_topic(self, *, chat_id: int, thread_id: int, name: str) -> None:
+        try:
+            await self._bot.edit_forum_topic(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                name=name,
+            )
+        except BadRequest as error:
+            if "topic not modified" not in str(error).lower().replace("_", " "):
+                raise TopicSynchronizationError(type(error).__name__) from error
+        except TelegramError as error:
+            raise TopicSynchronizationError(type(error).__name__) from error
+
+    async def create_topic(self, *, chat_id: int, name: str) -> int:
+        try:
+            topic = await self._bot.create_forum_topic(chat_id=chat_id, name=name)
+        except TelegramError as error:
+            raise TopicCreationOutcomeUnknown(type(error).__name__) from error
+        return topic.message_thread_id
 
 
 def message_update(update: Update, bot_id: str) -> MessageUpdate | None:
@@ -132,7 +157,16 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
     if query is None or user is None or query.message is None or query.data is None:
         return None
     parts = query.data.split(":", maxsplit=2)
-    allowed_actions = {"approve", "reject", "start", "pause", "resume", "cancel", "retry"}
+    allowed_actions = {
+        "approve",
+        "redo",
+        "reject",
+        "start",
+        "pause",
+        "resume",
+        "cancel",
+        "retry",
+    }
     if len(parts) != 3 or parts[0] != "v1" or parts[1] not in allowed_actions:
         return None
     try:
@@ -140,7 +174,9 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
     except ValueError:
         return None
     targets = (
-        {"approval_id": target_id} if parts[1] in {"approve", "reject"} else {"task_id": target_id}
+        {"approval_id": target_id}
+        if parts[1] in {"approve", "redo", "reject"}
+        else {"task_id": target_id}
     )
     return ControlUpdate(
         bot_id=bot_id,
@@ -154,19 +190,29 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
 
 
 def _control_markup(
-    actions: tuple[str, ...], task_id: uuid.UUID | None
+    actions: tuple[str, ...],
+    *,
+    task_id: uuid.UUID | None,
+    approval_id: uuid.UUID | None,
 ) -> InlineKeyboardMarkup | None:
-    if not actions or task_id is None:
+    if not actions:
         return None
     labels = {
         "start": "Start",
         "pause": "Pause",
         "resume": "Resume",
         "cancel": "Cancel",
+        "approve": "Approve",
+        "redo": "Redo",
+        "reject": "Reject",
     }
+    approval_actions = {"approve", "redo", "reject"}
+    targets = {action: approval_id if action in approval_actions else task_id for action in actions}
+    if any(target is None for target in targets.values()):
+        return None
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(labels[action], callback_data=f"v1:{action}:{task_id}")]
+            [InlineKeyboardButton(labels[action], callback_data=f"v1:{action}:{targets[action]}")]
             for action in actions
         ]
     )
@@ -178,8 +224,18 @@ def build_long_polling_application(
     bot_id: str,
     on_message: MessageHandlerFn,
     on_control: ControlHandlerFn,
+    on_startup: StartupHandlerFn | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
-    application = ApplicationBuilder().token(token).build()
+    builder = ApplicationBuilder().token(token)
+
+    if on_startup is not None:
+
+        async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
+            await on_startup(application.bot)
+
+        builder = builder.post_init(post_init)
+
+    application = builder.build()
 
     async def handle_message(update: Update, _context: object) -> None:
         converted = message_update(update, bot_id)

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import signal
 from collections.abc import Callable
@@ -10,6 +11,8 @@ from pydantic import SecretStr
 from pytest import LogCaptureFixture, MonkeyPatch
 
 from vuzol.cli import app as app_cli
+from vuzol.cli import applier as applier_cli
+from vuzol.cli import project_provisioner as provisioner_cli
 from vuzol.cli import telegram as telegram_cli
 from vuzol.cli import telegram_delivery as delivery_cli
 from vuzol.cli import worker as worker_cli
@@ -43,6 +46,74 @@ def test_app_main_composes_server(monkeypatch: MonkeyPatch) -> None:
     assert calls["host"] == "127.0.0.2"
     assert calls["port"] == 9001
     assert calls["log_config"] is None
+
+
+@pytest.mark.anyio
+async def test_project_provisioner_composes_and_disposes(monkeypatch: MonkeyPatch) -> None:
+    settings = Settings(environment="test")
+    runtime = runtime_configuration(settings)
+    calls: dict[str, object] = {}
+    handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
+
+    class Engine:
+        async def dispose(self) -> None:
+            calls["disposed"] = True
+
+    class BotContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    bot_context = BotContext()
+
+    def bot_factory(token: str) -> BotContext:
+        calls["token"] = token
+        return bot_context
+
+    service = object()
+    monkeypatch.setattr(provisioner_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
+    monkeypatch.setattr(provisioner_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
+    monkeypatch.setattr(provisioner_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(provisioner_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(provisioner_cli, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr(provisioner_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
+    monkeypatch.setattr(provisioner_cli, "Bot", bot_factory)
+    monkeypatch.setattr(provisioner_cli, "PythonTelegramClient", lambda bot: ("client", bot))
+    monkeypatch.setattr(provisioner_cli, "FixedSystemdReloader", lambda: "reloader")
+    monkeypatch.setattr(
+        provisioner_cli,
+        "ProjectProvisioningService",
+        lambda *_args, **kwargs: calls.update(service_kwargs=kwargs) or service,
+    )
+    monkeypatch.setattr(
+        signal, "signal", lambda signum, handler: handlers.update({signum: handler})
+    )
+
+    async def run_loop(actual: object, **kwargs: object) -> None:
+        calls["service"] = actual
+        calls.update(kwargs)
+        handler = handlers[signal.SIGTERM]
+        handler(signal.SIGTERM, None)
+
+    monkeypatch.setattr(provisioner_cli, "run_provisioning_loop", run_loop)
+
+    await provisioner_cli.run()
+
+    assert calls["service"] is service
+    service_kwargs = calls["service_kwargs"]
+    assert isinstance(service_kwargs, dict)
+    assert service_kwargs.keys() == {"owner", "reloader"}
+    assert service_kwargs["reloader"] == "reloader"
+    assert isinstance(service_kwargs["owner"], str)
+    assert ":" in service_kwargs["owner"]
+    assert calls["poll_interval_seconds"] == settings.worker_poll_interval_seconds
+    stop_event = calls["stop_event"]
+    assert isinstance(stop_event, asyncio.Event)
+    assert stop_event.is_set()
+    assert calls["disposed"] is True
+    assert calls["level"] == "INFO"
 
 
 def test_worker_main_composes_runtime_and_handles_stop(
@@ -121,6 +192,67 @@ def test_worker_main_composes_runtime_and_handles_stop(
     assert calls["recovery_batch_size"] == 100
     assert calls["disposed"] is True
     assert any(record.__dict__.get("signal") == signal.SIGTERM for record in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_applier_composes_narrow_control_and_privileged_worker(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    settings = Settings(environment="test")
+    runtime = runtime_configuration(settings)
+    calls: dict[str, object] = {}
+
+    class Engine:
+        async def dispose(self) -> None:
+            calls["disposed"] = True
+
+    class Stop:
+        checks = 0
+
+        def is_set(self) -> bool:
+            self.checks += 1
+            return self.checks > 1
+
+        def set(self) -> None:
+            self.checks = 2
+
+        async def wait(self) -> None:
+            return None
+
+    controls = MagicMock()
+    controls.process_one = AsyncMock(return_value=False)
+    worker = MagicMock()
+    worker.process_one = AsyncMock(return_value=False)
+    monkeypatch.setattr(applier_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
+    monkeypatch.setattr(applier_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
+    monkeypatch.setattr(applier_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(applier_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(applier_cli, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr(applier_cli, "WorkflowControlConsumer", lambda *_args, **_kwargs: controls)
+    monkeypatch.setattr(applier_cli, "ResultApplyHandler", MagicMock())
+    monkeypatch.setattr(applier_cli, "WorkflowWorker", lambda *_args, **_kwargs: worker)
+    monkeypatch.setattr("vuzol.cli.applier.asyncio.Event", Stop)
+
+    await applier_cli.run()
+
+    assert calls["service"] == "vuzol-applier"
+    assert calls["disposed"] is True
+    controls.process_one.assert_awaited_once()
+    worker.process_one.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_applier_chain_prioritizes_controls() -> None:
+    controls = MagicMock()
+    controls.process_one = AsyncMock(return_value=True)
+    worker = MagicMock()
+    worker.process_one = AsyncMock(return_value=True)
+    chain = applier_cli.ApplierChain(controls, worker)
+    assert await chain.process_one()
+    worker.process_one.assert_not_awaited()
+    controls.process_one.return_value = False
+    assert await chain.process_one()
+    worker.process_one.assert_awaited_once()
 
 
 @pytest.mark.anyio

@@ -46,7 +46,7 @@ def request(*, voice: bool = False, uncertain: bool = False) -> InterpretationIn
     return InterpretationInput(
         original_input="inspect the service",
         transcript="inspect the service" if voice else None,
-        topic_kind=TopicKind.INBOX,
+        topic_kind=TopicKind.PERSONAL,
         capability_vocabulary=frozenset(Capability),
         source_is_voice=voice,
         transcription_uncertain=uncertain,
@@ -83,6 +83,54 @@ def test_task_draft_requires_consistent_clarification_and_continuation() -> None
         draft(needs_clarification=True)
     with pytest.raises(ValidationError, match="referenced task"):
         draft(action=TaskAction.CONTINUE_TASK)
+    with pytest.raises(ValidationError, match="new project fields"):
+        draft(new_project_id="notes", new_project_name="Notes")
+
+
+def test_inbox_is_explicit_project_provisioning_boundary() -> None:
+    inbox = request().model_copy(update={"topic_kind": TopicKind.INBOX})
+    value = draft(
+        action=TaskAction.CREATE_PROJECT,
+        new_project_id="notes",
+        new_project_name="Notes",
+    )
+    policy = enforce_interpretation_policy(
+        inbox,
+        value,
+        known_project_ids=frozenset({"vuzol"}),
+    )
+    assert policy.draft.action is TaskAction.CREATE_PROJECT
+    assert policy.draft.project_id is None
+    assert policy.draft.new_project_id == "notes"
+    assert policy.draft.required_capabilities == frozenset(
+        {Capability.FILESYSTEM_WRITE, Capability.GIT, Capability.TELEGRAM_SEND}
+    )
+    assert not policy.draft.needs_clarification
+    assert policy.automatic_execution_eligible
+
+
+def test_inbox_requires_new_identity_and_rejects_configured_project_collision() -> None:
+    inbox = request().model_copy(update={"topic_kind": TopicKind.INBOX})
+    missing = enforce_interpretation_policy(
+        inbox,
+        draft(),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+    assert missing.draft.action is TaskAction.CREATE_PROJECT
+    assert missing.draft.needs_clarification
+    assert "project_identity_missing" in missing.reasons
+
+    collision = enforce_interpretation_policy(
+        inbox,
+        draft(
+            action=TaskAction.CREATE_PROJECT,
+            new_project_id="vuzol",
+            new_project_name="Another Vuzol",
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+    assert collision.draft.needs_clarification
+    assert "project_identity_conflict" in collision.reasons
 
 
 def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:

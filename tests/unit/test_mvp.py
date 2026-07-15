@@ -135,3 +135,5 @@ def test_validation_clone_uses_the_verified_operator_checkout() -> None:
     content = (ROOT / "deploy/mvp/check.py").read_text()
     assert '"--no-hardlinks", str(ROOT), str(checkout)' in content
     assert '"--no-hardlinks", str(DEPLOYED), str(checkout)' not in content
+    assert 'f"u:{mapped_uid}:x", str(temporary_root)' in content
+    assert '"-x", f"u:{mapped_uid}", str(temporary_root)' in content

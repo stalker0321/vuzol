@@ -132,8 +132,10 @@ def _require_codex_profile(document: dict[str, object]) -> None:
 def _validation_gates(image: str) -> None:
     mapped_uid = _mapped_identity(10001)
     with tempfile.TemporaryDirectory(prefix="vuzol-mvp-check-") as temporary:
-        checkout = Path(temporary) / "repository"
+        temporary_root = Path(temporary)
+        checkout = temporary_root / "repository"
         _run(("git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(checkout)))
+        _run(("sudo", "-n", "setfacl", "-m", f"u:{mapped_uid}:x", str(temporary_root)))
         _run(("sudo", "-n", "setfacl", "-R", "-m", f"u:{mapped_uid}:rwX", str(checkout)))
         _run(("sudo", "-n", "setfacl", "-R", "-m", f"d:u:{mapped_uid}:rwX", str(checkout)))
         try:
@@ -165,6 +167,7 @@ def _validation_gates(image: str) -> None:
         finally:
             _run(("sudo", "-n", "setfacl", "-R", "-x", f"u:{mapped_uid}", str(checkout)))
             _run(("sudo", "-n", "setfacl", "-R", "-k", str(checkout)))
+            _run(("sudo", "-n", "setfacl", "-x", f"u:{mapped_uid}", str(temporary_root)))
 
 
 def _durable_state() -> None:

@@ -11,7 +11,13 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.cli.experiment import _inspect, _serialize_artifact, _serialize_process, _write_csv
+from vuzol.cli.experiment import (
+    _inspect,
+    _parse_args,
+    _serialize_artifact,
+    _serialize_process,
+    _write_csv,
+)
 from vuzol.experiments.domain import (
     BoundedLevel,
     BoundedRepairContext,
@@ -890,6 +896,78 @@ def test_process_duration_requires_safe_non_negative_integer(
     )
 
     assert _serialize_process(process)["duration_ms"] == expected
+
+
+def test_inspect_latest_flag_is_optional() -> None:
+    default = _parse_args(["inspect", "experiment"])
+    latest = _parse_args(["inspect", "experiment", "--latest"])
+
+    assert default.command == "inspect"
+    assert default.experiment_id == "experiment"
+    assert default.latest is False
+    assert latest.latest is True
+
+
+@pytest.mark.anyio
+async def test_inspect_latest_selects_newest_with_deterministic_uuid_tie() -> None:
+    experiment_id = "step09a-inspect-latest"
+    created = datetime(2026, 7, 15, 12, tzinfo=UTC)
+    older = _mock_row(
+        id=uuid.UUID(int=40),
+        task_id=uuid.UUID(int=140),
+        workflow_type="adaptive_worker_trial",
+        created_at=datetime(2026, 7, 15, 11, tzinfo=UTC),
+        status=RunStatus.COMPLETED,
+        selected_route={"experiment_id": experiment_id, "experiment_task_id": "older"},
+    )
+    tied_lower = _mock_row(
+        id=uuid.UUID(int=41),
+        task_id=uuid.UUID(int=141),
+        workflow_type="adaptive_worker_trial",
+        created_at=created,
+        status=RunStatus.COMPLETED,
+        selected_route={"experiment_id": experiment_id, "experiment_task_id": "lower"},
+    )
+    tied_higher = _mock_row(
+        id=uuid.UUID(int=42),
+        task_id=uuid.UUID(int=142),
+        workflow_type="adaptive_worker_trial",
+        created_at=created,
+        status=RunStatus.FAILED,
+        selected_route={"experiment_id": experiment_id, "experiment_task_id": "higher"},
+    )
+    foreign = _mock_row(
+        id=uuid.UUID(int=99),
+        task_id=uuid.UUID(int=199),
+        workflow_type="adaptive_worker_trial",
+        created_at=datetime(2026, 7, 15, 13, tzinfo=UTC),
+        status=RunStatus.COMPLETED,
+        selected_route={"experiment_id": "another-experiment"},
+    )
+    runs: list[object] = [older, tied_lower, tied_higher, foreign]
+
+    def factory_for(selected_runs: list[object]) -> MagicMock:
+        session = AsyncMock(spec=AsyncSession)
+        session.scalars.side_effect = [
+            _scalar_result(selected_runs),
+            *(_scalar_result([]) for _ in range(4 * len(selected_runs))),
+        ]
+        session.scalar.return_value = None
+        context = AsyncMock()
+        context.__aenter__.return_value = session
+        context.__aexit__.return_value = False
+        factory = MagicMock(spec=async_sessionmaker)
+        factory.return_value = context
+        return factory
+
+    default = await _inspect(factory_for(runs), experiment_id)
+    latest = await _inspect(factory_for(runs), experiment_id, latest=True)
+    missing = await _inspect(factory_for([]), "missing", latest=True)
+
+    assert [run["task_id"] for run in default["runs"]] == ["older", "lower", "higher"]
+    assert [run["task_id"] for run in latest["runs"]] == ["higher"]
+    assert latest["runs"][0]["run_uuid"] == str(tied_higher.id)
+    assert missing == {"experiment_id": "missing", "runs": []}
 
 
 @pytest.mark.anyio

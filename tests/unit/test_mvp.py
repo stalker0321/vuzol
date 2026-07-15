@@ -24,10 +24,10 @@ def _module(name: str, path: Path) -> ModuleType:
 
 
 def test_coverage_precision_rejects_unrounded_below_threshold() -> None:
-    assert should_fail_under(89.91, 90.0, 2)
-    assert not should_fail_under(90.00, 90.0, 2)
+    assert should_fail_under(89.998225, 90.0, 6)
+    assert not should_fail_under(90.0, 90.0, 6)
     configuration = (ROOT / "pyproject.toml").read_text()
-    assert "precision = 2" in configuration
+    assert "precision = 6" in configuration
     assert configuration.count("--cov-fail-under=90") == 1
 
 
@@ -41,7 +41,7 @@ def test_pytest_failure_and_below_threshold_are_nonzero(tmp_path: Path) -> None:
     config = tmp_path / "pyproject.toml"
     config.write_text(
         "[tool.pytest.ini_options]\naddopts='--cov=sample --cov-fail-under=90'\n"
-        "[tool.coverage.report]\nprecision=2\n"
+        "[tool.coverage.report]\nprecision=6\n"
     )
     below = subprocess.run(
         (sys.executable, "-m", "pytest", "-q", "-c", str(config)),

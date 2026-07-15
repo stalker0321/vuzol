@@ -140,6 +140,8 @@ def test_bundle_rejects_unknown_topic_project(tmp_path: Path) -> None:
 def test_settings_require_absolute_roots_and_positive_nested_limits(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="must be absolute"):
         Settings(repository_root=Path("relative"))
+    with pytest.raises(ValidationError, match="must be absolute"):
+        Settings(registry_overlay_file=Path("projects.json"))
     with pytest.raises(ValidationError, match="greater than 0"):
         Settings.model_validate(
             {

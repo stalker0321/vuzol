@@ -24,7 +24,7 @@ from vuzol.storage.types import (
     TaskStatus,
     WorktreeDeliveryState,
 )
-from vuzol.telegram.projections import build_status_card
+from vuzol.telegram.projections import build_approval_card, build_status_card
 from vuzol.workflows.controls import decide_result
 from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.ports import CancellationContext
@@ -189,6 +189,11 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             assert "diff" not in card.html.lower()
             assert card.buttons == ("approve", "redo", "reject")
             assert card.approval_id is not None
+            approval_card = await build_approval_card(session, task_id)
+            assert "vuzol · Bounded task" in approval_card.html
+            assert "Added the requested validator &lt;safely&gt;." in approval_card.html
+            assert "tests — 1.2s" in approval_card.html
+            assert approval_card.buttons == ("approve", "redo", "reject")
 
         async with factory.begin() as session:
             assert card.approval_id is not None
@@ -206,6 +211,9 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             assert approval is not None and approval.status is ApprovalStatus.APPROVED
             assert persisted_step is not None and persisted_step.status is StepStatus.QUEUED
             assert persisted_task is not None and persisted_task.status is TaskStatus.EXECUTING
+            decided_card = await build_approval_card(session, task_id)
+            assert "Решение: <b>approved</b>" in decided_card.html
+            assert decided_card.buttons == ()
 
         project = SimpleNamespace(
             repository_path=repository,

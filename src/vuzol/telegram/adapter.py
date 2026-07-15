@@ -18,7 +18,7 @@ from telegram.ext import (
 
 from vuzol.config import ScopedSecretResolver, Settings
 from vuzol.telegram.domain import AttachmentKind, ControlUpdate, MessageUpdate, TelegramAttachment
-from vuzol.telegram.workspace import TopicSynchronizationError
+from vuzol.telegram.workspace import TopicCreationOutcomeUnknown, TopicSynchronizationError
 
 MessageHandlerFn = Callable[[MessageUpdate], Awaitable[None]]
 ControlHandlerFn = Callable[[ControlUpdate], Awaitable[None]]
@@ -97,6 +97,13 @@ class PythonTelegramClient:
                 raise TopicSynchronizationError(type(error).__name__) from error
         except TelegramError as error:
             raise TopicSynchronizationError(type(error).__name__) from error
+
+    async def create_topic(self, *, chat_id: int, name: str) -> int:
+        try:
+            topic = await self._bot.create_forum_topic(chat_id=chat_id, name=name)
+        except TelegramError as error:
+            raise TopicCreationOutcomeUnknown(type(error).__name__) from error
+        return topic.message_thread_id
 
 
 def message_update(update: Update, bot_id: str) -> MessageUpdate | None:

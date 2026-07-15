@@ -23,6 +23,7 @@ from vuzol.storage.leasing import (
 )
 from vuzol.storage.models import (
     Interpretation,
+    ProjectProvisioning,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
@@ -44,6 +45,7 @@ class DeliveryAction(StrEnum):
     SEND_STATUS = "send_status"
     EDIT_STATUS = "edit_status"
     SEND_CLARIFICATION = "send_clarification"
+    SEND_PROJECT_WELCOME = "send_project_welcome"
     NOOP = "noop"
 
 
@@ -79,7 +81,28 @@ async def prepare_delivery(
     item: TransactionalOutbox,
     topics: TopicRegistry | None = None,
 ) -> PreparedDelivery:
-    if item.operation_type != "send_message" or item.linked_entity_type != "telegram_intake":
+    if item.operation_type != "send_message":
+        raise PermanentDeliveryError("unsupported_telegram_operation")
+    if item.linked_entity_type == "project_provisioning":
+        if item.payload.get("role") != "project_created":
+            raise PermanentDeliveryError("invalid_project_delivery_payload")
+        provisioning = await session.get(ProjectProvisioning, item.linked_entity_id)
+        if provisioning is None or provisioning.topic_thread_id is None:
+            raise PermanentDeliveryError("project_provisioning_missing")
+        html = (
+            f"<b>{telegram_html(provisioning.display_name)}</b>\n"
+            f"Проект создан: <code>{telegram_html(provisioning.project_id)}</code>\n\n"
+            f"{telegram_html(provisioning.description)}"
+        )
+        return PreparedDelivery(
+            DeliveryAction.SEND_PROJECT_WELCOME,
+            chat_id=provisioning.chat_id,
+            thread_id=provisioning.topic_thread_id,
+            html=html,
+            task_id=provisioning.task_id,
+            message_role="project_welcome",
+        )
+    if item.linked_entity_type != "telegram_intake":
         raise PermanentDeliveryError("unsupported_telegram_operation")
     intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
     if intake is None:
@@ -251,7 +274,11 @@ class TelegramDeliveryService:
         return True
 
     async def _call_telegram(self, prepared: PreparedDelivery) -> int | None:
-        if prepared.action in {DeliveryAction.SEND_STATUS, DeliveryAction.SEND_CLARIFICATION}:
+        if prepared.action in {
+            DeliveryAction.SEND_STATUS,
+            DeliveryAction.SEND_CLARIFICATION,
+            DeliveryAction.SEND_PROJECT_WELCOME,
+        }:
             message_id = await self._client.send_message(
                 chat_id=prepared.chat_id,
                 thread_id=prepared.thread_id,
@@ -310,6 +337,17 @@ class TelegramDeliveryService:
                         message_id=confirmed_message_id,
                         task_id=prepared.task_id,
                         message_role="clarification",
+                    )
+                )
+            elif prepared.action == DeliveryAction.SEND_PROJECT_WELCOME:
+                assert confirmed_message_id is not None
+                session.add(
+                    TelegramMessageLink(
+                        chat_id=prepared.chat_id,
+                        message_thread_id=prepared.thread_id,
+                        message_id=confirmed_message_id,
+                        task_id=prepared.task_id,
+                        message_role=prepared.message_role or "project_welcome",
                     )
                 )
             await complete_outbox_item(session, token)

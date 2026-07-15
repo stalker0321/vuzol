@@ -14,9 +14,15 @@ from vuzol.storage.unit_of_work import UnitOfWork
 class TelegramWorkspaceClient(Protocol):
     async def rename_topic(self, *, chat_id: int, thread_id: int, name: str) -> None: ...
 
+    async def create_topic(self, *, chat_id: int, name: str) -> int: ...
+
 
 class TopicSynchronizationError(RuntimeError):
     """A categorized Bot API failure while updating one configured topic."""
+
+
+class TopicCreationOutcomeUnknown(RuntimeError):
+    """Telegram may have created a topic but no stable thread ID was received."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -180,6 +180,19 @@ def test_sandbox_spec_hash_is_stable_and_redacts_stdin(tmp_path: Path) -> None:
     assert configured.sandbox.stable_hash in repr(configured.redacted)
 
 
+def test_local_git_initializes_project_repository_idempotently(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repository = tmp_path / "notes"
+        git = LocalGit()
+        first = await git.initialize_repository(repository, readme="# Notes\n\nA project.\n")
+        second = await git.initialize_repository(repository, readme="# Notes\n\nA project.\n")
+        assert first == second == await git.resolve_commit(repository, "HEAD")
+        assert (repository / "README.md").read_text() == "# Notes\n\nA project.\n"
+        await git.require_clean_source(repository)
+
+    asyncio.run(scenario())
+
+
 def test_docker_argv_enforces_outer_isolation(tmp_path: Path) -> None:
     configured = envelope(tmp_path)
     argv = docker_run_argv(tmp_path / "docker.sock", "task", configured)

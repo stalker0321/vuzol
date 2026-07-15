@@ -44,6 +44,26 @@ filenames, and archives are bounded or rejected. The Step 05 interpreter runtime
 `telegram_file` download, private artifact persistence, and voice transcription; Telegram delivery
 never claims those records.
 
+## Forum workspace
+
+The configured forum is the shared control plane for every project. Topic display names are
+declarative registry data. On Telegram ingress startup, Vuzol upserts every configured stable
+chat/thread mapping into PostgreSQL and synchronizes the names through the Bot API. Routing never
+depends on a mutable display name.
+
+The initial workspace uses these roles:
+
+- `Новый проект` (`inbox`) for future project intake and environment creation;
+- `Статус проектов` (`task_dashboard`) for a future in-place global dashboard;
+- `Апрувы` (`approvals`) for exact-result decisions across all projects;
+- `Система` (`system`) for future operational alerts;
+- `История` (`changelog`) for the future append-only cross-project history;
+- one `<project>` (`project`) topic for each active project.
+
+An exact-result approval has its own message link in the global approvals topic. It does not replace
+the task status message in the project topic. After a decision, Vuzol edits the approval card to
+remove its buttons and show the persisted outcome, then separately refreshes the project card.
+
 ## Controls and projections
 
 Callbacks resolve a persisted target, verify authorization and current existence, deduplicate by

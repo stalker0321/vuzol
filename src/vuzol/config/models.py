@@ -326,6 +326,7 @@ class TopicConfig(FrozenModel):
     chat_id: int
     message_thread_id: int = Field(ge=1)
     kind: TopicKind
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
     project_id: str | None = None
     accepts_new_tasks: bool = True
     default_workflow: str = Field(min_length=1)

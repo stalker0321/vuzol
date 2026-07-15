@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import SecretStr
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -17,9 +18,11 @@ from telegram.ext import (
 
 from vuzol.config import ScopedSecretResolver, Settings
 from vuzol.telegram.domain import AttachmentKind, ControlUpdate, MessageUpdate, TelegramAttachment
+from vuzol.telegram.workspace import TopicSynchronizationError
 
 MessageHandlerFn = Callable[[MessageUpdate], Awaitable[None]]
 ControlHandlerFn = Callable[[ControlUpdate], Awaitable[None]]
+StartupHandlerFn = Callable[[Bot], Awaitable[None]]
 
 
 def resolve_bot_token(
@@ -81,6 +84,19 @@ class PythonTelegramClient:
         telegram_file = await self._bot.get_file(file_id)
         content = await telegram_file.download_as_bytearray()
         return bytes(content)
+
+    async def rename_topic(self, *, chat_id: int, thread_id: int, name: str) -> None:
+        try:
+            await self._bot.edit_forum_topic(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                name=name,
+            )
+        except BadRequest as error:
+            if "topic not modified" not in str(error).lower().replace("_", " "):
+                raise TopicSynchronizationError(type(error).__name__) from error
+        except TelegramError as error:
+            raise TopicSynchronizationError(type(error).__name__) from error
 
 
 def message_update(update: Update, bot_id: str) -> MessageUpdate | None:
@@ -201,8 +217,18 @@ def build_long_polling_application(
     bot_id: str,
     on_message: MessageHandlerFn,
     on_control: ControlHandlerFn,
+    on_startup: StartupHandlerFn | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
-    application = ApplicationBuilder().token(token).build()
+    builder = ApplicationBuilder().token(token)
+
+    if on_startup is not None:
+
+        async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
+            await on_startup(application.bot)
+
+        builder = builder.post_init(post_init)
+
+    application = builder.build()
 
     async def handle_message(update: Update, _context: object) -> None:
         converted = message_update(update, bot_id)

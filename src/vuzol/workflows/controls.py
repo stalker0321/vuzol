@@ -184,6 +184,7 @@ async def decide_result(
         )
     )
     await _enqueue_telegram_projection(session, task, run)
+    await _enqueue_telegram_projection(session, task, run, role="approval_card")
 
 
 async def pause_task(

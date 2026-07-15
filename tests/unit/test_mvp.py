@@ -129,3 +129,9 @@ def test_mvp_check_inspects_protected_runtime_without_direct_traversal(
             "-quit",
         )
     ]
+
+
+def test_validation_clone_uses_the_verified_operator_checkout() -> None:
+    content = (ROOT / "deploy/mvp/check.py").read_text()
+    assert '"--no-hardlinks", str(ROOT), str(checkout)' in content
+    assert '"--no-hardlinks", str(DEPLOYED), str(checkout)' not in content

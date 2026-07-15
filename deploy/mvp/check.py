@@ -133,7 +133,7 @@ def _validation_gates(image: str) -> None:
     mapped_uid = _mapped_identity(10001)
     with tempfile.TemporaryDirectory(prefix="vuzol-mvp-check-") as temporary:
         checkout = Path(temporary) / "repository"
-        _run(("git", "clone", "--quiet", "--no-hardlinks", str(DEPLOYED), str(checkout)))
+        _run(("git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(checkout)))
         _run(("sudo", "-n", "setfacl", "-R", "-m", f"u:{mapped_uid}:rwX", str(checkout)))
         _run(("sudo", "-n", "setfacl", "-R", "-m", f"d:u:{mapped_uid}:rwX", str(checkout)))
         try:

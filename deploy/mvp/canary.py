@@ -5,11 +5,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 TERMINAL = {"blocked", "cancelled", "completed", "failed"}
+
+
+def _experiment_cli() -> Path:
+    executable = Path(sys.executable).with_name("vuzol-experiment")
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeError(
+            f"certification companion executable is absent or not executable: {executable}"
+        )
+    return executable
 
 
 def _run(argv: tuple[str, ...]) -> str:
@@ -24,7 +35,7 @@ def _run(argv: tuple[str, ...]) -> str:
 def _service() -> tuple[int, int]:
     output = _run(
         (
-            "systemctl",
+            "/usr/bin/systemctl",
             "show",
             "vuzol-executor.service",
             "--property=ActiveState,SubState,MainPID,NRestarts",
@@ -41,12 +52,13 @@ def run(request: Path, *, timeout_seconds: int) -> dict[str, object]:
     experiment_id = request_body["experiment_id"]
     if "qual" not in experiment_id and "canary" not in experiment_id:
         raise RuntimeError("canary experiment ID must be explicitly marked")
+    experiment_cli = _experiment_cli()
     before = _service()
-    seeded = json.loads(_run(("vuzol-experiment", "seed", str(request))))
+    seeded = json.loads(_run((str(experiment_cli), "seed", str(request))))
     deadline = time.monotonic() + timeout_seconds
     inspected: dict[str, object] = {}
     while time.monotonic() < deadline:
-        inspected = json.loads(_run(("vuzol-experiment", "inspect", experiment_id)))
+        inspected = json.loads(_run((str(experiment_cli), "inspect", experiment_id)))
         candidate_runs = inspected.get("runs", [])
         runs = candidate_runs if isinstance(candidate_runs, list) else []
         if runs and all(isinstance(run, dict) and run.get("status") in TERMINAL for run in runs):
@@ -62,6 +74,7 @@ def run(request: Path, *, timeout_seconds: int) -> dict[str, object]:
         "excluded_from_worker_quality": True,
         "executor_pid": after[0],
         "executor_restarts": after[1],
+        "experiment_executable": str(experiment_cli),
         "seed": seeded,
         "inspect": inspected,
     }

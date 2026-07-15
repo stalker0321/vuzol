@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Fail-closed, no-provider readiness check for the deliberately narrow Vuzol MVP."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import pwd
+import subprocess
+import tempfile
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+DEPLOYED = Path("/opt/vuzol")
+REGISTRY = Path("/etc/vuzol/executor-registries.toml")
+MIRROR = Path("/srv/vuzol/repositories/vuzol")
+SOCKET = Path("/run/user/994/docker.sock")
+GATES = ("format-check", "lint", "type-check", "security", "test")
+
+
+class MvpCheckError(RuntimeError):
+    pass
+
+
+def _run(argv: tuple[str, ...], *, cwd: Path | None = None) -> str:
+    completed = subprocess.run(  # noqa: S603 - caller supplies finite operational argv
+        argv, cwd=cwd, check=False, capture_output=True, text=True
+    )
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        raise MvpCheckError(f"command failed ({argv[0]}): {detail[-1] if detail else 'no detail'}")
+    return completed.stdout.strip()
+
+
+def _git(repository: Path, *argv: str) -> str:
+    return _run(("git", "-c", f"safe.directory={repository}", "-C", str(repository), *argv))
+
+
+def _service_snapshot() -> tuple[int, int]:
+    output = _run(
+        (
+            "systemctl",
+            "show",
+            "vuzol-executor.service",
+            "--property=ActiveState,SubState,MainPID,NRestarts",
+        )
+    )
+    values = dict(line.split("=", 1) for line in output.splitlines())
+    if values.get("ActiveState") != "active" or values.get("SubState") != "running":
+        raise MvpCheckError("vuzol-executor is not active/running")
+    pid = int(values.get("MainPID", "0"))
+    if pid < 1:
+        raise MvpCheckError("vuzol-executor has no live PID")
+    return pid, int(values.get("NRestarts", "0"))
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _mapped_identity(container_id: int) -> int:
+    executor = pwd.getpwnam("vuzol-executor")
+    dockerd = next(
+        (
+            process
+            for process in Path("/proc").iterdir()
+            if process.name.isdigit()
+            and process.stat().st_uid == executor.pw_uid
+            and "dockerd" in (process / "comm").read_text(errors="ignore")
+        ),
+        None,
+    )
+    if dockerd is None:
+        raise MvpCheckError("rootless dockerd process was not found")
+    for line in (dockerd / "uid_map").read_text().splitlines():
+        inside, outside, length = (int(value) for value in line.split())
+        if inside <= container_id < inside + length:
+            return outside + container_id - inside
+    raise MvpCheckError("validation sandbox UID is absent from the rootless mapping")
+
+
+def _docker(*argv: str) -> str:
+    return _run(
+        (
+            "sudo",
+            "-n",
+            "-u",
+            "vuzol-executor",
+            "env",
+            f"DOCKER_HOST=unix://{SOCKET}",
+            "XDG_RUNTIME_DIR=/run/user/994",
+            "docker",
+            *argv,
+        )
+    )
+
+
+def _registry() -> dict[str, object]:
+    checked = ROOT / "deploy/registries.executor.toml"
+    production_hash = _run(("sudo", "-n", "sha256sum", str(REGISTRY))).split()[0]
+    if _sha256(checked) != production_hash:
+        raise MvpCheckError("production registry differs from the reviewed registry")
+    return tomllib.loads(checked.read_text())
+
+
+def _configured_image(document: dict[str, object], profile_id: str) -> str:
+    sandboxes = document.get("sandboxes")
+    if not isinstance(sandboxes, list):
+        raise MvpCheckError("registry has no sandbox list")
+    for item in sandboxes:
+        if isinstance(item, dict) and item.get("id") == profile_id:
+            image = item.get("image")
+            if isinstance(image, str) and "@sha256:" in image:
+                return image
+    raise MvpCheckError(f"sandbox image is unavailable: {profile_id}")
+
+
+def _require_codex_profile(document: dict[str, object]) -> None:
+    profiles = document.get("profiles")
+    if not isinstance(profiles, list):
+        raise MvpCheckError("registry has no provider profile list")
+    matches = [
+        item
+        for item in profiles
+        if isinstance(item, dict) and item.get("id") == "codex-subscription-prod"
+    ]
+    if len(matches) != 1 or matches[0].get("enabled") is not True:
+        raise MvpCheckError("codex-subscription-prod is not uniquely enabled")
+
+
+def _validation_gates(image: str) -> None:
+    mapped_uid = _mapped_identity(10001)
+    with tempfile.TemporaryDirectory(prefix="vuzol-mvp-check-") as temporary:
+        checkout = Path(temporary) / "repository"
+        _run(("git", "clone", "--quiet", "--no-hardlinks", str(DEPLOYED), str(checkout)))
+        _run(("sudo", "-n", "setfacl", "-R", "-m", f"u:{mapped_uid}:rwX", str(checkout)))
+        _run(("sudo", "-n", "setfacl", "-R", "-m", f"d:u:{mapped_uid}:rwX", str(checkout)))
+        try:
+            tool_commands = (
+                ("/usr/bin/make", "--version"),
+                ("python", "--version"),
+                ("uv", "--version"),
+            )
+            for command in tool_commands:
+                _docker("run", "--rm", "--network", "none", image, *command)
+            for gate in GATES:
+                _docker(
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "-v",
+                    f"{checkout}:/workspace:rw",
+                    "-w",
+                    "/workspace",
+                    image,
+                    "/usr/bin/make",
+                    gate,
+                )
+            if _git(checkout, "status", "--short"):
+                raise MvpCheckError("validation gates modified the disposable checkout")
+            if (checkout / ".venv").exists():
+                raise MvpCheckError("validation gates created a worktree .venv")
+        finally:
+            _run(("sudo", "-n", "setfacl", "-R", "-x", f"u:{mapped_uid}", str(checkout)))
+            _run(("sudo", "-n", "setfacl", "-R", "-k", str(checkout)))
+
+
+def _durable_state() -> None:
+    sql = """
+SELECT
+  (SELECT count(*) FROM provider_budget_reservations r JOIN runs x ON x.id=r.run_id
+   WHERE r.status='reserved' AND x.selected_route->>'experiment_id' LIKE '%qual%'),
+  (SELECT count(*) FROM worktrees w JOIN runs x ON x.id=w.run_id
+   WHERE w.delivery_state='active' AND x.selected_route->>'experiment_id' LIKE '%qual%');
+"""
+    output = _run(
+        (
+            "docker",
+            "exec",
+            "vuzol-postgres-1",
+            "psql",
+            "-U",
+            "vuzol",
+            "-d",
+            "vuzol",
+            "-X",
+            "-A",
+            "-t",
+            "-F",
+            ",",
+            "-c",
+            sql,
+        )
+    )
+    if output.strip() != "0,0":
+        raise MvpCheckError("qualification reservation or worktree state is unresolved")
+
+
+def check(expected_sha: str) -> dict[str, object]:
+    if _git(ROOT, "status", "--short"):
+        raise MvpCheckError("public checkout is dirty")
+    if _git(ROOT, "rev-parse", "HEAD") != expected_sha:
+        raise MvpCheckError("public checkout SHA differs from the expected SHA")
+    if _git(ROOT, "rev-parse", "origin/step09a-adaptive-worker-trial") != expected_sha:
+        raise MvpCheckError("origin branch differs from the expected SHA")
+    if _git(DEPLOYED, "status", "--short") or _git(DEPLOYED, "rev-parse", "HEAD") != expected_sha:
+        raise MvpCheckError("deployed checkout is dirty or at the wrong SHA")
+    if _git(MIRROR, "rev-parse", "refs/heads/main") != expected_sha:
+        raise MvpCheckError("managed source mirror base ref differs from the deployed SHA")
+    pid_before, restarts_before = _service_snapshot()
+    runtime = Path("/run/vuzol/proxy")
+    if not runtime.is_dir() or runtime.stat().st_mode & 0o777 != 0o700:
+        raise MvpCheckError("systemd-managed proxy runtime directory is unavailable")
+    document = _registry()
+    _require_codex_profile(document)
+    provider_image = _configured_image(document, "project-default")
+    validation_image = _configured_image(document, "vuzol-validation")
+    _docker("image", "inspect", provider_image)
+    _docker("image", "inspect", validation_image)
+    if _docker("ps", "-q", "--filter", "label=vuzol.managed=true"):
+        raise MvpCheckError("stale managed container exists")
+    if _docker("network", "ls", "-q", "--filter", "label=vuzol.managed=true"):
+        raise MvpCheckError("stale managed network exists")
+    mapped_uid = _mapped_identity(10001)
+    acl = _run(("sudo", "-n", "getfacl", "-R", "-cp", "/srv/vuzol/worktrees"))
+    if f"user:{mapped_uid}:" in acl:
+        raise MvpCheckError("stale sandbox ACL exists")
+    proxy_entries = tuple(Path("/run/vuzol/proxy").iterdir())
+    if proxy_entries:
+        raise MvpCheckError("stale proxy runtime entry exists")
+    _durable_state()
+    _validation_gates(validation_image)
+    pid_after, restarts_after = _service_snapshot()
+    if (pid_after, restarts_after) != (pid_before, restarts_before):
+        raise MvpCheckError("executor PID or restart count changed during readiness checking")
+    return {
+        "schema_version": "vuzol-mvp-check.v1",
+        "sha": expected_sha,
+        "executor_pid": pid_after,
+        "executor_restarts": restarts_after,
+        "provider_image": provider_image,
+        "validation_image": validation_image,
+        "gates": list(GATES),
+        "status": "ready",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--expected-sha", required=True)
+    args = parser.parse_args()
+    try:
+        result = check(args.expected_sha)
+    except MvpCheckError as error:
+        print(f"MVP_CHECK_FAILED: {error}")
+        return 1
+    print(result)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

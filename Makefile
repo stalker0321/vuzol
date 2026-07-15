@@ -1,4 +1,4 @@
-.PHONY: run-app run-worker run-telegram test test-rootless test-rootless-proxy test-postgres lint format format-check type-check dependency-audit secret-scan security check db-up db-down db-migrate db-current
+.PHONY: run-app run-worker run-telegram test test-rootless test-rootless-proxy test-postgres lint format format-check type-check dependency-audit secret-scan security check mvp-check db-up db-down db-migrate db-current
 
 UV ?= uv
 LOCAL_DATABASE_DSN ?= postgresql+psycopg://vuzol:vuzol-local-only@127.0.0.1:5432/vuzol# pragma: allowlist secret
@@ -59,6 +59,9 @@ secret-scan:
 security: dependency-audit secret-scan
 
 check: lint format-check type-check test security
+
+mvp-check:
+	uv run python deploy/mvp/check.py --expected-sha "$$(git rev-parse HEAD)"
 
 db-up:
 	docker compose up -d postgres

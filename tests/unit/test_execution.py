@@ -1405,6 +1405,7 @@ async def test_provider_handler_revokes_acl_on_provider_failure_or_cancellation(
     failure: str,
 ) -> None:
     from vuzol.providers.handlers import ProviderStepHandler
+    from vuzol.workflows.domain import OutcomeKind, StepOutcome
 
     access = MagicMock()
     access.revoke = AsyncMock()
@@ -1425,9 +1426,22 @@ async def test_provider_handler_revokes_acl_on_provider_failure_or_cancellation(
         asyncio.CancelledError() if failure == "cancellation" else RuntimeError("provider failure")
     )
     handler._execute_built = AsyncMock(side_effect=error)  # type: ignore[method-assign]
+    handler._provider_launch_exists = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    handler._unexpected_pre_provider_failure = AsyncMock(  # type: ignore[method-assign]
+        return_value=StepOutcome(
+            kind=OutcomeKind.PERMANENT_FAILURE,
+            result={},
+            category="pre_provider_unexpected",
+            summary="RuntimeError",
+        )
+    )
     request = MagicMock(step_type="execute_code")
-    with pytest.raises(type(error)):
-        await handler.execute(request, CancellationContext())
+    if failure == "cancellation":
+        with pytest.raises(asyncio.CancelledError):
+            await handler.execute(request, CancellationContext())
+    else:
+        outcome = await handler.execute(request, CancellationContext())
+        assert outcome.category == "pre_provider_unexpected"
     access.revoke.assert_awaited_once()
 
 
@@ -1441,12 +1455,6 @@ async def test_missing_validation_sandbox_prevents_provider_execution(
     monkeypatch.setattr(provider_handlers, "release_reservation", AsyncMock())
 
     factory = MagicMock()
-    transaction = AsyncMock()
-    session = AsyncMock()
-    session.scalar.return_value = None
-    transaction.__aenter__.return_value = session
-    transaction.__aexit__.return_value = False
-    factory.begin.return_value = transaction
     handler = ProviderStepHandler(
         factory,
         MagicMock(),
@@ -1462,12 +1470,79 @@ async def test_missing_validation_sandbox_prevents_provider_execution(
     handler._grant_worktree_access = AsyncMock(  # type: ignore[method-assign]
         side_effect=WorktreeAccessError("project has no validation sandbox profile")
     )
+    handler._unwind_pre_provider = AsyncMock()  # type: ignore[method-assign]
     handler._execute_built = AsyncMock()  # type: ignore[method-assign]
 
     outcome = await handler.execute(MagicMock(step_type="execute_code"), CancellationContext())
 
     assert outcome.category == "worker_access_unavailable"
     handler._execute_built.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("error", (LookupError("missing state"), ValueError("invalid state")))
+async def test_provider_request_preparation_failure_unwinds_before_adapter(
+    error: Exception,
+) -> None:
+    from vuzol.providers.handlers import ProviderStepHandler
+    from vuzol.workflows.domain import OutcomeKind
+
+    adapters = MagicMock()
+    handler = ProviderStepHandler(MagicMock(), MagicMock(), adapters)
+    handler._build_request = AsyncMock(side_effect=error)  # type: ignore[method-assign]
+    handler._unwind_pre_provider = AsyncMock()  # type: ignore[method-assign]
+    request = MagicMock(
+        task_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_id=uuid.uuid4(),
+        step_type="execute_model",
+        payload={"budget_reservation_id": str(uuid.uuid4()), "provider_attempt": 1},
+    )
+
+    outcome = await handler.execute(request, CancellationContext())
+
+    assert outcome.kind is OutcomeKind.PERMANENT_FAILURE
+    assert outcome.category == "provider_request_invalid"
+    assert outcome.summary == type(error).__name__
+    handler._unwind_pre_provider.assert_awaited_once()
+    adapters.get.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_pre_provider_unwind_failure_preserves_both_safe_failure_types() -> None:
+    from vuzol.providers.handlers import ProviderStepHandler
+
+    handler = ProviderStepHandler(MagicMock(), MagicMock(), MagicMock())
+    handler._unwind_pre_provider = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("private unwind detail")
+    )
+    request = MagicMock(
+        task_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_id=uuid.uuid4(),
+        lease=MagicMock(generation=3),
+    )
+
+    outcome = await handler._pre_provider_failure(
+        request,
+        reservation_id=uuid.uuid4(),
+        category="provider_request_invalid",
+        error=ValueError("private preparation detail"),
+    )
+
+    assert outcome.category == "pre_provider_unwind_failed"
+    assert outcome.summary == "provider_request_invalid followed by unwind failure (RuntimeError)"
+    assert "private" not in outcome.summary
+
+
+def test_reservation_reference_parser_rejects_malformed_values() -> None:
+    from vuzol.providers.handlers import _reservation_id
+
+    reservation_id = uuid.uuid4()
+    assert _reservation_id({"budget_reservation_id": str(reservation_id)}) == reservation_id
+    assert _reservation_id({"budget_reservation_id": "../reservation"}) is None
+    assert _reservation_id({"budget_reservation_id": 1}) is None
+    assert _reservation_id({}) is None
 
 
 @pytest.mark.anyio

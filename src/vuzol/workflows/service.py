@@ -199,6 +199,12 @@ async def commit_step_outcome(
     else:
         await transition_step(session, step, StepStatus.FAILED, actor_type="worker")
         await transition_run(session, run, RunStatus.FAILED, actor_type="worker")
+    if outcome.kind is not OutcomeKind.SUCCEEDED:
+        step.failure_category = outcome.category
+        step.failure_summary = outcome.summary
+        if run.status in {RunStatus.BLOCKED, RunStatus.FAILED, RunStatus.CANCELLED}:
+            run.failure_category = outcome.category
+            run.failure_summary = outcome.summary
     step.lease_owner = None
     step.lease_expires_at = None
     if step.status is StepStatus.COMPLETED:

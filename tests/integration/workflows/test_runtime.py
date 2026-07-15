@@ -871,7 +871,9 @@ def test_worker_normalizes_handler_exception(postgres_dsn: str) -> None:
         async with factory() as session:
             loaded_run = await session.scalar(select(Run).where(Run.task_id == task_id))
             assert loaded_run is not None and loaded_run.status is RunStatus.FAILED
-            assert loaded_run.failure_summary is None
+            assert loaded_run.failure_category == "handler_exception"
+            assert loaded_run.failure_summary == "RuntimeError"
+            assert "provider detail" not in loaded_run.failure_summary
         await engine.dispose()
 
     asyncio.run(scenario())

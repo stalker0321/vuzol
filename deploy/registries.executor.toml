@@ -130,3 +130,52 @@ destinations = [
   { url = "https://cli-chat-proxy.grok.com", purpose = "Grok subscription inference" },
   { url = "https://auth.x.ai", purpose = "Grok subscription authentication" },
 ]
+
+[[topics]]
+chat_id = -1003950752781
+message_thread_id = 3
+kind = "inbox"
+accepts_new_tasks = false
+default_workflow = "simple_model_task"
+enabled = true
+
+[[topics]]
+chat_id = -1003950752781
+message_thread_id = 5
+kind = "task_dashboard"
+accepts_new_tasks = false
+default_workflow = "simple_model_task"
+enabled = true
+
+[[topics]]
+chat_id = -1003950752781
+message_thread_id = 7
+kind = "approvals"
+accepts_new_tasks = false
+default_workflow = "simple_model_task"
+enabled = true
+
+[[topics]]
+chat_id = -1003950752781
+message_thread_id = 9
+kind = "system"
+accepts_new_tasks = false
+default_workflow = "simple_model_task"
+enabled = true
+
+[[topics]]
+chat_id = -1003950752781
+message_thread_id = 11
+kind = "project"
+project_id = "vuzol"
+accepts_new_tasks = true
+default_workflow = "adaptive_worker_trial"
+enabled = true
+
+[[topics]]
+chat_id = -1003950752781
+message_thread_id = 13
+kind = "changelog"
+accepts_new_tasks = false
+default_workflow = "simple_model_task"
+enabled = true

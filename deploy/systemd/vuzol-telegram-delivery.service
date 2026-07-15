@@ -1,0 +1,30 @@
+[Unit]
+Description=Vuzol Telegram durable outbox delivery
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vuzol-telegram
+Group=vuzol-telegram
+EnvironmentFile=/etc/vuzol/telegram.env
+ExecStart=/opt/vuzol/.venv/bin/vuzol-telegram-delivery
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol
+
+[Install]
+WantedBy=multi-user.target

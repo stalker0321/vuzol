@@ -5,6 +5,7 @@ from vuzol.observability import configure_logging
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.telegram.adapter import build_long_polling_application, resolve_bot_token
 from vuzol.telegram.controls import TelegramControlService
+from vuzol.telegram.dogfood import TelegramDogfoodIngressService
 from vuzol.telegram.domain import ControlUpdate, MessageUpdate
 from vuzol.telegram.ingress import TelegramIngressService
 
@@ -16,10 +17,12 @@ def main() -> None:
     engine = create_engine(settings, resolve_database_dsn(settings))
     factory = create_session_factory(engine)
     ingress = TelegramIngressService(runtime, factory)
+    dogfood = TelegramDogfoodIngressService(runtime, factory)
     controls = TelegramControlService(runtime, factory)
 
     async def on_message(update: MessageUpdate) -> None:
-        await ingress.accept_message(update)
+        if await dogfood.accept_message(update) is None:
+            await ingress.accept_message(update)
 
     async def on_control(update: ControlUpdate) -> None:
         await controls.accept(update)

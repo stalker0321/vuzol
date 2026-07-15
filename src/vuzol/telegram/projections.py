@@ -11,7 +11,7 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.storage.models import Event, Run, Step, Task, TelegramMessageLink
+from vuzol.storage.models import Event, Run, Step, Task, TelegramMessageLink, UsageRecord, Worktree
 
 TELEGRAM_TEXT_LIMIT = 4096
 
@@ -53,7 +53,11 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     event = await session.scalar(
         select(Event).where(Event.entity_id == task_id).order_by(Event.created_at.desc()).limit(1)
     )
-    title = str(task.task_draft.get("title") or task.original_text).strip()[:120]
+    title = str(
+        task.task_draft.get("normalized_title")
+        or task.task_draft.get("title")
+        or task.original_text
+    ).strip()[:120]
     scope = task.project_id or "personal"
     lines = [
         f"<b>{telegram_html(title)}</b>",
@@ -64,9 +68,28 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     if step is not None:
         lines.append(f"Step: {telegram_html(step.step_type)} ({telegram_html(step.status.value)})")
     if run is not None and run.selected_route:
-        executor = run.selected_route.get("executor") or run.selected_route.get("profile_id")
+        executor = (
+            run.selected_route.get("trusted_profile_id")
+            or run.selected_route.get("executor")
+            or run.selected_route.get("profile_id")
+        )
         if executor:
             lines.append(f"Executor: {telegram_html(executor)}")
+        worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
+        if worktree is not None and worktree.result_commit:
+            lines.append(f"Result commit: <code>{telegram_html(worktree.result_commit)}</code>")
+            lines.append(f"Delivery: {telegram_html(worktree.delivery_state.value)}")
+        usage = await session.scalar(
+            select(UsageRecord)
+            .where(UsageRecord.run_id == run.id)
+            .order_by(UsageRecord.created_at.desc())
+            .limit(1)
+        )
+        if usage is not None and usage.input_tokens is not None:
+            lines.append(
+                f"Usage: {telegram_html(usage.input_tokens)} in / "
+                f"{telegram_html(usage.output_tokens or 0)} out"
+            )
     elapsed = max(0, int((datetime.now(UTC) - task.created_at).total_seconds()))
     lines.append(f"Elapsed: {elapsed}s")
     if event is not None:

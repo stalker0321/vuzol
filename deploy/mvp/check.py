@@ -82,15 +82,25 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _is_executor_dockerd(process: Path, executor_uid: int) -> bool:
+    try:
+        return (
+            process.name.isdigit()
+            and process.stat().st_uid == executor_uid
+            and "dockerd" in (process / "comm").read_text(errors="ignore")
+        )
+    except FileNotFoundError:
+        # Processes may exit between /proc enumeration and inspection.
+        return False
+
+
 def _mapped_identity(container_id: int) -> int:
     executor = pwd.getpwnam("vuzol-executor")
     dockerd = next(
         (
             process
             for process in Path("/proc").iterdir()
-            if process.name.isdigit()
-            and process.stat().st_uid == executor.pw_uid
-            and "dockerd" in (process / "comm").read_text(errors="ignore")
+            if _is_executor_dockerd(process, executor.pw_uid)
         ),
         None,
     )

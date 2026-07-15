@@ -100,3 +100,32 @@ def test_canary_uses_running_service_without_stop_or_restart(
         )
         == 2
     )
+
+
+def test_mvp_check_inspects_protected_runtime_without_direct_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("mvp_check", ROOT / "deploy/mvp/check.py")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: tuple[str, ...], *, cwd: Path | None = None) -> str:
+        del cwd
+        calls.append(argv)
+        return ""
+
+    monkeypatch.setattr(module, "_run", fake_run)
+    assert module._proxy_runtime_is_empty() is True
+    assert calls == [
+        (
+            "sudo",
+            "-n",
+            "find",
+            "/run/vuzol/proxy",
+            "-mindepth",
+            "1",
+            "-maxdepth",
+            "1",
+            "-print",
+            "-quit",
+        )
+    ]

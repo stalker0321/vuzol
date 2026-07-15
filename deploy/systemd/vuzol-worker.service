@@ -1,0 +1,30 @@
+[Unit]
+Description=Vuzol workflow dispatch and internal worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vuzol-executor
+Group=vuzol-executor
+EnvironmentFile=/etc/vuzol/executor.env
+ExecStart=/opt/vuzol/.venv/bin/vuzol-worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/srv/vuzol/repositories /srv/vuzol/worktrees /srv/vuzol/artifacts /etc/vuzol
+
+[Install]
+WantedBy=multi-user.target

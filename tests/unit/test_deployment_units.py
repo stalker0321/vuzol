@@ -17,6 +17,7 @@ USER_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/user/vuzol-rootless-docker.servic
 LEGACY_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/vuzol-rootless-docker.service"
 EXECUTOR_UNIT = REPO_ROOT / "deploy/systemd/vuzol-executor.service"
 APPLIER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-applier.service"
+WORKER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-worker.service"
 TELEGRAM_UNITS = (
     REPO_ROOT / "deploy/systemd/vuzol-telegram.service",
     REPO_ROOT / "deploy/systemd/vuzol-telegram-delivery.service",
@@ -220,6 +221,20 @@ def test_applier_has_only_the_managed_repository_write_boundary() -> None:
     assert "ReadWritePaths=/srv/vuzol/repositories" in text
     assert "ReadOnlyPaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /etc/vuzol" in text
     assert "/var/lib/vuzol-provider-state" not in text
+    assert "docker.sock" not in text
+    assert "NoNewPrivileges=true" in text
+    assert "ProtectSystem=strict" in text
+
+
+def test_workflow_worker_is_persistent_and_has_no_repository_write_boundary() -> None:
+    text = _read(WORKER_UNIT)
+    assert "ExecStart=/opt/vuzol/.venv/bin/vuzol-worker" in text
+    assert "User=vuzol-executor" in text
+    assert "EnvironmentFile=/etc/vuzol/executor.env" in text
+    assert "Restart=on-failure" in text
+    assert "WantedBy=multi-user.target" in text
+    assert "ReadWritePaths=" not in text
+    assert "ReadOnlyPaths=/srv/vuzol/repositories" in text
     assert "docker.sock" not in text
     assert "NoNewPrivileges=true" in text
     assert "ProtectSystem=strict" in text

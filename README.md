@@ -103,6 +103,9 @@ Systemd units:
 
 - `deploy/systemd/user/vuzol-rootless-docker.service` — dedicated rootless Docker daemon as a linger-enabled systemd **user** unit (installed to `/etc/systemd/user/vuzol-rootless-docker.service`). Runs inside the `vuzol-executor` user's manager (with `loginctl enable-linger`). Uses `%t` for the socket path under the user's XDG_RUNTIME_DIR. No `User=`/`Group=` lines.
 - `deploy/systemd/vuzol-executor.service` — the system service (with `User=vuzol-executor`) that runs the dedicated executor worker. It no longer declares a direct systemd dependency on the docker unit (user units are in a separate manager). Readiness is provided by an `ExecStartPre` socket wait plus the strict `RootlessDockerRuntime.preflight()` gate inside the process.
+- `deploy/systemd/vuzol-worker.service` — the persistent workflow dispatcher, recovery loop, controls,
+  and internal handlers. It has read-only project visibility and no Docker or repository-write
+  boundary.
 - `deploy/systemd/vuzol-applier.service` — the narrow control/apply service. It can read retained
   worktrees and write managed repository refs, but it has no provider, Docker, secret-state, push,
   or deployment capability.

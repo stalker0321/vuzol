@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +47,7 @@ def test_pytest_failure_and_below_threshold_are_nonzero(tmp_path: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
+        env={**os.environ, "COVERAGE_FILE": str(tmp_path / ".coverage")},
     )
     assert below.returncode != 0
     assert "fail-under=90" in below.stdout
@@ -135,5 +137,13 @@ def test_validation_clone_uses_the_verified_operator_checkout() -> None:
     content = (ROOT / "deploy/mvp/check.py").read_text()
     assert '"--no-hardlinks", str(ROOT), str(checkout)' in content
     assert '"--no-hardlinks", str(DEPLOYED), str(checkout)' not in content
+    assert 'f"u:{executor_uid}:x", str(temporary_root)' in content
     assert 'f"u:{mapped_uid}:x", str(temporary_root)' in content
     assert '"-x", f"u:{mapped_uid}", str(temporary_root)' in content
+    assert '"-x", f"u:{executor_uid}", str(temporary_root)' in content
+    assert '"--read-only"' in content
+    assert '"seccomp=/etc/vuzol/sandbox-seccomp.json"' in content
+    assert "dst=/workspace/.git,readonly" in content
+    assert '"UV_NO_SYNC": "1"' in content
+    assert '"UV_OFFLINE": "1"' in content
+    assert '"UV_CACHE_DIR": "/tmp/uv-cache"' in content

@@ -17,6 +17,26 @@ REGISTRY = Path("/etc/vuzol/executor-registries.toml")
 MIRROR = Path("/srv/vuzol/repositories/vuzol")
 SOCKET = Path("/run/user/994/docker.sock")
 GATES = ("format-check", "lint", "type-check", "security", "test")
+VALIDATION_ENVIRONMENT = {
+    "CI": "1",
+    "COVERAGE_FILE": "/tmp/.coverage",  # noqa: S108 - container-only tmpfs
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "safe.directory",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_VALUE_0": "/workspace",
+    "GIT_TERMINAL_PROMPT": "0",
+    "HOME": "/tmp/home",  # noqa: S108 - container-only tmpfs
+    "MYPY_CACHE_DIR": "/tmp/mypy-cache",  # noqa: S108 - container-only tmpfs
+    "PATH": "/opt/vuzol-validation/bin:/usr/local/bin:/usr/bin:/bin",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "/workspace/src",
+    "RUFF_CACHE_DIR": "/tmp/ruff-cache",  # noqa: S108 - container-only tmpfs
+    "UV_CACHE_DIR": "/tmp/uv-cache",  # noqa: S108 - container-only tmpfs
+    "UV_NO_SYNC": "1",
+    "UV_OFFLINE": "1",
+    "UV_PROJECT_ENVIRONMENT": "/opt/vuzol-validation",
+    "VIRTUAL_ENV": "/opt/vuzol-validation",
+}
 
 
 class MvpCheckError(RuntimeError):
@@ -28,8 +48,11 @@ def _run(argv: tuple[str, ...], *, cwd: Path | None = None) -> str:
         argv, cwd=cwd, check=False, capture_output=True, text=True
     )
     if completed.returncode:
-        detail = (completed.stderr or completed.stdout).strip().splitlines()
-        raise MvpCheckError(f"command failed ({argv[0]}): {detail[-1] if detail else 'no detail'}")
+        stdout_tail = completed.stdout.strip().splitlines()[-8:]
+        stderr_tail = completed.stderr.strip().splitlines()[-8:]
+        detail = stdout_tail + stderr_tail
+        tail = " | ".join(detail) if detail else "no detail"
+        raise MvpCheckError(f"command failed ({argv[0]}): {tail}")
     return completed.stdout.strip()
 
 
@@ -131,10 +154,12 @@ def _require_codex_profile(document: dict[str, object]) -> None:
 
 def _validation_gates(image: str) -> None:
     mapped_uid = _mapped_identity(10001)
+    executor_uid = pwd.getpwnam("vuzol-executor").pw_uid
     with tempfile.TemporaryDirectory(prefix="vuzol-mvp-check-") as temporary:
         temporary_root = Path(temporary)
         checkout = temporary_root / "repository"
         _run(("git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(checkout)))
+        _run(("sudo", "-n", "setfacl", "-m", f"u:{executor_uid}:x", str(temporary_root)))
         _run(("sudo", "-n", "setfacl", "-m", f"u:{mapped_uid}:x", str(temporary_root)))
         _run(("sudo", "-n", "setfacl", "-R", "-m", f"u:{mapped_uid}:rwX", str(checkout)))
         _run(("sudo", "-n", "setfacl", "-R", "-m", f"d:u:{mapped_uid}:rwX", str(checkout)))
@@ -147,19 +172,51 @@ def _validation_gates(image: str) -> None:
             for command in tool_commands:
                 _docker("run", "--rm", "--network", "none", image, *command)
             for gate in GATES:
-                _docker(
+                arguments = [
                     "run",
                     "--rm",
+                    "--pull",
+                    "never",
                     "--network",
                     "none",
-                    "-v",
-                    f"{checkout}:/workspace:rw",
-                    "-w",
+                    "--read-only",
+                    "--user",
+                    "10001:10001",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges:true",
+                    "--security-opt",
+                    "seccomp=/etc/vuzol/sandbox-seccomp.json",
+                    "--memory",
+                    "1073741824",
+                    "--memory-swap",
+                    "1073741824",
+                    "--cpus",
+                    "1.0",
+                    "--pids-limit",
+                    "128",
+                    "--ulimit",
+                    "nofile=1024:1024",
+                    "--tmpfs",
+                    "/tmp:rw,nosuid,nodev,noexec,size=134217728",  # noqa: S108
+                    "--workdir",
                     "/workspace",
-                    image,
-                    "/usr/bin/make",
-                    gate,
+                    "--mount",
+                    f"type=bind,src={checkout},dst=/workspace",
+                    "--mount",
+                    f"type=bind,src={checkout / '.git'},dst=/workspace/.git,readonly",
+                ]
+                for key, value in sorted(VALIDATION_ENVIRONMENT.items()):
+                    arguments.extend(("--env", f"{key}={value}"))
+                arguments.extend(
+                    (
+                        image,
+                        "/usr/bin/make",
+                        gate,
+                    )
                 )
+                _docker(*arguments)
             if _git(checkout, "status", "--short"):
                 raise MvpCheckError("validation gates modified the disposable checkout")
             if (checkout / ".venv").exists():
@@ -168,6 +225,7 @@ def _validation_gates(image: str) -> None:
             _run(("sudo", "-n", "setfacl", "-R", "-x", f"u:{mapped_uid}", str(checkout)))
             _run(("sudo", "-n", "setfacl", "-R", "-k", str(checkout)))
             _run(("sudo", "-n", "setfacl", "-x", f"u:{mapped_uid}", str(temporary_root)))
+            _run(("sudo", "-n", "setfacl", "-x", f"u:{executor_uid}", str(temporary_root)))
 
 
 def _durable_state() -> None:

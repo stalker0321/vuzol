@@ -11,6 +11,7 @@ marks the profile as unavailable.
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
 import urllib.request
@@ -562,49 +563,148 @@ def _codex_access_token(auth_path: Path) -> str | None:
 
 
 def _grok_access_token(state_directory: Path) -> str | None:
+    for _scope, token in _grok_auth_entries(state_directory):
+        return token
+    return None
+
+
+def _grok_auth_entries(state_directory: Path) -> tuple[tuple[str, str], ...]:
+    """Return ``(scope, access_token)`` pairs from a Grok state directory."""
+
     candidates = (
         state_directory / "auth.json",
         state_directory / ".grok" / "auth.json",
     )
+    found: list[tuple[str, str]] = []
     for path in candidates:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(data, dict):
-            for value in data.values():
-                if isinstance(value, dict):
-                    token = value.get("key") or value.get("access_token")
-                    if isinstance(token, str) and token:
-                        return token
-            token = data.get("key") or data.get("access_token")
-            if isinstance(token, str) and token:
-                return token
+        if not isinstance(data, dict):
+            continue
+        for key, value in data.items():
+            if isinstance(value, dict):
+                token = value.get("key") or value.get("access_token")
+                if isinstance(token, str) and token:
+                    found.append((str(key), token))
+        token = data.get("key") or data.get("access_token")
+        if isinstance(token, str) and token:
+            found.append(("", token))
+    return tuple(found)
+
+
+def _jwt_subject(token: str) -> str | None:
+    """Best-effort JWT ``sub`` / ``principal_id`` without signature verification."""
+
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    padded = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("sub", "principal_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
     return None
+
+
+def _host_grok_billing_log_paths(state_directory: Path) -> tuple[Path, ...]:
+    """Interactive host Grok profiles that share the same OAuth subject.
+
+    Sandboxed provider state rarely records ``billing: fetched credits config``
+    lines. Interactive CLI sessions under ``~/.grok-profiles`` do, and for the
+    same Super accounts the OAuth subject matches.
+    """
+
+    subjects = {
+        sub
+        for _scope, token in _grok_auth_entries(state_directory)
+        if (sub := _jwt_subject(token)) is not None
+    }
+    if not subjects:
+        return ()
+    # Hard-coded host layout used by this dogfood host; missing roots are skipped.
+    roots = (
+        Path("/home/vodkolyan/.grok-profiles"),
+        Path.home() / ".grok-profiles",
+    )
+    matched: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            accounts = list(root.iterdir())
+        except OSError:
+            continue
+        for account in accounts:
+            if not account.is_dir():
+                continue
+            account_subjects = {
+                sub
+                for _scope, token in _grok_auth_entries(account)
+                if (sub := _jwt_subject(token)) is not None
+            }
+            if not subjects.intersection(account_subjects):
+                continue
+            for rel in ("logs/unified.jsonl", ".grok/logs/unified.jsonl"):
+                path = account / rel
+                if path in seen:
+                    continue
+                if path.is_file():
+                    seen.add(path)
+                    matched.append(path)
+    return tuple(matched)
 
 
 def _latest_grok_billing_from_logs(state_directory: Path) -> dict[str, Any] | None:
     log_candidates = (
         state_directory / "logs" / "unified.jsonl",
         state_directory / ".grok" / "logs" / "unified.jsonl",
+        *_host_grok_billing_log_paths(state_directory),
     )
     for path in log_candidates:
-        if not path.is_file():
+        ctx = _billing_ctx_from_log_file(path)
+        if ctx is not None:
+            return ctx
+    return None
+
+
+def _billing_ctx_from_log_file(path: Path) -> dict[str, Any] | None:
+    """Scan a Grok unified log for the latest credits-config payload.
+
+    Interactive logs can be multi-MB; scan a large tail rather than the whole
+    file, but far enough back that billing lines are not lost among shell noise.
+    """
+
+    if not path.is_file():
+        return None
+    try:
+        # ~4 MiB tail is enough for days of interactive noise while staying cheap.
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - 4_000_000))
+            raw = handle.read()
+    except OSError:
+        return None
+    text = raw.decode("utf-8", errors="ignore")
+    for line in reversed(text.splitlines()):
+        if "billing: fetched credits config" not in line:
             continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
             continue
-        for line in reversed(lines[-500:]):
-            if "billing: fetched credits config" not in line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            ctx = payload.get("ctx")
-            if isinstance(ctx, dict):
-                return ctx
+        ctx = payload.get("ctx")
+        if isinstance(ctx, dict):
+            return ctx
     return None
 
 

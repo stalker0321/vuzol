@@ -244,11 +244,8 @@ def _humanize_model_slug(slug: str) -> str:
     text = slug.strip().replace("_", "-")
     if not text:
         return text
-    date_suffix = ""
-    dated = re.search(r"-(\d{4}-\d{2}-\d{2})$", text)
-    if dated:
-        date_suffix = f" ({dated.group(1)})"
-        text = text[: dated.start()]
+    # Drop trailing calendar versions like -2025-08-07 from display names.
+    text = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", text)
     parts = text.split("-")
     pretty: list[str] = []
     index = 0
@@ -282,7 +279,7 @@ def _humanize_model_slug(slug: str) -> str:
         else:
             pretty.append(part.capitalize() if part.islower() else part)
         index += 1
-    return " ".join(pretty) + date_suffix
+    return " ".join(pretty)
 
 
 def dashboard_revision_for(

@@ -33,14 +33,16 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.telegram.layout import STATUS_DASHBOARD_TOPIC_KIND
+from vuzol.telegram.layout import HISTORY_TOPIC_KIND, STATUS_DASHBOARD_TOPIC_KIND
 from vuzol.telegram.projections import (
     PROJECT_STATUS_DASHBOARD_ROLE,
+    TASK_HISTORY_ROLE,
     LostTelegramResponse,
     TelegramClient,
     build_approval_card,
     build_project_status_dashboard,
     build_status_card,
+    build_task_history_report,
     telegram_html,
 )
 
@@ -98,6 +100,8 @@ async def prepare_delivery(
         return await _prepare_project_status_dashboard(
             session, item, topics=topics, projects=projects, profiles=profiles
         )
+    if item.payload.get("role") == TASK_HISTORY_ROLE:
+        return await _prepare_task_history_report(session, item, topics=topics, projects=projects)
     if item.linked_entity_type == "project_naming":
         naming = await session.get(ProjectNamingRequest, item.linked_entity_id)
         if naming is None:
@@ -312,6 +316,60 @@ async def _resolve_status_dashboard_thread(
     if mapping is None:
         raise PermanentDeliveryError("status_dashboard_topic_missing")
     return mapping.message_thread_id
+
+
+async def _prepare_task_history_report(
+    session: AsyncSession,
+    item: TransactionalOutbox,
+    *,
+    topics: TopicRegistry | None,
+    projects: ProjectRegistry | None,
+) -> PreparedDelivery:
+    """Deliver a one-shot completion report into «История» (changelog)."""
+
+    raw_task_id = item.payload.get("task_id")
+    try:
+        task_id = uuid.UUID(str(raw_task_id))
+    except (TypeError, ValueError) as error:
+        raise PermanentDeliveryError("invalid_history_task_id") from error
+    project_names = (
+        {project.id: project.display_name for project in projects.items()}
+        if projects is not None
+        else None
+    )
+    report = await build_task_history_report(session, task_id, project_names=project_names)
+    if report is None:
+        return PreparedDelivery(
+            DeliveryAction.NOOP,
+            chat_id=int(item.payload.get("chat_id") or 0),
+            thread_id=None,
+        )
+    thread_id = report.thread_id
+    if topics is not None:
+        destination = topics.system_topic(report.chat_id, HISTORY_TOPIC_KIND)
+        if destination is not None and destination.enabled:
+            thread_id = destination.message_thread_id
+    existing = await session.scalar(
+        select(TelegramMessageLink).where(
+            TelegramMessageLink.task_id == task_id,
+            TelegramMessageLink.message_role == TASK_HISTORY_ROLE,
+        )
+    )
+    if existing is not None:
+        return PreparedDelivery(
+            DeliveryAction.NOOP,
+            chat_id=report.chat_id,
+            thread_id=thread_id,
+        )
+    return PreparedDelivery(
+        DeliveryAction.SEND_STATUS,
+        chat_id=report.chat_id,
+        thread_id=thread_id,
+        html=report.html,
+        task_id=task_id,
+        revision=report.revision,
+        message_role=TASK_HISTORY_ROLE,
+    )
 
 
 async def _prepare_project_status_dashboard(

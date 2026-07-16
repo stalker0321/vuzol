@@ -53,7 +53,11 @@ class LocalGit:
             raise GitError("unfinished project README differs from the requested project")
         readme_path.write_text(readme)
         await self.stage_paths(repository, ("README.md",))
-        return await self.create_commit(repository, "chore: initialize project")
+        commit = await self.create_commit(repository, "chore: initialize project")
+        # Leave the managed primary tree detached so apply can CAS-update main
+        # without fighting a checked-out branch on newly provisioned projects.
+        await self._run(repository, "switch", "--detach", "HEAD")
+        return commit
 
     async def resolve_commit(self, repository: Path, ref: str) -> str:
         value = await self._run(repository, "rev-parse", "--verify", f"{ref}^{{commit}}")
@@ -215,7 +219,13 @@ class LocalGit:
         expected_head: str,
         result_commit: str,
     ) -> bool:
-        """Atomically advance an un-checked-out target ref to one verified result."""
+        """Atomically advance the target ref to one verified result.
+
+        Prefer an un-checked-out ref (``update-ref`` CAS). When the managed
+        repository still has the target branch checked out — typical for a
+        freshly provisioned project — require a clean tree at ``expected_head``
+        and hard-reset after the CAS so the worktree stays coherent.
+        """
 
         await self.require_clean_worktree(worktree)
         await self.require_no_remotes(worktree)
@@ -223,8 +233,11 @@ class LocalGit:
             raise GitError("result commit is not a direct child of the approved base")
         target_ref = f"refs/heads/{target_branch}"
         checked_out = await self._optional(repository, "symbolic-ref", "--quiet", "HEAD")
-        if checked_out is not None and checked_out.decode().strip() == target_ref:
-            raise GitError("target branch is checked out in the managed repository")
+        target_is_checked_out = (
+            checked_out is not None and checked_out.decode().strip() == target_ref
+        )
+        if target_is_checked_out:
+            await self.require_clean_source(repository)
         current = await self.resolve_commit(repository, target_ref)
         if current == result_commit:
             return False
@@ -236,6 +249,11 @@ class LocalGit:
         await self._run(repository, "update-ref", target_ref, result_commit, expected_head)
         if await self.resolve_commit(repository, target_ref) != result_commit:
             raise GitError("target branch did not advance to the approved result")
+        if target_is_checked_out:
+            # Keep the primary worktree aligned with the advanced branch tip.
+            await self._run(repository, "reset", "--hard", result_commit)
+            if await self.resolve_commit(repository, "HEAD") != result_commit:
+                raise GitError("managed worktree did not reset to the approved result")
         return True
 
     async def remove_worktree(self, repository: Path, path: Path) -> None:

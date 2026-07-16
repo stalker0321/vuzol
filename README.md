@@ -20,10 +20,12 @@ Telegram text or voice message
 → versioned persisted workflow and explicit steps
 → deterministic capability/health/budget-aware provider routing
 → atomic budget reservation and fenced execution
-→ for explicit bounded coding tasks: isolated worktree and Codex sandbox
-→ measured diff, trusted validation, and retained result commit
-→ Telegram summary plus trusted gate results
-→ exact-result approval and drift-safe local apply
+→ coding.v1: isolated worktree + sandbox execute
+→ deterministic validate (trusted gates + measured result commit)
+→ mechanical review when risk ≥ medium
+→ exact-result card in «Апрувы»
+→ privileged local apply after Approve
+→ completion report / dashboard refresh
 → restart recovery
 ```
 
@@ -31,21 +33,34 @@ Ingress, Telegram delivery, interpretation, and workflow management run as separ
 Their inbox/outbox, step, event, and fenced lease records make completed delivery, transcription,
 interpretation, controls, and workflow progress safe across process restarts.
 
-The current MVP can route and execute safe model-only OpenAI-compatible workflow steps. It also
-supports one deliberately narrow production coding path: an allowlisted user may submit an
-explicit `/sol` command with a closed file scope in a configured project topic. Vuzol executes
-Codex in an isolated rootless sandbox and standalone Git worktree, measures the resulting diff,
-runs the configured trusted gates in a separate pinned validation image, retains the verified
-result commit, and reports a semantic completion summary plus trusted gate results through
-Telegram. Approve is bound to the exact base, result, diff identity, gates, and policy revisions;
-a separate trusted applier may then advance only the configured local branch with an atomic
-target-head check.
+The current MVP routes and executes safe model-only OpenAI-compatible workflow steps and a
+production **coding.v1** path. Interpreted coding tasks (including the bounded `/sol` intake) run
+in an isolated rootless sandbox and standalone Git worktree. After execution Vuzol:
 
-This coding path does not push, deploy, perform general privileged host actions, or grant broad
-repository scope. Redo closes the result and asks for a corrected bounded `/sol` request, Reject
-leaves the retained result unapplied, and no decision exposes the code diff in Telegram. General natural-language coding
-intake, automatic trust promotion, independent review policy, merge, push, and deployment remain
-outside the supported boundary.
+1. **validates** with measured Git facts and trusted gates in a separate pinned validation image,
+   then retains a host-owned result commit;
+2. **reviews** mechanically for medium risk (pattern/diff inspection; no production secrets);
+3. posts an **exact-result** Approve / Redo / Reject card in the global «Апрувы» topic, bound to
+   base, result, diff identity, gates, and the approved action envelope;
+4. on Approve, a separate **applier** advances only the configured local managed-branch tip with
+   CAS protection (including when that branch is still checked out on a clean primary tree).
+
+High and privileged risk fail closed until an independent model reviewer is enabled. Redo cancels
+the retained result for a corrected request; Reject leaves it unapplied. Diffs stay private audit
+artifacts and are not posted to Telegram.
+
+This path does **not** push, open merge requests, deploy, or perform general privileged host
+actions. Automatic trust promotion and independent LLM review remain outside the supported
+boundary.
+
+### Production smoke (coding path)
+
+After deploy, one end-to-end check is enough to confirm Step 09 wiring:
+
+1. Send a small coding task in a configured project topic.
+2. Wait for validate + review; confirm a card appears in **Апрувы**.
+3. Press **Approve**; confirm the managed project `main` (or configured branch) advances and the
+   task reaches **completed** (dashboard / История).
 
 ## Requirements and setup
 

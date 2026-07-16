@@ -63,6 +63,8 @@ provider response bodies and exceptions do not enter task state, events, Telegra
 
 The worker can execute safe, model-only OpenAI-compatible steps such as simple answers, planning,
 research synthesis, and summarization. Automatic workflow start remains disabled by default.
+Production planning uses a dedicated GPT-5 nano API profile with a bounded 1,000-token output;
+repository analysis and architectural discussion remain full agent tasks rather than planner work.
 
 The dedicated executor also registers isolated Codex and Grok CLI transports behind the Step 08
 worktree, supervised-process, rootless-sandbox, and controlled-egress boundary. Provider state,

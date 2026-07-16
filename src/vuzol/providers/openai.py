@@ -196,12 +196,22 @@ def _payload(request: ProviderRequest, profile: ProviderProfileConfig) -> dict[s
             },
             {"role": "user", "content": json.dumps(user_data, ensure_ascii=False)},
         ],
-        "temperature": 0,
-        "max_tokens": request.max_output_tokens,
     }
+    if _uses_reasoning_chat_parameters(profile.model):
+        payload["max_completion_tokens"] = request.max_output_tokens
+        payload["reasoning_effort"] = "minimal"
+    else:
+        payload["temperature"] = 0
+        payload["max_tokens"] = request.max_output_tokens
     if request.output_json_schema is not None:
         payload["response_format"] = {"type": "json_object"}
     return payload
+
+
+def _uses_reasoning_chat_parameters(model: str) -> bool:
+    """Use the Chat Completions parameter set required by GPT-5 models."""
+
+    return model.lower().startswith("gpt-5")
 
 
 def _http_failure(response: httpx.Response) -> ProviderFailure:

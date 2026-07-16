@@ -216,6 +216,8 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             assert decided_card.buttons == ()
 
         project = SimpleNamespace(
+            enabled=True,
+            default_branch="main",
             repository_path=repository,
             git_delivery=GitDeliveryPolicy(
                 allowed_modes=frozenset(

@@ -477,12 +477,27 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
         assert client.edited == []
         assert len(client.sent) == 1
         # Completing the task empties the dashboard and edits the same message.
+        # Double enqueue in one session (intake_ack + approval_card path) must not
+        # insert two outbox rows with the same idempotency key.
         async with factory.begin() as session:
             row = await session.get(Task, task_id)
             assert row is not None
             row.status = TaskStatus.COMPLETED
             row.version = 2
             await enqueue_project_status_dashboard(session, chat_id)
+            await enqueue_project_status_dashboard(session, chat_id)
+            pending = await session.scalar(
+                select(func.count())
+                .select_from(TransactionalOutbox)
+                .where(
+                    TransactionalOutbox.destination == "telegram",
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                    TransactionalOutbox.idempotency_key.like(
+                        f"%project_status_dashboard:{chat_id}:%"
+                    ),
+                )
+            )
+            assert pending == 1
         assert await delivery.deliver_one()
         assert len(client.sent) == 1
         assert len(client.edited) == 1

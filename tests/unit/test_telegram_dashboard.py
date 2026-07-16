@@ -64,7 +64,7 @@ def test_model_label_is_english_and_friendly() -> None:
     assert format_executor_model("gpt-5.6-terra", effort="high", provider="codex") == (
         "Codex Terra · high"
     )
-    assert format_executor_model("gpt-5-nano-2025-08-07") == "GPT-5 Nano (2025-08-07)"
+    assert format_executor_model("gpt-5-nano-2025-08-07") == "GPT-5 Nano"
     assert format_executor_model("gpt-5.1-codex") == "GPT-5.1 Codex"
 
 

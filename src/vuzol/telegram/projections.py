@@ -115,6 +115,25 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
                 f"Usage: {telegram_html(usage.input_tokens)} in / "
                 f"{telegram_html(usage.output_tokens or 0)} out"
             )
+    if run is not None and task.status.value == "completed":
+        result_step = await session.scalar(
+            select(Step)
+            .where(
+                Step.run_id == run.id,
+                Step.step_type.in_(
+                    ("execute_agent", "execute_model", "research_execute", "synthesize")
+                ),
+            )
+            .order_by(Step.ordinal.desc())
+            .limit(1)
+        )
+        result = result_step.result if result_step is not None else None
+        text = result.get("text") if isinstance(result, dict) else None
+        if isinstance(text, str) and text.strip():
+            bounded = text.strip()[:3_000]
+            if len(text.strip()) > len(bounded):
+                bounded += "…"
+            lines.extend(("", "<b>Результат</b>", telegram_html(bounded)))
     elapsed = max(0, int((datetime.now(UTC) - task.created_at).total_seconds()))
     lines.append(f"Elapsed: {elapsed}s")
     if event is not None:

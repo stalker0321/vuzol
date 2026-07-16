@@ -95,7 +95,7 @@ def test_registry_overlay_adds_one_inherited_project_and_topic_idempotently(
     assert [project.id for project in overlay.projects] == ["notes"]
     assert overlay.projects[0].git_delivery.allowed_modes
     assert overlay.topics[0].message_thread_id == 41
-    assert overlay.topics[0].default_workflow == "coding_task"
+    assert overlay.topics[0].default_workflow == "adaptive_task"
     merged = build_bundle(merge_documents(base, overlay), settings)
     assert merged.projects.get("notes").repository_path == repository_root / "notes"
     assert merged.topics.resolve(-100, 41).project_id == "notes"

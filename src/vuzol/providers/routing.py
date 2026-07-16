@@ -38,6 +38,7 @@ PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
     "plan": ProviderRole.PLANNER,
     "review": ProviderRole.REVIEWER,
     "execute_code": ProviderRole.EXECUTOR,
+    "execute_agent": ProviderRole.EXECUTOR,
 }
 
 
@@ -151,9 +152,11 @@ async def claim_routed_step(
             trusted_profile_id=_trusted_profile_id(run),
             failed_profile_id=failed_profile_id,
             allowed_fallback_ids=allowed_fallbacks,
-            requires_sandbox=step.step_type == "execute_code",
+            requires_sandbox=step.step_type in {"execute_code", "execute_agent"},
             required_launch_mode=(
-                LaunchMode.CLI if step.step_type == "execute_code" else LaunchMode.API
+                LaunchMode.CLI
+                if step.step_type in {"execute_code", "execute_agent"}
+                else LaunchMode.API
             ),
         )
         decision = select_profile(policy_request, profiles, states)

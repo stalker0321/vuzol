@@ -129,7 +129,11 @@ class ExecutionEnvelopeFactory:
                 SandboxMount(
                     source=worktree_path,
                     target=Path("/workspace"),
-                    mode=MountMode.READ_WRITE,
+                    mode=(
+                        MountMode.READ_ONLY
+                        if step.step_type == "execute_agent"
+                        else MountMode.READ_WRITE
+                    ),
                     purpose="task-worktree",
                 ),
                 SandboxMount(
@@ -611,10 +615,10 @@ def _worktree_git_metadata(worktree: Path) -> Path:
 
 def _require_provider_command(argv: tuple[str, ...], provider: str, model: str) -> None:
     expected = {
-        "codex": canonical_codex_argv(),
-        "grok": canonical_grok_argv(model),
+        "codex": {canonical_codex_argv(), canonical_codex_argv(read_only=True)},
+        "grok": {canonical_grok_argv(model), canonical_grok_argv(model, read_only=True)},
     }.get(provider)
-    if expected is None or argv != expected:
+    if expected is None or argv not in expected:
         raise ValueError("sandbox rejected a non-canonical provider command")
 
 

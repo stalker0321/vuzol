@@ -78,6 +78,18 @@ def enforce_interpretation_policy(
             project_name_options=(),
         )
         reasons.append("project_creation_confined_to_inbox")
+    elif request.topic_kind is TopicKind.PROJECT and draft.task_type is TaskType.ARCHITECTURE:
+        if draft.action in {TaskAction.ANSWER_QUESTION, TaskAction.GENERAL_CONVERSATION}:
+            updates.update(action=TaskAction.CREATE_TASK, operation=TaskOperation.INSPECT)
+            reasons.append("architecture_requires_agent_task")
+        if draft.action in {
+            TaskAction.CREATE_TASK,
+            TaskAction.CONTINUE_TASK,
+            TaskAction.ANSWER_QUESTION,
+            TaskAction.GENERAL_CONVERSATION,
+        } and draft.required_capabilities != frozenset({Capability.REPOSITORY_READ}):
+            updates["required_capabilities"] = frozenset({Capability.REPOSITORY_READ})
+            reasons.append("architecture_confined_to_read_only")
     if draft.project_id is not None and draft.project_id not in known_project_ids:
         updates.update(
             project_id=None,

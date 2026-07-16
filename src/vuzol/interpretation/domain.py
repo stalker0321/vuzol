@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from vuzol.config import Capability, TopicKind
 from vuzol.storage.types import RiskLevel
 
-TASK_DRAFT_SCHEMA_VERSION = "1.2"
-INTERPRETER_PROMPT_VERSION = "project-naming-v2"
+TASK_DRAFT_SCHEMA_VERSION = "1.3"
+INTERPRETER_PROMPT_VERSION = "architecture-routing-v4"
 
 
 class FrozenModel(BaseModel):
@@ -31,6 +31,7 @@ class TaskAction(StrEnum):
 
 class TaskType(StrEnum):
     CODING = "coding"
+    ARCHITECTURE = "architecture"
     RESEARCH = "research"
     INFRASTRUCTURE = "infrastructure"
     FILE_PROCESSING = "file_processing"

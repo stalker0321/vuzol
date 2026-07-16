@@ -271,7 +271,10 @@ class ProviderStepHandler:
                     step_id=request.step_id,
                     result=finalization_result,
                 )
-            if request.step_type == "execute_code" and self._worktrees is not None:
+            if (
+                request.step_type in {"execute_code", "execute_agent"}
+                and self._worktrees is not None
+            ):
                 wt = await session.scalar(select(Worktree).where(Worktree.run_id == request.run_id))
                 if wt is not None:
                     await self._worktrees.retain(
@@ -600,7 +603,7 @@ class ProviderStepHandler:
         )
 
     async def _retain_active_worktree(self, request: StepExecutionRequest) -> None:
-        if request.step_type != "execute_code" or self._worktrees is None:
+        if request.step_type not in {"execute_code", "execute_agent"} or self._worktrees is None:
             return
         async with self._factory.begin() as session:
             worktree = await session.scalar(
@@ -681,7 +684,7 @@ class ProviderStepHandler:
                 raise LookupError("provider reservation is missing")
             profile = self._registries.profiles.get(step.executor_profile_id)
             worktree = None
-            if step.step_type == "execute_code":
+            if step.step_type in {"execute_code", "execute_agent"}:
                 worktree = await session.scalar(
                     select(Worktree).where(
                         Worktree.run_id == run.id,
@@ -689,7 +692,7 @@ class ProviderStepHandler:
                     )
                 )
                 if worktree is None:
-                    raise LookupError("execute_code requires a prepared worktree")
+                    raise LookupError("agent execution requires a prepared worktree")
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
@@ -753,7 +756,7 @@ def provider_handlers(handler: ProviderStepHandler) -> dict[str, ProviderStepHan
 
 
 def executor_provider_handlers(handler: ProviderStepHandler) -> dict[str, ProviderStepHandler]:
-    return {"execute_code": handler}
+    return {"execute_agent": handler, "execute_code": handler}
 
 
 def _step09a_result_schema(

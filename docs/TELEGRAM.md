@@ -60,6 +60,10 @@ The initial workspace uses these roles:
 - `История` (`changelog`) for the future append-only cross-project history;
 - one `<project>` (`project`) topic for each active project.
 
+Project topics use adaptive workflow selection. Implementation requests use the coding workflow;
+repository-aware architecture and design discussions use the read-only architecture-agent
+workflow and return their textual result in the task card.
+
 `Новый проект` is an explicit provisioning boundary. An allowlisted text or voice message is
 treated as the project's nature and goal. The interpreter proposes nine distinct display-name and
 bounded repository-ID pairs. Telegram presents them as three rows of inline buttons plus `Другие

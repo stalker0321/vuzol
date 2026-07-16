@@ -167,6 +167,35 @@ def test_project_topic_cannot_be_reinterpreted_as_new_project() -> None:
     assert "project_creation_confined_to_inbox" in policy.reasons
 
 
+def test_task_schema_exposes_architecture_as_a_distinct_agent_task() -> None:
+    schema = TaskDraft.model_json_schema()
+    task_type_schema = schema["$defs"]["TaskType"]
+    assert "architecture" in task_type_schema["enum"]
+
+
+def test_project_architecture_question_is_a_read_only_agent_task() -> None:
+    contextual = request().model_copy(
+        update={"topic_kind": TopicKind.PROJECT, "mapped_project_id": "vuzol"}
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(
+            action=TaskAction.ANSWER_QUESTION,
+            task_type=TaskType.ARCHITECTURE,
+            operation=TaskOperation.EXPLAIN,
+            required_capabilities=frozenset({Capability.CODE_EDIT}),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.action is TaskAction.CREATE_TASK
+    assert policy.draft.operation is TaskOperation.INSPECT
+    assert policy.draft.required_capabilities == frozenset({Capability.REPOSITORY_READ})
+    assert policy.draft.project_id == "vuzol"
+    assert "architecture_requires_agent_task" in policy.reasons
+    assert "architecture_confined_to_read_only" in policy.reasons
+
+
 def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:
     value = draft(
         project_id="invented",

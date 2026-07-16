@@ -5,7 +5,8 @@ import pytest
 from sqlalchemy import select
 
 from tests.integration.storage.helpers import storage
-from vuzol.storage.models import TelegramMessageLink
+from vuzol.storage.models import Step, Task, TelegramMessageLink
+from vuzol.storage.types import IdempotencyClass, RunStatus, StepStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.projections import (
     FakeTelegramClient,
@@ -79,6 +80,50 @@ def test_failed_or_lost_send_does_not_create_projection_link(postgres_dsn: str) 
             await session.rollback()
         async with factory() as session:
             assert await session.scalar(select(TelegramMessageLink.id)) is None
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_completed_agent_result_is_rendered_in_project_topic(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                project_id="vuzol",
+                original_text="Review the architecture",
+                task_type="architecture",
+            )
+            run_id = await uow.runs.create(
+                task_id=task.id,
+                workflow_type="architecture",
+                workflow_version="1",
+                budget_mode="balanced",
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+                status=RunStatus.COMPLETED,
+            )
+            step = await uow.steps.create(
+                run_id=run_id,
+                ordinal=1,
+                step_type="execute_agent",
+                status=StepStatus.COMPLETED,
+                idempotency_class=IdempotencyClass.READ_ONLY,
+            )
+            assert uow.session is not None
+            stored_task = await uow.session.get(Task, task.id)
+            stored_step = await uow.session.get(Step, step.id)
+            assert stored_task is not None and stored_step is not None
+            stored_task.status = TaskStatus.COMPLETED
+            stored_step.result = {"text": "Use <ports> and adapters."}
+
+        async with factory() as session:
+            card = await build_status_card(session, task.id)
+            assert "<b>Результат</b>" in card.html
+            assert "Use &lt;ports&gt; and adapters." in card.html
         await engine.dispose()
 
     asyncio.run(scenario())

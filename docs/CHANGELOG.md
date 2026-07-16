@@ -16,6 +16,8 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added adaptive project-topic routing and a full read-only architecture-agent workflow with a
+  bounded GPT-5 nano planning step, isolated repository inspection, and Telegram result delivery;
 - added the narrow retained-result decision loop: semantic Telegram completion summaries, trusted
   gate results, immutable exact-result Approve/Redo/Reject callbacks, and a separate policy-gated
   local applier with atomic target-drift protection; diffs remain private audit artifacts and no

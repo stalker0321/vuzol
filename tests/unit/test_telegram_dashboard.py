@@ -38,6 +38,24 @@ def test_task_number_prefers_public_then_local() -> None:
     assert task_number_label(missing) == "—"  # type: ignore[arg-type]
 
 
+def test_model_label_is_english_and_friendly() -> None:
+    from vuzol.telegram.projections import model_label_for_profile
+
+    assert model_label_for_profile(None) == "not assigned yet"
+    assert (
+        model_label_for_profile(
+            "codex-subscription-prod", profile_models={"codex-subscription-prod": "codex"}
+        )
+        == "Codex"
+    )
+    assert (
+        model_label_for_profile(
+            "grok-subscription-a", profile_models={"grok-subscription-a": "grok-build"}
+        )
+        == "Grok"
+    )
+
+
 def test_task_sense_is_one_sentence() -> None:
     task = SimpleNamespace(
         task_draft={
@@ -56,10 +74,10 @@ def test_task_sense_is_one_sentence() -> None:
 
 
 def test_model_label_uses_registry_model() -> None:
-    assert model_label_for_profile(None) == "ещё не назначена"
-    assert model_label_for_profile("codex-prod") == "codex-prod"
+    assert model_label_for_profile(None) == "not assigned yet"
+    assert model_label_for_profile("other-profile") == "other-profile"
     assert (
-        model_label_for_profile("codex-prod", profile_models={"codex-prod": "gpt-5.1-codex"})
+        model_label_for_profile("other-profile", profile_models={"other-profile": "gpt-5.1-codex"})
         == "gpt-5.1-codex"
     )
 

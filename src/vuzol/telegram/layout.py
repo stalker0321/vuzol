@@ -34,6 +34,7 @@ UNPINNED_SYSTEM_TOPIC_KINDS: frozenset[TopicKind] = frozenset({TopicKind.SYSTEM}
 # (display name «Статус проектов»). Content is chat-scoped but the role is product-global.
 STATUS_DASHBOARD_TOPIC_KIND = TopicKind.TASK_DASHBOARD
 STATUS_DASHBOARD_DISPLAY_NAME = SYSTEM_TOPIC_DISPLAY_NAMES[STATUS_DASHBOARD_TOPIC_KIND]
+DASHBOARD_CARD_TITLE = "Project status"
 
 
 def is_system_workspace_kind(kind: TopicKind) -> bool:

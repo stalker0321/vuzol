@@ -339,13 +339,11 @@ async def _prepare_project_status_dashboard(
         if profiles is not None
         else None
     )
-    subscription_profiles = tuple(profiles.items()) if profiles is not None else None
     card = await build_project_status_dashboard(
         session,
         chat_id,
         project_names=project_names,
         profile_models=profile_models,
-        subscription_profiles=subscription_profiles,
     )
     link = await session.scalar(
         select(TelegramMessageLink).where(

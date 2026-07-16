@@ -4,9 +4,12 @@ import asyncio
 import os
 import signal
 import socket
+import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
 from vuzol.config.models import SandboxNetworkMode
@@ -225,21 +228,71 @@ async def run() -> None:
             queue_classes=frozenset({QueueClass.HEAVY}),
         )
         await _run_loop(
-            ExecutorChain(worktree_worker, provider_worker), settings.workflow.poll_interval_seconds
+            ExecutorChain(worktree_worker, provider_worker),
+            settings.workflow.poll_interval_seconds,
+            session_factory=factory,
+            registries=runtime.registries,
         )
     finally:
         await engine.dispose()
 
 
-async def _run_loop(processor: ExecutorChain, poll_interval: float) -> None:
+async def _run_loop(
+    processor: ExecutorChain,
+    poll_interval: float,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    registries: object | None = None,
+) -> None:
+    from sqlalchemy import select
+
+    from vuzol.providers.subscription_limits import refresh_and_store_subscription_limits
+    from vuzol.storage.models import TopicMapping
+    from vuzol.telegram.projections import enqueue_project_status_dashboard
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         with suppress(NotImplementedError):
             loop.add_signal_handler(signum, stop.set)
     get_logger(__name__).info("executor ready", extra={"event": "executor.ready"})
+    limit_refresh_seconds = 120.0
+    last_limit_refresh = -limit_refresh_seconds  # refresh once on startup
     while not stop.is_set():
-        if not await processor.process_one():
+        worked = await processor.process_one()
+        now = time.monotonic()
+        if (
+            session_factory is not None
+            and registries is not None
+            and now - last_limit_refresh >= limit_refresh_seconds
+        ):
+            try:
+                async with session_factory.begin() as session:
+                    profiles = registries.profiles.items()  # type: ignore[attr-defined]
+                    await refresh_and_store_subscription_limits(session, profiles)
+                    chats = (
+                        await session.scalars(
+                            select(TopicMapping.chat_id)
+                            .where(
+                                TopicMapping.topic_kind == "task_dashboard",
+                                TopicMapping.enabled.is_(True),
+                            )
+                            .distinct()
+                        )
+                    ).all()
+                    for chat_id in chats:
+                        await enqueue_project_status_dashboard(session, int(chat_id))
+                last_limit_refresh = now
+            except Exception as error:  # pragma: no cover - operational best-effort
+                get_logger(__name__).warning(
+                    "subscription limit refresh failed",
+                    extra={
+                        "event": "executor.subscription_limits_failed",
+                        "error_type": type(error).__name__,
+                    },
+                )
+                last_limit_refresh = now
+        if not worked:
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval)
     get_logger(__name__).info("executor stopped", extra={"event": "executor.stopped"})

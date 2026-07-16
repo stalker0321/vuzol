@@ -455,10 +455,10 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
         html = client.sent[0][2]
         assert client.sent[0][0] == chat_id
         assert client.sent[0][1] == dashboard_thread
-        assert "Статус проектов" in html
-        assert "№100001" in html
+        assert "Project status" in html
+        assert "#100001" in html
         assert "Build a dashboard" in html
-        assert "codex-subscription-prod" in html
+        assert "Codex" in html
         # Same content/revision must not enqueue another pending outbox row.
         async with factory.begin() as session:
             await enqueue_project_status_dashboard(session, chat_id)
@@ -487,7 +487,7 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
         assert len(client.sent) == 1
         assert len(client.edited) == 1
         assert client.edited[0][1] == 200
-        assert "нет задач в работе" in client.edited[0][2]
+        assert "No active tasks right now." in client.edited[0][2]
         async with factory() as session:
             links = (
                 await session.scalars(

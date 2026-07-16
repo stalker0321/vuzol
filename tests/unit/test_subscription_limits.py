@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -556,3 +558,202 @@ def test_http_json_non_dict_and_log_oserror(
 
     monkeypatch.setattr(Path, "read_text", boom)
     assert _latest_grok_billing_from_logs(tmp_path) is None
+
+
+@pytest.mark.anyio
+async def test_persist_and_load_subscription_limits() -> None:
+    """Persist/load round-trip using a lightweight in-memory session mock."""
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from vuzol.providers.subscription_limits import (
+        load_subscription_limits,
+        persist_subscription_limits,
+        refresh_and_store_subscription_limits,
+    )
+
+    snap = SubscriptionLimitSnapshot(
+        profile_id="codex-subscription-prod",
+        company="OpenAI",
+        plan_label="Plus",
+        five_hour=LimitWindow(remaining_percent=40, reset_at=None, available=True),
+        weekly=LimitWindow(
+            remaining_percent=70,
+            reset_at=datetime(2026, 7, 20, tzinfo=UTC),
+            available=True,
+        ),
+        observed_at=datetime(2026, 7, 16, tzinfo=UTC),
+        ok=True,
+    )
+    failed = SubscriptionLimitSnapshot(
+        profile_id="grok-subscription-a",
+        company="xAI",
+        plan_label="Super",
+        five_hour=LimitWindow(None, None, available=False, detail="—"),
+        weekly=LimitWindow(None, None, available=False, detail="—"),
+        observed_at=datetime(2026, 7, 16, tzinfo=UTC),
+        ok=False,
+        detail="PermissionError",
+    )
+
+    stored: dict[str, Any] = {}
+    session = MagicMock()
+
+    async def _get(_model: object, key: str) -> Any:
+        return stored.get(key)
+
+    def _add(row: Any) -> None:
+        stored[row.profile_id] = row
+
+    session.get = AsyncMock(side_effect=_get)
+    session.add = MagicMock(side_effect=_add)
+    session.flush = AsyncMock()
+
+    await persist_subscription_limits(session, (snap, failed))
+    assert set(stored) == {"codex-subscription-prod", "grok-subscription-a"}
+    codex_row = stored["codex-subscription-prod"]
+    assert codex_row.company == "OpenAI"
+    assert codex_row.weekly_remaining_percent == 70
+
+    # Second persist updates the existing ORM row in place.
+    snap2 = SubscriptionLimitSnapshot(
+        profile_id="codex-subscription-prod",
+        company="OpenAI",
+        plan_label="Pro",
+        five_hour=LimitWindow(remaining_percent=None, reset_at=None, available=False),
+        weekly=LimitWindow(
+            remaining_percent=55,
+            reset_at=datetime(2026, 7, 21, tzinfo=UTC),
+            available=True,
+        ),
+        observed_at=datetime(2026, 7, 16, 1, tzinfo=UTC),
+        ok=True,
+    )
+    await persist_subscription_limits(session, (snap2,))
+    assert codex_row.plan_label == "Pro"
+    assert codex_row.weekly_remaining_percent == 55
+    assert codex_row.five_hour_remaining_percent is None
+
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: list(stored.values())))
+    loaded = await load_subscription_limits(session)
+    assert len(loaded) == 2
+    by_id = {item.profile_id: item for item in loaded}
+    assert by_id["codex-subscription-prod"].plan_label == "Pro"
+    assert by_id["codex-subscription-prod"].weekly.remaining_percent == 55
+    assert by_id["grok-subscription-a"].ok is False
+    assert by_id["grok-subscription-a"].detail == "PermissionError"
+    assert by_id["grok-subscription-a"].five_hour.available is False
+
+    from vuzol.providers import subscription_limits as limits_mod
+
+    async def fake_collect(
+        profiles: object, *, now: object = None
+    ) -> tuple[SubscriptionLimitSnapshot, ...]:
+        return (snap,)
+
+    original = limits_mod.collect_subscription_limits
+    limits_mod.collect_subscription_limits = fake_collect
+    try:
+        out = await refresh_and_store_subscription_limits(session, ())
+        assert len(out) == 1
+        assert out[0].profile_id == "codex-subscription-prod"
+    finally:
+        limits_mod.collect_subscription_limits = original
+
+
+def test_grok_billing_unavailable_and_html_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "g"
+    state.mkdir()
+    profile = _cli_profile("grok-empty", "grok", state)
+    # No auth, no logs → billing unavailable
+    assert collect_profile_limits(profile).detail == "billing unavailable"
+
+    (state / "auth.json").write_text(json.dumps({"k": {"key": "tok"}}), encoding="utf-8")
+
+    def html_then_none(url: str, *, headers: dict[str, str]) -> dict[str, object] | None:
+        if "grok.com" in url:
+            return {"title": "Not billing"}  # looks like HTML / non-billing
+        return None
+
+    monkeypatch.setattr(
+        "vuzol.providers.subscription_limits._http_json",
+        html_then_none,
+    )
+    assert collect_profile_limits(profile).detail == "billing unavailable"
+
+    monkeypatch.setattr(
+        "vuzol.providers.subscription_limits._http_json",
+        lambda *a, **k: {"config": "not-a-dict", "creditUsagePercent": 50},
+    )
+    # Non-dict config falls back to the outer payload; still a valid snapshot.
+    snap = collect_profile_limits(profile, now=datetime(2026, 7, 16, tzinfo=UTC))
+    assert snap.ok is True
+    assert snap.weekly.remaining_percent == 50
+
+
+def test_codex_window_edges_and_invalid_percents() -> None:
+    from vuzol.providers.subscription_limits import (
+        _classify_codex_window,
+        _weekly_from_grok_config,
+        _window_from_generic,
+    )
+
+    observed = datetime(2026, 7, 16, tzinfo=UTC)
+    assert _classify_codex_window({"limit_window_seconds": "bad"}, observed) is None
+    assert _classify_codex_window({"limit_window_seconds": 12_000}, observed) is not None
+    # Between 6h and 3d → unclassified
+    assert _classify_codex_window({"limit_window_seconds": 86_400}, observed) is None
+    # Invalid percent values fall back to None remaining
+    window = _window_from_generic(
+        {"used_percent": "nope", "limit_window_seconds": 18_000},
+        observed,
+        default_seconds=18_000,
+    )
+    assert window.remaining_percent is None
+    weekly = _weekly_from_grok_config(
+        {
+            "creditUsagePercent": "x",
+            "currentPeriod": {"end": "2026-07-20T00:00:00Z"},
+        },
+        observed,
+    )
+    assert weekly.remaining_percent is None
+    assert weekly.reset_at is not None
+
+
+@pytest.mark.anyio
+async def test_dashboard_loads_limits_from_db_not_filesystem() -> None:
+    """Delivery path must use DB snapshots (no collect_subscription_limits)."""
+
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from vuzol.telegram.projections import build_project_status_dashboard
+
+    snap = SubscriptionLimitSnapshot(
+        profile_id="codex-subscription-prod",
+        company="OpenAI",
+        plan_label="Plus",
+        five_hour=LimitWindow(remaining_percent=80, reset_at=None, available=True),
+        weekly=LimitWindow(
+            remaining_percent=28,
+            reset_at=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+            available=True,
+        ),
+        observed_at=datetime(2026, 7, 16, tzinfo=UTC),
+        ok=True,
+    )
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+
+    with patch(
+        "vuzol.telegram.projections.load_subscription_limits",
+        new=AsyncMock(return_value=(snap,)),
+    ) as load_mock:
+        card = await build_project_status_dashboard(session, chat_id=1)
+    load_mock.assert_awaited_once()
+    assert "Subscription limits" in card.html
+    assert "28% left" in card.html
+    assert "OpenAI" in card.html
+    assert "auth.json" not in card.html

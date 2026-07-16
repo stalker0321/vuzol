@@ -239,6 +239,69 @@ def test_route_reservation_and_fenced_claim_are_atomic(postgres_dsn: str, tmp_pa
 
 
 @pytest.mark.postgresql
+def test_safe_lease_recovery_can_reuse_the_same_provider(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        settings, registries = bundle(tmp_path, profile("api"))
+        settings = settings.model_copy(
+            update={
+                "limits": settings.limits.model_copy(
+                    update={"provider_call_output_tokens": 1_000}
+                )
+            }
+        )
+        _task_id, _run_id, step_id = await seed_provider_step(factory)
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+        async with factory.begin() as session:
+            first = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="first-worker",
+                lease_seconds=60,
+                candidate_limit=20,
+            )
+            assert first is not None
+            step = await session.get(Step, step_id)
+            assert step is not None
+            step.status = StepStatus.QUEUED
+            step.lease_owner = None
+            step.lease_expires_at = None
+
+        async with factory.begin() as session:
+            second = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="recovery-worker",
+                lease_seconds=60,
+                candidate_limit=20,
+            )
+
+        assert second is not None and second.step.id == step_id
+        async with factory() as session:
+            decisions = tuple(
+                (
+                    await session.scalars(
+                        select(RoutingDecision)
+                        .where(RoutingDecision.step_id == step_id)
+                        .order_by(RoutingDecision.provider_attempt)
+                    )
+                ).all()
+            )
+            assert [item.selected_profile_id for item in decisions] == ["api", "api"]
+            assert decisions[-1].decision_kind == "initial"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_execute_code_route_requires_cli_sandbox_profile(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
@@ -407,6 +470,7 @@ def test_categorized_retry_selects_only_configured_fallback(
             step = await session.get(Step, step_id)
             assert step is not None
             step.executor_profile_id = "primary"
+            step.failure_category = "provider_unavailable"
             session.add(
                 RoutingDecision(
                     run_id=run_id,

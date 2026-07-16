@@ -173,6 +173,13 @@ class ProjectProvisioningStatus(StrEnum):
     FAILED = "failed"
 
 
+class ProjectNamingStatus(StrEnum):
+    PENDING = "pending"
+    GENERATING = "generating"
+    SELECTED = "selected"
+    FAILED = "failed"
+
+
 def enum_type(enum: type[StrEnum], name: str, *, length: int | None = None) -> SqlEnum:
     if length is not None:
         return SqlEnum(

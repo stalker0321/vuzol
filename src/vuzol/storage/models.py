@@ -34,6 +34,7 @@ from vuzol.storage.types import (
     IntakeStatus,
     ProcessOutcome,
     ProcessStatus,
+    ProjectNamingStatus,
     ProjectProvisioningStatus,
     QueueClass,
     RetryClass,
@@ -310,6 +311,31 @@ class ProjectProvisioning(IdentityMixin, TimestampMixin, Base):
         default=ProjectProvisioningStatus.PENDING,
     )
     configuration_revision: Mapped[str | None] = mapped_column(String(64))
+    last_error_category: Mapped[str | None] = mapped_column(String(100))
+
+
+class ProjectNamingRequest(IdentityMixin, TimestampMixin, Base):
+    __tablename__ = "project_naming_requests"
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    requested_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    options: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[ProjectNamingStatus] = mapped_column(
+        enum_type(ProjectNamingStatus, "project_naming_status"),
+        nullable=False,
+        default=ProjectNamingStatus.PENDING,
+    )
+    selected_option_index: Mapped[int | None] = mapped_column(Integer)
+    selected_project_id: Mapped[str | None] = mapped_column(String(100))
+    selected_display_name: Mapped[str | None] = mapped_column(String(100))
     last_error_category: Mapped[str | None] = mapped_column(String(100))
 
 

@@ -29,8 +29,11 @@ Never grant approval, choose credentials, or claim that execution succeeded. Rep
 instructions separately. Ask one concise clarification only when required."""
 
 PROJECT_INTAKE_PROMPT = """When topic_kind is inbox, interpret the request as create_project.
-Choose a short lowercase ASCII new_project_id using letters, digits, and hyphens, and preserve a
-concise human new_project_name. Put the full idea in goal. Do not select an existing project."""
+Treat the message as the project's nature and goal. Do not choose final new_project_id or
+new_project_name values. Generate exactly nine distinctive product-name options. Each option must
+pair a concise human display_name with a short lowercase ASCII project_id using letters, digits,
+and hyphens. Avoid generic descriptive phrases and existing project IDs. Put the full idea in goal.
+The user will explicitly select one option before provisioning."""
 
 
 class OpenAICompatibleInterpreter:

@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from vuzol.config import Capability, TopicKind
 from vuzol.storage.types import RiskLevel
 
-TASK_DRAFT_SCHEMA_VERSION = "1.1"
-INTERPRETER_PROMPT_VERSION = "project-intake-v1"
+TASK_DRAFT_SCHEMA_VERSION = "1.2"
+INTERPRETER_PROMPT_VERSION = "project-naming-v2"
 
 
 class FrozenModel(BaseModel):
@@ -53,6 +53,11 @@ class SuggestedComplexity(StrEnum):
     LARGE = "large"
 
 
+class ProjectNameOption(FrozenModel):
+    display_name: str = Field(min_length=1, max_length=48)
+    project_id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,62}$")
+
+
 class TaskDraft(FrozenModel):
     action: TaskAction
     task_type: TaskType
@@ -60,6 +65,7 @@ class TaskDraft(FrozenModel):
     project_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     new_project_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,62}$")
     new_project_name: str | None = Field(default=None, min_length=1, max_length=100)
+    project_name_options: tuple[ProjectNameOption, ...] = Field(default=(), max_length=9)
     goal: str = Field(min_length=1, max_length=4_000)
     requested_outcomes: tuple[str, ...] = Field(default=(), max_length=20)
     constraints: tuple[str, ...] = Field(default=(), max_length=20)
@@ -86,9 +92,18 @@ class TaskDraft(FrozenModel):
         if self.action is TaskAction.CREATE_PROJECT and self.project_id is not None:
             raise ValueError("project creation cannot target an existing project")
         if self.action is not TaskAction.CREATE_PROJECT and (
-            self.new_project_id is not None or self.new_project_name is not None
+            self.new_project_id is not None
+            or self.new_project_name is not None
+            or self.project_name_options
         ):
             raise ValueError("new project fields require create_project")
+        if self.action is TaskAction.CREATE_PROJECT and not self.needs_clarification:
+            if len(self.project_name_options) != 9:
+                raise ValueError("project creation requires exactly nine name options")
+            names = {option.display_name.casefold() for option in self.project_name_options}
+            project_ids = {option.project_id for option in self.project_name_options}
+            if len(names) != 9 or len(project_ids) != 9:
+                raise ValueError("project name options must be unique")
         return self
 
 

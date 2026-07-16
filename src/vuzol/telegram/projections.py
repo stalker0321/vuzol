@@ -203,6 +203,7 @@ class TelegramClient(Protocol):
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
     ) -> int: ...
 
     async def edit_message(
@@ -214,7 +215,10 @@ class TelegramClient(Protocol):
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
     ) -> None: ...
+
+    async def delete_message(self, *, chat_id: int, message_id: int) -> None: ...
 
 
 class LostTelegramResponse(RuntimeError):
@@ -227,6 +231,10 @@ class FakeTelegramClient:
     next_message_id: int = 1
     sent: list[tuple[int, int | None, str]] = field(default_factory=list, init=False)
     edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
+    deleted: list[tuple[int, int]] = field(default_factory=list, init=False)
+    sent_keyboards: list[tuple[tuple[tuple[str, str], ...], ...]] = field(
+        default_factory=list, init=False
+    )
 
     async def send_message(
         self,
@@ -237,11 +245,13 @@ class FakeTelegramClient:
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
     ) -> int:
         del buttons, task_id, approval_id
         if self.fail:
             raise self.fail
         self.sent.append((chat_id, thread_id, html))
+        self.sent_keyboards.append(callback_buttons)
         message_id = self.next_message_id
         self.next_message_id += 1
         return message_id
@@ -255,11 +265,17 @@ class FakeTelegramClient:
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
     ) -> None:
-        del buttons, task_id, approval_id
+        del buttons, task_id, approval_id, callback_buttons
         if self.fail:
             raise self.fail
         self.edited.append((chat_id, message_id, html))
+
+    async def delete_message(self, *, chat_id: int, message_id: int) -> None:
+        if self.fail:
+            raise self.fail
+        self.deleted.append((chat_id, message_id))
 
 
 async def apply_status_projection(

@@ -10,6 +10,7 @@ from tests.integration.telegram.helpers import telegram_runtime
 from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
 from vuzol.interpretation.domain import (
     InterpretationResult,
+    ProjectNameOption,
     SuggestedComplexity,
     TaskAction,
     TaskDraft,
@@ -19,8 +20,23 @@ from vuzol.interpretation.domain import (
 )
 from vuzol.interpretation.ports import InterpreterUnavailable
 from vuzol.interpretation.service import InterpretationPipeline
-from vuzol.storage.models import ClarificationDecision, Interpretation, Task, TransactionalOutbox
-from vuzol.storage.types import DeliveryStatus, RiskLevel, TaskStatus
+from vuzol.storage.models import (
+    ClarificationDecision,
+    Interpretation,
+    ProjectNamingRequest,
+    Task,
+    TelegramIntakeMessage,
+    TopicMapping,
+    TransactionalOutbox,
+)
+from vuzol.storage.types import (
+    DeliveryStatus,
+    IntakeStatus,
+    ProjectNamingStatus,
+    RiskLevel,
+    TaskStatus,
+)
+from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import AttachmentKind, MessageUpdate, TelegramAttachment
 from vuzol.telegram.ingress import TelegramIngressService
 
@@ -251,6 +267,134 @@ def test_clarification_answer_is_persisted_before_reinterpretation(
             assert decision.question == "Which environment should be inspected?"
             assert decision.answer == "Use the staging environment"
             assert task is not None and task.status is TaskStatus.INTERPRETED
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_project_name_regeneration_replaces_options_and_queues_new_card(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        runtime = telegram_runtime(tmp_path)
+        old_options = [
+            {"display_name": f"Old {index + 1}", "project_id": f"old-{index + 1}"}
+            for index in range(9)
+        ]
+        new_options = tuple(
+            ProjectNameOption(display_name=f"Fresh {index + 1}", project_id=f"fresh-{index + 1}")
+            for index in range(9)
+        )
+        draft = TaskDraft(
+            action=TaskAction.CREATE_PROJECT,
+            task_type=TaskType.INFRASTRUCTURE,
+            operation=TaskOperation.CREATE,
+            goal="Build private notes",
+            project_name_options=new_options,
+            suggested_complexity=SuggestedComplexity.SMALL,
+            suggested_risk=RiskLevel.LOW,
+            needs_planning=False,
+            needs_clarification=False,
+            normalized_title="Private notes",
+        )
+        async with UnitOfWork(factory) as uow:
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                original_text="Build private notes",
+                task_type="infrastructure",
+            )
+            assert uow.session is not None
+            task_row = await uow.session.get(Task, task.id)
+            assert task_row is not None
+            task_row.status = TaskStatus.AWAITING_USER
+            task_row.task_draft = draft.model_copy(
+                update={
+                    "project_name_options": tuple(
+                        ProjectNameOption.model_validate(option) for option in old_options
+                    )
+                }
+            ).model_dump(mode="json")
+            inbox_id, _ = await uow.inbox.receive_once(
+                source="telegram",
+                consumer="bot:main",
+                external_event_id="project-naming-regeneration",
+                payload_hash="b" * 64,
+            )
+            intake = TelegramIntakeMessage(
+                inbox_id=inbox_id,
+                chat_id=-100,
+                message_thread_id=10,
+                message_id=500,
+                user_id=42,
+                task_id=task.id,
+                original_text="Build private notes",
+                affinity_kind="new_task",
+                status=IntakeStatus.AWAITING_INTERPRETATION,
+            )
+            uow.session.add(intake)
+            uow.session.add(
+                TopicMapping(
+                    chat_id=-100,
+                    message_thread_id=10,
+                    topic_kind="inbox",
+                    default_workflow="project_provisioning",
+                )
+            )
+            naming = ProjectNamingRequest(
+                task_id=task.id,
+                requested_by_user_id=42,
+                chat_id=-100,
+                source_thread_id=10,
+                description="Build private notes",
+                options=old_options,
+                revision=2,
+                status=ProjectNamingStatus.GENERATING,
+            )
+            uow.session.add(naming)
+            await uow.session.flush()
+            uow.session.add(
+                TransactionalOutbox(
+                    destination="interpretation",
+                    operation_type="regenerate_project_names",
+                    linked_entity_type="project_naming",
+                    linked_entity_id=naming.id,
+                    idempotency_key=f"regenerate:{naming.id}:2",
+                    payload={"revision": 2},
+                )
+            )
+            naming_id = naming.id
+        interpreter = FakeInterpreter(
+            [
+                InterpretationResult(
+                    draft=draft,
+                    profile_id="fake-interpreter",
+                    model="fake-model",
+                    duration_ms=2,
+                )
+            ]
+        )
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=interpreter,
+            owner="interpreter-a",
+        )
+        assert await pipeline.process_one()
+        assert interpreter.requests[0][1] is not None
+        async with factory() as session:
+            naming = await session.get(ProjectNamingRequest, naming_id)
+            card = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.linked_entity_type == "project_naming",
+                    TransactionalOutbox.operation_type == "send_message",
+                )
+            )
+            assert naming is not None and naming.status is ProjectNamingStatus.PENDING
+            assert naming.options[0]["project_id"] == "fresh-1"
+            assert card is not None and card.payload["revision"] == 2
         await engine.dispose()
 
     asyncio.run(scenario())

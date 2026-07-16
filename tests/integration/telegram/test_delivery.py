@@ -9,12 +9,18 @@ from telegram.error import NetworkError
 from tests.integration.storage.helpers import storage
 from vuzol.storage.models import (
     Interpretation,
+    ProjectNamingRequest,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
     TransactionalOutbox,
 )
-from vuzol.storage.types import DeliveryStatus, IntakeStatus
+from vuzol.storage.types import (
+    DeliveryStatus,
+    IntakeStatus,
+    ProjectNamingStatus,
+    TaskStatus,
+)
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.projections import FakeTelegramClient, LostTelegramResponse
@@ -264,6 +270,99 @@ def test_semantic_clarification_is_rebuilt_from_persisted_interpretation(
                 select(TelegramMessageLink).where(TelegramMessageLink.message_id == 101)
             )
             assert link is not None and link.task_id == task_id
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_project_name_options_are_sent_as_buttons_then_deleted(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        options = [
+            {"display_name": f"Project {index + 1}", "project_id": f"project-{index + 1}"}
+            for index in range(9)
+        ]
+        async with factory.begin() as session:
+            task = Task(
+                user_id=42,
+                source_chat_id=-100,
+                source_thread_id=10,
+                original_text="Build a project",
+                task_type="infrastructure",
+                status=TaskStatus.AWAITING_USER,
+            )
+            session.add(task)
+            await session.flush()
+            naming = ProjectNamingRequest(
+                task_id=task.id,
+                requested_by_user_id=42,
+                chat_id=-100,
+                source_thread_id=10,
+                description="Build <a useful project>",
+                options=options,
+                revision=1,
+                status=ProjectNamingStatus.PENDING,
+            )
+            session.add(naming)
+            await session.flush()
+            session.add(
+                TransactionalOutbox(
+                    destination="telegram",
+                    operation_type="send_message",
+                    linked_entity_type="project_naming",
+                    linked_entity_id=naming.id,
+                    idempotency_key=f"names:{naming.id}:1",
+                    payload={"role": "project_name_options", "revision": 1},
+                )
+            )
+            naming_id = naming.id
+            task_id = task.id
+        client = FakeTelegramClient(next_message_id=120)
+        delivery = service(factory, client)
+        assert await delivery.deliver_one()
+        assert "&lt;a useful project&gt;" in client.sent[0][2]
+        keyboard = client.sent_keyboards[0]
+        assert [len(row) for row in keyboard] == [3, 3, 3, 1]
+        assert keyboard[0][0][1] == f"v1:pn:{naming_id.hex}:1:0"
+        assert keyboard[-1][0][1] == f"v1:pn:{naming_id.hex}:1:r"
+        async with factory.begin() as session:
+            naming = await session.get(ProjectNamingRequest, naming_id, with_for_update=True)
+            assert naming is not None
+            naming.status = ProjectNamingStatus.GENERATING
+            naming.revision = 2
+            session.add(
+                TransactionalOutbox(
+                    destination="telegram",
+                    operation_type="delete_message",
+                    linked_entity_type="project_naming",
+                    linked_entity_id=naming.id,
+                    idempotency_key=f"names:{naming.id}:1:delete",
+                    payload={"role": "project_name_options", "revision": 1},
+                )
+            )
+        assert await delivery.deliver_one()
+        assert client.deleted == [(-100, 120)]
+        async with factory.begin() as session:
+            session.add(
+                TransactionalOutbox(
+                    destination="telegram",
+                    operation_type="delete_message",
+                    linked_entity_type="project_naming",
+                    linked_entity_id=naming_id,
+                    idempotency_key=f"names:{naming_id}:delete-again",
+                    payload={"role": "project_name_options", "revision": 1},
+                )
+            )
+        assert await delivery.deliver_one()
+        assert client.deleted == [(-100, 120)]
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.task_id == task_id,
+                    TelegramMessageLink.message_role == "project_naming",
+                )
+            )
+            assert link is None
         await engine.dispose()
 
     asyncio.run(scenario())

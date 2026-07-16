@@ -52,13 +52,19 @@ class PythonTelegramClient:
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
     ) -> int:
         message = await self._bot.send_message(
             chat_id=chat_id,
             message_thread_id=thread_id,
             text=html,
             parse_mode=ParseMode.HTML,
-            reply_markup=_control_markup(buttons, task_id=task_id, approval_id=approval_id),
+            reply_markup=_control_markup(
+                buttons,
+                task_id=task_id,
+                approval_id=approval_id,
+                callback_buttons=callback_buttons,
+            ),
         )
         return message.message_id
 
@@ -71,14 +77,27 @@ class PythonTelegramClient:
         buttons: tuple[str, ...] = (),
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
     ) -> None:
         await self._bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=html,
             parse_mode=ParseMode.HTML,
-            reply_markup=_control_markup(buttons, task_id=task_id, approval_id=approval_id),
+            reply_markup=_control_markup(
+                buttons,
+                task_id=task_id,
+                approval_id=approval_id,
+                callback_buttons=callback_buttons,
+            ),
         )
+
+    async def delete_message(self, *, chat_id: int, message_id: int) -> None:
+        try:
+            await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except BadRequest:
+            # Naming cards are ephemeral. Missing/expired cards must not block regeneration.
+            return
 
     async def download(self, file_id: str) -> bytes:
         telegram_file = await self._bot.get_file(file_id)
@@ -156,7 +175,27 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
     user = update.effective_user
     if query is None or user is None or query.message is None or query.data is None:
         return None
-    parts = query.data.split(":", maxsplit=2)
+    parts = query.data.split(":")
+    if len(parts) == 5 and parts[:2] == ["v1", "pn"]:
+        try:
+            naming_request_id = uuid.UUID(hex=parts[2])
+            revision = int(parts[3])
+            option_index = None if parts[4] == "r" else int(parts[4])
+        except (ValueError, TypeError):
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            action_kind=(
+                "project_name_regenerate" if option_index is None else "project_name_select"
+            ),
+            naming_request_id=naming_request_id,
+            naming_revision=revision,
+            naming_option_index=option_index,
+        )
     allowed_actions = {
         "approve",
         "redo",
@@ -173,11 +212,8 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
         target_id = uuid.UUID(parts[2])
     except ValueError:
         return None
-    targets = (
-        {"approval_id": target_id}
-        if parts[1] in {"approve", "redo", "reject"}
-        else {"task_id": target_id}
-    )
+    approval_id = target_id if parts[1] in {"approve", "redo", "reject"} else None
+    task_id = None if approval_id is not None else target_id
     return ControlUpdate(
         bot_id=bot_id,
         update_id=update.update_id,
@@ -185,7 +221,8 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
         chat_id=query.message.chat.id,
         user_id=user.id,
         action_kind=parts[1],
-        **targets,
+        task_id=task_id,
+        approval_id=approval_id,
     )
 
 
@@ -194,7 +231,15 @@ def _control_markup(
     *,
     task_id: uuid.UUID | None,
     approval_id: uuid.UUID | None,
+    callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
 ) -> InlineKeyboardMarkup | None:
+    if callback_buttons:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(label, callback_data=data) for label, data in row]
+                for row in callback_buttons
+            ]
+        )
     if not actions:
         return None
     labels = {

@@ -44,10 +44,18 @@ class ControlUpdate(TelegramModel):
     callback_query_id: str = Field(min_length=1, max_length=255)
     chat_id: int
     user_id: int
-    action_kind: str = Field(pattern=r"^(approve|redo|reject|start|pause|resume|cancel|retry)$")
+    action_kind: str = Field(
+        pattern=(
+            r"^(approve|redo|reject|start|pause|resume|cancel|retry|"
+            r"project_name_select|project_name_regenerate)$"
+        )
+    )
     task_id: uuid.UUID | None = None
     step_id: uuid.UUID | None = None
     approval_id: uuid.UUID | None = None
+    naming_request_id: uuid.UUID | None = None
+    naming_revision: int | None = Field(default=None, ge=1)
+    naming_option_index: int | None = Field(default=None, ge=0, le=8)
 
 
 class IngressStatus(StrEnum):

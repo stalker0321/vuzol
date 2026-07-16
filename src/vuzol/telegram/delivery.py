@@ -23,6 +23,7 @@ from vuzol.storage.leasing import (
 )
 from vuzol.storage.models import (
     Interpretation,
+    ProjectNamingRequest,
     ProjectProvisioning,
     Task,
     TelegramIntakeMessage,
@@ -46,6 +47,8 @@ class DeliveryAction(StrEnum):
     EDIT_STATUS = "edit_status"
     SEND_CLARIFICATION = "send_clarification"
     SEND_PROJECT_WELCOME = "send_project_welcome"
+    SEND_PROJECT_NAMES = "send_project_names"
+    DELETE_MESSAGE = "delete_message"
     NOOP = "noop"
 
 
@@ -62,6 +65,7 @@ class PreparedDelivery:
     buttons: tuple[str, ...] = ()
     approval_id: uuid.UUID | None = None
     message_role: str | None = None
+    callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = ()
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -81,8 +85,75 @@ async def prepare_delivery(
     item: TransactionalOutbox,
     topics: TopicRegistry | None = None,
 ) -> PreparedDelivery:
-    if item.operation_type != "send_message":
+    if item.operation_type not in {"send_message", "delete_message"}:
         raise PermanentDeliveryError("unsupported_telegram_operation")
+    if item.linked_entity_type == "project_naming":
+        naming = await session.get(ProjectNamingRequest, item.linked_entity_id)
+        if naming is None:
+            raise PermanentDeliveryError("project_naming_missing")
+        link = await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.task_id == naming.task_id,
+                TelegramMessageLink.message_role == "project_naming",
+            )
+        )
+        if item.operation_type == "delete_message":
+            if link is None:
+                return PreparedDelivery(
+                    DeliveryAction.NOOP,
+                    chat_id=naming.chat_id,
+                    thread_id=naming.source_thread_id,
+                )
+            return PreparedDelivery(
+                DeliveryAction.DELETE_MESSAGE,
+                chat_id=link.chat_id,
+                thread_id=link.message_thread_id,
+                link_id=link.id,
+                message_id=link.message_id,
+            )
+        revision = item.payload.get("revision")
+        if (
+            item.payload.get("role") != "project_name_options"
+            or revision != naming.revision
+            or naming.status.value != "pending"
+            or len(naming.options) != 9
+        ):
+            raise PermanentDeliveryError("invalid_project_naming_delivery")
+        if link is not None and link.projection_revision >= naming.revision:
+            return PreparedDelivery(
+                DeliveryAction.NOOP,
+                chat_id=naming.chat_id,
+                thread_id=naming.source_thread_id,
+            )
+        rows: list[tuple[tuple[str, str], ...]] = []
+        for offset in range(0, 9, 3):
+            rows.append(
+                tuple(
+                    (
+                        str(option["display_name"]),
+                        f"v1:pn:{naming.id.hex}:{naming.revision}:{index}",
+                    )
+                    for index, option in enumerate(
+                        naming.options[offset : offset + 3], start=offset
+                    )
+                )
+            )
+        rows.append((("Другие варианты", f"v1:pn:{naming.id.hex}:{naming.revision}:r"),))
+        html = (
+            "<b>Выберите название проекта</b>\n"
+            "Каждый вариант включает безопасное имя репозитория.\n\n"
+            f"{telegram_html(naming.description)}"
+        )
+        return PreparedDelivery(
+            DeliveryAction.SEND_PROJECT_NAMES,
+            chat_id=naming.chat_id,
+            thread_id=naming.source_thread_id,
+            html=html,
+            task_id=naming.task_id,
+            revision=naming.revision,
+            message_role="project_naming",
+            callback_buttons=tuple(rows),
+        )
     if item.linked_entity_type == "project_provisioning":
         if item.payload.get("role") != "project_created":
             raise PermanentDeliveryError("invalid_project_delivery_payload")
@@ -278,6 +349,7 @@ class TelegramDeliveryService:
             DeliveryAction.SEND_STATUS,
             DeliveryAction.SEND_CLARIFICATION,
             DeliveryAction.SEND_PROJECT_WELCOME,
+            DeliveryAction.SEND_PROJECT_NAMES,
         }:
             message_id = await self._client.send_message(
                 chat_id=prepared.chat_id,
@@ -286,10 +358,18 @@ class TelegramDeliveryService:
                 buttons=prepared.buttons,
                 task_id=prepared.task_id,
                 approval_id=prepared.approval_id,
+                callback_buttons=prepared.callback_buttons,
             )
             if not message_id:
                 raise LostTelegramResponse("Telegram returned no confirmed message ID")
             return message_id
+        if prepared.action == DeliveryAction.DELETE_MESSAGE:
+            assert prepared.message_id is not None
+            await self._client.delete_message(
+                chat_id=prepared.chat_id,
+                message_id=prepared.message_id,
+            )
+            return None
         assert prepared.message_id is not None
         await self._client.edit_message(
             chat_id=prepared.chat_id,
@@ -298,6 +378,7 @@ class TelegramDeliveryService:
             buttons=prepared.buttons,
             task_id=prepared.task_id,
             approval_id=prepared.approval_id,
+            callback_buttons=prepared.callback_buttons,
         )
         return None
 
@@ -350,6 +431,24 @@ class TelegramDeliveryService:
                         message_role=prepared.message_role or "project_welcome",
                     )
                 )
+            elif prepared.action == DeliveryAction.SEND_PROJECT_NAMES:
+                assert prepared.task_id is not None and prepared.revision is not None
+                assert confirmed_message_id is not None
+                session.add(
+                    TelegramMessageLink(
+                        chat_id=prepared.chat_id,
+                        message_thread_id=prepared.thread_id,
+                        message_id=confirmed_message_id,
+                        task_id=prepared.task_id,
+                        message_role="project_naming",
+                        projection_revision=prepared.revision,
+                    )
+                )
+            elif prepared.action == DeliveryAction.DELETE_MESSAGE:
+                assert prepared.link_id is not None
+                link = await session.get(TelegramMessageLink, prepared.link_id)
+                if link is not None:
+                    await session.delete(link)
             await complete_outbox_item(session, token)
 
     async def _mark_ambiguous(self, token: OutboxLeaseToken) -> None:

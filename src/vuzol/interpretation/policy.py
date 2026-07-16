@@ -42,24 +42,33 @@ def enforce_interpretation_policy(
             task_type=TaskType.INFRASTRUCTURE,
             operation=TaskOperation.CREATE,
             project_id=None,
+            new_project_id=None,
+            new_project_name=None,
             required_capabilities=frozenset(
                 {Capability.FILESYSTEM_WRITE, Capability.GIT, Capability.TELEGRAM_SEND}
             ),
         )
-        if draft.new_project_id is None or draft.new_project_name is None:
-            updates.update(
-                needs_clarification=True,
-                clarification_question="What short name should this new project use?",
-            )
-            reasons.append("project_identity_missing")
-        elif draft.new_project_id in known_project_ids:
+        conflicting_options = tuple(
+            option
+            for option in draft.project_name_options
+            if option.project_id in known_project_ids
+        )
+        if len(draft.project_name_options) != 9:
             updates.update(
                 needs_clarification=True,
                 clarification_question=(
-                    "A project with that short name already exists. Choose another."
+                    "I could not generate nine project names. Please restate the project idea."
                 ),
             )
-            reasons.append("project_identity_conflict")
+            reasons.append("project_name_options_missing")
+        elif conflicting_options:
+            updates.update(
+                needs_clarification=True,
+                clarification_question=(
+                    "Generated project names conflict with existing projects. Regenerate them."
+                ),
+            )
+            reasons.append("project_name_options_conflict")
     if draft.project_id is not None and draft.project_id not in known_project_ids:
         updates.update(
             project_id=None,

@@ -125,7 +125,7 @@ class RegistryOverlayWriter:
             display_name=provisioning.display_name,
             project_id=provisioning.project_id,
             accepts_new_tasks=True,
-            default_workflow="adaptive_worker_trial",
+            default_workflow="coding_task",
         )
         updated = RegistryDocument(
             projects=(*overlay.projects, project),

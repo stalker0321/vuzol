@@ -19,6 +19,24 @@ _RISK_ORDER = {
     RiskLevel.PRIVILEGED: 3,
 }
 
+_DESIGN_DISCUSSION_MARKERS = (
+    "как лучше",
+    "как правильнее",
+    "как это сделать",
+    "какой подход",
+    "какую архитектур",
+    "что думаешь",
+    "что скажешь",
+    "спроектир",
+    "як краще",
+    "best way",
+    "how should",
+    "what do you think",
+    "which approach",
+    "architecture",
+    "design this",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyResult:
@@ -36,10 +54,18 @@ def enforce_interpretation_policy(
     reasons: list[str] = []
     updates: dict[str, object] = {}
     risk = draft.suggested_risk
+    normalized_input = request.original_input.casefold()
+    read_only_request = not draft.required_capabilities & {
+        Capability.CODE_EDIT,
+        Capability.FILESYSTEM_WRITE,
+    }
     architecture_intent = draft.task_type is TaskType.ARCHITECTURE or (
         draft.task_type is TaskType.CODING
-        and draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN}
-        and not draft.required_capabilities & {Capability.CODE_EDIT, Capability.FILESYSTEM_WRITE}
+        and read_only_request
+        and (
+            draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN}
+            or any(marker in normalized_input for marker in _DESIGN_DISCUSSION_MARKERS)
+        )
     )
     if request.topic_kind is TopicKind.INBOX:
         updates.update(
@@ -85,7 +111,7 @@ def enforce_interpretation_policy(
         reasons.append("project_creation_confined_to_inbox")
     elif request.topic_kind is TopicKind.PROJECT and architecture_intent:
         if draft.task_type is not TaskType.ARCHITECTURE:
-            updates["task_type"] = TaskType.ARCHITECTURE
+            updates.update(task_type=TaskType.ARCHITECTURE, operation=TaskOperation.INSPECT)
             reasons.append("read_only_design_reclassified_as_architecture")
         if draft.action in {TaskAction.ANSWER_QUESTION, TaskAction.GENERAL_CONVERSATION}:
             updates.update(action=TaskAction.CREATE_TASK, operation=TaskOperation.INSPECT)

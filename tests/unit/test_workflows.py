@@ -202,6 +202,15 @@ def test_planned_task_can_advance_to_prepared_context() -> None:
     )
 
 
+@pytest.mark.parametrize("target", [TaskStatus.PLANNED, TaskStatus.CONTEXT_PREPARED])
+def test_retrying_task_can_restore_early_workflow_status(target: TaskStatus) -> None:
+    workflow_transitions._check(
+        TaskStatus.RETRYING,
+        target,
+        workflow_transitions.TASK_TRANSITIONS,
+    )
+
+
 def test_coding_workflow_and_heavy_queue() -> None:
     """Test the coding workflow queue and effects policy."""
     from vuzol.storage.types import IdempotencyClass, QueueClass

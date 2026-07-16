@@ -2,11 +2,15 @@
 
 from vuzol.config import TopicConfig, TopicKind
 from vuzol.telegram.layout import (
+    STATUS_DASHBOARD_TOPIC_KIND,
     SYSTEM_PINNED_TOPIC_ORDER,
     SYSTEM_TOPIC_DISPLAY_NAMES,
     effective_display_name,
+    is_status_dashboard_topic,
+    is_system_workspace_kind,
     ordered_pinned_topics,
     project_topic_should_pin_on_create,
+    project_topic_should_pin_when_active,
     project_topic_should_pin_when_paused_or_finished,
     system_pin_rank,
     topic_wants_pin,
@@ -166,3 +170,11 @@ def test_ordered_pinned_topics_puts_system_then_projects() -> None:
         "alpha",
         "beta",
     ]
+
+
+def test_status_dashboard_helpers() -> None:
+    assert is_status_dashboard_topic(STATUS_DASHBOARD_TOPIC_KIND)
+    assert is_status_dashboard_topic("task_dashboard")
+    assert not is_status_dashboard_topic(TopicKind.INBOX)
+    assert is_system_workspace_kind(TopicKind.APPROVALS)
+    assert project_topic_should_pin_when_active() is True

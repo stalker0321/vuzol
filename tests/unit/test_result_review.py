@@ -320,3 +320,78 @@ async def test_review_fails_closed_on_git_error(tmp_path: Path) -> None:
     outcome = await handler.execute(_request(task_id, run_id, lease), CancellationContext())
     assert outcome.kind is OutcomeKind.BLOCKED
     assert outcome.category == "review_failed"
+
+
+@pytest.mark.anyio
+async def test_review_fails_when_state_missing(tmp_path: Path) -> None:
+    lease = _lease()
+    session = MagicMock()
+    session.get = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=AsyncContext(session))
+    handler = ResultReviewHandler(factory, MagicMock(), worktree_root=tmp_path)
+    outcome = await handler.execute(
+        _request(uuid.uuid4(), uuid.uuid4(), lease), CancellationContext()
+    )
+    assert outcome.kind is OutcomeKind.BLOCKED
+    assert outcome.category == "review_failed"
+
+
+@pytest.mark.anyio
+async def test_review_fails_on_lease_mismatch(tmp_path: Path) -> None:
+    lease = _lease()
+    task_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    step = SimpleNamespace(
+        status=StepStatus.PENDING,
+        lease_owner="other",
+        lease_generation=9,
+        run_id=run_id,
+    )
+    session = MagicMock()
+    session.get = AsyncMock(
+        side_effect=[step, SimpleNamespace(task_id=task_id), SimpleNamespace(risk=RiskLevel.LOW)]
+    )
+    factory = MagicMock(return_value=AsyncContext(session))
+    handler = ResultReviewHandler(factory, MagicMock(), worktree_root=tmp_path)
+    outcome = await handler.execute(_request(task_id, run_id, lease), CancellationContext())
+    assert outcome.kind is OutcomeKind.BLOCKED
+    assert outcome.category == "review_failed"
+
+
+@pytest.mark.anyio
+async def test_review_fails_without_worktree(tmp_path: Path) -> None:
+    lease = _lease()
+    task_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    validate = SimpleNamespace(
+        step_type="validate",
+        status=StepStatus.COMPLETED,
+        result={
+            "structured_output": {
+                "base_commit": "a" * 40,
+                "result_commit": "b" * 40,
+                "gates": [{"exit_code": 0}],
+            }
+        },
+    )
+    step = SimpleNamespace(
+        status=StepStatus.RUNNING,
+        lease_owner=lease.owner,
+        lease_generation=lease.generation,
+        run_id=run_id,
+        dependency_metadata={"predecessor_ordinals": [1]},
+    )
+    session = MagicMock()
+    session.get = AsyncMock(
+        side_effect=[
+            step,
+            SimpleNamespace(task_id=task_id),
+            SimpleNamespace(risk=RiskLevel.LOW, task_draft={}),
+        ]
+    )
+    session.scalar = AsyncMock(side_effect=[validate, None])
+    factory = MagicMock(return_value=AsyncContext(session))
+    handler = ResultReviewHandler(factory, MagicMock(), worktree_root=tmp_path)
+    outcome = await handler.execute(_request(task_id, run_id, lease), CancellationContext())
+    assert outcome.kind is OutcomeKind.BLOCKED
+    assert outcome.category == "review_failed"

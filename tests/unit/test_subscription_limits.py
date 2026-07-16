@@ -524,3 +524,35 @@ def test_grok_five_hour_key_variants(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert snap.ok
     assert snap.plan_label == "Super Lite"
     assert snap.five_hour.remaining_percent == 12
+
+
+def test_http_json_non_dict_and_log_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vuzol.providers.subscription_limits import _latest_grok_billing_from_logs
+
+    class FakeResp:
+        def read(self) -> bytes:
+            return b'["not", "object"]'
+
+        def __enter__(self) -> FakeResp:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "vuzol.providers.subscription_limits.urllib.request.urlopen",
+        lambda *a, **k: FakeResp(),
+    )
+    assert _http_json("https://example.com/x", headers={}) is None
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "unified.jsonl").write_text("billing: fetched credits config {}\n", encoding="utf-8")
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    assert _latest_grok_billing_from_logs(tmp_path) is None

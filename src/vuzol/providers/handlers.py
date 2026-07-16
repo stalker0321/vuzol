@@ -97,6 +97,7 @@ class ProviderStepHandler:
         requires_finalizer = (
             request.step_type == "execute_code" and "step09a_capsule" in provider_request.task_draft
         )
+        requires_worktree_access = request.step_type == "execute_code"
         if requires_finalizer and (
             self._finalizer is None or self._worktrees is None or self._worktree_access is None
         ):
@@ -121,8 +122,14 @@ class ProviderStepHandler:
                     error=error,
                 )
         access: WorktreeAccessLease | None = None
-        if requires_finalizer:
-            assert self._worktree_access is not None
+        if requires_worktree_access:
+            if self._worktree_access is None:
+                return await self._pre_provider_failure(
+                    request,
+                    reservation_id=reservation_id,
+                    category="worker_access_unavailable",
+                    summary="worktree access manager is unavailable",
+                )
             try:
                 access = await self._grant_worktree_access(request)
             except (LookupError, ValueError, WorktreeAccessError) as error:

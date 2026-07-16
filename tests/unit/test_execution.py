@@ -1716,6 +1716,36 @@ async def test_provider_handler_revokes_acl_on_provider_failure_or_cancellation(
 
 
 @pytest.mark.anyio
+async def test_provider_handler_grants_acl_for_regular_coding_task() -> None:
+    from vuzol.providers.handlers import ProviderStepHandler
+    from vuzol.workflows.domain import StepOutcome
+
+    access = MagicMock()
+    access.revoke = AsyncMock()
+    handler = ProviderStepHandler(
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        worktrees=MagicMock(),
+        worktree_access=MagicMock(),
+    )
+    provider_request = MagicMock(task_draft={})
+    handler._build_request = AsyncMock(  # type: ignore[method-assign]
+        return_value=(provider_request, "codex-subscription-prod", uuid.uuid4(), "revision")
+    )
+    handler._grant_worktree_access = AsyncMock(return_value=access)  # type: ignore[method-assign]
+    handler._execute_built = AsyncMock(  # type: ignore[method-assign]
+        return_value=StepOutcome.succeeded({"text": "implemented"})
+    )
+
+    outcome = await handler.execute(MagicMock(step_type="execute_code"), CancellationContext())
+
+    assert outcome.result == {"text": "implemented"}
+    handler._grant_worktree_access.assert_awaited_once()
+    access.revoke.assert_awaited_once()
+
+
+@pytest.mark.anyio
 async def test_missing_validation_sandbox_prevents_provider_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

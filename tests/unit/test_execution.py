@@ -917,6 +917,40 @@ async def test_typed_git_applies_one_approved_result_with_target_cas(tmp_path: P
     )
 
 
+@pytest.mark.anyio
+async def test_typed_git_applies_when_target_branch_is_checked_out(tmp_path: Path) -> None:
+    """Freshly provisioned repos keep main checked out; apply must still CAS-advance."""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "test@example.com")
+    _git(repository, "config", "user.name", "Test")
+    (repository / "value.txt").write_text("base\n")
+    _git(repository, "add", "value.txt")
+    _git(repository, "commit", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD").strip()
+    assert _git(repository, "branch", "--show-current").strip() == "main"
+
+    worktree = tmp_path / "worktree"
+    git = LocalGit()
+    await git.add_worktree(repository, worktree, "result", base)
+    (worktree / "value.txt").write_text("approved-on-main\n")
+    await git.stage_paths(worktree, ("value.txt",))
+    result = await git.create_commit(worktree, "approved result")
+
+    assert await git.apply_result(
+        repository,
+        worktree,
+        target_branch="main",
+        expected_head=base,
+        result_commit=result,
+    )
+    assert _git(repository, "rev-parse", "main").strip() == result
+    assert _git(repository, "rev-parse", "HEAD").strip() == result
+    assert (repository / "value.txt").read_text() == "approved-on-main\n"
+
+
 def _finalizer_repository(tmp_path: Path) -> tuple[Path, str, str]:
     repository = tmp_path / "finalizer-repo"
     repository.mkdir()

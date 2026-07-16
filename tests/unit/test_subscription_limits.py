@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -553,10 +554,10 @@ def test_http_json_non_dict_and_log_oserror(
     logs.mkdir()
     (logs / "unified.jsonl").write_text("billing: fetched credits config {}\n", encoding="utf-8")
 
-    def boom(*args: object, **kwargs: object) -> str:
+    def boom_open(*args: object, **kwargs: object) -> object:
         raise OSError("unreadable")
 
-    monkeypatch.setattr(Path, "read_text", boom)
+    monkeypatch.setattr(Path, "open", boom_open)
     assert _latest_grok_billing_from_logs(tmp_path) is None
 
 
@@ -659,6 +660,86 @@ async def test_persist_and_load_subscription_limits() -> None:
         assert out[0].profile_id == "codex-subscription-prod"
     finally:
         limits_mod.collect_subscription_limits = original
+
+
+def test_host_grok_billing_logs_matched_by_jwt_subject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sandbox state can reuse interactive host logs for the same OAuth subject."""
+
+    from vuzol.providers.subscription_limits import (
+        _billing_ctx_from_log_file,
+        _host_grok_billing_log_paths,
+        _jwt_subject,
+        collect_profile_limits,
+    )
+
+    # Minimal unsigned JWT with sub claim.
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
+    payload = (
+        base64.urlsafe_b64encode(b'{"sub":"user-abc","principal_id":"user-abc"}')
+        .decode()
+        .rstrip("=")
+    )
+    token = f"{header}.{payload}.sig"
+    assert _jwt_subject(token) == "user-abc"
+    assert _jwt_subject("not-a-jwt") is None
+    assert _jwt_subject("a.%%% .c") is None
+
+    state = tmp_path / "provider-state"
+    state.mkdir()
+    (state / ".grok").mkdir()
+    (state / ".grok" / "auth.json").write_text(
+        json.dumps({"https://auth.x.ai::x": {"key": token}}),
+        encoding="utf-8",
+    )
+
+    # Real host-root discovery uses Path.home() / ".grok-profiles".
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    host_root = tmp_path / ".grok-profiles"
+    account = host_root / "account-x"
+    logs = account / "logs"
+    logs.mkdir(parents=True)
+    (account / "auth.json").write_text(
+        json.dumps({"https://auth.x.ai::x": {"key": token}}),
+        encoding="utf-8",
+    )
+    other = host_root / "account-other"
+    other_logs = other / "logs"
+    other_logs.mkdir(parents=True)
+    other_payload = base64.urlsafe_b64encode(b'{"sub":"someone-else"}').decode().rstrip("=")
+    (other / "auth.json").write_text(
+        json.dumps({"https://auth.x.ai::x": {"key": f"{header}.{other_payload}.sig"}}),
+        encoding="utf-8",
+    )
+    (other_logs / "unified.jsonl").write_text("nope\n", encoding="utf-8")
+
+    billing_line = json.dumps(
+        {
+            "msg": "billing: fetched credits config",
+            "ctx": {
+                "subscriptionTier": "SuperGrok",
+                "config": {
+                    "creditUsagePercent": 15.0,
+                    "billingPeriodEnd": "2026-07-20T00:00:00+00:00",
+                },
+            },
+        }
+    )
+    (logs / "unified.jsonl").write_text(
+        ("noise\n" * 50) + billing_line + "\n" + ("later\n" * 20),
+        encoding="utf-8",
+    )
+
+    paths = _host_grok_billing_log_paths(state)
+    assert paths == (logs / "unified.jsonl",)
+    ctx = _billing_ctx_from_log_file(logs / "unified.jsonl")
+    assert ctx is not None
+    assert ctx["config"]["creditUsagePercent"] == 15.0
+    profile = _cli_profile("grok-subscription-a", "grok", state)
+    snap = collect_profile_limits(profile, now=datetime(2026, 7, 16, tzinfo=UTC))
+    assert snap.ok
+    assert snap.weekly.remaining_percent == 85
 
 
 def test_grok_billing_unavailable_and_html_payload(

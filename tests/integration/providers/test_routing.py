@@ -239,17 +239,13 @@ def test_route_reservation_and_fenced_claim_are_atomic(postgres_dsn: str, tmp_pa
 
 
 @pytest.mark.postgresql
-def test_safe_lease_recovery_can_reuse_the_same_provider(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+def test_safe_lease_recovery_can_reuse_the_same_provider(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         settings, registries = bundle(tmp_path, profile("api"))
         settings = settings.model_copy(
             update={
-                "limits": settings.limits.model_copy(
-                    update={"provider_call_output_tokens": 1_000}
-                )
+                "limits": settings.limits.model_copy(update={"provider_call_output_tokens": 1_000})
             }
         )
         _task_id, run_id, step_id = await seed_provider_step(factory)

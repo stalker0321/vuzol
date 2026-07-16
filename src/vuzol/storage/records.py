@@ -11,6 +11,8 @@ from vuzol.storage.types import DeliveryStatus, StepStatus, TaskStatus
 @dataclass(frozen=True, slots=True)
 class TaskRecord:
     id: uuid.UUID
+    topic_task_number: int | None
+    public_task_number: int | None
     status: TaskStatus
     original_text: str
     task_draft: dict[str, Any]

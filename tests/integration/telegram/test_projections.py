@@ -33,7 +33,8 @@ def test_status_card_rebuild_and_revision_guard(postgres_dsn: str) -> None:
         client = FakeTelegramClient()
         async with factory() as session, session.begin():
             card = await build_status_card(session, task.id)
-            assert "&lt;script&gt;" in card.html
+            assert "<b>Задача №100001</b>" in card.html
+            assert "&lt;script&gt;" not in card.html
             assert await apply_status_projection(
                 session, client, card=card, chat_id=-100, thread_id=10
             )

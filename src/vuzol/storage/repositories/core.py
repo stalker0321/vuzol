@@ -5,10 +5,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.errors import EntityNotFound
-from vuzol.storage.models import Event, Run, Step, Task
+from vuzol.storage.models import Event, Run, Step, Task, TopicTaskCounter
 from vuzol.storage.records import StepRecord, TaskRecord
 from vuzol.storage.types import (
     IdempotencyClass,
@@ -23,6 +24,8 @@ from vuzol.storage.types import (
 def task_record(task: Task) -> TaskRecord:
     return TaskRecord(
         id=task.id,
+        topic_task_number=task.topic_task_number,
+        public_task_number=task.public_task_number,
         status=task.status,
         original_text=task.original_text,
         task_draft=dict(task.task_draft),
@@ -56,10 +59,28 @@ class TaskRepository:
         thread_id: int | None = None,
         project_id: str | None = None,
     ) -> TaskRecord:
+        topic_task_number: int | None = None
+        public_task_number: int | None = None
+        if thread_id is not None:
+            statement = (
+                postgres_insert(TopicTaskCounter)
+                .values(chat_id=chat_id, message_thread_id=thread_id, last_number=1)
+                .on_conflict_do_update(
+                    index_elements=["chat_id", "message_thread_id"],
+                    set_={"last_number": TopicTaskCounter.last_number + 1},
+                )
+                .returning(TopicTaskCounter.last_number)
+            )
+            topic_task_number = (await self._session.execute(statement)).scalar_one()
+            if topic_task_number > 9_999:
+                raise ValueError("topic task number capacity exceeded")
+            public_task_number = thread_id * 10_000 + topic_task_number
         task = Task(
             user_id=user_id,
             source_chat_id=chat_id,
             source_thread_id=thread_id,
+            topic_task_number=topic_task_number,
+            public_task_number=public_task_number,
             project_id=project_id,
             original_text=original_text,
             task_type=task_type,

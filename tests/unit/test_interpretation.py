@@ -146,6 +146,27 @@ def test_inbox_requires_name_options_and_rejects_configured_project_collision() 
     assert "project_name_options_conflict" in collision.reasons
 
 
+def test_project_topic_cannot_be_reinterpreted_as_new_project() -> None:
+    contextual = request().model_copy(
+        update={"topic_kind": TopicKind.PROJECT, "mapped_project_id": "bill-buddy"}
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(
+            action=TaskAction.CREATE_PROJECT,
+            task_type=TaskType.GENERAL,
+            project_name_options=name_options(),
+        ),
+        known_project_ids=frozenset({"bill-buddy"}),
+    )
+
+    assert policy.draft.action is TaskAction.CREATE_TASK
+    assert policy.draft.task_type is TaskType.CODING
+    assert policy.draft.project_id == "bill-buddy"
+    assert policy.draft.project_name_options == ()
+    assert "project_creation_confined_to_inbox" in policy.reasons
+
+
 def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:
     value = draft(
         project_id="invented",

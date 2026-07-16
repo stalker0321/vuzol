@@ -79,9 +79,40 @@ def test_authorized_project_intake_is_atomic_and_duplicate_safe(
         assert duplicate.status is IngressStatus.DUPLICATE
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(Task)) == 1
+            task = await session.get(Task, first.task_id)
+            assert task is not None
+            assert task.topic_task_number == 1
+            assert task.public_task_number == 100001
             assert await session.scalar(select(func.count()).select_from(ExternalInbox)) == 1
             assert await session.scalar(select(func.count()).select_from(TopicMapping)) == 1
             assert await session.scalar(select(func.count()).select_from(TransactionalOutbox)) == 2
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_topic_task_numbers_are_atomic_and_independent(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+
+        async def create(thread_id: int) -> tuple[int | None, int | None]:
+            async with UnitOfWork(factory) as uow:
+                task = await uow.tasks.create(
+                    user_id=42,
+                    chat_id=-100,
+                    thread_id=thread_id,
+                    project_id="vuzol",
+                    original_text="task",
+                    task_type="coding",
+                )
+                return task.topic_task_number, task.public_task_number
+
+        first, second = await asyncio.gather(create(73), create(73))
+        other = await create(74)
+
+        assert sorted((first, second)) == [(1, 730001), (2, 730002)]
+        assert other == (1, 740001)
         await engine.dispose()
 
     asyncio.run(scenario())

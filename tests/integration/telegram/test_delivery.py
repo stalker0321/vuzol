@@ -108,7 +108,8 @@ def test_acknowledgement_sends_once_and_persists_confirmed_link(postgres_dsn: st
         assert await delivery.deliver_one()
         assert not await delivery.deliver_one()
         assert len(client.sent) == 1
-        assert "&lt;unsafe &amp; text&gt;" in client.sent[0][2]
+        assert "<b>Задача №100001</b>" in client.sent[0][2]
+        assert "&lt;unsafe &amp; text&gt;" not in client.sent[0][2]
         async with factory() as session:
             item = await session.get(TransactionalOutbox, outbox_id)
             link = await session.scalar(

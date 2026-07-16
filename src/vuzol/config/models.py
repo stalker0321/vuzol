@@ -233,6 +233,11 @@ class ProviderProfileConfig(FrozenModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
+    # Optional reasoning effort for models that expose it (Codex Sol/Terra/etc.).
+    model_reasoning_effort: str | None = Field(
+        default=None,
+        pattern=r"^(low|medium|high|xhigh|max|ultra)$",
+    )
     api_base_url: HttpUrl | None = None
     launch_mode: LaunchMode
     credential_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
@@ -331,6 +336,10 @@ class TopicConfig(FrozenModel):
     accepts_new_tasks: bool = True
     default_workflow: str = Field(min_length=1)
     enabled: bool = True
+    # Desired forum-topic pin state. None means "derive from product layout policy":
+    # system control topics pin by kind; project topics stay unpinned unless set True
+    # at provision time (cleared later on pause/complete).
+    pinned: bool | None = None
 
     @model_validator(mode="after")
     def validate_project_scope(self) -> "TopicConfig":

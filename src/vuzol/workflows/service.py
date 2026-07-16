@@ -20,6 +20,10 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import ApprovalStatus, RunStatus, StepStatus, TaskStatus
+from vuzol.telegram.projections import (
+    enqueue_project_status_dashboard,
+    enqueue_task_history_report,
+)
 from vuzol.workflows.domain import MaterializedWorkflow, OutcomeKind, StepOutcome
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
@@ -232,7 +236,14 @@ async def commit_step_outcome(
     target = derive_task_status(await _steps_for_run(session, run.id), run.status)
     if target is not task.status:
         await transition_task(session, task, target, actor_type="workflow_manager")
-        await _enqueue_telegram_projection(session, task, run)
+        if target is TaskStatus.WAITING_APPROVAL:
+            # Project card in the project topic + decision card in Апрувы.
+            await _enqueue_telegram_projection(session, task, run, role="intake_ack")
+            await _enqueue_telegram_projection(session, task, run, role="approval_card")
+        else:
+            await _enqueue_telegram_projection(session, task, run)
+        if target is TaskStatus.COMPLETED:
+            await enqueue_task_history_report(session, task.id)
 
 
 async def _enqueue_telegram_projection(
@@ -279,6 +290,7 @@ async def _enqueue_telegram_projection(
             },
         )
     )
+    await enqueue_project_status_dashboard(session, task.source_chat_id)
 
 
 async def finalize_if_complete(session: AsyncSession, run: Run) -> bool:

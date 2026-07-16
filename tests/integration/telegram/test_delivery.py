@@ -369,3 +369,153 @@ def test_project_name_options_are_sent_as_buttons_then_deleted(postgres_dsn: str
         await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        from vuzol.storage.models import Run, Step, TopicMapping
+        from vuzol.storage.types import (
+            IdempotencyClass,
+            QueueClass,
+            RetryClass,
+            RunStatus,
+            StepStatus,
+        )
+        from vuzol.telegram.projections import (
+            PROJECT_STATUS_DASHBOARD_ROLE,
+            enqueue_project_status_dashboard,
+        )
+
+        # Isolated forum chat so leftover tasks from other tests are not listed.
+        chat_id = -1003950752999
+        dashboard_thread = 5
+        engine, factory = storage(postgres_dsn)
+        async with factory.begin() as session:
+            session.add(
+                TopicMapping(
+                    chat_id=chat_id,
+                    message_thread_id=dashboard_thread,
+                    topic_kind="task_dashboard",
+                    accepts_new_tasks=False,
+                    default_workflow="simple_model_task",
+                    enabled=True,
+                )
+            )
+            task = Task(
+                user_id=42,
+                source_chat_id=chat_id,
+                source_thread_id=10,
+                topic_task_number=1,
+                public_task_number=100001,
+                project_id="vuzol",
+                original_text="Build a dashboard. With many details later.",
+                task_type="coding",
+                status=TaskStatus.EXECUTING,
+                task_draft={
+                    "normalized_title": "Build a dashboard. With many details later.",
+                    "goal": "Build a dashboard",
+                },
+                version=1,
+            )
+            session.add(task)
+            await session.flush()
+            run = Run(
+                task_id=task.id,
+                workflow_type="coding",
+                workflow_version="1",
+                status=RunStatus.RUNNING,
+                selected_route={},
+                budget_mode="balanced",
+                configuration_revision="cfg",
+                policy_revision="pol",
+            )
+            session.add(run)
+            await session.flush()
+            session.add(
+                Step(
+                    run_id=run.id,
+                    ordinal=1,
+                    step_type="execute_code",
+                    queue_class=QueueClass.HEAVY,
+                    status=StepStatus.RUNNING,
+                    executor_profile_id="codex-subscription-prod",
+                    required_capabilities=[],
+                    retry_class=RetryClass.NEVER,
+                    idempotency_class=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+                    max_attempts=1,
+                    timeout_seconds=600,
+                )
+            )
+            await enqueue_project_status_dashboard(session, chat_id)
+            task_id = task.id
+        client = FakeTelegramClient(next_message_id=200)
+        delivery = service(factory, client)
+        assert await delivery.deliver_one()
+        assert len(client.sent) == 1
+        html = client.sent[0][2]
+        assert client.sent[0][0] == chat_id
+        assert client.sent[0][1] == dashboard_thread
+        assert "Project status" in html
+        assert "#100001" in html
+        assert "Build a dashboard" in html
+        assert "Codex" in html
+        # Same content/revision must not enqueue another pending outbox row.
+        async with factory.begin() as session:
+            await enqueue_project_status_dashboard(session, chat_id)
+            pending = await session.scalar(
+                select(func.count())
+                .select_from(TransactionalOutbox)
+                .where(
+                    TransactionalOutbox.destination == "telegram",
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                    TransactionalOutbox.idempotency_key.like(
+                        f"%project_status_dashboard:{chat_id}:%"
+                    ),
+                )
+            )
+            assert pending == 0
+        assert client.edited == []
+        assert len(client.sent) == 1
+        # Completing the task empties the dashboard and edits the same message.
+        # Double enqueue in one session (intake_ack + approval_card path) must not
+        # insert two outbox rows with the same idempotency key.
+        async with factory.begin() as session:
+            row = await session.get(Task, task_id)
+            assert row is not None
+            row.status = TaskStatus.COMPLETED
+            row.version = 2
+            await enqueue_project_status_dashboard(session, chat_id)
+            await enqueue_project_status_dashboard(session, chat_id)
+            pending = await session.scalar(
+                select(func.count())
+                .select_from(TransactionalOutbox)
+                .where(
+                    TransactionalOutbox.destination == "telegram",
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                    TransactionalOutbox.idempotency_key.like(
+                        f"%project_status_dashboard:{chat_id}:%"
+                    ),
+                )
+            )
+            assert pending == 1
+        assert await delivery.deliver_one()
+        assert len(client.sent) == 1
+        assert len(client.edited) == 1
+        assert client.edited[0][1] == 200
+        assert "No active tasks right now." in client.edited[0][2]
+        async with factory() as session:
+            links = (
+                await session.scalars(
+                    select(TelegramMessageLink).where(
+                        TelegramMessageLink.chat_id == chat_id,
+                        TelegramMessageLink.message_role == PROJECT_STATUS_DASHBOARD_ROLE,
+                    )
+                )
+            ).all()
+            assert len(links) == 1
+            assert links[0].message_id == 200
+            assert links[0].message_thread_id == dashboard_thread
+            assert links[0].task_id is None
+        await engine.dispose()
+
+    asyncio.run(scenario())

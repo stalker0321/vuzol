@@ -78,9 +78,12 @@ def test_compiler_resolves_optional_predecessors() -> None:
         "prepare_worktree",
         "execute_code",
         "validate",
-        "await_apply_or_complete",
+        "approve_result",
         "finalize",
     ]
+    approve = next(step for step in without_optional.steps if step.key == "approve_result")
+    assert approve.step_type == "approval"
+    assert approve.payload == {"requested_action": "apply_result"}
     assert without_optional.steps[1].predecessor_ordinals == (0,)
     assert "plan" in [step.key for step in with_optional.steps]
     assert "review" in [step.key for step in with_optional.steps]

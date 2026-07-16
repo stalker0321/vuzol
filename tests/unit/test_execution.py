@@ -917,6 +917,40 @@ async def test_typed_git_applies_one_approved_result_with_target_cas(tmp_path: P
     )
 
 
+@pytest.mark.anyio
+async def test_typed_git_applies_when_target_branch_is_checked_out(tmp_path: Path) -> None:
+    """Freshly provisioned repos keep main checked out; apply must still CAS-advance."""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "test@example.com")
+    _git(repository, "config", "user.name", "Test")
+    (repository / "value.txt").write_text("base\n")
+    _git(repository, "add", "value.txt")
+    _git(repository, "commit", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD").strip()
+    assert _git(repository, "branch", "--show-current").strip() == "main"
+
+    worktree = tmp_path / "worktree"
+    git = LocalGit()
+    await git.add_worktree(repository, worktree, "result", base)
+    (worktree / "value.txt").write_text("approved-on-main\n")
+    await git.stage_paths(worktree, ("value.txt",))
+    result = await git.create_commit(worktree, "approved result")
+
+    assert await git.apply_result(
+        repository,
+        worktree,
+        target_branch="main",
+        expected_head=base,
+        result_commit=result,
+    )
+    assert _git(repository, "rev-parse", "main").strip() == result
+    assert _git(repository, "rev-parse", "HEAD").strip() == result
+    assert (repository / "value.txt").read_text() == "approved-on-main\n"
+
+
 def _finalizer_repository(tmp_path: Path) -> tuple[Path, str, str]:
     repository = tmp_path / "finalizer-repo"
     repository.mkdir()
@@ -1976,7 +2010,7 @@ async def test_unexpected_post_launch_failure_uses_conservative_accounting(
         step_id=uuid.uuid4(),
         lease=MagicMock(generation=2),
     )
-    profile = MagicMock(provider="codex", model="codex")
+    profile = MagicMock(provider="codex", model="codex", model_reasoning_effort=None)
     reservation_id = uuid.uuid4()
 
     outcome = await handler._unexpected_launched_provider_failure(
@@ -2688,6 +2722,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
         enabled=True,
         provider="codex",
         model="codex",
+        model_reasoning_effort=None,
     )
 
     envelope, pid = await envf.build(inv)
@@ -3196,6 +3231,17 @@ def test_coding_workflow_execute_code_config() -> None:
     exec_step = next((s for s in coding.steps if s.key == "execute_code"), None)
     assert exec_step is not None
     assert exec_step.idempotency_class == IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
+
+
+def test_coding_workflow_review_is_retryable() -> None:
+    from vuzol.storage.types import RetryClass
+    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
+
+    coding = WORKFLOW_REGISTRY["coding.v1"]
+    review = next((s for s in coding.steps if s.key == "review"), None)
+    assert review is not None
+    assert review.max_attempts == 3
+    assert review.retry_class is RetryClass.TRANSIENT
 
 
 def test_step08_related_classes_construction() -> None:

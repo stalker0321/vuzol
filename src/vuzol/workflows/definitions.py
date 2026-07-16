@@ -20,10 +20,11 @@ def _step(
     attempts: int = 1,
     optional: str | None = None,
     internal: bool = False,
+    step_type: str | None = None,
 ) -> StepDefinition:
     return StepDefinition(
         key=key,
-        step_type=key,
+        step_type=step_type or key,
         predecessors=predecessors,
         queue_class=queue,
         capabilities=capabilities,
@@ -87,9 +88,25 @@ WORKFLOW_DEFINITIONS: tuple[WorkflowDefinition, ...] = (
                 queue=QueueClass.HEAVY,
                 capabilities=frozenset({Capability.PROJECT_SHELL}),
             ),
-            _step("review", "validate", optional="needs_review"),
-            _step("await_apply_or_complete", "review", queue=QueueClass.CONTROL, internal=True),
-            _step("finalize", "await_apply_or_complete", queue=QueueClass.CONTROL, internal=True),
+            _step(
+                "review",
+                "validate",
+                optional="needs_review",
+                # Mechanical/read-only; allow requeue after worker crash mid-commit.
+                retry=RetryClass.TRANSIENT,
+                attempts=3,
+            ),
+            _step(
+                "approve_result",
+                "review",
+                step_type="approval",
+                queue=QueueClass.PRIVILEGED,
+                capabilities=frozenset({Capability.GIT}),
+                idempotency=IdempotencyClass.IDEMPOTENT,
+                timeout=120,
+                attempts=2,
+            ),
+            _step("finalize", "approve_result", queue=QueueClass.CONTROL, internal=True),
         ),
     ),
     WorkflowDefinition(
@@ -195,11 +212,12 @@ def validate_definition(definition: WorkflowDefinition) -> None:
             raise WorkflowDefinitionError(
                 f"unknown or cyclic predecessor for {step.key}: {missing}"
             )
-        if (
-            step.queue_class is QueueClass.PRIVILEGED
-            and Capability.HOST_ADMIN not in step.capabilities
+        if step.queue_class is QueueClass.PRIVILEGED and not (
+            Capability.HOST_ADMIN in step.capabilities or Capability.GIT in step.capabilities
         ):
-            raise WorkflowDefinitionError(f"privileged step lacks host_admin: {step.key}")
+            raise WorkflowDefinitionError(
+                f"privileged step lacks host_admin or git capability: {step.key}"
+            )
         if step.max_attempts > 1 and step.idempotency_class in {
             IdempotencyClass.NON_IDEMPOTENT,
             IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,

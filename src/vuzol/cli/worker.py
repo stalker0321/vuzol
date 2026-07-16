@@ -17,15 +17,17 @@ from vuzol.config import (
     ScopedSecretResolver,
     get_runtime_configuration,
 )
+from vuzol.execution.git import LocalGit
 from vuzol.observability import configure_logging, get_logger
 from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
 from vuzol.providers.health import synchronize_profiles
 from vuzol.providers.registry import AdapterRegistry
+from vuzol.review import ResultReviewHandler
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.dispatch import WorkflowDispatcher
 from vuzol.workflows.recovery import recover_expired_steps
-from vuzol.workflows.worker import INTERNAL_HANDLERS, RoutedWorkflowWorker, WorkflowWorker
+from vuzol.workflows.worker import BASE_INTERNAL_HANDLERS, RoutedWorkflowWorker, WorkflowWorker
 
 
 class Processor(Protocol):
@@ -89,11 +91,19 @@ async def run() -> None:
     owner = f"{socket.gethostname()}:{os.getpid()}"
     dispatcher = WorkflowDispatcher(runtime, factory, owner=f"{owner}:dispatch")
     controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
+    handlers = {
+        **BASE_INTERNAL_HANDLERS,
+        "review": ResultReviewHandler(
+            factory,
+            LocalGit(),
+            worktree_root=settings.worktree_root,
+        ),
+    }
     internal_worker = WorkflowWorker(
         settings,
         factory,
         owner=f"{owner}:worker",
-        handlers=INTERNAL_HANDLERS,
+        handlers=handlers,
         profile_limits={
             profile.id: profile.concurrency_limit for profile in runtime.registries.profiles.items()
         },

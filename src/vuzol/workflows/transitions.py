@@ -41,6 +41,7 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     ),
     TaskStatus.PLANNED: frozenset(
         {
+            TaskStatus.CONTEXT_PREPARED,
             TaskStatus.WAITING_APPROVAL,
             TaskStatus.EXECUTING,
             TaskStatus.AWAITING_USER,

@@ -252,7 +252,7 @@ def test_safe_lease_recovery_can_reuse_the_same_provider(
                 )
             }
         )
-        _task_id, _run_id, step_id = await seed_provider_step(factory)
+        _task_id, run_id, step_id = await seed_provider_step(factory)
         async with factory.begin() as session:
             await synchronize_profiles(
                 session, registries.profiles.items(), configuration_revision="a" * 64
@@ -272,6 +272,20 @@ def test_safe_lease_recovery_can_reuse_the_same_provider(
             step.status = StepStatus.QUEUED
             step.lease_owner = None
             step.lease_expires_at = None
+            for attempt in (2, 3):
+                session.add(
+                    RoutingDecision(
+                        run_id=run_id,
+                        step_id=step_id,
+                        provider_attempt=attempt,
+                        decision_kind="fallback",
+                        role="executor",
+                        selected_profile_id=None,
+                        alternatives=[],
+                        inputs={},
+                        policy_revision="b" * 64,
+                    )
+                )
 
         async with factory.begin() as session:
             second = await claim_routed_step(
@@ -294,7 +308,12 @@ def test_safe_lease_recovery_can_reuse_the_same_provider(
                     )
                 ).all()
             )
-            assert [item.selected_profile_id for item in decisions] == ["api", "api"]
+            assert [item.selected_profile_id for item in decisions] == [
+                "api",
+                None,
+                None,
+                "api",
+            ]
             assert decisions[-1].decision_kind == "initial"
         await engine.dispose()
 

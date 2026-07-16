@@ -201,6 +201,11 @@ class LocalGit:
         if status:
             raise GitError("finalized worktree is dirty")
 
+    async def require_diff_check(self, worktree: Path) -> None:
+        """Fail closed on conflict markers or whitespace errors in the staged index."""
+
+        await self._run(worktree, "diff", "--cached", "--check", "--no-ext-diff", "--no-color")
+
     async def apply_result(
         self,
         repository: Path,

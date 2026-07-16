@@ -76,11 +76,19 @@ not hard-code a chat or thread id: each control forum supplies its own mapping i
 (`kind = "task_dashboard"`), and delivery resolves that mapping the same way approvals resolve
 `kind = "approvals"`.
 
-That topic holds **one** reconstructable message listing every non-terminal task across all
-projects in the forum. Each line shows project name, public/local task number, a one-sentence
-goal, and the assigned model (from the active executor profile). The message is created once and
-then only edited; new status lines never spam additional messages. Delivery uses role
-`project_status_dashboard` and content-hash revision coalescing.
+That topic holds **one** reconstructable message with two sections:
+
+1. every non-terminal task across all projects in the forum (project, public/local number,
+   one-sentence goal, assigned model);
+2. **subscription limits** for every enabled CLI Codex/Grok profile: company, plan (Plus / Super),
+   remaining 5-hour and weekly windows when the provider exposes them, and reset times.
+
+Codex limits are read from ChatGPT usage (`wham/usage`) with the profile state `auth.json`.
+Grok limits prefer the billing credits payload, with a fallback to the latest local billing log
+under the profile state directory. Fetch failures are non-fatal and render as «недоступны».
+
+The message is created once and then only edited; new status lines never spam additional messages.
+Delivery uses role `project_status_dashboard` and content-hash revision coalescing.
 
 ### Project topic pin lifecycle
 

@@ -12,6 +12,12 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.config.models import ProviderProfileConfig
+from vuzol.providers.subscription_limits import (
+    SubscriptionLimitSnapshot,
+    collect_subscription_limits,
+    format_subscription_limits_html,
+)
 from vuzol.storage.models import (
     Approval,
     Event,
@@ -136,13 +142,19 @@ def model_label_for_profile(
     return profile_id
 
 
-def dashboard_revision_for(tasks: Sequence[Task], model_by_task: Mapping[uuid.UUID, str]) -> int:
+def dashboard_revision_for(
+    tasks: Sequence[Task],
+    model_by_task: Mapping[uuid.UUID, str],
+    *,
+    limit_fingerprints: Sequence[str] = (),
+) -> int:
     """Stable content identity for the dashboard; equal content must not re-edit."""
 
     parts = [
         f"{task.id}:{task.version}:{task.status.value}:{model_by_task.get(task.id, '')}"
         for task in tasks
     ]
+    parts.extend(limit_fingerprints)
     digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()
     return int(digest[:8], 16) % (2**31 - 1) or 1
 
@@ -153,8 +165,10 @@ async def build_project_status_dashboard(
     *,
     project_names: Mapping[str, str] | None = None,
     profile_models: Mapping[str, str] | None = None,
+    subscription_profiles: Sequence[ProviderProfileConfig] | None = None,
+    subscription_snapshots: Sequence[SubscriptionLimitSnapshot] | None = None,
 ) -> DashboardCard:
-    """Build the single in-progress task list for the forum's status topic."""
+    """Build the single in-progress task list plus subscription limits."""
 
     tasks = list(
         (
@@ -172,33 +186,39 @@ async def build_project_status_dashboard(
     lines = [f"<b>{telegram_html(STATUS_DASHBOARD_DISPLAY_NAME)}</b>", ""]
     if not tasks:
         lines.append("Сейчас нет задач в работе.")
-        html_body = "\n".join(lines)
-        return DashboardCard(
-            chat_id=chat_id,
-            revision=dashboard_revision_for((), {}),
-            html=split_message(html_body)[0],
+    else:
+        for task in tasks:
+            profile_id = await _active_executor_profile(session, task.id)
+            model = model_label_for_profile(profile_id, profile_models=profile_models)
+            model_by_task[task.id] = model
+            project_id = task.project_id
+            if project_id and project_names is not None and project_id in project_names:
+                project_label = project_names[project_id]
+            else:
+                project_label = project_id or "без проекта"
+            lines.append(
+                f"• <b>{telegram_html(project_label)}</b> · "
+                f"№{telegram_html(task_number_label(task))}"
+            )
+            lines.append(f"  {telegram_html(task_sense_sentence(task))}")
+            lines.append(f"  Модель: {telegram_html(model)}")
+            lines.append("")
+
+    if subscription_snapshots is None and subscription_profiles is not None:
+        subscription_snapshots = await collect_subscription_limits(subscription_profiles)
+    if subscription_snapshots is not None:
+        lines.append(f"<b>{telegram_html('Лимиты подписок')}</b>")
+        lines.extend(
+            format_subscription_limits_html(
+                subscription_snapshots, html_escape=telegram_html
+            )
         )
 
-    for task in tasks:
-        profile_id = await _active_executor_profile(session, task.id)
-        model = model_label_for_profile(profile_id, profile_models=profile_models)
-        model_by_task[task.id] = model
-        project_id = task.project_id
-        if project_id and project_names is not None and project_id in project_names:
-            project_label = project_names[project_id]
-        else:
-            project_label = project_id or "без проекта"
-        lines.append(
-            f"• <b>{telegram_html(project_label)}</b> · №{telegram_html(task_number_label(task))}"
-        )
-        lines.append(f"  {telegram_html(task_sense_sentence(task))}")
-        lines.append(f"  Модель: {telegram_html(model)}")
-        lines.append("")
-
+    fingerprints = tuple(snap.fingerprint() for snap in (subscription_snapshots or ()))
     html_body = "\n".join(lines).rstrip()
     return DashboardCard(
         chat_id=chat_id,
-        revision=dashboard_revision_for(tasks, model_by_task),
+        revision=dashboard_revision_for(tasks, model_by_task, limit_fingerprints=fingerprints),
         html=split_message(html_body)[0],
     )
 

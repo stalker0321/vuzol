@@ -17,8 +17,9 @@ This file records completed implementation changes, not plans or speculative ide
 ## Unreleased
 
 - added a single editable «Статус проектов» dashboard listing in-progress tasks with project,
-  task number, one-sentence goal, and assigned model; refreshed on status/routing changes without
-  spamming new messages;
+  task number, one-sentence goal, and assigned model, plus subscription limit rows for connected
+  Codex/Grok CLI profiles (company, plan, remaining 5h/weekly windows when available); refreshed
+  on status/routing changes without spamming new messages;
 - fixed the product-level Telegram forum layout: permanent pin order
   История → Статус проектов → Апрувы → Новый проект, canonical system display names,
   project topics pin on provision and unpin on later pause/finish; live Bot API pin

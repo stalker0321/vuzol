@@ -124,7 +124,11 @@ async def claim_routed_step(
             if role is ProviderRole.PLANNER
             else settings.limits.provider_call_output_tokens
         )
-        failed_profile_id = step.executor_profile_id if attempt > 1 else None
+        failed_profile_id = (
+            step.executor_profile_id
+            if attempt > 1 and step.failure_category is not None
+            else None
+        )
         allowed_fallbacks: tuple[str, ...] = ()
         if failed_profile_id is not None:
             allowed_fallbacks = registries.profiles.get(failed_profile_id).fallback_profile_ids
@@ -298,7 +302,7 @@ async def _persist_decision(
             run_id=run.id,
             step_id=step.id,
             provider_attempt=attempt,
-            decision_kind="fallback" if attempt > 1 else "initial",
+            decision_kind="fallback" if request.failed_profile_id is not None else "initial",
             role=role.value,
             selected_profile_id=selected_profile_id,
             alternatives=[

@@ -259,7 +259,7 @@ def test_dispatcher_materializes_one_project_naming_request(
                 task_draft=recovered_draft.model_dump(mode="json"),
                 profile_id="fake",
                 model="fake",
-                prompt_version="architecture-routing-v4",
+                prompt_version="architecture-routing-v5",
                 schema_version="1.3",
             )
             session.add(interpretation)

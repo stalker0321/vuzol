@@ -69,10 +69,13 @@ class OpenAICompatibleInterpreter:
             "task_draft_schema": schema,
             "repair_error": repair_error,
         }
+        system_prompt = SYSTEM_PROMPT
+        if request.topic_kind.value == "inbox":
+            system_prompt = f"{system_prompt}\n{PROJECT_INTAKE_PROMPT}"
         payload = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": f"{SYSTEM_PROMPT}\n{PROJECT_INTAKE_PROMPT}"},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
             "response_format": {"type": "json_object"},

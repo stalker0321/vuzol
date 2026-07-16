@@ -418,10 +418,13 @@ def test_versioned_fixture_set_and_safety_gate() -> None:
 def test_openai_compatible_adapters_parse_provider_neutral_results() -> None:
     async def scenario() -> None:
         valid_draft = draft().model_dump(mode="json")
+        system_prompts: list[str] = []
 
         async def handler(provider_request: httpx.Request) -> httpx.Response:
             assert provider_request.headers["authorization"] == "Bearer test-key"
             if provider_request.url.path.endswith("/chat/completions"):
+                body = json.loads(provider_request.content)
+                system_prompts.append(body["messages"][0]["content"])
                 return httpx.Response(
                     200,
                     headers={"x-request-id": "request-1"},
@@ -452,6 +455,11 @@ def test_openai_compatible_adapters_parse_provider_neutral_results() -> None:
             assert interpreted.draft == draft()
             assert interpreted.input_tokens == 10 and interpreted.output_tokens == 5
             assert interpreted.provider_request_id == "request-1"
+            await interpreter.interpret(
+                request().model_copy(update={"topic_kind": TopicKind.INBOX})
+            )
+            assert "Generate exactly nine" not in system_prompts[0]
+            assert "Generate exactly nine" in system_prompts[1]
             transcriber = OpenAICompatibleTranscriber(
                 base_url="https://provider.example/v1",
                 credential=SecretStr("test-key"),

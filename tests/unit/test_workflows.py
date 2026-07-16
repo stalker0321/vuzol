@@ -194,6 +194,14 @@ def test_illegal_transition_is_rejected_before_mutation() -> None:
         )
 
 
+def test_planned_task_can_advance_to_prepared_context() -> None:
+    workflow_transitions._check(
+        TaskStatus.PLANNED,
+        TaskStatus.CONTEXT_PREPARED,
+        workflow_transitions.TASK_TRANSITIONS,
+    )
+
+
 def test_coding_workflow_and_heavy_queue() -> None:
     """Test the coding workflow queue and effects policy."""
     from vuzol.storage.types import IdempotencyClass, QueueClass

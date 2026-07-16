@@ -1976,7 +1976,7 @@ async def test_unexpected_post_launch_failure_uses_conservative_accounting(
         step_id=uuid.uuid4(),
         lease=MagicMock(generation=2),
     )
-    profile = MagicMock(provider="codex", model="codex")
+    profile = MagicMock(provider="codex", model="codex", model_reasoning_effort=None)
     reservation_id = uuid.uuid4()
 
     outcome = await handler._unexpected_launched_provider_failure(
@@ -2688,6 +2688,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
         enabled=True,
         provider="codex",
         model="codex",
+        model_reasoning_effort=None,
     )
 
     envelope, pid = await envf.build(inv)

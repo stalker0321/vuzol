@@ -109,7 +109,12 @@ class ExecutionEnvelopeFactory:
                 raise LookupError("sandbox worktree or step is missing")
             _validate_fenced_binding(invocation, worktree, step)
             profile = self._registries.profiles.get(invocation.profile_id)
-            _require_provider_command(invocation.argv, profile.provider, profile.model)
+            _require_provider_command(
+                invocation.argv,
+                profile.provider,
+                profile.model,
+                reasoning_effort=profile.model_reasoning_effort,
+            )
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
             if not sandbox.enabled or profile.state_directory is None:
@@ -613,9 +618,19 @@ def _worktree_git_metadata(worktree: Path) -> Path:
     return path
 
 
-def _require_provider_command(argv: tuple[str, ...], provider: str, model: str) -> None:
+def _require_provider_command(
+    argv: tuple[str, ...],
+    provider: str,
+    model: str,
+    *,
+    reasoning_effort: str | None = None,
+) -> None:
+    effort = reasoning_effort if isinstance(reasoning_effort, str) else None
     expected = {
-        "codex": {canonical_codex_argv(), canonical_codex_argv(read_only=True)},
+        "codex": {
+            canonical_codex_argv(model=model, reasoning_effort=effort),
+            canonical_codex_argv(model=model, reasoning_effort=effort, read_only=True),
+        },
         "grok": {canonical_grok_argv(model), canonical_grok_argv(model, read_only=True)},
     }.get(provider)
     if expected is None or argv not in expected:

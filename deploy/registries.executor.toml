@@ -80,7 +80,8 @@ enabled = true
 [[profiles]]
 id = "codex-subscription-prod"
 provider = "codex"
-model = "codex"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
 launch_mode = "cli"
 credential_required = false
 capabilities = ["repository_read", "code_edit", "git", "project_shell"]

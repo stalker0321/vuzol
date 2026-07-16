@@ -87,18 +87,27 @@ async def claim_routed_step(
             )
             if active_class >= limit:
                 continue
-        attempt = (
-            int(
-                await session.scalar(
-                    select(func.count())
-                    .select_from(RoutingDecision)
-                    .where(RoutingDecision.step_id == step.id)
-                )
-                or 0
+        decision_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(RoutingDecision)
+                .where(RoutingDecision.step_id == step.id)
             )
-            + 1
+            or 0
         )
-        if attempt > settings.limits.provider_attempts:
+        provider_call_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(RoutingDecision)
+                .where(
+                    RoutingDecision.step_id == step.id,
+                    RoutingDecision.selected_profile_id.is_not(None),
+                )
+            )
+            or 0
+        )
+        attempt = decision_count + 1
+        if provider_call_count >= settings.limits.provider_attempts:
             await _block_route(
                 session,
                 step=step,

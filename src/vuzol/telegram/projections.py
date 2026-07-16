@@ -1,9 +1,10 @@
 """Reconstructable and revision-safe Telegram projections."""
 
 import asyncio
+import hashlib
 import html
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -18,13 +19,38 @@ from vuzol.storage.models import (
     Step,
     Task,
     TelegramMessageLink,
+    TopicMapping,
+    TransactionalOutbox,
     UsageRecord,
     Worktree,
 )
-from vuzol.storage.types import ApprovalStatus
+from vuzol.storage.types import ApprovalStatus, StepStatus, TaskStatus
+from vuzol.telegram.layout import STATUS_DASHBOARD_DISPLAY_NAME, STATUS_DASHBOARD_TOPIC_KIND
 from vuzol.workflows.result_approval import verified_envelope
 
 TELEGRAM_TEXT_LIMIT = 4096
+# Outbox/message_role for the single editable card in the task_dashboard topic.
+PROJECT_STATUS_DASHBOARD_ROLE = "project_status_dashboard"
+
+_TERMINAL_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.ROLLED_BACK,
+    }
+)
+_ACTIVE_PROVIDER_STEPS = frozenset(
+    {
+        "plan",
+        "execute_model",
+        "execute_code",
+        "execute_agent",
+        "research_execute",
+        "synthesize",
+        "review",
+    }
+)
 
 
 def telegram_html(value: object) -> str:
@@ -48,6 +74,15 @@ class StatusCard:
     approval_id: uuid.UUID | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DashboardCard:
+    """Single editable global dashboard projection for one forum chat."""
+
+    chat_id: int
+    revision: int
+    html: str
+
+
 def task_title(task: Task) -> str:
     if task.public_task_number is not None:
         return f"Задача №{task.public_task_number}"
@@ -56,6 +91,192 @@ def task_title(task: Task) -> str:
         or task.task_draft.get("title")
         or task.original_text
     ).strip()[:120]
+
+
+def task_number_label(task: Task) -> str:
+    if task.public_task_number is not None:
+        return str(task.public_task_number)
+    if task.topic_task_number is not None:
+        return f"{task.topic_task_number:04d}"
+    return "—"
+
+
+def task_sense_sentence(task: Task) -> str:
+    """One short user-facing sentence about what the task is for."""
+
+    draft = task.task_draft if isinstance(task.task_draft, dict) else {}
+    raw = (
+        draft.get("normalized_title")
+        or draft.get("goal")
+        or draft.get("title")
+        or task.original_text
+        or ""
+    )
+    text = " ".join(str(raw).split()).strip()
+    if not text:
+        return "Без описания"
+    for separator in (". ", "! ", "? ", "\n"):
+        if separator in text:
+            text = text.split(separator, 1)[0].strip()
+            break
+    text = text.rstrip(".!?").strip()
+    if len(text) > 160:
+        text = text[:157].rstrip() + "…"
+    return text or "Без описания"
+
+
+def model_label_for_profile(
+    profile_id: str | None, *, profile_models: Mapping[str, str] | None = None
+) -> str:
+    if not profile_id:
+        return "ещё не назначена"
+    model = None if profile_models is None else profile_models.get(profile_id)
+    if model:
+        return model
+    return profile_id
+
+
+def dashboard_revision_for(tasks: Sequence[Task], model_by_task: Mapping[uuid.UUID, str]) -> int:
+    """Stable content identity for the dashboard; equal content must not re-edit."""
+
+    parts = [
+        f"{task.id}:{task.version}:{task.status.value}:{model_by_task.get(task.id, '')}"
+        for task in tasks
+    ]
+    digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()
+    return int(digest[:8], 16) % (2**31 - 1) or 1
+
+
+async def build_project_status_dashboard(
+    session: AsyncSession,
+    chat_id: int,
+    *,
+    project_names: Mapping[str, str] | None = None,
+    profile_models: Mapping[str, str] | None = None,
+) -> DashboardCard:
+    """Build the single in-progress task list for the forum's status topic."""
+
+    tasks = list(
+        (
+            await session.scalars(
+                select(Task)
+                .where(
+                    Task.source_chat_id == chat_id,
+                    Task.status.not_in(_TERMINAL_TASK_STATUSES),
+                )
+                .order_by(Task.created_at.asc(), Task.id.asc())
+            )
+        ).all()
+    )
+    model_by_task: dict[uuid.UUID, str] = {}
+    lines = [f"<b>{telegram_html(STATUS_DASHBOARD_DISPLAY_NAME)}</b>", ""]
+    if not tasks:
+        lines.append("Сейчас нет задач в работе.")
+        html_body = "\n".join(lines)
+        return DashboardCard(
+            chat_id=chat_id,
+            revision=dashboard_revision_for((), {}),
+            html=split_message(html_body)[0],
+        )
+
+    for task in tasks:
+        profile_id = await _active_executor_profile(session, task.id)
+        model = model_label_for_profile(profile_id, profile_models=profile_models)
+        model_by_task[task.id] = model
+        project_id = task.project_id
+        if project_id and project_names is not None and project_id in project_names:
+            project_label = project_names[project_id]
+        else:
+            project_label = project_id or "без проекта"
+        lines.append(
+            f"• <b>{telegram_html(project_label)}</b> · №{telegram_html(task_number_label(task))}"
+        )
+        lines.append(f"  {telegram_html(task_sense_sentence(task))}")
+        lines.append(f"  Модель: {telegram_html(model)}")
+        lines.append("")
+
+    html_body = "\n".join(lines).rstrip()
+    return DashboardCard(
+        chat_id=chat_id,
+        revision=dashboard_revision_for(tasks, model_by_task),
+        html=split_message(html_body)[0],
+    )
+
+
+async def _active_executor_profile(session: AsyncSession, task_id: uuid.UUID) -> str | None:
+    run = await session.scalar(
+        select(Run).where(Run.task_id == task_id).order_by(Run.created_at.desc()).limit(1)
+    )
+    if run is None:
+        return None
+    trusted = run.selected_route.get("trusted_profile_id")
+    if isinstance(trusted, str) and trusted:
+        return trusted
+    steps = list(
+        (
+            await session.scalars(
+                select(Step)
+                .where(
+                    Step.run_id == run.id,
+                    Step.step_type.in_(_ACTIVE_PROVIDER_STEPS),
+                    Step.executor_profile_id.is_not(None),
+                )
+                .order_by(Step.ordinal.desc())
+            )
+        ).all()
+    )
+    for step in steps:
+        if step.status in {StepStatus.LEASED, StepStatus.RUNNING} and step.executor_profile_id:
+            return step.executor_profile_id
+    for step in steps:
+        if step.executor_profile_id:
+            return step.executor_profile_id
+    return None
+
+
+async def enqueue_project_status_dashboard(session: AsyncSession, chat_id: int) -> None:
+    """Queue a refresh of the existing «Статус проектов» topic (kind=task_dashboard).
+
+    Product policy always targets :data:`STATUS_DASHBOARD_TOPIC_KIND`. The stable
+    thread id comes from the forum's configured mapping — never from a display name
+    and never from a hard-coded chat. No new Telegram topic is created.
+    """
+
+    mapping = await session.scalar(
+        select(TopicMapping).where(
+            TopicMapping.chat_id == chat_id,
+            TopicMapping.topic_kind == STATUS_DASHBOARD_TOPIC_KIND.value,
+            TopicMapping.enabled.is_(True),
+        )
+    )
+    if mapping is None:
+        return
+    card = await build_project_status_dashboard(session, chat_id)
+    key = f"telegram:{PROJECT_STATUS_DASHBOARD_ROLE}:{chat_id}:revision:{card.revision}"
+    existing = await session.scalar(
+        select(TransactionalOutbox.id).where(
+            TransactionalOutbox.destination == "telegram",
+            TransactionalOutbox.idempotency_key == key,
+        )
+    )
+    if existing is not None:
+        return
+    session.add(
+        TransactionalOutbox(
+            destination="telegram",
+            operation_type="send_message",
+            linked_entity_type="topic_mapping",
+            linked_entity_id=mapping.id,
+            idempotency_key=key,
+            payload={
+                "role": PROJECT_STATUS_DASHBOARD_ROLE,
+                "chat_id": chat_id,
+                "message_thread_id": mapping.message_thread_id,
+                "topic_kind": STATUS_DASHBOARD_TOPIC_KIND.value,
+                "revision": card.revision,
+            },
+        )
+    )
 
 
 async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> StatusCard:

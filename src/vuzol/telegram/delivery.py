@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
 
 from vuzol.config import TopicKind, TopicRegistry
+from vuzol.config.registries import ProfileRegistry, ProjectRegistry
 from vuzol.observability import get_logger
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
@@ -28,13 +29,17 @@ from vuzol.storage.models import (
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
+    TopicMapping,
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
+from vuzol.telegram.layout import STATUS_DASHBOARD_TOPIC_KIND
 from vuzol.telegram.projections import (
+    PROJECT_STATUS_DASHBOARD_ROLE,
     LostTelegramResponse,
     TelegramClient,
     build_approval_card,
+    build_project_status_dashboard,
     build_status_card,
     telegram_html,
 )
@@ -84,9 +89,15 @@ async def prepare_delivery(
     session: AsyncSession,
     item: TransactionalOutbox,
     topics: TopicRegistry | None = None,
+    projects: ProjectRegistry | None = None,
+    profiles: ProfileRegistry | None = None,
 ) -> PreparedDelivery:
     if item.operation_type not in {"send_message", "delete_message"}:
         raise PermanentDeliveryError("unsupported_telegram_operation")
+    if item.payload.get("role") == PROJECT_STATUS_DASHBOARD_ROLE:
+        return await _prepare_project_status_dashboard(
+            session, item, topics=topics, projects=projects, profiles=profiles
+        )
     if item.linked_entity_type == "project_naming":
         naming = await session.get(ProjectNamingRequest, item.linked_entity_id)
         if naming is None:
@@ -279,6 +290,95 @@ async def prepare_delivery(
     )
 
 
+async def _resolve_status_dashboard_thread(
+    session: AsyncSession,
+    chat_id: int,
+    topics: TopicRegistry | None,
+) -> int:
+    """Resolve the existing task_dashboard topic thread for this forum chat."""
+
+    destination = (
+        topics.system_topic(chat_id, STATUS_DASHBOARD_TOPIC_KIND) if topics is not None else None
+    )
+    if destination is not None and destination.enabled:
+        return destination.message_thread_id
+    mapping = await session.scalar(
+        select(TopicMapping).where(
+            TopicMapping.chat_id == chat_id,
+            TopicMapping.topic_kind == STATUS_DASHBOARD_TOPIC_KIND.value,
+            TopicMapping.enabled.is_(True),
+        )
+    )
+    if mapping is None:
+        raise PermanentDeliveryError("status_dashboard_topic_missing")
+    return mapping.message_thread_id
+
+
+async def _prepare_project_status_dashboard(
+    session: AsyncSession,
+    item: TransactionalOutbox,
+    *,
+    topics: TopicRegistry | None,
+    projects: ProjectRegistry | None,
+    profiles: ProfileRegistry | None,
+) -> PreparedDelivery:
+    """Deliver into the forum's configured «Статус проектов» (task_dashboard) topic."""
+
+    try:
+        chat_id = int(item.payload["chat_id"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise PermanentDeliveryError("invalid_dashboard_chat_id") from error
+    thread_id = await _resolve_status_dashboard_thread(session, chat_id, topics)
+    project_names = (
+        {project.id: project.display_name for project in projects.items()}
+        if projects is not None
+        else None
+    )
+    profile_models = (
+        {profile.id: profile.model for profile in profiles.items()}
+        if profiles is not None
+        else None
+    )
+    card = await build_project_status_dashboard(
+        session,
+        chat_id,
+        project_names=project_names,
+        profile_models=profile_models,
+    )
+    link = await session.scalar(
+        select(TelegramMessageLink).where(
+            TelegramMessageLink.chat_id == chat_id,
+            TelegramMessageLink.message_thread_id == thread_id,
+            TelegramMessageLink.message_role == PROJECT_STATUS_DASHBOARD_ROLE,
+        )
+    )
+    if link is not None and card.revision == link.projection_revision:
+        return PreparedDelivery(
+            DeliveryAction.NOOP,
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+    if link is None:
+        return PreparedDelivery(
+            DeliveryAction.SEND_STATUS,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            html=card.html,
+            revision=card.revision,
+            message_role=PROJECT_STATUS_DASHBOARD_ROLE,
+        )
+    return PreparedDelivery(
+        DeliveryAction.EDIT_STATUS,
+        chat_id=link.chat_id,
+        thread_id=link.message_thread_id,
+        html=card.html,
+        revision=card.revision,
+        link_id=link.id,
+        message_id=link.message_id,
+        message_role=PROJECT_STATUS_DASHBOARD_ROLE,
+    )
+
+
 class TelegramDeliveryService:
     def __init__(
         self,
@@ -291,6 +391,8 @@ class TelegramDeliveryService:
         retry_min_seconds: float,
         retry_max_seconds: float,
         topics: TopicRegistry | None = None,
+        projects: ProjectRegistry | None = None,
+        profiles: ProfileRegistry | None = None,
     ) -> None:
         self._factory = session_factory
         self._client = client
@@ -300,6 +402,8 @@ class TelegramDeliveryService:
         self._retry_min = retry_min_seconds
         self._retry_max = retry_max_seconds
         self._topics = topics
+        self._projects = projects
+        self._profiles = profiles
         self._logger = get_logger(__name__)
 
     async def deliver_one(self) -> bool:
@@ -317,7 +421,13 @@ class TelegramDeliveryService:
                 item = await session.get(TransactionalOutbox, token.item_id)
                 assert item is not None
                 attempt_count = item.attempt_count
-                prepared = await prepare_delivery(session, item, self._topics)
+                prepared = await prepare_delivery(
+                    session,
+                    item,
+                    self._topics,
+                    projects=self._projects,
+                    profiles=self._profiles,
+                )
             if prepared.action == DeliveryAction.NOOP:
                 await self._complete(token, prepared, None)
                 return True
@@ -390,8 +500,10 @@ class TelegramDeliveryService:
     ) -> None:
         async with self._factory.begin() as session:
             if prepared.action == DeliveryAction.SEND_STATUS:
-                assert prepared.task_id is not None and prepared.revision is not None
+                assert prepared.revision is not None
                 assert confirmed_message_id is not None
+                if prepared.message_role != PROJECT_STATUS_DASHBOARD_ROLE:
+                    assert prepared.task_id is not None
                 session.add(
                     TelegramMessageLink(
                         chat_id=prepared.chat_id,

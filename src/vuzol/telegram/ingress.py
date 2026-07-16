@@ -11,6 +11,7 @@ from vuzol.storage.types import IntakeStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
 from vuzol.telegram.policy import TelegramPolicyError, authorize, validate_message
+from vuzol.telegram.projections import enqueue_project_status_dashboard
 
 
 def update_hash(update: MessageUpdate) -> str:
@@ -137,6 +138,9 @@ class TelegramIngressService:
                     "candidate_task_ids": [str(candidate) for candidate in candidates],
                 },
             )
+            if task_id is not None:
+                assert uow.session is not None
+                await enqueue_project_status_dashboard(uow.session, update.chat_id)
             has_voice = any(
                 attachment.kind.value in {"voice", "audio"} for attachment in update.attachments
             )

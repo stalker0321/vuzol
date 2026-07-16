@@ -68,6 +68,20 @@ Additional workspace roles that are **not** part of the fixed pin stack:
 - `Система` (`system`) for operational alerts;
 - one `<project>` (`project`) topic per provisioned project.
 
+### Project status dashboard
+
+The product always reuses the existing system topic kind `task_dashboard` (canonical name
+`Статус проектов` from `vuzol.telegram.layout`). It does **not** create a parallel topic and does
+not hard-code a chat or thread id: each control forum supplies its own mapping in the registry
+(`kind = "task_dashboard"`), and delivery resolves that mapping the same way approvals resolve
+`kind = "approvals"`.
+
+That topic holds **one** reconstructable message listing every non-terminal task across all
+projects in the forum. Each line shows project name, public/local task number, a one-sentence
+goal, and the assigned model (from the active executor profile). The message is created once and
+then only edited; new status lines never spam additional messages. Delivery uses role
+`project_status_dashboard` and content-hash revision coalescing.
+
 ### Project topic pin lifecycle
 
 - When a project is provisioned, its topic is created and marked `pinned=true` so it joins the pin

@@ -26,6 +26,7 @@ from vuzol.storage.types import (
     StepStatus,
     TaskStatus,
 )
+from vuzol.telegram.projections import enqueue_project_status_dashboard
 from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.controls import cancel_task, pause_task, resume_task
 from vuzol.workflows.service import materialize_run
@@ -254,6 +255,7 @@ class WorkflowDispatcher:
                 },
             )
         )
+        await enqueue_project_status_dashboard(session, intake.chat_id)
 
     async def _continue_task(
         self,

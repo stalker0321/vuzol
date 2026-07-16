@@ -29,9 +29,20 @@ SYSTEM_TOPIC_DISPLAY_NAMES: dict[TopicKind, str] = {
 # Optional global roles that exist in the workspace but are not part of the fixed pin stack.
 UNPINNED_SYSTEM_TOPIC_KINDS: frozenset[TopicKind] = frozenset({TopicKind.SYSTEM})
 
+# Exclusive product destination for the global in-progress task list.
+# Does not create a topic: every control forum already maps this kind in the registry
+# (display name «Статус проектов»). Content is chat-scoped but the role is product-global.
+STATUS_DASHBOARD_TOPIC_KIND = TopicKind.TASK_DASHBOARD
+STATUS_DASHBOARD_DISPLAY_NAME = SYSTEM_TOPIC_DISPLAY_NAMES[STATUS_DASHBOARD_TOPIC_KIND]
+
 
 def is_system_workspace_kind(kind: TopicKind) -> bool:
     return kind in SYSTEM_TOPIC_DISPLAY_NAMES
+
+
+def is_status_dashboard_topic(kind: TopicKind | str) -> bool:
+    value = kind.value if isinstance(kind, TopicKind) else kind
+    return value == STATUS_DASHBOARD_TOPIC_KIND.value
 
 
 def effective_display_name(topic: TopicConfig) -> str | None:
@@ -87,7 +98,9 @@ def system_pin_rank(kind: TopicKind) -> int | None:
         return None
 
 
-def ordered_pinned_topics(topics: tuple[TopicConfig, ...] | list[TopicConfig]) -> tuple[TopicConfig, ...]:
+def ordered_pinned_topics(
+    topics: tuple[TopicConfig, ...] | list[TopicConfig],
+) -> tuple[TopicConfig, ...]:
     """Topics that should be pinned, ordered for a single chat's pin stack.
 
     Permanent system topics come first in product order. Project topics that want a

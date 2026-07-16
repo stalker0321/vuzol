@@ -117,6 +117,7 @@ accepts_new_tasks = false
 default_workflow = "simple_model_task"
 enabled = false
 
+# Global in-progress task dashboard posts into this existing system topic only.
 [[topics]]
 chat_id = -1000000000000
 message_thread_id = 2

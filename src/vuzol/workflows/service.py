@@ -20,6 +20,7 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import ApprovalStatus, RunStatus, StepStatus, TaskStatus
+from vuzol.telegram.projections import enqueue_project_status_dashboard
 from vuzol.workflows.domain import MaterializedWorkflow, OutcomeKind, StepOutcome
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
@@ -279,6 +280,7 @@ async def _enqueue_telegram_projection(
             },
         )
     )
+    await enqueue_project_status_dashboard(session, task.source_chat_id)
 
 
 async def finalize_if_complete(session: AsyncSession, run: Run) -> bool:

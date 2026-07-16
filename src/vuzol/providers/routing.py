@@ -29,6 +29,7 @@ from vuzol.storage.models import RoutingDecision, Run, Step, Task
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.repositories.core import step_record
 from vuzol.storage.types import QueueClass, RunStatus, StepStatus, TaskStatus
+from vuzol.telegram.projections import enqueue_project_status_dashboard
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
 PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
@@ -236,6 +237,8 @@ async def claim_routed_step(
         }
         await session.flush()
         await session.refresh(step, attribute_names=["heartbeat_at", "lease_expires_at"])
+        if task.source_chat_id:
+            await enqueue_project_status_dashboard(session, task.source_chat_id)
         return LeaseToken(step=step_record(step), owner=owner, generation=step.lease_generation)
     return None
 

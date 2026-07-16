@@ -14,8 +14,16 @@ from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.result_approval import envelope_hash
 
 
-def project_policy(*, allowed: bool = True, approval_required: bool = True) -> object:
+def project_policy(
+    *,
+    allowed: bool = True,
+    approval_required: bool = True,
+    enabled: bool = True,
+    default_branch: str = "main",
+) -> object:
     return SimpleNamespace(
+        enabled=enabled,
+        default_branch=default_branch,
         repository_path=Path("/managed/repository"),
         git_delivery=GitDeliveryPolicy(
             allowed_modes=(
@@ -31,13 +39,22 @@ def project_policy(*, allowed: bool = True, approval_required: bool = True) -> o
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "failure",
-    ("not_allowed", "approval_not_required", "revision_changed", "identity_changed", "git"),
+    (
+        "not_allowed",
+        "approval_not_required",
+        "disabled",
+        "branch_changed",
+        "identity_changed",
+        "git",
+    ),
 )
 async def test_result_apply_fails_closed_before_recording_delivery(failure: str) -> None:
     registries = MagicMock(revision="a" * 64)
     registries.projects.get.return_value = project_policy(
         allowed=failure != "not_allowed",
         approval_required=failure != "approval_not_required",
+        enabled=failure != "disabled",
+        default_branch="other" if failure == "branch_changed" else "main",
     )
     git = MagicMock()
     git.repository_identity = AsyncMock(
@@ -50,7 +67,8 @@ async def test_result_apply_fails_closed_before_recording_delivery(failure: str)
     approval_id = uuid.uuid4()
     worktree = SimpleNamespace(id=uuid.uuid4(), project_id="vuzol", path="/retained/result")
     envelope = {
-        "configuration_revision": "d" * 64 if failure == "revision_changed" else "a" * 64,
+        "configuration_revision": "a" * 64,
+        "project_id": "vuzol",
         "repository_identity_hash": "b" * 64,
         "target_branch": "main",
         "expected_target_head": "e" * 40,
@@ -67,8 +85,10 @@ async def test_result_apply_fails_closed_before_recording_delivery(failure: str)
 
 
 @pytest.mark.anyio
-async def test_result_apply_records_the_exact_successful_operation() -> None:
-    registries = MagicMock(revision="a" * 64)
+async def test_result_apply_tolerates_unrelated_bundle_revision_drift() -> None:
+    """Profile/model label changes must not block an already-approved local apply."""
+
+    registries = MagicMock(revision="z" * 64)
     registries.projects.get.return_value = project_policy()
     git = MagicMock()
     git.repository_identity = AsyncMock(return_value=("b" * 64, None))
@@ -78,6 +98,7 @@ async def test_result_apply_records_the_exact_successful_operation() -> None:
     worktree = SimpleNamespace(id=uuid.uuid4(), project_id="vuzol", path="/retained/result")
     envelope = {
         "configuration_revision": "a" * 64,
+        "project_id": "vuzol",
         "repository_identity_hash": "b" * 64,
         "target_branch": "main",
         "expected_target_head": "e" * 40,
@@ -92,6 +113,33 @@ async def test_result_apply_records_the_exact_successful_operation() -> None:
     git.apply_result.assert_awaited_once()
     handler._record_applied.assert_awaited_once()
 
+
+@pytest.mark.anyio
+async def test_result_apply_records_the_exact_successful_operation() -> None:
+    registries = MagicMock(revision="a" * 64)
+    registries.projects.get.return_value = project_policy()
+    git = MagicMock()
+    git.repository_identity = AsyncMock(return_value=("b" * 64, None))
+    git.apply_result = AsyncMock(return_value=True)
+    handler = ResultApplyHandler(MagicMock(), registries, git)
+    approval_id = uuid.uuid4()
+    worktree = SimpleNamespace(id=uuid.uuid4(), project_id="vuzol", path="/retained/result")
+    envelope = {
+        "configuration_revision": "a" * 64,
+        "project_id": "vuzol",
+        "repository_identity_hash": "b" * 64,
+        "target_branch": "main",
+        "expected_target_head": "e" * 40,
+        "result_commit": "f" * 40,
+    }
+    handler._load = AsyncMock(return_value=(approval_id, envelope, worktree))  # type: ignore[method-assign]
+    handler._record_applied = AsyncMock()  # type: ignore[method-assign]
+
+    outcome = await handler.execute(MagicMock(), CancellationContext())
+
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    git.apply_result.assert_awaited_once()
+    handler._record_applied.assert_awaited_once()
 
 class AsyncContext:
     def __init__(self, value: object) -> None:

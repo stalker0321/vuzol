@@ -16,6 +16,8 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- changed Telegram task affinity so a standalone project-topic message always creates a new task;
+  replying to a linked task message is now the only implicit continuation path;
 - added adaptive project-topic routing and a full read-only architecture-agent workflow with a
   bounded GPT-5 nano planning step, isolated repository inspection, and Telegram result delivery;
 - added the narrow retained-result decision loop: semantic Telegram completion summaries, trusted

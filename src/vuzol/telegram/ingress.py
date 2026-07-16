@@ -72,14 +72,6 @@ class TelegramIngressService:
                 if task_id is not None:
                     affinity_kind = "reply"
             if task_id is None:
-                active = await uow.tasks.active_in_topic(update.chat_id, update.message_thread_id)
-                if len(active) == 1:
-                    task_id = active[0].id
-                    affinity_kind = "single_active_task"
-                elif len(active) > 1:
-                    candidates = tuple(task.id for task in active)
-
-            if task_id is None and not candidates:
                 task = await uow.tasks.create(
                     user_id=update.user_id,
                     chat_id=update.chat_id,
@@ -91,11 +83,7 @@ class TelegramIngressService:
                 task_id = task.id
                 affinity_kind = "new_task"
 
-            intake_status = (
-                IntakeStatus.NEEDS_CLARIFICATION
-                if candidates
-                else IntakeStatus.AWAITING_INTERPRETATION
-            )
+            intake_status = IntakeStatus.AWAITING_INTERPRETATION
             intake = TelegramIntakeMessage(
                 inbox_id=inbox_id,
                 chat_id=update.chat_id,

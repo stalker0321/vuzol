@@ -20,6 +20,7 @@ from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.proxy_service import ProxyServiceManager
 from vuzol.execution.reconciliation import ProxyStartupReconciler
+from vuzol.execution.result_validation import ResultValidationHandler
 from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
 from vuzol.execution.worktrees import WorktreeService
@@ -196,11 +197,23 @@ async def run() -> None:
             worktree_service,
             owner=owner,
         )
+        validation_handler = ResultValidationHandler(
+            factory,
+            runtime.registries,
+            local_git,
+            worktree_root=settings.worktree_root,
+            gate_runner=TrustedGateRunner(envelope_factory, sandbox_runtime),
+            worktree_access=worktree_access,
+            artifacts=artifact_store,
+        )
         worktree_worker = WorkflowWorker(
             settings,
             factory,
             owner=f"{owner}:worktree",
-            handlers={"prepare_worktree": worktree_handler},
+            handlers={
+                "prepare_worktree": worktree_handler,
+                "validate": validation_handler,
+            },
             queue_classes=frozenset({QueueClass.HEAVY}),
         )
         provider_worker = RoutedWorkflowWorker(

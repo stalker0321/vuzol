@@ -1,14 +1,32 @@
 import uuid
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vuzol.storage.models import Step
+from vuzol.storage.types import StepStatus
 from vuzol.workflows.result_approval import (
     ensure_result_approval,
     envelope_hash,
     verified_envelope,
 )
+
+
+def _step(
+    *,
+    step_type: str,
+    result: dict[str, Any] | None = None,
+    status: StepStatus = StepStatus.COMPLETED,
+    ordinal: int = 0,
+) -> Step:
+    step = MagicMock()
+    step.step_type = step_type
+    step.status = status
+    step.result = result
+    step.ordinal = ordinal
+    return cast(Step, step)
 
 
 @pytest.mark.anyio
@@ -37,74 +55,128 @@ async def test_existing_result_approval_is_reused() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("failure", ("predecessor", "manifest"))
-async def test_result_approval_rejects_incomplete_finalization(failure: str) -> None:
+async def test_result_approval_requires_retained_worktree() -> None:
     session = MagicMock()
-    session.scalar = AsyncMock(return_value=None)
-    predecessor = MagicMock(result={})
-    step = MagicMock(
-        id=uuid.uuid4(),
-        payload={"requested_action": "apply_result"},
-        dependency_metadata={"predecessor_ordinals": [] if failure == "predecessor" else [2]},
-    )
-    with pytest.raises(ValueError):
+    session.scalar = AsyncMock(side_effect=(None, None))
+    step = MagicMock(id=uuid.uuid4(), payload={"requested_action": "apply_result"})
+    with pytest.raises(ValueError, match="retained measured worktree"):
         await ensure_result_approval(
             session,
             run=MagicMock(),
             approval_step=step,
-            steps_by_ordinal={2: predecessor},
+            steps_by_ordinal={},
         )
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("failure", ("worktree", "gates"))
-async def test_result_approval_requires_matching_retention_and_passing_gates(failure: str) -> None:
+@pytest.mark.parametrize("failure", ("missing_validate", "gates"))
+async def test_result_approval_requires_validation_evidence(failure: str) -> None:
     base = "a" * 40
     result_commit = "b" * 40
-    manifest = {
-        "base_commit": base,
-        "result_commit": result_commit,
-        "gates": [] if failure == "gates" else [{"exit_code": 0}],
-    }
-    source = MagicMock(result={"structured_output": manifest})
-    step = MagicMock(
+    worktree = SimpleNamespace(
+        result_commit=result_commit,
+        diff_hash="c" * 64,
+        base_commit=base,
+        project_id="vuzol",
+        repository_identity_hash="d" * 64,
+        default_branch="main",
+        expected_target_head=base,
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=(None, worktree))
+    steps = {}
+    if failure != "missing_validate":
+        steps[5] = _step(
+            step_type="validate",
+            result={
+                "structured_output": {
+                    "base_commit": base,
+                    "result_commit": result_commit,
+                    "gates": [] if failure == "gates" else [{"exit_code": 0}],
+                }
+            },
+        )
+    with pytest.raises(ValueError):
+        await ensure_result_approval(
+            session,
+            run=MagicMock(),
+            approval_step=MagicMock(id=uuid.uuid4(), payload={"requested_action": "apply_result"}),
+            steps_by_ordinal=steps,
+        )
+
+
+@pytest.mark.anyio
+async def test_result_approval_prefers_review_summary_and_validate_gates() -> None:
+    base = "a" * 40
+    result_commit = "b" * 40
+    validate = _step(
+        step_type="validate",
+        ordinal=5,
+        result={
+            "structured_output": {
+                "base_commit": base,
+                "result_commit": result_commit,
+                "gates": [{"name": "git-facts", "exit_code": 0, "duration_ms": 1}],
+            },
+            "implementation_summary": "validate summary",
+        },
+    )
+    review = _step(
+        step_type="review",
+        ordinal=6,
+        result={"summary": "Mechanical review passed for 2 changed path(s)."},
+    )
+    approval_step = MagicMock(
         id=uuid.uuid4(),
         payload={"requested_action": "apply_result"},
-        dependency_metadata={"predecessor_ordinals": [2]},
     )
     worktree = SimpleNamespace(
         result_commit=result_commit,
         diff_hash="c" * 64,
         base_commit=base,
+        project_id="bill-buddy",
+        repository_identity_hash="d" * 64,
+        default_branch="main",
+        expected_target_head=base,
     )
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=(None, None if failure == "worktree" else worktree))
-    with pytest.raises(ValueError):
-        await ensure_result_approval(
-            session,
-            run=MagicMock(),
-            approval_step=step,
-            steps_by_ordinal={2: source},
-        )
+    session.scalar = AsyncMock(side_effect=(None, worktree))
+    session.flush = AsyncMock()
+    run = MagicMock(
+        task_id=uuid.uuid4(),
+        id=uuid.uuid4(),
+        configuration_revision="e" * 64,
+        policy_revision="f" * 64,
+    )
+    approval = await ensure_result_approval(
+        session,
+        run=run,
+        approval_step=approval_step,
+        steps_by_ordinal={5: validate, 6: review},
+    )
+    assert approval is not None
+    assert approval.human_summary.startswith("Mechanical review passed")
+    assert approval_step.payload["action_envelope"]["project_id"] == "bill-buddy"
+    assert approval_step.payload["action_envelope"]["gates"][0]["name"] == "git-facts"
 
 
 @pytest.mark.anyio
 async def test_result_approval_uses_a_safe_summary_fallback() -> None:
     base = "a" * 40
     result_commit = "b" * 40
-    source = MagicMock(
+    source = _step(
+        step_type="validate",
         result={
             "structured_output": {
                 "base_commit": base,
                 "result_commit": result_commit,
                 "gates": [{"name": "tests", "exit_code": 0}],
             }
-        }
+        },
     )
     step = MagicMock(
         id=uuid.uuid4(),
         payload={"requested_action": "apply_result"},
-        dependency_metadata={"predecessor_ordinals": [2]},
     )
     worktree = SimpleNamespace(
         result_commit=result_commit,

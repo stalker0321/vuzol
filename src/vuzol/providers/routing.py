@@ -134,9 +134,7 @@ async def claim_routed_step(
             else settings.limits.provider_call_output_tokens
         )
         failed_profile_id = (
-            step.executor_profile_id
-            if attempt > 1 and step.failure_category is not None
-            else None
+            step.executor_profile_id if attempt > 1 and step.failure_category is not None else None
         )
         allowed_fallbacks: tuple[str, ...] = ()
         if failed_profile_id is not None:

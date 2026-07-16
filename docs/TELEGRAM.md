@@ -80,8 +80,9 @@ That topic holds **one** reconstructable message with two sections:
 
 1. every non-terminal task across all projects in the forum (project, public/local number,
    one-sentence goal, assigned model);
-2. **subscription limits** for every enabled CLI Codex/Grok profile: company, plan (Plus / Super),
-   remaining 5-hour and weekly windows when the provider exposes them, and reset times.
+2. **subscription limits** (English UI) for every enabled CLI Codex/Grok profile: company, plan
+   (Plus / Super), a monospace used/remaining bar, percent left, and reset time on the next line.
+   Windows without data (for example a missing 5-hour quota) are omitted entirely.
 
 Codex limits are read from ChatGPT usage (`wham/usage`) with the profile state `auth.json`.
 Grok limits prefer the billing credits payload, with a fallback to the latest local billing log

@@ -107,6 +107,11 @@ def collect_profile_limits(
     return _unavailable(profile, observed, f"unsupported provider {profile.provider}")
 
 
+_BAR_WIDTH = 10
+_BAR_FILLED = "█"
+_BAR_EMPTY = "░"
+
+
 def format_subscription_limits_html(
     snapshots: Sequence[SubscriptionLimitSnapshot],
     *,
@@ -115,8 +120,7 @@ def format_subscription_limits_html(
     """Render the limits section as HTML lines (without the section header)."""
 
     if not snapshots:
-        # Russian UI copy for the Telegram control forum.
-        return ["Подключённых subscription-профилей нет."]
+        return ["No subscription profiles are connected."]
     lines: list[str] = []
     for snap in snapshots:
         title = (
@@ -126,30 +130,54 @@ def format_subscription_limits_html(
         lines.append(title)
         if not snap.ok:
             detail = html_escape(snap.detail or "unknown")
-            lines.append(f"  лимиты: недоступны ({detail})")
+            lines.append(f"  limits unavailable ({detail})")
             continue
-        lines.append(f"  5ч: {_window_label(snap.five_hour, html_escape)}")
-        lines.append(f"  неделя: {_window_label(snap.weekly, html_escape)}")
+        window_lines = (
+            *_format_window_block("5h", snap.five_hour, html_escape),
+            *_format_window_block("week", snap.weekly, html_escape),
+        )
+        if not window_lines:
+            lines.append("  no limit windows reported")
+            continue
+        lines.extend(window_lines)
     return lines
 
 
-def _window_label(window: LimitWindow, html_escape: Callable[[object], str]) -> str:
-    if not window.available:
-        return html_escape(window.detail or "—")
-    if window.remaining_percent is None and window.reset_at is None:
-        return "—"
-    parts: list[str] = []
-    if window.remaining_percent is not None:
-        parts.append(f"осталось {window.remaining_percent}%")
-    if window.reset_at is not None:
-        parts.append(f"сброс {_format_reset(window.reset_at)}")  # noqa: RUF001
-    return html_escape(" · ".join(parts) if parts else "—")
+def progress_bar(remaining_percent: int, *, width: int = _BAR_WIDTH) -> str:
+    """Filled bar for used capacity; empty cells are still remaining."""
+
+    remaining = max(0, min(100, int(remaining_percent)))
+    used = 100 - remaining
+    filled = max(0, min(width, round(used * width / 100)))
+    empty = width - filled
+    return f"[{_BAR_FILLED * filled}{_BAR_EMPTY * empty}]"
+
+
+def _format_window_block(
+    label: str,
+    window: LimitWindow,
+    html_escape: Callable[[object], str],
+) -> tuple[str, ...]:
+    """Skip windows without usable remaining %; never invent a missing 5h row."""
+
+    if not window.available or window.remaining_percent is None:
+        return ()
+    bar = progress_bar(window.remaining_percent)
+    # Monospace bar so cells stay aligned in Telegram HTML.
+    line = (
+        f"  <b>{html_escape(label)}</b>  "
+        f"<code>{html_escape(bar)}</code>  "
+        f"{html_escape(f'{window.remaining_percent}% left')}"
+    )
+    if window.reset_at is None:
+        return (line,)
+    reset = f"reset {_format_reset(window.reset_at)}"
+    return (line, f"  <i>{html_escape(reset)}</i>")
 
 
 def _format_reset(when: datetime) -> str:
     local = when.astimezone(UTC)
     return local.strftime("%Y-%m-%d %H:%M UTC")
-
 
 def _unavailable(
     profile: ProviderProfileConfig, observed: datetime, detail: str

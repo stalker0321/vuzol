@@ -164,25 +164,39 @@ def test_subscription_profiles_filters_cli_only(tmp_path: Path) -> None:
     assert [p.id for p in subscription_profiles((codex, api))] == ["codex-a"]
 
 
+def test_progress_bar_fills_used_portion() -> None:
+    from vuzol.providers.subscription_limits import progress_bar
+
+    # 28% left → 72% used → about 7 of 10 cells filled
+    assert progress_bar(28) == "[███████░░░]"
+    assert progress_bar(100) == "[░░░░░░░░░░]"
+    assert progress_bar(0) == "[██████████]"
+
+
 def test_format_subscription_limits_html() -> None:
     snap = SubscriptionLimitSnapshot(
         profile_id="codex-subscription-prod",
         company="OpenAI",
         plan_label="Plus",
         five_hour=LimitWindow(
-            remaining_percent=40,
-            reset_at=datetime(2026, 7, 16, 18, 0, tzinfo=UTC),
+            remaining_percent=None,
+            reset_at=None,
+            available=False,
+            detail="no 5h data",
         ),
         weekly=LimitWindow(
-            remaining_percent=80,
+            remaining_percent=28,
             reset_at=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
         ),
         observed_at=datetime(2026, 7, 16, tzinfo=UTC),
         ok=True,
     )
     lines = format_subscription_limits_html((snap,), html_escape=telegram_html)
+    joined = "\n".join(lines)
     assert "OpenAI" in lines[0]
     assert "Plus" in lines[0]
-    assert "5ч" not in lines[0]
-    assert "40%" in lines[1]
-    assert "80%" in lines[2]
+    assert "5h" not in joined
+    assert "week" in joined
+    assert "[███████░░░]" in joined
+    assert "28% left" in joined
+    assert "reset 2026-07-19 12:00 UTC" in joined

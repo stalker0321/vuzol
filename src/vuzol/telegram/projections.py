@@ -207,7 +207,7 @@ async def build_project_status_dashboard(
     if subscription_snapshots is None and subscription_profiles is not None:
         subscription_snapshots = await collect_subscription_limits(subscription_profiles)
     if subscription_snapshots is not None:
-        lines.append(f"<b>{telegram_html('Лимиты подписок')}</b>")
+        lines.append(f"<b>{telegram_html('Subscription limits')}</b>")
         lines.extend(
             format_subscription_limits_html(
                 subscription_snapshots, html_escape=telegram_html

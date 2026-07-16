@@ -238,6 +238,37 @@ def test_design_question_survives_coding_create_misclassification() -> None:
     assert policy.draft.required_capabilities == frozenset({Capability.REPOSITORY_READ})
 
 
+def test_explicit_implementation_overrides_architecture_misclassification() -> None:
+    contextual = request().model_copy(
+        update={
+            "original_input": (
+                "Окей, давай приступать к реализации. Сделай пока сайт с нужным "  # noqa: RUF001
+                "функционалом, а апи моделей я добавлю потом."  # noqa: RUF001
+            ),
+            "topic_kind": TopicKind.PROJECT,
+            "mapped_project_id": "bill-buddy",
+        }
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(
+            task_type=TaskType.ARCHITECTURE,
+            operation=TaskOperation.INSPECT,
+            project_id="bill-buddy",
+            required_capabilities=frozenset({Capability.REPOSITORY_READ}),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.action is TaskAction.CREATE_TASK
+    assert policy.draft.task_type is TaskType.CODING
+    assert policy.draft.operation is TaskOperation.CREATE
+    assert policy.draft.required_capabilities == frozenset(
+        {Capability.REPOSITORY_READ, Capability.CODE_EDIT}
+    )
+    assert "explicit_implementation_reclassified_as_coding" in policy.reasons
+
+
 def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:
     value = draft(
         project_id="invented",

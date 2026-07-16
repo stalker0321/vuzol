@@ -815,3 +815,25 @@ class SupervisedProcess(IdentityMixin, TimestampMixin, Base):
     runtime_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
     )
+
+
+class SubscriptionLimitSnapshotRow(Base):
+    """Latest subscription limit observation per provider profile (host-collected)."""
+
+    __tablename__ = "subscription_limit_snapshots"
+
+    profile_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    company: Mapped[str] = mapped_column(String(50), nullable=False)
+    plan_label: Mapped[str] = mapped_column(String(50), nullable=False)
+    five_hour_remaining_percent: Mapped[int | None] = mapped_column(Integer)
+    five_hour_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    weekly_remaining_percent: Mapped[int | None] = mapped_column(Integer)
+    weekly_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    detail: Mapped[str | None] = mapped_column(String(200))
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

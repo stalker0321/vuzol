@@ -21,7 +21,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from vuzol.config.models import LaunchMode, ProviderProfileConfig
+from vuzol.storage.models import SubscriptionLimitSnapshotRow
 
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 GROK_BILLING_URLS = (
@@ -89,6 +93,104 @@ async def collect_subscription_limits(
     observed = now or datetime.now(UTC)
     selected = subscription_profiles(profiles)
     return tuple(collect_profile_limits(profile, now=observed) for profile in selected)
+
+
+async def persist_subscription_limits(
+    session: AsyncSession,
+    snapshots: Sequence[SubscriptionLimitSnapshot],
+) -> None:
+    """Upsert the latest host-collected limit observation for each profile."""
+
+    for snap in snapshots:
+        row = await session.get(SubscriptionLimitSnapshotRow, snap.profile_id)
+        if row is None:
+            row = SubscriptionLimitSnapshotRow(profile_id=snap.profile_id)
+            session.add(row)
+        row.company = snap.company
+        row.plan_label = snap.plan_label
+        row.five_hour_remaining_percent = (
+            snap.five_hour.remaining_percent if snap.five_hour.available else None
+        )
+        row.five_hour_reset_at = snap.five_hour.reset_at if snap.five_hour.available else None
+        row.weekly_remaining_percent = (
+            snap.weekly.remaining_percent if snap.weekly.available else None
+        )
+        row.weekly_reset_at = snap.weekly.reset_at if snap.weekly.available else None
+        row.ok = snap.ok
+        row.detail = snap.detail or None
+        row.payload = {
+            "five_hour": {
+                "remaining_percent": snap.five_hour.remaining_percent,
+                "reset_at": (
+                    snap.five_hour.reset_at.isoformat() if snap.five_hour.reset_at else None
+                ),
+                "available": snap.five_hour.available,
+                "detail": snap.five_hour.detail,
+            },
+            "weekly": {
+                "remaining_percent": snap.weekly.remaining_percent,
+                "reset_at": snap.weekly.reset_at.isoformat() if snap.weekly.reset_at else None,
+                "available": snap.weekly.available,
+                "detail": snap.weekly.detail,
+            },
+        }
+        row.observed_at = snap.observed_at
+    await session.flush()
+
+
+async def load_subscription_limits(
+    session: AsyncSession,
+) -> tuple[SubscriptionLimitSnapshot, ...]:
+    """Load the latest persisted snapshots for dashboard rendering."""
+
+    rows = list(
+        (
+            await session.scalars(
+                select(SubscriptionLimitSnapshotRow).order_by(
+                    SubscriptionLimitSnapshotRow.profile_id.asc()
+                )
+            )
+        ).all()
+    )
+    snapshots: list[SubscriptionLimitSnapshot] = []
+    for row in rows:
+        five = LimitWindow(
+            remaining_percent=row.five_hour_remaining_percent,
+            reset_at=row.five_hour_reset_at,
+            available=row.five_hour_remaining_percent is not None,
+        )
+        weekly = LimitWindow(
+            remaining_percent=row.weekly_remaining_percent,
+            reset_at=row.weekly_reset_at,
+            available=row.weekly_remaining_percent is not None or row.weekly_reset_at is not None,
+        )
+        if not row.ok:
+            five = LimitWindow(None, None, available=False, detail=row.detail or "unavailable")
+            weekly = LimitWindow(None, None, available=False, detail=row.detail or "unavailable")
+        snapshots.append(
+            SubscriptionLimitSnapshot(
+                profile_id=row.profile_id,
+                company=row.company,
+                plan_label=row.plan_label,
+                five_hour=five,
+                weekly=weekly,
+                observed_at=row.observed_at,
+                ok=row.ok,
+                detail=row.detail or "",
+            )
+        )
+    return tuple(snapshots)
+
+
+async def refresh_and_store_subscription_limits(
+    session: AsyncSession,
+    profiles: Sequence[ProviderProfileConfig],
+) -> tuple[SubscriptionLimitSnapshot, ...]:
+    """Collect host-visible limits and persist them for Telegram delivery."""
+
+    snapshots = await collect_subscription_limits(profiles)
+    await persist_subscription_limits(session, snapshots)
+    return snapshots
 
 
 def collect_profile_limits(

@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.config.models import ProviderProfileConfig
 from vuzol.providers.subscription_limits import (
     SubscriptionLimitSnapshot,
-    collect_subscription_limits,
     format_subscription_limits_html,
+    load_subscription_limits,
 )
 from vuzol.storage.models import (
     Approval,
@@ -31,7 +31,7 @@ from vuzol.storage.models import (
     Worktree,
 )
 from vuzol.storage.types import ApprovalStatus, StepStatus, TaskStatus
-from vuzol.telegram.layout import STATUS_DASHBOARD_DISPLAY_NAME, STATUS_DASHBOARD_TOPIC_KIND
+from vuzol.telegram.layout import DASHBOARD_CARD_TITLE, STATUS_DASHBOARD_TOPIC_KIND
 from vuzol.workflows.result_approval import verified_envelope
 
 TELEGRAM_TEXT_LIMIT = 4096
@@ -128,17 +128,28 @@ def task_sense_sentence(task: Task) -> str:
     text = text.rstrip(".!?").strip()
     if len(text) > 160:
         text = text[:157].rstrip() + "…"
-    return text or "Без описания"
+    return text or "No description"
 
 
 def model_label_for_profile(
     profile_id: str | None, *, profile_models: Mapping[str, str] | None = None
 ) -> str:
     if not profile_id:
-        return "ещё не назначена"
+        return "not assigned yet"
     model = None if profile_models is None else profile_models.get(profile_id)
+    if model in {None, "", "codex"}:
+        if profile_id.startswith("codex"):
+            return "Codex"
+        if model:
+            return str(model)
+    if model in {"grok-build", "grok"}:
+        return "Grok"
     if model:
-        return model
+        return str(model)
+    if profile_id.startswith("codex"):
+        return "Codex"
+    if profile_id.startswith("grok"):
+        return "Grok"
     return profile_id
 
 
@@ -183,9 +194,9 @@ async def build_project_status_dashboard(
         ).all()
     )
     model_by_task: dict[uuid.UUID, str] = {}
-    lines = [f"<b>{telegram_html(STATUS_DASHBOARD_DISPLAY_NAME)}</b>", ""]
+    lines = [f"<b>{telegram_html(DASHBOARD_CARD_TITLE)}</b>", ""]
     if not tasks:
-        lines.append("Сейчас нет задач в работе.")
+        lines.append("No active tasks right now.")
     else:
         for task in tasks:
             profile_id = await _active_executor_profile(session, task.id)
@@ -195,18 +206,21 @@ async def build_project_status_dashboard(
             if project_id and project_names is not None and project_id in project_names:
                 project_label = project_names[project_id]
             else:
-                project_label = project_id or "без проекта"
+                project_label = project_id or "no project"
             lines.append(
                 f"• <b>{telegram_html(project_label)}</b> · "
-                f"№{telegram_html(task_number_label(task))}"
+                f"#{telegram_html(task_number_label(task))}"
             )
             lines.append(f"  {telegram_html(task_sense_sentence(task))}")
-            lines.append(f"  Модель: {telegram_html(model)}")
+            lines.append(f"  Model: {telegram_html(model)}")
             lines.append("")
 
-    if subscription_snapshots is None and subscription_profiles is not None:
-        subscription_snapshots = await collect_subscription_limits(subscription_profiles)
-    if subscription_snapshots is not None:
+    # Delivery must not open provider state dirs (no auth ACL). Prefer DB snapshots
+    # collected by the executor process; optional live collection is test-only.
+    if subscription_snapshots is None:
+        subscription_snapshots = await load_subscription_limits(session)
+    del subscription_profiles  # reserved for tests / offline collectors
+    if subscription_snapshots:
         lines.append(f"<b>{telegram_html('Subscription limits')}</b>")
         lines.extend(
             format_subscription_limits_html(subscription_snapshots, html_escape=telegram_html)

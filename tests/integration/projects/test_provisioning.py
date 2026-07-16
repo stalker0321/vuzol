@@ -232,6 +232,62 @@ def test_dispatcher_materializes_one_project_naming_request(
             assert naming is not None and naming.status is ProjectNamingStatus.PENDING
             assert len(naming.options) == 9 and naming.revision == 1
             assert queued is not None and queued.status is DeliveryStatus.PENDING
+
+        recovered_options = tuple(
+            ProjectNameOption(
+                display_name=f"Recovered {index + 1}",
+                project_id=f"recovered-{index + 1}",
+            )
+            for index in range(9)
+        )
+        recovered_draft = draft.model_copy(update={"project_name_options": recovered_options})
+        async with factory.begin() as session:
+            recovered_task = await session.get(Task, task_id, with_for_update=True)
+            failed_naming = await session.scalar(
+                select(ProjectNamingRequest)
+                .where(ProjectNamingRequest.task_id == task_id)
+                .with_for_update()
+            )
+            assert recovered_task is not None and failed_naming is not None
+            recovered_task.status = TaskStatus.INTERPRETED
+            recovered_task.task_draft = recovered_draft.model_dump(mode="json")
+            failed_naming.status = ProjectNamingStatus.FAILED
+            failed_naming.last_error_category = "provider_unavailable"
+            interpretation = Interpretation(
+                task_id=recovered_task.id,
+                original_input_hash="b" * 64,
+                task_draft=recovered_draft.model_dump(mode="json"),
+                profile_id="fake",
+                model="fake",
+                prompt_version="project-naming-v2",
+                schema_version="1.2",
+            )
+            session.add(interpretation)
+            await session.flush()
+            session.add(
+                TransactionalOutbox(
+                    destination="workflow_dispatch",
+                    operation_type="dispatch_interpretation",
+                    linked_entity_type="interpretation",
+                    linked_entity_id=interpretation.id,
+                    idempotency_key=f"workflow:dispatch:{interpretation.id}",
+                    payload={"task_id": str(recovered_task.id)},
+                )
+            )
+        assert await dispatcher.process_one()
+        async with factory() as session:
+            final_task = await session.get(Task, task_id)
+            recovered_naming = await session.scalar(
+                select(ProjectNamingRequest).where(ProjectNamingRequest.task_id == task_id)
+            )
+            assert final_task is not None and final_task.status is TaskStatus.AWAITING_USER
+            assert (
+                recovered_naming is not None
+                and recovered_naming.status is ProjectNamingStatus.PENDING
+            )
+            assert recovered_naming.revision == 2
+            assert recovered_naming.last_error_category is None
+            assert recovered_naming.options[0]["project_id"] == "recovered-1"
         await engine.dispose()
 
     asyncio.run(scenario())

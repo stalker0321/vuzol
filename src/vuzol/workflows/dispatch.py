@@ -161,22 +161,34 @@ class WorkflowDispatcher:
         if task.source_thread_id is None:
             raise WorkflowDispatchError("project naming requires a forum topic")
         existing = await session.scalar(
-            select(ProjectNamingRequest).where(ProjectNamingRequest.task_id == task.id)
+            select(ProjectNamingRequest)
+            .where(ProjectNamingRequest.task_id == task.id)
+            .with_for_update()
         )
         if existing is not None:
-            return
-        naming = ProjectNamingRequest(
-            task_id=task.id,
-            requested_by_user_id=task.user_id,
-            chat_id=task.source_chat_id,
-            source_thread_id=task.source_thread_id,
-            description=draft.goal,
-            options=[option.model_dump(mode="json") for option in draft.project_name_options],
-            revision=1,
-            status=ProjectNamingStatus.PENDING,
-        )
-        session.add(naming)
-        await session.flush()
+            if existing.status is not ProjectNamingStatus.FAILED:
+                return
+            existing.description = draft.goal
+            existing.options = [
+                option.model_dump(mode="json") for option in draft.project_name_options
+            ]
+            existing.revision += 1
+            existing.status = ProjectNamingStatus.PENDING
+            existing.last_error_category = None
+            naming = existing
+        else:
+            naming = ProjectNamingRequest(
+                task_id=task.id,
+                requested_by_user_id=task.user_id,
+                chat_id=task.source_chat_id,
+                source_thread_id=task.source_thread_id,
+                description=draft.goal,
+                options=[option.model_dump(mode="json") for option in draft.project_name_options],
+                revision=1,
+                status=ProjectNamingStatus.PENDING,
+            )
+            session.add(naming)
+            await session.flush()
         await transition_task(
             session,
             task,

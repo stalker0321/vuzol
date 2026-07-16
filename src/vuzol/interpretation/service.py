@@ -498,8 +498,23 @@ class InterpretationPipeline:
                     with_for_update=True,
                 )
                 if naming is not None:
-                    naming.status = ProjectNamingStatus.FAILED
+                    naming.status = ProjectNamingStatus.PENDING
                     naming.last_error_category = category[:100]
+                    session.add(
+                        TransactionalOutbox(
+                            destination="telegram",
+                            operation_type="send_message",
+                            linked_entity_type="project_naming",
+                            linked_entity_id=naming.id,
+                            idempotency_key=(
+                                f"telegram:project-naming:{naming.id}:{naming.revision}:fallback"
+                            ),
+                            payload={
+                                "role": "project_name_options",
+                                "revision": naming.revision,
+                            },
+                        )
+                    )
             await dead_letter_outbox_item(session, token, error_category=category)
 
 

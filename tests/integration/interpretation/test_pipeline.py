@@ -398,6 +398,54 @@ def test_project_name_regeneration_replaces_options_and_queues_new_card(
             )
             assert persisted_naming.options[0]["project_id"] == "fresh-1"
             assert card is not None and card.payload["revision"] == 2
+
+        async with factory.begin() as session:
+            persisted_naming = await session.get(
+                ProjectNamingRequest, naming_id, with_for_update=True
+            )
+            assert persisted_naming is not None
+            persisted_naming.status = ProjectNamingStatus.GENERATING
+            persisted_naming.revision = 3
+            session.add(
+                TransactionalOutbox(
+                    destination="interpretation",
+                    operation_type="regenerate_project_names",
+                    linked_entity_type="project_naming",
+                    linked_entity_id=naming_id,
+                    idempotency_key=f"regenerate:{naming_id}:3",
+                    payload={"revision": 3},
+                )
+            )
+        failing_runtime = runtime.model_copy(
+            update={
+                "settings": runtime.settings.model_copy(
+                    update={
+                        "interpretation": runtime.settings.interpretation.model_copy(
+                            update={"max_attempts": 1}
+                        )
+                    }
+                )
+            }
+        )
+        failing_pipeline = InterpretationPipeline(
+            failing_runtime,
+            factory,
+            interpreter=FakeInterpreter([InterpreterUnavailable("offline")]),
+            owner="interpreter-b",
+        )
+        assert await failing_pipeline.process_one()
+        async with factory() as session:
+            persisted_naming = await session.get(ProjectNamingRequest, naming_id)
+            fallback_card = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.linked_entity_id == naming_id,
+                    TransactionalOutbox.idempotency_key.endswith(":3:fallback"),
+                )
+            )
+            assert persisted_naming is not None
+            assert persisted_naming.status is ProjectNamingStatus.PENDING
+            assert persisted_naming.last_error_category == "provider_unavailable"
+            assert fallback_card is not None and fallback_card.payload["revision"] == 3
         await engine.dispose()
 
     asyncio.run(scenario())

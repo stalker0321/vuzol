@@ -161,7 +161,7 @@ class CompleteHandler:
         return StepOutcome.succeeded()
 
 
-INTERNAL_HANDLERS: dict[str, StepHandler] = {
+BASE_INTERNAL_HANDLERS: dict[str, StepHandler] = {
     "await_apply_or_complete": CompleteHandler(),
     "complete_or_block": CompleteHandler(),
     "format_result": CompleteHandler(),
@@ -170,6 +170,9 @@ INTERNAL_HANDLERS: dict[str, StepHandler] = {
     # records the workflow boundary without duplicating an agent-scale repository read.
     "prepare_context": CompleteHandler(),
 }
+
+# Backwards-compatible alias used by tests that import the static map.
+INTERNAL_HANDLERS = BASE_INTERNAL_HANDLERS
 
 
 class RoutedWorkflowWorker(WorkflowWorker):

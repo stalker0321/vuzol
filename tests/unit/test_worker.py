@@ -5,6 +5,11 @@ import threading
 from pytest import LogCaptureFixture
 
 from vuzol.cli.worker import run_runtime, run_worker
+from vuzol.workflows.worker import INTERNAL_HANDLERS
+
+
+def test_internal_worker_owns_the_bounded_context_boundary() -> None:
+    assert "prepare_context" in INTERNAL_HANDLERS
 
 
 def test_worker_stops_when_requested(caplog: LogCaptureFixture) -> None:

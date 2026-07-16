@@ -31,7 +31,10 @@ async def _recover_one(session: AsyncSession, step: Step) -> None:
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
     assert task is not None
     previous_status = step.status
-    safe = previous_status is StepStatus.LEASED or (
+    # LEASED means start_step never committed — no handler effects. Always requeue and
+    # refund the claim attempt so a worker crash before start cannot burn max_attempts.
+    leased_only = previous_status is StepStatus.LEASED
+    safe = leased_only or (
         step.idempotency_class is IdempotencyClass.READ_ONLY
         or (
             step.idempotency_class is IdempotencyClass.IDEMPOTENT
@@ -48,10 +51,12 @@ async def _recover_one(session: AsyncSession, step: Step) -> None:
         await transition_step(
             session, step, StepStatus.CANCELLED, actor_type="recovery", payload=payload
         )
-    elif safe and attempts_remain:
+    elif leased_only or (safe and attempts_remain):
         await transition_step(
             session, step, StepStatus.QUEUED, actor_type="recovery", payload=payload
         )
+        if leased_only and step.attempt_count > 0:
+            step.attempt_count -= 1
     elif safe:
         await transition_step(
             session, step, StepStatus.FAILED, actor_type="recovery", payload=payload

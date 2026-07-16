@@ -88,7 +88,14 @@ WORKFLOW_DEFINITIONS: tuple[WorkflowDefinition, ...] = (
                 queue=QueueClass.HEAVY,
                 capabilities=frozenset({Capability.PROJECT_SHELL}),
             ),
-            _step("review", "validate", optional="needs_review"),
+            _step(
+                "review",
+                "validate",
+                optional="needs_review",
+                # Mechanical/read-only; allow requeue after worker crash mid-commit.
+                retry=RetryClass.TRANSIENT,
+                attempts=3,
+            ),
             _step(
                 "approve_result",
                 "review",

@@ -465,6 +465,15 @@ async def enqueue_project_status_dashboard(session: AsyncSession, chat_id: int) 
     )
     if existing is not None:
         return
+    # Same transaction can call this twice (e.g. intake_ack + approval_card). The DB
+    # SELECT above does not see unflushed pending rows, so also scan session.new.
+    for pending in session.new:
+        if (
+            isinstance(pending, TransactionalOutbox)
+            and pending.destination == "telegram"
+            and pending.idempotency_key == key
+        ):
+            return
     session.add(
         TransactionalOutbox(
             destination="telegram",

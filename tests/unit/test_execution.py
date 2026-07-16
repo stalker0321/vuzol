@@ -3199,6 +3199,17 @@ def test_coding_workflow_execute_code_config() -> None:
     assert exec_step.idempotency_class == IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
 
 
+def test_coding_workflow_review_is_retryable() -> None:
+    from vuzol.storage.types import RetryClass
+    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
+
+    coding = WORKFLOW_REGISTRY["coding.v1"]
+    review = next((s for s in coding.steps if s.key == "review"), None)
+    assert review is not None
+    assert review.max_attempts == 3
+    assert review.retry_class is RetryClass.TRANSIENT
+
+
 def test_step08_related_classes_construction() -> None:
     """Exercise construction of Step 08 related classes for coverage (real entry points)."""
     from vuzol.cli.executor import ExecutorChain

@@ -9,7 +9,7 @@ from vuzol.config import Capability, TopicKind
 from vuzol.storage.types import RiskLevel
 
 TASK_DRAFT_SCHEMA_VERSION = "1.3"
-INTERPRETER_PROMPT_VERSION = "architecture-routing-v5"
+INTERPRETER_PROMPT_VERSION = "architecture-routing-v6"
 
 
 class FrozenModel(BaseModel):

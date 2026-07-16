@@ -37,6 +37,26 @@ _DESIGN_DISCUSSION_MARKERS = (
     "design this",
 )
 
+_IMPLEMENTATION_MARKERS = (
+    "приступать к реализации",
+    "приступаем к реализации",
+    "давай реализ",
+    "реализуй",
+    "сделай сайт",
+    "сделай приложение",
+    "создай сайт",
+    "создай приложение",
+    "напиши код",
+    "начинай разработ",
+    "implement",
+    "build the site",
+    "build the app",
+    "start coding",
+    "write the code",
+    "create the site",
+    "create the app",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyResult:
@@ -55,16 +75,20 @@ def enforce_interpretation_policy(
     updates: dict[str, object] = {}
     risk = draft.suggested_risk
     normalized_input = request.original_input.casefold()
+    implementation_intent = any(marker in normalized_input for marker in _IMPLEMENTATION_MARKERS)
     read_only_request = not draft.required_capabilities & {
         Capability.CODE_EDIT,
         Capability.FILESYSTEM_WRITE,
     }
-    architecture_intent = draft.task_type is TaskType.ARCHITECTURE or (
-        draft.task_type is TaskType.CODING
-        and read_only_request
-        and (
-            draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN}
-            or any(marker in normalized_input for marker in _DESIGN_DISCUSSION_MARKERS)
+    architecture_intent = not implementation_intent and (
+        draft.task_type is TaskType.ARCHITECTURE
+        or (
+            draft.task_type is TaskType.CODING
+            and read_only_request
+            and (
+                draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN}
+                or any(marker in normalized_input for marker in _DESIGN_DISCUSSION_MARKERS)
+            )
         )
     )
     if request.topic_kind is TopicKind.INBOX:
@@ -109,6 +133,19 @@ def enforce_interpretation_policy(
             project_name_options=(),
         )
         reasons.append("project_creation_confined_to_inbox")
+    elif request.topic_kind is TopicKind.PROJECT and implementation_intent:
+        updates.update(
+            action=TaskAction.CREATE_TASK,
+            task_type=TaskType.CODING,
+            operation=(
+                TaskOperation.CREATE
+                if draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN}
+                else draft.operation
+            ),
+            required_capabilities=frozenset({Capability.REPOSITORY_READ, Capability.CODE_EDIT}),
+        )
+        if draft.task_type is not TaskType.CODING:
+            reasons.append("explicit_implementation_reclassified_as_coding")
     elif request.topic_kind is TopicKind.PROJECT and architecture_intent:
         if draft.task_type is not TaskType.ARCHITECTURE:
             updates.update(task_type=TaskType.ARCHITECTURE, operation=TaskOperation.INSPECT)

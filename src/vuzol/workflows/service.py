@@ -233,7 +233,12 @@ async def commit_step_outcome(
     target = derive_task_status(await _steps_for_run(session, run.id), run.status)
     if target is not task.status:
         await transition_task(session, task, target, actor_type="workflow_manager")
-        await _enqueue_telegram_projection(session, task, run)
+        if target is TaskStatus.WAITING_APPROVAL:
+            # Project card in the project topic + decision card in Апрувы.
+            await _enqueue_telegram_projection(session, task, run, role="intake_ack")
+            await _enqueue_telegram_projection(session, task, run, role="approval_card")
+        else:
+            await _enqueue_telegram_projection(session, task, run)
 
 
 async def _enqueue_telegram_projection(

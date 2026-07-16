@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -66,10 +67,25 @@ class TimestampMixin:
 
 class Task(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "topic_task_number IS NULL OR topic_task_number BETWEEN 1 AND 9999",
+            name="topic_task_number_range",
+        ),
+        UniqueConstraint(
+            "source_chat_id",
+            "source_thread_id",
+            "topic_task_number",
+            name="uq_task_topic_number",
+        ),
+        UniqueConstraint("source_chat_id", "public_task_number", name="uq_task_public_number"),
+    )
 
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_thread_id: Mapped[int | None] = mapped_column(BigInteger)
+    topic_task_number: Mapped[int | None] = mapped_column(Integer)
+    public_task_number: Mapped[int | None] = mapped_column(BigInteger)
     project_id: Mapped[str | None] = mapped_column(String(100), index=True)
     original_text: Mapped[str] = mapped_column(Text, nullable=False)
     transcript: Mapped[str | None] = mapped_column(Text)
@@ -92,6 +108,18 @@ class Task(IdentityMixin, TimestampMixin, Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class TopicTaskCounter(IdentityMixin, Base):
+    __tablename__ = "topic_task_counters"
+    __table_args__ = (
+        CheckConstraint("last_number BETWEEN 1 AND 9999", name="last_number_range"),
+        UniqueConstraint("chat_id", "message_thread_id", name="uq_topic_task_counter"),
+    )
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class Run(IdentityMixin, TimestampMixin, Base):

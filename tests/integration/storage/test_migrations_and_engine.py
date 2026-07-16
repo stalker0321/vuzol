@@ -44,6 +44,7 @@ def test_initial_migration_contains_complete_foundation(postgres_dsn: str) -> No
         "supervised_processes",
         "project_provisioning",
         "project_naming_requests",
+        "topic_task_counters",
     }.issubset(tables)
 
 

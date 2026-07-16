@@ -69,6 +69,15 @@ def enforce_interpretation_policy(
                 ),
             )
             reasons.append("project_name_options_conflict")
+    elif request.topic_kind is TopicKind.PROJECT and draft.action is TaskAction.CREATE_PROJECT:
+        updates.update(
+            action=TaskAction.CREATE_TASK,
+            task_type=TaskType.CODING,
+            new_project_id=None,
+            new_project_name=None,
+            project_name_options=(),
+        )
+        reasons.append("project_creation_confined_to_inbox")
     if draft.project_id is not None and draft.project_id not in known_project_ids:
         updates.update(
             project_id=None,

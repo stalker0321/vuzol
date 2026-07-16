@@ -48,6 +48,16 @@ class StatusCard:
     approval_id: uuid.UUID | None = None
 
 
+def task_title(task: Task) -> str:
+    if task.public_task_number is not None:
+        return f"Задача №{task.public_task_number}"
+    return str(
+        task.task_draft.get("normalized_title")
+        or task.task_draft.get("title")
+        or task.original_text
+    ).strip()[:120]
+
+
 async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> StatusCard:
     """Build presentation solely from canonical database state."""
 
@@ -65,11 +75,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     event = await session.scalar(
         select(Event).where(Event.entity_id == task_id).order_by(Event.created_at.desc()).limit(1)
     )
-    title = str(
-        task.task_draft.get("normalized_title")
-        or task.task_draft.get("title")
-        or task.original_text
-    ).strip()[:120]
+    title = task_title(task)
     scope = task.project_id or "personal"
     lines = [
         f"<b>{telegram_html(title)}</b>",
@@ -160,11 +166,7 @@ async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> Stat
     step = await session.get(Step, approval.step_id)
     assert step is not None
     envelope = verified_envelope(step, approval)
-    title = str(
-        task.task_draft.get("normalized_title")
-        or task.task_draft.get("title")
-        or task.original_text
-    ).strip()[:120]
+    title = task_title(task)
     lines = [
         f"<b>{telegram_html(task.project_id or 'personal')} · {telegram_html(title)}</b>",
         f"<code>{task.id}</code>",

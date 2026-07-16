@@ -179,6 +179,7 @@ def _format_reset(when: datetime) -> str:
     local = when.astimezone(UTC)
     return local.strftime("%Y-%m-%d %H:%M UTC")
 
+
 def _unavailable(
     profile: ProviderProfileConfig, observed: datetime, detail: str
 ) -> SubscriptionLimitSnapshot:
@@ -222,7 +223,8 @@ def _collect_codex(profile: ProviderProfileConfig, observed: datetime) -> Subscr
         return _unavailable(profile, observed, "usage endpoint failed")
     plan = str(payload.get("plan_type") or default_plan).strip()
     plan_label = _human_plan("codex", plan)
-    rate = payload.get("rate_limit") if isinstance(payload.get("rate_limit"), dict) else {}
+    raw_rate = payload.get("rate_limit")
+    rate: dict[str, Any] = raw_rate if isinstance(raw_rate, dict) else {}
     five, weekly = _windows_from_codex_rate_limit(rate, observed)
     return SubscriptionLimitSnapshot(
         profile_id=profile.id,

@@ -17,9 +17,7 @@ class TelegramWorkspaceClient(Protocol):
 
     async def create_topic(self, *, chat_id: int, name: str) -> int: ...
 
-    async def set_topic_pinned(
-        self, *, chat_id: int, thread_id: int, pinned: bool
-    ) -> None: ...
+    async def set_topic_pinned(self, *, chat_id: int, thread_id: int, pinned: bool) -> None: ...
 
 
 class TopicSynchronizationError(RuntimeError):

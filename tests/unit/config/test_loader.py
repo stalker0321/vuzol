@@ -53,7 +53,9 @@ def test_example_toml_loads_into_strict_document() -> None:
 
     assert document.projects[0].id == "example"
     assert document.profiles[0].id == "example-api"
-    assert document.topics[0].kind == "inbox"
+    kinds = {topic.kind for topic in document.topics}
+    assert "inbox" in kinds
+    assert "task_dashboard" in kinds
 
 
 def test_invalid_toml_and_schema_fail_with_file_context(tmp_path: Path) -> None:

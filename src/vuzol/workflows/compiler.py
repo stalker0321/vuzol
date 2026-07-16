@@ -9,6 +9,7 @@ from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow, Workf
 
 TASK_WORKFLOWS = {
     TaskType.CODING: "coding.v1",
+    TaskType.ARCHITECTURE: "architecture.v1",
     TaskType.RESEARCH: "research.v1",
     TaskType.INFRASTRUCTURE: "infrastructure.v1",
     TaskType.FILE_PROCESSING: "simple_model.v1",

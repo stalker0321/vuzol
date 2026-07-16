@@ -2544,6 +2544,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_step.status = StepStatus.LEASED
     mock_step.lease_generation = 1
     mock_step.run_id = run_id
+    mock_step.step_type = "execute_code"
 
     mock_sess = AsyncMock()
     stored_process: list[Any] = []
@@ -2675,6 +2676,24 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     assert '"/workspace"="write"' in " ".join(envelope.argv)
     assert '"/artifacts"' not in " ".join(envelope.argv)
     assert "network={enabled=false}" in " ".join(envelope.argv)
+
+    reader_inv = MagicMock(spec=CodexInvocation)
+    reader_inv.sandbox_reference = f"worktree:{mock_wt.id}"
+    reader_inv.task_id = task_id
+    reader_inv.run_id = run_id
+    reader_inv.step_id = uuid.uuid4()
+    reader_inv.profile_id = "prof"
+    reader_inv.provider_attempt = 2
+    reader_inv.lease_generation = 1
+    reader_inv.argv = canonical_codex_argv(read_only=True)
+    reader_inv.stdin = "analyze"
+    reader_inv.timeout_seconds = 30
+    mock_step.step_type = "execute_agent"
+    reader_envelope, _reader_pid = await envf.build(reader_inv)
+    assert reader_envelope.sandbox.mounts[0].mode is MountMode.READ_ONLY
+    assert 'default_permissions="vuzol-reader"' in reader_envelope.argv
+    assert '"/workspace"="read"' in " ".join(reader_envelope.argv)
+    mock_step.step_type = "execute_code"
 
     grok_inv = MagicMock(spec=CodexInvocation)
     grok_inv.sandbox_reference = f"worktree:{mock_wt.id}"

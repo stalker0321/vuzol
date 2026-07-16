@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from vuzol.config.models import ProviderProfileConfig
+from vuzol.config.models import Capability, ProviderProfileConfig
 from vuzol.providers.domain import (
     EffectiveProfileState,
     NormalizedUsage,
@@ -23,9 +23,9 @@ from vuzol.providers.ports import CodexInvocation, CodexProcessTransport
 from vuzol.workflows.ports import CancellationContext
 
 
-def canonical_grok_argv(model: str) -> tuple[str, ...]:
+def canonical_grok_argv(model: str, *, read_only: bool = False) -> tuple[str, ...]:
     """Return the only Grok command accepted by the production transport."""
-    return (
+    argv = [
         "grok",
         "--no-auto-update",
         "--prompt-file",
@@ -51,8 +51,6 @@ def canonical_grok_argv(model: str) -> tuple[str, ...]:
         "--allow",
         "Bash(date +%s%3N)",
         "--allow",
-        "Edit(**)",
-        "--allow",
         "Read(**)",
         "--allow",
         "Grep(**)",
@@ -70,7 +68,11 @@ def canonical_grok_argv(model: str) -> tuple[str, ...]:
         "--no-subagents",
         "--disable-web-search",
         "--verbatim",
-    )
+    ]
+    if not read_only:
+        edit_index = argv.index("Read(**)") - 1
+        argv[edit_index:edit_index] = ["--allow", "Edit(**)"]
+    return tuple(argv)
 
 
 class GrokCliAdapter:
@@ -109,14 +111,21 @@ class GrokCliAdapter:
                 "output_schema": request.output_json_schema,
                 "execution_policy": {
                     "shell_invocation": _shell_contract_instruction(request),
-                    "file_edits": "Use the Edit tool for workspace file changes.",
+                    "file_edits": (
+                        "File edits are forbidden; inspect the repository and return analysis only."
+                        if Capability.CODE_EDIT not in request.required_capabilities
+                        else "Use the Edit tool for workspace file changes."
+                    ),
                     "result_manifest": _result_contract_instruction(request),
                 },
             },
             ensure_ascii=False,
         )
         invocation = CodexInvocation(
-            argv=canonical_grok_argv(profile.model),
+            argv=canonical_grok_argv(
+                profile.model,
+                read_only=Capability.CODE_EDIT not in request.required_capabilities,
+            ),
             stdin=prompt,
             runtime_identity=profile.runtime_identity,
             state_directory=str(profile.state_directory),

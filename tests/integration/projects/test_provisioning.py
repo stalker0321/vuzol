@@ -259,8 +259,8 @@ def test_dispatcher_materializes_one_project_naming_request(
                 task_draft=recovered_draft.model_dump(mode="json"),
                 profile_id="fake",
                 model="fake",
-                prompt_version="project-naming-v2",
-                schema_version="1.2",
+                prompt_version="architecture-routing-v4",
+                schema_version="1.3",
             )
             session.add(interpretation)
             await session.flush()
@@ -321,7 +321,7 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
         overlay = json.loads(overlay_path.read_text())
         assert overlay["projects"][0]["id"] == "notes"
         assert overlay["topics"][0]["message_thread_id"] == 41
-        assert overlay["topics"][0]["default_workflow"] == "coding_task"
+        assert overlay["topics"][0]["default_workflow"] == "adaptive_task"
         async with factory() as session:
             row = await session.get(ProjectProvisioning, provisioning_id)
             item = await session.get(TransactionalOutbox, outbox_id)

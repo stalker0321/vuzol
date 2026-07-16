@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
-from vuzol.interpretation.domain import TaskAction, TaskDraft
+from vuzol.interpretation.domain import TaskAction, TaskDraft, TaskType
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, dead_letter_outbox_item
 from vuzol.storage.models import (
     Interpretation,
@@ -33,11 +33,19 @@ from vuzol.workflows.transitions import transition_run, transition_step, transit
 
 POLICY_REVISION = hashlib.sha256(b"step-06-workflow-policy-v1").hexdigest()
 WORKFLOW_ALIASES = {
+    "adaptive_task": None,
     "coding_task": "coding.v1",
     "simple_model_task": "simple_model.v1",
     "research_task": "research.v1",
     "infrastructure_task": "infrastructure.v1",
 }
+
+
+def configured_topic_workflow(default_workflow: str, task_type: TaskType) -> str | None:
+    configured = WORKFLOW_ALIASES.get(default_workflow, default_workflow)
+    if configured == "coding.v1" and task_type is not TaskType.CODING:
+        return None
+    return configured
 
 
 class WorkflowDispatchError(RuntimeError):
@@ -220,7 +228,7 @@ class WorkflowDispatcher:
         )
         if topic is None:
             return None
-        return WORKFLOW_ALIASES.get(topic.default_workflow, topic.default_workflow)
+        return configured_topic_workflow(topic.default_workflow, draft.task_type)
 
     async def _enqueue_task_projection(self, session: AsyncSession, task: Task, run: Run) -> None:
         intake = await session.scalar(

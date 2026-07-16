@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 from pydantic import ValidationError
 
-from vuzol.config import WorkflowSettings
+from vuzol.config import Capability, WorkflowSettings
 from vuzol.interpretation.domain import (
     SuggestedComplexity,
     TaskAction,
@@ -27,6 +27,7 @@ from vuzol.storage.types import (
 from vuzol.workflows import WORKFLOW_DEFINITIONS, compile_workflow
 from vuzol.workflows import transitions as workflow_transitions
 from vuzol.workflows.definitions import validate_definition
+from vuzol.workflows.dispatch import configured_topic_workflow
 from vuzol.workflows.domain import StepOutcome, WorkflowDefinition, WorkflowDefinitionError
 from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.service import derive_task_status
@@ -55,6 +56,7 @@ def test_definitions_are_valid_and_stable() -> None:
     assert [item.stable_id for item in WORKFLOW_DEFINITIONS] == [
         "simple_model.v1",
         "coding.v1",
+        "architecture.v1",
         "research.v1",
         "infrastructure.v1",
     ]
@@ -91,6 +93,33 @@ def test_compiler_rejects_unknown_or_incompatible_workflow() -> None:
             interpretation_id=uuid.uuid4(),
             configured_workflow="coding.v1",
         )
+
+
+def test_architecture_workflow_uses_read_only_agent_without_delivery_gates() -> None:
+    workflow = compile_workflow(
+        draft(TaskType.ARCHITECTURE, planning=True),
+        interpretation_id=uuid.uuid4(),
+    )
+
+    assert workflow.workflow_type == "architecture"
+    assert [step.step_type for step in workflow.steps] == [
+        "interpret",
+        "plan",
+        "prepare_context",
+        "prepare_worktree",
+        "execute_agent",
+        "format_result",
+        "finalize",
+    ]
+    agent = next(step for step in workflow.steps if step.step_type == "execute_agent")
+    assert agent.capabilities == frozenset({Capability.REPOSITORY_READ})
+    assert agent.idempotency_class is IdempotencyClass.READ_ONLY
+
+
+def test_project_topics_select_architecture_without_breaking_legacy_coding_defaults() -> None:
+    assert configured_topic_workflow("adaptive_task", TaskType.ARCHITECTURE) is None
+    assert configured_topic_workflow("coding_task", TaskType.ARCHITECTURE) is None
+    assert configured_topic_workflow("coding_task", TaskType.CODING) == "coding.v1"
 
 
 def test_definition_validation_rejects_duplicate_and_missing_edges() -> None:

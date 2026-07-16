@@ -65,6 +65,9 @@ The worker can execute safe, model-only OpenAI-compatible steps such as simple a
 research synthesis, and summarization. Automatic workflow start remains disabled by default.
 Production planning uses a dedicated GPT-5 nano API profile with a bounded 1,000-token output;
 repository analysis and architectural discussion remain full agent tasks rather than planner work.
+Architecture tasks route to subscription agents through a dedicated read-only workflow. The
+repository worktree and provider permissions are both read-only, no validation/apply approval is
+created, and the agent's bounded textual result is returned to the project topic.
 
 The dedicated executor also registers isolated Codex and Grok CLI transports behind the Step 08
 worktree, supervised-process, rootless-sandbox, and controlled-egress boundary. Provider state,

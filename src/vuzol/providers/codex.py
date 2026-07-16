@@ -6,7 +6,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 
-from vuzol.config.models import ProviderProfileConfig
+from vuzol.config.models import Capability, ProviderProfileConfig
 from vuzol.providers.domain import (
     EffectiveProfileState,
     NormalizedUsage,
@@ -25,10 +25,20 @@ CODEX_PERMISSION_CONFIG = (
     '"/workspace"="write","/codex-home"="none"},'
     "network={enabled=false}}"
 )
+CODEX_READ_ONLY_PERMISSION_PROFILE = "vuzol-reader"
+CODEX_READ_ONLY_PERMISSION_CONFIG = (
+    'permissions.vuzol-reader={filesystem={":minimal"="read",'
+    '"/workspace"="read","/codex-home"="none"},'
+    "network={enabled=false}}"
+)
 
 
-def canonical_codex_argv() -> tuple[str, ...]:
+def canonical_codex_argv(*, read_only: bool = False) -> tuple[str, ...]:
     """Return the only Codex command accepted by the production sandbox transport."""
+    permission_profile = (
+        CODEX_READ_ONLY_PERMISSION_PROFILE if read_only else CODEX_PERMISSION_PROFILE
+    )
+    permission_config = CODEX_READ_ONLY_PERMISSION_CONFIG if read_only else CODEX_PERMISSION_CONFIG
     return (
         "codex",
         "exec",
@@ -40,9 +50,9 @@ def canonical_codex_argv() -> tuple[str, ...]:
         "--config",
         'approval_policy="never"',
         "--config",
-        f'default_permissions="{CODEX_PERMISSION_PROFILE}"',
+        f'default_permissions="{permission_profile}"',
         "--config",
-        CODEX_PERMISSION_CONFIG,
+        permission_config,
         "--cd",
         "/workspace",
         "-",
@@ -96,7 +106,9 @@ class CodexCliAdapter:
             "output_schema": request.output_json_schema,
         }
         invocation = CodexInvocation(
-            argv=canonical_codex_argv(),
+            argv=canonical_codex_argv(
+                read_only=Capability.CODE_EDIT not in request.required_capabilities
+            ),
             stdin=json.dumps(envelope, ensure_ascii=False),
             runtime_identity=profile.runtime_identity,
             state_directory=str(profile.state_directory),

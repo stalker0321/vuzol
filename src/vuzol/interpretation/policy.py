@@ -36,6 +36,11 @@ def enforce_interpretation_policy(
     reasons: list[str] = []
     updates: dict[str, object] = {}
     risk = draft.suggested_risk
+    architecture_intent = draft.task_type is TaskType.ARCHITECTURE or (
+        draft.task_type is TaskType.CODING
+        and draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN}
+        and not draft.required_capabilities & {Capability.CODE_EDIT, Capability.FILESYSTEM_WRITE}
+    )
     if request.topic_kind is TopicKind.INBOX:
         updates.update(
             action=TaskAction.CREATE_PROJECT,
@@ -78,7 +83,10 @@ def enforce_interpretation_policy(
             project_name_options=(),
         )
         reasons.append("project_creation_confined_to_inbox")
-    elif request.topic_kind is TopicKind.PROJECT and draft.task_type is TaskType.ARCHITECTURE:
+    elif request.topic_kind is TopicKind.PROJECT and architecture_intent:
+        if draft.task_type is not TaskType.ARCHITECTURE:
+            updates["task_type"] = TaskType.ARCHITECTURE
+            reasons.append("read_only_design_reclassified_as_architecture")
         if draft.action in {TaskAction.ANSWER_QUESTION, TaskAction.GENERAL_CONVERSATION}:
             updates.update(action=TaskAction.CREATE_TASK, operation=TaskOperation.INSPECT)
             reasons.append("architecture_requires_agent_task")

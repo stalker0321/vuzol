@@ -196,6 +196,25 @@ def test_project_architecture_question_is_a_read_only_agent_task() -> None:
     assert "architecture_confined_to_read_only" in policy.reasons
 
 
+def test_read_only_coding_inspection_is_reclassified_as_architecture() -> None:
+    contextual = request().model_copy(
+        update={"topic_kind": TopicKind.PROJECT, "mapped_project_id": "vuzol"}
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(
+            task_type=TaskType.CODING,
+            operation=TaskOperation.INSPECT,
+            required_capabilities=frozenset({Capability.REPOSITORY_READ, Capability.WEB_RESEARCH}),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.task_type is TaskType.ARCHITECTURE
+    assert policy.draft.required_capabilities == frozenset({Capability.REPOSITORY_READ})
+    assert "read_only_design_reclassified_as_architecture" in policy.reasons
+
+
 def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:
     value = draft(
         project_id="invented",

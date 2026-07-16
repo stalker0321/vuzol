@@ -210,7 +210,7 @@ def test_unauthorized_input_creates_no_persisted_content(postgres_dsn: str, tmp_
 
 
 @pytest.mark.postgresql
-def test_reply_has_affinity_and_multiple_active_tasks_force_clarification(
+def test_only_reply_has_affinity_and_standalone_message_creates_task(
     postgres_dsn: str, tmp_path: Path
 ) -> None:
     async def scenario() -> None:
@@ -244,15 +244,21 @@ def test_reply_has_affinity_and_multiple_active_tasks_force_clarification(
             )
         service = TelegramIngressService(runtime, factory)
         reply = await service.accept_message(message(2, 101, reply_to_message_id=50))
-        ambiguous = await service.accept_message(message(3, 102))
+        standalone = await service.accept_message(message(3, 102))
 
         assert reply.status is IngressStatus.CONTINUATION and reply.task_id == task_a.id
-        assert ambiguous.status is IngressStatus.NEEDS_CLARIFICATION
+        assert standalone.status is IngressStatus.CREATED
+        assert standalone.task_id is not None and standalone.task_id != task_a.id
         async with factory() as session:
             intake = await session.scalar(
-                select(TelegramIntakeMessage).where(TelegramIntakeMessage.id == ambiguous.intake_id)
+                select(TelegramIntakeMessage).where(
+                    TelegramIntakeMessage.id == standalone.intake_id
+                )
             )
-            assert intake is not None and len(intake.ambiguous_task_ids) == 2
+            assert intake is not None
+            assert intake.affinity_kind == "new_task"
+            assert intake.ambiguous_task_ids == []
+            assert await session.scalar(select(func.count()).select_from(Task)) == 3
         await engine.dispose()
 
     asyncio.run(scenario())

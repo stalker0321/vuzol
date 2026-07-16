@@ -17,7 +17,11 @@ from vuzol.telegram.adapter import (
     resolve_bot_token,
 )
 from vuzol.telegram.domain import ControlUpdate, MessageUpdate
-from vuzol.telegram.workspace import TopicCreationOutcomeUnknown, TopicSynchronizationError
+from vuzol.telegram.workspace import (
+    TopicCreationOutcomeUnknown,
+    TopicPinUnsupported,
+    TopicSynchronizationError,
+)
 
 
 def test_bot_token_is_resolved_only_from_telegram_scope(tmp_path: Path) -> None:
@@ -114,6 +118,15 @@ def test_python_telegram_client_renames_topic_idempotently_and_categorizes_error
         bot.edit_forum_topic.side_effect = TimedOut("network")
         with pytest.raises(TopicSynchronizationError):
             await client.rename_topic(chat_id=-100, thread_id=41, name="Notes")
+
+    asyncio.run(scenario())
+
+
+def test_python_telegram_client_reports_forum_topic_pin_unsupported() -> None:
+    async def scenario() -> None:
+        client = PythonTelegramClient(AsyncMock())
+        with pytest.raises(TopicPinUnsupported, match="unsupported_by_bot_api"):
+            await client.set_topic_pinned(chat_id=-100, thread_id=41, pinned=True)
 
     asyncio.run(scenario())
 

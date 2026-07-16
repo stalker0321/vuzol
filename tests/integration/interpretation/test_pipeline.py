@@ -385,15 +385,18 @@ def test_project_name_regeneration_replaces_options_and_queues_new_card(
         assert await pipeline.process_one()
         assert interpreter.requests[0][1] is not None
         async with factory() as session:
-            naming = await session.get(ProjectNamingRequest, naming_id)
+            persisted_naming = await session.get(ProjectNamingRequest, naming_id)
             card = await session.scalar(
                 select(TransactionalOutbox).where(
                     TransactionalOutbox.linked_entity_type == "project_naming",
                     TransactionalOutbox.operation_type == "send_message",
                 )
             )
-            assert naming is not None and naming.status is ProjectNamingStatus.PENDING
-            assert naming.options[0]["project_id"] == "fresh-1"
+            assert (
+                persisted_naming is not None
+                and persisted_naming.status is ProjectNamingStatus.PENDING
+            )
+            assert persisted_naming.options[0]["project_id"] == "fresh-1"
             assert card is not None and card.payload["revision"] == 2
         await engine.dispose()
 

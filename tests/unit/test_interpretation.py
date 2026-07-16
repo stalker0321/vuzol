@@ -215,6 +215,29 @@ def test_read_only_coding_inspection_is_reclassified_as_architecture() -> None:
     assert "read_only_design_reclassified_as_architecture" in policy.reasons
 
 
+def test_design_question_survives_coding_create_misclassification() -> None:
+    contextual = request().model_copy(
+        update={
+            "original_input": "Как лучше всего это сделать? Я думаю в виде лёгкого сайта.",
+            "topic_kind": TopicKind.PROJECT,
+            "mapped_project_id": "vuzol",
+        }
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(
+            task_type=TaskType.CODING,
+            operation=TaskOperation.CREATE,
+            required_capabilities=frozenset(),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.task_type is TaskType.ARCHITECTURE
+    assert policy.draft.operation is TaskOperation.INSPECT
+    assert policy.draft.required_capabilities == frozenset({Capability.REPOSITORY_READ})
+
+
 def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:
     value = draft(
         project_id="invented",

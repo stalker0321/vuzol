@@ -141,6 +141,7 @@ async def test_result_apply_records_the_exact_successful_operation() -> None:
     git.apply_result.assert_awaited_once()
     handler._record_applied.assert_awaited_once()
 
+
 class AsyncContext:
     def __init__(self, value: object) -> None:
         self.value = value

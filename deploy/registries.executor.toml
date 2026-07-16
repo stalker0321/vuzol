@@ -55,6 +55,29 @@ destinations = [
 ]
 
 [[profiles]]
+id = "openai-planner-prod"
+provider = "openai-compatible"
+model = "gpt-5-nano-2025-08-07"
+api_base_url = "https://api.openai.com/v1"
+launch_mode = "api"
+credential_reference = "env:VUZOL_OPENAI_PLANNER_API_KEY"
+credential_required = true
+capabilities = []
+concurrency_limit = 10
+context_limit = 100000
+output_limit = 1000
+cost_class = "cheap"
+roles = ["planner"]
+routing_priority = 50
+supported_task_types = ["coding", "research", "infrastructure", "file_processing", "general"]
+fallback_profile_ids = []
+sandbox_required = false
+input_cost_units_per_million = 0.05
+output_cost_units_per_million = 0.40
+minimum_unknown_usage_cost = 0.001
+enabled = true
+
+[[profiles]]
 id = "codex-subscription-prod"
 provider = "codex"
 model = "codex"

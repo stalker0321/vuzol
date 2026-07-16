@@ -119,7 +119,11 @@ async def claim_routed_step(
         )
         role = PROVIDER_STEP_ROLES[step.step_type]
         estimated_input = _estimated_input_tokens(task)
-        requested_output = settings.limits.provider_call_output_tokens
+        requested_output = (
+            settings.limits.planner_output_tokens
+            if role is ProviderRole.PLANNER
+            else settings.limits.provider_call_output_tokens
+        )
         failed_profile_id = step.executor_profile_id if attempt > 1 else None
         allowed_fallbacks: tuple[str, ...] = ()
         if failed_profile_id is not None:

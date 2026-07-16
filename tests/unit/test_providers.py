@@ -293,6 +293,31 @@ async def test_openai_adapter_normalizes_structured_result_and_usage() -> None:
 
 
 @pytest.mark.anyio
+async def test_openai_adapter_uses_gpt5_chat_completion_parameters() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == "gpt-5-nano-2025-08-07"
+        assert payload["max_completion_tokens"] == 1_000
+        assert payload["reasoning_effort"] == "minimal"
+        assert "max_tokens" not in payload
+        assert "temperature" not in payload
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "plan"}, "finish_reason": "stop"}]},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://api.openai.com/v1"
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("test-key"), client=client)
+        request = provider_request().model_copy(update={"max_output_tokens": 1_000})
+        selected = profile("profile").model_copy(update={"model": "gpt-5-nano-2025-08-07"})
+        result = await adapter.execute(request, selected, CancellationContext())
+
+    assert result.text == "plan"
+
+
+@pytest.mark.anyio
 async def test_openai_adapter_maps_errors_without_response_body() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(

@@ -149,7 +149,7 @@ def _configured_image(document: dict[str, object], profile_id: str) -> str:
     raise MvpCheckError(f"sandbox image is unavailable: {profile_id}")
 
 
-def _require_codex_profile(document: dict[str, object]) -> None:
+def _require_provider_profiles(document: dict[str, object]) -> None:
     profiles = document.get("profiles")
     if not isinstance(profiles, list):
         raise MvpCheckError("registry has no provider profile list")
@@ -160,6 +160,24 @@ def _require_codex_profile(document: dict[str, object]) -> None:
     ]
     if len(matches) != 1 or matches[0].get("enabled") is not True:
         raise MvpCheckError("codex-subscription-prod is not uniquely enabled")
+    planners = [
+        item
+        for item in profiles
+        if isinstance(item, dict) and item.get("id") == "openai-planner-prod"
+    ]
+    if len(planners) != 1:
+        raise MvpCheckError("openai-planner-prod is not uniquely configured")
+    planner = planners[0]
+    expected = {
+        "provider": "openai-compatible",
+        "model": "gpt-5-nano-2025-08-07",
+        "launch_mode": "api",
+        "roles": ["planner"],
+        "output_limit": 1_000,
+        "enabled": True,
+    }
+    if any(planner.get(key) != value for key, value in expected.items()):
+        raise MvpCheckError("openai-planner-prod does not match the bounded production policy")
 
 
 def _validation_gates(image: str) -> None:
@@ -318,7 +336,7 @@ def check(expected_sha: str) -> dict[str, object]:
     if not runtime.is_dir() or runtime.stat().st_mode & 0o777 != 0o700:
         raise MvpCheckError("systemd-managed proxy runtime directory is unavailable")
     document = _registry()
-    _require_codex_profile(document)
+    _require_provider_profiles(document)
     provider_image = _configured_image(document, "project-default")
     validation_image = _configured_image(document, "vuzol-validation")
     _docker("image", "inspect", provider_image)

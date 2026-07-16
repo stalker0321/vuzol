@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import html
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -132,25 +133,156 @@ def task_sense_sentence(task: Task) -> str:
 
 
 def model_label_for_profile(
-    profile_id: str | None, *, profile_models: Mapping[str, str] | None = None
+    profile_id: str | None,
+    *,
+    profile_models: Mapping[str, str] | None = None,
+    profile_efforts: Mapping[str, str | None] | None = None,
+    profile_providers: Mapping[str, str] | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> str:
-    if not profile_id:
+    """Human-readable executor identity with full model + effort when known.
+
+    Prefer explicit ``model``/``effort`` (from a step/usage record). Fall back to
+    the profile registry mapping so the dashboard still shows the configured
+    executor (e.g. ``Codex Sol · medium``) before the first step result lands.
+    """
+
+    if not profile_id and not model:
         return "not assigned yet"
-    model = None if profile_models is None else profile_models.get(profile_id)
-    if model in {None, "", "codex"}:
+    resolved_model = model
+    if resolved_model is None and profile_id and profile_models is not None:
+        resolved_model = profile_models.get(profile_id)
+    resolved_effort = effort
+    if resolved_effort is None and profile_id and profile_efforts is not None:
+        resolved_effort = profile_efforts.get(profile_id)
+    provider = (
+        None if profile_providers is None or not profile_id else profile_providers.get(profile_id)
+    )
+    if provider is None and profile_id:
         if profile_id.startswith("codex"):
-            return "Codex"
-        if model:
-            return str(model)
-    if model in {"grok-build", "grok"}:
-        return "Grok"
-    if model:
-        return str(model)
-    if profile_id.startswith("codex"):
-        return "Codex"
-    if profile_id.startswith("grok"):
-        return "Grok"
-    return profile_id
+            provider = "codex"
+        elif profile_id.startswith("grok"):
+            provider = "grok"
+    return format_executor_model(
+        resolved_model,
+        effort=resolved_effort,
+        provider=provider,
+        profile_id=profile_id,
+    )
+
+
+def format_executor_model(
+    model: str | None,
+    *,
+    effort: str | None = None,
+    provider: str | None = None,
+    profile_id: str | None = None,
+) -> str:
+    """Turn a registry/step model slug into a full dashboard label."""
+
+    slug = (model or "").strip()
+    effort_label = (effort or "").strip().lower() or None
+    provider_key = (provider or "").strip().lower()
+    if not provider_key and profile_id:
+        if profile_id.startswith("codex"):
+            provider_key = "codex"
+        elif profile_id.startswith("grok"):
+            provider_key = "grok"
+
+    if not slug and not profile_id:
+        return "not assigned yet"
+
+    base: str
+    is_codex = provider_key == "codex" or (
+        not provider_key
+        and (slug.lower() in {"codex", "auto"} or (profile_id or "").startswith("codex"))
+    )
+    if is_codex:
+        variant = _codex_variant_label(slug)
+        base = f"Codex {variant}".strip() if variant else "Codex"
+    elif slug.lower() in {"grok-build", "grok"} or provider_key == "grok":
+        if slug.lower() == "grok-build" or (not slug and provider_key == "grok"):
+            base = "Grok Build"
+        elif slug.lower() == "grok":
+            base = "Grok"
+        else:
+            base = _humanize_model_slug(slug) if slug else "Grok"
+    elif slug:
+        base = _humanize_model_slug(slug)
+    elif profile_id:
+        base = profile_id
+    else:
+        base = "not assigned yet"
+
+    if effort_label:
+        return f"{base} · {effort_label}"
+    return base
+
+
+def _codex_variant_label(slug: str) -> str | None:
+    """Map Codex model slugs to short product names (Sol / Terra / Luna / …)."""
+
+    lowered = slug.strip().lower()
+    if not lowered or lowered in {"codex", "auto"}:
+        return None
+    # gpt-5.6-sol → Sol; gpt-5.6-terra → Terra; keep full human form otherwise.
+    if lowered.endswith("-sol") or lowered == "sol":
+        return "Sol"
+    if lowered.endswith("-terra") or lowered == "terra":
+        return "Terra"
+    if lowered.endswith("-luna") or lowered == "luna":
+        return "Luna"
+    if lowered.startswith("gpt-"):
+        return _humanize_model_slug(slug)
+    return _humanize_model_slug(slug)
+
+
+def _humanize_model_slug(slug: str) -> str:
+    """Best-effort prettify of model ids (gpt-5.6-sol → GPT-5.6 Sol)."""
+
+    text = slug.strip().replace("_", "-")
+    if not text:
+        return text
+    date_suffix = ""
+    dated = re.search(r"-(\d{4}-\d{2}-\d{2})$", text)
+    if dated:
+        date_suffix = f" ({dated.group(1)})"
+        text = text[: dated.start()]
+    parts = text.split("-")
+    pretty: list[str] = []
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        lower = part.lower()
+        if lower == "gpt":
+            version_parts: list[str] = []
+            look = index + 1
+            # Take at most one numeric version token (5 / 5.6 / 5.1).
+            if look < len(parts) and re.fullmatch(r"\d+(?:\.\d+)*", parts[look]):
+                version_parts.append(parts[look])
+                look += 1
+            pretty.append("GPT-" + version_parts[0] if version_parts else "GPT")
+            index = look
+            continue
+        if lower in {
+            "sol",
+            "terra",
+            "luna",
+            "nano",
+            "mini",
+            "build",
+            "composer",
+            "codex",
+            "grok",
+        }:
+            pretty.append(part.capitalize())
+        elif re.fullmatch(r"\d+(?:\.\d+)*", part):
+            pretty.append(part)
+        else:
+            pretty.append(part.capitalize() if part.islower() else part)
+        index += 1
+    return " ".join(pretty) + date_suffix
 
 
 def dashboard_revision_for(
@@ -176,6 +308,8 @@ async def build_project_status_dashboard(
     *,
     project_names: Mapping[str, str] | None = None,
     profile_models: Mapping[str, str] | None = None,
+    profile_efforts: Mapping[str, str | None] | None = None,
+    profile_providers: Mapping[str, str] | None = None,
     subscription_profiles: Sequence[ProviderProfileConfig] | None = None,
     subscription_snapshots: Sequence[SubscriptionLimitSnapshot] | None = None,
 ) -> DashboardCard:
@@ -200,7 +334,14 @@ async def build_project_status_dashboard(
     else:
         for task in tasks:
             profile_id = await _active_executor_profile(session, task.id)
-            model = model_label_for_profile(profile_id, profile_models=profile_models)
+            step_model = await _latest_step_model(session, task.id)
+            model = model_label_for_profile(
+                profile_id,
+                profile_models=profile_models,
+                profile_efforts=profile_efforts,
+                profile_providers=profile_providers,
+                model=step_model,
+            )
             model_by_task[task.id] = model
             project_id = task.project_id
             if project_id and project_names is not None and project_id in project_names:
@@ -263,6 +404,37 @@ async def _active_executor_profile(session: AsyncSession, task_id: uuid.UUID) ->
     for step in steps:
         if step.executor_profile_id:
             return step.executor_profile_id
+    return None
+
+
+async def _latest_step_model(session: AsyncSession, task_id: uuid.UUID) -> str | None:
+    """Prefer the model recorded on the latest provider step result when available."""
+
+    run = await session.scalar(
+        select(Run).where(Run.task_id == task_id).order_by(Run.created_at.desc()).limit(1)
+    )
+    if run is None:
+        return None
+    steps = list(
+        (
+            await session.scalars(
+                select(Step)
+                .where(
+                    Step.run_id == run.id,
+                    Step.step_type.in_(_ACTIVE_PROVIDER_STEPS),
+                    Step.result.is_not(None),
+                )
+                .order_by(Step.ordinal.desc())
+            )
+        ).all()
+    )
+    for step in steps:
+        result = step.result
+        if not isinstance(result, dict):
+            continue
+        raw = result.get("model")
+        if isinstance(raw, str) and raw.strip() and raw.strip().lower() not in {"codex", "auto"}:
+            return raw.strip()
     return None
 
 

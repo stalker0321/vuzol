@@ -33,13 +33,23 @@ CODEX_READ_ONLY_PERMISSION_CONFIG = (
 )
 
 
-def canonical_codex_argv(*, read_only: bool = False) -> tuple[str, ...]:
-    """Return the only Codex command accepted by the production sandbox transport."""
+def canonical_codex_argv(
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    read_only: bool = False,
+) -> tuple[str, ...]:
+    """Return the only Codex command accepted by the production sandbox transport.
+
+    When ``model`` is a real Codex slug (e.g. ``gpt-5.6-sol``), pass it explicitly
+    so the dashboard and usage records can report the full executor identity.
+    The generic registry token ``codex`` is left unset so the CLI default applies.
+    """
     permission_profile = (
         CODEX_READ_ONLY_PERMISSION_PROFILE if read_only else CODEX_PERMISSION_PROFILE
     )
     permission_config = CODEX_READ_ONLY_PERMISSION_CONFIG if read_only else CODEX_PERMISSION_CONFIG
-    return (
+    args: list[str] = [
         "codex",
         "exec",
         "--json",
@@ -47,16 +57,26 @@ def canonical_codex_argv(*, read_only: bool = False) -> tuple[str, ...]:
         "--ephemeral",
         "--ignore-user-config",
         "--ignore-rules",
-        "--config",
-        'approval_policy="never"',
-        "--config",
-        f'default_permissions="{permission_profile}"',
-        "--config",
-        permission_config,
-        "--cd",
-        "/workspace",
-        "-",
+    ]
+    resolved_model = (model or "").strip()
+    if resolved_model and resolved_model.lower() not in {"codex", "auto"}:
+        args.extend(["--model", resolved_model])
+    if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+        args.extend(["--config", f'model_reasoning_effort="{reasoning_effort.strip()}"'])
+    args.extend(
+        [
+            "--config",
+            'approval_policy="never"',
+            "--config",
+            f'default_permissions="{permission_profile}"',
+            "--config",
+            permission_config,
+            "--cd",
+            "/workspace",
+            "-",
+        ]
     )
+    return tuple(args)
 
 
 class CodexCliAdapter:
@@ -107,7 +127,9 @@ class CodexCliAdapter:
         }
         invocation = CodexInvocation(
             argv=canonical_codex_argv(
-                read_only=Capability.CODE_EDIT not in request.required_capabilities
+                model=profile.model,
+                reasoning_effort=profile.model_reasoning_effort,
+                read_only=Capability.CODE_EDIT not in request.required_capabilities,
             ),
             stdin=json.dumps(envelope, ensure_ascii=False),
             runtime_identity=profile.runtime_identity,

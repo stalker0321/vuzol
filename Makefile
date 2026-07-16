@@ -65,7 +65,7 @@ mvp-check:
 	uv run python deploy/mvp/check.py --expected-sha "$$(git rev-parse HEAD)"
 
 db-up:
-	docker compose up -d postgres
+	docker compose up -d --wait postgres
 
 db-down:
 	docker compose down

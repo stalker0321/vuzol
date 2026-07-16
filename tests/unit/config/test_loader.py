@@ -53,7 +53,9 @@ def test_example_toml_loads_into_strict_document() -> None:
 
     assert document.projects[0].id == "example"
     assert document.profiles[0].id == "example-api"
-    assert document.topics[0].kind == "inbox"
+    kinds = {topic.kind for topic in document.topics}
+    assert "inbox" in kinds
+    assert "task_dashboard" in kinds
 
 
 def test_invalid_toml_and_schema_fail_with_file_context(tmp_path: Path) -> None:
@@ -123,6 +125,23 @@ def test_bundle_revision_is_stable_and_contains_no_secret_value(tmp_path: Path) 
     assert first.revision == second.revision
     assert "secret-one" not in repr(first)
     assert "secret-two" not in repr(second)
+
+
+def test_content_revision_is_stable_for_frozenset_fields() -> None:
+    from vuzol.config.models import DeliveryMode, GitDeliveryPolicy
+    from vuzol.config.revision import content_revision
+
+    left = GitDeliveryPolicy(
+        allowed_modes=frozenset({DeliveryMode.PATCH, DeliveryMode.APPLY, DeliveryMode.RETAIN}),
+        approval_required=frozenset({DeliveryMode.APPLY}),
+    )
+    right = GitDeliveryPolicy(
+        allowed_modes=frozenset({DeliveryMode.RETAIN, DeliveryMode.PATCH, DeliveryMode.APPLY}),
+        approval_required=frozenset({DeliveryMode.APPLY}),
+    )
+    digests = {content_revision(left) for _ in range(20)}
+    digests.add(content_revision(right))
+    assert digests == {content_revision(left)}
 
 
 def test_bundle_rejects_unknown_topic_project(tmp_path: Path) -> None:

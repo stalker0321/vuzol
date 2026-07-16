@@ -46,6 +46,8 @@ async def run() -> None:
                 retry_min_seconds=delivery.delivery_retry_min_seconds,
                 retry_max_seconds=delivery.delivery_retry_max_seconds,
                 topics=runtime.registries.topics,
+                projects=runtime.registries.projects,
+                profiles=runtime.registries.profiles,
             )
             await run_delivery_loop(
                 service,

@@ -38,7 +38,13 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import ProjectProvisioningStatus, TaskStatus
-from vuzol.telegram.workspace import TelegramWorkspaceClient, TopicCreationOutcomeUnknown
+from vuzol.telegram.layout import project_topic_should_pin_on_create
+from vuzol.telegram.workspace import (
+    TelegramWorkspaceClient,
+    TopicCreationOutcomeUnknown,
+    TopicPinUnsupported,
+    TopicSynchronizationError,
+)
 from vuzol.workflows.transitions import transition_task
 
 PROJECT_PROVISIONING_DESTINATIONS = frozenset({"project_provisioning"})
@@ -126,6 +132,7 @@ class RegistryOverlayWriter:
             project_id=provisioning.project_id,
             accepts_new_tasks=True,
             default_workflow="adaptive_task",
+            pinned=project_topic_should_pin_on_create(),
         )
         updated = RegistryDocument(
             projects=(*overlay.projects, project),
@@ -235,6 +242,19 @@ class ProjectProvisioningService:
                 chat_id=chat_id,
                 name=display_name,
             )
+            if project_topic_should_pin_on_create():
+                try:
+                    await self._telegram.set_topic_pinned(
+                        chat_id=chat_id,
+                        thread_id=topic_thread_id,
+                        pinned=True,
+                    )
+                except TopicPinUnsupported:
+                    # Pin remains registry/product intent until Bot API supports it.
+                    pass
+                except TopicSynchronizationError:
+                    # Topic exists; pin is best-effort presentation state.
+                    pass
             async with self._factory.begin() as session:
                 row = await session.get(ProjectProvisioning, provisioning_id, with_for_update=True)
                 assert row is not None

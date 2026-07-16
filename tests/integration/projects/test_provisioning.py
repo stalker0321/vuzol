@@ -54,6 +54,7 @@ class FakeWorkspaceClient:
         self.thread_id = thread_id
         self.fail = fail
         self.created: list[tuple[int, str]] = []
+        self.pin_calls: list[tuple[int, int, bool]] = []
 
     async def rename_topic(self, *, chat_id: int, thread_id: int, name: str) -> None:
         return None
@@ -63,6 +64,9 @@ class FakeWorkspaceClient:
         if self.fail:
             raise TopicCreationOutcomeUnknown("lost response")
         return self.thread_id
+
+    async def set_topic_pinned(self, *, chat_id: int, thread_id: int, pinned: bool) -> None:
+        self.pin_calls.append((chat_id, thread_id, pinned))
 
 
 class FakeReloader:
@@ -312,6 +316,7 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
         assert await service.process_one()
         assert not await service.process_one()
         assert workspace.created == [(-100, "Notes")]
+        assert workspace.pin_calls == [(-100, 41, True)]
         assert reloader.calls == 1
         repository = configured.settings.repository_root / "notes"
         assert (repository / ".git").is_dir()
@@ -322,6 +327,7 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
         assert overlay["projects"][0]["id"] == "notes"
         assert overlay["topics"][0]["message_thread_id"] == 41
         assert overlay["topics"][0]["default_workflow"] == "adaptive_task"
+        assert overlay["topics"][0]["pinned"] is True
         async with factory() as session:
             row = await session.get(ProjectProvisioning, provisioning_id)
             item = await session.get(TransactionalOutbox, outbox_id)

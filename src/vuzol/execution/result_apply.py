@@ -36,12 +36,19 @@ class ResultApplyHandler:
         try:
             approval_id, envelope, worktree = await self._load(request)
             project = self._registries.projects.get(worktree.project_id)
+            if not project.enabled:
+                raise ValueError("project is disabled; approved result cannot be applied")
             if DeliveryMode.APPLY not in project.git_delivery.allowed_modes:
                 raise ValueError("project policy does not allow local apply")
             if DeliveryMode.APPLY not in project.git_delivery.approval_required:
                 raise ValueError("project policy does not require approval for local apply")
-            if envelope["configuration_revision"] != self._registries.revision:
-                raise ValueError("runtime configuration changed after approval was requested")
+            if project.default_branch != envelope["target_branch"]:
+                raise ValueError("project default branch changed after approval was requested")
+            # Full bundle revision includes display-only profile fields (model labels,
+            # planner entries). Those must not strand an already-approved local apply;
+            # repository identity + delivery policy are the apply-relevant gates.
+            if envelope["project_id"] != worktree.project_id:
+                raise ValueError("approval project does not match retained worktree")
             identity, _remote = await self._git.repository_identity(project.repository_path)
             if identity != envelope["repository_identity_hash"]:
                 raise ValueError("managed repository identity does not match the approval")

@@ -326,17 +326,19 @@ def test_project_name_options_are_sent_as_buttons_then_deleted(postgres_dsn: str
         assert keyboard[0][0][1] == f"v1:pn:{naming_id.hex}:1:0"
         assert keyboard[-1][0][1] == f"v1:pn:{naming_id.hex}:1:r"
         async with factory.begin() as session:
-            naming = await session.get(ProjectNamingRequest, naming_id, with_for_update=True)
-            assert naming is not None
-            naming.status = ProjectNamingStatus.GENERATING
-            naming.revision = 2
+            persisted_naming = await session.get(
+                ProjectNamingRequest, naming_id, with_for_update=True
+            )
+            assert persisted_naming is not None
+            persisted_naming.status = ProjectNamingStatus.GENERATING
+            persisted_naming.revision = 2
             session.add(
                 TransactionalOutbox(
                     destination="telegram",
                     operation_type="delete_message",
                     linked_entity_type="project_naming",
-                    linked_entity_id=naming.id,
-                    idempotency_key=f"names:{naming.id}:1:delete",
+                    linked_entity_id=persisted_naming.id,
+                    idempotency_key=f"names:{persisted_naming.id}:1:delete",
                     payload={"role": "project_name_options", "revision": 1},
                 )
             )

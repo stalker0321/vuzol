@@ -16,6 +16,7 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- made PostgreSQL-backed checks wait for the Compose healthcheck before running migrations;
 - changed Telegram task affinity so a standalone project-topic message creates a new task unless
   exactly one task is awaiting a clarification answer; replies remain explicit continuations;
 - added adaptive project-topic routing and a full read-only architecture-agent workflow with a

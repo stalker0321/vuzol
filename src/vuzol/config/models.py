@@ -331,6 +331,10 @@ class TopicConfig(FrozenModel):
     accepts_new_tasks: bool = True
     default_workflow: str = Field(min_length=1)
     enabled: bool = True
+    # Desired forum-topic pin state. None means "derive from product layout policy":
+    # system control topics pin by kind; project topics stay unpinned unless set True
+    # at provision time (cleared later on pause/complete).
+    pinned: bool | None = None
 
     @model_validator(mode="after")
     def validate_project_scope(self) -> "TopicConfig":

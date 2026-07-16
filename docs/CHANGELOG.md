@@ -16,6 +16,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- fixed the product-level Telegram forum layout: permanent pin order
+  История → Статус проектов → Апрувы → Новый проект, canonical system display names,
+  project topics pin on provision and unpin on later pause/finish; live Bot API pin
+  remains best-effort until Telegram exposes forum-topic pin methods;
 - granted the mapped sandbox identity temporary writable ACL access for every regular coding run,
   not only the experimental worker-capsule path;
 - made PostgreSQL-backed checks wait for the Compose healthcheck before running migrations;

@@ -46,19 +46,41 @@ never claims those records.
 
 ## Forum workspace
 
-The configured forum is the shared control plane for every project. Topic display names are
-declarative registry data. On Telegram ingress startup, Vuzol upserts every configured stable
-chat/thread mapping into PostgreSQL and synchronizes the names through the Bot API. Routing never
-depends on a mutable display name.
+The configured forum is the shared control plane for every project. Stable `chat_id` +
+`message_thread_id` mappings live in the registry; **display names and pin intent are product
+policy** in `vuzol.telegram.layout`, not ad-hoc labels of one live group. On Telegram ingress
+startup, Vuzol upserts every configured mapping into PostgreSQL and synchronizes system topic
+names through the Bot API. Routing never depends on a mutable display name.
 
-The initial workspace uses these roles:
+### Canonical layout (product policy)
 
-- `Новый проект` (`inbox`) for future project intake and environment creation;
-- `Статус проектов` (`task_dashboard`) for a future in-place global dashboard;
-- `Апрувы` (`approvals`) for exact-result decisions across all projects;
-- `Система` (`system`) for future operational alerts;
-- `История` (`changelog`) for the future append-only cross-project history;
-- one `<project>` (`project`) topic for each active project.
+Permanently pinned system topics, top → bottom:
+
+| Pin order | Display name        | Kind              | Role                                      |
+| --------- | ------------------- | ----------------- | ----------------------------------------- |
+| 1         | `История`           | `changelog`       | Append-only cross-project history         |
+| 2         | `Статус проектов`   | `task_dashboard`  | Global project dashboard                  |
+| 3         | `Апрувы`            | `approvals`       | Exact-result decisions across projects    |
+| 4         | `Новый проект`      | `inbox`           | Project intake and environment creation   |
+
+Additional workspace roles that are **not** part of the fixed pin stack:
+
+- `Система` (`system`) for operational alerts;
+- one `<project>` (`project`) topic per provisioned project.
+
+### Project topic pin lifecycle
+
+- When a project is provisioned, its topic is created and marked `pinned=true` so it joins the pin
+  stack **after** the four fixed system topics (new projects append next).
+- When work on a project is paused or finished (detailed lifecycle later), the topic is marked
+  unpinned and leaves the pin stack; the topic itself remains for history.
+- Registry field `pinned` on a topic is optional: system control kinds pin by layout when enabled;
+  project topics pin only when explicitly set (provisioning sets true).
+
+Forum-topic pin/reorder is currently available only on Telegram's MTProto client API, not on the
+Bot API used by Vuzol. The product still records and synchronizes **desired** pin state; live pin
+enforcement lands when bot methods exist. Display-name synchronization already enforces the
+canonical Russian labels for system kinds.
 
 Project topics use adaptive workflow selection. Implementation requests use the coding workflow;
 repository-aware architecture and design discussions use the read-only architecture-agent

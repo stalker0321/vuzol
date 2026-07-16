@@ -18,7 +18,11 @@ from telegram.ext import (
 
 from vuzol.config import ScopedSecretResolver, Settings
 from vuzol.telegram.domain import AttachmentKind, ControlUpdate, MessageUpdate, TelegramAttachment
-from vuzol.telegram.workspace import TopicCreationOutcomeUnknown, TopicSynchronizationError
+from vuzol.telegram.workspace import (
+    TopicCreationOutcomeUnknown,
+    TopicPinUnsupported,
+    TopicSynchronizationError,
+)
 
 MessageHandlerFn = Callable[[MessageUpdate], Awaitable[None]]
 ControlHandlerFn = Callable[[ControlUpdate], Awaitable[None]]
@@ -123,6 +127,19 @@ class PythonTelegramClient:
         except TelegramError as error:
             raise TopicCreationOutcomeUnknown(type(error).__name__) from error
         return topic.message_thread_id
+
+    async def set_topic_pinned(self, *, chat_id: int, thread_id: int, pinned: bool) -> None:
+        """Apply desired forum-topic pin state.
+
+        Telegram exposes topic pin/reorder only on the MTProto client API today
+        (``messages.updatePinnedForumTopic`` / ``messages.reorderPinnedForumTopics``).
+        The Bot API used by this adapter has no equivalent method, so pin intent is
+        product policy until Telegram adds bot support. Callers treat
+        :class:`TopicPinUnsupported` as non-fatal layout documentation.
+        """
+
+        del chat_id, thread_id, pinned
+        raise TopicPinUnsupported("forum_topic_pin_unsupported_by_bot_api")
 
 
 def message_update(update: Update, bot_id: str) -> MessageUpdate | None:

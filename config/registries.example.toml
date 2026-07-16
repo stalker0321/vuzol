@@ -104,11 +104,47 @@ runtime_identity = "vuzol-codex-b"
 state_directory = "/var/lib/vuzol-codex-b"
 enabled = false
 
+# Forum layout (product policy): permanently pinned top→bottom =
+# История, Статус проектов, Апрувы, Новый проект. Active project topics pin next.
+# System topic exists but is not in the fixed pin stack. Display names for these
+# kinds are enforced by vuzol.telegram.layout regardless of TOML text.
+
 [[topics]]
 chat_id = -1000000000000
 message_thread_id = 1
+kind = "changelog"
+accepts_new_tasks = false
+default_workflow = "simple_model_task"
+enabled = false
+
+[[topics]]
+chat_id = -1000000000000
+message_thread_id = 2
+kind = "task_dashboard"
+accepts_new_tasks = false
+default_workflow = "simple_model_task"
+enabled = false
+
+[[topics]]
+chat_id = -1000000000000
+message_thread_id = 3
+kind = "approvals"
+accepts_new_tasks = false
+default_workflow = "simple_model_task"
+enabled = false
+
+[[topics]]
+chat_id = -1000000000000
+message_thread_id = 4
 kind = "inbox"
-display_name = "Новый проект"
 accepts_new_tasks = true
+default_workflow = "simple_model_task"
+enabled = false
+
+[[topics]]
+chat_id = -1000000000000
+message_thread_id = 5
+kind = "system"
+accepts_new_tasks = false
 default_workflow = "simple_model_task"
 enabled = false

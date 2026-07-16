@@ -32,12 +32,18 @@ from vuzol.storage.models import (
     Worktree,
 )
 from vuzol.storage.types import ApprovalStatus, StepStatus, TaskStatus
-from vuzol.telegram.layout import DASHBOARD_CARD_TITLE, STATUS_DASHBOARD_TOPIC_KIND
+from vuzol.telegram.layout import (
+    DASHBOARD_CARD_TITLE,
+    HISTORY_TOPIC_KIND,
+    STATUS_DASHBOARD_TOPIC_KIND,
+)
 from vuzol.workflows.result_approval import verified_envelope
 
 TELEGRAM_TEXT_LIMIT = 4096
 # Outbox/message_role for the single editable card in the task_dashboard topic.
 PROJECT_STATUS_DASHBOARD_ROLE = "project_status_dashboard"
+# One-shot completion report in the «История» (changelog) topic.
+TASK_HISTORY_ROLE = "task_history"
 
 _TERMINAL_TASK_STATUSES = frozenset(
     {
@@ -433,6 +439,244 @@ async def _latest_step_model(session: AsyncSession, task_id: uuid.UUID) -> str |
         if isinstance(raw, str) and raw.strip() and raw.strip().lower() not in {"codex", "auto"}:
             return raw.strip()
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryReport:
+    task_id: uuid.UUID
+    chat_id: int
+    thread_id: int
+    html: str
+    revision: int = 1
+
+
+async def build_task_history_report(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    *,
+    project_names: Mapping[str, str] | None = None,
+) -> HistoryReport | None:
+    """Build a one-shot completion report for the «История» topic.
+
+    Returns ``None`` when the task is not completed or has no source chat.
+    Approval wait time is excluded from the work duration.
+    """
+
+    task = await session.get(Task, task_id)
+    if task is None or task.status is not TaskStatus.COMPLETED:
+        return None
+    if not task.source_chat_id:
+        return None
+    mapping = await session.scalar(
+        select(TopicMapping).where(
+            TopicMapping.chat_id == task.source_chat_id,
+            TopicMapping.topic_kind == HISTORY_TOPIC_KIND.value,
+            TopicMapping.enabled.is_(True),
+        )
+    )
+    if mapping is None:
+        return None
+
+    project_id = task.project_id or "no project"
+    if project_names is not None and task.project_id and task.project_id in project_names:
+        project_label = project_names[task.project_id]
+    else:
+        project_label = project_id
+
+    summary = await _history_summary(session, task)
+    tokens_in, tokens_out, tokens_cached = await _history_token_totals(session, task.id)
+    work_seconds = await _history_work_seconds(session, task)
+
+    number = task_number_label(task)
+    lines = [
+        f"<b>#{telegram_html(number)}</b> · <b>{telegram_html(project_label)}</b>",
+        telegram_html(summary),
+        "",
+        (
+            f"Tokens: <code>{telegram_html(_format_count(tokens_in))}</code> in / "
+            f"<code>{telegram_html(_format_count(tokens_out))}</code> out / "
+            f"<code>{telegram_html(_format_count(tokens_cached))}</code> cached"
+        ),
+        f"Work: <code>{telegram_html(_format_duration(work_seconds))}</code>",
+    ]
+    return HistoryReport(
+        task_id=task.id,
+        chat_id=int(task.source_chat_id),
+        thread_id=int(mapping.message_thread_id),
+        html=split_message("\n".join(lines))[0],
+    )
+
+
+async def enqueue_task_history_report(session: AsyncSession, task_id: uuid.UUID) -> None:
+    """Queue a one-shot completion report into the forum's «История» topic."""
+
+    report = await build_task_history_report(session, task_id)
+    if report is None:
+        return
+    key = f"telegram:{TASK_HISTORY_ROLE}:task:{task_id}"
+    existing = await session.scalar(
+        select(TransactionalOutbox.id).where(
+            TransactionalOutbox.destination == "telegram",
+            TransactionalOutbox.idempotency_key == key,
+        )
+    )
+    if existing is not None:
+        return
+    mapping = await session.scalar(
+        select(TopicMapping).where(
+            TopicMapping.chat_id == report.chat_id,
+            TopicMapping.topic_kind == HISTORY_TOPIC_KIND.value,
+            TopicMapping.enabled.is_(True),
+        )
+    )
+    if mapping is None:
+        return
+    session.add(
+        TransactionalOutbox(
+            destination="telegram",
+            operation_type="send_message",
+            linked_entity_type="task",
+            linked_entity_id=task_id,
+            idempotency_key=key,
+            payload={
+                "role": TASK_HISTORY_ROLE,
+                "chat_id": report.chat_id,
+                "message_thread_id": report.thread_id,
+                "topic_kind": HISTORY_TOPIC_KIND.value,
+                "task_id": str(task_id),
+                "revision": report.revision,
+            },
+        )
+    )
+
+
+async def _history_summary(session: AsyncSession, task: Task) -> str:
+    """Prefer the approval human summary, then execute result text, then task sense."""
+
+    approval = await session.scalar(
+        select(Approval)
+        .join(Step, Approval.step_id == Step.id)
+        .join(Run, Step.run_id == Run.id)
+        .where(
+            Run.task_id == task.id,
+            Approval.status.in_(
+                {ApprovalStatus.APPROVED, ApprovalStatus.CONSUMED, ApprovalStatus.PENDING}
+            ),
+        )
+        .order_by(Approval.requested_at.desc())
+        .limit(1)
+    )
+    if approval is not None and approval.human_summary and approval.human_summary.strip():
+        return _one_line_summary(approval.human_summary)
+
+    run = await session.scalar(
+        select(Run).where(Run.task_id == task.id).order_by(Run.created_at.desc()).limit(1)
+    )
+    if run is not None:
+        steps = list(
+            (
+                await session.scalars(
+                    select(Step)
+                    .where(
+                        Step.run_id == run.id,
+                        Step.step_type.in_(_ACTIVE_PROVIDER_STEPS),
+                        Step.result.is_not(None),
+                    )
+                    .order_by(Step.ordinal.desc())
+                )
+            ).all()
+        )
+        for step in steps:
+            result = step.result if isinstance(step.result, dict) else {}
+            for key in ("implementation_summary", "summary", "text"):
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    return _one_line_summary(value)
+    return _one_line_summary(task_sense_sentence(task))
+
+
+async def _history_token_totals(session: AsyncSession, task_id: uuid.UUID) -> tuple[int, int, int]:
+    rows = list(
+        (await session.scalars(select(UsageRecord).where(UsageRecord.task_id == task_id))).all()
+    )
+    tokens_in = sum(int(row.input_tokens or 0) for row in rows)
+    tokens_out = sum(int(row.output_tokens or 0) for row in rows)
+    tokens_cached = sum(int(row.cached_tokens or 0) for row in rows)
+    return tokens_in, tokens_out, tokens_cached
+
+
+async def _history_work_seconds(session: AsyncSession, task: Task) -> int:
+    """Active work time excluding human approval wait.
+
+    Prefer the sum of provider invocation durations (never includes approval wait).
+    If no usage rows exist, fall back to wall-clock minus approval pending spans.
+    """
+
+    rows = list(
+        (await session.scalars(select(UsageRecord).where(UsageRecord.task_id == task.id))).all()
+    )
+    if rows:
+        total_ms = sum(max(0, int(row.duration_ms or 0)) for row in rows)
+        return max(0, total_ms // 1000)
+
+    started = task.created_at
+    ended = task.updated_at or datetime.now(UTC)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    if ended.tzinfo is None:
+        ended = ended.replace(tzinfo=UTC)
+    total = max(0.0, (ended - started).total_seconds())
+
+    approvals = list(
+        (
+            await session.scalars(
+                select(Approval)
+                .join(Step, Approval.step_id == Step.id)
+                .join(Run, Step.run_id == Run.id)
+                .where(Run.task_id == task.id)
+            )
+        ).all()
+    )
+    for approval in approvals:
+        requested = approval.requested_at
+        decided = approval.decided_at
+        if requested is None or decided is None:
+            continue
+        if requested.tzinfo is None:
+            requested = requested.replace(tzinfo=UTC)
+        if decided.tzinfo is None:
+            decided = decided.replace(tzinfo=UTC)
+        total -= max(0.0, (decided - requested).total_seconds())
+    return max(0, int(total))
+
+
+def _one_line_summary(text: str, *, limit: int = 280) -> str:
+    cleaned = " ".join(text.split()).strip()
+    if not cleaned:
+        return "No description"
+    for separator in (". ", "! ", "? ", "\n"):
+        if separator in cleaned:
+            cleaned = cleaned.split(separator, 1)[0].strip()
+            break
+    cleaned = cleaned.rstrip(".!?").strip()
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1].rstrip() + "…"
+    return cleaned or "No description"
+
+
+def _format_count(value: int) -> str:
+    return f"{max(0, int(value)):,}"
+
+
+def _format_duration(seconds: int) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 async def enqueue_project_status_dashboard(session: AsyncSession, chat_id: int) -> None:

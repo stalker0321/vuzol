@@ -277,8 +277,12 @@ async def retry_blocked_step(
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
     assert task is not None
     await transition_step(session, step, StepStatus.QUEUED, actor_type="user", actor_id=actor_id)
+    step.failure_category = None
+    step.failure_summary = None
     if run.status is RunStatus.BLOCKED:
         await transition_run(session, run, RunStatus.RUNNING, actor_type="user", actor_id=actor_id)
+        run.failure_category = None
+        run.failure_summary = None
     if task.status is TaskStatus.BLOCKED:
         await transition_task(
             session, task, TaskStatus.RETRYING, actor_type="user", actor_id=actor_id

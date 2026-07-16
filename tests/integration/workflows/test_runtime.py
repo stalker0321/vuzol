@@ -805,7 +805,11 @@ def test_explicit_retry_requeues_only_safe_blocked_step(postgres_dsn: str) -> No
             task = await session.get(Task, task_id)
             assert step is not None and task is not None
             step.status = StepStatus.BLOCKED
+            step.failure_category = "provider_unavailable"
+            step.failure_summary = "provider temporarily unavailable"
             run.status = RunStatus.BLOCKED
+            run.failure_category = "provider_unavailable"
+            run.failure_summary = "provider temporarily unavailable"
             task.status = TaskStatus.BLOCKED
             await session.flush()
             step_id = step.id
@@ -835,7 +839,9 @@ def test_explicit_retry_requeues_only_safe_blocked_step(postgres_dsn: str) -> No
             loaded_run = await session.scalar(select(Run).where(Run.task_id == task_id))
             task = await session.get(Task, task_id)
             assert step is not None and step.status is StepStatus.QUEUED
+            assert step.failure_category is None and step.failure_summary is None
             assert loaded_run is not None and loaded_run.status is RunStatus.RUNNING
+            assert loaded_run.failure_category is None and loaded_run.failure_summary is None
             assert task is not None and task.status is TaskStatus.RETRYING
         await engine.dispose()
 

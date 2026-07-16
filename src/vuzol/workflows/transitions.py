@@ -133,6 +133,8 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     ),
     TaskStatus.RETRYING: frozenset(
         {
+            TaskStatus.CONTEXT_PREPARED,
+            TaskStatus.PLANNED,
             TaskStatus.EXECUTING,
             TaskStatus.VALIDATING,
             TaskStatus.AWAITING_USER,

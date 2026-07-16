@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.models import Approval, Run, Step, Worktree
-from vuzol.storage.types import ApprovalStatus
+from vuzol.storage.types import ApprovalStatus, StepStatus
 
 RESULT_APPROVAL_SCHEMA = "result-approval.v1"
 RESULT_APPROVAL_TTL = timedelta(days=7)
@@ -35,34 +35,14 @@ async def ensure_result_approval(
     existing = await session.scalar(select(Approval).where(Approval.step_id == approval_step.id))
     if existing is not None:
         return existing
-    predecessors = approval_step.dependency_metadata.get("predecessor_ordinals", [])
-    if len(predecessors) != 1:
-        raise ValueError("result approval requires exactly one predecessor")
-    source_step = steps_by_ordinal[int(predecessors[0])]
-    result = source_step.result or {}
-    manifest = result.get("structured_output")
-    if not isinstance(manifest, dict):
-        raise ValueError("result approval requires a finalized worker manifest")
+
     worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
-    if (
-        worktree is None
-        or worktree.result_commit is None
-        or worktree.diff_hash is None
-        or manifest.get("result_commit") != worktree.result_commit
-        or manifest.get("base_commit") != worktree.base_commit
-    ):
-        raise ValueError("retained result does not match the finalized worker manifest")
-    gates = manifest.get("gates")
-    if (
-        not isinstance(gates, list)
-        or not gates
-        or any(not isinstance(gate, dict) or gate.get("exit_code") != 0 for gate in gates)
-    ):
-        raise ValueError("result approval requires passing trusted gates")
-    summary = result.get("implementation_summary")
-    if not isinstance(summary, str) or not summary.strip():
-        summary = "The requested change was implemented and passed all configured checks."
-    summary = summary.strip()[:2_000]
+    if worktree is None or worktree.result_commit is None or worktree.diff_hash is None:
+        raise ValueError("result approval requires a retained measured worktree")
+
+    evidence = _validation_evidence(steps_by_ordinal, worktree)
+    gates = evidence["gates"]
+    summary = evidence["summary"]
     envelope: dict[str, Any] = {
         "schema_version": RESULT_APPROVAL_SCHEMA,
         "requested_action": "apply_result",
@@ -112,3 +92,87 @@ def verified_envelope(step: Step, approval: Approval) -> dict[str, Any]:
     if raw.get("step_id") != str(step.id):
         raise ValueError("approval action envelope targets another step")
     return raw
+
+
+def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) -> dict[str, Any]:
+    """Collect gate evidence and summary from validate/review/execute predecessors."""
+
+    ordered = [steps_by_ordinal[key] for key in sorted(steps_by_ordinal)]
+    validate = next(
+        (
+            step
+            for step in ordered
+            if step.step_type == "validate" and step.status is StepStatus.COMPLETED
+        ),
+        None,
+    )
+    review = next(
+        (
+            step
+            for step in ordered
+            if step.step_type == "review" and step.status is StepStatus.COMPLETED
+        ),
+        None,
+    )
+    execute = next(
+        (
+            step
+            for step in ordered
+            if step.step_type == "execute_code" and step.status is StepStatus.COMPLETED
+        ),
+        None,
+    )
+
+    source = validate
+    if source is None:
+        # Fall back to any completed predecessor with structured validation output.
+        for step in reversed(ordered):
+            if step.status is not StepStatus.COMPLETED:
+                continue
+            result = step.result if isinstance(step.result, dict) else {}
+            structured = result.get("structured_output")
+            if (
+                isinstance(structured, dict)
+                and structured.get("result_commit") == worktree.result_commit
+                and isinstance(structured.get("gates"), list)
+                and structured.get("gates")
+            ):
+                source = step
+                break
+    if source is None:
+        raise ValueError("result approval requires a completed validate step")
+
+    result = source.result if isinstance(source.result, dict) else {}
+    manifest = result.get("structured_output")
+    if not isinstance(manifest, dict):
+        raise ValueError("result approval requires structured validation output")
+    if (
+        manifest.get("result_commit") != worktree.result_commit
+        or manifest.get("base_commit") != worktree.base_commit
+    ):
+        raise ValueError("retained result does not match the finalized validation evidence")
+    gates = manifest.get("gates")
+    if (
+        not isinstance(gates, list)
+        or not gates
+        or any(not isinstance(gate, dict) or gate.get("exit_code") != 0 for gate in gates)
+    ):
+        raise ValueError("result approval requires passing trusted gates")
+
+    review_result = review.result if review and isinstance(review.result, dict) else {}
+    execute_result = execute.result if execute and isinstance(execute.result, dict) else {}
+    summary = None
+    for candidate in (
+        review_result.get("summary"),
+        review_result.get("implementation_summary"),
+        result.get("implementation_summary"),
+        execute_result.get("implementation_summary"),
+        execute_result.get("text"),
+        result.get("text"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            summary = candidate.strip()
+            break
+    if summary is None:
+        summary = "The requested change was implemented and passed all configured checks."
+    return {"gates": gates, "summary": summary[:2_000]}

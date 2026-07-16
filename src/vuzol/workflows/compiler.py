@@ -50,6 +50,13 @@ def compile_workflow(
                 pending.extend(original[predecessor].predecessors)
         return tuple(sorted(resolved))
 
+    def payload_for(step_key: str, step_type: str) -> dict[str, str]:
+        if step_key == "interpret":
+            return {"interpretation_id": str(interpretation_id)}
+        if step_type == "approval" or step_key == "approve_result":
+            return {"requested_action": "apply_result"}
+        return {}
+
     steps = tuple(
         MaterializedStep(
             ordinal=index,
@@ -64,9 +71,7 @@ def compile_workflow(
             max_attempts=step.max_attempts,
             priority=step.priority,
             status=StepStatus.COMPLETED if step.key == "interpret" else StepStatus.PENDING,
-            payload={"interpretation_id": str(interpretation_id)}
-            if step.key == "interpret"
-            else {},
+            payload=payload_for(step.key, step.step_type),
         )
         for index, step in enumerate(included)
     )

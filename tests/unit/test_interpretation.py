@@ -17,6 +17,7 @@ from vuzol.interpretation.adapters import (
 from vuzol.interpretation.domain import (
     InterpretationInput,
     InterpretationResult,
+    ProjectNameOption,
     SuggestedComplexity,
     TaskAction,
     TaskContext,
@@ -38,7 +39,7 @@ from vuzol.interpretation.ports import (
     InvalidInterpreterOutput,
     TranscriptionUnavailable,
 )
-from vuzol.interpretation.service import interpret_with_recovery
+from vuzol.interpretation.service import interpret_with_recovery, regenerate_project_names
 from vuzol.storage.types import RiskLevel
 
 
@@ -78,6 +79,16 @@ def result(value: TaskDraft, *, profile: str = "primary") -> InterpretationResul
     )
 
 
+def name_options(*, conflicting_id: str | None = None) -> tuple[ProjectNameOption, ...]:
+    return tuple(
+        ProjectNameOption(
+            display_name=f"Notes {index + 1}",
+            project_id=conflicting_id if index == 0 and conflicting_id else f"notes-{index + 1}",
+        )
+        for index in range(9)
+    )
+
+
 def test_task_draft_requires_consistent_clarification_and_continuation() -> None:
     with pytest.raises(ValidationError, match="clarification question is required"):
         draft(needs_clarification=True)
@@ -93,6 +104,7 @@ def test_inbox_is_explicit_project_provisioning_boundary() -> None:
         action=TaskAction.CREATE_PROJECT,
         new_project_id="notes",
         new_project_name="Notes",
+        project_name_options=name_options(),
     )
     policy = enforce_interpretation_policy(
         inbox,
@@ -101,7 +113,9 @@ def test_inbox_is_explicit_project_provisioning_boundary() -> None:
     )
     assert policy.draft.action is TaskAction.CREATE_PROJECT
     assert policy.draft.project_id is None
-    assert policy.draft.new_project_id == "notes"
+    assert policy.draft.new_project_id is None
+    assert policy.draft.new_project_name is None
+    assert len(policy.draft.project_name_options) == 9
     assert policy.draft.required_capabilities == frozenset(
         {Capability.FILESYSTEM_WRITE, Capability.GIT, Capability.TELEGRAM_SEND}
     )
@@ -109,7 +123,7 @@ def test_inbox_is_explicit_project_provisioning_boundary() -> None:
     assert policy.automatic_execution_eligible
 
 
-def test_inbox_requires_new_identity_and_rejects_configured_project_collision() -> None:
+def test_inbox_requires_name_options_and_rejects_configured_project_collision() -> None:
     inbox = request().model_copy(update={"topic_kind": TopicKind.INBOX})
     missing = enforce_interpretation_policy(
         inbox,
@@ -118,19 +132,18 @@ def test_inbox_requires_new_identity_and_rejects_configured_project_collision() 
     )
     assert missing.draft.action is TaskAction.CREATE_PROJECT
     assert missing.draft.needs_clarification
-    assert "project_identity_missing" in missing.reasons
+    assert "project_name_options_missing" in missing.reasons
 
     collision = enforce_interpretation_policy(
         inbox,
         draft(
             action=TaskAction.CREATE_PROJECT,
-            new_project_id="vuzol",
-            new_project_name="Another Vuzol",
+            project_name_options=name_options(conflicting_id="vuzol"),
         ),
         known_project_ids=frozenset({"vuzol"}),
     )
     assert collision.draft.needs_clarification
-    assert "project_identity_conflict" in collision.reasons
+    assert "project_name_options_conflict" in collision.reasons
 
 
 def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:
@@ -226,6 +239,46 @@ def test_invalid_output_gets_one_repair_then_fallback() -> None:
         assert interpreted.profile_id == "fallback"
         assert len(primary.requests) == 2
         assert primary.requests[1][1] == "bad"
+
+    asyncio.run(scenario())
+
+
+def test_project_name_regeneration_rejects_reused_names_and_uses_fallback() -> None:
+    async def scenario() -> None:
+        previous = frozenset(option.project_id for option in name_options())
+        reused = draft(
+            action=TaskAction.CREATE_PROJECT,
+            operation=TaskOperation.CREATE,
+            project_name_options=name_options(),
+        )
+        fresh_options = tuple(
+            ProjectNameOption(display_name=f"Fresh {index}", project_id=f"fresh-{index}")
+            for index in range(1, 10)
+        )
+        fresh = draft(
+            action=TaskAction.CREATE_PROJECT,
+            operation=TaskOperation.CREATE,
+            project_name_options=fresh_options,
+        )
+        primary = FakeInterpreter([result(reused)])
+        fallback = FakeInterpreter([result(fresh, profile="fallback")])
+        regenerated = await regenerate_project_names(
+            primary,
+            [fallback],
+            request(),
+            previous_project_ids=previous,
+        )
+        assert regenerated.profile_id == "fallback"
+        assert "notes-1" in (primary.requests[0][1] or "")
+
+        unavailable = FakeInterpreter([InterpreterUnavailable("offline")])
+        with pytest.raises(InterpreterUnavailable, match="all_interpreters_unavailable"):
+            await regenerate_project_names(
+                unavailable,
+                [],
+                request(),
+                previous_project_ids=previous,
+            )
 
     asyncio.run(scenario())
 

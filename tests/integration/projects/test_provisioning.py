@@ -16,6 +16,7 @@ from vuzol.config import (
     build_bundle,
 )
 from vuzol.interpretation.domain import (
+    ProjectNameOption,
     SuggestedComplexity,
     TaskAction,
     TaskDraft,
@@ -25,6 +26,7 @@ from vuzol.interpretation.domain import (
 from vuzol.projects.provisioning import ProjectProvisioningService
 from vuzol.storage.models import (
     Interpretation,
+    ProjectNamingRequest,
     ProjectProvisioning,
     Task,
     TelegramMessageLink,
@@ -32,6 +34,7 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.types import (
     DeliveryStatus,
+    ProjectNamingStatus,
     ProjectProvisioningStatus,
     RiskLevel,
     TaskStatus,
@@ -78,8 +81,10 @@ def project_draft() -> TaskDraft:
         action=TaskAction.CREATE_PROJECT,
         task_type=TaskType.INFRASTRUCTURE,
         operation=TaskOperation.CREATE,
-        new_project_id="notes",
-        new_project_name="Notes",
+        project_name_options=tuple(
+            ProjectNameOption(display_name=f"Notes {index + 1}", project_id=f"notes-{index + 1}")
+            for index in range(9)
+        ),
         goal="A private note-taking application",
         suggested_complexity=SuggestedComplexity.SMALL,
         suggested_risk=RiskLevel.LOW,
@@ -168,7 +173,7 @@ async def seed_provisioning(factory: object) -> tuple[uuid.UUID, uuid.UUID]:
         return provisioning.id, outbox.id
 
 
-def test_dispatcher_materializes_one_project_provisioning_request(
+def test_dispatcher_materializes_one_project_naming_request(
     postgres_dsn: str, tmp_path: Path
 ) -> None:
     async def scenario() -> None:
@@ -213,17 +218,19 @@ def test_dispatcher_materializes_one_project_provisioning_request(
         assert await dispatcher.process_one()
         async with factory() as session:
             persisted_task = await session.get(Task, task_id)
-            request = await session.scalar(
-                select(ProjectProvisioning).where(ProjectProvisioning.task_id == task_id)
+            naming = await session.scalar(
+                select(ProjectNamingRequest).where(ProjectNamingRequest.task_id == task_id)
             )
             queued = await session.scalar(
                 select(TransactionalOutbox).where(
-                    TransactionalOutbox.destination == "project_provisioning"
+                    TransactionalOutbox.linked_entity_type == "project_naming"
                 )
             )
-            assert persisted_task is not None and persisted_task.status is TaskStatus.EXECUTING
-            assert persisted_task.project_id == "notes"
-            assert request is not None and request.project_id == "notes"
+            assert persisted_task is not None
+            assert persisted_task.status is TaskStatus.AWAITING_USER
+            assert persisted_task.project_id is None
+            assert naming is not None and naming.status is ProjectNamingStatus.PENDING
+            assert len(naming.options) == 9 and naming.revision == 1
             assert queued is not None and queued.status is DeliveryStatus.PENDING
         await engine.dispose()
 

@@ -208,6 +208,103 @@ def test_result_decision_callback_targets_the_exact_approval() -> None:
     assert converted.task_id is None
 
 
+def test_project_naming_callbacks_include_revision_and_option() -> None:
+    request_id = uuid.uuid4()
+    for suffix, action, option in (
+        ("4", "project_name_select", 4),
+        ("r", "project_name_regenerate", None),
+    ):
+        update = Update.de_json(
+            {
+                "update_id": 3 if option is not None else 4,
+                "callback_query": {
+                    "id": f"naming-{suffix}",
+                    "from": {"id": 7, "is_bot": False, "first_name": "User"},
+                    "chat_instance": "instance",
+                    "data": f"v1:pn:{request_id.hex}:2:{suffix}",
+                    "message": {
+                        "message_id": 11,
+                        "date": 0,
+                        "chat": {"id": -100, "type": "supergroup"},
+                    },
+                },
+            },
+            None,
+        )
+        converted = control_update(update, "main")
+        assert converted is not None
+        assert converted.action_kind == action
+        assert converted.naming_request_id == request_id
+        assert converted.naming_revision == 2
+        assert converted.naming_option_index == option
+
+
+def test_project_naming_callback_rejects_malformed_payload() -> None:
+    update = Update.de_json(
+        {
+            "update_id": 5,
+            "callback_query": {
+                "id": "malformed-naming",
+                "from": {"id": 7, "is_bot": False, "first_name": "User"},
+                "chat_instance": "instance",
+                "data": "v1:pn:not-a-uuid:revision:choice",
+                "message": {
+                    "message_id": 12,
+                    "date": 0,
+                    "chat": {"id": -100, "type": "supergroup"},
+                },
+            },
+        },
+        None,
+    )
+    assert control_update(update, "main") is None
+    invalid_target = Update.de_json(
+        {
+            "update_id": 6,
+            "callback_query": {
+                "id": "malformed-target",
+                "from": {"id": 7, "is_bot": False, "first_name": "User"},
+                "chat_instance": "instance",
+                "data": "v1:start:not-a-uuid",
+                "message": {
+                    "message_id": 13,
+                    "date": 0,
+                    "chat": {"id": -100, "type": "supergroup"},
+                },
+            },
+        },
+        None,
+    )
+    assert control_update(invalid_target, "main") is None
+
+
+def test_python_telegram_client_builds_custom_markup_and_best_effort_delete() -> None:
+    async def scenario() -> None:
+        bot = AsyncMock()
+        bot.send_message.return_value = SimpleNamespace(message_id=19)
+        client = PythonTelegramClient(bot)
+        message_id = await client.send_message(
+            chat_id=-100,
+            thread_id=10,
+            html="names",
+            callback_buttons=((("First", "v1:first"), ("Second", "v1:second")),),
+        )
+        assert message_id == 19
+        markup = bot.send_message.await_args.kwargs["reply_markup"]
+        assert [button.callback_data for button in markup.inline_keyboard[0]] == [
+            "v1:first",
+            "v1:second",
+        ]
+        await client.send_message(chat_id=-100, thread_id=10, html="without controls")
+        assert bot.send_message.await_args.kwargs["reply_markup"] is None
+        await client.delete_message(chat_id=-100, message_id=19)
+        bot.delete_message.side_effect = BadRequest("message not found")
+        await client.delete_message(chat_id=-100, message_id=19)
+        assert bot.delete_message.await_count == 2
+
+    asyncio.run(scenario())
+
+
 def test_python_telegram_client_builds_result_decision_markup() -> None:
     async def scenario() -> None:
         bot = AsyncMock()

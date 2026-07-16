@@ -61,12 +61,19 @@ The initial workspace uses these roles:
 - one `<project>` (`project`) topic for each active project.
 
 `Новый проект` is an explicit provisioning boundary. An allowlisted text or voice message is
-transcribed and interpreted into a bounded project ID, display name, and description. It creates a
-persisted provisioning request rather than an ordinary model task. The project provisioner then
-creates an initial Git repository and one project topic, validates and atomically writes the dynamic
-registry overlay, reloads registry-caching services, and posts the project description into the new
-topic. It never creates a remote, pushes, deploys, installs dependencies, or executes user-supplied
-commands. An unknown Telegram topic-creation outcome blocks for reconciliation instead of retrying.
+treated as the project's nature and goal. The interpreter proposes nine distinct display-name and
+bounded repository-ID pairs. Telegram presents them as three rows of inline buttons plus `Другие
+варианты`; no repository, registry entry, or project topic exists yet. Only the author of the intake
+may select a current option. Selection persists the final identity and creates the provisioning
+request. Regeneration invalidates the old revision, best-effort deletes its card, and sends a new
+card after fresh options are persisted, so old buttons cannot provision anything even if Telegram
+could not delete the old message.
+
+The project provisioner then creates an initial Git repository and one project topic, validates and
+atomically writes the dynamic registry overlay, reloads registry-caching services, and posts the
+project description into the new topic. It never creates a remote, pushes, deploys, installs
+dependencies, or executes user-supplied commands. An unknown Telegram topic-creation outcome blocks
+for reconciliation instead of retrying.
 
 An exact-result approval has its own message link in the global approvals topic. It does not replace
 the task status message in the project topic. After a decision, Vuzol edits the approval card to

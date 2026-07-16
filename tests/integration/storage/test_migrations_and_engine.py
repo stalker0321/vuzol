@@ -43,6 +43,7 @@ def test_initial_migration_contains_complete_foundation(postgres_dsn: str) -> No
         "worktrees",
         "supervised_processes",
         "project_provisioning",
+        "project_naming_requests",
     }.issubset(tables)
 
 

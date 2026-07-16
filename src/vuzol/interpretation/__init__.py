@@ -3,6 +3,7 @@
 from vuzol.interpretation.domain import (
     InterpretationInput,
     InterpretationResult,
+    ProjectNameOption,
     TaskAction,
     TaskDraft,
     TaskOperation,
@@ -15,6 +16,7 @@ from vuzol.interpretation.ports import SemanticInterpreter, Transcriber
 __all__ = [
     "InterpretationInput",
     "InterpretationResult",
+    "ProjectNameOption",
     "SemanticInterpreter",
     "TaskAction",
     "TaskDraft",

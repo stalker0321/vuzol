@@ -5,6 +5,7 @@ import hashlib
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
+from vuzol.projects.naming import ProjectNamingControlError, ProjectNamingController
 from vuzol.storage.errors import EntityNotFound
 from vuzol.storage.models import Approval, TelegramControlAction
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -20,6 +21,7 @@ class TelegramControlService:
     ) -> None:
         self._runtime = runtime
         self._session_factory = session_factory
+        self._project_naming = ProjectNamingController(runtime)
 
     async def accept(self, update: ControlUpdate) -> IngressResult:
         try:
@@ -28,7 +30,8 @@ class TelegramControlService:
                 chat_id=update.chat_id,
                 user_id=update.user_id,
             )
-            if update.task_id is None and update.approval_id is None:
+            naming_action = update.action_kind.startswith("project_name_")
+            if update.task_id is None and update.approval_id is None and not naming_action:
                 raise TelegramPolicyError("control action requires a persisted target")
             if update.action_kind in {"approve", "redo", "reject"} and update.approval_id is None:
                 raise TelegramPolicyError("approval action requires approval_id")
@@ -46,6 +49,15 @@ class TelegramControlService:
                 )
                 if not update_created:
                     return IngressResult(status=IngressStatus.DUPLICATE)
+                if naming_action:
+                    assert uow.session is not None
+                    outcome = await self._project_naming.apply(uow.session, update)
+                    await uow.inbox.mark_processed(
+                        inbox_id,
+                        entity_type="project_naming",
+                        entity_id=outcome.request_id,
+                    )
+                    return IngressResult(status=IngressStatus.CREATED)
                 if update.task_id is not None:
                     await uow.tasks.get(update.task_id, for_update=True)
                 elif update.approval_id is not None:
@@ -77,7 +89,7 @@ class TelegramControlService:
                     entity_type="telegram_control_action",
                     entity_id=action_id,
                 )
-        except EntityNotFound as error:
+        except (EntityNotFound, ProjectNamingControlError) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 
         return IngressResult(

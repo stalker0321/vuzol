@@ -14,6 +14,7 @@ from vuzol.interpretation.domain import (
     InterpretationInput,
     InterpretationResult,
     ProjectSummary,
+    TaskAction,
     TaskContext,
     TranscriptionInput,
 )
@@ -36,13 +37,14 @@ from vuzol.storage.models import (
     Artifact,
     ClarificationDecision,
     Interpretation,
+    ProjectNamingRequest,
     Task,
     TelegramIntakeMessage,
     TopicMapping,
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.storage.types import TaskStatus
+from vuzol.storage.types import ProjectNamingStatus, TaskStatus
 
 INTERPRETATION_DESTINATIONS = frozenset({"telegram_file", "interpretation"})
 
@@ -72,6 +74,32 @@ async def interpret_with_recovery(
             return await fallback.interpret(request)
         except (InvalidInterpreterOutput, InterpreterUnavailable):
             continue
+    raise InterpreterUnavailable("all_interpreters_unavailable")
+
+
+async def regenerate_project_names(
+    primary: SemanticInterpreter,
+    fallbacks: Sequence[SemanticInterpreter],
+    request: InterpretationInput,
+    *,
+    previous_project_ids: frozenset[str],
+) -> InterpretationResult:
+    instruction = (
+        "Generate exactly nine entirely new project_name_options for the same idea. "
+        "Do not reuse these project_id values: " + ", ".join(sorted(previous_project_ids))
+    )
+    for interpreter in (primary, *fallbacks):
+        try:
+            result = await interpreter.interpret(request, repair_error=instruction[:1_000])
+        except (InvalidInterpreterOutput, InterpreterUnavailable):
+            continue
+        generated_ids = {option.project_id for option in result.draft.project_name_options}
+        if (
+            result.draft.action is TaskAction.CREATE_PROJECT
+            and len(generated_ids) == 9
+            and generated_ids.isdisjoint(previous_project_ids)
+        ):
+            return result
     raise InterpreterUnavailable("all_interpreters_unavailable")
 
 
@@ -112,11 +140,14 @@ class InterpretationPipeline:
                 return True
             attempt_count = item.attempt_count
             destination = item.destination
+            operation_type = item.operation_type
         try:
             if destination == "telegram_file":
                 await self._process_attachment(token)
-            elif destination == "interpretation":
+            elif destination == "interpretation" and operation_type == "interpret_intake":
                 await self._process_interpretation(token)
+            elif destination == "interpretation" and operation_type == "regenerate_project_names":
+                await self._process_project_name_regeneration(token)
             else:
                 raise PermanentPipelineError("unsupported_pipeline_destination")
         except (InterpreterUnavailable, TranscriptionUnavailable):
@@ -295,6 +326,94 @@ class InterpretationPipeline:
                 )
             await complete_outbox_item(session, token)
 
+    async def _process_project_name_regeneration(self, token: OutboxLeaseToken) -> None:
+        async with self._factory() as session:
+            item = await session.get(TransactionalOutbox, token.item_id)
+            assert item is not None
+            naming = await session.get(ProjectNamingRequest, item.linked_entity_id)
+            if naming is None:
+                raise PermanentPipelineError("project_naming_missing")
+            revision = int(item.payload.get("revision", 0))
+            if naming.status is not ProjectNamingStatus.GENERATING or naming.revision != revision:
+                async with self._factory.begin() as complete_session:
+                    await complete_outbox_item(complete_session, token)
+                return
+            intake = await session.scalar(
+                select(TelegramIntakeMessage)
+                .where(TelegramIntakeMessage.task_id == naming.task_id)
+                .order_by(TelegramIntakeMessage.created_at.desc())
+                .limit(1)
+            )
+            if intake is None:
+                raise PermanentPipelineError("project_naming_intake_missing")
+            request = await self._build_input(session, intake, item)
+            previous_project_ids = frozenset(
+                str(option["project_id"])
+                for option in naming.options
+                if isinstance(option, dict) and option.get("project_id")
+            )
+        result = await regenerate_project_names(
+            self._interpreter,
+            self._fallbacks,
+            request,
+            previous_project_ids=previous_project_ids,
+        )
+        policy = enforce_interpretation_policy(
+            request,
+            result.draft,
+            known_project_ids=frozenset(
+                project.id for project in self._runtime.registries.projects.items()
+            ),
+        )
+        if policy.draft.needs_clarification or len(policy.draft.project_name_options) != 9:
+            raise InterpreterUnavailable("invalid_project_name_regeneration")
+        async with self._factory.begin() as session:
+            naming = await session.get(
+                ProjectNamingRequest,
+                item.linked_entity_id,
+                with_for_update=True,
+            )
+            if naming is None:
+                raise PermanentPipelineError("project_naming_missing")
+            if naming.status is not ProjectNamingStatus.GENERATING or naming.revision != revision:
+                await complete_outbox_item(session, token)
+                return
+            task = await session.get(Task, naming.task_id, with_for_update=True)
+            if task is None:
+                raise PermanentPipelineError("task_missing")
+            interpretation = Interpretation(
+                task_id=task.id,
+                original_input_hash=hashlib.sha256(request.original_input.encode()).hexdigest(),
+                transcript=request.transcript,
+                task_draft=policy.draft.model_dump(mode="json"),
+                profile_id=result.profile_id,
+                model=result.model,
+                prompt_version=result.prompt_version,
+                schema_version=result.schema_version,
+            )
+            session.add(interpretation)
+            naming.options = [
+                option.model_dump(mode="json") for option in policy.draft.project_name_options
+            ]
+            naming.status = ProjectNamingStatus.PENDING
+            naming.last_error_category = None
+            task.task_draft = policy.draft.model_dump(mode="json")
+            task.interpreter_profile = result.profile_id
+            task.prompt_version = result.prompt_version
+            task.draft_schema_version = result.schema_version
+            task.version += 1
+            session.add(
+                TransactionalOutbox(
+                    destination="telegram",
+                    operation_type="send_message",
+                    linked_entity_type="project_naming",
+                    linked_entity_id=naming.id,
+                    idempotency_key=f"telegram:project-naming:{naming.id}:{naming.revision}",
+                    payload={"role": "project_name_options", "revision": naming.revision},
+                )
+            )
+            await complete_outbox_item(session, token)
+
     async def _build_input(
         self,
         session: AsyncSession,
@@ -371,6 +490,16 @@ class InterpretationPipeline:
 
     async def _dead_letter(self, token: OutboxLeaseToken, category: str) -> None:
         async with self._factory.begin() as session:
+            item = await session.get(TransactionalOutbox, token.item_id)
+            if item is not None and item.linked_entity_type == "project_naming":
+                naming = await session.get(
+                    ProjectNamingRequest,
+                    item.linked_entity_id,
+                    with_for_update=True,
+                )
+                if naming is not None:
+                    naming.status = ProjectNamingStatus.FAILED
+                    naming.last_error_category = category[:100]
             await dead_letter_outbox_item(session, token, error_category=category)
 
 

@@ -11,7 +11,7 @@ from vuzol.interpretation.domain import TaskAction, TaskDraft
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, dead_letter_outbox_item
 from vuzol.storage.models import (
     Interpretation,
-    ProjectProvisioning,
+    ProjectNamingRequest,
     Run,
     Step,
     Task,
@@ -20,7 +20,12 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.storage.types import ProjectProvisioningStatus, RunStatus, StepStatus, TaskStatus
+from vuzol.storage.types import (
+    ProjectNamingStatus,
+    RunStatus,
+    StepStatus,
+    TaskStatus,
+)
 from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.controls import cancel_task, pause_task, resume_task
 from vuzol.workflows.service import materialize_run
@@ -89,7 +94,7 @@ class WorkflowDispatcher:
             raise WorkflowDispatchError("clarification is unresolved")
 
         if draft.action is TaskAction.CREATE_PROJECT:
-            await self._create_project_request(session, task, draft)
+            await self._create_project_naming_request(session, task, draft)
             return
 
         if draft.action in {
@@ -145,80 +150,50 @@ class WorkflowDispatcher:
             return
         raise WorkflowDispatchError(f"unsupported action: {draft.action.value}")
 
-    async def _create_project_request(
+    async def _create_project_naming_request(
         self,
         session: AsyncSession,
         task: Task,
         draft: TaskDraft,
     ) -> None:
-        if draft.new_project_id is None or draft.new_project_name is None:
-            raise WorkflowDispatchError("project identity is missing")
+        if len(draft.project_name_options) != 9:
+            raise WorkflowDispatchError("project naming options are missing")
         if task.source_thread_id is None:
-            raise WorkflowDispatchError("project provisioning requires a forum topic")
-        lock_key = int.from_bytes(
-            hashlib.sha256(f"project:{draft.new_project_id}".encode()).digest()[:8],
-            signed=True,
-        )
-        await session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            raise WorkflowDispatchError("project naming requires a forum topic")
         existing = await session.scalar(
-            select(ProjectProvisioning).where(ProjectProvisioning.task_id == task.id)
+            select(ProjectNamingRequest).where(ProjectNamingRequest.task_id == task.id)
         )
         if existing is not None:
             return
-        conflict = await session.scalar(
-            select(ProjectProvisioning.id).where(
-                ProjectProvisioning.project_id == draft.new_project_id
-            )
-        )
-        if conflict is not None:
-            raise WorkflowDispatchError("project identity is already being provisioned")
-        provisioning = ProjectProvisioning(
+        naming = ProjectNamingRequest(
             task_id=task.id,
             requested_by_user_id=task.user_id,
             chat_id=task.source_chat_id,
             source_thread_id=task.source_thread_id,
-            project_id=draft.new_project_id,
-            display_name=draft.new_project_name,
             description=draft.goal,
-            repository_path=draft.new_project_id,
-            status=ProjectProvisioningStatus.PENDING,
+            options=[option.model_dump(mode="json") for option in draft.project_name_options],
+            revision=1,
+            status=ProjectNamingStatus.PENDING,
         )
-        session.add(provisioning)
+        session.add(naming)
         await session.flush()
-        task.project_id = provisioning.project_id
         await transition_task(
             session,
             task,
-            TaskStatus.EXECUTING,
-            actor_type="project_provisioning",
+            TaskStatus.AWAITING_USER,
+            actor_type="project_naming",
+            payload={"naming_request_id": str(naming.id), "revision": naming.revision},
         )
         session.add(
             TransactionalOutbox(
-                destination="project_provisioning",
-                operation_type="create_project",
-                linked_entity_type="project_provisioning",
-                linked_entity_id=provisioning.id,
-                idempotency_key=f"project:provision:{provisioning.id}",
-                payload={"project_id": provisioning.project_id},
+                destination="telegram",
+                operation_type="send_message",
+                linked_entity_type="project_naming",
+                linked_entity_id=naming.id,
+                idempotency_key=f"telegram:project-naming:{naming.id}:{naming.revision}",
+                payload={"role": "project_name_options", "revision": naming.revision},
             )
         )
-        intake = await session.scalar(
-            select(TelegramIntakeMessage)
-            .where(TelegramIntakeMessage.task_id == task.id)
-            .order_by(TelegramIntakeMessage.created_at.desc())
-            .limit(1)
-        )
-        if intake is not None:
-            session.add(
-                TransactionalOutbox(
-                    destination="telegram",
-                    operation_type="send_message",
-                    linked_entity_type="telegram_intake",
-                    linked_entity_id=intake.id,
-                    idempotency_key=(f"telegram:project:{provisioning.id}:status:{task.version}"),
-                    payload={"role": "intake_ack", "task_id": str(task.id)},
-                )
-            )
 
     async def _configured_workflow(
         self, session: AsyncSession, task: Task, draft: TaskDraft

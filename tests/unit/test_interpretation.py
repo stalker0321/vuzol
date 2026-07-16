@@ -250,6 +250,21 @@ def test_policy_rejects_unknown_project_and_raises_privileged_risk() -> None:
     assert not policy.automatic_execution_eligible
 
 
+def test_topic_mapping_remains_authoritative_when_interpreter_registry_lags() -> None:
+    contextual = request().model_copy(
+        update={"topic_kind": TopicKind.PROJECT, "mapped_project_id": "bill-buddy"}
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(project_id="bill-buddy"),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.project_id == "bill-buddy"
+    assert not policy.draft.needs_clarification
+    assert "unknown_project" not in policy.reasons
+
+
 def test_uncertain_dangerous_voice_requires_confirmation() -> None:
     policy = enforce_interpretation_policy(
         request(voice=True, uncertain=True),

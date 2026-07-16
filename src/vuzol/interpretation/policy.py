@@ -124,7 +124,11 @@ def enforce_interpretation_policy(
         } and draft.required_capabilities != frozenset({Capability.REPOSITORY_READ}):
             updates["required_capabilities"] = frozenset({Capability.REPOSITORY_READ})
             reasons.append("architecture_confined_to_read_only")
-    if draft.project_id is not None and draft.project_id not in known_project_ids:
+    if (
+        draft.project_id is not None
+        and draft.project_id not in known_project_ids
+        and draft.project_id != request.mapped_project_id
+    ):
         updates.update(
             project_id=None,
             needs_clarification=True,

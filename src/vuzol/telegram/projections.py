@@ -209,9 +209,7 @@ async def build_project_status_dashboard(
     if subscription_snapshots is not None:
         lines.append(f"<b>{telegram_html('Subscription limits')}</b>")
         lines.extend(
-            format_subscription_limits_html(
-                subscription_snapshots, html_escape=telegram_html
-            )
+            format_subscription_limits_html(subscription_snapshots, html_escape=telegram_html)
         )
 
     fingerprints = tuple(snap.fingerprint() for snap in (subscription_snapshots or ()))

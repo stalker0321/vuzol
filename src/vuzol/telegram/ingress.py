@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.storage.models import TelegramIntakeMessage, TelegramMessageLink, TopicMapping
-from vuzol.storage.types import IntakeStatus
+from vuzol.storage.types import IntakeStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
 from vuzol.telegram.policy import TelegramPolicyError, authorize, validate_message
@@ -71,6 +71,14 @@ class TelegramIngressService:
                 )
                 if task_id is not None:
                     affinity_kind = "reply"
+            if task_id is None:
+                active = await uow.tasks.active_in_topic(update.chat_id, update.message_thread_id)
+                awaiting_clarification = tuple(
+                    task for task in active if task.status is TaskStatus.AWAITING_USER
+                )
+                if len(awaiting_clarification) == 1:
+                    task_id = awaiting_clarification[0].id
+                    affinity_kind = "clarification_answer"
             if task_id is None:
                 task = await uow.tasks.create(
                     user_id=update.user_id,

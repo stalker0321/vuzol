@@ -11,12 +11,24 @@ import hashlib
 import json
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.config.settings import HardLimits
 from vuzol.execution.domain import GitInspection
+from vuzol.providers.budgets import (
+    BudgetExceeded,
+    account_usage,
+    estimate_reservation,
+    reconcile_usage,
+    release_reservation,
+    reserve_budget,
+)
 from vuzol.providers.domain import (
     ContextItem,
     ProviderRequest,
@@ -32,6 +44,7 @@ from vuzol.review.domain import (
     ReviewVerdictKind,
 )
 from vuzol.storage.models import Task
+from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import RiskLevel
 from vuzol.workflows.ports import CancellationContext
 
@@ -82,6 +95,110 @@ class AdapterLookup(Protocol):
     def get(self, profile_id: str) -> ProviderAdapter: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewBudgetReservation:
+    id: uuid.UUID
+    cost_units: Decimal
+    quota_units: Decimal
+
+
+class ReviewAccountingPort(Protocol):
+    async def reserve(
+        self,
+        *,
+        request: ProviderRequest,
+        profile: ProviderProfileConfig,
+    ) -> ReviewBudgetReservation: ...
+
+    async def reconcile(
+        self,
+        *,
+        reservation: ReviewBudgetReservation,
+        lease: LeaseToken,
+        profile: ProviderProfileConfig,
+        result: ProviderResult | None,
+        outcome: str,
+        conservative: bool,
+    ) -> None: ...
+
+    async def release(self, *, reservation: ReviewBudgetReservation, lease: LeaseToken) -> None: ...
+
+
+class DatabaseReviewAccounting:
+    """Use the shared hard-budget ledger for conditional reviewer calls."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        limits: HardLimits,
+    ) -> None:
+        self._factory = session_factory
+        self._limits = limits
+
+    async def reserve(
+        self,
+        *,
+        request: ProviderRequest,
+        profile: ProviderProfileConfig,
+    ) -> ReviewBudgetReservation:
+        input_tokens = min(
+            max(1, sum(len(item.content) for item in request.context) // 4),
+            request.max_input_tokens,
+        )
+        estimate = estimate_reservation(
+            profile,
+            input_tokens=input_tokens,
+            output_tokens=request.max_output_tokens,
+        )
+        async with self._factory.begin() as session:
+            try:
+                row = await reserve_budget(
+                    session,
+                    task_id=request.task_id,
+                    run_id=request.run_id,
+                    step_id=request.step_id,
+                    profile_id=profile.id,
+                    provider_attempt=request.provider_attempt,
+                    estimate=estimate,
+                    limits=self._limits,
+                )
+            except BudgetExceeded as error:
+                raise IndependentReviewError("independent review budget is exhausted") from error
+        return ReviewBudgetReservation(
+            id=row.id,
+            cost_units=estimate.cost_units,
+            quota_units=estimate.quota_units,
+        )
+
+    async def reconcile(
+        self,
+        *,
+        reservation: ReviewBudgetReservation,
+        lease: LeaseToken,
+        profile: ProviderProfileConfig,
+        result: ProviderResult | None,
+        outcome: str,
+        conservative: bool,
+    ) -> None:
+        usage = account_usage(profile, result.usage) if result is not None else None
+        async with self._factory.begin() as session:
+            await reconcile_usage(
+                session,
+                reservation_id=reservation.id,
+                token=lease,
+                provider=profile.provider,
+                model=profile.model,
+                usage=usage,
+                provider_request_id=result.provider_request_id if result is not None else None,
+                outcome=outcome,
+                conservative=conservative,
+            )
+
+    async def release(self, *, reservation: ReviewBudgetReservation, lease: LeaseToken) -> None:
+        async with self._factory.begin() as session:
+            await release_reservation(session, reservation_id=reservation.id, token=lease)
+
+
 def select_reviewer_profile(
     profiles: Sequence[ProviderProfileConfig],
 ) -> ProviderProfileConfig | None:
@@ -116,11 +233,13 @@ class IndependentModelReviewer:
         self,
         registries: ConfigurationBundle,
         adapters: AdapterLookup,
+        accounting: ReviewAccountingPort,
         *,
         policy_revision: str = "independent-review-policy.v1",
     ) -> None:
         self._registries = registries
         self._adapters = adapters
+        self._accounting = accounting
         self._policy_revision = policy_revision
 
     async def review(
@@ -137,6 +256,7 @@ class IndependentModelReviewer:
         request_ids: tuple[uuid.UUID, uuid.UUID, uuid.UUID],
         timeout_seconds: float,
         cancellation: CancellationContext,
+        lease: LeaseToken,
     ) -> ReviewVerdict:
         profile = select_reviewer_profile(self._registries.profiles.items())
         if profile is None:
@@ -177,11 +297,39 @@ class IndependentModelReviewer:
             timeout_seconds=timeout_seconds,
             profile=profile,
             policy_revision=self._policy_revision,
+            provider_attempt=lease.generation,
+        )
+        reservation = await self._accounting.reserve(request=provider_request, profile=profile)
+        provider_request = provider_request.model_copy(
+            update={
+                "lease_generation": lease.generation,
+                "reserved_cost_units": reservation.cost_units,
+                "reserved_quota_units": reservation.quota_units,
+            }
         )
         try:
             result = await adapter.execute(provider_request, profile, cancellation)
         except ProviderFailure as failure:
+            if failure.request_sent:
+                await self._accounting.reconcile(
+                    reservation=reservation,
+                    lease=lease,
+                    profile=profile,
+                    result=None,
+                    outcome=failure.category.value,
+                    conservative=True,
+                )
+            else:
+                await self._accounting.release(reservation=reservation, lease=lease)
             raise IndependentReviewError(failure.safe_summary) from failure
+        await self._accounting.reconcile(
+            reservation=reservation,
+            lease=lease,
+            profile=profile,
+            result=result,
+            outcome=result.status.value,
+            conservative=False,
+        )
         if result.status is not ProviderResultStatus.SUCCEEDED:
             raise IndependentReviewError("independent reviewer did not succeed")
         return _verdict_from_provider_result(
@@ -212,6 +360,7 @@ def _build_request(
     timeout_seconds: float,
     profile: ProviderProfileConfig,
     policy_revision: str,
+    provider_attempt: int = 1,
 ) -> ProviderRequest:
     files = inspection.changed_files
     diff_text = inspection.diff.decode("utf-8", "replace")
@@ -255,7 +404,7 @@ def _build_request(
         task_id=task_id,
         run_id=run_id,
         step_id=step_id,
-        provider_attempt=1,
+        provider_attempt=provider_attempt,
         role=ProviderRole.REVIEWER,
         original_input_reference=f"task:{task_id}:review",
         original_input=goal or "independent coding result review",

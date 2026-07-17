@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,11 +25,13 @@ from vuzol.review.domain import FindingSeverity, ReviewFinding, ReviewVerdictKin
 from vuzol.review.independent import (
     IndependentModelReviewer,
     IndependentReviewError,
+    ReviewBudgetReservation,
     _build_request,
     _verdict_from_provider_result,
     select_reviewer_profile,
 )
-from vuzol.storage.types import RiskLevel
+from vuzol.storage.records import LeaseToken, StepRecord
+from vuzol.storage.types import RiskLevel, StepStatus
 from vuzol.workflows.ports import CancellationContext
 
 
@@ -60,6 +63,35 @@ def _api_profile(
         minimum_unknown_usage_cost=0.001,
         enabled=True,
     )
+
+
+def _lease() -> LeaseToken:
+    return LeaseToken(
+        step=StepRecord(
+            id=uuid.uuid4(),
+            run_id=uuid.uuid4(),
+            status=StepStatus.RUNNING,
+            lease_generation=1,
+            lease_owner="reviewer",
+            lease_expires_at=None,
+        ),
+        owner="reviewer",
+        generation=1,
+    )
+
+
+def _reviewer(registries: MagicMock, adapters: MagicMock) -> IndependentModelReviewer:
+    accounting = MagicMock()
+    accounting.reserve = AsyncMock(
+        return_value=ReviewBudgetReservation(
+            id=uuid.uuid4(),
+            cost_units=Decimal("0.001"),
+            quota_units=Decimal("0"),
+        )
+    )
+    accounting.reconcile = AsyncMock()
+    accounting.release = AsyncMock()
+    return IndependentModelReviewer(registries, adapters, accounting)
 
 
 def test_select_reviewer_prefers_reviewer_role() -> None:
@@ -135,6 +167,7 @@ def test_large_review_bundle_is_complete_across_hashed_context_chunks() -> None:
         timeout_seconds=60,
         profile=profile,
         policy_revision="test-policy.v1",
+        provider_attempt=1,
     )
 
     assert len(request.context) > 1
@@ -172,7 +205,7 @@ async def test_independent_reviewer_builds_pass_verdict() -> None:
     )
     adapters = MagicMock()
     adapters.get.return_value = adapter
-    reviewer = IndependentModelReviewer(registries, adapters)
+    reviewer = _reviewer(registries, adapters)
     task = SimpleNamespace(
         task_draft={"goal": "Harden login"},
         original_text="please harden login",
@@ -201,6 +234,7 @@ async def test_independent_reviewer_builds_pass_verdict() -> None:
         request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
         timeout_seconds=60,
         cancellation=CancellationContext(),
+        lease=_lease(),
     )
     assert verdict.review_kind == "independent"
     assert verdict.verdict is ReviewVerdictKind.PASSED_WITH_WARNINGS
@@ -233,7 +267,7 @@ async def test_independent_reviewer_fails_closed_on_provider_error() -> None:
     )
     adapters = MagicMock()
     adapters.get.return_value = adapter
-    reviewer = IndependentModelReviewer(registries, adapters)
+    reviewer = _reviewer(registries, adapters)
     with pytest.raises(IndependentReviewError, match="timed out"):
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text="x"),  # type: ignore[arg-type]
@@ -252,6 +286,7 @@ async def test_independent_reviewer_fails_closed_on_provider_error() -> None:
             request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
             timeout_seconds=30,
             cancellation=CancellationContext(),
+            lease=_lease(),
         )
 
 
@@ -259,7 +294,7 @@ async def test_independent_reviewer_fails_closed_on_provider_error() -> None:
 async def test_independent_reviewer_requires_configured_profile() -> None:
     registries = MagicMock()
     registries.profiles.items.return_value = ()
-    reviewer = IndependentModelReviewer(registries, MagicMock())
+    reviewer = _reviewer(registries, MagicMock())
     with pytest.raises(IndependentReviewError, match="no openai-compatible"):
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text="x"),  # type: ignore[arg-type]
@@ -278,6 +313,7 @@ async def test_independent_reviewer_requires_configured_profile() -> None:
             request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
             timeout_seconds=30,
             cancellation=CancellationContext(),
+            lease=_lease(),
         )
 
 
@@ -309,7 +345,7 @@ async def test_independent_reviewer_blocks_when_model_blocks() -> None:
     )
     adapters = MagicMock()
     adapters.get.return_value = adapter
-    reviewer = IndependentModelReviewer(registries, adapters)
+    reviewer = _reviewer(registries, adapters)
     verdict = await reviewer.review(
         task=SimpleNamespace(task_draft={}, original_text="x"),  # type: ignore[arg-type]
         risk=RiskLevel.PRIVILEGED,
@@ -327,6 +363,7 @@ async def test_independent_reviewer_blocks_when_model_blocks() -> None:
         request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
         timeout_seconds=45,
         cancellation=CancellationContext(),
+        lease=_lease(),
     )
     assert verdict.verdict is ReviewVerdictKind.BLOCKED
     assert not verdict.allows_progress
@@ -340,7 +377,7 @@ async def test_independent_reviewer_adapter_missing() -> None:
     registries.profiles.items.return_value = (profile,)
     adapters = MagicMock()
     adapters.get.side_effect = LookupError("missing")
-    reviewer = IndependentModelReviewer(registries, adapters)
+    reviewer = _reviewer(registries, adapters)
     with pytest.raises(IndependentReviewError, match="adapter is unavailable"):
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text="x"),  # type: ignore[arg-type]
@@ -359,6 +396,7 @@ async def test_independent_reviewer_adapter_missing() -> None:
             request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
             timeout_seconds=30,
             cancellation=CancellationContext(),
+            lease=_lease(),
         )
 
 
@@ -382,7 +420,7 @@ async def test_independent_reviewer_rejects_oversized_bundle() -> None:
     )
     adapters = MagicMock()
     adapters.get.return_value = adapter
-    reviewer = IndependentModelReviewer(registries, adapters)
+    reviewer = _reviewer(registries, adapters)
     with pytest.raises(IndependentReviewError, match="maximum is 80"):
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
@@ -401,6 +439,7 @@ async def test_independent_reviewer_rejects_oversized_bundle() -> None:
             request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
             timeout_seconds=30,
             cancellation=CancellationContext(),
+            lease=_lease(),
         )
     adapter.execute.assert_not_awaited()
 
@@ -421,7 +460,7 @@ async def test_independent_reviewer_rejects_invalid_structured_output() -> None:
     )
     adapters = MagicMock()
     adapters.get.return_value = adapter
-    reviewer = IndependentModelReviewer(registries, adapters)
+    reviewer = _reviewer(registries, adapters)
     with pytest.raises(IndependentReviewError, match="schema interpretation"):
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text="x"),  # type: ignore[arg-type]
@@ -440,4 +479,5 @@ async def test_independent_reviewer_rejects_invalid_structured_output() -> None:
             request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
             timeout_seconds=30,
             cancellation=CancellationContext(),
+            lease=_lease(),
         )

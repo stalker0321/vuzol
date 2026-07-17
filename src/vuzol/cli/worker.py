@@ -23,7 +23,7 @@ from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
 from vuzol.providers.health import synchronize_profiles
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.review import ResultReviewHandler
-from vuzol.review.independent import IndependentModelReviewer
+from vuzol.review.independent import DatabaseReviewAccounting, IndependentModelReviewer
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.dispatch import WorkflowDispatcher
@@ -123,6 +123,7 @@ async def run() -> None:
         independent_reviewer = IndependentModelReviewer(
             runtime.registries,
             adapter_registry,
+            DatabaseReviewAccounting(factory, settings.limits),
             policy_revision=runtime.registries.revision,
         )
     handlers = {

@@ -68,6 +68,30 @@ fallback_profile_ids = []
 sandbox_required = false
 enabled = false
 
+# Cheap model-only reviewer used for high/privileged coding.v1 results.
+[[profiles]]
+id = "example-reviewer"
+provider = "openai-compatible"
+model = "replace-me"
+api_base_url = "https://api.example.com/v1"
+launch_mode = "api"
+credential_reference = "env:VUZOL_OPENAI_PLANNER_API_KEY"
+credential_required = true
+capabilities = []
+concurrency_limit = 4
+context_limit = 100000
+output_limit = 2000
+cost_class = "cheap"
+roles = ["reviewer", "planner"]
+routing_priority = 40
+supported_task_types = ["architecture", "coding", "research", "infrastructure", "file_processing", "general"]
+fallback_profile_ids = []
+sandbox_required = false
+input_cost_units_per_million = 0.05
+output_cost_units_per_million = 0.40
+minimum_unknown_usage_cost = 0.001
+enabled = false
+
 [[profiles]]
 id = "codex-account-a"
 provider = "codex"

@@ -37,7 +37,7 @@ def _api_profile(
         id=profile_id,
         provider="openai-compatible",
         model="gpt-test",
-        api_base_url="https://api.example.com/v1",
+        api_base_url="https://api.example.com/v1",  # type: ignore[arg-type]
         launch_mode=LaunchMode.API,
         credential_reference="env:VUZOL_OPENAI_PLANNER_API_KEY",
         credential_required=True,
@@ -368,4 +368,3 @@ async def test_independent_reviewer_rejects_invalid_structured_output() -> None:
             timeout_seconds=30,
             cancellation=CancellationContext(),
         )
-

@@ -45,6 +45,18 @@ def is_system_workspace_kind(kind: TopicKind) -> bool:
     return kind in SYSTEM_TOPIC_DISPLAY_NAMES
 
 
+def is_update_command(text: str | None) -> bool:
+    """True for bare ``/update`` (optional @bot suffix), no extra arguments required."""
+
+    if text is None:
+        return False
+    parts = text.strip().split()
+    if not parts:
+        return False
+    command = parts[0].split("@", 1)[0]
+    return command == "/update"
+
+
 def is_status_dashboard_topic(kind: TopicKind | str) -> bool:
     value = kind.value if isinstance(kind, TopicKind) else kind
     return value == STATUS_DASHBOARD_TOPIC_KIND.value

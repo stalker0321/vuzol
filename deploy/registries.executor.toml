@@ -42,6 +42,22 @@ sandbox_profile = "project-default"
 validation_sandbox_profile = "vuzol-validation"
 enabled = true
 
+[[projects.validation_commands]]
+name = "tests"
+argv = ["make", "test"]
+
+[[projects.validation_commands]]
+name = "format"
+argv = ["make", "format-check"]
+
+[[projects.validation_commands]]
+name = "lint"
+argv = ["make", "lint"]
+
+[[projects.validation_commands]]
+name = "types"
+argv = ["make", "type-check"]
+
 [projects.git_delivery]
 allowed_modes = ["retain", "patch", "apply"]
 approval_required = ["apply"]

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import (
     Capability,
+    CommandDefinition,
     DeliveryMode,
     RegistryDocument,
     RuntimeConfiguration,
@@ -105,7 +106,7 @@ class RegistryOverlayWriter:
                 "display_name": provisioning.display_name,
                 "repository_path": Path(provisioning.repository_path),
                 "summary_path": None,
-                "validation_commands": (),
+                "validation_commands": (CommandDefinition(name="tests", argv=("make", "test")),),
                 "allowed_capabilities": frozenset(
                     {
                         Capability.REPOSITORY_READ,

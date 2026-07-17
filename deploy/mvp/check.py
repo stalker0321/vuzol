@@ -11,11 +11,14 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+from vuzol.interpretation.domain import INTERPRETER_PROMPT_VERSION
+
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOYED = Path("/opt/vuzol")
 REGISTRY = Path("/etc/vuzol/executor-registries.toml")
 MIRROR = Path("/srv/vuzol/repositories/vuzol")
 SOCKET = Path("/run/user/994/docker.sock")
+INTERPRETER_CONTAINER = "vuzol-interpreter-1"
 GATES = ("format-check", "lint", "type-check", "security", "test")
 VALIDATION_ENVIRONMENT = {
     "CI": "1",
@@ -76,6 +79,29 @@ def _service_snapshot() -> tuple[int, int]:
     if pid < 1:
         raise MvpCheckError("vuzol-executor has no live PID")
     return pid, int(values.get("NRestarts", "0"))
+
+
+def _interpreter_prompt_version() -> str:
+    state = _run(("docker", "inspect", "--format", "{{.State.Status}}", INTERPRETER_CONTAINER))
+    if state != "running":
+        raise MvpCheckError("interpreter container is not running")
+    runtime_version = _run(
+        (
+            "docker",
+            "exec",
+            INTERPRETER_CONTAINER,
+            "python",
+            "-c",
+            "from vuzol.interpretation.domain import INTERPRETER_PROMPT_VERSION; "
+            "print(INTERPRETER_PROMPT_VERSION)",
+        )
+    )
+    if runtime_version != INTERPRETER_PROMPT_VERSION:
+        raise MvpCheckError(
+            "interpreter prompt version differs from the deployed source: "
+            f"runtime={runtime_version!r}, source={INTERPRETER_PROMPT_VERSION!r}"
+        )
+    return runtime_version
 
 
 def _sha256(path: Path) -> str:
@@ -352,6 +378,7 @@ def check(expected_sha: str) -> dict[str, object]:
     if not _proxy_runtime_is_empty():
         raise MvpCheckError("stale proxy runtime entry exists")
     _durable_state()
+    interpreter_prompt_version = _interpreter_prompt_version()
     _validation_gates(validation_image)
     pid_after, restarts_after = _service_snapshot()
     if (pid_after, restarts_after) != (pid_before, restarts_before):
@@ -363,6 +390,7 @@ def check(expected_sha: str) -> dict[str, object]:
         "executor_restarts": restarts_after,
         "provider_image": provider_image,
         "validation_image": validation_image,
+        "interpreter_prompt_version": interpreter_prompt_version,
         "gates": list(GATES),
         "status": "ready",
     }

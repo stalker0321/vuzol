@@ -24,6 +24,7 @@ from vuzol.execution.result_validation import (
     prohibited_paths,
     resolve_trusted_gates,
 )
+from vuzol.storage.errors import LeaseLost
 from vuzol.storage.records import LeaseToken, StepRecord
 from vuzol.storage.types import StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind
@@ -392,16 +393,15 @@ async def test_validate_already_finalized(tmp_path: Path) -> None:
     git = MagicMock()
     git.require_clean_source = AsyncMock()
     git.require_no_remotes = AsyncMock()
-    git.inspect = AsyncMock(
-        return_value=_inspection(head=result, files=("index.html",), diff=b"+ok\n")
-    )
+    inspection = _inspection(head=result, files=("index.html",), diff=b"+ok\n")
+    git.inspect = AsyncMock(return_value=inspection)
     git.require_clean_worktree = AsyncMock()
     git.commit_parent = AsyncMock(return_value=base)
     worktree = _worktree(
         worktree_path,
         base_commit=base,
         result_commit=result,
-        diff_hash="d" * 64,
+        diff_hash=inspection.diff_hash,
     )
     handler = _handler(git=git, worktree_root=tmp_path)
     handler._load = AsyncMock(return_value=(worktree, _project(tmp_path), worktree_path))  # type: ignore[method-assign]
@@ -412,6 +412,41 @@ async def test_validate_already_finalized(tmp_path: Path) -> None:
     git.create_commit = AsyncMock()
     # already finalized path should not create another commit
     assert not hasattr(git.create_commit, "await_count") or git.create_commit.await_count == 0
+
+
+@pytest.mark.anyio
+async def test_validate_recovers_commit_created_before_persistence(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "wt"
+    worktree_path.mkdir()
+    base = "a" * 40
+    result = "b" * 40
+    inspection = _inspection(head=result, files=("index.html",), diff=b"+ok\n")
+    git = MagicMock()
+    git.require_clean_source = AsyncMock()
+    git.require_no_remotes = AsyncMock()
+    git.inspect = AsyncMock(return_value=inspection)
+    git.require_clean_worktree = AsyncMock()
+    git.commit_parent = AsyncMock(return_value=base)
+    worktree = _worktree(
+        worktree_path,
+        base_commit=base,
+        result_commit=base,
+        diff_hash=inspection.diff_hash,
+    )
+    handler = _handler(git=git, worktree_root=tmp_path)
+    handler._load = AsyncMock(return_value=(worktree, _project(tmp_path), worktree_path))  # type: ignore[method-assign]
+    handler._persist = AsyncMock()  # type: ignore[method-assign]
+
+    outcome = await handler.execute(_request(worktree), CancellationContext())
+
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    assert outcome.result["result_commit"] == result
+    assert any(
+        check["command_id"] == "system:recovered-result-commit"
+        for check in outcome.result["system_checks"]
+    )
+    git.create_commit = AsyncMock()
+    assert git.create_commit.await_count == 0
 
 
 @pytest.mark.anyio
@@ -643,7 +678,7 @@ async def test_persist_writes_validation_results(tmp_path: Path) -> None:
     worktree_path.mkdir()
     worktree = _worktree(worktree_path, result_commit="a" * 40, lifecycle_generation=2)
     session = MagicMock()
-    session.scalar = AsyncMock(return_value=worktree)
+    session.scalar = AsyncMock(side_effect=[SimpleNamespace(), worktree])
     session.add = MagicMock()
     session.flush = AsyncMock()
     artifacts = MagicMock()
@@ -707,6 +742,21 @@ async def test_persist_writes_validation_results(tmp_path: Path) -> None:
     assert session.add.call_count >= 2
     assert artifacts.persist.await_count >= 2
     assert "_gate_runs" not in evidence
+
+
+@pytest.mark.anyio
+async def test_persist_rejects_stale_validation_lease(tmp_path: Path) -> None:
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
+    handler = _handler(git=MagicMock(), worktree_root=tmp_path, session=session)
+    worktree = _worktree(tmp_path)
+
+    with pytest.raises(LeaseLost, match="before persistence"):
+        await handler._persist(
+            _request(worktree),
+            worktree_id=worktree.id,
+            evidence={"result_commit": "b" * 40, "diff_hash": "c" * 64},
+        )
 
 
 @pytest.mark.anyio

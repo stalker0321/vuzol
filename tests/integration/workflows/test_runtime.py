@@ -712,8 +712,12 @@ def test_outcome_state_matrix(
         async with factory() as session:
             step = await session.get(Step, token.step.id)
             loaded_run = await session.get(Run, token.step.run_id)
+            task = await session.get(Task, task_id)
             assert step is not None and step.status is step_status
             assert loaded_run is not None and loaded_run.status is run_status
+            assert task is not None
+            if run_status in {RunStatus.BLOCKED, RunStatus.FAILED}:
+                assert task.completed_at is not None
         await engine.dispose()
 
     asyncio.run(scenario())

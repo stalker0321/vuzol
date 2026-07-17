@@ -33,6 +33,7 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
+from vuzol.storage.types import TaskStatus
 from vuzol.telegram.layout import HISTORY_TOPIC_KIND, STATUS_DASHBOARD_TOPIC_KIND
 from vuzol.telegram.projections import (
     PROJECT_STATUS_DASHBOARD_ROLE,
@@ -353,7 +354,17 @@ async def _prepare_task_history_report(
         if projects is not None
         else None
     )
-    report = await build_task_history_report(session, task_id, project_names=project_names)
+    raw_status = item.payload.get("terminal_status")
+    try:
+        expected_status = TaskStatus(str(raw_status)) if raw_status else None
+    except ValueError as error:
+        raise PermanentDeliveryError("invalid_history_terminal_status") from error
+    report = await build_task_history_report(
+        session,
+        task_id,
+        project_names=project_names,
+        expected_status=expected_status,
+    )
     if report is None:
         return PreparedDelivery(
             DeliveryAction.NOOP,
@@ -365,10 +376,14 @@ async def _prepare_task_history_report(
         destination = topics.system_topic(report.chat_id, HISTORY_TOPIC_KIND)
         if destination is not None and destination.enabled:
             thread_id = destination.message_thread_id
+    if expected_status is None or expected_status is TaskStatus.COMPLETED:
+        message_role = TASK_HISTORY_ROLE
+    else:
+        message_role = f"{TASK_HISTORY_ROLE}_{expected_status.value}"
     existing = await session.scalar(
         select(TelegramMessageLink).where(
             TelegramMessageLink.task_id == task_id,
-            TelegramMessageLink.message_role == TASK_HISTORY_ROLE,
+            TelegramMessageLink.message_role == message_role,
         )
     )
     if existing is not None:
@@ -384,7 +399,7 @@ async def _prepare_task_history_report(
         html=report.html,
         task_id=task_id,
         revision=report.revision,
-        message_role=TASK_HISTORY_ROLE,
+        message_role=message_role,
     )
 
 

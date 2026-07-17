@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added terminal task outcome reports across the project topic and «История»: successful tasks now
+  show a bounded implementation report and trusted checks, while failed or blocked tasks show the
+  exact stage and persisted reason; blocked tasks retain their canonical recovery meaning but no
+  longer remain in task affinity or the active «Статус проектов» dashboard;
 - rebuilt and repinned the offline validation image against the current attested `pyproject.toml`
   and unchanged lockfile so production readiness can validate the active CLI entrypoint set;
 - updated the fail-closed MVP readiness check to follow the authoritative `origin/main`

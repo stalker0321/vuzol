@@ -142,6 +142,37 @@ async def test_latest_step_model_prefers_concrete_slug() -> None:
     assert await _latest_step_model(session, uuid.uuid4()) is None
 
 
+@pytest.mark.anyio
+async def test_task_status_projection_enqueues_project_card_and_dashboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from vuzol.telegram.projections import enqueue_task_status_projection
+
+    task = SimpleNamespace(
+        id=uuid.uuid4(),
+        version=4,
+        source_chat_id=-100,
+        source_thread_id=10,
+    )
+    run = SimpleNamespace(id=uuid.uuid4())
+    intake = SimpleNamespace(id=uuid.uuid4())
+    dashboard = AsyncMock()
+    monkeypatch.setattr("vuzol.telegram.projections.enqueue_project_status_dashboard", dashboard)
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=[intake, None])
+    session.add = MagicMock()
+
+    await enqueue_task_status_projection(session, task, run)  # type: ignore[arg-type]
+
+    item = session.add.call_args.args[0]
+    assert item.payload["role"] == "intake_ack"
+    assert item.payload["run_id"] == str(run.id)
+    assert item.payload["message_thread_id"] == 10
+    dashboard.assert_awaited_once_with(session, -100)
+
+
 def test_dashboard_revision_changes_with_content() -> None:
     task_a = SimpleNamespace(id=uuid.uuid4(), version=1, status=TaskStatus.EXECUTING)
     task_b = SimpleNamespace(id=task_a.id, version=2, status=TaskStatus.EXECUTING)

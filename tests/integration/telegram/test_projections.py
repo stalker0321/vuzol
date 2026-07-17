@@ -13,6 +13,7 @@ from vuzol.telegram.projections import (
     LostTelegramResponse,
     StatusCard,
     apply_status_projection,
+    build_project_status_dashboard,
     build_status_card,
 )
 
@@ -130,8 +131,95 @@ def test_completed_agent_result_is_rendered_in_project_topic(postgres_dsn: str) 
 
         async with factory() as session:
             card = await build_status_card(session, task.id)
-            assert "<b>Результат</b>" in card.html
+            assert "<b>Отчёт о выполнении</b>" in card.html  # noqa: RUF001
             assert "Use &lt;ports&gt; and adapters." in card.html
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_failed_result_reports_stage_and_reason_in_project_topic(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                project_id="vuzol",
+                original_text="Change the API",
+                task_type="coding",
+            )
+            run_id = await uow.runs.create(
+                task_id=task.id,
+                workflow_type="coding",
+                workflow_version="1",
+                budget_mode="balanced",
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+                status=RunStatus.FAILED,
+            )
+            step = await uow.steps.create(
+                run_id=run_id,
+                ordinal=1,
+                step_type="validate",
+                status=StepStatus.FAILED,
+                idempotency_class=IdempotencyClass.READ_ONLY,
+            )
+            assert uow.session is not None
+            stored_task = await uow.session.get(Task, task.id)
+            stored_step = await uow.session.get(Step, step.id)
+            assert stored_task is not None and stored_step is not None
+            stored_task.status = TaskStatus.FAILED
+            stored_step.failure_category = "validation_failed"
+            stored_step.failure_summary = "API contract test failed."
+
+        async with factory() as session:
+            card = await build_status_card(session, task.id)
+            assert "Завершена неудачно" in card.html
+            assert "<b>Отчёт о завершении</b>" in card.html  # noqa: RUF001
+            assert "<b>Этап:</b> validate" in card.html
+            assert "API contract test failed." in card.html
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_blocked_task_is_not_active_or_in_project_dashboard(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            blocked = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                project_id="vuzol",
+                original_text="Blocked task marker",
+                task_type="coding",
+                task_draft={"task_summary": "Blocked task marker"},
+            )
+            active = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                project_id="vuzol",
+                original_text="Active task marker",
+                task_type="coding",
+                task_draft={"task_summary": "Active task marker"},
+            )
+            assert uow.session is not None
+            blocked_task = await uow.session.get(Task, blocked.id)
+            active_task = await uow.session.get(Task, active.id)
+            assert blocked_task is not None and active_task is not None
+            blocked_task.status = TaskStatus.BLOCKED
+            active_task.status = TaskStatus.EXECUTING
+            await uow.session.flush()
+
+            active_records = await uow.tasks.active_in_topic(-100, 10)
+            assert [record.id for record in active_records] == [active.id]
+            dashboard = await build_project_status_dashboard(uow.session, -100)
+            assert "Active task marker" in dashboard.html
+            assert "Blocked task marker" not in dashboard.html
         await engine.dispose()
 
     asyncio.run(scenario())

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.models import Run, Step, Task
 from vuzol.storage.types import IdempotencyClass, RunStatus, StepStatus, TaskStatus
+from vuzol.telegram.projections import enqueue_terminal_task_projections
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
 
@@ -47,6 +48,7 @@ async def _recover_one(session: AsyncSession, step: Step) -> None:
         "generation": step.lease_generation,
         "idempotency_class": step.idempotency_class.value,
     }
+    terminal_outcome = False
     if run.status in {RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.COMPLETED}:
         await transition_step(
             session, step, StepStatus.CANCELLED, actor_type="recovery", payload=payload
@@ -58,21 +60,51 @@ async def _recover_one(session: AsyncSession, step: Step) -> None:
         if leased_only and step.attempt_count > 0:
             step.attempt_count -= 1
     elif safe:
+        category = "lease_expired_attempts_exhausted"
+        summary = "Исполнитель не завершил этап до истечения lease; безопасные повторы исчерпаны."
         await transition_step(
             session, step, StepStatus.FAILED, actor_type="recovery", payload=payload
         )
+        step.failure_category = category
+        step.failure_summary = summary
         if run.status is RunStatus.RUNNING:
             await transition_run(session, run, RunStatus.FAILED, actor_type="recovery")
         if task.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.COMPLETED}:
-            await transition_task(session, task, TaskStatus.FAILED, actor_type="recovery")
+            await transition_task(
+                session,
+                task,
+                TaskStatus.FAILED,
+                actor_type="recovery",
+                payload={"category": category, "summary": summary},
+            )
+        run.failure_category = category
+        run.failure_summary = summary
+        terminal_outcome = True
     else:
+        category = "lease_expired_unknown_effects"
+        summary = (
+            "Аренда этапа истекла, а внешние эффекты нельзя безопасно определить или повторить."  # noqa: RUF001
+        )
         step.unknown_effects = True
         await transition_step(
             session, step, StepStatus.BLOCKED, actor_type="recovery", payload=payload
         )
+        step.failure_category = category
+        step.failure_summary = summary
         if run.status is RunStatus.RUNNING:
             await transition_run(session, run, RunStatus.BLOCKED, actor_type="recovery")
         if task.status not in {TaskStatus.BLOCKED, TaskStatus.CANCELLED, TaskStatus.COMPLETED}:
-            await transition_task(session, task, TaskStatus.BLOCKED, actor_type="recovery")
+            await transition_task(
+                session,
+                task,
+                TaskStatus.BLOCKED,
+                actor_type="recovery",
+                payload={"category": category, "summary": summary},
+            )
+        run.failure_category = category
+        run.failure_summary = summary
+        terminal_outcome = True
     step.lease_owner = None
     step.lease_expires_at = None
+    if terminal_outcome:
+        await enqueue_terminal_task_projections(session, task, run)

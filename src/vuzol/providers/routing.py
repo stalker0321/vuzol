@@ -29,7 +29,10 @@ from vuzol.storage.models import RoutingDecision, Run, Step, Task
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.repositories.core import step_record
 from vuzol.storage.types import QueueClass, RunStatus, StepStatus, TaskStatus
-from vuzol.telegram.projections import enqueue_project_status_dashboard
+from vuzol.telegram.projections import (
+    enqueue_project_status_dashboard,
+    enqueue_terminal_task_projections,
+)
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
 PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
@@ -345,6 +348,11 @@ async def _block_route(
     category: str,
     quota: bool,
 ) -> None:
+    summary = (
+        "Доступный лимит провайдера исчерпан; задача ожидает возобновления квоты."
+        if quota
+        else "Маршрутизатор не нашёл безопасного доступного исполнителя для этого этапа."
+    )
     await transition_step(
         session,
         step,
@@ -353,6 +361,7 @@ async def _block_route(
         payload={"category": category},
     )
     step.failure_category = category
+    step.failure_summary = summary
     await transition_run(
         session,
         run,
@@ -361,6 +370,7 @@ async def _block_route(
         payload={"category": category},
     )
     run.failure_category = category
+    run.failure_summary = summary
     await transition_task(
         session,
         task,
@@ -368,6 +378,8 @@ async def _block_route(
         actor_type="routing_policy",
         payload={"category": category},
     )
+    if not quota:
+        await enqueue_terminal_task_projections(session, task, run)
 
 
 def _estimated_input_tokens(task: Task) -> int:

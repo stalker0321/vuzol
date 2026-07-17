@@ -12,6 +12,7 @@ from vuzol.storage.errors import EntityNotFound
 from vuzol.storage.models import Event, Run, Step, Task, TopicTaskCounter
 from vuzol.storage.records import StepRecord, TaskRecord
 from vuzol.storage.types import (
+    USER_TERMINAL_TASK_STATUSES,
     IdempotencyClass,
     QueueClass,
     RetryClass,
@@ -104,19 +105,13 @@ class TaskRepository:
         return task_record(await self.get(task_id))
 
     async def active_in_topic(self, chat_id: int, thread_id: int) -> tuple[TaskRecord, ...]:
-        terminal = (
-            TaskStatus.COMPLETED,
-            TaskStatus.FAILED,
-            TaskStatus.CANCELLED,
-            TaskStatus.ROLLED_BACK,
-        )
         tasks = (
             await self._session.scalars(
                 select(Task)
                 .where(
                     Task.source_chat_id == chat_id,
                     Task.source_thread_id == thread_id,
-                    Task.status.not_in(terminal),
+                    Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
                 )
                 .order_by(Task.created_at, Task.id)
             )

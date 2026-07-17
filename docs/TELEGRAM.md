@@ -91,6 +91,11 @@ under the profile state directory. Fetch failures are non-fatal and render as «
 The message is created once and then only edited; new status lines never spam additional messages.
 Delivery uses role `project_status_dashboard` and content-hash revision coalescing.
 
+`blocked` is a terminal unsuccessful outcome for user-facing projections and task affinity, even
+though PostgreSQL keeps the distinct canonical status so an operator can understand unknown
+effects and explicitly reopen a safe task later. Consequently failed and blocked tasks disappear
+from this dashboard immediately.
+
 ### Project topic pin lifecycle
 
 - When a project is provisioned, its topic is created and marked `pinned=true` so it joins the pin
@@ -134,11 +139,17 @@ Callbacks resolve a persisted target, verify authorization and current existence
 callback identity, and enqueue a workflow-control outbox record. They do not perform transitions or
 dangerous work in the Telegram handler.
 
-After bounded coding succeeds, the status card shows the worker's concise semantic description and
-the independently measured trusted gate names, results, and durations. It deliberately does not
-show source code, a commit identity, or the diff. Approve, Redo, and Reject callbacks target the
-persisted approval ID, not a mutable task label. The canonical approval envelope binds the target
-head, base and result commits, diff hash, gate evidence, and configuration/policy revisions.
+After a task succeeds, its project-topic status card shows a bounded but detailed implementation
+report, preferring the approved human summary or structured provider result, plus the independently
+measured trusted gate names when available. It deliberately does not show source code, a commit
+identity, or the diff. Failed and blocked terminal cards instead show an unsuccessful outcome, the
+exact failed/blocked step, and its persisted safe failure summary or category. Both successful and
+unsuccessful terminal outcomes are appended once to `История`; history keeps the requested task
+separate from either the result or failure reason.
+
+Approve, Redo, and Reject callbacks target the persisted approval ID, not a mutable task label. The
+canonical approval envelope binds the target head, base and result commits, diff hash, gate
+evidence, and configuration/policy revisions.
 
 Approve queues the exact result for the separate `vuzol-applier` process. The applier revalidates
 project policy and repository identity, fetches the retained commit locally, and advances the

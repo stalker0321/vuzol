@@ -13,10 +13,14 @@ from vuzol.storage.types import ApprovalStatus, TaskStatus
 from vuzol.telegram.layout import HISTORY_TOPIC_KIND
 from vuzol.telegram.projections import (
     TASK_HISTORY_ROLE,
+    _bounded_report,
+    _completion_report,
+    _failure_details,
     _format_count,
     _format_duration,
     _history_work_seconds,
     _one_line_summary,
+    _task_outcome_label,
     build_task_history_report,
     enqueue_task_history_report,
 )
@@ -43,6 +47,69 @@ def test_one_line_summary_truncates() -> None:
     assert len(_one_line_summary(long)) <= 280
     assert _one_line_summary("   ") == "No description"
     assert _one_line_summary("") == "No description"
+
+
+def test_terminal_report_formatting_is_bounded() -> None:
+    assert _task_outcome_label(TaskStatus.COMPLETED) == "✅ Завершена успешно"
+    assert "заблокирована" in _task_outcome_label(TaskStatus.BLOCKED)
+    assert _task_outcome_label(TaskStatus.FAILED) == "❌ Завершена неудачно"
+    assert _bounded_report(" first \n\n second ") == "first\nsecond"
+    assert _bounded_report("x" * 20, 10) == "xxxxxxxxx…"
+    assert _bounded_report("   ") == "Без описания"
+
+
+@pytest.mark.anyio
+async def test_completion_report_prefers_approval_and_gate_names() -> None:
+    task = SimpleNamespace(id=uuid4())
+    approval = SimpleNamespace(
+        step_id=uuid4(),
+        human_summary="Implemented the terminal report with bounded details.",
+    )
+    approval_step = SimpleNamespace(
+        payload={
+            "action_envelope": {
+                "gates": [
+                    {"name": "format-check"},
+                    {"name": "test"},
+                    {"exit_code": 0},
+                    "invalid",
+                ]
+            }
+        }
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=approval)
+    session.get = AsyncMock(return_value=approval_step)
+
+    report, gates = await _completion_report(session, task)  # type: ignore[arg-type]
+
+    assert report == "Implemented the terminal report with bounded details."
+    assert gates == ("format-check", "test")
+
+
+@pytest.mark.anyio
+async def test_completion_and_failure_reports_have_canonical_fallbacks() -> None:
+    task = SimpleNamespace(
+        id=uuid4(),
+        task_draft={"task_summary": "Fallback task summary."},
+        original_text="fallback",
+    )
+    run = SimpleNamespace(id=uuid4())
+    result_step = SimpleNamespace(
+        result={"structured_output": {"implementation_summary": "Structured result."}}
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=[None, run])
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [result_step]))
+    report, gates = await _completion_report(session, task)  # type: ignore[arg-type]
+    assert report == "Structured result."
+    assert gates == ()
+
+    event = SimpleNamespace(payload={"reason": "Project topic creation was ambiguous."})
+    session.scalar = AsyncMock(side_effect=[None, event])
+    stage, reason = await _failure_details(session, task)  # type: ignore[arg-type]
+    assert stage is None
+    assert reason == "Project topic creation was ambiguous."
 
 
 @pytest.mark.anyio
@@ -113,6 +180,20 @@ async def test_prepare_task_history_delivery(monkeypatch: pytest.MonkeyPatch) ->
     assert prepared.message_role == TASK_HISTORY_ROLE
     assert prepared.html == "<b>#1</b>"
 
+    failed_item = SimpleNamespace(
+        operation_type="send_message",
+        payload={
+            "role": TASK_HISTORY_ROLE,
+            "task_id": str(task_id),
+            "chat_id": -100,
+            "terminal_status": "failed",
+        },
+        linked_entity_type="task",
+        linked_entity_id=task_id,
+    )
+    prepared_failed = await prepare_delivery(session, failed_item)  # type: ignore[arg-type]
+    assert prepared_failed.message_role == f"{TASK_HISTORY_ROLE}_failed"
+
     bad = SimpleNamespace(
         operation_type="send_message",
         payload={"role": TASK_HISTORY_ROLE, "task_id": "not-a-uuid"},
@@ -155,6 +236,64 @@ async def test_build_report_requires_completed_task() -> None:
         )
     )
     assert await build_task_history_report(session, uuid4()) is None
+
+
+@pytest.mark.anyio
+async def test_failed_task_history_reports_stage_and_reason() -> None:
+    task_id = uuid4()
+    run = SimpleNamespace(
+        id=uuid4(),
+        created_at=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+        failure_category="validation_failed",
+        failure_summary="Trusted tests did not pass.",
+    )
+    failed_step = SimpleNamespace(
+        step_type="validate",
+        failure_category="validation_failed",
+        failure_summary="API contract test failed on the response schema.",
+    )
+    mapping = SimpleNamespace(message_thread_id=13)
+    task = SimpleNamespace(
+        id=task_id,
+        status=TaskStatus.FAILED,
+        source_chat_id=-100,
+        project_id="vuzol",
+        public_task_number=730005,
+        topic_task_number=5,
+        task_draft={"task_summary": "Update the API response contract."},
+        original_text="update api",
+        created_at=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 7, 16, 10, 2, tzinfo=UTC),
+    )
+    session = MagicMock()
+    session.get = AsyncMock(return_value=task)
+
+    async def scalar(stmt: object) -> object:
+        query = str(stmt).lower()
+        if "topic_mapping" in query:
+            return mapping
+        if "from runs" in query:
+            return run
+        if "from steps" in query:
+            return failed_step
+        return None
+
+    session.scalar = AsyncMock(side_effect=scalar)
+    session.scalars = AsyncMock(
+        side_effect=[
+            SimpleNamespace(all=lambda: []),
+            SimpleNamespace(all=lambda: []),
+            SimpleNamespace(all=lambda: []),
+        ]
+    )
+
+    report = await build_task_history_report(session, task_id)
+
+    assert report is not None
+    assert "Завершена неудачно" in report.html
+    assert "Этап:</b> validate" in report.html
+    assert "API contract test failed on the response schema" in report.html
+    assert "Результат:</b>" not in report.html
 
 
 @pytest.mark.anyio
@@ -266,4 +405,7 @@ async def test_build_and_enqueue_history_report() -> None:
     assert session.add.called
     outbox = session.add.call_args[0][0]
     assert outbox.payload["role"] == TASK_HISTORY_ROLE
-    assert outbox.idempotency_key == f"telegram:{TASK_HISTORY_ROLE}:task:{task_id}"
+    assert outbox.idempotency_key == (
+        f"telegram:{TASK_HISTORY_ROLE}:task:{task_id}:outcome:completed"
+    )
+    assert outbox.payload["terminal_status"] == "completed"

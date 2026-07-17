@@ -40,6 +40,7 @@ from vuzol.storage.models import (
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import ProjectProvisioningStatus, TaskStatus
 from vuzol.telegram.layout import project_topic_should_pin_on_create
+from vuzol.telegram.projections import enqueue_terminal_task_projections
 from vuzol.telegram.workspace import (
     TelegramWorkspaceClient,
     TopicCreationOutcomeUnknown,
@@ -332,6 +333,7 @@ class ProjectProvisioningService:
                 actor_type="project_provisioning",
                 payload={"reason": category},
             )
+            await enqueue_terminal_task_projections(session, task)
             await mark_outbox_ambiguous(session, token)
 
     async def _retry_or_fail(
@@ -367,6 +369,7 @@ class ProjectProvisioningService:
                 actor_type="project_provisioning",
                 payload={"reason": category},
             )
+            await enqueue_terminal_task_projections(session, task)
             await dead_letter_outbox_item(session, token, error_category=category)
 
 

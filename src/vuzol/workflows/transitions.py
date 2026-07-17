@@ -4,11 +4,12 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.errors import IllegalTransition
 from vuzol.storage.models import Event, Run, Step, Task
-from vuzol.storage.types import RunStatus, StepStatus, TaskStatus
+from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, RunStatus, StepStatus, TaskStatus
 
 TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.RECEIVED: frozenset(
@@ -275,6 +276,7 @@ async def transition_task(
     _check(previous, target, TASK_TRANSITIONS)
     task.status = target
     task.version += 1
+    task.completed_at = func.now() if target in USER_TERMINAL_TASK_STATUSES else None
     await _event(
         session, task.id, "task", previous.value, target.value, actor_type, actor_id, payload
     )

@@ -25,6 +25,22 @@ class TaskStatus(StrEnum):
     COMPLETED = "completed"
 
 
+# BLOCKED keeps its distinct canonical meaning (notably for unknown external
+# effects), while being a terminal unsuccessful outcome in user projections.
+USER_TERMINAL_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.BLOCKED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.ROLLED_BACK,
+        TaskStatus.COMPLETED,
+    }
+)
+USER_REPORTABLE_TASK_STATUSES = frozenset(
+    {TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.COMPLETED}
+)
+
+
 class RunStatus(StrEnum):
     CREATED = "created"
     RUNNING = "running"

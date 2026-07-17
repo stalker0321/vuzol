@@ -25,13 +25,20 @@ from vuzol.storage.models import (
     Run,
     Step,
     Task,
+    TelegramIntakeMessage,
     TelegramMessageLink,
     TopicMapping,
     TransactionalOutbox,
     UsageRecord,
     Worktree,
 )
-from vuzol.storage.types import ApprovalStatus, StepStatus, TaskStatus
+from vuzol.storage.types import (
+    USER_REPORTABLE_TASK_STATUSES,
+    USER_TERMINAL_TASK_STATUSES,
+    ApprovalStatus,
+    StepStatus,
+    TaskStatus,
+)
 from vuzol.telegram.layout import (
     DASHBOARD_CARD_TITLE,
     HISTORY_TOPIC_KIND,
@@ -45,14 +52,6 @@ PROJECT_STATUS_DASHBOARD_ROLE = "project_status_dashboard"
 # One-shot completion report in the «История» (changelog) topic.
 TASK_HISTORY_ROLE = "task_history"
 
-_TERMINAL_TASK_STATUSES = frozenset(
-    {
-        TaskStatus.COMPLETED,
-        TaskStatus.FAILED,
-        TaskStatus.CANCELLED,
-        TaskStatus.ROLLED_BACK,
-    }
-)
 _ACTIVE_PROVIDER_STEPS = frozenset(
     {
         "plan",
@@ -325,7 +324,7 @@ async def build_project_status_dashboard(
                 select(Task)
                 .where(
                     Task.source_chat_id == chat_id,
-                    Task.status.not_in(_TERMINAL_TASK_STATUSES),
+                    Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
                 )
                 .order_by(Task.created_at.asc(), Task.id.asc())
             )
@@ -463,15 +462,18 @@ async def build_task_history_report(
     task_id: uuid.UUID,
     *,
     project_names: Mapping[str, str] | None = None,
+    expected_status: TaskStatus | None = None,
 ) -> HistoryReport | None:
-    """Build a one-shot completion report for the «История» topic.
+    """Build a one-shot terminal report for the «История» topic.
 
-    Returns ``None`` when the task is not completed or has no source chat.
+    Returns ``None`` when the task has no reportable outcome or source chat.
     Approval wait time is excluded from the work duration.
     """
 
     task = await session.get(Task, task_id)
-    if task is None or task.status is not TaskStatus.COMPLETED:
+    if task is None or task.status not in USER_REPORTABLE_TASK_STATUSES:
+        return None
+    if expected_status is not None and task.status is not expected_status:
         return None
     if not task.source_chat_id:
         return None
@@ -492,7 +494,9 @@ async def build_task_history_report(
         project_label = project_id
 
     task_summary = task_sense_sentence(task)
-    result_summary = await _history_summary(session, task)
+    result_summary = (
+        await _history_summary(session, task) if task.status is TaskStatus.COMPLETED else None
+    )
     tokens_in, tokens_out, tokens_cached = await _history_token_totals(session, task.id)
     work_seconds = await _history_work_seconds(session, task)
 
@@ -500,15 +504,31 @@ async def build_task_history_report(
     lines = [
         f"<b>#{telegram_html(number)}</b> · <b>{telegram_html(project_label)}</b>",
         f"<b>Задача:</b> {telegram_html(task_summary)}",
-        f"<b>Результат:</b> {telegram_html(result_summary)}",
-        "",
-        (
-            f"Tokens: <code>{telegram_html(_format_count(tokens_in))}</code> in / "
-            f"<code>{telegram_html(_format_count(tokens_out))}</code> out / "
-            f"<code>{telegram_html(_format_count(tokens_cached))}</code> cached"
-        ),
-        f"Work: <code>{telegram_html(_format_duration(work_seconds))}</code>",
     ]
+    if task.status is TaskStatus.COMPLETED:
+        lines.extend(
+            (
+                "<b>Итог:</b> ✅ Завершена успешно",
+                f"<b>Результат:</b> {telegram_html(result_summary or 'Без описания')}",
+            )
+        )
+    else:
+        stage, reason = await _failure_details(session, task)
+        lines.append(f"<b>Итог:</b> {_task_outcome_label(task.status)}")
+        if stage:
+            lines.append(f"<b>Этап:</b> {telegram_html(stage)}")
+        lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
+    lines.extend(
+        (
+            "",
+            (
+                f"Tokens: <code>{telegram_html(_format_count(tokens_in))}</code> in / "
+                f"<code>{telegram_html(_format_count(tokens_out))}</code> out / "
+                f"<code>{telegram_html(_format_count(tokens_cached))}</code> cached"
+            ),
+            f"Work: <code>{telegram_html(_format_duration(work_seconds))}</code>",
+        )
+    )
     return HistoryReport(
         task_id=task.id,
         chat_id=int(task.source_chat_id),
@@ -518,12 +538,14 @@ async def build_task_history_report(
 
 
 async def enqueue_task_history_report(session: AsyncSession, task_id: uuid.UUID) -> None:
-    """Queue a one-shot completion report into the forum's «История» topic."""
+    """Queue a one-shot terminal report into the forum's «История» topic."""
 
     report = await build_task_history_report(session, task_id)
     if report is None:
         return
-    key = f"telegram:{TASK_HISTORY_ROLE}:task:{task_id}"
+    task = await session.get(Task, task_id)
+    assert task is not None
+    key = f"telegram:{TASK_HISTORY_ROLE}:task:{task_id}:outcome:{task.status.value}"
     existing = await session.scalar(
         select(TransactionalOutbox.id).where(
             TransactionalOutbox.destination == "telegram",
@@ -554,6 +576,7 @@ async def enqueue_task_history_report(session: AsyncSession, task_id: uuid.UUID)
                 "message_thread_id": report.thread_id,
                 "topic_kind": HISTORY_TOPIC_KIND.value,
                 "task_id": str(task_id),
+                "terminal_status": task.status.value,
                 "revision": report.revision,
             },
         )
@@ -603,6 +626,107 @@ async def _history_summary(session: AsyncSession, task: Task) -> str:
                 if isinstance(value, str) and value.strip():
                     return _one_line_summary(value)
     return _one_line_summary(task_sense_sentence(task))
+
+
+async def _completion_report(session: AsyncSession, task: Task) -> tuple[str, tuple[str, ...]]:
+    """Return bounded implementation detail and any trusted gate names."""
+
+    approval = await session.scalar(
+        select(Approval)
+        .join(Step, Approval.step_id == Step.id)
+        .join(Run, Step.run_id == Run.id)
+        .where(
+            Run.task_id == task.id,
+            Approval.status.in_({ApprovalStatus.APPROVED, ApprovalStatus.CONSUMED}),
+        )
+        .order_by(Approval.requested_at.desc())
+        .limit(1)
+    )
+    if approval is not None and approval.human_summary.strip():
+        approval_step = await session.get(Step, approval.step_id)
+        gates: list[str] = []
+        if approval_step is not None:
+            envelope = approval_step.payload.get("action_envelope")
+            raw_gates = envelope.get("gates") if isinstance(envelope, dict) else None
+            if isinstance(raw_gates, list):
+                gates = [
+                    str(gate.get("name", "check"))
+                    for gate in raw_gates
+                    if isinstance(gate, dict) and gate.get("name")
+                ]
+        return _bounded_report(approval.human_summary), tuple(gates[:12])
+
+    run = await session.scalar(
+        select(Run).where(Run.task_id == task.id).order_by(Run.created_at.desc()).limit(1)
+    )
+    if run is not None:
+        steps = list(
+            (
+                await session.scalars(
+                    select(Step)
+                    .where(Step.run_id == run.id, Step.result.is_not(None))
+                    .order_by(Step.ordinal.desc())
+                )
+            ).all()
+        )
+        for step in steps:
+            result = step.result if isinstance(step.result, dict) else {}
+            structured = result.get("structured_output")
+            sources = (structured, result) if isinstance(structured, dict) else (result,)
+            for source in sources:
+                for key in ("implementation_summary", "summary", "text"):
+                    value = source.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return _bounded_report(value), ()
+    return task_sense_sentence(task), ()
+
+
+async def _failure_details(session: AsyncSession, task: Task) -> tuple[str | None, str]:
+    """Find the exact failed/blocked stage and its safest available reason."""
+
+    run = await session.scalar(
+        select(Run).where(Run.task_id == task.id).order_by(Run.created_at.desc()).limit(1)
+    )
+    if run is not None:
+        step = await session.scalar(
+            select(Step)
+            .where(
+                Step.run_id == run.id,
+                Step.status.in_({StepStatus.FAILED, StepStatus.BLOCKED}),
+            )
+            .order_by(Step.ordinal.desc())
+            .limit(1)
+        )
+        category = step.failure_category if step is not None else run.failure_category
+        summary = step.failure_summary if step is not None else run.failure_summary
+        reason = summary or category
+        if reason:
+            return (step.step_type if step is not None else None), _bounded_report(reason, 700)
+
+    event = await session.scalar(
+        select(Event)
+        .where(Event.entity_type == "task", Event.entity_id == task.id)
+        .order_by(Event.created_at.desc())
+        .limit(1)
+    )
+    payload = event.payload if event is not None and isinstance(event.payload, dict) else {}
+    reason = payload.get("reason") or payload.get("summary") or payload.get("category")
+    return None, _bounded_report(str(reason or "Причина не указана"), 700)
+
+
+def _task_outcome_label(status: TaskStatus) -> str:
+    if status is TaskStatus.COMPLETED:
+        return "✅ Завершена успешно"
+    if status is TaskStatus.BLOCKED:
+        return "⛔ Завершена неудачно (заблокирована)"
+    return "❌ Завершена неудачно"
+
+
+def _bounded_report(text: str, limit: int = 1_800) -> str:
+    cleaned = "\n".join(line.strip() for line in text.strip().splitlines() if line.strip())
+    if len(cleaned) > limit:
+        return cleaned[: limit - 1].rstrip() + "…"
+    return cleaned or "Без описания"
 
 
 async def _history_token_totals(session: AsyncSession, task_id: uuid.UUID) -> tuple[int, int, int]:
@@ -743,6 +867,73 @@ async def enqueue_project_status_dashboard(session: AsyncSession, chat_id: int) 
     )
 
 
+async def enqueue_task_status_projection(
+    session: AsyncSession,
+    task: Task,
+    run: Run | None = None,
+    *,
+    role: str | None = None,
+) -> None:
+    """Refresh a task's project-topic card and the global active dashboard."""
+
+    if not task.source_chat_id:
+        return
+    chat_id = int(task.source_chat_id)
+    if task.source_thread_id is None:
+        await enqueue_project_status_dashboard(session, chat_id)
+        return
+    intake = await session.scalar(
+        select(TelegramIntakeMessage)
+        .where(TelegramIntakeMessage.task_id == task.id)
+        .order_by(TelegramIntakeMessage.created_at.desc())
+        .limit(1)
+    )
+    if intake is None:
+        await enqueue_project_status_dashboard(session, chat_id)
+        return
+    if role is None:
+        pending_approval = None
+        if run is not None:
+            pending_approval = await session.scalar(
+                select(Approval.id)
+                .join(Step, Approval.step_id == Step.id)
+                .where(
+                    Step.run_id == run.id,
+                    Approval.status == ApprovalStatus.PENDING,
+                )
+                .limit(1)
+            )
+        role = "approval_card" if pending_approval is not None else "intake_ack"
+    payload: dict[str, object] = {
+        "chat_id": task.source_chat_id,
+        "message_thread_id": task.source_thread_id,
+        "role": role,
+        "task_id": str(task.id),
+    }
+    if run is not None:
+        payload["run_id"] = str(run.id)
+    session.add(
+        TransactionalOutbox(
+            destination="telegram",
+            operation_type="send_message",
+            linked_entity_type="telegram_intake",
+            linked_entity_id=intake.id,
+            idempotency_key=f"telegram:{role}:task:{task.id}:revision:{task.version}",
+            payload=payload,
+        )
+    )
+    await enqueue_project_status_dashboard(session, chat_id)
+
+
+async def enqueue_terminal_task_projections(
+    session: AsyncSession, task: Task, run: Run | None = None
+) -> None:
+    """Project a successful or unsuccessful terminal outcome everywhere."""
+
+    await enqueue_task_status_projection(session, task, run)
+    await enqueue_task_history_report(session, task.id)
+
+
 async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> StatusCard:
     """Build presentation solely from canonical database state."""
 
@@ -766,11 +957,16 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     draft = task.task_draft if isinstance(task.task_draft, dict) else {}
     if any(draft.get(key) for key in ("task_summary", "normalized_title", "goal", "title")):
         lines.append(f"Задача: {telegram_html(task_sense_sentence(task))}")
+    status_label = (
+        _task_outcome_label(task.status)
+        if task.status in USER_REPORTABLE_TASK_STATUSES
+        else telegram_html(task.status.value)
+    )
     lines.extend(
         (
             f"<code>{task.id}</code>",
             f"Scope: {telegram_html(scope)}",
-            f"Status: <b>{telegram_html(task.status.value)}</b>",
+            f"Status: <b>{status_label}</b>",
         )
     )
     if step is not None:
@@ -805,25 +1001,18 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
                 f"Usage: {telegram_html(usage.input_tokens)} in / "
                 f"{telegram_html(usage.output_tokens or 0)} out"
             )
-    if run is not None and task.status.value == "completed":
-        result_step = await session.scalar(
-            select(Step)
-            .where(
-                Step.run_id == run.id,
-                Step.step_type.in_(
-                    ("execute_agent", "execute_model", "research_execute", "synthesize")
-                ),
-            )
-            .order_by(Step.ordinal.desc())
-            .limit(1)
-        )
-        result = result_step.result if result_step is not None else None
-        text = result.get("text") if isinstance(result, dict) else None
-        if isinstance(text, str) and text.strip():
-            bounded = text.strip()[:3_000]
-            if len(text.strip()) > len(bounded):
-                bounded += "…"
-            lines.extend(("", "<b>Результат</b>", telegram_html(bounded)))
+    if task.status is TaskStatus.COMPLETED:
+        report, gates = await _completion_report(session, task)
+        lines.extend(("", "<b>Отчёт о выполнении</b>", telegram_html(report)))  # noqa: RUF001
+        if gates:
+            lines.extend(("", "<b>Проверки</b>"))
+            lines.extend(f"✅ {telegram_html(gate)}" for gate in gates)
+    elif task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+        failed_stage, reason = await _failure_details(session, task)
+        lines.extend(("", "<b>Отчёт о завершении</b>"))  # noqa: RUF001
+        if failed_stage:
+            lines.append(f"<b>Этап:</b> {telegram_html(failed_stage)}")
+        lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
     elapsed = max(0, int((datetime.now(UTC) - task.created_at).total_seconds()))
     lines.append(f"Elapsed: {elapsed}s")
     if event is not None:

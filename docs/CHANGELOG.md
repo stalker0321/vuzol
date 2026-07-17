@@ -4,6 +4,8 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- rebuilt and repinned the offline validation image against the current attested `pyproject.toml`
+  and unchanged lockfile so production readiness can validate the active CLI entrypoint set;
 - updated the fail-closed MVP readiness check to follow the authoritative `origin/main`
   deployment branch and the active planner/reviewer policy instead of retired Step 09A assumptions;
 - added a required one-line `task_summary` to the semantic interpreter contract and surfaced it in

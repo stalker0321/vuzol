@@ -316,8 +316,13 @@ def _verdict_from_provider_result(
     # Mechanical blockers already short-circuit before this path; still surface
     # mechanical warnings next to independent findings for the approval card.
     merged = tuple((*mechanical_findings, *findings))
-    if verdict_kind is ReviewVerdictKind.PASSED and any(
-        item.severity in {FindingSeverity.WARNING, FindingSeverity.ERROR} for item in merged
+    if verdict_kind in {
+        ReviewVerdictKind.PASSED,
+        ReviewVerdictKind.PASSED_WITH_WARNINGS,
+    } and any(item.severity in {FindingSeverity.ERROR, FindingSeverity.BLOCKER} for item in merged):
+        verdict_kind = ReviewVerdictKind.CHANGES_REQUIRED
+    elif verdict_kind is ReviewVerdictKind.PASSED and any(
+        item.severity is FindingSeverity.WARNING for item in merged
     ):
         verdict_kind = ReviewVerdictKind.PASSED_WITH_WARNINGS
     if not summary:

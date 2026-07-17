@@ -21,6 +21,7 @@ from vuzol.review.domain import FindingSeverity, ReviewFinding, ReviewVerdictKin
 from vuzol.review.independent import (
     IndependentModelReviewer,
     IndependentReviewError,
+    _verdict_from_provider_result,
     select_reviewer_profile,
 )
 from vuzol.storage.types import RiskLevel
@@ -72,6 +73,39 @@ def test_select_reviewer_falls_back_to_planner_api() -> None:
 
 def test_select_reviewer_returns_none_without_api_profiles() -> None:
     assert select_reviewer_profile(()) is None
+
+
+def test_pass_verdict_with_blocking_finding_requires_changes() -> None:
+    result = ProviderResult(
+        status=ProviderResultStatus.SUCCEEDED,
+        structured_output={
+            "verdict": "pass",
+            "summary": "Looks fine.",
+            "findings": [
+                {
+                    "severity": "blocker",
+                    "classification": "unsafe_change",
+                    "summary": "A blocking issue remains.",
+                }
+            ],
+        },
+        usage=NormalizedUsage(duration_ms=1),
+        adapter_version="openai-compatible.v1",
+    )
+
+    verdict = _verdict_from_provider_result(
+        result,
+        risk=RiskLevel.HIGH,
+        base_commit="a" * 40,
+        result_commit="b" * 40,
+        diff_hash="c" * 64,
+        changed_files=("x.py",),
+        profile_id="reviewer",
+        mechanical_findings=(),
+    )
+
+    assert verdict.verdict is ReviewVerdictKind.CHANGES_REQUIRED
+    assert not verdict.allows_progress
 
 
 @pytest.mark.anyio
@@ -368,4 +402,3 @@ async def test_independent_reviewer_rejects_invalid_structured_output() -> None:
             timeout_seconds=30,
             cancellation=CancellationContext(),
         )
-

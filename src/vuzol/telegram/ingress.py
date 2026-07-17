@@ -6,10 +6,13 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RegistryError, RuntimeConfiguration
+from vuzol.config.models import TopicConfig
+from vuzol.providers.subscription_limits import SUBSCRIPTION_LIMITS_DESTINATION
 from vuzol.storage.models import TelegramIntakeMessage, TelegramMessageLink, TopicMapping
 from vuzol.storage.types import IntakeStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
+from vuzol.telegram.layout import is_status_dashboard_topic, is_update_command
 from vuzol.telegram.policy import TelegramPolicyError, authorize, validate_message
 from vuzol.telegram.projections import enqueue_project_status_dashboard
 
@@ -36,6 +39,10 @@ class TelegramIngressService:
             topic = self._runtime.registries.topics.resolve(
                 update.chat_id, update.message_thread_id
             )
+            if is_status_dashboard_topic(topic.kind) and is_update_command(update.text):
+                if not topic.enabled:
+                    raise TelegramPolicyError("status dashboard topic is disabled")
+                return await self._handle_dashboard_update(update, topic)
             if not topic.enabled or not topic.accepts_new_tasks:
                 raise TelegramPolicyError("topic does not accept new tasks")
         except (TelegramPolicyError, RegistryError) as error:
@@ -179,3 +186,51 @@ class TelegramIngressService:
             task_id=task_id,
             intake_id=intake_id,
         )
+
+    async def _handle_dashboard_update(
+        self, update: MessageUpdate, topic: TopicConfig
+    ) -> IngressResult:
+        """Handle ``/update`` in «Статус проектов»: refresh limits and delete the command.
+
+        Limit collection requires provider-state ACL, so the ingress only enqueues a
+        refresh for the executor and a delete for Telegram delivery.
+        """
+
+        del topic
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+
+            await uow.inbox.mark_processed(
+                inbox_id, entity_type="telegram_command", entity_id=inbox_id
+            )
+            await uow.outbox.enqueue(
+                destination=SUBSCRIPTION_LIMITS_DESTINATION,
+                operation_type="refresh",
+                entity_type="telegram_inbox",
+                entity_id=inbox_id,
+                idempotency_key=(
+                    f"subscription_limits:refresh:{update.chat_id}:{update.update_id}"
+                ),
+                payload={"chat_id": update.chat_id, "reason": "user_update_command"},
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="delete_message",
+                entity_type="telegram_inbox",
+                entity_id=inbox_id,
+                idempotency_key=(f"telegram:delete_command:{update.chat_id}:{update.message_id}"),
+                payload={
+                    "role": "user_command_delete",
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "message_id": update.message_id,
+                },
+            )
+        return IngressResult(status=IngressStatus.HANDLED)

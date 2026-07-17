@@ -28,6 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.config.models import LaunchMode, ProviderProfileConfig
 from vuzol.storage.models import SubscriptionLimitSnapshotRow
 
+# Outbox destination claimed by the executor (provider-state ACL for auth/logs).
+SUBSCRIPTION_LIMITS_DESTINATION = "subscription_limits"
+
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 GROK_BILLING_URLS = (
     "https://grok.com/billing?format=credits",

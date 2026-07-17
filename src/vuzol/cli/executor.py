@@ -237,6 +237,77 @@ async def run() -> None:
         await engine.dispose()
 
 
+async def _refresh_subscription_limits_tick(
+    session_factory: async_sessionmaker[AsyncSession],
+    registries: object,
+    *,
+    due_periodic: bool,
+) -> bool:
+    """Claim optional /update refresh requests, collect host limits, refresh dashboards.
+
+    Returns True when a forced refresh request was claimed (so the loop can skip sleep).
+    """
+
+    from sqlalchemy import select
+
+    from vuzol.providers.subscription_limits import (
+        SUBSCRIPTION_LIMITS_DESTINATION,
+        refresh_and_store_subscription_limits,
+    )
+    from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item
+    from vuzol.storage.models import TopicMapping, TransactionalOutbox
+    from vuzol.telegram.projections import enqueue_project_status_dashboard
+
+    try:
+        async with session_factory.begin() as session:
+            token = await claim_outbox_item(
+                session,
+                owner="vuzol-executor-limits",
+                lease_seconds=60,
+                allowed_destinations=frozenset({SUBSCRIPTION_LIMITS_DESTINATION}),
+            )
+            force_chat_ids: list[int] = []
+            if token is not None:
+                item = await session.get(TransactionalOutbox, token.item_id)
+                if item is not None:
+                    raw_chat = item.payload.get("chat_id")
+                    if raw_chat is not None:
+                        force_chat_ids.append(int(raw_chat))
+            if token is None and not due_periodic:
+                return False
+            profiles = registries.profiles.items()  # type: ignore[attr-defined]
+            await refresh_and_store_subscription_limits(session, profiles)
+            if force_chat_ids:
+                chats: list[int] = force_chat_ids
+            else:
+                chats = list(
+                    (
+                        await session.scalars(
+                            select(TopicMapping.chat_id)
+                            .where(
+                                TopicMapping.topic_kind == "task_dashboard",
+                                TopicMapping.enabled.is_(True),
+                            )
+                            .distinct()
+                        )
+                    ).all()
+                )
+            for chat_id in chats:
+                await enqueue_project_status_dashboard(session, int(chat_id))
+            if token is not None:
+                await complete_outbox_item(session, token)
+            return token is not None
+    except Exception as error:  # pragma: no cover - operational best-effort
+        get_logger(__name__).warning(
+            "subscription limit refresh failed",
+            extra={
+                "event": "executor.subscription_limits_failed",
+                "error_type": type(error).__name__,
+            },
+        )
+        return False
+
+
 async def _run_loop(
     processor: ExecutorChain,
     poll_interval: float,
@@ -244,12 +315,6 @@ async def _run_loop(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     registries: object | None = None,
 ) -> None:
-    from sqlalchemy import select
-
-    from vuzol.providers.subscription_limits import refresh_and_store_subscription_limits
-    from vuzol.storage.models import TopicMapping
-    from vuzol.telegram.projections import enqueue_project_status_dashboard
-
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -261,37 +326,14 @@ async def _run_loop(
     while not stop.is_set():
         worked = await processor.process_one()
         now = time.monotonic()
-        if (
-            session_factory is not None
-            and registries is not None
-            and now - last_limit_refresh >= limit_refresh_seconds
-        ):
-            try:
-                async with session_factory.begin() as session:
-                    profiles = registries.profiles.items()  # type: ignore[attr-defined]
-                    await refresh_and_store_subscription_limits(session, profiles)
-                    chats = (
-                        await session.scalars(
-                            select(TopicMapping.chat_id)
-                            .where(
-                                TopicMapping.topic_kind == "task_dashboard",
-                                TopicMapping.enabled.is_(True),
-                            )
-                            .distinct()
-                        )
-                    ).all()
-                    for chat_id in chats:
-                        await enqueue_project_status_dashboard(session, int(chat_id))
+        due_periodic = now - last_limit_refresh >= limit_refresh_seconds
+        if session_factory is not None and registries is not None:
+            forced = await _refresh_subscription_limits_tick(
+                session_factory, registries, due_periodic=due_periodic
+            )
+            if forced or due_periodic:
                 last_limit_refresh = now
-            except Exception as error:  # pragma: no cover - operational best-effort
-                get_logger(__name__).warning(
-                    "subscription limit refresh failed",
-                    extra={
-                        "event": "executor.subscription_limits_failed",
-                        "error_type": type(error).__name__,
-                    },
-                )
-                last_limit_refresh = now
+            worked = worked or forced
         if not worked:
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval)

@@ -90,6 +90,7 @@ def project_draft() -> TaskDraft:
             for index in range(9)
         ),
         goal="A private note-taking application",
+        task_summary="Create a private note-taking application",
         suggested_complexity=SuggestedComplexity.SMALL,
         suggested_risk=RiskLevel.LOW,
         needs_planning=False,
@@ -263,8 +264,8 @@ def test_dispatcher_materializes_one_project_naming_request(
                 task_draft=recovered_draft.model_dump(mode="json"),
                 profile_id="fake",
                 model="fake",
-                prompt_version="architecture-routing-v6",
-                schema_version="1.3",
+                prompt_version="architecture-routing-v7",
+                schema_version="1.4",
             )
             session.add(interpretation)
             await session.flush()

@@ -31,10 +31,18 @@ def test_status_card_rebuild_and_revision_guard(postgres_dsn: str) -> None:
                 original_text='<script>alert("x")</script>',
                 task_type="coding",
             )
+            assert uow.session is not None
+            stored = await uow.session.get(Task, task.id)
+            assert stored is not None
+            stored.task_draft = {
+                "normalized_title": "Improve task cards",
+                "task_summary": "Show a concise task description in Telegram",
+            }
         client = FakeTelegramClient()
         async with factory() as session, session.begin():
             card = await build_status_card(session, task.id)
             assert "<b>Задача №100001</b>" in card.html
+            assert "Задача: Show a concise task description in Telegram" in card.html
             assert "&lt;script&gt;" not in card.html
             assert await apply_status_projection(
                 session, client, card=card, chat_id=-100, thread_id=10

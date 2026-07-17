@@ -37,6 +37,7 @@ def naming_draft() -> TaskDraft:
         task_type=TaskType.INFRASTRUCTURE,
         operation=TaskOperation.CREATE,
         goal="A private note-taking application",
+        task_summary="Create a private note-taking application",
         project_name_options=tuple(
             ProjectNameOption(display_name=f"Notes {index + 1}", project_id=f"notes-{index + 1}")
             for index in range(9)

@@ -4,6 +4,9 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added a required one-line `task_summary` to the semantic interpreter contract and surfaced it in
+  project task cards, the active-project dashboard, and completion history while preserving a
+  separate implementation-result summary and compatibility with persisted pre-1.4 drafts;
 - enabled **independent model review** for high/privileged coding results: after mechanical
   gates, a model-only reviewer/planner profile returns a structured pass/warn/block verdict
   over a truncated read-only diff bundle (no sandbox, no host secrets beyond the API credential).

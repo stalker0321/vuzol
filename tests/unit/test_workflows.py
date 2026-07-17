@@ -44,6 +44,7 @@ def draft(
         task_type=task_type,
         operation=TaskOperation.MODIFY,
         goal="Implement the request",
+        task_summary="Implement the requested change",
         suggested_complexity=SuggestedComplexity.SMALL,
         suggested_risk=risk,
         needs_planning=planning,

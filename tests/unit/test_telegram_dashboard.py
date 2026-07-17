@@ -71,12 +71,15 @@ def test_model_label_is_english_and_friendly() -> None:
 def test_task_sense_is_one_sentence() -> None:
     task = SimpleNamespace(
         task_draft={
+            "task_summary": "Подготовить адаптивный лендинг для нового продукта.",
             "normalized_title": "Сделать лендинг. Потом API.",
             "goal": "ignored",
         },
         original_text="fallback",
     )
-    assert task_sense_sentence(task) == "Сделать лендинг"  # type: ignore[arg-type]
+    assert task_sense_sentence(task) == (  # type: ignore[arg-type]
+        "Подготовить адаптивный лендинг для нового продукта"
+    )
     long = SimpleNamespace(
         task_draft={"goal": "x" * 200},
         original_text="",

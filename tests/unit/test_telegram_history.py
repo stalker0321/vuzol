@@ -168,7 +168,10 @@ async def test_build_and_enqueue_history_report() -> None:
         project_id="bill-buddy",
         public_task_number=730004,
         topic_task_number=1,
-        task_draft={"normalized_title": "Build the landing page."},
+        task_draft={
+            "normalized_title": "Build the landing page.",
+            "task_summary": "Build a responsive landing page for Bill Buddy.",
+        },
         original_text="landing",
         created_at=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
         updated_at=datetime(2026, 7, 16, 10, 5, tzinfo=UTC),
@@ -229,6 +232,8 @@ async def test_build_and_enqueue_history_report() -> None:
     assert report.thread_id == 13
     assert "#730004" in report.html
     assert "Bill Buddy" in report.html
+    assert "Задача:</b> Build a responsive landing page for Bill Buddy" in report.html
+    assert "Результат:</b> Landing page implemented" in report.html
     assert "Landing page implemented" in report.html
     assert "1,000" in report.html
     assert "200" in report.html

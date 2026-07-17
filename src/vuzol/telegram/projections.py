@@ -119,7 +119,8 @@ def task_sense_sentence(task: Task) -> str:
 
     draft = task.task_draft if isinstance(task.task_draft, dict) else {}
     raw = (
-        draft.get("normalized_title")
+        draft.get("task_summary")
+        or draft.get("normalized_title")
         or draft.get("goal")
         or draft.get("title")
         or task.original_text
@@ -490,14 +491,16 @@ async def build_task_history_report(
     else:
         project_label = project_id
 
-    summary = await _history_summary(session, task)
+    task_summary = task_sense_sentence(task)
+    result_summary = await _history_summary(session, task)
     tokens_in, tokens_out, tokens_cached = await _history_token_totals(session, task.id)
     work_seconds = await _history_work_seconds(session, task)
 
     number = task_number_label(task)
     lines = [
         f"<b>#{telegram_html(number)}</b> · <b>{telegram_html(project_label)}</b>",
-        telegram_html(summary),
+        f"<b>Задача:</b> {telegram_html(task_summary)}",
+        f"<b>Результат:</b> {telegram_html(result_summary)}",
         "",
         (
             f"Tokens: <code>{telegram_html(_format_count(tokens_in))}</code> in / "
@@ -759,12 +762,17 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     )
     title = task_title(task)
     scope = task.project_id or "personal"
-    lines = [
-        f"<b>{telegram_html(title)}</b>",
-        f"<code>{task.id}</code>",
-        f"Scope: {telegram_html(scope)}",
-        f"Status: <b>{telegram_html(task.status.value)}</b>",
-    ]
+    lines = [f"<b>{telegram_html(title)}</b>"]
+    draft = task.task_draft if isinstance(task.task_draft, dict) else {}
+    if any(draft.get(key) for key in ("task_summary", "normalized_title", "goal", "title")):
+        lines.append(f"Задача: {telegram_html(task_sense_sentence(task))}")
+    lines.extend(
+        (
+            f"<code>{task.id}</code>",
+            f"Scope: {telegram_html(scope)}",
+            f"Status: <b>{telegram_html(task.status.value)}</b>",
+        )
+    )
     if step is not None:
         lines.append(f"Step: {telegram_html(step.step_type)} ({telegram_html(step.status.value)})")
     approval = None

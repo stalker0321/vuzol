@@ -623,8 +623,10 @@ def _host_grok_billing_log_paths(state_directory: Path) -> tuple[Path, ...]:
     """Interactive host Grok profiles that share the same OAuth subject.
 
     Sandboxed provider state rarely records ``billing: fetched credits config``
-    lines. Interactive CLI sessions under ``~/.grok-profiles`` do, and for the
-    same Super accounts the OAuth subject matches.
+    lines. Interactive CLI sessions under ``~/.grok-profiles`` do. Match by JWT
+    subject from provider auth.json, then either host auth.json (when readable)
+    or the presence of that subject string in the host log (logs are usually
+    world-readable even when auth.json is 0600).
     """
 
     subjects = {
@@ -651,21 +653,57 @@ def _host_grok_billing_log_paths(state_directory: Path) -> tuple[Path, ...]:
         for account in accounts:
             if not account.is_dir():
                 continue
-            account_subjects = {
-                sub
-                for _scope, token in _grok_auth_entries(account)
-                if (sub := _jwt_subject(token)) is not None
-            }
-            if not subjects.intersection(account_subjects):
+            log_paths = tuple(
+                path
+                for rel in ("logs/unified.jsonl", ".grok/logs/unified.jsonl")
+                if (path := account / rel).is_file()
+            )
+            if not log_paths:
                 continue
-            for rel in ("logs/unified.jsonl", ".grok/logs/unified.jsonl"):
-                path = account / rel
-                if path in seen:
-                    continue
-                if path.is_file():
+            if not _host_account_matches_subjects(account, log_paths, subjects):
+                continue
+            for path in log_paths:
+                if path not in seen:
                     seen.add(path)
                     matched.append(path)
     return tuple(matched)
+
+
+def _host_account_matches_subjects(
+    account: Path, log_paths: Sequence[Path], subjects: set[str]
+) -> bool:
+    """True when host auth or logs prove ownership of one of ``subjects``."""
+
+    account_subjects = {
+        sub
+        for _scope, token in _grok_auth_entries(account)
+        if (sub := _jwt_subject(token)) is not None
+    }
+    if subjects.intersection(account_subjects):
+        return True
+    # Fallback: host auth.json is often mode 0600 (executor cannot read it), but
+    # interactive logs mention the principal id and are usually readable.
+    for path in log_paths:
+        if _log_contains_any_subject(path, subjects):
+            return True
+    return False
+
+
+def _log_contains_any_subject(path: Path, subjects: set[str]) -> bool:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            # Subject usually appears early (AuthManager::new); scan both ends.
+            handle.seek(0)
+            head = handle.read(min(size, 512_000))
+            handle.seek(max(0, size - 512_000))
+            tail = handle.read()
+    except OSError:
+        return False
+    blob = head + b"\n" + tail
+    text = blob.decode("utf-8", errors="ignore")
+    return any(subject in text for subject in subjects)
 
 
 def _latest_grok_billing_from_logs(state_directory: Path) -> dict[str, Any] | None:

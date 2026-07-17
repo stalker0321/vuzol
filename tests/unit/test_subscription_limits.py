@@ -741,6 +741,26 @@ def test_host_grok_billing_logs_matched_by_jwt_subject(
     assert snap.ok
     assert snap.weekly.remaining_percent == 85
 
+    # Host auth.json may be unreadable (0600); match via subject string in logs.
+    (account / "auth.json").unlink()
+    (logs / "unified.jsonl").write_text(
+        json.dumps(
+            {
+                "msg": "AuthManager::new",
+                "ctx": {"principal": "user-abc", "sub": "user-abc"},
+            }
+        )
+        + "\n"
+        + billing_line
+        + "\n",
+        encoding="utf-8",
+    )
+    paths2 = _host_grok_billing_log_paths(state)
+    assert paths2 == (logs / "unified.jsonl",)
+    snap2 = collect_profile_limits(profile, now=datetime(2026, 7, 16, tzinfo=UTC))
+    assert snap2.ok
+    assert snap2.weekly.remaining_percent == 85
+
 
 def test_grok_billing_unavailable_and_html_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -176,6 +176,7 @@ def test_worker_main_composes_runtime_and_handles_stop(
     monkeypatch.setattr(worker_cli, "create_session_factory", lambda _engine: Factory())
     monkeypatch.setattr(worker_cli, "WorkflowDispatcher", Dispatcher)
     monkeypatch.setattr(worker_cli, "WorkflowControlConsumer", Controls)
+    monkeypatch.setattr(worker_cli, "ResultReviewHandler", MagicMock())
     monkeypatch.setattr(worker_cli, "WorkflowWorker", WorkflowWorker)
 
     async def recover(_session: object, *, batch_size: int) -> int:

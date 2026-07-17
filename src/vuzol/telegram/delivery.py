@@ -643,10 +643,11 @@ class TelegramDeliveryService:
                     )
                 )
             elif prepared.action == DeliveryAction.DELETE_MESSAGE:
-                assert prepared.link_id is not None
-                link = await session.get(TelegramMessageLink, prepared.link_id)
-                if link is not None:
-                    await session.delete(link)
+                # Project-naming deletes track a projection link; /update command deletes do not.
+                if prepared.link_id is not None:
+                    link = await session.get(TelegramMessageLink, prepared.link_id)
+                    if link is not None:
+                        await session.delete(link)
             await complete_outbox_item(session, token)
 
     async def _mark_ambiguous(self, token: OutboxLeaseToken) -> None:

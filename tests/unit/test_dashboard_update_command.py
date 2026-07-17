@@ -241,3 +241,50 @@ async def test_prepare_user_command_delete() -> None:
     assert prepared.action == DeliveryAction.DELETE_MESSAGE
     assert prepared.chat_id == -100
     assert prepared.message_id == 77
+    assert prepared.link_id is None
+
+
+@pytest.mark.anyio
+async def test_complete_user_command_delete_without_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/update deletes must complete the outbox even without a projection link."""
+
+    from vuzol.storage.records import OutboxLeaseToken
+    from vuzol.storage.types import DeliveryStatus
+    from vuzol.telegram.delivery import DeliveryAction, PreparedDelivery, TelegramDeliveryService
+
+    prepared = PreparedDelivery(
+        DeliveryAction.DELETE_MESSAGE,
+        chat_id=-100,
+        thread_id=5,
+        message_id=77,
+    )
+    token = OutboxLeaseToken(
+        item_id=uuid4(),
+        status=DeliveryStatus.LEASED,
+        owner="delivery",
+        generation=1,
+        lease_expires_at=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+    session = MagicMock()
+    session.get = AsyncMock(return_value=None)
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock()
+    factory.begin.return_value = session_cm
+    complete = AsyncMock(return_value=None)
+    monkeypatch.setattr("vuzol.telegram.delivery.complete_outbox_item", complete)
+
+    service = TelegramDeliveryService(
+        factory,
+        MagicMock(),
+        owner="delivery",
+        lease_seconds=30,
+        max_attempts=5,
+        retry_min_seconds=0.1,
+        retry_max_seconds=1.0,
+    )
+    await service._complete(token, prepared, None)
+    complete.assert_awaited_once()

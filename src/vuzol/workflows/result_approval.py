@@ -57,6 +57,9 @@ async def ensure_result_approval(
         "result_commit": worktree.result_commit,
         "diff_hash": worktree.diff_hash,
         "gates": gates,
+        "validation_evidence_hash": evidence["validation_evidence_hash"],
+        "review_evidence": evidence["review_evidence"],
+        "review_evidence_hash": evidence["review_evidence_hash"],
         "configuration_revision": run.configuration_revision,
         "policy_revision": run.policy_revision,
     }
@@ -106,6 +109,7 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
         ),
         None,
     )
+    review_steps = [step for step in ordered if step.step_type == "review"]
     review = next(
         (
             step
@@ -159,6 +163,42 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     ):
         raise ValueError("result approval requires passing trusted gates")
 
+    review_evidence: dict[str, Any] | None = None
+    review_evidence_hash: str | None = None
+    if review_steps and review is None:
+        raise ValueError("result approval requires the configured review step to complete")
+    if review is not None:
+        review_result = review.result if isinstance(review.result, dict) else {}
+        review_manifest = review_result.get("structured_output")
+        if not isinstance(review_manifest, dict):
+            raise ValueError("result approval requires structured review output")
+        if (
+            review_manifest.get("base_commit") != worktree.base_commit
+            or review_manifest.get("result_commit") != worktree.result_commit
+            or review_manifest.get("diff_hash") != worktree.diff_hash
+        ):
+            raise ValueError("review evidence does not match the retained result")
+        verdict = review_manifest.get("verdict")
+        if verdict not in {"pass", "pass_with_warnings"}:
+            raise ValueError("result approval requires a passing review verdict")
+        findings = review_manifest.get("findings", [])
+        if not isinstance(findings, list) or any(
+            not isinstance(finding, dict) or finding.get("severity") in {"error", "blocker"}
+            for finding in findings
+        ):
+            raise ValueError("passing review evidence contains blocking findings")
+        review_evidence_hash = envelope_hash(review_manifest)
+        review_evidence = {
+            "schema_version": review_manifest.get("schema_version"),
+            "verdict": verdict,
+            "review_kind": review_manifest.get("review_kind"),
+            "risk": review_manifest.get("risk"),
+            "base_commit": review_manifest.get("base_commit"),
+            "result_commit": review_manifest.get("result_commit"),
+            "diff_hash": review_manifest.get("diff_hash"),
+            "evidence_hash": review_evidence_hash,
+        }
+
     review_result = review.result if review and isinstance(review.result, dict) else {}
     execute_result = execute.result if execute and isinstance(execute.result, dict) else {}
     summary = None
@@ -175,4 +215,10 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
             break
     if summary is None:
         summary = "The requested change was implemented and passed all configured checks."
-    return {"gates": gates, "summary": summary[:2_000]}
+    return {
+        "gates": gates,
+        "summary": summary[:2_000],
+        "validation_evidence_hash": envelope_hash(manifest),
+        "review_evidence": review_evidence,
+        "review_evidence_hash": review_evidence_hash,
+    }

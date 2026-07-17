@@ -124,7 +124,19 @@ async def test_result_approval_prefers_review_summary_and_validate_gates() -> No
     review = _step(
         step_type="review",
         ordinal=6,
-        result={"summary": "Mechanical review passed for 2 changed path(s)."},
+        result={
+            "summary": "Mechanical review passed for 2 changed path(s).",
+            "structured_output": {
+                "schema_version": "result-review.v1",
+                "verdict": "pass",
+                "review_kind": "mechanical",
+                "risk": "medium",
+                "base_commit": base,
+                "result_commit": result_commit,
+                "diff_hash": "c" * 64,
+                "findings": [],
+            },
+        },
     )
     approval_step = MagicMock(
         id=uuid.uuid4(),
@@ -158,6 +170,66 @@ async def test_result_approval_prefers_review_summary_and_validate_gates() -> No
     assert approval.human_summary.startswith("Mechanical review passed")
     assert approval_step.payload["action_envelope"]["project_id"] == "bill-buddy"
     assert approval_step.payload["action_envelope"]["gates"][0]["name"] == "git-facts"
+    assert approval_step.payload["action_envelope"]["validation_evidence_hash"]
+    assert approval_step.payload["action_envelope"]["review_evidence"]["verdict"] == "pass"
+    assert approval_step.payload["action_envelope"]["review_evidence_hash"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ("mismatch", "verdict", "contradiction"))
+async def test_result_approval_rejects_invalid_review_evidence(failure: str) -> None:
+    base = "a" * 40
+    result_commit = "b" * 40
+    validate = _step(
+        step_type="validate",
+        ordinal=5,
+        result={
+            "structured_output": {
+                "base_commit": base,
+                "result_commit": result_commit,
+                "gates": [{"name": "tests", "exit_code": 0}],
+            }
+        },
+    )
+    review = _step(
+        step_type="review",
+        ordinal=6,
+        result={
+            "structured_output": {
+                "schema_version": "result-review.v1",
+                "verdict": "changes_required" if failure == "verdict" else "pass",
+                "review_kind": "independent",
+                "risk": "high",
+                "base_commit": base,
+                "result_commit": "d" * 40 if failure == "mismatch" else result_commit,
+                "diff_hash": "c" * 64,
+                "findings": (
+                    [{"severity": "blocker", "classification": "unsafe"}]
+                    if failure == "contradiction"
+                    else []
+                ),
+            }
+        },
+    )
+    worktree = SimpleNamespace(
+        result_commit=result_commit,
+        diff_hash="c" * 64,
+        base_commit=base,
+        project_id="vuzol",
+        repository_identity_hash="d" * 64,
+        default_branch="main",
+        expected_target_head=base,
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=(None, worktree))
+
+    with pytest.raises(ValueError):
+        await ensure_result_approval(
+            session,
+            run=MagicMock(),
+            approval_step=MagicMock(id=uuid.uuid4(), payload={"requested_action": "apply_result"}),
+            steps_by_ordinal={5: validate, 6: review},
+        )
 
 
 @pytest.mark.anyio

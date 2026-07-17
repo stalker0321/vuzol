@@ -369,6 +369,13 @@ async def build_project_status_dashboard(
         lines.extend(
             format_subscription_limits_html(subscription_snapshots, html_escape=telegram_html)
         )
+        updated_at = max((snap.observed_at for snap in subscription_snapshots), default=None)
+        if updated_at is not None:
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
+            stamp = updated_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+            lines.append("")
+            lines.append(f"<i>Updated {telegram_html(stamp)}</i>")
 
     fingerprints = tuple(snap.fingerprint() for snap in (subscription_snapshots or ()))
     html_body = "\n".join(lines).rstrip()

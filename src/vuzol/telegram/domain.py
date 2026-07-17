@@ -64,6 +64,7 @@ class IngressStatus(StrEnum):
     NEEDS_CLARIFICATION = "needs_clarification"
     DUPLICATE = "duplicate"
     REJECTED = "rejected"
+    HANDLED = "handled"
 
 
 class IngressResult(TelegramModel):

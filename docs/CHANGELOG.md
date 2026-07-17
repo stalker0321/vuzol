@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- enabled **independent model review** for high/privileged coding results: after mechanical
+  gates, a model-only reviewer/planner profile returns a structured pass/warn/block verdict
+  over a truncated read-only diff bundle (no sandbox, no host secrets beyond the API credential).
+
 ## 2026-07-16 — Step 09 validation, mechanical review, and approvals
 
 - added the production **coding.v1** post-execute chain: deterministic **validate** (Git facts,

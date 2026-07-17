@@ -23,6 +23,7 @@ from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
 from vuzol.providers.health import synchronize_profiles
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.review import ResultReviewHandler
+from vuzol.review.independent import IndependentModelReviewer
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.dispatch import WorkflowDispatcher
@@ -91,12 +92,46 @@ async def run() -> None:
     owner = f"{socket.gethostname()}:{os.getpid()}"
     dispatcher = WorkflowDispatcher(runtime, factory, owner=f"{owner}:dispatch")
     controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
+    model_roles = frozenset(
+        {
+            ProviderRole.EXECUTOR,
+            ProviderRole.PLANNER,
+            ProviderRole.SUMMARIZER,
+            ProviderRole.REVIEWER,
+        }
+    )
+    routable_profiles = tuple(
+        profile
+        for profile in runtime.registries.profiles.items()
+        if profile.enabled
+        and profile.provider == "openai-compatible"
+        and profile.launch_mode is LaunchMode.API
+        and profile.roles.intersection(model_roles)
+    )
+    independent_reviewer: IndependentModelReviewer | None = None
+    adapter_registry: AdapterRegistry | None = None
+    if routable_profiles:
+        resolver = ScopedSecretResolver(
+            access_policy={
+                profile.credential_reference: frozenset({f"profile:{profile.id}"})
+                for profile in runtime.registries.profiles.items()
+                if profile.credential_reference is not None
+            },
+            secret_file_root=settings.secret_file_root,
+        )
+        adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver)
+        independent_reviewer = IndependentModelReviewer(
+            runtime.registries,
+            adapter_registry,
+            policy_revision=runtime.registries.revision,
+        )
     handlers = {
         **BASE_INTERNAL_HANDLERS,
         "review": ResultReviewHandler(
             factory,
             LocalGit(),
             worktree_root=settings.worktree_root,
+            independent_reviewer=independent_reviewer,
         ),
     }
     internal_worker = WorkflowWorker(
@@ -108,26 +143,8 @@ async def run() -> None:
             profile.id: profile.concurrency_limit for profile in runtime.registries.profiles.items()
         },
     )
-    model_roles = frozenset({ProviderRole.EXECUTOR, ProviderRole.PLANNER, ProviderRole.SUMMARIZER})
-    routable_profiles = tuple(
-        profile
-        for profile in runtime.registries.profiles.items()
-        if profile.enabled
-        and profile.provider == "openai-compatible"
-        and profile.launch_mode is LaunchMode.API
-        and profile.roles.intersection(model_roles)
-    )
     worker: Processor = internal_worker
-    if routable_profiles:
-        resolver = ScopedSecretResolver(
-            access_policy={
-                profile.credential_reference: frozenset({f"profile:{profile.id}"})
-                for profile in runtime.registries.profiles.items()
-                if profile.credential_reference is not None
-            },
-            secret_file_root=settings.secret_file_root,
-        )
-        adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver)
+    if adapter_registry is not None:
         provider_handler = ProviderStepHandler(factory, runtime.registries, adapter_registry)
         routed_worker = RoutedWorkflowWorker(
             settings,

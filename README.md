@@ -45,13 +45,13 @@ in an isolated rootless sandbox and standalone Git worktree. After execution Vuz
 4. on Approve, a separate **applier** advances only the configured local managed-branch tip with
    CAS protection (including when that branch is still checked out on a clean primary tree).
 
-High and privileged risk fail closed until an independent model reviewer is enabled. Redo cancels
-the retained result for a corrected request; Reject leaves it unapplied. Diffs stay private audit
-artifacts and are not posted to Telegram.
+High and privileged risk additionally require an **independent model-only reviewer** (structured
+JSON verdict over a truncated read-only diff). Mechanical blockers still fail closed without
+calling the model. Redo cancels the retained result for a corrected request; Reject leaves it
+unapplied. Diffs stay private audit artifacts and are not posted to Telegram.
 
 This path does **not** push, open merge requests, deploy, or perform general privileged host
-actions. Automatic trust promotion and independent LLM review remain outside the supported
-boundary.
+actions. Automatic trust promotion remains outside the supported boundary.
 
 ### Production smoke (coding path)
 

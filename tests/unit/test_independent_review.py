@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import HttpUrl
 
 from vuzol.config.models import CostClass, LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.execution.domain import GitInspection
@@ -22,6 +24,7 @@ from vuzol.review.domain import FindingSeverity, ReviewFinding, ReviewVerdictKin
 from vuzol.review.independent import (
     IndependentModelReviewer,
     IndependentReviewError,
+    _build_request,
     _verdict_from_provider_result,
     select_reviewer_profile,
 )
@@ -39,7 +42,7 @@ def _api_profile(
         id=profile_id,
         provider="openai-compatible",
         model="gpt-test",
-        api_base_url="https://api.example.com/v1",
+        api_base_url=HttpUrl("https://api.example.com/v1"),
         launch_mode=LaunchMode.API,
         credential_reference="env:VUZOL_OPENAI_PLANNER_API_KEY",
         credential_required=True,
@@ -109,6 +112,40 @@ def test_pass_verdict_with_blocking_finding_requires_changes() -> None:
     assert not verdict.allows_progress
 
 
+def test_large_review_bundle_is_complete_across_hashed_context_chunks() -> None:
+    profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="task",
+        changed_files=("x.py",),
+        diff=b"+" + b"x" * 25_000,
+    )
+    request = _build_request(
+        task=SimpleNamespace(task_draft={"goal": "Large change"}, original_text="x"),  # type: ignore[arg-type]
+        risk=RiskLevel.HIGH,
+        inspection=inspection,
+        base_commit="a" * 40,
+        result_commit="b" * 40,
+        diff_hash=inspection.diff_hash,
+        gates=[{"name": "tests", "exit_code": 0}],
+        mechanical_findings=(),
+        task_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_id=uuid.uuid4(),
+        timeout_seconds=60,
+        profile=profile,
+        policy_revision="test-policy.v1",
+    )
+
+    assert len(request.context) > 1
+    encoded = "".join(item.content for item in request.context)
+    assert json.loads(encoded)["diff"].endswith("x" * 25_000)
+    assert all(
+        item.content_hash == hashlib.sha256(item.content.encode()).hexdigest()
+        for item in request.context
+    )
+
+
 @pytest.mark.anyio
 async def test_independent_reviewer_builds_pass_verdict() -> None:
     profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
@@ -174,9 +211,9 @@ async def test_independent_reviewer_builds_pass_verdict() -> None:
     assert request.role is ProviderRole.REVIEWER
     assert request.sandbox_reference is None
     assert request.output_json_schema is not None
-    assert (
-        request.context[0].content_hash
-        == hashlib.sha256(request.context[0].content.encode()).hexdigest()
+    assert all(
+        item.content_hash == hashlib.sha256(item.content.encode()).hexdigest()
+        for item in request.context
     )
 
 

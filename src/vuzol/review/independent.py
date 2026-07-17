@@ -39,6 +39,7 @@ INDEPENDENT_REVIEW_SCHEMA = "independent-review.v1"
 _PROMPT_REVISION = "independent-review-v1"
 _MAX_DIFF_CHARS = 60_000
 _MAX_FILES = 80
+_MAX_CONTEXT_ITEM_CHARS = 20_000
 
 _OUTPUT_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -246,7 +247,10 @@ def _build_request(
         "diff": diff_text,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    content_hash = hashlib.sha256(encoded.encode()).hexdigest()
+    chunks = tuple(
+        encoded[offset : offset + _MAX_CONTEXT_ITEM_CHARS]
+        for offset in range(0, len(encoded), _MAX_CONTEXT_ITEM_CHARS)
+    )
     return ProviderRequest(
         task_id=task_id,
         run_id=run_id,
@@ -260,13 +264,14 @@ def _build_request(
             "suggested_risk": risk.value,
             "review_mode": "independent",
         },
-        context=(
+        context=tuple(
             ContextItem(
-                source="retained_result_review_bundle",
-                reference=f"worktree-diff:{result_commit[:12]}",
-                content=encoded,
-                content_hash=content_hash,
-            ),
+                source="retained_result_review_bundle_chunk",
+                reference=f"worktree-diff:{result_commit[:12]}:part-{index}-of-{len(chunks)}",
+                content=chunk,
+                content_hash=hashlib.sha256(chunk.encode()).hexdigest(),
+            )
+            for index, chunk in enumerate(chunks, start=1)
         ),
         output_schema_name="IndependentReviewReport",
         output_schema_version=INDEPENDENT_REVIEW_SCHEMA,

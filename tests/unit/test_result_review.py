@@ -200,6 +200,88 @@ async def test_review_blocks_high_risk_without_independent_reviewer(tmp_path: Pa
 
 
 @pytest.mark.anyio
+async def test_review_uses_independent_reviewer_for_high_risk(tmp_path: Path) -> None:
+    from vuzol.review.domain import ReviewVerdict
+
+    worktree_path = tmp_path / "wt"
+    worktree_path.mkdir()
+    base = "a" * 40
+    result = "b" * 40
+    lease = _lease()
+    task_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    validate = SimpleNamespace(
+        step_type="validate",
+        status=StepStatus.COMPLETED,
+        result={
+            "structured_output": {
+                "base_commit": base,
+                "result_commit": result,
+                "gates": [{"name": "git-facts", "exit_code": 0}],
+            }
+        },
+    )
+    step = SimpleNamespace(
+        status=StepStatus.RUNNING,
+        lease_owner=lease.owner,
+        lease_generation=lease.generation,
+        run_id=run_id,
+        dependency_metadata={"predecessor_ordinals": [5]},
+    )
+    task = SimpleNamespace(
+        risk=RiskLevel.HIGH, task_draft={"goal": "Harden auth"}, original_text="x"
+    )
+    session = MagicMock()
+    session.get = AsyncMock(side_effect=[step, SimpleNamespace(task_id=task_id), task])
+    session.scalar = AsyncMock(
+        side_effect=[
+            validate,
+            SimpleNamespace(
+                path=str(worktree_path),
+                delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
+                base_commit=base,
+                result_commit=result,
+                diff_hash="c" * 64,
+                branch="task-branch",
+            ),
+        ]
+    )
+    factory = MagicMock(return_value=AsyncContext(session))
+    git = MagicMock()
+    git.require_clean_worktree = AsyncMock()
+    git.require_no_remotes = AsyncMock()
+    git.inspect = AsyncMock(
+        return_value=GitInspection(
+            head=result,
+            branch="task-branch",
+            changed_files=("auth.py",),
+            diff=b"+def ok():\n+    return 1\n",
+        )
+    )
+    independent = MagicMock()
+    independent.review = AsyncMock(
+        return_value=ReviewVerdict(
+            verdict=ReviewVerdictKind.PASSED,
+            review_kind="independent",
+            risk="high",
+            base_commit=base,
+            result_commit=result,
+            diff_hash="c" * 64,
+            changed_files=("auth.py",),
+            findings=(),
+            summary="Independent review passed.",
+        )
+    )
+    handler = ResultReviewHandler(
+        factory, git, worktree_root=tmp_path, independent_reviewer=independent
+    )
+    outcome = await handler.execute(_request(task_id, run_id, lease), CancellationContext())
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    assert outcome.result["review_kind"] == "independent"
+    independent.review.assert_awaited_once()
+
+
+@pytest.mark.anyio
 async def test_review_blocks_suspicious_diff(tmp_path: Path) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()

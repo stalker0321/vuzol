@@ -1,5 +1,41 @@
 # Changelog
 
+This file records completed implementation changes, not plans or speculative ideas.
+
+## Unreleased
+
+- enabled **independent model review** for high/privileged coding results: after mechanical
+  gates, a model-only reviewer/planner profile returns a structured pass/warn/block verdict
+  over a truncated read-only diff bundle (no sandbox, no host secrets beyond the API credential).
+
+## 2026-07-16 — Step 09 validation, mechanical review, and approvals
+
+- added the production **coding.v1** post-execute chain: deterministic **validate** (Git facts,
+  trusted gates, host-owned result commit), optional **mechanical review** for medium risk, and
+  exact-result **approve_result** with a dedicated privileged applier;
+- high/privileged risk still fails closed until an independent model reviewer is enabled;
+- bound Approve/Redo/Reject cards to an immutable action envelope and the global «Апрувы» topic,
+  while project status stays in the project topic and completion reports post to «История»;
+- added the single editable «Статус проектов» dashboard (active tasks, model identity, subscription
+  limit bars) refreshed via outbox without spam;
+- codified forum pin policy: История → Статус проектов → Апрувы → Новый проект;
+- stabilized registry content revisions across process starts; apply no longer fails on unrelated
+  profile/model-label registry drift when delivery policy and repository identity still match;
+- fixed dual dashboard outbox enqueue in one transaction (approval cards no longer roll back on
+  `uq_outbox_idempotency`); recovery refunds unused LEASED claim attempts; review is retryable;
+- local apply CAS-advances the target branch even when it is cleanly checked out on the managed
+  primary tree (freshly provisioned projects);
+- granted the mapped sandbox identity temporary writable ACL access for every regular coding run,
+  not only the experimental worker-capsule path;
+- completed and production-qualified the Step 08 execution boundary with a dedicated rootless
+  Docker daemon, task-specific standalone Git worktrees, pinned sandbox and seccomp identities,
+  controlled proxy egress, supervised processes, bounded artifacts, cleanup/reconciliation, and
+  live Codex acceptance;
+- added isolated Grok subscription transports and a bounded Step 09A experiment runner; Grok trust
+  promotion remains experimental and incomplete;
+- retained the bounded `/sol` intake as one explicit coding entry; general NL coding intake follows
+  the same coding.v1 chain when interpretation classifies the task as coding.
+
 ## 2026-07-15 — Telegram forum workspace routing
 
 - Declared stable display names for global and per-project forum topics and synchronized configured
@@ -12,49 +48,12 @@
 - Added the persistent production workflow-worker unit required to move interpreted intake into
   dispatch and provisioning after host restarts.
 
-This file records completed implementation changes, not plans or speculative ideas.
+## Earlier foundation
 
-## Unreleased
-
-- added a single editable «Статус проектов» dashboard listing in-progress tasks with project,
-  task number, one-sentence goal, and assigned model, plus subscription limit rows for connected
-  Codex/Grok CLI profiles (company, plan, remaining 5h/weekly windows when available); refreshed
-  on status/routing changes without spamming new messages;
-- fixed the product-level Telegram forum layout: permanent pin order
-  История → Статус проектов → Апрувы → Новый проект, canonical system display names,
-  project topics pin on provision and unpin on later pause/finish; live Bot API pin
-  remains best-effort until Telegram exposes forum-topic pin methods;
-- granted the mapped sandbox identity temporary writable ACL access for every regular coding run,
-  not only the experimental worker-capsule path;
-- made PostgreSQL-backed checks wait for the Compose healthcheck before running migrations;
-- changed Telegram task affinity so a standalone project-topic message creates a new task unless
-  exactly one task is awaiting a clarification answer; replies remain explicit continuations;
 - added adaptive project-topic routing and a full read-only architecture-agent workflow with a
   bounded GPT-5 nano planning step, isolated repository inspection, and Telegram result delivery;
-- added the narrow retained-result decision loop: semantic Telegram completion summaries, trusted
-  gate results, immutable exact-result Approve/Redo/Reject callbacks, and a separate policy-gated
-  local applier with atomic target-drift protection; diffs remain private audit artifacts and no
-  push or deployment is performed;
-- completed and production-qualified the Step 08 execution boundary with a dedicated rootless
-  Docker daemon, task-specific standalone Git worktrees, pinned sandbox and seccomp identities,
-  controlled proxy egress, supervised processes, bounded artifacts, cleanup/reconciliation, and
-  live Codex acceptance;
-- added isolated Grok subscription transports and a bounded Step 09A experiment runner, including
-  typed worker manifests, deterministic classification, durable telemetry, fail-closed provider
-  diagnostics, and repaired concurrent-executor startup recovery; Grok trust promotion remains
-  experimental and incomplete;
-- added deterministic worker finalization with measured changed-file scope, typed Codex output,
-  host-owned Git commits, a separate pinned validation image, trusted repository gates, bounded
-  repair evidence, and safe result inspection;
-- added fail-closed MVP readiness checks and canaries that verify the deployed revision, managed
-  mirror, service health, rootless isolation, image identities, cleanup, and the full trusted gate
-  set without silently weakening validation;
-- closed a sub-threshold coverage rounding escape with a separate six-decimal raw coverage check,
-  without changing the validation image's attested dependency inputs, and covered both Telegram
-  dogfood/fallback composition branches;
-- added an explicit bounded `/sol` Telegram coding path that persists intake, fixes the production
-  Codex profile, executes only within one to ten declared paths, retains verified result commits,
-  projects usage and delivery state, and never merges or deploys automatically;
+- added the narrow retained-result decision loop precursors and fail-closed MVP readiness checks;
+- closed a sub-threshold coverage rounding escape with a separate six-decimal raw coverage check;
 - added ADR-0007 for transactional inbox/outbox delivery and fenced leases;
 - added ADR-0008 for untrusted repository, attachment, retrieved-content, and model-output boundaries;
 - expanded MVP persistence, Telegram delivery, workflow recovery, sandbox, approvals, budgets, Git result lifecycle, backup, and acceptance contracts;

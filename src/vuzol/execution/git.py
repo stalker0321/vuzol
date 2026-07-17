@@ -236,13 +236,21 @@ class LocalGit:
         target_is_checked_out = (
             checked_out is not None and checked_out.decode().strip() == target_ref
         )
-        if target_is_checked_out:
-            await self.require_clean_source(repository)
         current = await self.resolve_commit(repository, target_ref)
         if current == result_commit:
+            if target_is_checked_out:
+                if await self._tree_matches_commit(repository, result_commit):
+                    return False
+                if not await self._tree_matches_commit(repository, expected_head):
+                    raise GitError("managed worktree diverged during apply recovery")
+                await self._run(repository, "reset", "--hard", result_commit)
+                if not await self._tree_matches_commit(repository, result_commit):
+                    raise GitError("managed worktree did not recover to the approved result")
             return False
         if current != expected_head:
             raise GitError("target branch changed after the result was produced")
+        if target_is_checked_out:
+            await self.require_clean_source(repository)
         await self._run(repository, "fetch", "--no-tags", str(worktree), result_commit)
         if await self.resolve_commit(repository, "FETCH_HEAD") != result_commit:
             raise GitError("fetched result identity does not match the approval")
@@ -255,6 +263,19 @@ class LocalGit:
             if await self.resolve_commit(repository, "HEAD") != result_commit:
                 raise GitError("managed worktree did not reset to the approved result")
         return True
+
+    async def _tree_matches_commit(self, repository: Path, commit: str) -> bool:
+        tracked = await self._run(
+            repository,
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            commit,
+            "--",
+        )
+        untracked = await self._run(repository, "ls-files", "--others", "--exclude-standard", "-z")
+        return not tracked and not untracked
 
     async def remove_worktree(self, repository: Path, path: Path) -> None:
         if (path / ".git").is_dir():

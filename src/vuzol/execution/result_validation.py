@@ -31,6 +31,7 @@ from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.experiments.domain import RequiredGate
 from vuzol.experiments.review import scan_suspicious_patterns
+from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import Run, Step, ValidationResult, Worktree
 from vuzol.storage.types import StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
@@ -115,6 +116,13 @@ class ResultValidationHandler:
                 cancellation=cancellation,
             )
             await self._persist(request, worktree_id=worktree.id, evidence=evidence)
+        except LeaseLost:
+            cancellation.request()
+            return StepOutcome(
+                kind=OutcomeKind.CANCELLED,
+                result={},
+                category="validation_lease_lost",
+            )
         except ResultValidationError as error:
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
@@ -217,14 +225,20 @@ class ResultValidationHandler:
                 "worktree branch differs from the prepared task branch",
             )
 
-        # Already finalized by a previous successful validate attempt: clean HEAD
-        # equals the retained result commit and is a direct child of base.
-        if (
-            worktree.result_commit is not None
-            and worktree.diff_hash is not None
-            and inspection.head == worktree.result_commit
-            and inspection.head != worktree.base_commit
-        ):
+        is_finalized = False
+        recovered = False
+        if inspection.head != worktree.base_commit:
+            # A retry may observe the host-created commit before the transaction
+            # that records it. Execute retained the measured diff hash and base
+            # commit first, which forms the recovery marker.
+            recorded_result = worktree.result_commit
+            is_finalized = (
+                worktree.diff_hash is not None
+                and inspection.diff_hash == worktree.diff_hash
+                and recorded_result in {worktree.base_commit, inspection.head}
+            )
+            recovered = is_finalized and recorded_result == worktree.base_commit
+        if is_finalized:
             try:
                 await self._git.require_clean_worktree(path)
                 parent = await self._git.commit_parent(path, inspection.head)
@@ -237,25 +251,7 @@ class ResultValidationHandler:
                     "validation_commit_ancestry",
                     "retained result commit is not a direct child of base",
                 )
-            system_checks.append(
-                SystemCheck(
-                    name="already-finalized",
-                    command_id=f"{SYSTEM_GATE_PREFIX}already-finalized",
-                    exit_code=0,
-                    duration_ms=_elapsed_ms(started),
-                )
-            )
-            return _success_payload(
-                base_commit=worktree.base_commit,
-                result_commit=inspection.head,
-                branch=inspection.branch,
-                changed_files=inspection.changed_files,
-                diff_hash=worktree.diff_hash,
-                system_checks=system_checks,
-                gates=(),
-            )
-
-        if inspection.head != worktree.base_commit:
+        elif inspection.head != worktree.base_commit:
             raise ResultValidationError(
                 "validation_precommitted",
                 "provider changed worktree HEAD before validation",
@@ -341,7 +337,7 @@ class ResultValidationHandler:
                 )
             post_gate = await self._git.inspect(path, worktree.base_commit)
             if (
-                post_gate.head != worktree.base_commit
+                post_gate.head != inspection.head
                 or post_gate.branch != inspection.branch
                 or post_gate.changed_files != inspection.changed_files
                 or post_gate.diff_hash != inspection.diff_hash
@@ -350,6 +346,31 @@ class ResultValidationHandler:
                     "validation_gate_mutated_worktree",
                     "required gates changed measured Git facts",
                 )
+
+        if is_finalized:
+            system_checks.append(
+                SystemCheck(
+                    name="recovered-result-commit" if recovered else "already-finalized",
+                    command_id=(
+                        f"{SYSTEM_GATE_PREFIX}recovered-result-commit"
+                        if recovered
+                        else f"{SYSTEM_GATE_PREFIX}already-finalized"
+                    ),
+                    exit_code=0,
+                    duration_ms=_elapsed_ms(started),
+                )
+            )
+            return _success_payload(
+                base_commit=worktree.base_commit,
+                result_commit=inspection.head,
+                branch=inspection.branch,
+                changed_files=inspection.changed_files,
+                diff_hash=inspection.diff_hash,
+                system_checks=system_checks,
+                gates=tuple(run.evidence for run in gate_runs),
+                gate_runs=gate_runs,
+                suspicious=tuple(signal.model_dump(mode="json") for signal in suspicious),
+            )
 
         try:
             await self._git.stage_paths(path, inspection.changed_files)
@@ -364,18 +385,18 @@ class ResultValidationHandler:
                 )
             await self._git.require_clean_worktree(path)
             await self._git.require_no_remotes(path)
-            finalized = await self._git.inspect(path, worktree.base_commit)
+            finalized_inspection = await self._git.inspect(path, worktree.base_commit)
         except GitError as error:
             raise ResultValidationError("validation_git_finalization", str(error)[:500]) from error
 
-        if finalized.head != result_commit:
+        if finalized_inspection.head != result_commit:
             raise ResultValidationError(
                 "validation_git_mismatch",
                 "final Git head does not match the result commit",
             )
 
         # After commit, changed files vs base are the tree delta of the result commit.
-        committed_files = finalized.changed_files or inspection.changed_files
+        committed_files = finalized_inspection.changed_files or inspection.changed_files
         system_checks.append(
             SystemCheck(
                 name="result-commit",
@@ -388,7 +409,7 @@ class ResultValidationHandler:
         return _success_payload(
             base_commit=worktree.base_commit,
             result_commit=result_commit,
-            branch=finalized.branch,
+            branch=finalized_inspection.branch,
             changed_files=committed_files,
             diff_hash=inspection.diff_hash,
             system_checks=system_checks,
@@ -405,6 +426,19 @@ class ResultValidationHandler:
         evidence: dict[str, Any],
     ) -> None:
         async with self._factory.begin() as session:
+            step = await session.scalar(
+                select(Step)
+                .where(
+                    Step.id == request.step_id,
+                    Step.run_id == request.run_id,
+                    Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
+                    Step.lease_owner == request.lease.owner,
+                    Step.lease_generation == request.lease.generation,
+                )
+                .with_for_update()
+            )
+            if step is None:
+                raise LeaseLost(f"validate step lease lost before persistence: {request.step_id}")
             worktree = await session.scalar(
                 select(Worktree).where(Worktree.id == worktree_id).with_for_update()
             )

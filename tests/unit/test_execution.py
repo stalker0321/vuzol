@@ -951,6 +951,40 @@ async def test_typed_git_applies_when_target_branch_is_checked_out(tmp_path: Pat
     assert (repository / "value.txt").read_text() == "approved-on-main\n"
 
 
+@pytest.mark.anyio
+async def test_typed_git_recovers_checked_out_branch_after_ref_only_apply(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "test@example.com")
+    _git(repository, "config", "user.name", "Test")
+    (repository / "value.txt").write_text("base\n")
+    _git(repository, "add", "value.txt")
+    _git(repository, "commit", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD").strip()
+
+    worktree = tmp_path / "worktree"
+    git = LocalGit()
+    await git.add_worktree(repository, worktree, "result", base)
+    (worktree / "value.txt").write_text("approved\n")
+    await git.stage_paths(worktree, ("value.txt",))
+    result = await git.create_commit(worktree, "approved result")
+
+    _git(repository, "fetch", "--no-tags", str(worktree), result)
+    _git(repository, "update-ref", "refs/heads/main", result, base)
+    assert (repository / "value.txt").read_text() == "base\n"
+
+    assert not await git.apply_result(
+        repository,
+        worktree,
+        target_branch="main",
+        expected_head=base,
+        result_commit=result,
+    )
+    assert (repository / "value.txt").read_text() == "approved\n"
+    assert not _git(repository, "status", "--porcelain").strip()
+
+
 def _finalizer_repository(tmp_path: Path) -> tuple[Path, str, str]:
     repository = tmp_path / "finalizer-repo"
     repository.mkdir()

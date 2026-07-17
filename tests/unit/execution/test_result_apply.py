@@ -8,7 +8,7 @@ import pytest
 from vuzol.config import DeliveryMode, GitDeliveryPolicy
 from vuzol.execution.git import GitError
 from vuzol.execution.result_apply import ResultApplyHandler
-from vuzol.storage.types import ApprovalStatus
+from vuzol.storage.types import ApprovalStatus, StepStatus
 from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.result_approval import envelope_hash
@@ -75,6 +75,7 @@ async def test_result_apply_fails_closed_before_recording_delivery(failure: str)
         "result_commit": "f" * 40,
     }
     handler._load = AsyncMock(return_value=(approval_id, envelope, worktree))  # type: ignore[method-assign]
+    handler._assert_current_lease = AsyncMock()  # type: ignore[method-assign]
     handler._record_applied = AsyncMock()  # type: ignore[method-assign]
 
     outcome = await handler.execute(MagicMock(), CancellationContext())
@@ -105,6 +106,7 @@ async def test_result_apply_tolerates_unrelated_bundle_revision_drift() -> None:
         "result_commit": "f" * 40,
     }
     handler._load = AsyncMock(return_value=(approval_id, envelope, worktree))  # type: ignore[method-assign]
+    handler._assert_current_lease = AsyncMock()  # type: ignore[method-assign]
     handler._record_applied = AsyncMock()  # type: ignore[method-assign]
 
     outcome = await handler.execute(MagicMock(), CancellationContext())
@@ -133,6 +135,7 @@ async def test_result_apply_records_the_exact_successful_operation() -> None:
         "result_commit": "f" * 40,
     }
     handler._load = AsyncMock(return_value=(approval_id, envelope, worktree))  # type: ignore[method-assign]
+    handler._assert_current_lease = AsyncMock()  # type: ignore[method-assign]
     handler._record_applied = AsyncMock()  # type: ignore[method-assign]
 
     outcome = await handler.execute(MagicMock(), CancellationContext())
@@ -165,8 +168,14 @@ async def test_result_apply_load_rejects_stale_persistence(failure: str) -> None
         "diff_hash": "c" * 64,
     }
     approval = SimpleNamespace(status=MagicMock(), action_envelope_hash="unused")
+    run_id = uuid.uuid4()
+    lease = SimpleNamespace(owner="applier", generation=3)
     step = SimpleNamespace(
         id=uuid.UUID(envelope["step_id"]),
+        status=StepStatus.RUNNING,
+        lease_owner=lease.owner,
+        lease_generation=lease.generation,
+        run_id=run_id,
         payload={
             "approval_id": str(approval_id),
             "action_envelope": envelope,
@@ -192,6 +201,24 @@ async def test_result_apply_load_rejects_stale_persistence(failure: str) -> None
     session.scalar = AsyncMock(return_value=None if failure == "worktree" else worktree)
     factory = MagicMock(return_value=AsyncContext(session))
     handler = ResultApplyHandler(factory, MagicMock(), MagicMock())
+    request = SimpleNamespace(
+        step_id=step.id,
+        run_id=run_id,
+        task_id=uuid.uuid4(),
+        lease=lease,
+    )
 
     with pytest.raises((LookupError, ValueError)):
-        await handler._load(MagicMock(step_id=step.id, run_id=uuid.uuid4(), task_id=uuid.uuid4()))
+        await handler._load(request)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_result_apply_honors_cancellation_before_side_effect() -> None:
+    handler = ResultApplyHandler(MagicMock(), MagicMock(), MagicMock())
+    cancellation = CancellationContext()
+    cancellation.request()
+
+    outcome = await handler.execute(MagicMock(), cancellation)
+
+    assert outcome.kind is OutcomeKind.CANCELLED
+    assert outcome.category == "cancelled_before_apply"

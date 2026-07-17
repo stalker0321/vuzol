@@ -11,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import DeliveryMode
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.git import GitError, LocalGit
+from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import Approval, Step, Worktree
-from vuzol.storage.types import ApprovalStatus, WorktreeDeliveryState
+from vuzol.storage.types import ApprovalStatus, StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.result_approval import envelope_hash, verified_envelope
@@ -32,7 +33,12 @@ class ResultApplyHandler:
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
     ) -> StepOutcome:
-        del cancellation
+        if cancellation.requested:
+            return StepOutcome(
+                kind=OutcomeKind.CANCELLED,
+                result={},
+                category="cancelled_before_apply",
+            )
         try:
             approval_id, envelope, worktree = await self._load(request)
             project = self._registries.projects.get(worktree.project_id)
@@ -52,6 +58,13 @@ class ResultApplyHandler:
             identity, _remote = await self._git.repository_identity(project.repository_path)
             if identity != envelope["repository_identity_hash"]:
                 raise ValueError("managed repository identity does not match the approval")
+            await self._assert_current_lease(request)
+            if cancellation.requested:
+                return StepOutcome(
+                    kind=OutcomeKind.CANCELLED,
+                    result={},
+                    category="cancelled_before_apply",
+                )
             await self._git.apply_result(
                 project.repository_path,
                 Path(worktree.path),
@@ -65,6 +78,13 @@ class ResultApplyHandler:
                 worktree_id=worktree.id,
                 operation_hash=envelope_hash(envelope),
                 target_branch=envelope["target_branch"],
+            )
+        except LeaseLost:
+            cancellation.request()
+            return StepOutcome(
+                kind=OutcomeKind.CANCELLED,
+                result={},
+                category="apply_lease_lost",
             )
         except (GitError, LookupError, ValueError) as error:
             return StepOutcome(
@@ -83,6 +103,13 @@ class ResultApplyHandler:
             step = await session.get(Step, request.step_id)
             if step is None:
                 raise LookupError("approval step is missing")
+            if (
+                step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
+                or step.lease_owner != request.lease.owner
+                or step.lease_generation != request.lease.generation
+                or step.run_id != request.run_id
+            ):
+                raise LeaseLost(f"apply step lease lost before loading: {request.step_id}")
             raw_id = step.payload.get("approval_id")
             if not isinstance(raw_id, str):
                 raise ValueError("approval step has no approval identity")
@@ -122,6 +149,19 @@ class ResultApplyHandler:
         target_branch: str,
     ) -> None:
         async with self._factory.begin() as session:
+            step = await session.scalar(
+                select(Step)
+                .where(
+                    Step.id == request.step_id,
+                    Step.run_id == request.run_id,
+                    Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
+                    Step.lease_owner == request.lease.owner,
+                    Step.lease_generation == request.lease.generation,
+                )
+                .with_for_update()
+            )
+            if step is None:
+                raise LeaseLost(f"apply step lease lost before persistence: {request.step_id}")
             approval = await session.scalar(
                 select(Approval).where(Approval.id == approval_id).with_for_update()
             )
@@ -143,3 +183,17 @@ class ResultApplyHandler:
             worktree.delivery_operation_hash = operation_hash
             worktree.delivered_ref = f"refs/heads/{target_branch}"
             await session.flush()
+
+    async def _assert_current_lease(self, request: StepExecutionRequest) -> None:
+        async with self._factory() as session:
+            step = await session.scalar(
+                select(Step).where(
+                    Step.id == request.step_id,
+                    Step.run_id == request.run_id,
+                    Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
+                    Step.lease_owner == request.lease.owner,
+                    Step.lease_generation == request.lease.generation,
+                )
+            )
+            if step is None:
+                raise LeaseLost(f"apply step lease lost before side effect: {request.step_id}")

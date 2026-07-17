@@ -37,7 +37,7 @@ from vuzol.workflows.ports import CancellationContext
 
 INDEPENDENT_REVIEW_SCHEMA = "independent-review.v1"
 _PROMPT_REVISION = "independent-review-v1"
-_MAX_DIFF_CHARS = 16_000
+_MAX_DIFF_CHARS = 60_000
 _MAX_FILES = 80
 
 _OUTPUT_JSON_SCHEMA: dict[str, Any] = {
@@ -150,6 +150,17 @@ class IndependentModelReviewer:
             ) from error
 
         task_id, run_id, step_id = request_ids
+        if len(inspection.changed_files) > _MAX_FILES:
+            raise IndependentReviewError(
+                f"independent review bundle has {len(inspection.changed_files)} files; "
+                f"maximum is {_MAX_FILES}; split the change"
+            )
+        diff_text = inspection.diff.decode("utf-8", "replace")
+        if len(diff_text) > _MAX_DIFF_CHARS:
+            raise IndependentReviewError(
+                f"independent review diff has {len(diff_text)} characters; "
+                f"maximum is {_MAX_DIFF_CHARS}; split the change"
+            )
         provider_request = _build_request(
             task=task,
             risk=risk,
@@ -201,11 +212,8 @@ def _build_request(
     profile: ProviderProfileConfig,
     policy_revision: str,
 ) -> ProviderRequest:
-    files = tuple(inspection.changed_files[:_MAX_FILES])
+    files = inspection.changed_files
     diff_text = inspection.diff.decode("utf-8", "replace")
-    truncated = len(diff_text) > _MAX_DIFF_CHARS
-    if truncated:
-        diff_text = diff_text[:_MAX_DIFF_CHARS] + "\n…[diff truncated for independent review]…"
     goal = ""
     draft = task.task_draft if isinstance(task.task_draft, dict) else {}
     for key in ("goal", "normalized_title", "summary"):
@@ -230,7 +238,7 @@ def _build_request(
         "diff_hash": diff_hash or inspection.diff_hash,
         "changed_files": list(files),
         "changed_file_count": len(inspection.changed_files),
-        "diff_truncated": truncated,
+        "diff_truncated": False,
         "gates": gates[:20],
         "mechanical_findings": [
             finding.model_dump(mode="json") for finding in mechanical_findings[:20]
@@ -256,7 +264,7 @@ def _build_request(
             ContextItem(
                 source="retained_result_review_bundle",
                 reference=f"worktree-diff:{result_commit[:12]}",
-                content=encoded[:20_000],
+                content=encoded,
                 content_hash=content_hash,
             ),
         ),

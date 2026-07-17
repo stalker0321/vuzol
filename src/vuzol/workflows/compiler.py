@@ -3,7 +3,7 @@
 import uuid
 
 from vuzol.interpretation.domain import TaskDraft, TaskType
-from vuzol.storage.types import RiskLevel, StepStatus
+from vuzol.storage.types import StepStatus
 from vuzol.workflows.definitions import WORKFLOW_REGISTRY
 from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow, WorkflowDefinitionError
 
@@ -30,8 +30,10 @@ def compile_workflow(
 
     flags = {
         "needs_planning": draft.needs_planning,
-        "needs_review": draft.suggested_risk
-        in {RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.PRIVILEGED},
+        # Coding results always receive a cheap mechanical review. The review
+        # step re-evaluates risk from the measured diff and only invokes an
+        # independent model when the runtime facts require it.
+        "needs_review": draft.task_type is TaskType.CODING,
     }
     included = [
         step for step in definition.steps if step.optional_flag is None or flags[step.optional_flag]

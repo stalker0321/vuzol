@@ -172,7 +172,7 @@ def _require_provider_profiles(document: dict[str, object]) -> None:
         "provider": "openai-compatible",
         "model": "gpt-5-nano-2025-08-07",
         "launch_mode": "api",
-        "roles": ["planner"],
+        "roles": ["planner", "reviewer"],
         "output_limit": 1_000,
         "enabled": True,
     }

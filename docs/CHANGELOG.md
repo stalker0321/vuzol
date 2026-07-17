@@ -4,8 +4,8 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
-- updated the fail-closed MVP readiness revision check to follow the authoritative `origin/main`
-  deployment branch instead of the retired Step 09A experiment branch;
+- updated the fail-closed MVP readiness check to follow the authoritative `origin/main`
+  deployment branch and the active planner/reviewer policy instead of retired Step 09A assumptions;
 - added a required one-line `task_summary` to the semantic interpreter contract and surfaced it in
   project task cards, the active-project dashboard, and completion history while preserving a
   separate implementation-result summary and compatibility with persisted pre-1.4 drafts;

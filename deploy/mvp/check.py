@@ -325,7 +325,7 @@ def check(expected_sha: str) -> dict[str, object]:
         raise MvpCheckError("public checkout is dirty")
     if _git(ROOT, "rev-parse", "HEAD") != expected_sha:
         raise MvpCheckError("public checkout SHA differs from the expected SHA")
-    if _git(ROOT, "rev-parse", "origin/step09a-adaptive-worker-trial") != expected_sha:
+    if _git(ROOT, "rev-parse", "origin/main") != expected_sha:
         raise MvpCheckError("origin branch differs from the expected SHA")
     if _git(DEPLOYED, "status", "--short") or _git(DEPLOYED, "rev-parse", "HEAD") != expected_sha:
         raise MvpCheckError("deployed checkout is dirty or at the wrong SHA")

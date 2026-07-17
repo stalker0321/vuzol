@@ -13,7 +13,9 @@ import pytest
 from pydantic import HttpUrl
 
 from vuzol.config.models import CostClass, LaunchMode, ProviderProfileConfig, ProviderRole
+from vuzol.config.settings import HardLimits
 from vuzol.execution.domain import GitInspection
+from vuzol.providers.budgets import BudgetExceeded
 from vuzol.providers.domain import (
     NormalizedUsage,
     ProviderErrorCategory,
@@ -21,8 +23,10 @@ from vuzol.providers.domain import (
     ProviderResultStatus,
 )
 from vuzol.providers.errors import ProviderFailure
+from vuzol.review import independent as independent_module
 from vuzol.review.domain import FindingSeverity, ReviewFinding, ReviewVerdictKind
 from vuzol.review.independent import (
+    DatabaseReviewAccounting,
     IndependentModelReviewer,
     IndependentReviewError,
     ReviewBudgetReservation,
@@ -94,6 +98,17 @@ def _reviewer(registries: MagicMock, adapters: MagicMock) -> IndependentModelRev
     return IndependentModelReviewer(registries, adapters, accounting)
 
 
+class AsyncContext:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    async def __aenter__(self) -> object:
+        return self.value
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
 def test_select_reviewer_prefers_reviewer_role() -> None:
     planner = _api_profile(profile_id="planner", roles={ProviderRole.PLANNER}, priority=10)
     reviewer = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER}, priority=90)
@@ -143,6 +158,27 @@ def test_pass_verdict_with_blocking_finding_requires_changes() -> None:
     assert verdict.verdict is ReviewVerdictKind.CHANGES_REQUIRED
     assert not verdict.allows_progress
 
+    fallback = _verdict_from_provider_result(
+        result.model_copy(
+            update={
+                "structured_output": {
+                    "verdict": "pass",
+                    "summary": "",
+                    "findings": ["ignored non-object finding"],
+                }
+            }
+        ),
+        risk=RiskLevel.HIGH,
+        base_commit="a" * 40,
+        result_commit="b" * 40,
+        diff_hash="c" * 64,
+        changed_files=("x.py",),
+        profile_id="reviewer",
+        mechanical_findings=(),
+    )
+    assert fallback.verdict is ReviewVerdictKind.PASSED
+    assert "Independent review via reviewer" in fallback.summary
+
 
 def test_large_review_bundle_is_complete_across_hashed_context_chunks() -> None:
     profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
@@ -177,6 +213,80 @@ def test_large_review_bundle_is_complete_across_hashed_context_chunks() -> None:
         item.content_hash == hashlib.sha256(item.content.encode()).hexdigest()
         for item in request.context
     )
+
+
+@pytest.mark.anyio
+async def test_database_review_accounting_reserves_reconciles_and_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="task",
+        changed_files=("x.py",),
+        diff=b"+safe\n",
+    )
+    request = _build_request(
+        task=SimpleNamespace(task_draft={"goal": "Review"}, original_text="x"),  # type: ignore[arg-type]
+        risk=RiskLevel.HIGH,
+        inspection=inspection,
+        base_commit="a" * 40,
+        result_commit="b" * 40,
+        diff_hash=inspection.diff_hash,
+        gates=[{"name": "tests", "exit_code": 0}],
+        mechanical_findings=(),
+        task_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_id=uuid.uuid4(),
+        timeout_seconds=60,
+        profile=profile,
+        policy_revision="test-policy.v1",
+    )
+    reservation_id = uuid.uuid4()
+    reserve = AsyncMock(return_value=SimpleNamespace(id=reservation_id))
+    reconcile = AsyncMock()
+    release = AsyncMock()
+    monkeypatch.setattr(independent_module, "reserve_budget", reserve)
+    monkeypatch.setattr(independent_module, "reconcile_usage", reconcile)
+    monkeypatch.setattr(independent_module, "release_reservation", release)
+    factory = MagicMock()
+    factory.begin.return_value = AsyncContext(MagicMock())
+    accounting = DatabaseReviewAccounting(factory, HardLimits())
+
+    reservation = await accounting.reserve(request=request, profile=profile)
+    result = ProviderResult(
+        status=ProviderResultStatus.SUCCEEDED,
+        structured_output={"verdict": "pass", "summary": "ok", "findings": []},
+        usage=NormalizedUsage(input_tokens=10, output_tokens=5, duration_ms=2),
+        provider_request_id="provider-request",
+        adapter_version="openai-compatible.v1",
+    )
+    lease = _lease()
+    await accounting.reconcile(
+        reservation=reservation,
+        lease=lease,
+        profile=profile,
+        result=result,
+        outcome="succeeded",
+        conservative=False,
+    )
+    await accounting.reconcile(
+        reservation=reservation,
+        lease=lease,
+        profile=profile,
+        result=None,
+        outcome="timeout",
+        conservative=True,
+    )
+    await accounting.release(reservation=reservation, lease=lease)
+
+    assert reservation.id == reservation_id
+    reserve.assert_awaited_once()
+    assert reconcile.await_count == 2
+    release.assert_awaited_once()
+    reserve.side_effect = BudgetExceeded("limit")
+    with pytest.raises(IndependentReviewError, match="budget is exhausted"):
+        await accounting.reserve(request=request, profile=profile)
 
 
 @pytest.mark.anyio
@@ -272,6 +382,32 @@ async def test_independent_reviewer_fails_closed_on_provider_error() -> None:
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text="x"),  # type: ignore[arg-type]
             risk=RiskLevel.PRIVILEGED,
+            inspection=GitInspection(
+                head="b" * 40,
+                branch="task",
+                changed_files=("x.py",),
+                diff=b"+x\n",
+            ),
+            base_commit="a" * 40,
+            result_commit="b" * 40,
+            diff_hash=None,
+            gates=[{"exit_code": 0}],
+            mechanical_findings=(),
+            request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
+            timeout_seconds=30,
+            cancellation=CancellationContext(),
+            lease=_lease(),
+        )
+    adapter.execute.side_effect = ProviderFailure(
+        ProviderErrorCategory.PROVIDER_UNAVAILABLE,
+        retryable=True,
+        request_sent=False,
+        safe_summary="provider unavailable before request",
+    )
+    with pytest.raises(IndependentReviewError, match="before request"):
+        await reviewer.review(
+            task=SimpleNamespace(task_draft={}, original_text="x"),  # type: ignore[arg-type]
+            risk=RiskLevel.HIGH,
             inspection=GitInspection(
                 head="b" * 40,
                 branch="task",
@@ -442,6 +578,26 @@ async def test_independent_reviewer_rejects_oversized_bundle() -> None:
             lease=_lease(),
         )
     adapter.execute.assert_not_awaited()
+    with pytest.raises(IndependentReviewError, match="maximum is 60000"):
+        await reviewer.review(
+            task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
+            risk=RiskLevel.HIGH,
+            inspection=GitInspection(
+                head="b" * 40,
+                branch="task",
+                changed_files=("large.py",),
+                diff=b"+" + b"x" * 60_001,
+            ),
+            base_commit="a" * 40,
+            result_commit="b" * 40,
+            diff_hash=None,
+            gates=[{"exit_code": 0}],
+            mechanical_findings=(),
+            request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
+            timeout_seconds=30,
+            cancellation=CancellationContext(),
+            lease=_lease(),
+        )
 
 
 @pytest.mark.anyio

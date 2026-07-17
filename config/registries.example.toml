@@ -42,6 +42,10 @@ sandbox_profile = "project-default"
 validation_sandbox_profile = "example-validation"
 enabled = false
 
+[[projects.validation_commands]]
+name = "tests"
+argv = ["make", "test"]
+
 [projects.git_delivery]
 allowed_modes = ["retain", "patch"]
 approval_required = []

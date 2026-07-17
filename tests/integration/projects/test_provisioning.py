@@ -325,6 +325,14 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
         assert overlay_path is not None
         overlay = json.loads(overlay_path.read_text())
         assert overlay["projects"][0]["id"] == "notes"
+        assert overlay["projects"][0]["validation_commands"] == [
+            {
+                "name": "tests",
+                "argv": ["make", "test"],
+                "timeout_seconds": 600,
+                "required": True,
+            }
+        ]
         assert overlay["topics"][0]["message_thread_id"] == 41
         assert overlay["topics"][0]["default_workflow"] == "adaptive_task"
         assert overlay["topics"][0]["pinned"] is True

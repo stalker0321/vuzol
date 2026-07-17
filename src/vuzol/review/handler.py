@@ -1,17 +1,20 @@
-"""Deterministic mechanical review for the coding.v1 review step.
+"""Coding.v1 review: mechanical inspection plus independent model review.
 
-Independent LLM review for high/privileged risk is not yet implemented and
-fails closed. Medium risk may advance after mechanical inspection only.
+Medium risk advances after mechanical inspection only. High and privileged
+risk always require an independent model-only reviewer after mechanical gates.
 """
 
 from __future__ import annotations
 
+import uuid
 from contextlib import suppress
 from pathlib import Path
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vuzol.execution.domain import GitInspection
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.experiments.review import scan_suspicious_patterns
@@ -21,12 +24,32 @@ from vuzol.review.domain import (
     ReviewVerdict,
     ReviewVerdictKind,
 )
+from vuzol.review.independent import IndependentReviewError
 from vuzol.storage.models import Run, Step, Task, Worktree
 from vuzol.storage.types import RiskLevel, StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
 REVIEW_SCHEMA = "result-review.v1"
+
+
+class IndependentReviewPort(Protocol):
+    async def review(
+        self,
+        *,
+        task: Task,
+        risk: RiskLevel,
+        inspection: GitInspection,
+        base_commit: str,
+        result_commit: str,
+        diff_hash: str | None,
+        gates: list[object],
+        mechanical_findings: tuple[ReviewFinding, ...],
+        request_ids: tuple[uuid.UUID, uuid.UUID, uuid.UUID],
+        timeout_seconds: float,
+        cancellation: CancellationContext,
+    ) -> ReviewVerdict: ...
+
 
 _BLOCKING_CLASSIFICATIONS = frozenset(
     {
@@ -53,7 +76,7 @@ _RISK_ORDER = {
 
 
 class ResultReviewHandler:
-    """System-owned mechanical review bound to a completed validate predecessor."""
+    """System-owned review bound to a completed validate predecessor."""
 
     def __init__(
         self,
@@ -61,22 +84,28 @@ class ResultReviewHandler:
         git: LocalGit,
         *,
         worktree_root: Path,
+        independent_reviewer: IndependentReviewPort | None = None,
     ) -> None:
         self._factory = session_factory
         self._git = git
         self._worktree_root = trusted_root(worktree_root, create=False)
+        self._independent = independent_reviewer
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
     ) -> StepOutcome:
-        del cancellation
         try:
-            verdict = await self._review(request)
-        except (GitError, LookupError, ValueError) as error:
+            verdict = await self._review(request, cancellation)
+        except (GitError, LookupError, ValueError, IndependentReviewError) as error:
+            category = (
+                "independent_review_required"
+                if isinstance(error, IndependentReviewError)
+                else "review_failed"
+            )
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
                 result={},
-                category="review_failed",
+                category=category,
                 summary=str(error)[:500],
                 unknown_effects=False,
             )
@@ -90,7 +119,9 @@ class ResultReviewHandler:
             )
         return StepOutcome.succeeded(verdict.as_step_result())
 
-    async def _review(self, request: StepExecutionRequest) -> ReviewVerdict:
+    async def _review(
+        self, request: StepExecutionRequest, cancellation: CancellationContext
+    ) -> ReviewVerdict:
         async with self._factory() as session:
             step = await session.get(Step, request.step_id)
             run = await session.get(Run, request.run_id)
@@ -145,6 +176,7 @@ class ResultReviewHandler:
                 raise ValueError("validate result commit does not match retained worktree")
             if structured.get("base_commit") != base_commit:
                 raise ValueError("validate base commit does not match retained worktree")
+            bound_task = task
 
         await self._git.require_clean_worktree(path)
         await self._git.require_no_remotes(path)
@@ -153,28 +185,6 @@ class ResultReviewHandler:
             raise ValueError("worktree HEAD does not match the retained result commit")
         if inspection.branch != branch:
             raise ValueError("worktree branch does not match the prepared task branch")
-
-        if risk in {RiskLevel.HIGH, RiskLevel.PRIVILEGED}:
-            return ReviewVerdict(
-                verdict=ReviewVerdictKind.BLOCKED,
-                review_kind="mechanical",
-                risk=risk.value,
-                base_commit=base_commit,
-                result_commit=result_commit,
-                diff_hash=diff_hash,
-                changed_files=inspection.changed_files,
-                findings=(
-                    ReviewFinding(
-                        severity=FindingSeverity.BLOCKER,
-                        classification="independent_review_required",
-                        summary=(
-                            "High or privileged risk requires an independent model reviewer "
-                            "which is not yet enabled."
-                        ),
-                    ),
-                ),
-                summary="Independent review is required and is not yet implemented.",
-            )
 
         findings = mechanical_findings(inspection.diff)
         blockers = tuple(item for item in findings if item.severity is FindingSeverity.BLOCKER)
@@ -192,6 +202,28 @@ class ResultReviewHandler:
                 findings=findings,
                 summary=f"Mechanical review blocked: {blockers[0].classification}.",
             )
+
+        requires_independent = risk in {RiskLevel.HIGH, RiskLevel.PRIVILEGED}
+        if requires_independent:
+            if self._independent is None:
+                raise IndependentReviewError(
+                    "high or privileged risk requires an independent model reviewer, "
+                    "but none is configured on this worker"
+                )
+            return await self._independent.review(
+                task=bound_task,
+                risk=risk,
+                inspection=inspection,
+                base_commit=base_commit,
+                result_commit=result_commit,
+                diff_hash=measured_diff_hash,
+                gates=list(gates),
+                mechanical_findings=findings,
+                request_ids=(request.task_id, request.run_id, request.step_id),
+                timeout_seconds=request.timeout_seconds,
+                cancellation=cancellation,
+            )
+
         if warnings:
             return ReviewVerdict(
                 verdict=ReviewVerdictKind.PASSED_WITH_WARNINGS,

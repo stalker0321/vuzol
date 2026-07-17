@@ -2,14 +2,20 @@
 
 ## Boundary
 
-Step 05 converts Telegram intake into a provider-neutral `TaskDraft` schema version `1.0` using
-prompt version `step-05-v1`. The original Telegram text remains in `telegram_intake_messages` and
+Step 05 converts Telegram intake into a provider-neutral `TaskDraft` schema version `1.4` using
+prompt version `architecture-routing-v7`. The original Telegram text remains in
+`telegram_intake_messages` and
 `tasks`; voice bytes are retained as a bounded private artifact, while the raw transcript is stored
 on both the task and immutable interpretation record.
 
 The interpreter receives only the current intake, mapped topic/project, reply-linked task, bounded
 active-task titles, configured project summaries, and the capability vocabulary. It never receives
 full topic history, credentials, provider accounts, repository contents, or unrelated tasks.
+
+Alongside the full `goal` and compact `normalized_title`, every new draft includes a one-line
+`task_summary` for user-facing Telegram projections. It describes what the task asks to achieve and
+must not claim execution progress or completion. Pre-1.4 persisted drafts remain readable through
+a deterministic fallback to their normalized title or goal.
 
 All user text, transcripts, summaries, quoted text, repository excerpts, and retrieved content are
 serialized as untrusted input beneath a fixed system instruction. Provider output must validate as

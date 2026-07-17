@@ -243,6 +243,7 @@ def _draft(request: TrialSeedRequest) -> TaskDraft:
         operation=TaskOperation.MODIFY,
         project_id=request.project_id,
         goal=request.goal,
+        task_summary=request.task_id.replace("_", " ")[:240],
         requested_outcomes=request.acceptance_criteria,
         constraints=request.forbidden_changes,
         required_capabilities=frozenset(

@@ -63,6 +63,7 @@ def simple_draft() -> TaskDraft:
         task_type=TaskType.GENERAL,
         operation=TaskOperation.EXPLAIN,
         goal="Answer the question",
+        task_summary="Answer the user's question",
         suggested_complexity=SuggestedComplexity.SMALL,
         suggested_risk=RiskLevel.LOW,
         needs_planning=False,

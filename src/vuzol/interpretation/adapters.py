@@ -31,7 +31,9 @@ architecture when the primary outcome is repository-aware design, architecture a
 technical decision rather than a file modification. In a project topic, classify that work as
 action=create_task, not answer_question or general_conversation. Architecture tasks may inspect
 the project through a full agent but must not edit it. An explicit request to implement, build,
-write code, or create project files is coding even when it follows an architecture discussion."""
+write code, or create project files is coding even when it follows an architecture discussion.
+Fill task_summary with one concise user-facing line describing what the task asks to achieve. Do
+not include status, identifiers, implementation claims, or claims that the work is complete."""
 
 PROJECT_INTAKE_PROMPT = """When topic_kind is inbox, interpret the request as create_project.
 Treat the message as the project's nature and goal. Do not choose final new_project_id or

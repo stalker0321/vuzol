@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from vuzol.config import Capability, TopicKind
 from vuzol.storage.types import RiskLevel
 
-TASK_DRAFT_SCHEMA_VERSION = "1.3"
-INTERPRETER_PROMPT_VERSION = "architecture-routing-v6"
+TASK_DRAFT_SCHEMA_VERSION = "1.4"
+INTERPRETER_PROMPT_VERSION = "architecture-routing-v7"
 
 
 class FrozenModel(BaseModel):
@@ -68,6 +68,7 @@ class TaskDraft(FrozenModel):
     new_project_name: str | None = Field(default=None, min_length=1, max_length=100)
     project_name_options: tuple[ProjectNameOption, ...] = Field(default=(), max_length=9)
     goal: str = Field(min_length=1, max_length=4_000)
+    task_summary: str = Field(min_length=1, max_length=240)
     requested_outcomes: tuple[str, ...] = Field(default=(), max_length=20)
     constraints: tuple[str, ...] = Field(default=(), max_length=20)
     missing_information: tuple[str, ...] = Field(default=(), max_length=20)
@@ -81,6 +82,19 @@ class TaskDraft(FrozenModel):
     normalized_title: str = Field(min_length=1, max_length=120)
     embedded_instructions: tuple[str, ...] = Field(default=(), max_length=20)
     contradiction_detected: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_legacy_task_summary(cls, value: object) -> object:
+        """Keep persisted pre-1.4 drafts readable while requiring the field from new models."""
+
+        if not isinstance(value, dict) or "task_summary" in value:
+            return value
+        legacy = dict(value)
+        fallback = legacy.get("normalized_title") or legacy.get("goal")
+        if isinstance(fallback, str) and fallback.strip():
+            legacy["task_summary"] = " ".join(fallback.split())[:240]
+        return legacy
 
     @model_validator(mode="after")
     def validate_clarification_and_continuation(self) -> "TaskDraft":

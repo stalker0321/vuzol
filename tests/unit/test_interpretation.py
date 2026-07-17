@@ -171,6 +171,17 @@ def test_task_schema_exposes_architecture_as_a_distinct_agent_task() -> None:
     schema = TaskDraft.model_json_schema()
     task_type_schema = schema["$defs"]["TaskType"]
     assert "architecture" in task_type_schema["enum"]
+    assert "task_summary" in schema["required"]
+
+
+def test_legacy_task_draft_derives_summary_from_normalized_title() -> None:
+    value = draft()
+    assert value.task_summary == "Inspect service"
+
+
+def test_explicit_task_summary_is_preserved() -> None:
+    value = draft(task_summary="Inspect current service health and report anomalies")
+    assert value.task_summary == "Inspect current service health and report anomalies"
 
 
 def test_project_architecture_question_is_a_read_only_agent_task() -> None:

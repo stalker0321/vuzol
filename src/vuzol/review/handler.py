@@ -23,6 +23,7 @@ from vuzol.review.domain import (
 )
 from vuzol.review.independent import IndependentReviewError
 from vuzol.storage.models import Run, Step, Task, Worktree
+from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import RiskLevel, StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -45,6 +46,7 @@ class IndependentReviewPort(Protocol):
         request_ids: tuple[uuid.UUID, uuid.UUID, uuid.UUID],
         timeout_seconds: float,
         cancellation: CancellationContext,
+        lease: LeaseToken,
     ) -> ReviewVerdict: ...
 
 
@@ -247,6 +249,7 @@ class ResultReviewHandler:
                 request_ids=(request.task_id, request.run_id, request.step_id),
                 timeout_seconds=request.timeout_seconds,
                 cancellation=cancellation,
+                lease=request.lease,
             )
 
         if warnings:

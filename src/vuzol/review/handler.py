@@ -1,11 +1,8 @@
-"""Coding.v1 review: mechanical inspection plus independent model review.
-
-Medium risk advances after mechanical inspection only. High and privileged
-risk always require an independent model-only reviewer after mechanical gates.
-"""
+"""Coding.v1 review: mechanical inspection plus risk-based independent review."""
 
 from __future__ import annotations
 
+import re
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -73,6 +70,33 @@ _RISK_ORDER = {
     RiskLevel.HIGH: 2,
     RiskLevel.PRIVILEGED: 3,
 }
+_PRIVILEGED_PATH_PARTS = frozenset(
+    {"ansible", "deploy", "deployment", "helm", "infra", "k8s", "systemd", "terraform"}
+)
+_HIGH_RISK_PATH_PARTS = frozenset(
+    {
+        "github",
+        "alembic",
+        "auth",
+        "credentials",
+        "migration",
+        "migrations",
+        "permissions",
+        "security",
+        "secrets",
+    }
+)
+_HIGH_RISK_FILENAMES = frozenset(
+    {
+        "dockerfile",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "pyproject.toml",
+        "requirements.txt",
+        "uv.lock",
+    }
+)
 
 
 class ResultReviewHandler:
@@ -185,6 +209,7 @@ class ResultReviewHandler:
             raise ValueError("worktree HEAD does not match the retained result commit")
         if inspection.branch != branch:
             raise ValueError("worktree branch does not match the prepared task branch")
+        risk = runtime_risk(risk, inspection)
 
         findings = mechanical_findings(inspection.diff)
         blockers = tuple(item for item in findings if item.severity is FindingSeverity.BLOCKER)
@@ -303,6 +328,27 @@ def effective_risk(task: Task) -> RiskLevel:
         with suppress(ValueError):
             candidates.append(RiskLevel(raw))
     return max(candidates, key=lambda value: _RISK_ORDER[value])
+
+
+def runtime_risk(current: RiskLevel, inspection: GitInspection) -> RiskLevel:
+    """Escalate persisted risk from measured paths and diff scope; never downgrade."""
+
+    measured = RiskLevel.LOW
+    normalized_paths = tuple(path.lower() for path in inspection.changed_files)
+    path_parts = {part for path in normalized_paths for part in re.split(r"[/._-]+", path) if part}
+    filenames = {path.rsplit("/", 1)[-1] for path in normalized_paths}
+    if path_parts & _PRIVILEGED_PATH_PARTS:
+        measured = RiskLevel.PRIVILEGED
+    elif (
+        path_parts & _HIGH_RISK_PATH_PARTS
+        or filenames & _HIGH_RISK_FILENAMES
+        or len(inspection.changed_files) > 20
+        or len(inspection.diff) > 16_000
+    ):
+        measured = RiskLevel.HIGH
+    elif len(inspection.changed_files) > 5 or len(inspection.diff) > 4_000:
+        measured = RiskLevel.MEDIUM
+    return max((current, measured), key=lambda value: _RISK_ORDER[value])
 
 
 def _blocked_category(verdict: ReviewVerdict) -> str:

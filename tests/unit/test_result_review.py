@@ -16,6 +16,7 @@ from vuzol.review.handler import (
     ResultReviewHandler,
     effective_risk,
     mechanical_findings,
+    runtime_risk,
 )
 from vuzol.storage.records import LeaseToken, StepRecord
 from vuzol.storage.types import RiskLevel, StepStatus, WorktreeDeliveryState
@@ -72,6 +73,29 @@ def test_effective_risk_uses_draft_when_higher() -> None:
     assert effective_risk(task) is RiskLevel.MEDIUM  # type: ignore[arg-type]
     task = SimpleNamespace(risk=RiskLevel.HIGH, task_draft={"suggested_risk": "low"})
     assert effective_risk(task) is RiskLevel.HIGH  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("paths", "diff", "expected"),
+    (
+        (("src/app.py",), b"+small\n", RiskLevel.LOW),
+        (("src/auth/session.py",), b"+small\n", RiskLevel.HIGH),
+        (("deploy/systemd/vuzol.service",), b"+small\n", RiskLevel.PRIVILEGED),
+        (tuple(f"src/f{i}.py" for i in range(21)), b"+wide\n", RiskLevel.HIGH),
+        (("src/app.py",), b"+" + b"x" * 4_100, RiskLevel.MEDIUM),
+    ),
+)
+def test_runtime_risk_escalates_from_measured_diff(
+    paths: tuple[str, ...], diff: bytes, expected: RiskLevel
+) -> None:
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="task",
+        changed_files=paths,
+        diff=diff,
+    )
+    assert runtime_risk(RiskLevel.LOW, inspection) is expected
+    assert runtime_risk(RiskLevel.PRIVILEGED, inspection) is RiskLevel.PRIVILEGED
 
 
 @pytest.mark.anyio
@@ -200,7 +224,7 @@ async def test_review_blocks_high_risk_without_independent_reviewer(tmp_path: Pa
 
 
 @pytest.mark.anyio
-async def test_review_uses_independent_reviewer_for_high_risk(tmp_path: Path) -> None:
+async def test_review_escalates_sensitive_diff_to_independent_reviewer(tmp_path: Path) -> None:
     from vuzol.review.domain import ReviewVerdict
 
     worktree_path = tmp_path / "wt"
@@ -229,7 +253,9 @@ async def test_review_uses_independent_reviewer_for_high_risk(tmp_path: Path) ->
         dependency_metadata={"predecessor_ordinals": [5]},
     )
     task = SimpleNamespace(
-        risk=RiskLevel.HIGH, task_draft={"goal": "Harden auth"}, original_text="x"
+        risk=RiskLevel.LOW,
+        task_draft={"goal": "Harden auth", "suggested_risk": "low"},
+        original_text="x",
     )
     session = MagicMock()
     session.get = AsyncMock(side_effect=[step, SimpleNamespace(task_id=task_id), task])
@@ -279,6 +305,7 @@ async def test_review_uses_independent_reviewer_for_high_risk(tmp_path: Path) ->
     assert outcome.kind is OutcomeKind.SUCCEEDED
     assert outcome.result["review_kind"] == "independent"
     independent.review.assert_awaited_once()
+    assert independent.review.await_args.kwargs["risk"] is RiskLevel.HIGH
 
 
 @pytest.mark.anyio

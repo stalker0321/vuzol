@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -173,6 +174,10 @@ async def test_independent_reviewer_builds_pass_verdict() -> None:
     assert request.role is ProviderRole.REVIEWER
     assert request.sandbox_reference is None
     assert request.output_json_schema is not None
+    assert (
+        request.context[0].content_hash
+        == hashlib.sha256(request.context[0].content.encode()).hexdigest()
+    )
 
 
 @pytest.mark.anyio
@@ -321,7 +326,7 @@ async def test_independent_reviewer_adapter_missing() -> None:
 
 
 @pytest.mark.anyio
-async def test_independent_reviewer_truncates_large_diff() -> None:
+async def test_independent_reviewer_rejects_oversized_bundle() -> None:
     profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
     registries = MagicMock()
     registries.profiles.items.return_value = (profile,)
@@ -341,29 +346,26 @@ async def test_independent_reviewer_truncates_large_diff() -> None:
     adapters = MagicMock()
     adapters.get.return_value = adapter
     reviewer = IndependentModelReviewer(registries, adapters)
-    huge = b"+" + (b"x" * 20_000) + b"\n"
-    await reviewer.review(
-        task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
-        risk=RiskLevel.HIGH,
-        inspection=GitInspection(
-            head="b" * 40,
-            branch="task",
-            changed_files=tuple(f"f{i}.py" for i in range(100)),
-            diff=huge,
-        ),
-        base_commit="a" * 40,
-        result_commit="b" * 40,
-        diff_hash=None,
-        gates=[{"exit_code": 0}],
-        mechanical_findings=(),
-        request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
-        timeout_seconds=30,
-        cancellation=CancellationContext(),
-    )
-    request = adapter.execute.await_args.args[0]
-    bundle = request.context[0].content
-    assert "diff truncated" in bundle
-    assert '"changed_file_count": 100' in bundle
+    with pytest.raises(IndependentReviewError, match="maximum is 80"):
+        await reviewer.review(
+            task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
+            risk=RiskLevel.HIGH,
+            inspection=GitInspection(
+                head="b" * 40,
+                branch="task",
+                changed_files=tuple(f"f{i}.py" for i in range(100)),
+                diff=b"+safe\n",
+            ),
+            base_commit="a" * 40,
+            result_commit="b" * 40,
+            diff_hash=None,
+            gates=[{"exit_code": 0}],
+            mechanical_findings=(),
+            request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
+            timeout_seconds=30,
+            cancellation=CancellationContext(),
+        )
+    adapter.execute.assert_not_awaited()
 
 
 @pytest.mark.anyio

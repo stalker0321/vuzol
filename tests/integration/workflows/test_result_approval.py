@@ -12,6 +12,7 @@ from sqlalchemy import select
 from vuzol.config import DeliveryMode, GitDeliveryPolicy
 from vuzol.execution.git import LocalGit
 from vuzol.execution.result_apply import ResultApplyHandler
+from vuzol.storage.leasing import claim_step, start_step
 from vuzol.storage.models import Approval, Run, Step, Task, Worktree
 from vuzol.storage.types import (
     ApprovalStatus,
@@ -27,7 +28,7 @@ from vuzol.storage.types import (
 from vuzol.telegram.projections import build_approval_card, build_status_card
 from vuzol.workflows.controls import decide_result
 from vuzol.workflows.domain import OutcomeKind
-from vuzol.workflows.ports import CancellationContext
+from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.result_approval import ensure_result_approval, envelope_hash
 
 from ..storage.helpers import storage
@@ -228,11 +229,24 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
         )
         registries = MagicMock(revision="c" * 64)
         registries.projects.get.return_value = project
-        request = MagicMock(
+        async with factory.begin() as session:
+            lease = await claim_step(
+                session,
+                owner="test-applier",
+                lease_seconds=60,
+                capabilities=frozenset({"git"}),
+                step_types=frozenset({"approval"}),
+            )
+            assert lease is not None
+            await start_step(session, lease)
+        request = StepExecutionRequest(
             task_id=task_id,
             run_id=run_id,
             step_id=approval_step_id,
             step_type="approval",
+            payload={},
+            timeout_seconds=120,
+            lease=lease,
         )
         outcome = await ResultApplyHandler(factory, registries, git).execute(
             request, CancellationContext()

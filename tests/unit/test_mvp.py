@@ -265,6 +265,42 @@ def test_mvp_check_inspects_protected_runtime_without_direct_traversal(
     ]
 
 
+def test_mvp_check_accepts_current_interpreter_prompt_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("mvp_check_interpreter_current", ROOT / "deploy/mvp/check.py")
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> str:
+        calls.append(argv)
+        return "running" if argv[1] == "inspect" else module.INTERPRETER_PROMPT_VERSION
+
+    monkeypatch.setattr(module, "_run", run)
+    assert module._interpreter_prompt_version() == module.INTERPRETER_PROMPT_VERSION
+    assert calls[0][-1] == module.INTERPRETER_CONTAINER
+    assert calls[1][:3] == ("docker", "exec", module.INTERPRETER_CONTAINER)
+
+
+def test_mvp_check_rejects_stale_interpreter_prompt_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("mvp_check_interpreter_stale", ROOT / "deploy/mvp/check.py")
+    monkeypatch.setattr(
+        module,
+        "_run",
+        lambda argv, **_kwargs: "running" if argv[1] == "inspect" else "architecture-routing-v7",
+    )
+    with pytest.raises(module.MvpCheckError, match="runtime='architecture-routing-v7'"):
+        module._interpreter_prompt_version()
+
+
+def test_mvp_check_rejects_stopped_interpreter(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _module("mvp_check_interpreter_stopped", ROOT / "deploy/mvp/check.py")
+    monkeypatch.setattr(module, "_run", lambda *_args, **_kwargs: "exited")
+    with pytest.raises(module.MvpCheckError, match="interpreter container is not running"):
+        module._interpreter_prompt_version()
+
+
 def test_mvp_check_ignores_processes_that_exit_during_proc_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

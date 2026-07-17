@@ -4,6 +4,9 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- made production readiness fail closed when the Compose interpreter is stopped or still serves an
+  older semantic prompt than the deployed source, preventing stale routing images from passing a
+  code-only rollout;
 - fixed imperative project modifications such as «Доработай» and «Добавь» being misclassified as
   read-only architecture; terminal reports now keep only bounded implementation facts, prefer the
   executor result over mechanical-review prose, and show the actual worker model in both the

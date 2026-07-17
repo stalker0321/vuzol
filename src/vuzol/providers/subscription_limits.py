@@ -683,10 +683,7 @@ def _host_account_matches_subjects(
         return True
     # Fallback: host auth.json is often mode 0600 (executor cannot read it), but
     # interactive logs mention the principal id and are usually readable.
-    for path in log_paths:
-        if _log_contains_any_subject(path, subjects):
-            return True
-    return False
+    return any(_log_contains_any_subject(path, subjects) for path in log_paths)
 
 
 def _log_contains_any_subject(path: Path, subjects: set[str]) -> bool:

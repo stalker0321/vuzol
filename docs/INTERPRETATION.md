@@ -3,7 +3,7 @@
 ## Boundary
 
 Step 05 converts Telegram intake into a provider-neutral `TaskDraft` schema version `1.4` using
-prompt version `architecture-routing-v7`. The original Telegram text remains in
+prompt version `architecture-routing-v8`. The original Telegram text remains in
 `telegram_intake_messages` and
 `tasks`; voice bytes are retained as a bounded private artifact, while the raw transcript is stored
 on both the task and immutable interpretation record.

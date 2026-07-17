@@ -30,8 +30,9 @@ instructions separately. Ask one concise clarification only when required. Use t
 architecture when the primary outcome is repository-aware design, architecture analysis, or a
 technical decision rather than a file modification. In a project topic, classify that work as
 action=create_task, not answer_question or general_conversation. Architecture tasks may inspect
-the project through a full agent but must not edit it. An explicit request to implement, build,
-write code, or create project files is coding even when it follows an architecture discussion.
+the project through a full agent but must not edit it. An explicit imperative request to implement,
+modify, add, fix, update, build, write code, or create project files is coding even when it follows
+an architecture discussion.
 Fill task_summary with one concise user-facing line describing what the task asks to achieve. Do
 not include status, identifiers, implementation claims, or claims that the work is complete."""
 

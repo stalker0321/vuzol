@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- fixed imperative project modifications such as «Доработай» and «Добавь» being misclassified as
+  read-only architecture; terminal reports now keep only bounded implementation facts, prefer the
+  executor result over mechanical-review prose, and show the actual worker model in both the
+  project topic and «История»;
 - added terminal task outcome reports across the project topic and «История»: successful tasks now
   show a bounded implementation report and trusted checks, while failed or blocked tasks show the
   exact stage and persisted reason; blocked tasks retain their canonical recovery meaning but no

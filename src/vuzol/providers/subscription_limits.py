@@ -66,9 +66,11 @@ class SubscriptionLimitSnapshot:
         five_reset = self.five_hour.reset_at.isoformat() if self.five_hour.reset_at else ""
         week = self.weekly.remaining_percent
         week_reset = self.weekly.reset_at.isoformat() if self.weekly.reset_at else ""
+        # Include observed_at so /update re-edits the dashboard even when % is unchanged.
+        observed = self.observed_at.isoformat() if self.observed_at is not None else ""
         return (
             f"{self.profile_id}:{self.company}:{self.plan_label}:"
-            f"{five}:{five_reset}:{week}:{week_reset}:{self.ok}:{self.detail}"
+            f"{five}:{five_reset}:{week}:{week_reset}:{self.ok}:{self.detail}:{observed}"
         )
 
 

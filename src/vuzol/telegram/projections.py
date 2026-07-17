@@ -63,6 +63,9 @@ _ACTIVE_PROVIDER_STEPS = frozenset(
         "review",
     }
 )
+_WORKER_STEP_TYPES = frozenset(
+    {"execute_model", "execute_code", "execute_agent", "research_execute", "synthesize"}
+)
 
 
 def telegram_html(value: object) -> str:
@@ -499,6 +502,7 @@ async def build_task_history_report(
     )
     tokens_in, tokens_out, tokens_cached = await _history_token_totals(session, task.id)
     work_seconds = await _history_work_seconds(session, task)
+    worker = await _task_worker_label(session, task.id)
 
     number = task_number_label(task)
     lines = [
@@ -518,6 +522,8 @@ async def build_task_history_report(
         if stage:
             lines.append(f"<b>Этап:</b> {telegram_html(stage)}")
         lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
+    if worker is not None:
+        lines.append(f"<b>Worker:</b> {telegram_html(worker)}")
     lines.extend(
         (
             "",
@@ -654,7 +660,7 @@ async def _completion_report(session: AsyncSession, task: Task) -> tuple[str, tu
                     for gate in raw_gates
                     if isinstance(gate, dict) and gate.get("name")
                 ]
-        return _bounded_report(approval.human_summary), tuple(gates[:12])
+        return _concise_completion_report(approval.human_summary), tuple(gates[:12])
 
     run = await session.scalar(
         select(Run).where(Run.task_id == task.id).order_by(Run.created_at.desc()).limit(1)
@@ -677,7 +683,7 @@ async def _completion_report(session: AsyncSession, task: Task) -> tuple[str, tu
                 for key in ("implementation_summary", "summary", "text"):
                     value = source.get(key)
                     if isinstance(value, str) and value.strip():
-                        return _bounded_report(value), ()
+                        return _concise_completion_report(value), ()
     return task_sense_sentence(task), ()
 
 
@@ -727,6 +733,81 @@ def _bounded_report(text: str, limit: int = 1_800) -> str:
     if len(cleaned) > limit:
         return cleaned[: limit - 1].rstrip() + "…"
     return cleaned or "Без описания"
+
+
+def _concise_completion_report(text: str, *, limit: int = 900, bullet_limit: int = 6) -> str:
+    """Keep implementation facts while dropping provider hand-off and suggestion sections."""
+
+    lines = [line.strip() for line in text.strip().splitlines()]
+    first_index = next((index for index, line in enumerate(lines) if line), None)
+    if first_index is None:
+        return "Без описания"
+    first = _plain_report_text(lines[first_index])
+    output = [first] if first else []
+    collecting_details = False
+    bullets = 0
+    for raw in lines[first_index + 1 :]:
+        if not raw:
+            continue
+        plain = _plain_report_text(raw)
+        heading = plain.rstrip(":").casefold()
+        if heading.startswith(
+            (
+                "план",
+                "для реализации",
+                "основные точки",
+                "файлы",
+                "запуск",
+                "подключение",
+                "следующ",
+                "plan",
+                "how to run",
+                "next step",
+            )
+        ):
+            break
+        if heading in {"реализовано", "что сделано", "готово", "implemented", "completed"}:
+            collecting_details = True
+            continue
+        if raw.lstrip().startswith(("- ", "* ")) and collecting_details:
+            if bullets >= bullet_limit:
+                break
+            output.append(f"• {plain.lstrip('-* ').strip()}")
+            bullets += 1
+    return _bounded_report("\n".join(output), limit)
+
+
+def _plain_report_text(text: str) -> str:
+    value = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text.strip())
+    return value.lstrip("# ").strip()
+
+
+async def _task_worker_label(session: AsyncSession, task_id: uuid.UUID) -> str | None:
+    """Return the actual execution worker model, excluding planners and reviewers."""
+
+    step = await session.scalar(
+        select(Step)
+        .join(Run, Step.run_id == Run.id)
+        .where(
+            Run.task_id == task_id,
+            Step.step_type.in_(_WORKER_STEP_TYPES),
+            Step.executor_profile_id.is_not(None),
+        )
+        .order_by(Run.created_at.desc(), Step.ordinal.desc())
+        .limit(1)
+    )
+    if step is None:
+        return None
+    profile_id = getattr(step, "executor_profile_id", None)
+    if not isinstance(profile_id, str) or not profile_id:
+        return None
+    raw_result = getattr(step, "result", None)
+    result = raw_result if isinstance(raw_result, dict) else {}
+    model = result.get("model") if isinstance(result.get("model"), str) else None
+    return format_executor_model(
+        model,
+        profile_id=profile_id,
+    )
 
 
 async def _history_token_totals(session: AsyncSession, task_id: uuid.UUID) -> tuple[int, int, int]:
@@ -971,6 +1052,9 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     )
     if step is not None:
         lines.append(f"Step: {telegram_html(step.step_type)} ({telegram_html(step.status.value)})")
+    worker = await _task_worker_label(session, task.id) if run is not None else None
+    if worker is not None:
+        lines.append(f"Worker: {telegram_html(worker)}")
     approval = None
     if step is not None and step.status.value == "waiting_approval":
         approval = await session.scalar(
@@ -985,7 +1069,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             or run.selected_route.get("executor")
             or run.selected_route.get("profile_id")
         )
-        if executor:
+        if executor and worker is None:
             lines.append(f"Executor: {telegram_html(executor)}")
         worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
         if worktree is not None and worktree.result_commit and approval is None:

@@ -145,7 +145,10 @@ measured trusted gate names when available. It deliberately does not show source
 identity, or the diff. Failed and blocked terminal cards instead show an unsuccessful outcome, the
 exact failed/blocked step, and its persisted safe failure summary or category. Both successful and
 unsuccessful terminal outcomes are appended once to `История`; history keeps the requested task
-separate from either the result or failure reason.
+separate from either the result or failure reason. Successful reports retain one factual outcome
+and at most six implementation bullets; provider hand-off sections such as plans, file lists, run
+instructions, and suggested next steps are omitted. Project cards and history identify the actual
+execution worker model from `execute_code` / `execute_agent` rather than a planner or reviewer.
 
 Approve, Redo, and Reject callbacks target the persisted approval ID, not a mutable task label. The
 canonical approval envelope binds the target head, base and result commits, diff hash, gate

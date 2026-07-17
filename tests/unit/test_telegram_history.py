@@ -15,12 +15,14 @@ from vuzol.telegram.projections import (
     TASK_HISTORY_ROLE,
     _bounded_report,
     _completion_report,
+    _concise_completion_report,
     _failure_details,
     _format_count,
     _format_duration,
     _history_work_seconds,
     _one_line_summary,
     _task_outcome_label,
+    _task_worker_label,
     build_task_history_report,
     enqueue_task_history_report,
 )
@@ -56,6 +58,40 @@ def test_terminal_report_formatting_is_bounded() -> None:
     assert _bounded_report(" first \n\n second ") == "first\nsecond"
     assert _bounded_report("x" * 20, 10) == "xxxxxxxxx…"
     assert _bounded_report("   ") == "Без описания"
+
+
+def test_completion_report_keeps_facts_and_drops_handoff_sections() -> None:
+    text = """Готово — добавлен выбор позиций.
+
+Реализовано:
+- чекбоксы для каждой позиции;
+- отдельная сумма выбранных позиций;
+- действия «Выбрать всё» и «Сбросить».
+
+Файлы:
+- [app.js](/workspace/app.js)
+
+Для локального запуска:
+python3 -m http.server
+"""
+    assert _concise_completion_report(text) == (
+        "Готово — добавлен выбор позиций.\n"
+        "• чекбоксы для каждой позиции;\n"
+        "• отдельная сумма выбранных позиций;\n"
+        "• действия «Выбрать всё» и «Сбросить»."
+    )
+
+
+@pytest.mark.anyio
+async def test_worker_label_uses_execution_model_not_planner() -> None:
+    step = SimpleNamespace(
+        executor_profile_id="codex-subscription-prod",
+        result={"model": "gpt-5.6-sol"},
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=step)
+
+    assert await _task_worker_label(session, uuid4()) == "Codex Sol"
 
 
 @pytest.mark.anyio
@@ -335,6 +371,10 @@ async def test_build_and_enqueue_history_report() -> None:
         decided_at=datetime(2026, 7, 16, 10, 4, tzinfo=UTC),
     )
     run = SimpleNamespace(id=uuid4(), created_at=datetime(2026, 7, 16, 10, 0, tzinfo=UTC))
+    worker_step = SimpleNamespace(
+        executor_profile_id="codex-subscription-prod",
+        result={"model": "gpt-5.6-sol"},
+    )
 
     session = MagicMock()
     session.get = AsyncMock(return_value=task)
@@ -346,6 +386,8 @@ async def test_build_and_enqueue_history_report() -> None:
             return mapping
         if "approvals" in text or "Approval" in text:
             return approval
+        if "JOIN runs" in text and "steps" in text:
+            return worker_step
         if "runs" in text or "Run" in text:
             return run
         if "transactional_outbox" in text or "TransactionalOutbox" in text:
@@ -373,6 +415,7 @@ async def test_build_and_enqueue_history_report() -> None:
     assert "Bill Buddy" in report.html
     assert "Задача:</b> Build a responsive landing page for Bill Buddy" in report.html
     assert "Результат:</b> Landing page implemented" in report.html
+    assert "Worker:</b> Codex Sol" in report.html
     assert "Landing page implemented" in report.html
     assert "1,000" in report.html
     assert "200" in report.html
@@ -385,6 +428,8 @@ async def test_build_and_enqueue_history_report() -> None:
             return mapping
         if "approval" in text:
             return approval
+        if "join runs" in text and "steps" in text:
+            return worker_step
         if " run " in text or "runs" in text:
             return run
         if "outbox" in text or "transactional" in text:

@@ -167,7 +167,7 @@ async def test_result_approval_prefers_review_summary_and_validate_gates() -> No
         steps_by_ordinal={5: validate, 6: review},
     )
     assert approval is not None
-    assert approval.human_summary.startswith("Mechanical review passed")
+    assert approval.human_summary == "validate summary"
     assert approval_step.payload["action_envelope"]["project_id"] == "bill-buddy"
     assert approval_step.payload["action_envelope"]["gates"][0]["name"] == "git-facts"
     assert approval_step.payload["action_envelope"]["validation_evidence_hash"]

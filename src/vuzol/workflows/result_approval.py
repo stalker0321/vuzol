@@ -203,12 +203,12 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     execute_result = execute.result if execute and isinstance(execute.result, dict) else {}
     summary = None
     for candidate in (
-        review_result.get("summary"),
-        review_result.get("implementation_summary"),
         result.get("implementation_summary"),
         execute_result.get("implementation_summary"),
         execute_result.get("text"),
         result.get("text"),
+        review_result.get("implementation_summary"),
+        review_result.get("summary"),
     ):
         if isinstance(candidate, str) and candidate.strip():
             summary = candidate.strip()

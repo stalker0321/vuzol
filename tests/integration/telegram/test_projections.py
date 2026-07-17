@@ -127,12 +127,18 @@ def test_completed_agent_result_is_rendered_in_project_topic(postgres_dsn: str) 
             stored_step = await uow.session.get(Step, step.id)
             assert stored_task is not None and stored_step is not None
             stored_task.status = TaskStatus.COMPLETED
-            stored_step.result = {"text": "Use <ports> and adapters."}
+            stored_step.executor_profile_id = "codex-subscription-prod"
+            stored_step.result = {
+                "model": "gpt-5.6-sol",
+                "text": ("Use <ports> and adapters.\n\nPlan:\n- Rewrite the service next."),
+            }
 
         async with factory() as session:
             card = await build_status_card(session, task.id)
             assert "<b>Отчёт о выполнении</b>" in card.html  # noqa: RUF001
             assert "Use &lt;ports&gt; and adapters." in card.html
+            assert "Worker: Codex Sol" in card.html
+            assert "Rewrite the service next" not in card.html
         await engine.dispose()
 
     asyncio.run(scenario())

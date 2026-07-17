@@ -96,6 +96,22 @@ async def prepare_delivery(
 ) -> PreparedDelivery:
     if item.operation_type not in {"send_message", "delete_message"}:
         raise PermanentDeliveryError("unsupported_telegram_operation")
+    if (
+        item.operation_type == "delete_message"
+        and item.payload.get("role") == "user_command_delete"
+    ):
+        try:
+            chat_id = int(item.payload["chat_id"])
+            message_id = int(item.payload["message_id"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise PermanentDeliveryError("invalid_command_delete_payload") from error
+        thread_id = item.payload.get("message_thread_id")
+        return PreparedDelivery(
+            DeliveryAction.DELETE_MESSAGE,
+            chat_id=chat_id,
+            thread_id=int(thread_id) if thread_id is not None else None,
+            message_id=message_id,
+        )
     if item.payload.get("role") == PROJECT_STATUS_DASHBOARD_ROLE:
         return await _prepare_project_status_dashboard(
             session, item, topics=topics, projects=projects, profiles=profiles

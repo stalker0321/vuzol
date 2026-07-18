@@ -29,6 +29,10 @@ from vuzol.providers.domain import (
 )
 from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
 from vuzol.providers.health import synchronize_profiles
+from vuzol.providers.planner_handoff import (
+    PLANNER_HANDOFF_FENCED_CATEGORY,
+    PlannerHandoffFenced,
+)
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.providers.routing import claim_routed_step
 from vuzol.storage.leasing import start_step
@@ -130,6 +134,8 @@ async def seed_run_with_steps(
                 required_capabilities=(
                     [Capability.CODE_EDIT.value, Capability.PROJECT_SHELL.value]
                     if step_type == "execute_code"
+                    else [Capability.REPOSITORY_READ.value]
+                    if step_type == "execute_agent"
                     else None
                 ),
                 status=status,
@@ -585,8 +591,212 @@ def test_plan_retry_recovers_and_stale_result_is_fenced(postgres_dsn: str, tmp_p
                 timeout_seconds=step.timeout_seconds,
                 lease=token,
             )
-        with pytest.raises(LookupError, match="fenced"):
+        with pytest.raises(Exception, match="fenced") as raised:
             await handler2._build_request(request)
+        from vuzol.providers.planner_handoff import (
+            PLANNER_HANDOFF_FENCED_CATEGORY,
+            PlannerHandoffFenced,
+        )
+
+        assert isinstance(raised.value, PlannerHandoffFenced)
+        assert raised.value.category == PLANNER_HANDOFF_FENCED_CATEGORY
+        outcome = await handler2.execute(request, CancellationContext())
+        assert outcome.category == PLANNER_HANDOFF_FENCED_CATEGORY
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_validated_plan_is_included_in_execute_agent_context(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(("git", "init", "-b", "main"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "test@example.invalid"), cwd=repository, check=True
+    )
+    subprocess.run(("git", "config", "user.name", "Test"), cwd=repository, check=True)
+    (repository / "tracked.txt").write_text("base\n")
+    subprocess.run(("git", "add", "tracked.txt"), cwd=repository, check=True)
+    subprocess.run(("git", "commit", "-m", "base"), cwd=repository, check=True)
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        configured = profile(
+            "cli",
+            provider="codex",
+            api_base_url=None,
+            launch_mode="cli",
+            credential_reference=None,
+            credential_required=False,
+            runtime_identity="cli-agent-plan",
+            state_directory=tmp_path / "cli-agent-state",
+            sandbox_required=True,
+            capabilities=frozenset({Capability.REPOSITORY_READ}),
+            roles=frozenset({ProviderRole.EXECUTOR}),
+            supported_task_types=frozenset({"architecture", "coding", "general"}),
+        )
+        settings, registries = bundle(tmp_path, configured)
+        plan_text = "1. Map modules\n2. Answer with bounded findings"
+        task_id, run_id, step_ids = await seed_run_with_steps(
+            factory,
+            steps=[
+                (
+                    "plan",
+                    StepStatus.COMPLETED,
+                    {
+                        "text": plan_text,
+                        "finish_reason": "stop",
+                        "handoff": {"status": "ready"},
+                    },
+                ),
+                ("execute_agent", StepStatus.QUEUED, None),
+            ],
+            task_draft={"task_type": "architecture", "needs_planning": True},
+        )
+        worktrees = WorktreeService(tmp_path / "worktrees-agent", LocalGit(), retention_days=3)
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+            await worktrees.prepare(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                project=ProjectConfig(
+                    id="project",
+                    display_name="Project",
+                    repository_path=repository,
+                    default_branch="main",
+                    allowed_capabilities=frozenset(
+                        {Capability.REPOSITORY_READ, Capability.GIT, Capability.CODE_EDIT}
+                    ),
+                    sandbox_profile="default",
+                ),
+                owner="agent-worker",
+            )
+        handler = ProviderStepHandler(
+            factory,
+            registries,
+            AdapterRegistry(
+                registries.profiles,
+                ScopedSecretResolver(access_policy={}, secret_file_root=tmp_path, environment={}),
+                adapters={"cli": CapturingAdapter()},
+            ),
+            worktrees=worktrees,
+        )
+        async with factory.begin() as session:
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="agent-worker",
+                lease_seconds=60,
+                candidate_limit=20,
+                step_types=frozenset({"execute_agent"}),
+            )
+        assert token is not None
+        async with factory.begin() as session:
+            await start_step(session, token)
+        async with factory() as session:
+            step = await session.get(Step, step_ids["execute_agent"])
+            assert step is not None
+            request = StepExecutionRequest(
+                task_id=task_id,
+                run_id=run_id,
+                step_id=step.id,
+                step_type="execute_agent",
+                payload=dict(step.payload),
+                timeout_seconds=step.timeout_seconds,
+                lease=token,
+            )
+        built, _profile_id, _reservation_id, _revision = await handler._build_request(request)
+        assert len(built.context) == 1
+        assert plan_text in built.context[0].content
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_rejected_plan_records_failure_health_not_success(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        planner = profile(
+            "planner",
+            roles=frozenset({ProviderRole.PLANNER}),
+            supported_task_types=frozenset({"coding", "general"}),
+        )
+        settings, registries = bundle(tmp_path, planner)
+        _task_id, _run_id, step_ids = await seed_run_with_steps(
+            factory,
+            steps=[
+                ("plan", StepStatus.QUEUED, None),
+                ("prepare_context", StepStatus.PENDING, None),
+            ],
+            task_status=TaskStatus.PLANNED,
+        )
+        revision = "a" * 64
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision=revision
+            )
+
+        class EmptyPlanAdapter:
+            async def execute(
+                self,
+                request: ProviderRequest,
+                profile: ProviderProfileConfig,
+                cancellation: CancellationContext,
+            ) -> ProviderResult:
+                del request, profile, cancellation
+                return ProviderResult(
+                    status=ProviderResultStatus.SUCCEEDED,
+                    text="",
+                    usage=NormalizedUsage(duration_ms=5),
+                    finish_reason="stop",
+                    adapter_version="empty.v1",
+                )
+
+            async def health(self, profile: ProviderProfileConfig) -> EffectiveProfileState:
+                del profile
+                return EffectiveProfileState()
+
+        handler = ProviderStepHandler(
+            factory,
+            registries,
+            AdapterRegistry(
+                registries.profiles,
+                ScopedSecretResolver(access_policy={}, secret_file_root=tmp_path, environment={}),
+                adapters={"planner": EmptyPlanAdapter()},
+            ),
+        )
+        worker = RoutedWorkflowWorker(
+            settings,
+            factory,
+            registries=registries,
+            owner="plan-health",
+            handlers=provider_handlers(handler),
+        )
+        assert await worker.process_one()
+        async with factory() as session:
+            step = await session.get(Step, step_ids["plan"])
+            assert step is not None and step.status is StepStatus.QUEUED
+            assert step.failure_category == "planner_empty_output"
+            observations = (await session.scalars(select(ProfileHealthObservation))).all()
+            assert observations
+            latest = max(observations, key=lambda row: row.observed_at)
+            assert latest.healthy is True
+            assert latest.category == "invalid_structured_output"
+            assert latest.last_success_at is None
+            assert latest.last_failure_at is not None
+            usage = (await session.scalars(select(UsageRecord))).all()
+            assert usage
+            assert usage[-1].outcome == "planner_empty_output"
         await engine.dispose()
 
     asyncio.run(scenario())

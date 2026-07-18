@@ -7,6 +7,10 @@ This file records completed implementation changes, not plans or speculative ide
 - rebuilt and repinned the offline validation image for the R1 testing-policy inputs; the image
   contains all 71 locked packages and its build-time dependency audit found no known
   vulnerabilities;
+- planner handoff corrections: assess plan usability before success health/usage accounting,
+  persist retry diagnostics only for plan steps, select plan provenance deterministically, use
+  dedicated `planner_handoff_fenced` failures, require `ProviderResultStatus.SUCCEEDED`, and document
+  `infrastructure.v1` plans as approval/human context only (no automatic privileged provider consumer);
 - connected validated planner results into executor `ProviderRequest.context`: non-empty completed
   plans are bounded and redacted before handoff; empty or `finish_reason=length` plan output is no
   longer marked successful and records a retryable/terminal reason; no-plan workflows still run;

@@ -12,6 +12,8 @@ from vuzol.providers.domain import NormalizedUsage, ProviderResult, ProviderResu
 from vuzol.providers.planner_handoff import (
     MAX_PLANNER_CONTEXT_CHARS,
     PLANNER_CONTEXT_SOURCE,
+    PLANNER_HANDOFF_FENCED_CATEGORY,
+    PlannerHandoffFenced,
     PlannerResultUnusable,
     assess_persisted_plan_result,
     assess_planner_provider_result,
@@ -21,8 +23,10 @@ from vuzol.providers.planner_handoff import (
     load_planner_context_for_run,
     redact_planner_text,
 )
+from vuzol.providers.routing import PROVIDER_STEP_ROLES
 from vuzol.storage.models import Step
 from vuzol.storage.types import IdempotencyClass, QueueClass, RetryClass, StepStatus
+from vuzol.workflows.definitions import WORKFLOW_REGISTRY
 
 
 def _usage() -> NormalizedUsage:
@@ -118,8 +122,9 @@ def test_successful_handoff_builds_bounded_redacted_context() -> None:
 
 def test_stale_incomplete_plan_is_fenced() -> None:
     step = _plan_step(status=StepStatus.FAILED, result={"text": "old", "finish_reason": "stop"})
-    with pytest.raises(LookupError, match="fenced"):
+    with pytest.raises(PlannerHandoffFenced, match="fenced") as error:
         load_planner_context_for_run(step)
+    assert error.value.category == PLANNER_HANDOFF_FENCED_CATEGORY
 
 
 def test_stale_completed_empty_plan_is_fenced() -> None:
@@ -127,8 +132,9 @@ def test_stale_completed_empty_plan_is_fenced() -> None:
         status=StepStatus.COMPLETED,
         result={"text": "", "finish_reason": "stop", "handoff": {"status": "ready"}},
     )
-    with pytest.raises(LookupError, match="fenced"):
+    with pytest.raises(PlannerHandoffFenced, match="fenced") as error:
         load_planner_context_for_run(step)
+    assert error.value.reason == "planner_empty_output"
 
 
 def test_stale_completed_truncated_plan_is_fenced() -> None:
@@ -136,8 +142,32 @@ def test_stale_completed_truncated_plan_is_fenced() -> None:
         status=StepStatus.COMPLETED,
         result={"text": "half", "finish_reason": "length"},
     )
-    with pytest.raises(LookupError, match="fenced"):
+    with pytest.raises(PlannerHandoffFenced, match="fenced") as error:
         load_planner_context_for_run(step)
+    assert error.value.reason == "planner_truncated"
+
+
+def test_non_succeeded_provider_status_is_rejected() -> None:
+    with pytest.raises(PlannerResultUnusable) as error:
+        assess_planner_provider_result(
+            _result(status=ProviderResultStatus.FAILED, text="looks fine")
+        )
+    assert error.value.category == "planner_invalid_output"
+
+
+def test_infrastructure_plan_is_not_a_provider_executor_consumer() -> None:
+    """Product decision: infrastructure plan is approval/human context only."""
+    definition = WORKFLOW_REGISTRY["infrastructure.v1"]
+    plan_keys = {
+        step.key for step in definition.steps if step.step_type == "plan" or step.key == "plan"
+    }
+    assert plan_keys
+    provider_consumers = frozenset({"execute_code", "execute_agent"})
+    consumer_steps = [step for step in definition.steps if step.step_type in provider_consumers]
+    assert consumer_steps == []
+    for step in definition.steps:
+        if step.step_type == "privileged_execute":
+            assert step.step_type not in PROVIDER_STEP_ROLES
 
 
 def test_context_items_are_bounded() -> None:

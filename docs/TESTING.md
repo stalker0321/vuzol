@@ -61,15 +61,18 @@ Mechanical review still flags **obvious quality sabotage** (forced success, swal
 ```text
 tests/
   unit/<domain>/          # fast, hermetic, by module boundary
-    _*_helpers.py         # shared imports/fixtures for that domain's splits
-    test_<theme>.py       # one cohesive theme (~200–500 lines typical)
+    _*_helpers.py         # optional shared setup when several files share it
+    test_<theme>.py       # one responsibility / risk boundary / adapter
   integration/<domain>/   # postgres / process boundaries when required
   fixtures/               # versioned shared fixtures (e.g. interpretation)
 ```
 
-Prefer domain packages (`unit/providers/`, `unit/execution/`, …) over root-level
-`test_everything.py` files. Shared setup for a domain lives in a private helpers
-module; individual files cover one risk boundary or adapter.
+**Structure follows responsibility, not line counts.** Split a file only when
+themes are genuinely mixed (different adapters, different lifecycle phases with
+different fixtures, different product surfaces) and a reader benefits from a
+clearer name and smaller blast radius. Do **not** split—or merge—just to hit a
+size band. A long file that is one coherent boundary is fine; a short file that
+is only half a story is not an improvement.
 
 Markers:
 

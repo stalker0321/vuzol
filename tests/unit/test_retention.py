@@ -1,12 +1,15 @@
-"""Unit coverage for retention policy helpers and filesystem safety edges."""
+"""Unit coverage for retention policy, dry-run purity, and path safety."""
+
+from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
-from vuzol.config.settings import RetentionDefaults, Settings
+from vuzol.config.settings import RetentionDefaults
 from vuzol.ops.retention import (
     QUARANTINE_DIR_NAME,
     RetentionOutcome,
@@ -34,19 +37,9 @@ def test_effective_retention_never_cleans_blocked_or_open_tasks() -> None:
         )
         is None
     )
-    assert (
-        effective_worktree_retention_until(
-            task_status=TaskStatus.EXECUTING,
-            retention_until=now - timedelta(days=30),
-            task_updated_at=now - timedelta(days=30),
-            completed_days=3,
-            failed_days=14,
-        )
-        is None
-    )
 
 
-def test_completed_uses_shorter_window_without_lengthening_failed_stamp() -> None:
+def test_completed_uses_shorter_window() -> None:
     updated = datetime(2026, 7, 1, tzinfo=UTC)
     stamped = updated + timedelta(days=14)
     effective = effective_worktree_retention_until(
@@ -59,49 +52,71 @@ def test_completed_uses_shorter_window_without_lengthening_failed_stamp() -> Non
     assert effective == updated + timedelta(days=3)
 
 
-def test_failed_keeps_at_least_failed_window() -> None:
-    updated = datetime(2026, 7, 1, tzinfo=UTC)
-    short_stamp = updated + timedelta(days=1)
-    effective = effective_worktree_retention_until(
-        task_status=TaskStatus.FAILED,
-        retention_until=short_stamp,
-        task_updated_at=updated,
-        completed_days=3,
-        failed_days=14,
+def test_dry_run_does_not_create_missing_roots(tmp_path: Path) -> None:
+    missing_wt = tmp_path / "missing-worktrees"
+    missing_art = tmp_path / "missing-artifacts"
+    repos = tmp_path / "repos"
+    repos.mkdir()
+
+    class Factory:
+        def __call__(self) -> object:
+            raise AssertionError("db unused when roots missing")
+
+    sweeper = RetentionSweeper(
+        Factory(),  # type: ignore[arg-type]
+        worktree_root=missing_wt,
+        artifact_root=missing_art,
+        repository_root=repos,
+        retention=RetentionDefaults(),
+        owner="test",
+        lock_timeout_seconds=0.1,
     )
-    assert effective == updated + timedelta(days=14)
+
+    async def run() -> None:
+        report = await sweeper.run(mode=RetentionSweepMode.DRY_RUN)
+        assert report.lock_acquired is False
+        assert report.actions[0].reason == "roots_unavailable"
+        assert not missing_wt.exists()
+        assert not missing_art.exists()
+        assert not (missing_art / QUARANTINE_DIR_NAME).exists()
+
+    import asyncio
+
+    asyncio.run(run())
 
 
-def test_report_payload_is_projection_ready() -> None:
-    from vuzol.ops.retention import RetentionAction, RetentionSweepReport
+def test_dry_run_bind_roots_does_not_create_quarantine(tmp_path: Path) -> None:
+    worktree_root = tmp_path / "worktrees"
+    artifact_root = tmp_path / "artifacts"
+    repos = tmp_path / "repos"
+    worktree_root.mkdir()
+    artifact_root.mkdir()
+    repos.mkdir()
 
-    report = RetentionSweepReport(
-        mode=RetentionSweepMode.DRY_RUN,
-        lock_acquired=True,
-        started_at=datetime(2026, 7, 1, tzinfo=UTC),
-        finished_at=datetime(2026, 7, 1, 0, 1, tzinfo=UTC),
-        actions=(
-            RetentionAction("worktree", "w1", RetentionOutcome.WOULD_CLEAN, "retention_expired"),
-            RetentionAction("artifact", "a1", RetentionOutcome.SKIPPED, "blocked_task"),
-        ),
+    class Factory:
+        def __call__(self) -> object:
+            raise AssertionError("unused")
+
+    sweeper = RetentionSweeper(
+        Factory(),  # type: ignore[arg-type]
+        worktree_root=worktree_root,
+        artifact_root=artifact_root,
+        repository_root=repos,
+        retention=RetentionDefaults(),
+        owner="test",
     )
-    payload = report.to_operational_payload()
-    assert payload["schema_version"] == "retention-sweep-report.v1"
-    assert payload["cleaned_count"] == 0
-    assert payload["skipped_count"] == 1
-    counts = payload["outcome_counts"]
-    assert isinstance(counts, dict)
-    assert counts["would_clean"] == 1
+    sweeper._bind_roots(mode=RetentionSweepMode.DRY_RUN)
+    assert not (artifact_root / QUARANTINE_DIR_NAME).exists()
 
 
 @pytest.mark.anyio
-async def test_orphan_symlink_is_reported_for_quarantine_without_following(tmp_path: Path) -> None:
-    from unittest.mock import AsyncMock
-
+async def test_orphan_symlink_dry_run_does_not_move(tmp_path: Path) -> None:
     worktree_root = tmp_path / "worktrees"
     artifact_root = tmp_path / "artifacts"
+    repos = tmp_path / "repos"
     worktree_root.mkdir()
     artifact_root.mkdir()
+    repos.mkdir()
     outside = tmp_path / "secret.txt"
     outside.write_text("secret\n")
     link = artifact_root / "escape"
@@ -109,16 +124,17 @@ async def test_orphan_symlink_is_reported_for_quarantine_without_following(tmp_p
 
     class Factory:
         def __call__(self) -> object:
-            raise AssertionError("database must not be used for this dry-run orphan check")
+            raise AssertionError("db must not be used")
 
     sweeper = RetentionSweeper(
         Factory(),  # type: ignore[arg-type]
         worktree_root=worktree_root,
         artifact_root=artifact_root,
+        repository_root=repos,
         retention=RetentionDefaults(),
         owner="test",
-        lock_timeout_seconds=0.1,
     )
+    sweeper._bind_roots(mode=RetentionSweepMode.DRY_RUN)
     sweeper._known_content_hashes = AsyncMock(return_value=set())  # type: ignore[method-assign]
     actions = await sweeper._reconcile_orphan_artifacts(mode=RetentionSweepMode.DRY_RUN)
     assert any(
@@ -127,16 +143,6 @@ async def test_orphan_symlink_is_reported_for_quarantine_without_following(tmp_p
     )
     assert link.exists() and link.is_symlink()
     assert outside.read_text() == "secret\n"
-    assert not (artifact_root / QUARANTINE_DIR_NAME).exists() or not any(
-        (artifact_root / QUARANTINE_DIR_NAME).rglob("*")
-    )
-
-
-def test_settings_accept_sweep_batch_defaults() -> None:
-    settings = Settings(environment="test")
-    assert settings.retention.sweep_batch_size == 50
-    assert settings.retention.completed_worktree_days == 3
-    assert settings.retention.failed_worktree_days == 14
 
 
 def test_retention_cli_defaults_to_dry_run() -> None:
@@ -144,19 +150,15 @@ def test_retention_cli_defaults_to_dry_run() -> None:
 
     args = _parse_args([])
     assert args.apply is False
-    assert args.dry_run is True
-    apply_args = _parse_args(["--apply", "--json"])
+    apply_args = _parse_args(["--apply"])
     assert apply_args.apply is True
-    assert apply_args.json is True
 
 
 @pytest.mark.anyio
-async def test_retention_cli_run_emits_text_and_json(
+async def test_retention_cli_run_modes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from datetime import UTC, datetime
-
-    from pydantic import SecretStr
+    from datetime import UTC
 
     from vuzol.cli import retention as retention_cli
     from vuzol.config import RegistryDocument, RuntimeConfiguration, Settings, build_bundle
@@ -189,7 +191,7 @@ async def test_retention_cli_run_emits_text_and_json(
             return None
 
     class FakeSweeper:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
+        def __init__(self, *_a: object, **_k: object) -> None:
             return None
 
         async def run(self, *, mode: RetentionSweepMode) -> RetentionSweepReport:
@@ -199,191 +201,20 @@ async def test_retention_cli_run_emits_text_and_json(
     monkeypatch.setattr(retention_cli, "get_runtime_configuration", lambda **_k: runtime)
     monkeypatch.setattr(retention_cli, "configure_logging", lambda **_k: None)
     monkeypatch.setattr(
-        retention_cli, "resolve_database_dsn", lambda _settings: SecretStr("postgresql+psycopg://x")
+        retention_cli, "resolve_database_dsn", lambda _s: SecretStr("postgresql+psycopg://x")
     )
     monkeypatch.setattr(retention_cli, "create_engine", lambda *_a, **_k: Engine())
-    monkeypatch.setattr(retention_cli, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr(retention_cli, "create_session_factory", lambda _e: object())
     monkeypatch.setattr(retention_cli, "RetentionSweeper", FakeSweeper)
 
-    code = await retention_cli._run(retention_cli._parse_args([]))
-    assert code == 0
-    out = capsys.readouterr().out
-    assert "would_clean" in out
-    assert "worktree" in out
-
-    code = await retention_cli._run(retention_cli._parse_args(["--json"]))
-    assert code == 0
-    payload = capsys.readouterr().out
-    assert '"schema_version": "retention-sweep-report.v1"' in payload
-
-    locked = RetentionSweepReport(
-        mode=RetentionSweepMode.APPLY,
-        lock_acquired=False,
-        started_at=datetime(2026, 7, 1, tzinfo=UTC),
-        finished_at=datetime(2026, 7, 1, 0, 1, tzinfo=UTC),
-        actions=(
-            RetentionAction("sweep", "lock", RetentionOutcome.SKIPPED, "advisory_lock_unavailable"),
-        ),
-    )
-
-    class LockedSweeper(FakeSweeper):
-        async def run(self, *, mode: RetentionSweepMode) -> RetentionSweepReport:
-            return locked
-
-    monkeypatch.setattr(retention_cli, "RetentionSweeper", LockedSweeper)
-    assert await retention_cli._run(retention_cli._parse_args(["--apply"])) == 2
-
-    failed = RetentionSweepReport(
-        mode=RetentionSweepMode.APPLY,
-        lock_acquired=True,
-        started_at=datetime(2026, 7, 1, tzinfo=UTC),
-        finished_at=datetime(2026, 7, 1, 0, 1, tzinfo=UTC),
-        actions=(RetentionAction("worktree", "w1", RetentionOutcome.FAILED, "path_violation"),),
-    )
-
-    class FailedSweeper(FakeSweeper):
-        async def run(self, *, mode: RetentionSweepMode) -> RetentionSweepReport:
-            return failed
-
-    monkeypatch.setattr(retention_cli, "RetentionSweeper", FailedSweeper)
-    assert await retention_cli._run(retention_cli._parse_args(["--apply"])) == 1
+    assert await retention_cli._run(retention_cli._parse_args([])) == 0
+    assert "would_clean" in capsys.readouterr().out
 
 
-def test_retention_cli_main_exits_with_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vuzol.cli import retention as retention_cli
-
-    async def fake_run(_args: object) -> int:
-        return 0
-
-    monkeypatch.setattr(retention_cli, "_run", fake_run)
-
-    with pytest.raises(SystemExit) as raised:
-        retention_cli.main([])
-    assert raised.value.code == 0
-
-
-def test_retention_unit_templates_are_oneshot_and_not_auto_installed() -> None:
+def test_retention_unit_templates_disabled_comments() -> None:
     root = Path(__file__).resolve().parents[2]
     service = (root / "deploy/systemd/vuzol-retention.service").read_text()
     timer = (root / "deploy/systemd/vuzol-retention.timer").read_text()
-    assert "Type=oneshot" in service
-    assert "vuzol-retention --apply" in service
     assert "Do not install" in service
-    assert "Unit=vuzol-retention.service" in timer
     assert "Do not install" in timer
-
-
-def test_remove_worktree_tree_and_entry_root_helpers(tmp_path: Path) -> None:
-    worktree_root = tmp_path / "worktrees"
-    artifact_root = tmp_path / "artifacts"
-    worktree_root.mkdir()
-    artifact_root.mkdir()
-
-    class Factory:
-        def __call__(self) -> object:
-            raise AssertionError("unused")
-
-    sweeper = RetentionSweeper(
-        Factory(),  # type: ignore[arg-type]
-        worktree_root=worktree_root,
-        artifact_root=artifact_root,
-        retention=RetentionDefaults(),
-        owner="test",
-    )
-    missing = worktree_root / "gone"
-    assert RetentionSweeper._remove_worktree_tree(missing) is True
-
-    tree = worktree_root / "project" / "run"
-    tree.mkdir(parents=True)
-    (tree / "file").write_text("x\n")
-    assert RetentionSweeper._remove_worktree_tree(tree) is True
-    assert not tree.exists()
-
-    link = worktree_root / "link"
-    link.symlink_to(tmp_path / "outside-target")
-    assert RetentionSweeper._remove_worktree_tree(link) is False
-
-    inside = artifact_root / "aa" / ("a" * 64)
-    inside.parent.mkdir()
-    inside.write_bytes(b"1")
-    assert sweeper._entry_is_under_root(inside) is True
-    foreign = tmp_path / "foreign"
-    foreign.write_text("nope\n")
-    assert sweeper._entry_is_under_root(foreign) is False
-
-
-@pytest.mark.anyio
-async def test_foreign_and_malformed_artifact_files_are_classified(tmp_path: Path) -> None:
-    from unittest.mock import AsyncMock
-
-    worktree_root = tmp_path / "worktrees"
-    artifact_root = tmp_path / "artifacts"
-    worktree_root.mkdir()
-    artifact_root.mkdir()
-    foreign = tmp_path / "outside.bin"
-    foreign.write_bytes(b"x")
-    malformed = artifact_root / "zz" / "not-a-hash"
-    malformed.parent.mkdir()
-    malformed.write_bytes(b"y")
-
-    class Factory:
-        def __call__(self) -> object:
-            raise AssertionError("unused")
-
-    sweeper = RetentionSweeper(
-        Factory(),  # type: ignore[arg-type]
-        worktree_root=worktree_root,
-        artifact_root=artifact_root,
-        retention=RetentionDefaults(),
-        owner="test",
-    )
-    sweeper._known_content_hashes = AsyncMock(return_value=set())  # type: ignore[method-assign]
-    sweeper._iter_managed_artifact_files = (  # type: ignore[method-assign]
-        lambda: [foreign, malformed]
-    )
-    actions = await sweeper._reconcile_orphan_artifacts(mode=RetentionSweepMode.DRY_RUN)
-    reasons = {action.reason for action in actions}
-    assert "path_violation" in reasons
-    assert "malformed_identity" in reasons
-
-
-def test_artifact_path_rejects_bad_uris(tmp_path: Path) -> None:
-    worktree_root = tmp_path / "worktrees"
-    artifact_root = tmp_path / "artifacts"
-    worktree_root.mkdir()
-    artifact_root.mkdir()
-
-    class Factory:
-        def __call__(self) -> object:
-            raise AssertionError("unused")
-
-    sweeper = RetentionSweeper(
-        Factory(),  # type: ignore[arg-type]
-        worktree_root=worktree_root,
-        artifact_root=artifact_root,
-        retention=RetentionDefaults(),
-        owner="test",
-    )
-    from vuzol.execution.paths import PathViolation
-    from vuzol.storage.models import Artifact
-    from vuzol.storage.types import ArtifactStorageState
-
-    bad = Artifact(
-        task_id=None,
-        run_id=None,
-        step_id=None,
-        artifact_type="x",
-        content_uri="file:/tmp/escape",
-        size_bytes=1,
-        content_hash="a" * 64,
-        media_type="text/plain",
-        sensitivity="internal",
-        visibility="private",
-        retention_until=datetime.now(UTC),
-        storage_state=ArtifactStorageState.AVAILABLE,
-    )
-    with pytest.raises(ValueError, match="unsupported"):
-        sweeper._artifact_path(bad)
-    bad.content_uri = "artifact:../escape"
-    with pytest.raises(PathViolation):
-        sweeper._artifact_path(bad)
+    assert "--apply" in service

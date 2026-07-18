@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, Settings
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.ops.disk_pressure import FreeSpaceProbe
 from vuzol.providers.routing import claim_routed_step
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_step, heartbeat_step, start_step
@@ -30,6 +31,7 @@ class WorkflowWorker:
         capabilities: frozenset[Capability] = frozenset(Capability),
         queue_classes: frozenset[QueueClass] = frozenset(QueueClass),
         profile_limits: Mapping[str, int] | None = None,
+        free_space_probe: FreeSpaceProbe | None = None,
     ) -> None:
         self._settings = settings
         self._factory = session_factory
@@ -38,6 +40,7 @@ class WorkflowWorker:
         self._capabilities = capabilities
         self._queue_classes = queue_classes
         self._profile_limits = dict(profile_limits or {})
+        self._free_space_probe = free_space_probe
 
     async def process_one(self) -> bool:
         limits = self._settings.concurrency
@@ -114,6 +117,8 @@ class WorkflowWorker:
             profile_limits=self._profile_limits,
             step_types=frozenset(self._handlers),
             candidate_limit=self._settings.workflow.claim_candidate_limit,
+            settings=self._settings,
+            free_space_probe=self._free_space_probe,
         )
 
     async def _request(self, step_id: uuid.UUID, token: LeaseToken) -> StepExecutionRequest:
@@ -185,6 +190,7 @@ class RoutedWorkflowWorker(WorkflowWorker):
         owner: str,
         handlers: Mapping[str, StepHandler],
         queue_classes: frozenset[QueueClass] | None = None,
+        free_space_probe: FreeSpaceProbe | None = None,
     ) -> None:
         effective_queues = queue_classes or frozenset({QueueClass.LIGHT})
         super().__init__(
@@ -193,6 +199,7 @@ class RoutedWorkflowWorker(WorkflowWorker):
             owner=owner,
             handlers=handlers,
             queue_classes=effective_queues,
+            free_space_probe=free_space_probe,
         )
         self._registries = registries
 
@@ -208,4 +215,5 @@ class RoutedWorkflowWorker(WorkflowWorker):
             candidate_limit=self._settings.workflow.claim_candidate_limit,
             class_limits=dict(class_limits),
             step_types=frozenset(self._handlers),
+            free_space_probe=self._free_space_probe,
         )

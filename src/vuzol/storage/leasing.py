@@ -6,6 +6,8 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.config.settings import Settings
+from vuzol.ops.disk_pressure import FreeSpaceProbe, assess_disk_pressure
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import Run, Step, TransactionalOutbox
 from vuzol.storage.records import LeaseToken, OutboxLeaseToken, StepRecord
@@ -26,6 +28,8 @@ async def claim_step(
     profile_limits: dict[str, int] | None = None,
     step_types: frozenset[str] | None = None,
     candidate_limit: int = 20,
+    settings: Settings | None = None,
+    free_space_probe: FreeSpaceProbe | None = None,
 ) -> LeaseToken | None:
     if not queue_classes or candidate_limit < 1:
         return None
@@ -50,7 +54,16 @@ async def claim_step(
             return None
         statement = statement.where(Step.step_type.in_(sorted(step_types)))
     candidates = tuple((await session.scalars(statement)).all())
+    heavy_disk_blocked: bool | None = None
     for step in candidates:
+        if step.queue_class is QueueClass.HEAVY and settings is not None:
+            if heavy_disk_blocked is None:
+                heavy_disk_blocked = not assess_disk_pressure(
+                    settings, probe=free_space_probe
+                ).allowed
+            if heavy_disk_blocked:
+                # Skip without leasing: no attempt_count / lease burn.
+                continue
         if class_limits is not None:
             class_limit = class_limits.get(step.queue_class)
             if class_limit is not None:

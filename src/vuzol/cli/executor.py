@@ -200,6 +200,7 @@ async def run() -> None:
             runtime.registries,
             worktree_service,
             owner=owner,
+            settings=settings,
         )
         validation_handler = ResultValidationHandler(
             factory,

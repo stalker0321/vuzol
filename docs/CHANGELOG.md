@@ -4,6 +4,9 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added Step 10 backup foundation (B1): typed `backup-manifest.v1` models, pure
+  load/store/hash helpers, fail-closed restore path and isolated-DSN guards, and
+  `BackupSettings` defaulting to `enabled=false` (no capture/crypto/CLI yet);
 - added a default-dry-run retention CLI for expired managed worktrees and artifacts with bounded
   batches, advisory locking, crash-recoverable intent/external/finalize phases, protected-runtime
   rechecks, shared-content handling, and orphan quarantine; the checked-in apply service/timer are

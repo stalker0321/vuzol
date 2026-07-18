@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "alembic>=1.16,<2",
+  "cryptography>=48.0.1,<50",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "jsonschema>=4.25,<5",
@@ -31,6 +32,7 @@ vuzol-applier = "vuzol.cli.applier:main"
 vuzol-project-provisioner = "vuzol.cli.project_provisioner:main"
 vuzol-experiment = "vuzol.cli.experiment:main"
 vuzol-retention = "vuzol.cli.retention:main"
+vuzol-backup = "vuzol.cli.backup:main"
 
 [dependency-groups]
 dev = [

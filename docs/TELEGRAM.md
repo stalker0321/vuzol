@@ -65,8 +65,26 @@ Permanently pinned system topics, top → bottom:
 
 Additional workspace roles that are **not** part of the fixed pin stack:
 
-- `Система` (`system`) for operational alerts;
+- `Система` (`system`) for operational alerts and bounded orchestration traces;
 - one `<project>` (`project`) topic per provisioned project.
+
+### Orchestration traces
+
+For production dogfood, every completed semantic-interpretation call and every terminal planner
+attempt emits a durable one-shot message into `Система`. These are diagnostic projections from
+PostgreSQL/outbox state, not best-effort process logs, so a Telegram or service restart does not
+silently lose them.
+
+The interpreter trace shows the task number and project, profile/model, prompt and schema versions,
+input/output tokens, duration, repair use, the model-produced `TaskDraft`, and—when different—the
+effective draft after deterministic policy enforcement. The planner trace shows attempt/status,
+profile/model, measured tokens and reserved output limit, `finish_reason`, plain and structured
+output, explicit warnings for a token-limited or empty successful result, and the current handoff
+state. The trace currently states that planner output is not attached to the downstream
+`ProviderRequest`; executors still receive the original intake and interpreted TaskDraft directly.
+All provider/user text is HTML-escaped and bounded below the Telegram message limit; credentials,
+provider request IDs, raw prompts, and execution artifacts are not included. These traces are
+observational only: they do not change routing, validation, approval, or task status.
 
 ### Project status dashboard
 

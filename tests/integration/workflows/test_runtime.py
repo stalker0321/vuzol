@@ -72,6 +72,22 @@ def simple_draft() -> TaskDraft:
     )
 
 
+def planned_coding_draft() -> TaskDraft:
+    return TaskDraft(
+        action=TaskAction.CREATE_TASK,
+        task_type=TaskType.CODING,
+        operation=TaskOperation.MODIFY,
+        project_id="vuzol",
+        goal="Implement the change",
+        task_summary="Implement the requested code change",
+        suggested_complexity=SuggestedComplexity.MEDIUM,
+        suggested_risk=RiskLevel.MEDIUM,
+        needs_planning=True,
+        needs_clarification=False,
+        normalized_title="Implement change",
+    )
+
+
 async def seed_interpreted(
     factory: object, task_draft: TaskDraft | None = None
 ) -> tuple[uuid.UUID, uuid.UUID]:
@@ -139,6 +155,60 @@ def test_materialized_workflow_reaches_completion(postgres_dsn: str) -> None:
             assert loaded_task is not None and loaded_task.status is TaskStatus.COMPLETED
             event_count = await session.scalar(select(func.count()).select_from(Event))
             assert event_count is not None and event_count > 0
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_completed_plan_enqueues_system_trace(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        draft = planned_coding_draft()
+        task_id, interpretation_id = await seed_interpreted(factory, draft)
+        async with factory.begin() as session:
+            await materialize_run(
+                session,
+                task_id=task_id,
+                workflow=compile_workflow(draft, interpretation_id=interpretation_id),
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+                prompt_revision="trace-v1",
+                automatic_start=True,
+            )
+        async with factory.begin() as session:
+            token = await claim_step(
+                session,
+                owner="planner",
+                lease_seconds=60,
+                capabilities=frozenset(),
+                step_types=frozenset({"plan"}),
+            )
+        assert token is not None
+        async with factory.begin() as session:
+            await start_step(session, token)
+            await commit_step_outcome(
+                session,
+                token,
+                StepOutcome.succeeded(
+                    {
+                        "model": "gpt-5-nano-2025-08-07",
+                        "profile_id": "openai-planner-prod",
+                        "text": "Inspect, edit, verify.",
+                        "finish_reason": "stop",
+                    }
+                ),
+            )
+        async with factory() as session:
+            trace = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.payload["role"].as_string() == "orchestration_trace",
+                    TransactionalOutbox.payload["trace_kind"].as_string() == "planner",
+                )
+            )
+            assert trace is not None
+            assert trace.linked_entity_id == token.step.id
+            assert trace.payload["attempt"] == 1
         await engine.dispose()
 
     asyncio.run(scenario())

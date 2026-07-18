@@ -4,6 +4,11 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added durable bounded orchestration traces to the Telegram `Система` topic: semantic-interpreter
+  messages expose the raw and policy-effective TaskDraft plus call measurements, while planner
+  messages expose attempts, model, token usage/limit, finish reason, output, and prominent empty or
+  truncated-result warnings; planner traces also make the currently disconnected downstream
+  handoff explicit without changing workflow decisions;
 - made production readiness fail closed when the Compose interpreter is stopped or still serves an
   older semantic prompt than the deployed source, preventing stale routing images from passing a
   code-only rollout;

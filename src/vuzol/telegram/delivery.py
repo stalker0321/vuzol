@@ -26,11 +26,15 @@ from vuzol.storage.models import (
     Interpretation,
     ProjectNamingRequest,
     ProjectProvisioning,
+    ProviderBudgetReservation,
+    Run,
+    Step,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
     TopicMapping,
     TransactionalOutbox,
+    UsageRecord,
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import TaskStatus
@@ -45,6 +49,13 @@ from vuzol.telegram.projections import (
     build_status_card,
     build_task_history_report,
     telegram_html,
+)
+from vuzol.telegram.tracing import (
+    INTERPRETER_TRACE_KIND,
+    ORCHESTRATION_TRACE_ROLE,
+    PLANNER_TRACE_KIND,
+    build_interpreter_trace_html,
+    build_planner_trace_html,
 )
 
 TELEGRAM_DESTINATIONS = frozenset({"telegram"})
@@ -67,6 +78,8 @@ class PreparedDelivery:
     thread_id: int | None
     html: str = ""
     task_id: uuid.UUID | None = None
+    run_id: uuid.UUID | None = None
+    step_id: uuid.UUID | None = None
     revision: int | None = None
     link_id: uuid.UUID | None = None
     message_id: int | None = None
@@ -119,6 +132,8 @@ async def prepare_delivery(
         )
     if item.payload.get("role") == TASK_HISTORY_ROLE:
         return await _prepare_task_history_report(session, item, topics=topics, projects=projects)
+    if item.payload.get("role") == ORCHESTRATION_TRACE_ROLE:
+        return await _prepare_orchestration_trace(session, item, topics=topics)
     if item.linked_entity_type == "project_naming":
         naming = await session.get(ProjectNamingRequest, item.linked_entity_id)
         if naming is None:
@@ -333,6 +348,89 @@ async def _resolve_status_dashboard_thread(
     if mapping is None:
         raise PermanentDeliveryError("status_dashboard_topic_missing")
     return mapping.message_thread_id
+
+
+async def _resolve_system_trace_thread(
+    session: AsyncSession,
+    chat_id: int,
+    topics: TopicRegistry | None,
+) -> int:
+    destination = topics.system_topic(chat_id, TopicKind.SYSTEM) if topics is not None else None
+    if destination is not None and destination.enabled:
+        return destination.message_thread_id
+    mapping = await session.scalar(
+        select(TopicMapping).where(
+            TopicMapping.chat_id == chat_id,
+            TopicMapping.topic_kind == TopicKind.SYSTEM.value,
+            TopicMapping.enabled.is_(True),
+        )
+    )
+    if mapping is None:
+        raise PermanentDeliveryError("system_topic_missing")
+    return mapping.message_thread_id
+
+
+async def _prepare_orchestration_trace(
+    session: AsyncSession,
+    item: TransactionalOutbox,
+    *,
+    topics: TopicRegistry | None,
+) -> PreparedDelivery:
+    try:
+        task_id = uuid.UUID(str(item.payload["task_id"]))
+    except (KeyError, TypeError, ValueError) as error:
+        raise PermanentDeliveryError("invalid_orchestration_trace_task_id") from error
+    task = await session.get(Task, task_id)
+    if task is None:
+        raise PermanentDeliveryError("orchestration_trace_task_missing")
+    thread_id = await _resolve_system_trace_thread(session, task.source_chat_id, topics)
+    trace_kind = item.payload.get("trace_kind")
+    if trace_kind == INTERPRETER_TRACE_KIND:
+        interpretation = await session.get(Interpretation, item.linked_entity_id)
+        if interpretation is None or interpretation.task_id != task.id:
+            raise PermanentDeliveryError("orchestration_trace_interpretation_missing")
+        return PreparedDelivery(
+            DeliveryAction.SEND_STATUS,
+            chat_id=task.source_chat_id,
+            thread_id=thread_id,
+            html=build_interpreter_trace_html(task, interpretation, item.payload),
+            task_id=task.id,
+            revision=1,
+            message_role="trace_interpreter",
+        )
+    if trace_kind != PLANNER_TRACE_KIND:
+        raise PermanentDeliveryError("invalid_orchestration_trace_kind")
+    step = await session.get(Step, item.linked_entity_id)
+    if step is None or step.step_type != "plan":
+        raise PermanentDeliveryError("orchestration_trace_planner_missing")
+    run = await session.get(Run, step.run_id)
+    if run is None or run.task_id != task.id:
+        raise PermanentDeliveryError("orchestration_trace_run_missing")
+    usage = await session.scalar(
+        select(UsageRecord)
+        .where(UsageRecord.step_id == step.id)
+        .order_by(UsageRecord.created_at.desc())
+        .limit(1)
+    )
+    reservation = None
+    raw_reservation_id = step.payload.get("budget_reservation_id")
+    try:
+        reservation_id = uuid.UUID(str(raw_reservation_id))
+    except (TypeError, ValueError):
+        reservation_id = None
+    if reservation_id is not None:
+        reservation = await session.get(ProviderBudgetReservation, reservation_id)
+    return PreparedDelivery(
+        DeliveryAction.SEND_STATUS,
+        chat_id=task.source_chat_id,
+        thread_id=thread_id,
+        html=build_planner_trace_html(task, step, usage=usage, reservation=reservation),
+        task_id=task.id,
+        run_id=run.id,
+        step_id=step.id,
+        revision=max(1, step.attempt_count),
+        message_role="trace_planner",
+    )
 
 
 async def _prepare_task_history_report(
@@ -611,6 +709,8 @@ class TelegramDeliveryService:
                         message_thread_id=prepared.thread_id,
                         message_id=confirmed_message_id,
                         task_id=prepared.task_id,
+                        run_id=prepared.run_id,
+                        step_id=prepared.step_id,
                         approval_id=prepared.approval_id,
                         message_role=prepared.message_role or "task_status",
                         projection_revision=prepared.revision,

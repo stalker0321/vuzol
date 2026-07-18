@@ -5,6 +5,11 @@ HEAVY queue claims are skipped without leasing (no attempt/budget burn). A last
 moment re-check before worktree preparation returns a retryable outcome if space
 dropped after claim (residual TOCTOU; attempt is refunded for this category).
 
+Claim callers **must** pass ``Settings`` when evaluating HEAVY work. Missing
+settings fail closed for HEAVY (wiring mistake must not silently disable a
+configured-or-unknown gate). Explicit ``min_free_bytes=0`` remains the
+compatible off switch when settings are provided.
+
 Control-plane, light, recovery, retention, and finalization paths must not call
 this gate to block safety/cleanup actions.
 """
@@ -12,14 +17,20 @@ this gate to block safety/cleanup actions.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from vuzol.config.settings import Settings
+from vuzol.observability import get_logger
 
 DISK_PRESSURE_CATEGORY = "disk_pressure"
 DISK_PRESSURE_SUMMARY = "insufficient free disk for heavy work"
+# Claim loops may poll often; log at most once per interval per process.
+_CLAIM_DEFER_LOG_INTERVAL_SECONDS = 60.0
+_last_claim_defer_log_monotonic: float = 0.0
+_LOGGER = get_logger(__name__)
 
 
 class FreeSpaceProbe(Protocol):
@@ -115,3 +126,70 @@ def heavy_work_allowed(
     """True when HEAVY claims / worktree setup may proceed."""
 
     return assess_disk_pressure(settings, probe=probe).allowed
+
+
+def assess_heavy_claim_gate(
+    settings: Settings | None,
+    *,
+    probe: FreeSpaceProbe | None = None,
+) -> DiskPressureAssessment:
+    """Gate for HEAVY claim paths.
+
+    - ``settings is None`` → fail closed (``missing_settings``): production claim
+      paths must pass settings; omitting them must not silently allow HEAVY work.
+    - ``settings`` present → :func:`assess_disk_pressure` (zero min_free still
+      disables the free-space check).
+    """
+
+    if settings is None:
+        return DiskPressureAssessment(
+            allowed=False,
+            reason="missing_settings",
+            required_bytes=0,
+        )
+    return assess_disk_pressure(settings, probe=probe)
+
+
+def report_claim_disk_pressure_deferred(
+    assessment: DiskPressureAssessment,
+    *,
+    force: bool = False,
+    log_interval_seconds: float = _CLAIM_DEFER_LOG_INTERVAL_SECONDS,
+) -> bool:
+    """Emit bounded claim-time observability for deferred HEAVY claims.
+
+    Logs at most once per ``log_interval_seconds`` (process-local) unless
+    ``force=True``. Payload is path-free (reason, free/required bytes only).
+
+    Returns True when a log line was emitted.
+    """
+
+    global _last_claim_defer_log_monotonic
+    if assessment.allowed:
+        return False
+    now = time.monotonic()
+    if (
+        not force
+        and _last_claim_defer_log_monotonic > 0.0
+        and (now - _last_claim_defer_log_monotonic) < log_interval_seconds
+    ):
+        return False
+    _last_claim_defer_log_monotonic = now
+    _LOGGER.warning(
+        "heavy work claim deferred due to disk pressure",
+        extra={
+            "event": "ops.disk_pressure.deferred",
+            "source": "claim",
+            "reason": assessment.reason,
+            "required_bytes": assessment.required_bytes,
+            "free_bytes": assessment.free_bytes,
+        },
+    )
+    return True
+
+
+def reset_claim_defer_log_state_for_tests() -> None:
+    """Test helper: clear rate-limit state between cases."""
+
+    global _last_claim_defer_log_monotonic
+    _last_claim_defer_log_monotonic = 0.0

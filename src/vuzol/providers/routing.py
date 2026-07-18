@@ -15,7 +15,11 @@ from vuzol.config.models import (
 )
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
-from vuzol.ops.disk_pressure import FreeSpaceProbe, assess_disk_pressure
+from vuzol.ops.disk_pressure import (
+    FreeSpaceProbe,
+    assess_heavy_claim_gate,
+    report_claim_disk_pressure_deferred,
+)
 from vuzol.projects.executor_preference import (
     ExecutorRoutePin,
     load_preference,
@@ -98,9 +102,12 @@ async def claim_routed_step(
     for step, run, task in tuple(rows.all()):
         if step.queue_class is QueueClass.HEAVY:
             if heavy_disk_blocked is None:
-                heavy_disk_blocked = not assess_disk_pressure(
-                    settings, probe=free_space_probe
-                ).allowed
+                # settings is required on this API; assess_heavy_claim_gate still
+                # fail-closes if a caller ever passes None via type hole.
+                assessment = assess_heavy_claim_gate(settings, probe=free_space_probe)
+                heavy_disk_blocked = assessment.blocked
+                if heavy_disk_blocked:
+                    report_claim_disk_pressure_deferred(assessment)
             if heavy_disk_blocked:
                 # Defer without routing decision, budget reservation, or attempt burn.
                 continue

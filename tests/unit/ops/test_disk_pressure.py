@@ -10,9 +10,13 @@ from pydantic import ValidationError
 from vuzol.config.settings import DiskPressureSettings, Settings
 from vuzol.ops.disk_pressure import (
     DISK_PRESSURE_CATEGORY,
+    DiskPressureAssessment,
     assess_disk_pressure,
+    assess_heavy_claim_gate,
     heavy_work_allowed,
     measurement_paths,
+    report_claim_disk_pressure_deferred,
+    reset_claim_defer_log_state_for_tests,
 )
 
 
@@ -120,3 +124,30 @@ def test_default_settings_compatible() -> None:
 
 def test_category_constant_stable() -> None:
     assert DISK_PRESSURE_CATEGORY == "disk_pressure"
+
+
+def test_missing_settings_fail_closed_for_claim_gate() -> None:
+    result = assess_heavy_claim_gate(None)
+    assert result.blocked is True
+    assert result.reason == "missing_settings"
+
+
+def test_claim_defer_log_rate_limited() -> None:
+    """Return value encodes rate-limit; avoids caplog interaction with suite logging config."""
+
+    reset_claim_defer_log_state_for_tests()
+    assessment = DiskPressureAssessment(
+        allowed=False, reason="low", required_bytes=1000, free_bytes=10
+    )
+    assert report_claim_disk_pressure_deferred(assessment, log_interval_seconds=60.0) is True
+    assert report_claim_disk_pressure_deferred(assessment, log_interval_seconds=60.0) is False
+    assert (
+        report_claim_disk_pressure_deferred(assessment, force=True, log_interval_seconds=60.0)
+        is True
+    )
+    assert (
+        report_claim_disk_pressure_deferred(
+            DiskPressureAssessment(allowed=True, reason="ok"), force=True
+        )
+        is False
+    )

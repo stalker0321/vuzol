@@ -154,6 +154,79 @@ def test_disabled_disk_gate_allows_heavy_claim(postgres_dsn: str, tmp_path: Path
 
 
 @pytest.mark.postgresql
+def test_heavy_claim_without_settings_fails_closed(postgres_dsn: str, tmp_path: Path) -> None:
+    """Missing settings must not silently allow HEAVY claims (C3)."""
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await seed_task_run_step(
+            factory,
+            capabilities=["code_edit"],
+            queue_class=QueueClass.HEAVY,
+        )
+        async with factory.begin() as session:
+            token = await claim_step(
+                session,
+                owner="executor",
+                lease_seconds=60,
+                capabilities=frozenset({"code_edit"}),
+                queue_classes=frozenset({QueueClass.HEAVY}),
+                settings=None,
+                free_space_probe=_Probe(10**12),
+            )
+        assert token is None
+        async with factory() as session:
+            step = (await session.scalars(select(Step))).one()
+            assert step.status is StepStatus.QUEUED
+            assert step.attempt_count == 0
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_heavy_claim_recovers_when_probe_reports_space(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await seed_task_run_step(
+            factory,
+            capabilities=["code_edit"],
+            queue_class=QueueClass.HEAVY,
+        )
+        settings = _settings(tmp_path, min_free=10_000)
+        probe = _Probe(100)
+        async with factory.begin() as session:
+            blocked = await claim_step(
+                session,
+                owner="executor",
+                lease_seconds=60,
+                capabilities=frozenset({"code_edit"}),
+                queue_classes=frozenset({QueueClass.HEAVY}),
+                settings=settings,
+                free_space_probe=probe,
+            )
+        assert blocked is None
+        probe.free = 50_000
+        async with factory.begin() as session:
+            recovered = await claim_step(
+                session,
+                owner="executor",
+                lease_seconds=60,
+                capabilities=frozenset({"code_edit"}),
+                queue_classes=frozenset({QueueClass.HEAVY}),
+                settings=settings,
+                free_space_probe=probe,
+            )
+        assert recovered is not None
+        async with factory() as session:
+            step = await session.get(Step, recovered.step.id)
+            assert step is not None and step.attempt_count == 1
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_disk_pressure_transient_refunds_attempt(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

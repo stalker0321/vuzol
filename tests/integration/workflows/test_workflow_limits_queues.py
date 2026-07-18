@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from vuzol.config.settings import DiskPressureSettings, Settings
+
 from ._test_runtime_helpers import (
     UTC,
     IdempotencyClass,
@@ -20,10 +24,24 @@ from ._test_runtime_helpers import (
 )
 
 
+def _gate_off_settings(tmp_path: Path) -> Settings:
+    """Explicit settings with disk gate off (required for HEAVY claim_step)."""
+
+    return Settings(
+        environment="test",
+        repository_root=tmp_path / "repositories",
+        worktree_root=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts",
+        secret_file_root=tmp_path / "secrets",
+        disk_pressure=DiskPressureSettings(min_free_bytes=0),
+    )
+
+
 @pytest.mark.postgresql
-def test_heavy_class_limit_is_transactional(postgres_dsn: str) -> None:
+def test_heavy_class_limit_is_transactional(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
+        settings = _gate_off_settings(tmp_path)
         step_ids: list[uuid.UUID] = []
         for _ in range(2):
             async with UnitOfWork(factory) as uow:
@@ -58,6 +76,7 @@ def test_heavy_class_limit_is_transactional(postgres_dsn: str) -> None:
                     capabilities=frozenset(),
                     queue_classes=frozenset({QueueClass.HEAVY}),
                     class_limits={QueueClass.HEAVY: 1},
+                    settings=settings,
                 )
 
         claims = await asyncio.gather(claim("a"), claim("b"))

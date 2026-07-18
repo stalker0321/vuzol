@@ -17,7 +17,9 @@ from vuzol.ops.disk_pressure import (
     FreeSpaceProbe,
     StatVfsProbe,
     assess_disk_pressure,
+    assess_heavy_claim_gate,
     heavy_work_allowed,
+    report_claim_disk_pressure_deferred,
 )
 from vuzol.ops.retention import (
     RetentionAction,
@@ -43,9 +45,11 @@ __all__ = [
     "assert_isolated_restore_dsn",
     "assert_safe_restore_paths",
     "assess_disk_pressure",
+    "assess_heavy_claim_gate",
     "effective_worktree_retention_until",
     "heavy_work_allowed",
     "load_manifest",
     "manifest_sha256",
+    "report_claim_disk_pressure_deferred",
     "store_manifest",
 ]

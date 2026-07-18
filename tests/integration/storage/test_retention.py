@@ -22,11 +22,12 @@ from vuzol.ops.retention import (
     RETENTION_SWEEP_LOCK_KEY,
     WORKTREE_EXTERNAL_DONE,
     WORKTREE_INTENT,
+    RetentionAction,
     RetentionOutcome,
     RetentionSweeper,
     RetentionSweepMode,
 )
-from vuzol.storage.models import Artifact, Event, Task, Worktree
+from vuzol.storage.models import Artifact, Event, Step, Task, Worktree
 from vuzol.storage.types import (
     ArtifactStorageState,
     IdempotencyClass,
@@ -936,6 +937,851 @@ def test_active_and_blocked_task_preserved(postgres_dsn: str, tmp_path: Path) ->
         assert "blocked_task" in reasons or "protected_delivery_state" in reasons
         assert Path(active.path).exists()  # noqa: ASYNC240
         assert Path(blocked.path).exists()  # noqa: ASYNC240
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+async def _add_linked_git_worktree(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    run_id: uuid.UUID,
+    root: Path,
+    repository: Path,
+    project_id: str = "project",
+    retention_until: datetime | None = None,
+) -> Worktree:
+    """Create a real linked Git worktree (`.git` file), not a standalone shallow clone."""
+    git = LocalGit()
+    identity, _ = await git.repository_identity(repository)
+    path = root / project_id / str(run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    head = subprocess.run(  # noqa: ASYNC221
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    branch = f"vuzol/task-{task_id}-run-{str(run_id)[:12]}"
+    subprocess.run(  # noqa: ASYNC221
+        ["git", "-C", str(repository), "worktree", "add", "-b", branch, str(path), head],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (path / ".git").is_file()  # linked worktree marker
+    row = Worktree(
+        task_id=task_id,
+        run_id=run_id,
+        project_id=project_id,
+        repository_identity_hash=identity,
+        base_commit=head,
+        default_branch="main",
+        expected_target_head=head,
+        branch=branch,
+        path=str(path),
+        owner="test",
+        delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
+        retention_until=retention_until or (datetime.now(UTC) - timedelta(days=1)),
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+@pytest.mark.postgresql
+def test_registered_git_worktree_removal(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        task_id, run_id, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            worktree = await _add_linked_git_worktree(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                root=worktree_root,
+                repository=repository,
+            )
+            path = Path(worktree.path)
+            worktree_id = worktree.id
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert not path.exists()  # noqa: ASYNC240
+        listing = subprocess.run(  # noqa: ASYNC221
+            ["git", "-C", str(repository), "worktree", "list", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert str(path) not in listing
+        async with factory() as session:
+            row = await session.get(Worktree, worktree_id)
+            assert row is not None
+            assert row.delivery_state is WorktreeDeliveryState.CLEANED
+            assert row.cleaned_at is not None
+        assert any(
+            a.resource_id == str(worktree_id)
+            and a.outcome in {RetentionOutcome.CLEANED, RetentionOutcome.RECONCILED}
+            for a in report.actions
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_r1_protection_recheck_before_external_deletion(
+    postgres_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Race: step becomes BLOCKED after INTENT, immediately before external Git/FS."""
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        task_id, run_id, step_id = await _seed_task(
+            factory, status=TaskStatus.COMPLETED, age_days=10
+        )
+        async with factory.begin() as session:
+            worktree = await _add_worktree(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                root=worktree_root,
+                repository=repository,
+            )
+            path = Path(worktree.path)
+            worktree_id = worktree.id
+
+        original_external = RetentionSweeper._worktree_phase_external
+
+        async def race_then_external(
+            self: RetentionSweeper, worktree_id: uuid.UUID
+        ) -> RetentionAction:
+            # Flip protection only after phase A committed INTENT.
+            async with factory.begin() as session:
+                await session.execute(
+                    update(Step).where(Step.id == step_id).values(status=StepStatus.BLOCKED)
+                )
+            return await original_external(self, worktree_id)
+
+        monkeypatch.setattr(RetentionSweeper, "_worktree_phase_external", race_then_external)
+
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert path.exists()  # noqa: ASYNC240
+        assert any(
+            a.resource_id == str(worktree_id) and a.reason == "protected_step"
+            for a in report.actions
+        )
+        async with factory() as session:
+            row = await session.get(Worktree, worktree_id)
+            assert row is not None
+            assert row.cleanup_reason == WORKTREE_INTENT
+            assert row.delivery_state is not WorktreeDeliveryState.CLEANED
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_shared_content_hash_peers_last_unlink(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        content = b"shared-bytes-for-two-tasks"
+        t1, r1, s1 = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        t2, r2, s2 = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            a1 = await _add_artifact(
+                session, task_id=t1, run_id=r1, step_id=s1, root=artifact_root, content=content
+            )
+            a2 = await _add_artifact(
+                session, task_id=t2, run_id=r2, step_id=s2, root=artifact_root, content=content
+            )
+            path = artifact_root / a1.content_uri.removeprefix("artifact:")
+            assert a1.content_hash == a2.content_hash
+            assert path.exists()
+        await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        async with factory() as session:
+            row1 = await session.get(Artifact, a1.id)
+            row2 = await session.get(Artifact, a2.id)
+            assert row1 is not None and row2 is not None
+            assert row1.storage_state is ArtifactStorageState.DELETED
+            assert row2.storage_state is ArtifactStorageState.DELETED
+        assert not path.exists()
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_artifact_resume_after_external_done(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        from vuzol.ops.retention import ARTIFACT_META_KEY, ARTIFACT_PHASE_EXTERNAL
+
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        task_id, run_id, step_id = await _seed_task(
+            factory, status=TaskStatus.COMPLETED, age_days=10
+        )
+        async with factory.begin() as session:
+            artifact = await _add_artifact(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=step_id,
+                root=artifact_root,
+                content=b"to-delete",
+            )
+            path = artifact_root / artifact.content_uri.removeprefix("artifact:")
+            path.unlink()
+            meta = dict(artifact.metadata_json or {})
+            meta[ARTIFACT_META_KEY] = {
+                "phase": ARTIFACT_PHASE_EXTERNAL,
+                "owner": "test",
+                "content_hash": artifact.content_hash,
+                "file_removed": True,
+            }
+            artifact.metadata_json = meta
+            flag_modified(artifact, "metadata_json")
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert any(
+            a.resource_id == str(artifact.id)
+            and a.outcome in {RetentionOutcome.MARKED_DELETED, RetentionOutcome.RECONCILED}
+            for a in report.actions
+        )
+        async with factory() as session:
+            row = await session.get(Artifact, artifact.id)
+            assert row is not None
+            assert row.storage_state is ArtifactStorageState.DELETED
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_removal_incomplete_when_external_done_but_path_remains(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        task_id, run_id, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            worktree = await _add_worktree(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                root=worktree_root,
+                repository=repository,
+            )
+            worktree.cleanup_reason = WORKTREE_EXTERNAL_DONE
+            # Path still present — finalize must fail closed.
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert any(
+            a.resource_id == str(worktree.id) and a.reason == "removal_incomplete"
+            for a in report.actions
+        )
+        assert Path(worktree.path).exists()  # noqa: ASYNC240
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_finalize_missing_after_intent_reconciles(postgres_dsn: str, tmp_path: Path) -> None:
+    """Crash window: path gone, cleanup_reason still INTENT — finalize reconciles."""
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        task_id, run_id, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            worktree = await _add_worktree(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                root=worktree_root,
+                repository=repository,
+            )
+            worktree.cleanup_reason = WORKTREE_INTENT
+            path = Path(worktree.path)
+            worktree_id = worktree.id
+        shutil.rmtree(path)
+        sweeper = _sweeper(factory, worktree_root, artifact_root, repos)
+        sweeper._bind_roots(mode=RetentionSweepMode.APPLY)
+        action = await sweeper._worktree_phase_finalize(worktree_id, mode=RetentionSweepMode.APPLY)
+        assert action.outcome is RetentionOutcome.RECONCILED
+        assert action.reason == "finalized_missing_after_intent"
+        async with factory() as session:
+            row = await session.get(Worktree, worktree_id)
+            assert row is not None
+            assert row.delivery_state is WorktreeDeliveryState.CLEANED
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_artifact_uri_escape_fails_closed(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        task_id, run_id, step_id = await _seed_task(
+            factory, status=TaskStatus.COMPLETED, age_days=10
+        )
+        async with factory.begin() as session:
+            artifact = await _add_artifact(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=step_id,
+                root=artifact_root,
+                content=b"escape-me",
+            )
+            artifact.content_uri = "artifact:../escape.bin"
+            artifact_id = artifact.id
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert any(
+            a.resource_id == str(artifact_id) and a.reason == "path_violation"
+            for a in report.actions
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_f9_quarantine_intent_dry_run_would_finalize(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        token = uuid.uuid4().hex
+        dest_rel = f".quarantine/{token}/orphan.bin"
+        dest = artifact_root / dest_rel
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(b"moved")
+        async with factory.begin() as session:
+            session.add(
+                Event(
+                    entity_type="artifact_file",
+                    entity_id=uuid.uuid4(),
+                    event_type="ops.retention.quarantine_intent",
+                    actor_type="retention",
+                    actor_id="test",
+                    payload={
+                        "reason": "orphan_filesystem_object",
+                        "source": "aa/orphan.bin",
+                        "token": token,
+                        "destination": dest_rel,
+                    },
+                )
+            )
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.DRY_RUN
+        )
+        assert any(a.reason == "would_finalize_quarantine_intent" for a in report.actions)
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_batch_size_stops_after_acted_budget(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        for _ in range(3):
+            task_id, run_id, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+            async with factory.begin() as session:
+                await _add_worktree(
+                    session,
+                    task_id=task_id,
+                    run_id=run_id,
+                    root=worktree_root,
+                    repository=repository,
+                )
+        report = await _sweeper(factory, worktree_root, artifact_root, repos, batch_size=1).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        cleaned = [
+            a
+            for a in report.actions
+            if a.resource_type == "worktree"
+            and a.outcome in {RetentionOutcome.CLEANED, RetentionOutcome.RECONCILED}
+        ]
+        assert len(cleaned) == 1
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_intent_resume_dry_run_and_protected_skip(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        t1, r1, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        t2, r2, s2 = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            w1 = await _add_worktree(
+                session, task_id=t1, run_id=r1, root=worktree_root, repository=repository
+            )
+            w1.cleanup_reason = WORKTREE_INTENT
+            w1_id = w1.id
+            w2 = await _add_worktree(
+                session, task_id=t2, run_id=r2, root=worktree_root, repository=repository
+            )
+            w2.cleanup_reason = WORKTREE_INTENT
+            w2_id = w2.id
+            await session.execute(
+                update(Step).where(Step.id == s2).values(status=StepStatus.BLOCKED)
+            )
+        dry = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.DRY_RUN
+        )
+        assert any(a.resource_id == str(w1_id) and a.reason == "resume_intent" for a in dry.actions)
+        applied = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert any(
+            a.resource_id == str(w2_id) and a.reason == "protected_step" for a in applied.actions
+        )
+        assert worktree_root.exists()
+        async with factory() as session:
+            row = await session.get(Worktree, w2_id)
+            assert row is not None
+            assert row.cleanup_reason == WORKTREE_INTENT
+            assert Path(row.path).exists()  # noqa: ASYNC240
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_worktree_path_violation_and_symlink(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        outside = tmp_path / "outside-wt"
+        outside.mkdir()
+        (outside / "README").write_text("x")
+        t1, r1, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        t2, r2, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            w_bad = await _add_worktree(
+                session, task_id=t1, run_id=r1, root=worktree_root, repository=repository
+            )
+            # Point path outside managed root.
+            shutil.rmtree(w_bad.path)
+            w_bad.path = str(outside)
+            bad_id = w_bad.id
+            w_link = await _add_worktree(
+                session, task_id=t2, run_id=r2, root=worktree_root, repository=repository
+            )
+            link_path = Path(w_link.path)
+            shutil.rmtree(link_path)
+            link_path.symlink_to(outside)  # noqa: ASYNC240
+            link_id = w_link.id
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert any(
+            a.resource_id == str(bad_id) and a.reason == "path_violation" for a in report.actions
+        )
+        # Symlink under root resolves outside → contained() fails closed as path_violation.
+        assert any(
+            a.resource_id == str(link_id) and a.reason == "path_violation" for a in report.actions
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_artifact_intent_resume_and_symlink_refused(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        from vuzol.ops.retention import ARTIFACT_META_KEY, ARTIFACT_PHASE_INTENT
+
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        t1, r1, s1 = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        t2, r2, s2 = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            a1 = await _add_artifact(
+                session, task_id=t1, run_id=r1, step_id=s1, root=artifact_root, content=b"resume"
+            )
+            meta = dict(a1.metadata_json or {})
+            meta[ARTIFACT_META_KEY] = {
+                "phase": ARTIFACT_PHASE_INTENT,
+                "owner": "test",
+                "content_hash": a1.content_hash,
+            }
+            a1.metadata_json = meta
+            flag_modified(a1, "metadata_json")
+            a1_id = a1.id
+            a2 = await _add_artifact(
+                session, task_id=t2, run_id=r2, step_id=s2, root=artifact_root, content=b"symlink"
+            )
+            path2 = artifact_root / a2.content_uri.removeprefix("artifact:")
+            path2.unlink()
+            outside = tmp_path / "secret.bin"
+            outside.write_bytes(b"secret")
+            path2.symlink_to(outside)
+            a2_id = a2.id
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert any(
+            a.resource_id == str(a1_id)
+            and a.outcome in {RetentionOutcome.MARKED_DELETED, RetentionOutcome.RECONCILED}
+            for a in report.actions
+        )
+        # Symlink target escapes artifact root via resolve → path_violation (fail-closed).
+        assert any(
+            a.resource_id == str(a2_id) and a.reason == "path_violation" for a in report.actions
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_quarantine_intent_skips_malformed_payload(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        async with factory.begin() as session:
+            session.add(
+                Event(
+                    entity_type="artifact_file",
+                    entity_id=uuid.uuid4(),
+                    event_type="ops.retention.quarantine_intent",
+                    actor_type="retention",
+                    actor_id="test",
+                    payload={"token": 123, "destination": None},
+                )
+            )
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert not any(a.reason == "quarantine_intent_finalized" for a in report.actions)
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_invalid_worktree_file_path_and_active_delivery(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        t1, r1, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        t2, r2, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            w_file = await _add_worktree(
+                session, task_id=t1, run_id=r1, root=worktree_root, repository=repository
+            )
+            path = Path(w_file.path)
+            shutil.rmtree(path)
+            path.write_text("not-a-dir")  # noqa: ASYNC240
+            file_id = w_file.id
+            w_active = await _add_worktree(
+                session,
+                task_id=t2,
+                run_id=r2,
+                root=worktree_root,
+                repository=repository,
+                delivery_state=WorktreeDeliveryState.ACTIVE,
+            )
+            # INTENT makes the row selectable; ACTIVE delivery must still skip.
+            w_active.cleanup_reason = WORKTREE_INTENT
+            active_id = w_active.id
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert any(
+            a.resource_id == str(file_id) and a.reason == "invalid_worktree_path"
+            for a in report.actions
+        )
+        assert any(
+            a.resource_id == str(active_id) and a.reason == "protected_delivery_state"
+            for a in report.actions
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_dry_run_would_finalize_external_done_missing(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        task_id, run_id, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            worktree = await _add_worktree(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                root=worktree_root,
+                repository=repository,
+            )
+            worktree.cleanup_reason = WORKTREE_EXTERNAL_DONE
+            path = Path(worktree.path)
+            worktree_id = worktree.id
+        shutil.rmtree(path)
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.DRY_RUN
+        )
+        assert any(
+            a.resource_id == str(worktree_id) and a.reason == "would_finalize_external_done"
+            for a in report.actions
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_pending_approval_blocks_worktree(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        from vuzol.storage.models import Approval
+        from vuzol.storage.types import ApprovalStatus
+
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        task_id, run_id, step_id = await _seed_task(
+            factory, status=TaskStatus.COMPLETED, age_days=10
+        )
+        async with factory.begin() as session:
+            worktree = await _add_worktree(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                root=worktree_root,
+                repository=repository,
+            )
+            worktree_id = worktree.id
+            session.add(
+                Approval(
+                    step_id=step_id,
+                    action_envelope_hash="a" * 64,
+                    requested_action="apply_result",
+                    normalized_target="result",
+                    human_summary="pending for retention test",
+                    token_hash="c" * 64,
+                    status=ApprovalStatus.PENDING,
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.APPLY
+        )
+        assert any(
+            a.resource_id == str(worktree_id) and a.reason == "pending_approval"
+            for a in report.actions
+        )
+        async with factory() as session:
+            row = await session.get(Worktree, worktree_id)
+            assert row is not None
+            assert Path(row.path).exists()  # noqa: ASYNC240
+            assert row.delivery_state is not WorktreeDeliveryState.CLEANED
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_dry_run_would_clean_eligible_worktree(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        repository = repos / "project"
+        _git_init(repository)
+        task_id, run_id, _ = await _seed_task(factory, status=TaskStatus.COMPLETED, age_days=10)
+        async with factory.begin() as session:
+            worktree = await _add_worktree(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                root=worktree_root,
+                repository=repository,
+            )
+            worktree_id = worktree.id
+            path = Path(worktree.path)
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.DRY_RUN
+        )
+        assert any(
+            a.resource_id == str(worktree_id)
+            and a.outcome is RetentionOutcome.WOULD_CLEAN
+            and a.reason == "retention_expired"
+            for a in report.actions
+        )
+        assert path.exists()  # noqa: ASYNC240
+        async with factory() as session:
+            row = await session.get(Worktree, worktree_id)
+            assert row is not None
+            assert row.cleanup_reason is None or row.cleanup_reason == ""
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_artifact_dry_run_would_mark_deleted(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        worktree_root = tmp_path / "worktrees"
+        artifact_root = tmp_path / "artifacts"
+        repos = tmp_path / "repos"
+        worktree_root.mkdir()
+        artifact_root.mkdir()
+        repos.mkdir()
+        task_id, run_id, step_id = await _seed_task(
+            factory, status=TaskStatus.COMPLETED, age_days=10
+        )
+        async with factory.begin() as session:
+            artifact = await _add_artifact(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=step_id,
+                root=artifact_root,
+                content=b"dry-run-artifact",
+            )
+            artifact_id = artifact.id
+            path = artifact_root / artifact.content_uri.removeprefix("artifact:")
+        report = await _sweeper(factory, worktree_root, artifact_root, repos).run(
+            mode=RetentionSweepMode.DRY_RUN
+        )
+        assert any(
+            a.resource_id == str(artifact_id) and a.outcome is RetentionOutcome.WOULD_MARK_DELETED
+            for a in report.actions
+        )
+        assert path.exists()
         await engine.dispose()
 
     asyncio.run(scenario())

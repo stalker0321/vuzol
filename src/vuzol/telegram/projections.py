@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import ProviderProfileConfig
+from vuzol.projects.executor_preference import format_preference_label, load_preference
 from vuzol.providers.subscription_limits import (
     SubscriptionLimitSnapshot,
     format_subscription_limits_html,
@@ -348,6 +349,11 @@ async def build_project_status_dashboard(
                 profile_providers=profile_providers,
                 model=step_model,
             )
+            # Before an executor step is claimed, surface the durable project /model pin.
+            if model == "not assigned yet" and task.project_id is not None:
+                preference = await load_preference(session, task.project_id)
+                if not preference.is_auto:
+                    model = f"{format_preference_label(preference)} (project default)"
             model_by_task[task.id] = model
             project_id = task.project_id
             if project_id and project_names is not None and project_id in project_names:

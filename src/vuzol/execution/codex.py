@@ -109,11 +109,23 @@ class ExecutionEnvelopeFactory:
                 raise LookupError("sandbox worktree or step is missing")
             _validate_fenced_binding(invocation, worktree, step)
             profile = self._registries.profiles.get(invocation.profile_id)
+            model = profile.model
+            reasoning_effort = profile.model_reasoning_effort
+            model_override = step.payload.get("executor_model_override")
+            if isinstance(model_override, str) and model_override.strip():
+                model = model_override.strip()
+            if "executor_reasoning_effort" in step.payload:
+                effort_override = step.payload.get("executor_reasoning_effort")
+                reasoning_effort = (
+                    effort_override.strip()
+                    if isinstance(effort_override, str) and effort_override.strip()
+                    else None
+                )
             _require_provider_command(
                 invocation.argv,
                 profile.provider,
-                profile.model,
-                reasoning_effort=profile.model_reasoning_effort,
+                model,
+                reasoning_effort=reasoning_effort,
             )
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)

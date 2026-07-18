@@ -34,6 +34,12 @@ quota, context, output, hard-budget, or concurrency policy. Eligible profiles ar
 5. active leases and queue depth;
 6. stable profile ID.
 
+Project-scoped `/model` preferences (see [Telegram](TELEGRAM.md)) may pin the executor role for a
+project to a worker family. Auto mode leaves ordering unchanged. Pin mode supplies the trusted
+profile for executor steps and restricts post-failure fallbacks to the same family (Codex stays on
+Codex; Grok may fall across Grok profiles only). Sol/Terra/Luna pins also attach claim-time model
+and reasoning-effort overrides for the Codex CLI transport without multiplying registry profiles.
+
 Every routed workflow call stores its decision, alternatives, bounded exclusion reasons, selected
 profile, and policy revision. Routing, hard-budget reservation, profile assignment, and fenced step
 claim commit atomically.

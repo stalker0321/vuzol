@@ -7,6 +7,10 @@ This file records completed implementation changes, not plans or speculative ide
 - rebuilt and repinned the offline validation image for the R1 testing-policy inputs; the image
   contains all 71 locked packages and its build-time dependency audit found no known
   vulnerabilities;
+- added project-scoped `/model` in project topics: choose Routing (auto), Sol/Terra/Luna with
+  reasoning effort, or Grok as the durable default coding executor for that project; pinned
+  selection is enforced by routing with same-family fallbacks only and claim-time model/effort
+  overrides for the Codex sandbox transport;
 - planner handoff corrections: assess plan usability before success health/usage accounting,
   persist retry diagnostics only for plan steps, select plan provenance deterministically, use
   dedicated `planner_handoff_fenced` failures, require `ProviderResultStatus.SUCCEEDED`, and document

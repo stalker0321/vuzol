@@ -188,20 +188,31 @@ class ExecutionSettings(BaseModel):
 
 
 class BackupSettings(BaseModel):
-    """Minimal backup foundation settings (capture not implemented; default off)."""
+    """Backup settings. Timers are never implied; capture is manual and gated."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # Product "enabled" remains false-by-default and does not mean scheduled.
     enabled: bool = False
+    # Manual APPLY capture gate (default off).
+    capture_cli_permitted: bool = False
     staging_root: Path | None = None
     drill_root: Path | None = None
     keep_local_runs: int = Field(default=3, ge=1, le=100)
     keep_offhost_days: int = Field(default=28, ge=1, le=3_650)
+    keep_failed_runs: bool = False
+    min_free_bytes: int = Field(default=2_147_483_648, ge=0, le=10_000_000_000_000)
     rpo_seconds_target: int = Field(default=86_400, ge=60, le=604_800)
     rto_seconds_target: int = Field(default=7_200, ge=60, le=86_400)
     drill_database_name_suffix: str = Field(default="_restore", min_length=1, max_length=32)
+    kek_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
+    postgres_container: str = Field(default="vuzol-postgres-1", min_length=1, max_length=64)
+    postgres_dump_argv: tuple[str, ...] | None = None
+    allow_non_loopback_dump: bool = False
+    quiesce_mode: Literal["none", "manual"] = "none"
+    deploy_path: Path = Path("/opt/vuzol")
 
-    @field_validator("staging_root", "drill_root")
+    @field_validator("staging_root", "drill_root", "deploy_path")
     @classmethod
     def require_absolute_optional_root(cls, value: Path | None) -> Path | None:
         if value is None:
@@ -220,11 +231,22 @@ class BackupSettings(BaseModel):
             raise ValueError("drill database name suffix must not contain whitespace")
         return cleaned
 
+    @field_validator("postgres_container")
+    @classmethod
+    def validate_container(cls, value: str) -> str:
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value):
+            raise ValueError("postgres_container name is unsafe")
+        return value
+
     @model_validator(mode="after")
-    def validate_enabled_requires_capture(self) -> "BackupSettings":
+    def validate_enabled_is_not_schedule(self) -> "BackupSettings":
+        # enabled=true is reserved / still forbidden so timers cannot be smuggled.
         if self.enabled:
             raise ValueError(
-                "backup.enabled cannot be true until capture/encrypt slices are implemented"
+                "backup.enabled cannot be true (timers not implemented); "
+                "use capture_cli_permitted for manual capture only"
             )
         return self
 

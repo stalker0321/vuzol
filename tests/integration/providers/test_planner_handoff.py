@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import uuid
 from decimal import Decimal
@@ -38,7 +39,7 @@ from vuzol.providers.routing import claim_routed_step
 from vuzol.storage.leasing import start_step
 from vuzol.storage.models import (
     ProfileHealthObservation,
-    RoutingDecision,
+    Run,
     Step,
     Task,
     UsageRecord,
@@ -593,10 +594,6 @@ def test_plan_retry_recovers_and_stale_result_is_fenced(postgres_dsn: str, tmp_p
             )
         with pytest.raises(Exception, match="fenced") as raised:
             await handler2._build_request(request)
-        from vuzol.providers.planner_handoff import (
-            PLANNER_HANDOFF_FENCED_CATEGORY,
-            PlannerHandoffFenced,
-        )
 
         assert isinstance(raised.value, PlannerHandoffFenced)
         assert raised.value.category == PLANNER_HANDOFF_FENCED_CATEGORY

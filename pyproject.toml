@@ -30,6 +30,7 @@ vuzol-executor = "vuzol.cli.executor:main"
 vuzol-applier = "vuzol.cli.applier:main"
 vuzol-project-provisioner = "vuzol.cli.project_provisioner:main"
 vuzol-experiment = "vuzol.cli.experiment:main"
+vuzol-retention = "vuzol.cli.retention:main"
 
 [dependency-groups]
 dev = [

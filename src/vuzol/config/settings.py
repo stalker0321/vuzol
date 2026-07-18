@@ -25,6 +25,15 @@ class RetentionDefaults(BaseModel):
     artifact_days: int = Field(default=14, ge=1)
     voice_days: int = Field(default=3, ge=1)
     log_days: int = Field(default=14, ge=1)
+    sweep_batch_size: int = Field(default=50, ge=1, le=1_000)
+    sweep_lock_timeout_seconds: float = Field(default=5.0, ge=0.1, le=120.0)
+
+    @model_validator(mode="after")
+    def validate_worktree_retention_order(self) -> "RetentionDefaults":
+        # Unresolved and failed/blocked work needs at least as long as successful work.
+        if self.failed_worktree_days < self.completed_worktree_days:
+            raise ValueError("failed worktree retention must not be shorter than completed")
+        return self
 
 
 class HardLimits(BaseModel):

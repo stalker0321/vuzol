@@ -21,6 +21,7 @@ from vuzol.telegram.projections import (
     enqueue_task_status_projection,
     enqueue_terminal_task_projections,
 )
+from vuzol.telegram.tracing import enqueue_planner_trace
 from vuzol.workflows.domain import MaterializedWorkflow, OutcomeKind, StepOutcome
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
@@ -230,6 +231,8 @@ async def commit_step_outcome(
         await finalize_if_complete(session, run)
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
     assert task is not None
+    if step.step_type == "plan":
+        enqueue_planner_trace(session, task=task, step=step)
     target = derive_task_status(await _steps_for_run(session, run.id), run.status)
     if target is not task.status:
         await transition_task(session, task, target, actor_type="workflow_manager")

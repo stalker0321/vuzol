@@ -45,6 +45,7 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import ProjectNamingStatus, TaskStatus
+from vuzol.telegram.tracing import enqueue_interpreter_trace
 
 INTERPRETATION_DESTINATIONS = frozenset({"telegram_file", "interpretation"})
 
@@ -307,6 +308,12 @@ class InterpretationPipeline:
                 else TaskStatus.INTERPRETED
             )
             task.version += 1
+            enqueue_interpreter_trace(
+                session,
+                task=task,
+                interpretation=interpretation,
+                result=result,
+            )
             if policy.draft.needs_clarification:
                 await _enqueue_semantic_clarification(
                     session,

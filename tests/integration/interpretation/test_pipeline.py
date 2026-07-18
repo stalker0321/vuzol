@@ -112,11 +112,20 @@ def test_text_interpretation_persists_draft_and_original_input(
             interpretation = await session.scalar(
                 select(Interpretation).where(Interpretation.task_id == accepted.task_id)
             )
+            trace = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.payload["role"].as_string() == "orchestration_trace",
+                    TransactionalOutbox.payload["trace_kind"].as_string() == "interpreter",
+                )
+            )
             assert task is not None and task.original_text == "inspect this project"
             assert task.status is TaskStatus.INTERPRETED
             assert task.task_draft["normalized_title"] == "Inspect project"
             assert interpretation is not None and interpretation.transcript is None
             assert len(interpretation.original_input_hash) == 64
+            assert trace is not None
+            assert trace.payload["model_task_draft"]["task_type"] == "coding"
+            assert trace.payload["duration_ms"] == 2
         await engine.dispose()
 
     asyncio.run(scenario())

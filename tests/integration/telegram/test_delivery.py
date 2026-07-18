@@ -10,20 +10,29 @@ from tests.integration.storage.helpers import storage
 from vuzol.storage.models import (
     Interpretation,
     ProjectNamingRequest,
+    Run,
+    Step,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
+    TopicMapping,
     TransactionalOutbox,
 )
 from vuzol.storage.types import (
     DeliveryStatus,
+    IdempotencyClass,
     IntakeStatus,
     ProjectNamingStatus,
+    QueueClass,
+    RetryClass,
+    RunStatus,
+    StepStatus,
     TaskStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.projections import FakeTelegramClient, LostTelegramResponse
+from vuzol.telegram.tracing import ORCHESTRATION_TRACE_ROLE
 
 pytestmark = pytest.mark.postgresql
 
@@ -120,6 +129,177 @@ def test_acknowledgement_sends_once_and_persists_confirmed_link(postgres_dsn: st
             )
             assert item is not None and item.status == DeliveryStatus.DELIVERED
             assert link is not None and link.message_id == 77 and link.projection_revision == 1
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_interpreter_trace_is_delivered_to_system_topic(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=73,
+                original_text="implement selection",
+                task_type="coding",
+            )
+            task_row = await uow.session.get(Task, task.id)
+            assert task_row is not None
+            task_row.status = TaskStatus.INTERPRETED
+            task_row.project_id = "bill-buddy"
+            task_row.public_task_number = 730010
+            interpretation = Interpretation(
+                task_id=task_row.id,
+                original_input_hash="a" * 64,
+                task_draft={"task_type": "coding", "operation": "modify"},
+                profile_id="openai-interpreter",
+                model="gpt-4o-mini",
+                prompt_version="architecture-routing-v8",
+                schema_version="1.4",
+            )
+            uow.session.add(interpretation)
+            await uow.session.flush()
+            uow.session.add(
+                TopicMapping(
+                    chat_id=-100,
+                    message_thread_id=99,
+                    topic_kind="system",
+                    accepts_new_tasks=False,
+                    default_workflow="simple_model",
+                    enabled=True,
+                )
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="interpretation",
+                entity_id=interpretation.id,
+                idempotency_key=f"trace:{interpretation.id}",
+                payload={
+                    "role": ORCHESTRATION_TRACE_ROLE,
+                    "trace_kind": "interpreter",
+                    "task_id": str(task_row.id),
+                    "model_task_draft": {"task_type": "coding", "operation": "create"},
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "duration_ms": 800,
+                    "repaired": False,
+                },
+            )
+            task_id = task_row.id
+        client = FakeTelegramClient(next_message_id=78)
+        delivery = service(factory, client)
+        assert await delivery.deliver_one()
+        assert client.sent[0][0:2] == (-100, 99)
+        assert "Интерпретатор · #730010" in client.sent[0][2]
+        assert "После deterministic policy" in client.sent[0][2]
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.task_id == task_id,
+                    TelegramMessageLink.message_role == "trace_interpreter",
+                )
+            )
+            assert link is not None and link.message_thread_id == 99
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_planner_trace_is_delivered_with_step_identity(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            task_record = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=73,
+                original_text="implement selection",
+                task_type="coding",
+            )
+            task = await uow.session.get(Task, task_record.id)
+            assert task is not None
+            task.status = TaskStatus.PLANNED
+            task.project_id = "bill-buddy"
+            run = Run(
+                task_id=task.id,
+                workflow_type="coding",
+                workflow_version="1",
+                status=RunStatus.RUNNING,
+                selected_route={},
+                budget_mode="balanced",
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+            )
+            uow.session.add(run)
+            await uow.session.flush()
+            step = Step(
+                run_id=run.id,
+                ordinal=1,
+                dependency_metadata={},
+                step_type="plan",
+                queue_class=QueueClass.LIGHT,
+                status=StepStatus.COMPLETED,
+                executor_profile_id="openai-planner-prod",
+                required_capabilities=[],
+                payload={},
+                result={
+                    "model": "gpt-5-nano-2025-08-07",
+                    "profile_id": "openai-planner-prod",
+                    "text": "Inspect, implement, verify.",
+                    "finish_reason": "stop",
+                },
+                retry_class=RetryClass.TRANSIENT,
+                idempotency_class=IdempotencyClass.READ_ONLY,
+                attempt_count=1,
+                max_attempts=3,
+                timeout_seconds=600,
+            )
+            uow.session.add(step)
+            await uow.session.flush()
+            uow.session.add(
+                TopicMapping(
+                    chat_id=-100,
+                    message_thread_id=99,
+                    topic_kind="system",
+                    accepts_new_tasks=False,
+                    default_workflow="simple_model",
+                    enabled=True,
+                )
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="step",
+                entity_id=step.id,
+                idempotency_key=f"trace:{step.id}",
+                payload={
+                    "role": ORCHESTRATION_TRACE_ROLE,
+                    "trace_kind": "planner",
+                    "task_id": str(task.id),
+                    "attempt": 1,
+                },
+            )
+            task_id, run_id, step_id = task.id, run.id, step.id
+        client = FakeTelegramClient(next_message_id=79)
+        delivery = service(factory, client)
+        assert await delivery.deliver_one()
+        assert client.sent[0][0:2] == (-100, 99)
+        assert "Планировщик" in client.sent[0][2]
+        assert "Inspect, implement, verify." in client.sent[0][2]
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.task_id == task_id,
+                    TelegramMessageLink.message_role == "trace_planner",
+                )
+            )
+            assert link is not None
+            assert (link.run_id, link.step_id) == (run_id, step_id)
         await engine.dispose()
 
     asyncio.run(scenario())

@@ -53,6 +53,7 @@ class IndependentReviewPort(Protocol):
 _BLOCKING_CLASSIFICATIONS = frozenset(
     {
         "forced_success",
+        "coverage_weakening",
         "shell_execution",
         "broad_cleanup",
     }

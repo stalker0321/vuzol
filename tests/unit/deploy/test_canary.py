@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from ._test_mvp_helpers import *
+from ._test_mvp_helpers import (
+    ROOT,
+    MagicMock,
+    Path,
+    _module,
+    json,
+    pytest,
+    subprocess,
+)
 
 
 def test_canary_uses_running_service_without_stop_or_restart(

@@ -2,7 +2,30 @@
 
 from __future__ import annotations
 
-from ._test_proxy_service_helpers import *
+from ._test_proxy_service_helpers import (
+    IMAGE,
+    PROXY_ALIAS,
+    SOCKET,
+    STATE_FILE,
+    Any,
+    FakeNetworks,
+    Path,
+    ProxyNetworkLease,
+    ProxyServiceError,
+    ProxyServiceManager,
+    _dict,
+    _identity,
+    _inspect,
+    _make_proxy_name,
+    _manager,
+    _ownership_labels,
+    _render_policy,
+    _target,
+    hashlib_sha256,
+    json,
+    pytest,
+    stat,
+)
 
 
 def test_proxy_identity_and_policy_are_deterministic_and_secret_free() -> None:

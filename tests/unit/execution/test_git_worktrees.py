@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
-from ._execution_helpers import *
+from ._execution_helpers import (
+    Any,
+    AsyncMock,
+    CancellationContext,
+    GitError,
+    LocalGit,
+    MagicMock,
+    Path,
+    PrepareWorktreeHandler,
+    WorktreeAccessError,
+    _FixedIdentityResolver,
+    _git,
+    _numeric_acl,
+    _TestAccessManager,
+    asyncio,
+    pytest,
+    subprocess,
+    uuid,
+    worktree_branch,
+)
 
 
 def test_local_git_initializes_project_repository_idempotently(tmp_path: Path) -> None:
@@ -14,8 +33,9 @@ def test_local_git_initializes_project_repository_idempotently(tmp_path: Path) -
         assert first == second == await git.resolve_commit(repository, "HEAD")
         assert (repository / "README.md").read_text() == "# Notes\n\nA project.\n"
         makefile = (repository / "Makefile").read_text()
+        assert "vuzol-scaffold-gate: true" in makefile
         assert "scaffold: no project tests yet" in makefile
-        # Green scaffold: empty managed projects must not fail validation for lack of tests.
+        # Green scaffold: empty/docs-only managed projects may pass make test.
         completed = subprocess.run(
             ("/usr/bin/make", "test"),
             cwd=repository,

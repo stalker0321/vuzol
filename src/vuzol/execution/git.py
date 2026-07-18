@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path, PurePosixPath
 
 from vuzol.execution.domain import GitInspection
+from vuzol.execution.scaffold import PROJECT_SCAFFOLD_MAKEFILE
 
 
 class GitError(RuntimeError):
@@ -20,19 +21,6 @@ SYSTEM_GIT_CONFIG = (
     "credential.helper=",
     "commit.gpgSign=false",
 )
-
-# Fresh managed projects get a green `make test` so validation never fails solely
-# because the product has no tests yet. See docs/TESTING.md.
-PROJECT_SCAFFOLD_MAKEFILE = """\
-# Scaffolded by Vuzol for managed projects.
-# `make test` must stay green while the project has no real suite.
-# When you add product behavior, replace this target with a real project test command.
-# Platform testing policy: docs/TESTING.md (in the Vuzol repository).
-
-.PHONY: test
-test:
-\t@echo "scaffold: no project tests yet (ok)"
-"""
 
 
 class LocalGit:

@@ -45,16 +45,14 @@ A change is done when the **relevant tier** is covered, not when a coverage perc
 - Multi-thousand-line grab-bag files; prefer modules by domain under `tests/unit/<area>/` and `tests/integration/<area>/`.
 - Copying the platform quality bar into managed projects.
 
-## Coverage (platform)
+## Coverage (platform vs managed projects)
 
-Coverage is a **report**, not a product requirement.
+| Surface | Coverage rule |
+|---|---|
+| **Vuzol platform** | Temporary **90%** fail-under floor (pytest + Makefile precision=6). Mechanical review still flags **coverage_weakening**. This is a short-term safeguard until automated **P0/P1** invariant checks exist. |
+| **Managed projects** | **No** platform coverage percentage. Project gates are whatever `validation_commands` declare (usually `make test`). |
 
-- `pytest` records coverage for visibility (`--cov=vuzol --cov-report=term-missing`).
-- There is **no hard fail-under percentage** in the default suite. Percent targets force padding once real tests are written.
-- CI still fails on **failing tests**, lint, types, and security scans.
-- Reviewers may ask for tests when a **P0/P1** path changes without coverage of the new behavior; they must not ask to “get to N%”.
-
-Mechanical review still flags **obvious quality sabotage** (forced success, swallowed exceptions, skipped tests, shell=True). Lowering or removing a coverage floor is not sabotage under this policy.
+Coverage percentage is not a substitute for behavioral P0/P1 tests. Prefer invariant tests; do not pad to hit 90%.
 
 ## Suite layout
 
@@ -92,31 +90,51 @@ make check             # lint, format, types, tests, security
 
 ### Scaffold
 
-Provisioning creates a minimal green repository:
+Provisioning creates a minimal repository:
 
 - `README.md` — project title and description
-- `Makefile` — `make test` target that **succeeds** when no project tests exist yet
+- `Makefile` — `make test` with machine marker `vuzol-scaffold-gate: true`
 
-`validation_commands` for new projects remains `make test` so the coding validation path has a trusted gate. That gate must not fail on an empty product.
+The scaffold `make test` target is **green only while the project is empty or docs-only**.
+It is not a permanent free pass.
+
+### Scaffold → code transition
+
+When coding validation sees **executable product files** in the result
+(source, package manifests, etc.) and the worktree still only has the scaffold
+gate (marker present and no other trusted gate such as real `make test` / lint /
+type-check / security), validation **fails closed** with category
+`validation_scaffold_gate` and a clear reason listing sample paths.
+
+To proceed after adding product code:
+
+1. Replace scaffold `make test` with a real project command (for example `pytest`);
+2. Remove the `vuzol-scaffold-gate: true` marker line from the Makefile;
+   and/or configure another trusted `validation_commands` entry.
+
+Docs-only changes (`README.md`, `docs/**`, changelog-style files) may still use the scaffold gate.
 
 ### Project test policy
 
 | Project stage | Expectation |
 |---|---|
-| Fresh scaffold / notes / no executable behavior | `make test` green with scaffold (no tests required) |
-| Library, CLI, or service with real behavior | Add focused tests for the public behavior you ship |
-| Security- or money-sensitive logic | Negative tests on the dangerous boundaries |
+| Fresh scaffold / notes / docs-only | scaffold `make test` green |
+| First executable product code | real test/build/smoke gate required; scaffold alone fails validation |
+| Library, CLI, or service with real behavior | focused tests for shipped behavior |
+| Security- or money-sensitive logic | negative tests on dangerous boundaries |
 
 Rules for agents and humans working **inside** managed projects:
 
-1. Do **not** impose Vuzol’s platform suite, mypy-strict-on-tests, or coverage floors.
+1. Do **not** impose Vuzol’s platform 90% coverage floor or mypy-strict-on-tests.
 2. Prefer one meaningful test over ten scaffolding asserts.
-3. When you introduce non-trivial behavior, extend `make test` to run the real project suite (for example `pytest` once the project has a toolchain).
-4. Do not fail validation solely because “tests folder is empty” on a brand-new project.
+3. When you introduce executable product code, configure a real gate and drop the scaffold marker.
+4. Do not fail validation solely because a brand-new empty/docs project has no tests yet.
 
 ### What Vuzol validates on managed projects
 
-Validation runs only **trusted fixed argv gates** configured for the project (today: `make test`, and optionally lint/format/type/security if configured). System Git facts and mechanical review remain platform-owned. Project gates are about **the project’s own quality command**, not about cloning Vuzol’s internal bar.
+Validation runs system Git facts, scaffold-gate policy, mechanical review, and
+**trusted fixed argv gates** from project config. Project gates are about the
+project’s own quality command, not about cloning Vuzol’s internal bar.
 
 ## When adding platform tests
 
@@ -139,6 +157,7 @@ Keep a test when removing it would let a P0/P1 regression ship silently.
 
 ## Summary
 
-- **Platform:** risk-tiered behavioral tests; coverage is informational.
-- **Managed projects:** green scaffold; grow tests with product risk, not with platform ceremony.
-- **Never** block a brand-new empty project because “there are no tests yet.”
+- **Platform:** risk-tiered behavioral tests; temporary 90% coverage floor until P0/P1 automation.
+- **Managed projects:** scaffold green for empty/docs-only; real gate required once product code appears; no platform coverage percentage.
+- **Never** block a brand-new empty/docs project solely for “no tests yet.”
+- **Do** block scaffold-only validation once executable product files land.

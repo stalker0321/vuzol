@@ -47,9 +47,9 @@ dev = [
 packages = ["src/vuzol"]
 
 [tool.pytest.ini_options]
-# Coverage is reported for visibility only. There is no fail-under percentage:
-# percentage floors force padding once real behavioral tests exist (docs/TESTING.md).
-addopts = "--strict-config --strict-markers --cov=vuzol --cov-report=term-missing"
+# Temporary platform safeguard (docs/TESTING.md). Managed projects do not inherit this floor.
+# Remove after automated P0/P1 invariant checks replace percentage gating.
+addopts = "--strict-config --strict-markers --cov=vuzol --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
 markers = [
     "postgresql: requires the real PostgreSQL integration database",
@@ -82,11 +82,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "ASYNC", "S"]
 ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests use shared domain helpers via star-import after suite splits; ANN is noise in tests.
-"tests/**" = ["ANN", "S603", "S607", "F403", "F405"]
-# Helpers re-export imports for split test modules; many names are used only by importers.
-"tests/**/_*helpers.py" = ["ANN", "S603", "S607", "F401", "F403", "F405"]
-"tests/unit/execution/_execution_helpers.py" = ["ANN", "S603", "S607", "F401", "F403", "F405"]
+"tests/**" = ["ANN", "S603", "S607"]
 "alembic/**" = ["ANN"]
 
 [tool.ruff.format]

@@ -19,7 +19,7 @@ test:
 	else \
 		$(UV) run pytest; \
 	fi
-	$(UV) run coverage report --precision=2
+	$(UV) run coverage report --precision=6 --fail-under=90
 
 test-rootless:
 	@test -n "$(VUZOL_ROOTLESS_DOCKER_SOCKET)" || (echo "VUZOL_ROOTLESS_DOCKER_SOCKET is required" >&2; exit 2)

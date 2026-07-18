@@ -10,6 +10,7 @@ import socket
 import sys
 
 from vuzol.config import get_runtime_configuration
+from vuzol.execution.git import LocalGit
 from vuzol.observability import configure_logging, get_logger
 from vuzol.ops.retention import RetentionSweeper, RetentionSweepMode
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
@@ -60,8 +61,11 @@ async def _run(args: argparse.Namespace) -> int:
             factory,
             worktree_root=settings.worktree_root,
             artifact_root=settings.artifact_root,
+            repository_root=settings.repository_root,
             retention=settings.retention,
             owner=owner,
+            projects=runtime.registries.projects,
+            git=LocalGit(),
         ).run(mode=mode)
     finally:
         await engine.dispose()

@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from ._test_interpretation_helpers import *
+from ._test_interpretation_helpers import (
+    Capability,
+    TaskAction,
+    TaskOperation,
+    TaskType,
+    TopicKind,
+    draft,
+    enforce_interpretation_policy,
+    request,
+)
 
 
 def test_project_architecture_question_is_a_read_only_agent_task() -> None:

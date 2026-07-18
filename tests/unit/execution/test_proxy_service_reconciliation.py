@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
-from ._test_proxy_service_helpers import *
+from ._test_proxy_service_helpers import (
+    STATE_FILE,
+    FakeNetworks,
+    Path,
+    ProxyNetworkLease,
+    ProxyServiceError,
+    _identity,
+    _make_proxy_name,
+    _manager,
+    _render_policy,
+    _target,
+    hashlib_sha256,
+    pytest,
+)
 
 
 @pytest.mark.anyio

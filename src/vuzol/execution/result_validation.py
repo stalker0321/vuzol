@@ -29,6 +29,7 @@ from vuzol.execution.finalization import (
 )
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.paths import contained, trusted_root
+from vuzol.execution.scaffold import scaffold_gate_violation
 from vuzol.experiments.domain import RequiredGate
 from vuzol.experiments.review import scan_suspicious_patterns
 from vuzol.storage.errors import LeaseLost
@@ -269,6 +270,15 @@ class ResultValidationHandler:
                 f"changed paths include prohibited names: {', '.join(prohibited[:5])}",
             )
 
+        trusted_command_ids = tuple(gate.command_id for gate in trusted_gates)
+        scaffold_reason = scaffold_gate_violation(
+            worktree=path,
+            changed_files=inspection.changed_files,
+            trusted_gate_command_ids=trusted_command_ids,
+        )
+        if scaffold_reason is not None:
+            raise ResultValidationError("validation_scaffold_gate", scaffold_reason)
+
         if self._artifacts is not None:
             self._artifacts.reject_secrets(inspection.diff)
 
@@ -280,7 +290,8 @@ class ResultValidationHandler:
         blocking = tuple(
             signal
             for signal in suspicious
-            if signal.classification in {"forced_success", "shell_execution", "broad_cleanup"}
+            if signal.classification
+            in {"forced_success", "coverage_weakening", "shell_execution", "broad_cleanup"}
         )
         if blocking:
             raise ResultValidationError(

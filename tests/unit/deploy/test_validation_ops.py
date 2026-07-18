@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from ._test_mvp_helpers import *
+from ._test_mvp_helpers import (
+    ROOT,
+)
 
 
-def test_platform_suite_does_not_enforce_coverage_percentage_floor() -> None:
-    """Coverage stays informational; percentage floors force padding (docs/TESTING.md)."""
+def test_platform_suite_keeps_temporary_coverage_floor() -> None:
+    """Vuzol keeps a temporary 90% floor until P0/P1 automation replaces it."""
     configuration = (ROOT / "pyproject.toml").read_text()
-    assert "--cov=vuzol" in configuration
-    assert "cov-fail-under" not in configuration
+    assert configuration.count("--cov-fail-under=90") == 1
     makefile = (ROOT / "Makefile").read_text()
-    assert "coverage report" in makefile
-    assert "fail-under" not in makefile
+    assert "coverage report --precision=6 --fail-under=90" in makefile
 
 
 def test_validation_wrapper_returns_the_real_pytest_status() -> None:

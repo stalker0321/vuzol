@@ -131,8 +131,6 @@ def simple_draft() -> TaskDraft:
     )
 
 
-
-
 def planned_coding_draft() -> TaskDraft:
     return TaskDraft(
         action=TaskAction.CREATE_TASK,
@@ -147,6 +145,7 @@ def planned_coding_draft() -> TaskDraft:
         needs_clarification=False,
         normalized_title="Implement change",
     )
+
 
 async def seed_interpreted(
     factory: object, task_draft: TaskDraft | None = None

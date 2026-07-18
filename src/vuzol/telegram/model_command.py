@@ -27,7 +27,7 @@ from vuzol.projects.executor_preference import (
 )
 from vuzol.storage.models import TransactionalOutbox
 from vuzol.telegram.domain import ControlUpdate
-from vuzol.telegram.projections import telegram_html
+from vuzol.telegram.projections import enqueue_project_status_dashboard, telegram_html
 
 PROJECT_MODEL_PICKER_ROLE = "project_model_picker"
 PROJECT_MODEL_CONFIRM_ROLE = "project_model_confirm"
@@ -171,7 +171,7 @@ class ProjectModelController:
                 user_id=update.user_id,
                 expected_revision=update.preference_revision,
             )
-            self._enqueue_confirm(
+            await self._enqueue_confirm(
                 session,
                 update=update,
                 action_id=action_id,
@@ -197,7 +197,7 @@ class ProjectModelController:
                     reasoning_effort=None,
                     registries=self._runtime.registries,
                 )
-                self._enqueue_confirm(
+                await self._enqueue_confirm(
                     session,
                     update=update,
                     action_id=action_id,
@@ -249,7 +249,7 @@ class ProjectModelController:
                 reasoning_effort=update.preference_effort,
                 registries=self._runtime.registries,
             )
-            self._enqueue_confirm(
+            await self._enqueue_confirm(
                 session,
                 update=update,
                 action_id=action_id,
@@ -259,7 +259,7 @@ class ProjectModelController:
             return ModelCommandOutcome(project_id=project_id, stage=ModelPickerStage.CONFIRM)
         raise ExecutorPreferenceError("unsupported model preference action")
 
-    def _enqueue_confirm(
+    async def _enqueue_confirm(
         self,
         session: AsyncSession,
         *,
@@ -290,3 +290,6 @@ class ProjectModelController:
                 },
             )
         )
+        # Preference mutations must refresh «Статус проектов» so project-default labels
+        # are not stale until an unrelated task event.
+        await enqueue_project_status_dashboard(session, update.chat_id)

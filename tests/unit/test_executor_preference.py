@@ -397,16 +397,15 @@ async def test_ensure_preference_row_inserts_when_missing() -> None:
 
     from vuzol.projects.executor_preference import ensure_preference_row
 
+    created = _PreferenceRow(revision=1)
     session = MagicMock()
-    session.get = AsyncMock(return_value=None)
-    session.add = MagicMock()
-    session.flush = AsyncMock()
+    session.get = AsyncMock(side_effect=[None, created])
+    session.execute = AsyncMock()
     row = await ensure_preference_row(session, "bill-buddy")
     assert row.project_id == "bill-buddy"
-    assert row.mode == "auto"
     assert row.revision == 1
-    session.add.assert_called_once()
-    session.flush.assert_awaited_once()
+    session.execute.assert_awaited_once()
+    assert session.get.await_count == 2
 
 
 @pytest.mark.anyio

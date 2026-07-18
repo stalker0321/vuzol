@@ -166,18 +166,27 @@ async def claim_routed_step(
         if failed_profile_id is not None:
             allowed_fallbacks = registries.profiles.get(failed_profile_id).fallback_profile_ids
         project_pin = None
+        pin_family_ids: frozenset[str] | None = None
         if role is ProviderRole.EXECUTOR and task.project_id is not None:
             preference = await load_preference(session, task.project_id)
             project_pin = resolve_route_pin(preference, registries)
             if project_pin is not None:
+                # Fence: only the pinned profile and same-family fallbacks, every attempt.
+                same_family = same_family_fallback_ids(
+                    registries,
+                    worker_key=project_pin.worker_key,
+                    primary_profile_id=project_pin.trusted_profile_id,
+                )
+                pin_family_ids = frozenset((project_pin.trusted_profile_id, *same_family))
                 if failed_profile_id is not None:
-                    allowed_fallbacks = same_family_fallback_ids(
-                        registries,
-                        worker_key=project_pin.worker_key,
-                        primary_profile_id=project_pin.trusted_profile_id,
+                    allowed_fallbacks = tuple(
+                        profile_id
+                        for profile_id in allowed_fallbacks
+                        if profile_id in pin_family_ids
                     )
                 else:
-                    allowed_fallbacks = ()
+                    # Initial claim: prefer trusted, allow same-family only if explicit edges exist.
+                    allowed_fallbacks = same_family
         trusted_profile_id = (
             project_pin.trusted_profile_id if project_pin is not None else _trusted_profile_id(run)
         )
@@ -193,6 +202,7 @@ async def claim_routed_step(
             trusted_profile_id=trusted_profile_id,
             failed_profile_id=failed_profile_id,
             allowed_fallback_ids=allowed_fallbacks,
+            restrict_to_profile_ids=pin_family_ids,
             requires_sandbox=step.step_type in {"execute_code", "execute_agent"},
             required_launch_mode=(
                 LaunchMode.CLI
@@ -204,7 +214,7 @@ async def claim_routed_step(
         ordered = tuple(
             profile_id
             for profile_id in (decision.selected_profile_id, *decision.alternatives)
-            if profile_id is not None
+            if profile_id is not None and (pin_family_ids is None or profile_id in pin_family_ids)
         )
         if not ordered and _temporarily_unavailable(decision):
             continue
@@ -275,16 +285,22 @@ async def claim_routed_step(
             "provider_attempt": attempt,
             "budget_reservation_id": str(reservation.id),
         }
-        if project_pin is not None and selected.id == project_pin.trusted_profile_id:
-            next_payload.update(preference_payload(project_pin))
-        elif project_pin is not None:
-            # Same-family fallback: keep worker key for observability, drop model pin.
-            next_payload.update(
-                {
-                    "executor_preference_mode": "pin",
-                    "executor_worker_key": project_pin.worker_key.value,
-                }
-            )
+        if project_pin is not None and pin_family_ids is not None:
+            if selected.id not in pin_family_ids:
+                # Defensive: fence must make this unreachable; never mis-attribute.
+                pass
+            elif selected.id == project_pin.trusted_profile_id:
+                next_payload.update(preference_payload(project_pin))
+            else:
+                # Explicit same-family fallback: attribute the actual selected profile.
+                next_payload.update(
+                    {
+                        "executor_preference_mode": "pin",
+                        "executor_worker_key": project_pin.worker_key.value,
+                        "executor_fallback_profile_id": selected.id,
+                        "executor_pin_profile_id": project_pin.trusted_profile_id,
+                    }
+                )
         step.payload = next_payload
         await session.flush()
         await session.refresh(step, attribute_names=["heartbeat_at", "lease_expires_at"])

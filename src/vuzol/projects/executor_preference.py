@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
@@ -104,18 +105,29 @@ async def load_preference(session: AsyncSession, project_id: str) -> ExecutorPre
 async def ensure_preference_row(
     session: AsyncSession, project_id: str
 ) -> ProjectExecutorPreference:
+    """Return the preference row, creating it if needed under concurrent first writers.
+
+    Concurrent first inserts use ``ON CONFLICT DO NOTHING`` then a locked re-select so a
+    unique violation never surfaces to Telegram control handlers.
+    """
+
     row = await session.get(ProjectExecutorPreference, project_id, with_for_update=True)
     if row is not None:
         return row
-    row = ProjectExecutorPreference(
-        project_id=project_id,
-        mode=ExecutorPreferenceMode.AUTO.value,
-        worker_key=None,
-        reasoning_effort=None,
-        revision=1,
+    await session.execute(
+        postgres_insert(ProjectExecutorPreference)
+        .values(
+            project_id=project_id,
+            mode=ExecutorPreferenceMode.AUTO.value,
+            worker_key=None,
+            reasoning_effort=None,
+            revision=1,
+        )
+        .on_conflict_do_nothing(index_elements=["project_id"])
     )
-    session.add(row)
-    await session.flush()
+    row = await session.get(ProjectExecutorPreference, project_id, with_for_update=True)
+    if row is None:
+        raise RuntimeError(f"project executor preference row missing after insert: {project_id}")
     return row
 
 

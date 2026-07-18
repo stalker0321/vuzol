@@ -1,0 +1,34 @@
+[Unit]
+Description=Vuzol retention sweeper (worktrees and artifacts)
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Template only for S10-2A. Do not install, enable, or start until an operator
+# review lands the production schedule and dry-run evidence.
+
+[Service]
+Type=oneshot
+User=vuzol-executor
+Group=vuzol-executor
+EnvironmentFile=/etc/vuzol/executor.env
+ExecStart=/opt/vuzol/.venv/bin/vuzol-retention --apply --json
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadWritePaths=/srv/vuzol/worktrees /srv/vuzol/artifacts
+ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol
+
+[Install]
+WantedBy=multi-user.target

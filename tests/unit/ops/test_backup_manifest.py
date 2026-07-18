@@ -168,6 +168,44 @@ def test_rejects_secret_like_fields_and_values() -> None:
         validate_manifest(raw)
 
 
+def test_f3_secret_value_scanner_covers_postgres_and_bearer_jwt() -> None:
+    """postgres:// and Bearer/JWT material must be rejected in free-text fields (F3)."""
+
+    for action in (
+        "postgres://user:pass@127.0.0.1/db",  # pragma: allowlist secret
+        "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",  # pragma: allowlist secret
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456ghi789jkl",  # pragma: allowlist secret
+    ):
+        raw = _manifest().model_dump(mode="json")
+        raw["artifact_reconciliation"]["orphan_files"] = [{"relpath": "ab/cd", "action": action}]
+        with pytest.raises(BackupManifestError, match="secret-like value"):
+            validate_manifest(raw)
+
+
+def test_f5_secret_field_name_token_boundaries() -> None:
+    """Token-boundary names: no-secret.toml allowed; password/api_key rejected (F5)."""
+
+    # Allowed basenames (negation / scanner context — not credential fields).
+    assert ConfigFileHash(name="no-secret.toml", sha256=_sha("c"), size=1).name == "no-secret.toml"
+    assert (
+        ConfigFileHash(name="secret-scan-report.toml", sha256=_sha("c"), size=1).name
+        == "secret-scan-report.toml"
+    )
+    # Credential-like basenames still rejected.
+    with pytest.raises((ValidationError, BackupManifestError)):
+        ConfigFileHash(name="password.toml", sha256=_sha("c"), size=1)
+    with pytest.raises((ValidationError, BackupManifestError)):
+        ConfigFileHash(name="api_key.toml", sha256=_sha("c"), size=1)
+    with pytest.raises((ValidationError, BackupManifestError)):
+        ConfigFileHash(name="client-secret.env", sha256=_sha("c"), size=1)
+    # Dict keys with dotted separators still fail closed.
+    raw = _manifest().model_dump(mode="json")
+    raw["api.key"] = "nope"
+    with pytest.raises(BackupManifestError, match="secret-like field"):
+        validate_manifest(raw)
+
+
 def test_rejects_forbidden_secret_path_material() -> None:
     raw = _manifest().model_dump(mode="json")
     raw["app"]["deploy_path"] = "/run/secrets/foo"
@@ -311,3 +349,69 @@ def test_postgres_requires_format() -> None:
                 )
             }
         )
+
+
+def test_complete_manifest_requires_postgres_unless_partial() -> None:
+    with pytest.raises(ValidationError, match="partial"):
+        _manifest(
+            components={
+                "config": BackupComponent(
+                    filename="config.tar.enc",
+                    sha256_ciphertext=_sha("2"),
+                    size_ciphertext=512,
+                )
+            }
+        )
+    partial = _manifest(
+        partial=True,
+        components={
+            "config": BackupComponent(
+                filename="config.tar.enc",
+                sha256_ciphertext=_sha("2"),
+                size_ciphertext=512,
+            )
+        },
+    )
+    assert partial.partial is True
+    assert "postgres" not in partial.components
+
+
+def test_rejects_naive_timestamps() -> None:
+    naive = datetime(2026, 7, 18, 12, 0, 0)  # intentional naive for rejection
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        _manifest(t_start=naive)
+
+
+def test_forbidden_path_uses_boundary_not_substring() -> None:
+    # Substring false positive must not fire for mirrored deploy paths.
+    manifest = _manifest(
+        app=BackupAppIdentity(
+            git_commit="abcdef0",
+            deploy_path="/opt/mirror/etc/vuzol/notreally",
+            service_name="vuzol",
+        )
+    )
+    assert manifest.app.deploy_path.endswith("notreally")
+    raw = _manifest().model_dump(mode="json")
+    raw["app"]["deploy_path"] = "/etc/vuzol/executor.env"
+    with pytest.raises(BackupManifestError, match="forbidden path"):
+        validate_manifest(raw)
+
+
+def test_golden_canonical_json_vector() -> None:
+    """Lock ISO-8601 / UUID encoding for stable content hashes."""
+
+    manifest = _manifest()
+    raw = canonical_manifest_json(manifest)
+    text = raw.decode("utf-8")
+    # Pydantic mode=json emits Z or +00:00; accept either but require UTC and fixed run_id.
+    assert '"run_id":"12345678-1234-5678-1234-567812345678"' in text
+    assert '"t_start":"2026-07-18T12:00:00' in text
+    assert '"partial":false' in text
+    assert '"schema_version":"backup-manifest.v1"' in text
+    assert list(json.loads(raw).keys()) == sorted(json.loads(raw).keys())
+    # Byte-stable across repeated dumps.
+    assert canonical_manifest_json(manifest) == raw
+    digest = manifest_sha256(manifest)
+    assert len(digest) == 64
+    assert digest == manifest_sha256(validate_manifest(json.loads(raw)))

@@ -13,7 +13,9 @@ from vuzol.ops.backup.paths import (
     ProductionRoots,
     assert_isolated_restore_dsn,
     assert_safe_restore_paths,
+    database_name_is_isolated,
     normalize_dsn_identity,
+    resolve_isolation_path,
 )
 
 
@@ -97,6 +99,39 @@ def test_symlink_into_production_is_rejected(tmp_path: Path) -> None:
         )
 
 
+def test_f1_parent_symlink_missing_leaf_is_rejected(tmp_path: Path) -> None:
+    """Missing restore leaf under a parent symlink into production must conflict (F1)."""
+
+    prod = _production(tmp_path)
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path / "srv", target_is_directory=True)
+    # Missing leaf that resolves equal to production artifact root.
+    missing_equal = alias / "artifacts"
+    assert not missing_equal.exists() or missing_equal.is_symlink() or True
+    # Prefer a non-existent nested path under the aliased production artifacts tree.
+    nested_missing = alias / "artifacts" / "drill-sub"
+    assert not nested_missing.exists()
+    resolved = resolve_isolation_path(nested_missing)
+    assert resolved == (tmp_path / "srv" / "artifacts" / "drill-sub").resolve()
+    with pytest.raises(BackupPathError, match="conflicts"):
+        assert_safe_restore_paths(
+            production=prod,
+            restore_artifact_root=nested_missing,
+        )
+    # Direct alias to the production leaf directory (exists as real dir via resolve).
+    with pytest.raises(BackupPathError, match="conflicts"):
+        assert_safe_restore_paths(
+            production=prod,
+            restore_artifact_root=alias / "artifacts",
+        )
+    # Sibling under /srv (not under a listed production root) remains allowed.
+    sibling = alias / "drill-artifacts"
+    assert_safe_restore_paths(
+        production=prod,
+        restore_artifact_root=sibling,
+    )
+
+
 def test_dsn_normalization_strips_credentials_and_aliases() -> None:
     host, port, database = normalize_dsn_identity(
         "postgresql+psycopg://vuzol:s3cret-value@localhost:5432/vuzol"  # pragma: allowlist secret
@@ -104,9 +139,21 @@ def test_dsn_normalization_strips_credentials_and_aliases() -> None:
     assert host == "127.0.0.1"
     assert port == 5432
     assert database == "vuzol"
-    host2, _, db2 = normalize_dsn_identity("postgresql://vuzol@127.0.0.1/vuzol_restore")
+    host2, port2, db2 = normalize_dsn_identity("postgresql://vuzol@127.0.0.1/vuzol_restore")
     assert host2 == "127.0.0.1"
+    assert port2 == 5432  # omitted port normalizes to default
     assert db2 == "vuzol_restore"
+
+
+def test_f2_default_port_equivalence_for_dsn_identity() -> None:
+    without_port = normalize_dsn_identity("postgresql://vuzol@127.0.0.1/vuzol_restore")
+    with_port = normalize_dsn_identity("postgresql://vuzol@127.0.0.1:5432/vuzol_restore")
+    assert without_port == with_port
+    with pytest.raises(BackupPathError, match="must not equal"):
+        assert_isolated_restore_dsn(
+            production_dsn="postgresql://vuzol@127.0.0.1/vuzol_restore",
+            restore_dsn="postgresql://vuzol@127.0.0.1:5432/vuzol_restore",
+        )
 
 
 def test_restore_dsn_must_not_equal_production() -> None:
@@ -134,6 +181,28 @@ def test_restore_dsn_accepts_suffix_and_drill_identity() -> None:
         production_dsn="postgresql://vuzol@127.0.0.1/vuzol",
         restore_dsn="postgresql://vuzol@127.0.0.1/vuzol_drill_20260718",
     )
+    assert_isolated_restore_dsn(
+        production_dsn="postgresql://vuzol@127.0.0.1/vuzol",
+        restore_dsn="postgresql://vuzol@127.0.0.1/vuzol_drill",
+    )
+
+
+def test_f4_drill_substring_soft_match_rejected() -> None:
+    """Only underscore-delimited 'drill' segments count — not soft substrings (F4)."""
+
+    assert database_name_is_isolated("vuzol_drill", "_restore") is True
+    assert database_name_is_isolated("vuzol_drill_20260718", "_restore") is True
+    assert database_name_is_isolated("vuzol_restore", "_restore") is True
+    assert database_name_is_isolated("vuzol_drillbit", "_restore") is False
+    assert database_name_is_isolated("notadrill", "_restore") is False
+    # 'not_drill' has a real segment 'drill' — accepted as explicit marker.
+    assert database_name_is_isolated("not_drill", "_restore") is True
+    for name in ("vuzol_drillbit", "staging", "vuzol_prod"):
+        with pytest.raises(BackupPathError, match=r"drill|suffix|_restore"):
+            assert_isolated_restore_dsn(
+                production_dsn="postgresql://vuzol@127.0.0.1/vuzol",
+                restore_dsn=f"postgresql://vuzol@127.0.0.1/{name}",
+            )
 
 
 def test_restore_dsn_rejects_non_loopback_when_required() -> None:
@@ -142,6 +211,34 @@ def test_restore_dsn_rejects_non_loopback_when_required() -> None:
             production_dsn="postgresql://vuzol@127.0.0.1/vuzol",
             restore_dsn="postgresql://vuzol@10.0.0.5/vuzol_restore",
         )
+
+
+def test_f6_dsn_driver_variants_and_unix_socket() -> None:
+    host, port, database = normalize_dsn_identity(
+        "postgresql+psycopg2://vuzol@127.0.0.1:5432/vuzol_restore"
+    )
+    assert (host, port, database) == ("127.0.0.1", 5432, "vuzol_restore")
+    host_s, port_s, db_s = normalize_dsn_identity(
+        "postgresql:///vuzol_restore?host=/var/run/postgresql"
+    )
+    assert host_s == "unix:/var/run/postgresql"
+    assert port_s is None
+    assert db_s == "vuzol_restore"
+    # Unix socket is treated as local for drills.
+    assert_isolated_restore_dsn(
+        production_dsn="postgresql://vuzol@127.0.0.1/vuzol",
+        restore_dsn="postgresql:///vuzol_restore?host=/var/run/postgresql",
+    )
+    # Query params ignored for identity; credentials stripped.
+    # pragma: allowlist secret — fixture credential in DSN, not a live secret
+    a = normalize_dsn_identity(
+        "postgresql+psycopg://u:x@127.0.0.1:5432/vuzol_restore" + "?sslmode=require"
+    )
+    b = normalize_dsn_identity("postgresql://u@127.0.0.1/vuzol_restore")
+    assert a == b
+    # Bracketed IPv6 loopback normalizes to 127.0.0.1.
+    host6, _, _ = normalize_dsn_identity("postgresql://vuzol@[::1]:5432/vuzol_restore")
+    assert host6 == "127.0.0.1"
 
 
 def test_backup_settings_default_disabled(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- corrected backup foundation isolation guards (F1–F5): resolve missing-leaf paths through real parents, default PostgreSQL port identity, explicit drill DB naming, broader secret-value scan (postgres://, Bearer/JWT), token-boundary field names; also partial manifests, UTC-aware timestamps, socket/driver DSN variants, and strict canonical JSON;
 - added Step 10 backup foundation (B1): typed `backup-manifest.v1` models, pure
   load/store/hash helpers, fail-closed restore path and isolated-DSN guards, and
   `BackupSettings` defaulting to `enabled=false` (no capture/crypto/CLI yet);

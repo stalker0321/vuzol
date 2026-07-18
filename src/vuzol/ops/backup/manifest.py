@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -22,31 +22,59 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEX_COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$")
 _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
-# Field names that must never appear anywhere in a manifest payload.
-_SECRET_FIELD_FRAGMENTS = (
-    "password",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-    "credential",
-    "private_key",
-    "dsn",
-    "authorization",
-    "bearer",
+# Exact identifier tokens (after non-alnum split) that mark secret-bearing fields.
+_SECRET_FIELD_TOKENS = frozenset(
+    {
+        "password",
+        "secret",
+        "token",
+        "apikey",
+        "credential",
+        "credentials",
+        "passwd",
+        "pwd",
+        "dsn",
+        "authorization",
+        "bearer",
+    }
+)
+# Adjacent token pairs after separator normalization (api_key, private_key, …).
+_SECRET_FIELD_PAIRS = frozenset(
+    {
+        ("api", "key"),
+        ("private", "key"),
+        ("access", "token"),
+        ("refresh", "token"),
+        ("client", "secret"),
+        ("auth", "token"),
+        ("signing", "key"),
+    }
+)
+# Leading tokens that negate a following secret token (no_secret, not_token, …).
+_SECRET_NEGATION_TOKENS = frozenset({"no", "non", "not", "without"})
+# Allow "secret" when it clearly names a scanner/report artifact, not a credential.
+_SECRET_CONTEXT_ALLOW = frozenset({"scan", "scanning", "scanner", "report", "policy", "audit"})
+_FILE_EXT_TOKENS = frozenset(
+    {"toml", "json", "yaml", "yml", "md", "txt", "env", "cfg", "ini", "pem", "conf"}
 )
 
 # Path prefixes that must not appear as string values (secret/config credential roots).
+# Matched on path-segment boundaries, not raw substring (avoids /mirror/etc/vuzol/… FP).
 _FORBIDDEN_PATH_PREFIXES = (
     "/run/secrets",
-    "/etc/vuzol/",
+    "/etc/vuzol",
 )
 
-# Values that look like embedded secrets.
+# Values that look like embedded secrets (fail-closed; not a complete secret detector).
 _SECRET_VALUE_RE = re.compile(
-    r"(?i)(password|secret|api[_-]?key|token)\s*[:=]\s*\S+"
+    r"(?i)(?:^|[^\w])(?:password|secret|api[_-]?key|token)\s*[:=]\s*\S+"
     r"|sk-[A-Za-z0-9]{16,}"
-    r"|postgresql(\+[a-z]+)?:\/\/[^\s]+"
+    # postgres:// and postgresql:// and postgresql+driver://
+    r"|postgres(?:ql)?(?:\+[a-z0-9_]+)?://[^\s]+"
+    # Authorization Bearer tokens (including JWT-shaped)
+    r"|Bearer\s+[A-Za-z0-9\-._~+/]+=*"
+    # Compact JWT (three base64url segments)
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
 )
 
 
@@ -61,6 +89,12 @@ class FrozenBackupModel(BaseModel):
         populate_by_name=True,
         serialize_by_alias=True,
     )
+
+
+def _require_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("timestamps must be timezone-aware (UTC preferred)")
+    return value.astimezone(UTC)
 
 
 class BackupAppIdentity(FrozenBackupModel):
@@ -250,6 +284,8 @@ class BackupManifest(FrozenBackupModel):
     retention: BackupRetentionMeta
     quiesce: BackupQuiesceInfo = Field(default_factory=BackupQuiesceInfo)
     rpo_rto: BackupRpoRto
+    # When true, incomplete component sets (e.g. config-only) are allowed.
+    partial: bool = False
 
     @field_validator("hostname")
     @classmethod
@@ -258,6 +294,11 @@ class BackupManifest(FrozenBackupModel):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}", cleaned):
             raise ValueError("hostname is unsafe")
         return cleaned
+
+    @field_validator("created_at", "t_start", "t_end")
+    @classmethod
+    def validate_aware_timestamps(cls, value: datetime) -> datetime:
+        return _require_aware_utc(value)
 
     @field_validator("components")
     @classmethod
@@ -278,6 +319,11 @@ class BackupManifest(FrozenBackupModel):
             raise ValueError("t_end must not precede t_start")
         if self.created_at < self.t_start:
             raise ValueError("created_at must not precede t_start")
+        # Complete manifests must include postgres ciphertext metadata unless partial.
+        if not self.partial and "postgres" not in self.components:
+            raise ValueError(
+                "complete manifest requires postgres component (set partial=true for subsets)"
+            )
         # Component metadata consistency: artifact inventory fields only on artifacts.
         for name, component in self.components.items():
             if name == "artifacts":
@@ -290,6 +336,19 @@ class BackupManifest(FrozenBackupModel):
                     raise ValueError(f"{name} component must not carry artifact inventory fields")
             if name == "postgres" and component.format is None:
                 raise ValueError("postgres component requires format")
+        # Soft alignment: object_count must match db_rows or fs_objects unless partial.
+        artifacts = self.components.get("artifacts")
+        if (
+            artifacts is not None
+            and artifacts.object_count is not None
+            and not self.partial
+            and self.artifact_reconciliation.db_rows != artifacts.object_count
+            and self.artifact_reconciliation.fs_objects != artifacts.object_count
+        ):
+            raise ValueError(
+                "artifact object_count must align with artifact_reconciliation "
+                "db_rows or fs_objects (or set partial=true)"
+            )
         return self
 
 
@@ -301,18 +360,62 @@ def _require_sha256(value: str) -> str:
 
 
 def _reject_secret_field_name(name: str) -> None:
-    lowered = name.lower().replace("-", "_")
-    for fragment in _SECRET_FIELD_FRAGMENTS:
-        if fragment in lowered:
+    """Reject secret-like identifiers using token boundaries (not raw substrings).
+
+    Allows basenames such as ``no-secret.toml`` (negation) and
+    ``secret-scan-report.toml`` (scanner context). Still rejects ``password``,
+    ``api_key``, ``client_secret``, and similar credential field names.
+    """
+
+    segments = [part for part in re.split(r"[^a-z0-9]+", name.lower()) if part]
+    if segments and segments[-1] in _FILE_EXT_TOKENS:
+        segments = segments[:-1]
+    if not segments:
+        return
+
+    for index, segment in enumerate(segments):
+        if index + 1 < len(segments) and (segment, segments[index + 1]) in _SECRET_FIELD_PAIRS:
             raise BackupManifestError(f"secret-like field name is forbidden: {name}")
+        if segment not in _SECRET_FIELD_TOKENS:
+            continue
+        if index > 0 and segments[index - 1] in _SECRET_NEGATION_TOKENS:
+            continue
+        if (
+            segment == "secret"
+            and index + 1 < len(segments)
+            and segments[index + 1] in _SECRET_CONTEXT_ALLOW
+        ):
+            continue
+        raise BackupManifestError(f"secret-like field name is forbidden: {name}")
+
+
+def _forbidden_path_material(value: str) -> bool:
+    """True when value contains a forbidden absolute path prefix at a boundary."""
+
+    for prefix in _FORBIDDEN_PATH_PREFIXES:
+        idx = 0
+        while True:
+            found = value.find(prefix, idx)
+            if found < 0:
+                break
+            # Require start or non-path char before prefix so
+            # "/opt/mirror/etc/vuzol" is not a false positive for "/etc/vuzol".
+            prev_ok = found == 0 or value[found - 1] not in (
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+            )
+            if prev_ok:
+                end = found + len(prefix)
+                if end == len(value) or value[end] in "/":
+                    return True
+            idx = found + 1
+    return False
 
 
 def _reject_secret_string(value: str, *, field: str) -> None:
     if _SECRET_VALUE_RE.search(value):
         raise BackupManifestError(f"secret-like value is forbidden in {field}")
-    for prefix in _FORBIDDEN_PATH_PREFIXES:
-        if prefix in value:
-            raise BackupManifestError(f"forbidden path material in {field}")
+    if _forbidden_path_material(value):
+        raise BackupManifestError(f"forbidden path material in {field}")
 
 
 def _walk_reject_secrets(obj: object, *, path: str = "$") -> None:
@@ -355,12 +458,14 @@ def canonical_manifest_json(manifest: BackupManifest) -> bytes:
 
     validated = validate_manifest(manifest)
     payload = validated.model_dump(mode="json")
+    # Strict: no default=str — unexpected types must fail rather than silently
+    # change the hash (F9).
     return json.dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-        default=str,
+        allow_nan=False,
     ).encode("utf-8")
 
 

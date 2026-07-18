@@ -29,7 +29,9 @@ from vuzol.ops.backup.paths import (
     ProductionRoots,
     assert_isolated_restore_dsn,
     assert_safe_restore_paths,
+    database_name_is_isolated,
     normalize_dsn_identity,
+    resolve_isolation_path,
 )
 from vuzol.ops.backup.settings import BackupSettings
 
@@ -54,9 +56,11 @@ __all__ = [
     "assert_isolated_restore_dsn",
     "assert_safe_restore_paths",
     "canonical_manifest_json",
+    "database_name_is_isolated",
     "load_manifest",
     "manifest_sha256",
     "normalize_dsn_identity",
+    "resolve_isolation_path",
     "store_manifest",
     "validate_manifest",
 ]

@@ -61,9 +61,15 @@ Mechanical review still flags **obvious quality sabotage** (forced success, swal
 ```text
 tests/
   unit/<domain>/          # fast, hermetic, by module boundary
+    _*_helpers.py         # shared imports/fixtures for that domain's splits
+    test_<theme>.py       # one cohesive theme (~200–500 lines typical)
   integration/<domain>/   # postgres / process boundaries when required
   fixtures/               # versioned shared fixtures (e.g. interpretation)
 ```
+
+Prefer domain packages (`unit/providers/`, `unit/execution/`, …) over root-level
+`test_everything.py` files. Shared setup for a domain lives in a private helpers
+module; individual files cover one risk boundary or adapter.
 
 Markers:
 

@@ -82,17 +82,11 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "ASYNC", "S"]
 ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["ANN", "S603", "S607"]
-# Domain splits share a hermetic helpers module via star-import to avoid a 3k-line file.
-"tests/unit/execution/test_sandbox_runtime.py" = ["ANN", "S603", "S607", "F403", "F405"]
-"tests/unit/execution/test_git_worktrees.py" = ["ANN", "S603", "S607", "F403", "F405"]
-"tests/unit/execution/test_worktree_access.py" = ["ANN", "S603", "S607", "F403", "F405"]
-"tests/unit/execution/test_finalization.py" = ["ANN", "S603", "S607", "F403", "F405"]
-"tests/unit/execution/test_provider_execution.py" = ["ANN", "S603", "S607", "F403", "F405"]
-"tests/unit/execution/test_artifacts.py" = ["ANN", "S603", "S607", "F403", "F405"]
-"tests/unit/execution/test_paths.py" = ["ANN", "S603", "S607", "F403", "F405"]
-"tests/unit/execution/test_executor_cli.py" = ["ANN", "S603", "S607", "F403", "F405"]
-"tests/unit/execution/_execution_helpers.py" = ["ANN", "S603", "S607"]
+# Tests use shared domain helpers via star-import after suite splits; ANN is noise in tests.
+"tests/**" = ["ANN", "S603", "S607", "F403", "F405"]
+# Helpers re-export imports for split test modules; many names are used only by importers.
+"tests/**/_*helpers.py" = ["ANN", "S603", "S607", "F401", "F403", "F405"]
+"tests/unit/execution/_execution_helpers.py" = ["ANN", "S603", "S607", "F401", "F403", "F405"]
 "alembic/**" = ["ANN"]
 
 [tool.ruff.format]

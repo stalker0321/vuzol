@@ -15,6 +15,12 @@ from vuzol.config.models import (
 )
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
+from vuzol.projects.executor_preference import (
+    load_preference,
+    preference_payload,
+    resolve_route_pin,
+    same_family_fallback_ids,
+)
 from vuzol.providers.budgets import BudgetExceeded, estimate_reservation, reserve_budget
 from vuzol.providers.domain import EffectiveProfileState
 from vuzol.providers.health import effective_health
@@ -159,6 +165,22 @@ async def claim_routed_step(
         allowed_fallbacks: tuple[str, ...] = ()
         if failed_profile_id is not None:
             allowed_fallbacks = registries.profiles.get(failed_profile_id).fallback_profile_ids
+        project_pin = None
+        if role is ProviderRole.EXECUTOR and task.project_id is not None:
+            preference = await load_preference(session, task.project_id)
+            project_pin = resolve_route_pin(preference, registries)
+            if project_pin is not None:
+                if failed_profile_id is not None:
+                    allowed_fallbacks = same_family_fallback_ids(
+                        registries,
+                        worker_key=project_pin.worker_key,
+                        primary_profile_id=project_pin.trusted_profile_id,
+                    )
+                else:
+                    allowed_fallbacks = ()
+        trusted_profile_id = (
+            project_pin.trusted_profile_id if project_pin is not None else _trusted_profile_id(run)
+        )
         policy_request = RoutingRequest(
             role=role,
             task_type=task.task_type,
@@ -168,7 +190,7 @@ async def claim_routed_step(
             estimated_input_tokens=estimated_input,
             max_output_tokens=requested_output,
             remaining_cost_units=settings.limits.task_cost_units,
-            trusted_profile_id=_trusted_profile_id(run),
+            trusted_profile_id=trusted_profile_id,
             failed_profile_id=failed_profile_id,
             allowed_fallback_ids=allowed_fallbacks,
             requires_sandbox=step.step_type in {"execute_code", "execute_agent"},
@@ -248,11 +270,22 @@ async def claim_routed_step(
         step.heartbeat_at = func.now()
         step.lease_expires_at = func.now() + timedelta(seconds=lease_seconds)
         step.attempt_count += 1
-        step.payload = {
+        next_payload = {
             **step.payload,
             "provider_attempt": attempt,
             "budget_reservation_id": str(reservation.id),
         }
+        if project_pin is not None and selected.id == project_pin.trusted_profile_id:
+            next_payload.update(preference_payload(project_pin))
+        elif project_pin is not None:
+            # Same-family fallback: keep worker key for observability, drop model pin.
+            next_payload.update(
+                {
+                    "executor_preference_mode": "pin",
+                    "executor_worker_key": project_pin.worker_key.value,
+                }
+            )
+        step.payload = next_payload
         await session.flush()
         await session.refresh(step, attribute_names=["heartbeat_at", "lease_expires_at"])
         if task.source_chat_id:

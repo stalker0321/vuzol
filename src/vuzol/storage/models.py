@@ -367,6 +367,37 @@ class ProjectNamingRequest(IdentityMixin, TimestampMixin, Base):
     last_error_category: Mapped[str | None] = mapped_column(String(100))
 
 
+class ProjectExecutorPreference(TimestampMixin, Base):
+    """Per-project durable executor selection (auto routing or pinned worker)."""
+
+    __tablename__ = "project_executor_preferences"
+    __table_args__ = (
+        CheckConstraint("mode IN ('auto', 'pin')", name="project_executor_preference_mode"),
+        CheckConstraint(
+            "(mode = 'auto' AND worker_key IS NULL AND reasoning_effort IS NULL) OR "
+            "(mode = 'pin' AND worker_key IS NOT NULL)",
+            name="project_executor_preference_shape",
+        ),
+        CheckConstraint(
+            "worker_key IS NULL OR worker_key IN ('sol', 'terra', 'luna', 'grok')",
+            name="project_executor_preference_worker",
+        ),
+        CheckConstraint(
+            "reasoning_effort IS NULL OR reasoning_effort IN "
+            "('low', 'medium', 'high', 'xhigh', 'max', 'ultra')",
+            name="project_executor_preference_effort",
+        ),
+        CheckConstraint("revision >= 1", name="project_executor_preference_revision"),
+    )
+
+    project_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
+    worker_key: Mapped[str | None] = mapped_column(String(40))
+    reasoning_effort: Mapped[str | None] = mapped_column(String(20))
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_by_user_id: Mapped[int | None] = mapped_column(BigInteger)
+
+
 class ProviderProfile(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "provider_profiles"
 

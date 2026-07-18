@@ -14,6 +14,9 @@ This file records completed implementation changes, not plans or speculative ide
 - provisioned managed projects now scaffold a green `Makefile` `test` target for empty/docs-only
   repos, with a machine-readable scaffold marker that validation rejects once executable code lands
   without a real project gate;
+- split oversized test modules into domain-scoped files under `tests/unit/{providers,experiments,
+  interpretation,deploy,execution}/` and matching integration packages so suites stay cohesive
+  instead of multi-thousand-line grab-bags;
 - made production readiness fail closed when the Compose interpreter is stopped or still serves an
   older semantic prompt than the deployed source, preventing stale routing images from passing a
   code-only rollout;

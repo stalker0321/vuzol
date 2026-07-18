@@ -182,8 +182,8 @@ def test_compile_rejects_invalid_idna_hostname() -> None:
         compile_proxy_allowlist(pol, provider_api_hosts=("ex..com",))
 
 
-def test_normalize_and_extract_helpers_cover_branches() -> None:
-    """Direct exercise of helpers (used by compile) for coverage and correctness."""
+def test_normalize_and_extract_helpers_reject_invalid_hosts() -> None:
+    """Hostname normalization and host extraction fail closed on invalid input."""
     # normalize
     with pytest.raises(ValueError, match="must not be empty"):
         _normalize_hostname("")

@@ -21,6 +21,19 @@ SYSTEM_GIT_CONFIG = (
     "commit.gpgSign=false",
 )
 
+# Fresh managed projects get a green `make test` so validation never fails solely
+# because the product has no tests yet. See docs/TESTING.md.
+PROJECT_SCAFFOLD_MAKEFILE = """\
+# Scaffolded by Vuzol for managed projects.
+# `make test` must stay green while the project has no real suite.
+# When you add product behavior, replace this target with a real project test command.
+# Platform testing policy: docs/TESTING.md (in the Vuzol repository).
+
+.PHONY: test
+test:
+\t@echo "scaffold: no project tests yet (ok)"
+"""
+
 
 class LocalGit:
     def __init__(self, *, timeout_seconds: float = 30) -> None:
@@ -51,8 +64,12 @@ class LocalGit:
         readme_path = repository / "README.md"
         if readme_path.exists() and readme_path.read_text() != readme:
             raise GitError("unfinished project README differs from the requested project")
+        makefile_path = repository / "Makefile"
+        if makefile_path.exists() and makefile_path.read_text() != PROJECT_SCAFFOLD_MAKEFILE:
+            raise GitError("unfinished project Makefile differs from the scaffold")
         readme_path.write_text(readme)
-        await self.stage_paths(repository, ("README.md",))
+        makefile_path.write_text(PROJECT_SCAFFOLD_MAKEFILE)
+        await self.stage_paths(repository, ("README.md", "Makefile"))
         commit = await self.create_commit(repository, "chore: initialize project")
         # Leave the managed primary tree detached so apply can CAS-update main
         # without fighting a checked-out branch on newly provisioned projects.

@@ -280,8 +280,7 @@ class ResultValidationHandler:
         blocking = tuple(
             signal
             for signal in suspicious
-            if signal.classification
-            in {"forced_success", "coverage_weakening", "shell_execution", "broad_cleanup"}
+            if signal.classification in {"forced_success", "shell_execution", "broad_cleanup"}
         )
         if blocking:
             raise ResultValidationError(

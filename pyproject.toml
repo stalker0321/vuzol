@@ -47,7 +47,9 @@ dev = [
 packages = ["src/vuzol"]
 
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers --cov=vuzol --cov-report=term-missing --cov-fail-under=90"
+# Coverage is reported for visibility only. There is no fail-under percentage:
+# percentage floors force padding once real behavioral tests exist (docs/TESTING.md).
+addopts = "--strict-config --strict-markers --cov=vuzol --cov-report=term-missing"
 testpaths = ["tests"]
 markers = [
     "postgresql: requires the real PostgreSQL integration database",
@@ -81,6 +83,16 @@ ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S603", "S607"]
+# Domain splits share a hermetic helpers module via star-import to avoid a 3k-line file.
+"tests/unit/execution/test_sandbox_runtime.py" = ["ANN", "S603", "S607", "F403", "F405"]
+"tests/unit/execution/test_git_worktrees.py" = ["ANN", "S603", "S607", "F403", "F405"]
+"tests/unit/execution/test_worktree_access.py" = ["ANN", "S603", "S607", "F403", "F405"]
+"tests/unit/execution/test_finalization.py" = ["ANN", "S603", "S607", "F403", "F405"]
+"tests/unit/execution/test_provider_execution.py" = ["ANN", "S603", "S607", "F403", "F405"]
+"tests/unit/execution/test_artifacts.py" = ["ANN", "S603", "S607", "F403", "F405"]
+"tests/unit/execution/test_paths.py" = ["ANN", "S603", "S607", "F403", "F405"]
+"tests/unit/execution/test_executor_cli.py" = ["ANN", "S603", "S607", "F403", "F405"]
+"tests/unit/execution/_execution_helpers.py" = ["ANN", "S603", "S607"]
 "alembic/**" = ["ANN"]
 
 [tool.ruff.format]

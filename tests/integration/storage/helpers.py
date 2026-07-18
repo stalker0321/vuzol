@@ -5,8 +5,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from vuzol.config import Settings
 from vuzol.storage import create_engine, create_session_factory
+from vuzol.storage.models import Task
 from vuzol.storage.records import StepRecord, TaskRecord
-from vuzol.storage.types import IdempotencyClass, RunStatus, StepStatus
+from vuzol.storage.types import (
+    IdempotencyClass,
+    QueueClass,
+    RetryClass,
+    RunStatus,
+    StepStatus,
+    TaskStatus,
+)
 from vuzol.storage.unit_of_work import UnitOfWork
 
 
@@ -21,6 +29,11 @@ async def seed_task_run_step(
     *,
     step_status: StepStatus = StepStatus.QUEUED,
     capabilities: list[str] | None = None,
+    queue_class: QueueClass = QueueClass.LIGHT,
+    retry_class: RetryClass = RetryClass.NEVER,
+    max_attempts: int = 3,
+    idempotency_class: IdempotencyClass = IdempotencyClass.ISOLATED_RETRYABLE,
+    step_type: str = "execute_code",
 ) -> tuple[TaskRecord, uuid.UUID, StepRecord]:
     async with UnitOfWork(factory) as uow:
         task = await uow.tasks.create(
@@ -29,6 +42,12 @@ async def seed_task_run_step(
             original_text="test request",
             task_type="coding",
         )
+        # Align with post-start runtime so outcome commit may derive task status.
+        session = uow.session
+        assert session is not None
+        row = await session.get(Task, task.id)
+        if row is not None:
+            row.status = TaskStatus.EXECUTING
         run_id = await uow.runs.create(
             task_id=task.id,
             workflow_type="coding",
@@ -41,10 +60,12 @@ async def seed_task_run_step(
         step = await uow.steps.create(
             run_id=run_id,
             ordinal=1,
-            step_type="execute_code",
-            idempotency_class=IdempotencyClass.ISOLATED_RETRYABLE,
+            step_type=step_type,
+            idempotency_class=idempotency_class,
             required_capabilities=capabilities,
             status=step_status,
-            max_attempts=3,
+            queue_class=queue_class,
+            retry_class=retry_class,
+            max_attempts=max_attempts,
         )
     return task, run_id, step

@@ -587,6 +587,32 @@ class RetentionSweeper:
                 return RetentionAction(
                     "worktree", str(worktree_id), RetentionOutcome.SKIPPED, "intent_missing"
                 )
+            task = await session.scalar(
+                select(Task).where(Task.id == worktree.task_id).with_for_update()
+            )
+            run = await session.scalar(
+                select(Run).where(Run.id == worktree.run_id).with_for_update()
+            )
+            if task is None or run is None or run.task_id != task.id:
+                return RetentionAction(
+                    "worktree",
+                    str(worktree_id),
+                    RetentionOutcome.SKIPPED,
+                    "ambiguous_identity",
+                )
+            # R1: re-check protected runtime immediately before Git/FS deletion.
+            # Leave INTENT in place so a later sweep can resume when safe.
+            skip = await self._worktree_skip_reason(
+                session, worktree, task, run, ignore_retention=True, ignore_intent=True
+            )
+            if skip is not None:
+                return RetentionAction(
+                    "worktree",
+                    str(worktree_id),
+                    RetentionOutcome.SKIPPED,
+                    skip[0],
+                    skip[1],
+                )
             path = Path(worktree.path)
             project_id = worktree.project_id
             expected_identity = worktree.repository_identity_hash
@@ -745,9 +771,7 @@ class RetentionSweeper:
                     "finalized_after_external",
                     {"path": str(path)},
                 )
-            if (
-                worktree.cleanup_reason == WORKTREE_EXTERNAL_DONE and not path_missing
-            ):  # pragma: no cover
+            if worktree.cleanup_reason == WORKTREE_EXTERNAL_DONE and not path_missing:
                 return RetentionAction(
                     "worktree",
                     str(worktree_id),
@@ -789,7 +813,7 @@ class RetentionSweeper:
                     RetentionOutcome.RECONCILED,
                     "finalized_missing_after_intent",
                 )
-            return RetentionAction(  # pragma: no cover
+            return RetentionAction(
                 "worktree",
                 str(worktree_id),
                 RetentionOutcome.FAILED,
@@ -797,7 +821,7 @@ class RetentionSweeper:
                 {"cleanup_reason": worktree.cleanup_reason},
             )
 
-    def _resolve_repository(self, project_id: str) -> Path:  # pragma: no cover
+    def _resolve_repository(self, project_id: str) -> Path:
         assert self._repository_root is not None
         if self._projects is not None:
             project = self._projects.get(project_id)
@@ -958,6 +982,11 @@ class RetentionSweeper:
         try:
             phase = await self._artifact_phase_declare_or_report(artifact_id, mode=mode)
             if phase.outcome is RetentionOutcome.EXTERNAL_DONE:
+                # Resume: may need last-peer unlink if prior external deferred it.
+                if mode is RetentionSweepMode.APPLY:
+                    external = await self._artifact_phase_external(artifact_id)
+                    if external.outcome is RetentionOutcome.FAILED:
+                        return external
                 return await self._artifact_phase_finalize(artifact_id, mode=mode)
             if phase.outcome is not RetentionOutcome.INTENT_RECORDED:
                 return phase
@@ -1139,15 +1168,22 @@ class RetentionSweeper:
             artifact = await session.scalar(
                 select(Artifact).where(Artifact.id == artifact_id).with_for_update()
             )
-            if artifact is None or self._artifact_phase(artifact) != ARTIFACT_PHASE_INTENT:
+            phase = None if artifact is None else self._artifact_phase(artifact)
+            if artifact is None or phase not in {
+                ARTIFACT_PHASE_INTENT,
+                ARTIFACT_PHASE_EXTERNAL,
+            }:
                 return RetentionAction(
                     "artifact", str(artifact_id), RetentionOutcome.SKIPPED, "intent_missing"
                 )
-            skip = await self._artifact_skip_reason(session, artifact, ignore_retention=True)
-            if skip is not None:
-                return RetentionAction(
-                    "artifact", str(artifact_id), RetentionOutcome.SKIPPED, skip[0], skip[1]
-                )
+            # EXTERNAL_DONE resume re-checks peers before a deferred last-peer unlink.
+            # INTENT still re-validates full skip (protection) before first FS touch.
+            if phase == ARTIFACT_PHASE_INTENT:
+                skip = await self._artifact_skip_reason(session, artifact, ignore_retention=True)
+                if skip is not None:
+                    return RetentionAction(
+                        "artifact", str(artifact_id), RetentionOutcome.SKIPPED, skip[0], skip[1]
+                    )
             content_hash = artifact.content_hash
             try:
                 absolute = self._artifact_path(artifact)
@@ -1174,8 +1210,13 @@ class RetentionSweeper:
                 )
                 .limit(1)
             )
+            prior_file_removed = False
+            if phase == ARTIFACT_PHASE_EXTERNAL:
+                block = (artifact.metadata_json or {}).get(ARTIFACT_META_KEY)
+                if isinstance(block, Mapping):
+                    prior_file_removed = bool(block.get("file_removed"))
         # External FS outside the transaction.
-        file_removed = False
+        file_removed = prior_file_removed
         if remaining is None and absolute.exists() and not absolute.is_symlink():
             try:
                 info = absolute.lstat()
@@ -1201,6 +1242,8 @@ class RetentionSweeper:
                     "filesystem_delete_failed",
                     {"error": type(error).__name__},
                 )
+        elif remaining is None and not absolute.exists():
+            file_removed = True
 
         async with self._factory() as session, session.begin():
             artifact = await session.scalar(
@@ -1265,7 +1308,26 @@ class RetentionSweeper:
             except (PathViolation, ValueError):
                 absolute = None
             path_missing = absolute is None or (not absolute.exists() and not absolute.is_symlink())
-            if not path_missing and phase == ARTIFACT_PHASE_EXTERNAL:
+            # Content-addressed peers may leave the blob in place while this row
+            # finalizes as DELETED; only the last peer is allowed to unlink.
+            remaining_peer = await session.scalar(
+                select(Artifact.id)
+                .where(
+                    Artifact.content_hash == artifact.content_hash,
+                    Artifact.id != artifact.id,
+                    Artifact.storage_state.in_(
+                        (
+                            ArtifactStorageState.AVAILABLE,
+                            ArtifactStorageState.STAGING,
+                            ArtifactStorageState.QUARANTINED,
+                        )
+                    ),
+                )
+                .limit(1)
+            )
+            # Shared content-hash peers keep the blob; only the last peer requires
+            # path absence. removal_incomplete is for last-peer incomplete unlink.
+            if not path_missing and phase == ARTIFACT_PHASE_EXTERNAL and remaining_peer is None:
                 return RetentionAction(
                     "artifact",
                     str(artifact_id),
@@ -1295,7 +1357,11 @@ class RetentionSweeper:
                     event_type="ops.retention.artifact_deleted",
                     actor_type="retention",
                     actor_id=self._owner,
-                    payload={"content_hash": artifact.content_hash, "phase": "finalized"},
+                    payload={
+                        "content_hash": artifact.content_hash,
+                        "phase": "finalized",
+                        "shared_blob_retained": not path_missing and remaining_peer is not None,
+                    },
                 )
             )
             return RetentionAction(
@@ -1518,16 +1584,14 @@ class RetentionSweeper:
                         if entry.is_dir(follow_symlinks=False):
                             # Do not cross mount points.
                             try:
-                                if (
-                                    child.stat().st_dev != self._artifact_root.stat().st_dev
-                                ):  # pragma: no cover - mount edge
+                                if child.stat().st_dev != self._artifact_root.stat().st_dev:
                                     continue
-                            except OSError:  # pragma: no cover
+                            except OSError:
                                 continue
                             stack.append(child)
                         elif entry.is_file(follow_symlinks=False):
                             results.append(child)
-            except OSError:  # pragma: no cover - unreadable entry
+            except OSError:
                 continue
         return results
 
@@ -1603,7 +1667,7 @@ class RetentionSweeper:
             {"quarantine_path": str(destination.relative_to(self._artifact_root))},
         )
 
-    async def _reconcile_quarantine_intents(  # pragma: no cover
+    async def _reconcile_quarantine_intents(
         self, *, mode: RetentionSweepMode
     ) -> list[RetentionAction]:
         """Finalize quarantine moves that crashed after FS move but before commit."""

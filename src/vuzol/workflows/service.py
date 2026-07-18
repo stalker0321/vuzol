@@ -204,6 +204,9 @@ async def commit_step_outcome(
         step.available_at = func.now() + timedelta(seconds=retry_delay_seconds)
         step.failure_category = outcome.category
         step.failure_summary = outcome.summary
+        if outcome.result:
+            # Keep diagnostic plan/provider payloads across retryable attempts.
+            step.result = outcome.result
     elif outcome.kind is OutcomeKind.NEEDS_USER_INPUT:
         await transition_step(session, step, StepStatus.AWAITING_USER, actor_type="worker")
         await transition_run(session, run, RunStatus.AWAITING_USER, actor_type="worker")
@@ -218,6 +221,8 @@ async def commit_step_outcome(
     else:
         await transition_step(session, step, StepStatus.FAILED, actor_type="worker")
         await transition_run(session, run, RunStatus.FAILED, actor_type="worker")
+        if outcome.result:
+            step.result = outcome.result
     if outcome.kind is not OutcomeKind.SUCCEEDED:
         step.failure_category = outcome.category
         step.failure_summary = outcome.summary

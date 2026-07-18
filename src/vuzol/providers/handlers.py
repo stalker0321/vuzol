@@ -26,9 +26,20 @@ from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import get_logger
 from vuzol.providers.budgets import account_usage, reconcile_usage, release_reservation
-from vuzol.providers.domain import ProviderErrorCategory, ProviderRequest, ProviderResult
+from vuzol.providers.domain import (
+    ContextItem,
+    ProviderErrorCategory,
+    ProviderRequest,
+    ProviderResult,
+)
 from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.health import record_failure_observation, record_success_observation
+from vuzol.providers.planner_handoff import (
+    PlannerResultUnusable,
+    assess_planner_provider_result,
+    load_planner_context_for_run,
+    planner_result_payload,
+)
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.providers.routing import PROVIDER_STEP_ROLES
@@ -58,6 +69,7 @@ class ProviderStepHandler:
         finalizer: WorkerFinalizer | None = None,
         worktree_access: WorktreeAccessManager | None = None,
         agent_certificates: AgentCertificateStore | None = None,
+        redaction_patterns: tuple[str, ...] = (),
     ) -> None:
         self._factory = factory
         self._registries = registries
@@ -67,6 +79,7 @@ class ProviderStepHandler:
         self._finalizer = finalizer
         self._worktree_access = worktree_access
         self._agent_certificates = agent_certificates
+        self._redaction_patterns = redaction_patterns
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -311,6 +324,37 @@ class ProviderStepHandler:
             if finalized is not None
             else result.structured_output
         )
+        if request.step_type == "plan":
+            try:
+                assess_planner_provider_result(result)
+            except PlannerResultUnusable as error:
+                return StepOutcome(
+                    kind=OutcomeKind.TRANSIENT_FAILURE,
+                    result=planner_result_payload(
+                        profile_id=profile.id,
+                        model=profile.model,
+                        provider_request_id=result.provider_request_id,
+                        text=result.text,
+                        structured_output=structured_output,
+                        finish_reason=result.finish_reason,
+                        handoff_status="rejected",
+                        handoff_reason=error.category,
+                    ),
+                    category=error.category,
+                    summary=error.summary,
+                    unknown_effects=False,
+                )
+            return StepOutcome.succeeded(
+                planner_result_payload(
+                    profile_id=profile.id,
+                    model=profile.model,
+                    provider_request_id=result.provider_request_id,
+                    text=result.text,
+                    structured_output=structured_output,
+                    finish_reason=result.finish_reason,
+                    handoff_status="ready",
+                )
+            )
         return StepOutcome.succeeded(
             {
                 "profile_id": profile.id,
@@ -691,6 +735,7 @@ class ProviderStepHandler:
                 raise LookupError("provider reservation is missing")
             profile = self._registries.profiles.get(step.executor_profile_id)
             worktree = None
+            context: tuple[ContextItem, ...] = ()
             if step.step_type in {"execute_code", "execute_agent"}:
                 worktree = await session.scalar(
                     select(Worktree).where(
@@ -700,6 +745,13 @@ class ProviderStepHandler:
                 )
                 if worktree is None:
                     raise LookupError("agent execution requires a prepared worktree")
+                plan_step = await session.scalar(
+                    select(Step).where(Step.run_id == run.id, Step.step_type == "plan")
+                )
+                context = load_planner_context_for_run(
+                    plan_step,
+                    redaction_patterns=self._redaction_patterns,
+                )
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
@@ -717,6 +769,7 @@ class ProviderStepHandler:
                     original_input_reference=f"task:{task.id}:original",
                     original_input=task.original_text,
                     task_draft=task.task_draft,
+                    context=context,
                     system_policy_revision=run.policy_revision,
                     prompt_revision=run.prompt_revision or "provider-step-v1",
                     output_schema_name=output_schema_name,

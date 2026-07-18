@@ -64,7 +64,9 @@ provider response bodies and exceptions do not enter task state, events, Telegra
 The worker can execute safe, model-only OpenAI-compatible steps such as simple answers, planning,
 research synthesis, and summarization. Automatic workflow start remains disabled by default.
 Production planning uses a dedicated GPT-5 nano API profile with a bounded 1,000-token output;
-repository analysis and architectural discussion remain full agent tasks rather than planner work.
+empty or token-truncated planner output is rejected rather than completed, and a validated plan is
+handed to downstream `execute_code` / `execute_agent` steps as bounded redacted context items.
+Repository analysis and architectural discussion remain full agent tasks rather than planner work.
 Architecture tasks route to subscription agents through a dedicated read-only workflow. The
 repository worktree and provider permissions are both read-only, no validation/apply approval is
 created, and the agent's bounded textual result is returned to the project topic.

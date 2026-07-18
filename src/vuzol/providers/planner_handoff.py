@@ -10,11 +10,12 @@ import hashlib
 import re
 from typing import Any
 
-from vuzol.providers.domain import ContextItem, ProviderResult
+from vuzol.providers.domain import ContextItem, ProviderResult, ProviderResultStatus
 from vuzol.storage.models import Step
 from vuzol.storage.types import StepStatus
 
 PLANNER_CONTEXT_SOURCE = "workflow_plan_result"
+PLANNER_HANDOFF_FENCED_CATEGORY = "planner_handoff_fenced"
 # Stay under ContextItem.content max (20_000) and keep total handoff bounded.
 MAX_PLANNER_CONTEXT_CHARS = 12_000
 MAX_CONTEXT_ITEM_CHARS = 8_000
@@ -33,9 +34,24 @@ class PlannerResultUnusable(ValueError):
         self.summary = summary
 
 
+class PlannerHandoffFenced(LookupError):
+    """Executor build refused a non-usable or incomplete plan step."""
+
+    def __init__(self, summary: str, *, reason: str = PLANNER_HANDOFF_FENCED_CATEGORY) -> None:
+        super().__init__(summary)
+        self.category = PLANNER_HANDOFF_FENCED_CATEGORY
+        self.reason = reason
+        self.summary = summary
+
+
 def assess_planner_provider_result(result: ProviderResult) -> str:
     """Return non-empty plan text or raise PlannerResultUnusable."""
 
+    if result.status is not ProviderResultStatus.SUCCEEDED:
+        raise PlannerResultUnusable(
+            "planner_invalid_output",
+            f"planner provider status is {result.status.value}, not succeeded",
+        )
     if result.finish_reason == "length":
         raise PlannerResultUnusable(
             "planner_truncated",
@@ -145,9 +161,15 @@ def load_planner_context_for_run(
     if plan_step is None:
         return ()
     if plan_step.step_type != "plan":
-        raise LookupError("planner handoff requires a plan step")
+        raise PlannerHandoffFenced(
+            "planner handoff requires a plan step",
+            reason="planner_missing_result",
+        )
     if plan_step.status is not StepStatus.COMPLETED:
-        raise LookupError(f"planner handoff fenced: plan step status is {plan_step.status.value}")
+        raise PlannerHandoffFenced(
+            f"planner handoff fenced: plan step status is {plan_step.status.value}",
+            reason=f"plan_status_{plan_step.status.value}",
+        )
     result = plan_step.result if isinstance(plan_step.result, dict) else None
     try:
         plan_text = assess_persisted_plan_result(result)
@@ -157,7 +179,10 @@ def load_planner_context_for_run(
             redaction_patterns=redaction_patterns,
         )
     except PlannerResultUnusable as error:
-        raise LookupError(f"planner handoff fenced: {error.summary}") from error
+        raise PlannerHandoffFenced(
+            f"planner handoff fenced: {error.summary}",
+            reason=error.category,
+        ) from error
 
 
 def planner_result_payload(

@@ -35,6 +35,7 @@ from vuzol.providers.domain import (
 from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.health import record_failure_observation, record_success_observation
 from vuzol.providers.planner_handoff import (
+    PlannerHandoffFenced,
     PlannerResultUnusable,
     assess_planner_provider_result,
     load_planner_context_for_run,
@@ -94,6 +95,14 @@ class ProviderStepHandler:
             ) = await self._build_request(request)
             profile = self._registries.profiles.get(profile_id)
             adapter = self._adapters.get(profile_id)
+        except PlannerHandoffFenced as error:
+            return await self._pre_provider_failure(
+                request,
+                reservation_id=reservation_id,
+                category=error.category,
+                summary=error.summary,
+                error=error,
+            )
         except (LookupError, ValueError) as error:
             return await self._pre_provider_failure(
                 request,
@@ -259,23 +268,53 @@ class ProviderStepHandler:
                 finalization_failure = error
             except ValidationError:
                 invalid_edit_report = True
+        plan_rejection: PlannerResultUnusable | None = None
+        if request.step_type == "plan":
+            try:
+                assess_planner_provider_result(result)
+            except PlannerResultUnusable as error:
+                plan_rejection = error
         async with self._factory.begin() as session:
             accounted_usage = account_usage(profile, result.usage)
-            await reconcile_usage(
-                session,
-                reservation_id=reservation_id,
-                token=request.lease,
-                provider=profile.provider,
-                model=profile.model,
-                usage=accounted_usage,
-                provider_request_id=result.provider_request_id,
-                outcome=result.status.value,
-            )
-            await record_success_observation(
-                session,
-                profile,
-                configuration_revision=configuration_revision,
-            )
+            if plan_rejection is not None:
+                # Content-quality rejection is not a profile outage, but it is not a success.
+                await reconcile_usage(
+                    session,
+                    reservation_id=reservation_id,
+                    token=request.lease,
+                    provider=profile.provider,
+                    model=profile.model,
+                    usage=accounted_usage,
+                    provider_request_id=result.provider_request_id,
+                    outcome=plan_rejection.category,
+                )
+                await record_failure_observation(
+                    session,
+                    profile,
+                    configuration_revision=configuration_revision,
+                    failure=ProviderFailure(
+                        category=ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+                        retryable=True,
+                        request_sent=True,
+                        safe_summary=plan_rejection.summary,
+                    ),
+                )
+            else:
+                await reconcile_usage(
+                    session,
+                    reservation_id=reservation_id,
+                    token=request.lease,
+                    provider=profile.provider,
+                    model=profile.model,
+                    usage=accounted_usage,
+                    provider_request_id=result.provider_request_id,
+                    outcome=result.status.value,
+                )
+                await record_success_observation(
+                    session,
+                    profile,
+                    configuration_revision=configuration_revision,
+                )
             finalization_result = (
                 finalized
                 if finalized is not None
@@ -303,6 +342,23 @@ class ProviderStepHandler:
                         artifacts=self._artifacts,
                         step_id=request.step_id,
                     )
+        if plan_rejection is not None:
+            return StepOutcome(
+                kind=OutcomeKind.TRANSIENT_FAILURE,
+                result=planner_result_payload(
+                    profile_id=profile.id,
+                    model=profile.model,
+                    provider_request_id=result.provider_request_id,
+                    text=result.text,
+                    structured_output=result.structured_output,
+                    finish_reason=result.finish_reason,
+                    handoff_status="rejected",
+                    handoff_reason=plan_rejection.category,
+                ),
+                category=plan_rejection.category,
+                summary=plan_rejection.summary,
+                unknown_effects=False,
+            )
         if finalization_failure is not None:
             return StepOutcome(
                 kind=OutcomeKind.PERMANENT_FAILURE,
@@ -325,25 +381,6 @@ class ProviderStepHandler:
             else result.structured_output
         )
         if request.step_type == "plan":
-            try:
-                assess_planner_provider_result(result)
-            except PlannerResultUnusable as error:
-                return StepOutcome(
-                    kind=OutcomeKind.TRANSIENT_FAILURE,
-                    result=planner_result_payload(
-                        profile_id=profile.id,
-                        model=profile.model,
-                        provider_request_id=result.provider_request_id,
-                        text=result.text,
-                        structured_output=structured_output,
-                        finish_reason=result.finish_reason,
-                        handoff_status="rejected",
-                        handoff_reason=error.category,
-                    ),
-                    category=error.category,
-                    summary=error.summary,
-                    unknown_effects=False,
-                )
             return StepOutcome.succeeded(
                 planner_result_payload(
                     profile_id=profile.id,
@@ -746,7 +783,10 @@ class ProviderStepHandler:
                 if worktree is None:
                     raise LookupError("agent execution requires a prepared worktree")
                 plan_step = await session.scalar(
-                    select(Step).where(Step.run_id == run.id, Step.step_type == "plan")
+                    select(Step)
+                    .where(Step.run_id == run.id, Step.step_type == "plan")
+                    .order_by(Step.ordinal.desc(), Step.id.desc())
+                    .limit(1)
                 )
                 context = load_planner_context_for_run(
                     plan_step,

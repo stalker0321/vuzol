@@ -16,6 +16,7 @@ from vuzol.config.models import (
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
 from vuzol.projects.executor_preference import (
+    ExecutorRoutePin,
     load_preference,
     preference_payload,
     resolve_route_pin,
@@ -167,10 +168,61 @@ async def claim_routed_step(
             allowed_fallbacks = registries.profiles.get(failed_profile_id).fallback_profile_ids
         project_pin = None
         pin_family_ids: frozenset[str] | None = None
-        if role is ProviderRole.EXECUTOR and task.project_id is not None:
+        pin_preference_revision: int | None = None
+        pin_worker_key: str | None = None
+        # Pins apply only to CLI coding/agent sandboxes — never API/research executors.
+        pin_eligible_step = step.step_type in {"execute_code", "execute_agent"}
+        if pin_eligible_step and task.project_id is not None:
             preference = await load_preference(session, task.project_id)
-            project_pin = resolve_route_pin(preference, registries)
-            if project_pin is not None:
+            pin_preference_revision = preference.revision
+            if not preference.is_auto:
+                pin_worker_key = (
+                    preference.worker_key.value if preference.worker_key is not None else None
+                )
+                project_pin = resolve_route_pin(preference, registries)
+                if project_pin is None:
+                    # Stored pin must not silently degrade to unrestricted auto routing.
+                    await _persist_decision(
+                        session,
+                        run=run,
+                        step=step,
+                        role=role,
+                        attempt=attempt,
+                        selected_profile_id=None,
+                        decision=PolicyDecision(
+                            selected_profile_id=None,
+                            alternatives=(),
+                            evaluations=(),
+                        ),
+                        request=RoutingRequest(
+                            role=role,
+                            task_type=task.task_type,
+                            required_capabilities=required,
+                            project_allowed_capabilities=project_caps,
+                            budget_mode=BudgetMode(run.budget_mode),
+                            estimated_input_tokens=estimated_input,
+                            max_output_tokens=requested_output,
+                            remaining_cost_units=settings.limits.task_cost_units,
+                        ),
+                        pin_inputs={
+                            "project_pin_mode": preference.mode.value,
+                            "project_pin_worker": pin_worker_key,
+                            "preference_revision": preference.revision,
+                            "project_pin_unresolved": True,
+                        },
+                    )
+                    await _block_route(
+                        session,
+                        step=step,
+                        run=run,
+                        task=task,
+                        category="project_pin_unresolved",
+                        quota=False,
+                        summary=(
+                            "Project /model pin cannot be resolved to an enabled executor profile."
+                        ),
+                    )
+                    continue
                 # Fence: only the pinned profile and same-family fallbacks, every attempt.
                 same_family = same_family_fallback_ids(
                     registries,
@@ -242,6 +294,12 @@ async def claim_routed_step(
                 continue
             selected = profile
             break
+        pin_decision_inputs = _pin_decision_inputs(
+            project_pin=project_pin,
+            pin_family_ids=pin_family_ids,
+            preference_revision=pin_preference_revision,
+            worker_key=pin_worker_key,
+        )
         if selected is None or reservation is None:
             exhausted = bool(ordered) or _quota_exhausted(decision)
             await _persist_decision(
@@ -253,6 +311,7 @@ async def claim_routed_step(
                 selected_profile_id=None,
                 decision=decision,
                 request=policy_request,
+                pin_inputs=pin_decision_inputs,
             )
             await _block_route(
                 session,
@@ -272,6 +331,7 @@ async def claim_routed_step(
             selected_profile_id=selected.id,
             decision=decision,
             request=policy_request,
+            pin_inputs=pin_decision_inputs,
         )
         step.executor_profile_id = selected.id
         step.status = StepStatus.LEASED
@@ -289,18 +349,12 @@ async def claim_routed_step(
             if selected.id not in pin_family_ids:
                 # Defensive: fence must make this unreachable; never mis-attribute.
                 pass
-            elif selected.id == project_pin.trusted_profile_id:
-                next_payload.update(preference_payload(project_pin))
             else:
-                # Explicit same-family fallback: attribute the actual selected profile.
-                next_payload.update(
-                    {
-                        "executor_preference_mode": "pin",
-                        "executor_worker_key": project_pin.worker_key.value,
-                        "executor_fallback_profile_id": selected.id,
-                        "executor_pin_profile_id": project_pin.trusted_profile_id,
-                    }
-                )
+                # Always keep pin model/effort overrides; record actual selected provenance.
+                next_payload.update(preference_payload(project_pin))
+                if selected.id != project_pin.trusted_profile_id:
+                    next_payload["executor_fallback_profile_id"] = selected.id
+                    next_payload["executor_pin_profile_id"] = project_pin.trusted_profile_id
         step.payload = next_payload
         await session.flush()
         await session.refresh(step, attribute_names=["heartbeat_at", "lease_expires_at"])
@@ -358,6 +412,34 @@ async def _states(
     return result
 
 
+def _pin_decision_inputs(
+    *,
+    project_pin: ExecutorRoutePin | None,
+    pin_family_ids: frozenset[str] | None,
+    preference_revision: int | None,
+    worker_key: str | None,
+) -> dict[str, object] | None:
+    """Bounded pin provenance stored on RoutingDecision.inputs."""
+
+    if project_pin is None and pin_family_ids is None and preference_revision is None:
+        return None
+    payload: dict[str, object] = {}
+    if preference_revision is not None:
+        payload["preference_revision"] = preference_revision
+    if worker_key is not None:
+        payload["project_pin_worker"] = worker_key
+    if project_pin is not None:
+        payload["project_pin_mode"] = "pin"
+        payload["trusted_profile_id"] = project_pin.trusted_profile_id
+        if project_pin.model_override is not None:
+            payload["model_override"] = project_pin.model_override
+        if project_pin.reasoning_effort is not None:
+            payload["reasoning_effort"] = project_pin.reasoning_effort
+    if pin_family_ids is not None:
+        payload["restrict_to_profile_ids"] = sorted(pin_family_ids)
+    return payload or None
+
+
 async def _persist_decision(
     session: AsyncSession,
     *,
@@ -368,6 +450,7 @@ async def _persist_decision(
     selected_profile_id: str | None,
     decision: PolicyDecision,
     request: RoutingRequest,
+    pin_inputs: dict[str, object] | None = None,
 ) -> None:
     evaluations = [
         {
@@ -377,6 +460,16 @@ async def _persist_decision(
         }
         for evaluation in decision.evaluations
     ]
+    inputs: dict[str, object] = {
+        "task_type": request.task_type,
+        "required_capabilities": sorted(
+            capability.value for capability in request.required_capabilities
+        ),
+        "budget_mode": request.budget_mode.value,
+        "evaluations": evaluations,
+    }
+    if pin_inputs:
+        inputs.update(pin_inputs)
     session.add(
         RoutingDecision(
             run_id=run.id,
@@ -389,14 +482,7 @@ async def _persist_decision(
                 {"profile_id": profile_id, "rank": rank}
                 for rank, profile_id in enumerate(decision.alternatives, start=1)
             ],
-            inputs={
-                "task_type": request.task_type,
-                "required_capabilities": sorted(
-                    capability.value for capability in request.required_capabilities
-                ),
-                "budget_mode": request.budget_mode.value,
-                "evaluations": evaluations,
-            },
+            inputs=inputs,
             policy_revision=run.policy_revision,
         )
     )
@@ -411,12 +497,14 @@ async def _block_route(
     task: Task,
     category: str,
     quota: bool,
+    summary: str | None = None,
 ) -> None:
-    summary = (
-        "Доступный лимит провайдера исчерпан; задача ожидает возобновления квоты."
-        if quota
-        else "Маршрутизатор не нашёл безопасного доступного исполнителя для этого этапа."
-    )
+    if summary is None:
+        summary = (
+            "Доступный лимит провайдера исчерпан; задача ожидает возобновления квоты."
+            if quota
+            else "Маршрутизатор не нашёл безопасного доступного исполнителя для этого этапа."
+        )
     await transition_step(
         session,
         step,

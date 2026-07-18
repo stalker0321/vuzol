@@ -11,8 +11,9 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
+from vuzol.config import ProjectConfig
 from vuzol.providers.errors import ProviderFailure
-from vuzol.storage.models import ProjectExecutorPreference, RoutingDecision, Step, Task
+from vuzol.storage.models import RoutingDecision, Step, Task
 
 from ._test_routing_helpers import (
     Capability,
@@ -31,6 +32,7 @@ from ._test_routing_helpers import (
     storage,
     synchronize_profiles,
 )
+
 
 @pytest.mark.postgresql
 def test_project_pin_fence_blocks_cross_family_when_primary_unhealthy(
@@ -470,6 +472,331 @@ def test_project_pin_trusted_payload_carries_codex_overrides(
             assert step.payload.get("executor_model_override") == "gpt-5.6-terra"
             assert step.payload.get("executor_reasoning_effort") == "xhigh"
             assert step.payload.get("executor_worker_key") == "terra"
+            decision = await session.scalar(
+                select(RoutingDecision).where(RoutingDecision.step_id == step_id)
+            )
+            assert decision is not None
+            assert decision.inputs.get("project_pin_worker") == "terra"
+            assert decision.inputs.get("trusted_profile_id") == "codex-subscription-prod"
+            assert decision.inputs.get("preference_revision") == 4
+            assert decision.inputs.get("model_override") == "gpt-5.6-terra"
+            assert decision.inputs.get("reasoning_effort") == "xhigh"
+            assert "codex-subscription-prod" in decision.inputs.get("restrict_to_profile_ids", [])
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_project_pin_does_not_affect_research_execute(postgres_dsn: str, tmp_path: Path) -> None:
+    """Stored coding pin must not fence API research_execute steps."""
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        (tmp_path / "codex-state").mkdir()
+        codex = profile(
+            "codex-subscription-prod",
+            provider="codex",
+            model="gpt-5.6-sol",
+            api_base_url=None,
+            launch_mode="cli",
+            credential_reference=None,
+            credential_required=False,
+            runtime_identity="codex-prod",
+            state_directory=tmp_path / "codex-state",
+            sandbox_required=True,
+            capabilities=frozenset(
+                {
+                    Capability.CODE_EDIT,
+                    Capability.REPOSITORY_READ,
+                    Capability.GIT,
+                    Capability.PROJECT_SHELL,
+                }
+            ),
+            supported_task_types=frozenset({"coding", "research"}),
+            roles=frozenset({ProviderRole.EXECUTOR}),
+        )
+        research = profile(
+            "research-api",
+            capabilities=frozenset({Capability.WEB_RESEARCH}),
+            supported_task_types=frozenset({"research"}),
+            roles=frozenset({ProviderRole.EXECUTOR}),
+            routing_priority=50,
+        )
+        research_project = ProjectConfig.model_validate(
+            {
+                "id": "bill-buddy",
+                "display_name": "bill-buddy",
+                "repository_path": "bill-buddy",
+                "default_branch": "main",
+                "allowed_capabilities": frozenset({Capability.WEB_RESEARCH}),
+                "sandbox_profile": "unused",
+                "enabled": False,
+            }
+        )
+        settings, registries = bundle(tmp_path, codex, research, projects=(research_project,))
+        task_id, _run_id, step_id = await seed_provider_step(
+            factory,
+            step_type="research_execute",
+            capabilities=[Capability.WEB_RESEARCH.value],
+        )
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            task.project_id = "bill-buddy"
+            task.task_type = "research"
+            from vuzol.storage.models import ProjectExecutorPreference
+
+            session.add(
+                ProjectExecutorPreference(
+                    project_id="bill-buddy",
+                    mode="pin",
+                    worker_key="sol",
+                    reasoning_effort="high",
+                    revision=2,
+                )
+            )
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+        async with factory.begin() as session:
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="research-worker",
+                lease_seconds=60,
+                candidate_limit=20,
+                step_types=frozenset({"research_execute"}),
+            )
+            step = await session.get(Step, step_id)
+            decision = await session.scalar(
+                select(RoutingDecision).where(RoutingDecision.step_id == step_id)
+            )
+            assert token is not None and token.step.id == step_id
+            assert step is not None and step.executor_profile_id == "research-api"
+            assert step.payload.get("executor_preference_mode") is None
+            assert decision is not None
+            assert "project_pin_worker" not in decision.inputs
+            assert "restrict_to_profile_ids" not in decision.inputs
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_unresolved_project_pin_blocks_without_auto_degrade(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    """Pin mode with no enabled worker family must fail closed."""
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        # Only an API executor exists — Grok CLI family is missing while preference pins Grok.
+        api = profile(
+            "api-executor",
+            capabilities=frozenset(
+                {
+                    Capability.CODE_EDIT,
+                    Capability.REPOSITORY_READ,
+                    Capability.GIT,
+                    Capability.PROJECT_SHELL,
+                }
+            ),
+            supported_task_types=frozenset({"coding"}),
+            roles=frozenset({ProviderRole.EXECUTOR}),
+            sandbox_required=True,
+        )
+        settings, registries = bundle(tmp_path, api, projects=(pin_project(),))
+        task_id, _run_id, step_id = await seed_provider_step(
+            factory,
+            step_type="execute_code",
+            capabilities=[
+                Capability.CODE_EDIT.value,
+                Capability.REPOSITORY_READ.value,
+                Capability.GIT.value,
+                Capability.PROJECT_SHELL.value,
+            ],
+        )
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            task.project_id = "bill-buddy"
+            task.task_type = "coding"
+            from vuzol.storage.models import ProjectExecutorPreference
+
+            session.add(
+                ProjectExecutorPreference(
+                    project_id="bill-buddy",
+                    mode="pin",
+                    worker_key="grok",
+                    reasoning_effort=None,
+                    revision=5,
+                )
+            )
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+        async with factory.begin() as session:
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="executor",
+                lease_seconds=60,
+                candidate_limit=20,
+                step_types=frozenset({"execute_code"}),
+            )
+            step = await session.get(Step, step_id)
+            decision = await session.scalar(
+                select(RoutingDecision).where(RoutingDecision.step_id == step_id)
+            )
+            assert token is None
+            assert step is not None and step.status is StepStatus.BLOCKED
+            assert step.failure_category == "project_pin_unresolved"
+            assert step.executor_profile_id is None
+            assert decision is not None
+            assert decision.selected_profile_id is None
+            assert decision.inputs.get("project_pin_unresolved") is True
+            assert decision.inputs.get("project_pin_worker") == "grok"
+            assert decision.inputs.get("preference_revision") == 5
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_same_family_codex_fallback_retains_model_and_effort_overrides(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    """Two Codex profiles: primary unhealthy still carries Terra pin model/effort."""
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        (tmp_path / "codex-a").mkdir()
+        (tmp_path / "codex-b").mkdir()
+        codex_a = profile(
+            "codex-subscription-a",
+            provider="codex",
+            model="gpt-5.6-sol",
+            model_reasoning_effort="medium",
+            api_base_url=None,
+            launch_mode="cli",
+            credential_reference=None,
+            credential_required=False,
+            runtime_identity="codex-a",
+            state_directory=tmp_path / "codex-a",
+            sandbox_required=True,
+            capabilities=frozenset(
+                {
+                    Capability.CODE_EDIT,
+                    Capability.REPOSITORY_READ,
+                    Capability.GIT,
+                    Capability.PROJECT_SHELL,
+                }
+            ),
+            supported_task_types=frozenset({"coding"}),
+            roles=frozenset({ProviderRole.EXECUTOR}),
+            routing_priority=200,
+            fallback_profile_ids=("codex-subscription-b",),
+        )
+        codex_b = profile(
+            "codex-subscription-b",
+            provider="codex",
+            model="gpt-5.6-sol",
+            model_reasoning_effort="low",
+            api_base_url=None,
+            launch_mode="cli",
+            credential_reference=None,
+            credential_required=False,
+            runtime_identity="codex-b",
+            state_directory=tmp_path / "codex-b",
+            sandbox_required=True,
+            capabilities=frozenset(
+                {
+                    Capability.CODE_EDIT,
+                    Capability.REPOSITORY_READ,
+                    Capability.GIT,
+                    Capability.PROJECT_SHELL,
+                }
+            ),
+            supported_task_types=frozenset({"coding"}),
+            roles=frozenset({ProviderRole.EXECUTOR}),
+            routing_priority=210,
+            fallback_profile_ids=(),
+        )
+        settings, registries = bundle(tmp_path, codex_a, codex_b, projects=(pin_project(),))
+        task_id, _run_id, step_id = await seed_provider_step(
+            factory,
+            step_type="execute_code",
+            capabilities=[
+                Capability.CODE_EDIT.value,
+                Capability.REPOSITORY_READ.value,
+                Capability.GIT.value,
+                Capability.PROJECT_SHELL.value,
+            ],
+        )
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            task.project_id = "bill-buddy"
+            task.task_type = "coding"
+            from vuzol.storage.models import ProjectExecutorPreference
+
+            session.add(
+                ProjectExecutorPreference(
+                    project_id="bill-buddy",
+                    mode="pin",
+                    worker_key="terra",
+                    reasoning_effort="xhigh",
+                    revision=7,
+                )
+            )
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+            await record_failure_observation(
+                session,
+                codex_a,
+                configuration_revision="a" * 64,
+                failure=ProviderFailure(
+                    ProviderErrorCategory.AUTHENTICATION,
+                    retryable=False,
+                    request_sent=True,
+                    safe_summary="authentication failed",
+                ),
+            )
+        async with factory.begin() as session:
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="executor",
+                lease_seconds=60,
+                candidate_limit=20,
+                step_types=frozenset({"execute_code"}),
+            )
+            step = await session.get(Step, step_id)
+            decision = await session.scalar(
+                select(RoutingDecision).where(RoutingDecision.step_id == step_id)
+            )
+            assert token is not None and token.step.id == step_id
+            assert step is not None
+            assert step.executor_profile_id == "codex-subscription-b"
+            assert step.payload.get("executor_preference_mode") == "pin"
+            assert step.payload.get("executor_worker_key") == "terra"
+            assert step.payload.get("executor_model_override") == "gpt-5.6-terra"
+            assert step.payload.get("executor_reasoning_effort") == "xhigh"
+            assert step.payload.get("executor_fallback_profile_id") == "codex-subscription-b"
+            assert step.payload.get("executor_pin_profile_id") == "codex-subscription-a"
+            assert decision is not None
+            assert decision.inputs.get("project_pin_worker") == "terra"
+            assert decision.inputs.get("model_override") == "gpt-5.6-terra"
+            assert decision.inputs.get("reasoning_effort") == "xhigh"
+            assert set(decision.inputs.get("restrict_to_profile_ids", [])) == {
+                "codex-subscription-a",
+                "codex-subscription-b",
+            }
         await engine.dispose()
 
     asyncio.run(scenario())

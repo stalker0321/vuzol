@@ -322,6 +322,7 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
         repository = configured.settings.repository_root / "notes"
         assert (repository / ".git").is_dir()
         assert (repository / "README.md").read_text().startswith("# Notes")
+        assert "scaffold: no project tests yet" in (repository / "Makefile").read_text()
         overlay_path = configured.settings.registry_overlay_file
         assert overlay_path is not None
         overlay = json.loads(overlay_path.read_text())

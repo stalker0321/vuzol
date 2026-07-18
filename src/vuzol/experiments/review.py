@@ -46,10 +46,8 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"except\s+(?:Exception|BaseException)[^:]*:\s*(?:#.*\n\s*)?pass\b"),
     ),
     ("arbitrary_skip", re.compile(r"pytest\.(?:skip|mark\.skip)|@pytest\.mark\.xfail")),
-    (
-        "coverage_weakening",
-        re.compile(r"(?:fail-under|cov-fail-under)[^\n]*[=-]\s*(?:[0-8]?\d)(?:\D|$)"),
-    ),
+    # Coverage floors are informational (docs/TESTING.md); do not treat threshold
+    # edits as sabotage. Keep signals for real quality bypasses only.
     ("ignore_added", re.compile(r"noqa|nosec|type:\s*ignore|pragma:\s*no cover")),
     (
         "broad_cleanup",

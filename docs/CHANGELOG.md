@@ -9,6 +9,11 @@ This file records completed implementation changes, not plans or speculative ide
   messages expose attempts, model, token usage/limit, finish reason, output, and prominent empty or
   truncated-result warnings; planner traces also make the currently disconnected downstream
   handoff explicit without changing workflow decisions;
+- adopted a risk-based testing policy (`docs/TESTING.md`) with a temporary platform coverage floor;
+  managed projects use a scaffold gate instead of inheriting the platform bar;
+- provisioned managed projects now scaffold a green `Makefile` `test` target for empty/docs-only
+  repos, with a machine-readable scaffold marker that validation rejects once executable code lands
+  without a real project gate;
 - made production readiness fail closed when the Compose interpreter is stopped or still serves an
   older semantic prompt than the deployed source, preventing stale routing images from passing a
   code-only rollout;

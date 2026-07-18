@@ -26,3 +26,12 @@ git diff --check
 ```
 
 Architecture changes require an accepted ADR or an explicit update to an existing ADR.
+
+## Testing
+
+Follow [docs/TESTING.md](docs/TESTING.md):
+
+- write behavioral tests for P0/P1 invariants, not coverage padding;
+- keep suite modules small and domain-scoped;
+- managed projects use a green scaffold and do not inherit the platform bar;
+- coverage is reported, not gated by a percentage floor.

@@ -31,6 +31,7 @@ class ExclusionReason(StrEnum):
     BUDGET = "budget"
     CONCURRENCY = "concurrency"
     NOT_CONFIGURED_FALLBACK = "not_configured_fallback"
+    PROJECT_PIN = "project_pin"
     LAUNCH_MODE = "launch_mode"
 
 
@@ -47,6 +48,8 @@ class RoutingRequest:
     trusted_profile_id: str | None = None
     failed_profile_id: str | None = None
     allowed_fallback_ids: tuple[str, ...] = ()
+    # When set, only these profile IDs may be selected (project pin fence).
+    restrict_to_profile_ids: frozenset[str] | None = None
     requires_sandbox: bool = False
     required_launch_mode: LaunchMode | None = None
 
@@ -166,4 +169,9 @@ def _exclusions(
         and profile.id not in request.allowed_fallback_ids
     ):
         reasons.append(ExclusionReason.NOT_CONFIGURED_FALLBACK)
+    if (
+        request.restrict_to_profile_ids is not None
+        and profile.id not in request.restrict_to_profile_ids
+    ):
+        reasons.append(ExclusionReason.PROJECT_PIN)
     return reasons

@@ -149,6 +149,7 @@ __all__ = [
     "executor_provider_handlers",
     "func",
     "json",
+    "pin_project",
     "profile",
     "provider_handlers",
     "pytest",
@@ -187,7 +188,9 @@ def profile(profile_id: str, **changes: object) -> ProviderProfileConfig:
 
 
 def bundle(
-    tmp_path: Path, *profiles: ProviderProfileConfig
+    tmp_path: Path,
+    *profiles: ProviderProfileConfig,
+    projects: tuple[ProjectConfig, ...] = (),
 ) -> tuple[Settings, ConfigurationBundle]:
     settings = Settings(
         environment="test",
@@ -196,10 +199,33 @@ def bundle(
         secret_file_root=tmp_path / "secrets",
     )
     return settings, build_bundle(
-        RegistryDocument(profiles=profiles),
+        RegistryDocument(profiles=profiles, projects=projects),
         settings,
         environment={},
         validate_profile_credentials=False,
+    )
+
+
+def pin_project(project_id: str = "bill-buddy") -> ProjectConfig:
+    """Minimal project config for project-scoped executor pin integration tests."""
+
+    return ProjectConfig.model_validate(
+        {
+            "id": project_id,
+            "display_name": project_id,
+            "repository_path": project_id,
+            "default_branch": "main",
+            "allowed_capabilities": frozenset(
+                {
+                    Capability.REPOSITORY_READ,
+                    Capability.CODE_EDIT,
+                    Capability.GIT,
+                    Capability.PROJECT_SHELL,
+                }
+            ),
+            "sandbox_profile": "unused",
+            "enabled": False,
+        }
     )
 
 

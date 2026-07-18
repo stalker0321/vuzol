@@ -260,7 +260,9 @@ def test_prepare_model_picker_delivery() -> None:
 
 
 @pytest.mark.anyio
-async def test_project_model_controller_auto_and_effort_and_grok() -> None:
+async def test_project_model_controller_auto_and_effort_and_grok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from pathlib import Path
 
     from vuzol.config import (
@@ -385,6 +387,10 @@ async def test_project_model_controller_auto_and_effort_and_grok() -> None:
     runtime = MagicMock(spec=RuntimeConfiguration)
     runtime.registries = registries
     controller = ProjectModelController(runtime)
+    monkeypatch.setattr(
+        "vuzol.telegram.model_command.enqueue_project_status_dashboard",
+        AsyncMock(return_value=None),
+    )
 
     class Row:
         def __init__(self) -> None:
@@ -400,6 +406,7 @@ async def test_project_model_controller_auto_and_effort_and_grok() -> None:
     session.get = AsyncMock(return_value=row)
     session.flush = AsyncMock()
     session.add = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
 
     auto = await controller.apply(
         session,

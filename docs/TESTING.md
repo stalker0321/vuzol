@@ -98,21 +98,29 @@ Provisioning creates a minimal repository:
 The scaffold `make test` target is **green only while the project is empty or docs-only**.
 It is not a permanent free pass.
 
+Scaffold status is detected from the **scaffold test recipe** (the no-op
+`scaffold: no project tests yet (ok)` echo) and/or the **exact dedicated marker
+line** `# vuzol-scaffold-gate: true`. Removing only the marker while leaving the
+no-op recipe does **not** unlock product code. A second trusted gate such as
+`make lint` does **not** bypass scaffold status either.
+
 ### Scaffold → code transition
 
 When coding validation sees **executable product files** in the result
-(source, package manifests, etc.) and the worktree still only has the scaffold
-gate (marker present and no other trusted gate such as real `make test` / lint /
-type-check / security), validation **fails closed** with category
-`validation_scaffold_gate` and a clear reason listing sample paths.
+(source, package manifests, `requirements*.txt`, etc.) and the worktree still
+uses the scaffold `make test` implementation, validation **fails closed** with
+category `validation_scaffold_gate` and a clear reason listing sample paths.
 
 To proceed after adding product code:
 
-1. Replace scaffold `make test` with a real project command (for example `pytest`);
-2. Remove the `vuzol-scaffold-gate: true` marker line from the Makefile;
-   and/or configure another trusted `validation_commands` entry.
+1. Replace the scaffold `make test` recipe with a real project command
+   (for example `/usr/bin/pytest -q`);
+2. Remove the dedicated `# vuzol-scaffold-gate: true` marker line from the
+   Makefile (prose comments that merely mention the marker string are ignored).
 
-Docs-only changes (`README.md`, `docs/**`, changelog-style files) may still use the scaffold gate.
+Docs-only changes (`README.md`, markdown/text under `docs/**`, structured
+OpenAPI/YAML samples under `docs/**`) may still use the scaffold gate. Pure data
+files (for example `data/*.csv`) do not by themselves force a real gate.
 
 ### Project test policy
 

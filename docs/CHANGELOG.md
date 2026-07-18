@@ -4,6 +4,13 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- hardened scaffold→code detection: scaffold is the no-op `make test` recipe and/or the exact
+  `# vuzol-scaffold-gate: true` line (not a raw substring); removing only the marker or adding
+  `make lint` no longer unlocks product code; a real `make test` recipe is allowed even when a
+  prose comment mentions the marker string;
+- classification fixes: `requirements*.txt` / `constraints*.txt` are product; structured docs under
+  `docs/` (json/yaml/toml) stay docs-only; pure data (csv/tsv/…) does not alone force a real gate;
+- restored behavioral coverage-floor tests (precision-6 fail-under and non-zero pytest status);
 - added durable bounded orchestration traces to the Telegram `Система` topic: semantic-interpreter
   messages expose the raw and policy-effective TaskDraft plus call measurements, while planner
   messages expose attempts, model, token usage/limit, finish reason, output, and prominent empty or

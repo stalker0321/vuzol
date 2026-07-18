@@ -57,6 +57,12 @@ def test_resolve_trusted_gates_rejects_arbitrary_argv() -> None:
     assert error.value.category == "validation_untrusted_command"
 
 
+def _write_real_test_makefile(worktree_path: Path) -> None:
+    """Gate unit tests exercise make test; provide a non-scaffold recipe."""
+
+    (worktree_path / "Makefile").write_text(".PHONY: test\ntest:\n\t/usr/bin/true\n")
+
+
 def test_success_payload_and_json_bytes() -> None:
     payload = _success_payload(
         base_commit="a" * 40,
@@ -92,6 +98,7 @@ def test_success_payload_and_json_bytes() -> None:
 async def test_validate_trusted_gates_pass_and_revoke_access(tmp_path: Path) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
+    _write_real_test_makefile(worktree_path)
     base = "a" * 40
     result = "b" * 40
     inspection = _inspection(head=base, files=("x.py",), diff=b"+print(1)\n")
@@ -167,6 +174,7 @@ async def test_validate_trusted_gates_pass_and_revoke_access(tmp_path: Path) -> 
 async def test_validate_trusted_gate_failure(tmp_path: Path) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
+    _write_real_test_makefile(worktree_path)
     inspection = _inspection()
     git = MagicMock()
     git.require_clean_source = AsyncMock()
@@ -213,6 +221,7 @@ async def test_validate_trusted_gate_failure(tmp_path: Path) -> None:
 async def test_validate_gate_runner_missing(tmp_path: Path) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
+    _write_real_test_makefile(worktree_path)
     git = MagicMock()
     git.require_clean_source = AsyncMock()
     git.require_no_remotes = AsyncMock()
@@ -235,6 +244,7 @@ async def test_validate_gate_runner_missing(tmp_path: Path) -> None:
 async def test_validate_gate_mutates_worktree(tmp_path: Path) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
+    _write_real_test_makefile(worktree_path)
     before = _inspection(files=("x.py",), diff=b"+a\n")
     after = _inspection(files=("x.py", "y.py"), diff=b"+a\n+b\n")
     git = MagicMock()

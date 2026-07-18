@@ -147,10 +147,12 @@ Choices:
   choose reasoning effort (`low` / `medium` / `high` / `xhigh`);
 - **Grok** — pin the first healthy Grok CLI executor profile (same-family fallbacks only).
 
-Pinned selection uses the router's trusted-profile path and stores model/effort overrides on the
-claimed step payload so the sandbox transport validates the exact command. Cross-family automatic
-fallback (for example Sol → Grok) is disabled while a pin is active. Planner and reviewer roles
-are unchanged by this preference.
+Pinned selection applies only to coding/agent CLI steps (`execute_code` / `execute_agent`). It uses
+the router's trusted-profile path and stores model/effort overrides on the claimed step payload so
+the sandbox transport validates the exact command—including when a same-family profile fallback is
+selected. Cross-family automatic fallback (for example Sol → Grok) is disabled while a pin is
+active. If the pinned worker family has no enabled profile, the step blocks rather than silently
+using auto routing. Planner, reviewer, research, and other API executor roles are unchanged.
 
 `Новый проект` is an explicit provisioning boundary. An allowlisted text or voice message is
 treated as the project's nature and goal. The interpreter proposes nine distinct display-name and

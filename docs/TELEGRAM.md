@@ -79,9 +79,11 @@ The interpreter trace shows the task number and project, profile/model, prompt a
 input/output tokens, duration, repair use, the model-produced `TaskDraft`, and—when different—the
 effective draft after deterministic policy enforcement. The planner trace shows attempt/status,
 profile/model, measured tokens and reserved output limit, `finish_reason`, plain and structured
-output, explicit warnings for a token-limited or empty successful result, and the current handoff
-state. The trace currently states that planner output is not attached to the downstream
-`ProviderRequest`; executors still receive the original intake and interpreted TaskDraft directly.
+output, explicit warnings for token-limited or empty results, and whether a validated plan was
+handed off. Empty or token-truncated planner output is not marked completed; it fails with a
+retryable category when attempts remain. A completed, non-empty plan is attached as bounded,
+redacted `ProviderRequest.context` items for `execute_code` / `execute_agent`. Workflows
+materialized without a plan step still execute with empty planner context.
 All provider/user text is HTML-escaped and bounded below the Telegram message limit; credentials,
 provider request IDs, raw prompts, and execution artifacts are not included. These traces are
 observational only: they do not change routing, validation, approval, or task status.

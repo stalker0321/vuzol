@@ -193,6 +193,7 @@ async def run() -> None:
             finalizer=finalizer,
             worktree_access=worktree_access,
             agent_certificates=AgentCertificateStore(settings.artifact_root / "agent-certificates"),
+            redaction_patterns=settings.redaction_patterns,
         )
         worktree_handler = PrepareWorktreeHandler(
             factory,

@@ -7,6 +7,10 @@ This file records completed implementation changes, not plans or speculative ide
 - rebuilt and repinned the offline validation image for the R1 testing-policy inputs; the image
   contains all 71 locked packages and its build-time dependency audit found no known
   vulnerabilities;
+- connected validated planner results into executor `ProviderRequest.context`: non-empty completed
+  plans are bounded and redacted before handoff; empty or `finish_reason=length` plan output is no
+  longer marked successful and records a retryable/terminal reason; no-plan workflows still run;
+  orchestration planner traces report actual handoff state;
 - hardened scaffold→code detection: scaffold is the no-op `make test` recipe and/or the exact
   `# vuzol-scaffold-gate: true` line (not a raw substring); removing only the marker or adding
   `make lint` no longer unlocks product code; a real `make test` recipe is allowed even when a
@@ -17,8 +21,7 @@ This file records completed implementation changes, not plans or speculative ide
 - added durable bounded orchestration traces to the Telegram `Система` topic: semantic-interpreter
   messages expose the raw and policy-effective TaskDraft plus call measurements, while planner
   messages expose attempts, model, token usage/limit, finish reason, output, and prominent empty or
-  truncated-result warnings; planner traces also make the currently disconnected downstream
-  handoff explicit without changing workflow decisions;
+  truncated-result warnings; planner traces report actual handoff state;
 - adopted a risk-based testing policy (`docs/TESTING.md`) with a temporary platform coverage floor;
   managed projects use a scaffold gate instead of inheriting the platform bar;
 - provisioned managed projects now scaffold a green `Makefile` `test` target for empty/docs-only
@@ -27,6 +30,7 @@ This file records completed implementation changes, not plans or speculative ide
 - split oversized test modules into domain-scoped files under `tests/unit/{providers,experiments,
   interpretation,deploy,execution}/` and matching integration packages so suites stay cohesive
   instead of multi-thousand-line grab-bags;
+
 - made production readiness fail closed when the Compose interpreter is stopped or still serves an
   older semantic prompt than the deployed source, preventing stale routing images from passing a
   code-only rollout;

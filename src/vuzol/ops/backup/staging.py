@@ -92,9 +92,20 @@ def publish_run(
     write_state(run_dir, STATE_PUBLISHED)
 
 
-def cleanup_run_dir(run_dir: Path, staging_root: Path) -> None:
-    """Delete run_dir only if contained under staging_root."""
+def cleanup_run_dir(
+    run_dir: Path,
+    staging_root: Path,
+    *,
+    production: ProductionRoots | None = None,
+) -> None:
+    """Delete run_dir only if contained under staging_root.
 
+    When ``production`` is provided, reassert staging-root isolation against
+    production roots (symlink/ancestor conflicts) immediately before delete.
+    """
+
+    if production is not None:
+        staging_root = assert_safe_staging_root(staging_root, production)
     resolved_run = resolve_isolation_path(run_dir)
     resolved_root = resolve_isolation_path(staging_root)
     try:
@@ -124,10 +135,25 @@ def prune_published_runs(staging_root: Path, *, keep: int) -> int:
     return removed
 
 
-def gc_incomplete_runs(staging_root: Path, *, max_age_seconds: float = 3600.0) -> int:
+def gc_incomplete_runs(
+    staging_root: Path,
+    production: ProductionRoots,
+    *,
+    max_age_seconds: float = 3600.0,
+) -> int:
+    """Remove incomplete staging runs under an isolation-checked staging root.
+
+    Reasserts configured staging-root isolation against ``production`` immediately
+    before directory traversal and again immediately before each deletion.
+    Incomplete-only/age semantics are unchanged: published runs are never removed;
+    candidates match max age or failed/cancelled/missing STATE.
+    """
+
     import time
 
-    runs_root = staging_root / "runs"
+    # Fail closed before any traversal (resolves symlinks / missing-leaf parents).
+    staging = assert_safe_staging_root(staging_root, production)
+    runs_root = staging / "runs"
     if not runs_root.is_dir():
         return 0
     now = time.time()
@@ -140,7 +166,8 @@ def gc_incomplete_runs(staging_root: Path, *, max_age_seconds: float = 3600.0) -
             continue
         age = now - child.stat().st_mtime
         if age >= max_age_seconds or state in {STATE_FAILED, STATE_CANCELLED, None}:
-            cleanup_run_dir(child, staging_root)
+            # Reassert isolation immediately before deletion (TOCTOU / symlink race).
+            cleanup_run_dir(child, staging, production=production)
             removed += 1
     return removed
 

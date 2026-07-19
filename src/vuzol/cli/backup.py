@@ -11,7 +11,11 @@ from vuzol.config.secrets import ScopedSecretResolver
 from vuzol.observability import configure_logging, get_logger
 from vuzol.ops.backup.capture import BackupCaptureRunner, CaptureMode
 from vuzol.ops.backup.crypto import load_kek_from_env_value, load_kek_from_file_bytes
-from vuzol.ops.backup.staging import gc_incomplete_runs
+from vuzol.ops.backup.paths import BackupPathError, ProductionRoots
+from vuzol.ops.backup.staging import BackupStagingError, gc_incomplete_runs
+
+# Stable operational code: isolation refusal without path leakage.
+_GC_STAGING_PATH_CONFLICT = "preflight_path_conflict"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -54,9 +58,34 @@ async def _run(args: argparse.Namespace) -> int:
 
     if args.command == "gc-staging":
         if settings.backup.staging_root is None:
-            print(json.dumps({"ok": False, "code": "preflight_staging"}))
+            print(json.dumps({"ok": False, "code": "preflight_staging", "schedule": "disabled"}))
             return 1
-        removed = gc_incomplete_runs(settings.backup.staging_root)
+        production = ProductionRoots(
+            repository_root=settings.repository_root,
+            worktree_root=settings.worktree_root,
+            artifact_root=settings.artifact_root,
+            secret_file_root=settings.secret_file_root,
+        )
+        try:
+            # Isolation reasserted inside gc_incomplete_runs before traverse/delete.
+            removed = gc_incomplete_runs(settings.backup.staging_root, production)
+        except (BackupPathError, BackupStagingError, OSError):
+            payload = {
+                "ok": False,
+                "code": _GC_STAGING_PATH_CONFLICT,
+                "schedule": "disabled",
+            }
+            print(json.dumps(payload))
+            logger.info(
+                "backup.gc_staging",
+                extra={
+                    "event": "ops.backup.gc_staging",
+                    "ok": False,
+                    "code": _GC_STAGING_PATH_CONFLICT,
+                    "schedule": "disabled",
+                },
+            )
+            return 1
         payload = {"ok": True, "removed": removed, "schedule": "disabled"}
         if args.json:
             print(json.dumps(payload))

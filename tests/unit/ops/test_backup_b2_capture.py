@@ -28,6 +28,7 @@ from vuzol.ops.backup.postgres_dump import (
     parse_dump_identity,
 )
 from vuzol.ops.backup.staging import (
+    STATE_FAILED,
     STATE_PUBLISHED,
     assert_safe_staging_root,
     cleanup_run_dir,
@@ -123,9 +124,11 @@ def test_staging_conflict_and_publish_layout(tmp_path: Path) -> None:
     removed = prune_published_runs(staging, keep=2)
     assert removed == 1
     write_state(ensure_staging_tree(staging, uuid.uuid4())[0], "dumping")
-    assert gc_incomplete_runs(staging, max_age_seconds=0) >= 1
+    assert gc_incomplete_runs(staging, production, max_age_seconds=0) >= 1
     assert prune_published_runs(tmp_path / "no-runs", keep=1) == 0
-    assert gc_incomplete_runs(tmp_path / "no-runs") == 0
+    empty_staging = tmp_path / "no-runs"
+    empty_staging.mkdir()
+    assert gc_incomplete_runs(empty_staging, production) == 0
 
     # publish_run missing source
     rid = uuid.uuid4()
@@ -138,6 +141,102 @@ def test_staging_conflict_and_publish_layout(tmp_path: Path) -> None:
     outside.mkdir()
     with pytest.raises(Exception, match="refuse cleanup"):
         cleanup_run_dir(outside, staging)
+
+
+def test_gc_incomplete_refuses_production_root_conflict(tmp_path: Path) -> None:
+    """gc must not traverse/delete when staging nests under a production root."""
+
+    prod_art = tmp_path / "artifacts"
+    prod_art.mkdir()
+    # Unsafe: staging lives inside production artifact root.
+    staging = prod_art / "nested-staging"
+    staging.mkdir()
+    production = ProductionRoots(
+        repository_root=tmp_path / "repos",
+        worktree_root=tmp_path / "wt",
+        artifact_root=prod_art,
+        secret_file_root=tmp_path / "secrets",
+    )
+    for root in (production.repository_root, production.worktree_root, production.secret_file_root):
+        root.mkdir(parents=True, exist_ok=True)
+
+    rid = uuid.uuid4()
+    run_dir, _, _ = ensure_staging_tree(staging, rid)
+    write_state(run_dir, STATE_FAILED)
+    marker = run_dir / "keep-me"
+    marker.write_text("x", encoding="utf-8")
+
+    with pytest.raises(BackupPathError):
+        gc_incomplete_runs(staging, production, max_age_seconds=0)
+
+    # No deletion on refusal.
+    assert marker.is_file()
+    assert run_dir.is_dir()
+
+
+def test_gc_incomplete_refuses_symlink_to_production(tmp_path: Path) -> None:
+    """Symlink staging that resolves into production must fail closed before GC."""
+
+    prod_art = tmp_path / "artifacts"
+    prod_art.mkdir()
+    # Real directory under production that incomplete runs would live in if GC ran.
+    real_under_prod = prod_art / "real-staging"
+    real_under_prod.mkdir()
+    link_staging = tmp_path / "staging-link"
+    link_staging.symlink_to(real_under_prod)
+
+    production = ProductionRoots(
+        repository_root=tmp_path / "repos",
+        worktree_root=tmp_path / "wt",
+        artifact_root=prod_art,
+        secret_file_root=tmp_path / "secrets",
+    )
+    for root in (production.repository_root, production.worktree_root, production.secret_file_root):
+        root.mkdir(parents=True, exist_ok=True)
+
+    rid = uuid.uuid4()
+    run_dir, _, _ = ensure_staging_tree(real_under_prod, rid)
+    write_state(run_dir, "dumping")
+    marker = run_dir / "payload"
+    marker.write_text("stay", encoding="utf-8")
+
+    with pytest.raises(BackupPathError):
+        gc_incomplete_runs(link_staging, production, max_age_seconds=0)
+
+    assert marker.is_file()
+    assert run_dir.is_dir()
+
+
+def test_gc_incomplete_safe_root_removes_incomplete_only(tmp_path: Path) -> None:
+    """Safe isolated staging: incomplete runs removed; published preserved."""
+
+    production = ProductionRoots(
+        repository_root=tmp_path / "repos",
+        worktree_root=tmp_path / "wt",
+        artifact_root=tmp_path / "art",
+        secret_file_root=tmp_path / "secrets",
+    )
+    for root in production.all_roots()[:4]:
+        root.mkdir(parents=True, exist_ok=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    assert_safe_staging_root(staging, production)
+
+    published_id = uuid.uuid4()
+    pub_dir, _, _ = ensure_staging_tree(staging, published_id)
+    write_state(pub_dir, STATE_PUBLISHED)
+    (pub_dir / "keep").write_text("published", encoding="utf-8")
+
+    failed_id = uuid.uuid4()
+    fail_dir, _, _ = ensure_staging_tree(staging, failed_id)
+    write_state(fail_dir, STATE_FAILED)
+    (fail_dir / "drop").write_text("incomplete", encoding="utf-8")
+
+    removed = gc_incomplete_runs(staging, production, max_age_seconds=3600.0)
+    assert removed == 1
+    assert pub_dir.is_dir()
+    assert (pub_dir / "keep").is_file()
+    assert not fail_dir.exists()
 
 
 def test_backup_settings_capture_gate() -> None:
@@ -736,17 +835,19 @@ def test_cli_capture_dry_run_and_gc(
     out = capsys.readouterr().out
     assert "preflight_dsn" in out or "preflight" in out
 
-    # gc-staging
+    # gc-staging (safe isolated staging from _base_settings)
     staging = settings.backup.staging_root
     assert staging is not None
     rid = uuid.uuid4()
     rd, _, _ = ensure_staging_tree(staging, rid)
-    write_state(rd, "dumping")
+    write_state(rd, STATE_FAILED)
     code = asyncio.run(backup_cli._run(backup_cli._parse_args(["gc-staging", "--json"])))
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["schedule"] == "disabled"
+    assert payload["removed"] >= 1
+    assert not rd.exists()
 
     # gc without staging
     runtime.settings = Settings(
@@ -759,6 +860,34 @@ def test_cli_capture_dry_run_and_gc(
     )
     code = asyncio.run(backup_cli._run(backup_cli._parse_args(["gc-staging", "--json"])))
     assert code == 1
+    assert "preflight_staging" in capsys.readouterr().out
+
+    # gc refuses production-nested staging with stable code and no path leak / no delete
+    bad_staging = settings.artifact_root / "evil-staging"
+    bad_staging.mkdir(parents=True, exist_ok=True)
+    bad_run, _, _ = ensure_staging_tree(bad_staging, uuid.uuid4())
+    write_state(bad_run, STATE_FAILED)
+    marker = bad_run / "untouched"
+    marker.write_text("alive", encoding="utf-8")
+    runtime.settings = Settings(
+        environment="test",
+        repository_root=settings.repository_root,
+        worktree_root=settings.worktree_root,
+        artifact_root=settings.artifact_root,
+        secret_file_root=settings.secret_file_root,
+        backup=BackupSettings(staging_root=bad_staging),
+    )
+    code = asyncio.run(backup_cli._run(backup_cli._parse_args(["gc-staging", "--json"])))
+    assert code == 1
+    refuse_out = capsys.readouterr().out
+    refuse_payload = json.loads(refuse_out)
+    assert refuse_payload["ok"] is False
+    assert refuse_payload["code"] == "preflight_path_conflict"
+    assert refuse_payload["schedule"] == "disabled"
+    # No absolute production/staging paths leaked in operational JSON.
+    assert str(settings.artifact_root) not in refuse_out
+    assert str(bad_staging) not in refuse_out
+    assert marker.is_file()
 
 
 def test_cli_resolve_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

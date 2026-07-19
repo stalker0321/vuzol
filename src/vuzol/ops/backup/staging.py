@@ -135,6 +135,17 @@ def prune_published_runs(staging_root: Path, *, keep: int) -> int:
     return removed
 
 
+def _require_under_staging(path: Path, staging: Path) -> Path:
+    """Resolve ``path`` and require it stays under resolved ``staging`` (no escape)."""
+
+    resolved = resolve_isolation_path(path)
+    try:
+        resolved.relative_to(staging)
+    except ValueError as error:
+        raise BackupStagingError("refuse path outside staging_root") from error
+    return resolved
+
+
 def gc_incomplete_runs(
     staging_root: Path,
     production: ProductionRoots,
@@ -145,6 +156,8 @@ def gc_incomplete_runs(
 
     Reasserts configured staging-root isolation against ``production`` immediately
     before directory traversal and again immediately before each deletion.
+    Binds ``runs/`` under the asserted staging root before any ``iterdir``; refuses
+    symlink/escaping ``runs`` or child entries before ``read_state``/``stat``.
     Incomplete-only/age semantics are unchanged: published runs are never removed;
     candidates match max age or failed/cancelled/missing STATE.
     """
@@ -153,21 +166,28 @@ def gc_incomplete_runs(
 
     # Fail closed before any traversal (resolves symlinks / missing-leaf parents).
     staging = assert_safe_staging_root(staging_root, production)
-    runs_root = staging / "runs"
+    runs_path = staging / "runs"
+    if not runs_path.exists():
+        return 0
+    # Bind runs/ under staging before scan (refuse escaping symlink targets).
+    runs_root = _require_under_staging(runs_path, staging)
     if not runs_root.is_dir():
         return 0
     now = time.time()
     removed = 0
     for child in runs_root.iterdir():
-        if not child.is_dir():
+        # Refuse escaping symlink children before read_state/stat side effects.
+        bound_child = _require_under_staging(child, staging)
+        if not bound_child.is_dir():
             continue
-        state = read_state(child)
+        # Prefer the bound path for metadata so we do not re-follow a hostile link.
+        state = read_state(bound_child)
         if state == STATE_PUBLISHED:
             continue
-        age = now - child.stat().st_mtime
+        age = now - bound_child.stat().st_mtime
         if age >= max_age_seconds or state in {STATE_FAILED, STATE_CANCELLED, None}:
             # Reassert isolation immediately before deletion (TOCTOU / symlink race).
-            cleanup_run_dir(child, staging, production=production)
+            cleanup_run_dir(bound_child, staging, production=production)
             removed += 1
     return removed
 

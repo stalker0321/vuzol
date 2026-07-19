@@ -28,8 +28,10 @@ from vuzol.ops.backup.postgres_dump import (
     parse_dump_identity,
 )
 from vuzol.ops.backup.staging import (
+    STATE_DUMPING,
     STATE_FAILED,
     STATE_PUBLISHED,
+    BackupStagingError,
     assert_safe_staging_root,
     cleanup_run_dir,
     ensure_staging_tree,
@@ -237,6 +239,119 @@ def test_gc_incomplete_safe_root_removes_incomplete_only(tmp_path: Path) -> None
     assert pub_dir.is_dir()
     assert (pub_dir / "keep").is_file()
     assert not fail_dir.exists()
+
+
+def test_gc_incomplete_preserves_young_dumping_under_default_age(tmp_path: Path) -> None:
+    """C3: young dumping runs are not removed under default max_age_seconds=3600."""
+
+    production = ProductionRoots(
+        repository_root=tmp_path / "repos",
+        worktree_root=tmp_path / "wt",
+        artifact_root=tmp_path / "art",
+        secret_file_root=tmp_path / "secrets",
+    )
+    for root in production.all_roots()[:4]:
+        root.mkdir(parents=True, exist_ok=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    dump_dir, _, _ = ensure_staging_tree(staging, uuid.uuid4())
+    write_state(dump_dir, STATE_DUMPING)
+    marker = dump_dir / "in-progress"
+    marker.write_text("live", encoding="utf-8")
+
+    removed = gc_incomplete_runs(staging, production, max_age_seconds=3600.0)
+    assert removed == 0
+    assert dump_dir.is_dir()
+    assert marker.is_file()
+    assert read_state(dump_dir) == STATE_DUMPING
+
+
+def test_gc_incomplete_refuses_escaping_runs_symlink(tmp_path: Path) -> None:
+    """C2: runs/ symlink that resolves outside staging fails before scan/delete."""
+
+    production = ProductionRoots(
+        repository_root=tmp_path / "repos",
+        worktree_root=tmp_path / "wt",
+        artifact_root=tmp_path / "art",
+        secret_file_root=tmp_path / "secrets",
+    )
+    for root in production.all_roots()[:4]:
+        root.mkdir(parents=True, exist_ok=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    foreign = tmp_path / "foreign-runs"
+    foreign.mkdir()
+    victim = foreign / "escape-run"
+    victim.mkdir()
+    (victim / "STATE").write_text("failed\n", encoding="utf-8")
+    marker = victim / "payload"
+    marker.write_text("stay", encoding="utf-8")
+    (staging / "runs").symlink_to(foreign)
+
+    with pytest.raises(BackupStagingError, match="refuse path outside staging_root"):
+        gc_incomplete_runs(staging, production, max_age_seconds=0)
+
+    assert marker.is_file()
+    assert victim.is_dir()
+
+
+def test_gc_incomplete_refuses_escaping_child_symlink(tmp_path: Path) -> None:
+    """C2: individual run dir symlink escaping staging fails before read_state."""
+
+    production = ProductionRoots(
+        repository_root=tmp_path / "repos",
+        worktree_root=tmp_path / "wt",
+        artifact_root=tmp_path / "art",
+        secret_file_root=tmp_path / "secrets",
+    )
+    for root in production.all_roots()[:4]:
+        root.mkdir(parents=True, exist_ok=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "runs").mkdir()
+    foreign = tmp_path / "foreign-child"
+    foreign.mkdir()
+    (foreign / "STATE").write_text("failed\n", encoding="utf-8")
+    marker = foreign / "payload"
+    marker.write_text("stay", encoding="utf-8")
+    (staging / "runs" / "linked-run").symlink_to(foreign)
+
+    with pytest.raises(BackupStagingError, match="refuse path outside staging_root"):
+        gc_incomplete_runs(staging, production, max_age_seconds=0)
+
+    assert marker.is_file()
+
+
+def test_cli_gc_io_error_distinct_from_path_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """C1: OSError during GC maps to gc_io_error, not preflight_path_conflict."""
+
+    from vuzol.cli import backup as backup_cli
+
+    settings = _base_settings(tmp_path)
+    runtime = MagicMock()
+    runtime.settings = settings
+    monkeypatch.setattr(backup_cli, "get_runtime_configuration", lambda **_k: runtime)
+    monkeypatch.setattr(backup_cli, "configure_logging", lambda **_k: None)
+    monkeypatch.setattr(backup_cli, "get_logger", lambda _n: MagicMock())
+
+    def _raise_oserror(*_a: object, **_k: object) -> int:
+        raise OSError(13, "permission denied")
+
+    monkeypatch.setattr(backup_cli, "gc_incomplete_runs", _raise_oserror)
+    code = asyncio.run(backup_cli._run(backup_cli._parse_args(["gc-staging", "--json"])))
+    assert code == 1
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["code"] == "gc_io_error"
+    assert payload["schedule"] == "disabled"
+    assert "permission denied" not in out
+    assert str(tmp_path) not in out
 
 
 def test_backup_settings_capture_gate() -> None:

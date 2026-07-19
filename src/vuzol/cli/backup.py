@@ -14,8 +14,9 @@ from vuzol.ops.backup.crypto import load_kek_from_env_value, load_kek_from_file_
 from vuzol.ops.backup.paths import BackupPathError, ProductionRoots
 from vuzol.ops.backup.staging import BackupStagingError, gc_incomplete_runs
 
-# Stable operational code: isolation refusal without path leakage.
+# Stable operational codes without path leakage.
 _GC_STAGING_PATH_CONFLICT = "preflight_path_conflict"
+_GC_STAGING_IO_ERROR = "gc_io_error"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -69,19 +70,32 @@ async def _run(args: argparse.Namespace) -> int:
         try:
             # Isolation reasserted inside gc_incomplete_runs before traverse/delete.
             removed = gc_incomplete_runs(settings.backup.staging_root, production)
-        except (BackupPathError, BackupStagingError, OSError):
-            payload = {
-                "ok": False,
-                "code": _GC_STAGING_PATH_CONFLICT,
-                "schedule": "disabled",
-            }
+        except (BackupPathError, BackupStagingError):
+            # Isolation / containment refusal (C1) — never include exception text (paths).
+            code = _GC_STAGING_PATH_CONFLICT
+            payload = {"ok": False, "code": code, "schedule": "disabled"}
             print(json.dumps(payload))
             logger.info(
                 "backup.gc_staging",
                 extra={
                     "event": "ops.backup.gc_staging",
                     "ok": False,
-                    "code": _GC_STAGING_PATH_CONFLICT,
+                    "code": code,
+                    "schedule": "disabled",
+                },
+            )
+            return 1
+        except OSError:
+            # Staging I/O failure distinct from isolation (C1) — still no path leakage.
+            code = _GC_STAGING_IO_ERROR
+            payload = {"ok": False, "code": code, "schedule": "disabled"}
+            print(json.dumps(payload))
+            logger.info(
+                "backup.gc_staging",
+                extra={
+                    "event": "ops.backup.gc_staging",
+                    "ok": False,
+                    "code": code,
                     "schedule": "disabled",
                 },
             )

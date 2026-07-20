@@ -45,6 +45,15 @@ PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
     "execute_agent": ProviderRole.EXECUTOR,
 }
 
+# Content-quality plan failures are not profile outages; the same planner may retry.
+PLANNER_CONTENT_FAILURE_CATEGORIES = frozenset(
+    {
+        "planner_empty_output",
+        "planner_truncated",
+        "planner_invalid_output",
+    }
+)
+
 
 async def claim_routed_step(
     session: AsyncSession,
@@ -139,7 +148,13 @@ async def claim_routed_step(
             else settings.limits.provider_call_output_tokens
         )
         failed_profile_id = (
-            step.executor_profile_id if attempt > 1 and step.failure_category is not None else None
+            step.executor_profile_id
+            if (
+                attempt > 1
+                and step.failure_category is not None
+                and step.failure_category not in PLANNER_CONTENT_FAILURE_CATEGORIES
+            )
+            else None
         )
         allowed_fallbacks: tuple[str, ...] = ()
         if failed_profile_id is not None:

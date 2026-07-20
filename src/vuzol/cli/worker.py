@@ -146,7 +146,12 @@ async def run() -> None:
     )
     worker: Processor = internal_worker
     if adapter_registry is not None:
-        provider_handler = ProviderStepHandler(factory, runtime.registries, adapter_registry)
+        provider_handler = ProviderStepHandler(
+            factory,
+            runtime.registries,
+            adapter_registry,
+            redaction_patterns=settings.redaction_patterns,
+        )
         routed_worker = RoutedWorkflowWorker(
             settings,
             factory,

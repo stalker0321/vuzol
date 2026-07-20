@@ -47,6 +47,8 @@ dev = [
 packages = ["src/vuzol"]
 
 [tool.pytest.ini_options]
+# Temporary platform safeguard (docs/TESTING.md). Managed projects do not inherit this floor.
+# Remove after automated P0/P1 invariant checks replace percentage gating.
 addopts = "--strict-config --strict-markers --cov=vuzol --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
 markers = [

@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path, PurePosixPath
 
 from vuzol.execution.domain import GitInspection
+from vuzol.execution.scaffold import PROJECT_SCAFFOLD_MAKEFILE
 
 
 class GitError(RuntimeError):
@@ -51,8 +52,12 @@ class LocalGit:
         readme_path = repository / "README.md"
         if readme_path.exists() and readme_path.read_text() != readme:
             raise GitError("unfinished project README differs from the requested project")
+        makefile_path = repository / "Makefile"
+        if makefile_path.exists() and makefile_path.read_text() != PROJECT_SCAFFOLD_MAKEFILE:
+            raise GitError("unfinished project Makefile differs from the scaffold")
         readme_path.write_text(readme)
-        await self.stage_paths(repository, ("README.md",))
+        makefile_path.write_text(PROJECT_SCAFFOLD_MAKEFILE)
+        await self.stage_paths(repository, ("README.md", "Makefile"))
         commit = await self.create_commit(repository, "chore: initialize project")
         # Leave the managed primary tree detached so apply can CAS-update main
         # without fighting a checked-out branch on newly provisioned projects.

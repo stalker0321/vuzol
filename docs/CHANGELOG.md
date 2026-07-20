@@ -4,11 +4,26 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- hardened scaffold→code detection: scaffold is the no-op `make test` recipe and/or the exact
+  `# vuzol-scaffold-gate: true` line (not a raw substring); removing only the marker or adding
+  `make lint` no longer unlocks product code; a real `make test` recipe is allowed even when a
+  prose comment mentions the marker string;
+- classification fixes: `requirements*.txt` / `constraints*.txt` are product; structured docs under
+  `docs/` (json/yaml/toml) stay docs-only; pure data (csv/tsv/…) does not alone force a real gate;
+- restored behavioral coverage-floor tests (precision-6 fail-under and non-zero pytest status);
 - added durable bounded orchestration traces to the Telegram `Система` topic: semantic-interpreter
   messages expose the raw and policy-effective TaskDraft plus call measurements, while planner
   messages expose attempts, model, token usage/limit, finish reason, output, and prominent empty or
   truncated-result warnings; planner traces also make the currently disconnected downstream
   handoff explicit without changing workflow decisions;
+- adopted a risk-based testing policy (`docs/TESTING.md`) with a temporary platform coverage floor;
+  managed projects use a scaffold gate instead of inheriting the platform bar;
+- provisioned managed projects now scaffold a green `Makefile` `test` target for empty/docs-only
+  repos, with a machine-readable scaffold marker that validation rejects once executable code lands
+  without a real project gate;
+- split oversized test modules into domain-scoped files under `tests/unit/{providers,experiments,
+  interpretation,deploy,execution}/` and matching integration packages so suites stay cohesive
+  instead of multi-thousand-line grab-bags;
 - made production readiness fail closed when the Compose interpreter is stopped or still serves an
   older semantic prompt than the deployed source, preventing stale routing images from passing a
   code-only rollout;

@@ -2,7 +2,7 @@ import asyncio
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from telegram import Update
@@ -338,12 +338,3 @@ def test_python_telegram_client_builds_result_decision_markup() -> None:
         ]
 
     asyncio.run(scenario())
-
-
-def test_python_telegram_client_construction() -> None:
-    """Additional coverage for telegram client (Step 08 overall cov)."""
-    from vuzol.telegram.adapter import PythonTelegramClient
-
-    mock_bot = MagicMock()
-    c = PythonTelegramClient(mock_bot)
-    assert c is not None

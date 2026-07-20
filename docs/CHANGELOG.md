@@ -4,6 +4,8 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- updated both production Grok subscription profiles to the current `grok-4.5` model id; the
+  retired `grok-build` id made pinned `/model` tasks fail before inference;
 - rebuilt and repinned the offline validation image for the R1 testing-policy inputs; the image
   contains all 71 locked packages and its build-time dependency audit found no known
   vulnerabilities;

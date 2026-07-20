@@ -124,7 +124,7 @@ destinations = [
 [[profiles]]
 id = "grok-subscription-a"
 provider = "grok"
-model = "grok-build"
+model = "grok-4.5"
 launch_mode = "cli"
 credential_required = false
 capabilities = ["repository_read", "code_edit", "git", "project_shell"]
@@ -149,7 +149,7 @@ destinations = [
 [[profiles]]
 id = "grok-subscription-b"
 provider = "grok"
-model = "grok-build"
+model = "grok-4.5"
 launch_mode = "cli"
 credential_required = false
 capabilities = ["repository_read", "code_edit", "git", "project_shell"]

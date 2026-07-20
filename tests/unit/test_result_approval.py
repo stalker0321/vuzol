@@ -106,7 +106,7 @@ async def test_result_approval_requires_validation_evidence(failure: str) -> Non
 
 
 @pytest.mark.anyio
-async def test_result_approval_prefers_review_summary_and_validate_gates() -> None:
+async def test_result_approval_prefers_executor_summary_and_validate_gates() -> None:
     base = "a" * 40
     result_commit = "b" * 40
     validate = _step(
@@ -120,6 +120,11 @@ async def test_result_approval_prefers_review_summary_and_validate_gates() -> No
             },
             "implementation_summary": "validate summary",
         },
+    )
+    execute = _step(
+        step_type="execute_code",
+        ordinal=4,
+        result={"text": "Added the requested README check."},
     )
     review = _step(
         step_type="review",
@@ -164,10 +169,10 @@ async def test_result_approval_prefers_review_summary_and_validate_gates() -> No
         session,
         run=run,
         approval_step=approval_step,
-        steps_by_ordinal={5: validate, 6: review},
+        steps_by_ordinal={4: execute, 5: validate, 6: review},
     )
     assert approval is not None
-    assert approval.human_summary == "validate summary"
+    assert approval.human_summary == "Added the requested README check."
     assert approval_step.payload["action_envelope"]["project_id"] == "bill-buddy"
     assert approval_step.payload["action_envelope"]["gates"][0]["name"] == "git-facts"
     assert approval_step.payload["action_envelope"]["validation_evidence_hash"]

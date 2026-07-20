@@ -61,6 +61,8 @@ class FixedSystemdReloader:
 
     _units = (
         "vuzol-executor.service",
+        "vuzol-worker.service",
+        "vuzol-applier.service",
         "vuzol-telegram.service",
         "vuzol-telegram-delivery.service",
     )

@@ -31,6 +31,7 @@ from vuzol.execution.finalization import (
 from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
+from vuzol.projects.executor_preference import apply_profile_overrides
 from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.grok import (
     GROK_DIAGNOSTIC_FILE_MAX_BYTES,
@@ -108,7 +109,10 @@ class ExecutionEnvelopeFactory:
             if worktree is None or step is None:
                 raise LookupError("sandbox worktree or step is missing")
             _validate_fenced_binding(invocation, worktree, step)
-            profile = self._registries.profiles.get(invocation.profile_id)
+            profile = apply_profile_overrides(
+                self._registries.profiles.get(invocation.profile_id),
+                dict(step.payload) if isinstance(step.payload, dict) else {},
+            )
             _require_provider_command(
                 invocation.argv,
                 profile.provider,

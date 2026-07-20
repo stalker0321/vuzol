@@ -34,6 +34,15 @@ quota, context, output, hard-budget, or concurrency policy. Eligible profiles ar
 5. active leases and queue depth;
 6. stable profile ID.
 
+Project-scoped `/model` preferences (see [Telegram](TELEGRAM.md)) may pin the coding/agent CLI
+executor for a project to a worker family. Auto mode leaves ordering unchanged. Pin mode applies
+only to `execute_code` / `execute_agent` (never API/research executor steps). It supplies the
+trusted profile, restricts eligibility and post-failure fallbacks to the same family (Codex stays
+on Codex; Grok may fall across Grok profiles only), and attaches claim-time model/reasoning-effort
+overrides even on same-family fallbacks. A stored pin that cannot resolve to an enabled profile
+blocks the step (`project_pin_unresolved`) instead of degrading to unrestricted auto routing.
+Routing decisions persist bounded pin inputs (worker, trusted profile, restrict set, revision).
+
 Every routed workflow call stores its decision, alternatives, bounded exclusion reasons, selected
 profile, and policy revision. Routing, hard-budget reservation, profile assignment, and fenced step
 claim commit atomically.

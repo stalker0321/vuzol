@@ -57,6 +57,18 @@ def is_update_command(text: str | None) -> bool:
     return command == "/update"
 
 
+def is_model_command(text: str | None) -> bool:
+    """True for bare ``/model`` (optional @bot suffix) with no extra arguments."""
+
+    if text is None:
+        return False
+    parts = text.strip().split()
+    if len(parts) != 1:
+        return False
+    command = parts[0].split("@", 1)[0]
+    return command == "/model"
+
+
 def is_status_dashboard_topic(kind: TopicKind | str) -> bool:
     value = kind.value if isinstance(kind, TopicKind) else kind
     return value == STATUS_DASHBOARD_TOPIC_KIND.value

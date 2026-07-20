@@ -39,6 +39,7 @@ from vuzol.storage.models import (
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import TaskStatus
 from vuzol.telegram.layout import HISTORY_TOPIC_KIND, STATUS_DASHBOARD_TOPIC_KIND
+from vuzol.telegram.model_command import PROJECT_MODEL_CONFIRM_ROLE, PROJECT_MODEL_PICKER_ROLE
 from vuzol.telegram.projections import (
     PROJECT_STATUS_DASHBOARD_ROLE,
     TASK_HISTORY_ROLE,
@@ -67,6 +68,7 @@ class DeliveryAction(StrEnum):
     SEND_CLARIFICATION = "send_clarification"
     SEND_PROJECT_WELCOME = "send_project_welcome"
     SEND_PROJECT_NAMES = "send_project_names"
+    SEND_MODEL_PICKER = "send_model_picker"
     DELETE_MESSAGE = "delete_message"
     NOOP = "noop"
 
@@ -126,6 +128,8 @@ async def prepare_delivery(
             thread_id=int(thread_id) if thread_id is not None else None,
             message_id=message_id,
         )
+    if item.payload.get("role") in {PROJECT_MODEL_PICKER_ROLE, PROJECT_MODEL_CONFIRM_ROLE}:
+        return _prepare_project_model_message(item)
     if item.payload.get("role") == PROJECT_STATUS_DASHBOARD_ROLE:
         return await _prepare_project_status_dashboard(
             session, item, topics=topics, projects=projects, profiles=profiles
@@ -501,6 +505,43 @@ async def _prepare_task_history_report(
     )
 
 
+def _prepare_project_model_message(item: TransactionalOutbox) -> PreparedDelivery:
+    """Deliver the project ``/model`` picker or confirmation card."""
+
+    try:
+        chat_id = int(item.payload["chat_id"])
+        thread_id = int(item.payload["message_thread_id"])
+        html = str(item.payload["html"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise PermanentDeliveryError("invalid_model_picker_payload") from error
+    if not html.strip():
+        raise PermanentDeliveryError("invalid_model_picker_payload")
+    raw_buttons = item.payload.get("callback_buttons") or ()
+    callback_buttons: list[tuple[tuple[str, str], ...]] = []
+    if not isinstance(raw_buttons, (list, tuple)):
+        raise PermanentDeliveryError("invalid_model_picker_payload")
+    for row in raw_buttons:
+        if not isinstance(row, (list, tuple)):
+            raise PermanentDeliveryError("invalid_model_picker_payload")
+        parsed_row: list[tuple[str, str]] = []
+        for button in row:
+            if not isinstance(button, (list, tuple)) or len(button) != 2:
+                raise PermanentDeliveryError("invalid_model_picker_payload")
+            label, data = button
+            if not isinstance(label, str) or not isinstance(data, str):
+                raise PermanentDeliveryError("invalid_model_picker_payload")
+            parsed_row.append((label, data))
+        callback_buttons.append(tuple(parsed_row))
+    return PreparedDelivery(
+        DeliveryAction.SEND_MODEL_PICKER,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        html=html,
+        message_role=str(item.payload.get("role") or PROJECT_MODEL_PICKER_ROLE),
+        callback_buttons=tuple(callback_buttons),
+    )
+
+
 async def _prepare_project_status_dashboard(
     session: AsyncSession,
     item: TransactionalOutbox,
@@ -659,6 +700,7 @@ class TelegramDeliveryService:
             DeliveryAction.SEND_CLARIFICATION,
             DeliveryAction.SEND_PROJECT_WELCOME,
             DeliveryAction.SEND_PROJECT_NAMES,
+            DeliveryAction.SEND_MODEL_PICKER,
         }:
             message_id = await self._client.send_message(
                 chat_id=prepared.chat_id,

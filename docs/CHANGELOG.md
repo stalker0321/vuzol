@@ -4,6 +4,9 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- rebuilt and repinned the offline validation image for the R1 testing-policy inputs; the image
+  contains all 71 locked packages and its build-time dependency audit found no known
+  vulnerabilities;
 - hardened scaffold→code detection: scaffold is the no-op `make test` recipe and/or the exact
   `# vuzol-scaffold-gate: true` line (not a raw substring); removing only the marker or adding
   `make lint` no longer unlocks product code; a real `make test` recipe is allowed even when a

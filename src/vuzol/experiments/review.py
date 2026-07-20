@@ -46,6 +46,7 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"except\s+(?:Exception|BaseException)[^:]*:\s*(?:#.*\n\s*)?pass\b"),
     ),
     ("arbitrary_skip", re.compile(r"pytest\.(?:skip|mark\.skip)|@pytest\.mark\.xfail")),
+    # Temporary platform safeguard until P0/P1 invariant automation replaces it.
     (
         "coverage_weakening",
         re.compile(r"(?:fail-under|cov-fail-under)[^\n]*[=-]\s*(?:[0-8]?\d)(?:\D|$)"),

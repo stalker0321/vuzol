@@ -109,6 +109,7 @@ Compose services do not mount the Docker socket or use privileged mode.
 
 - [Configuration](docs/CONFIGURATION.md)
 - [PostgreSQL storage](docs/STORAGE.md)
+- [Testing policy](docs/TESTING.md)
 
 ## Execution (worktrees + sandbox)
 
@@ -130,6 +131,7 @@ The executor process must not start until the user-managed rootless daemon is up
 - [Voice and semantic interpretation](docs/INTERPRETATION.md)
 - [Provider routing and budgets](docs/PROVIDERS.md)
 - [Architecture invariants](docs/ARCHITECTURE_INVARIANTS.md)
+- [Testing policy](docs/TESTING.md)
 - [Accepted architecture decisions](docs/decisions/)
 - [Changelog](docs/CHANGELOG.md)
 - [Contributing and documentation policy](CONTRIBUTING.md)

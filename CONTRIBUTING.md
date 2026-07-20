@@ -26,3 +26,12 @@ git diff --check
 ```
 
 Architecture changes require an accepted ADR or an explicit update to an existing ADR.
+
+## Testing
+
+Follow [docs/TESTING.md](docs/TESTING.md):
+
+- write behavioral tests for P0/P1 invariants, not coverage padding;
+- structure tests by responsibility (not line-count targets);
+- managed projects use a scaffold gate (empty/docs-only) and do not inherit the platform bar;
+- Vuzol currently keeps a temporary 90% coverage floor until P0/P1 automation replaces it.

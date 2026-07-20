@@ -40,6 +40,72 @@ def test_task_number_prefers_public_then_local() -> None:
     assert task_number_label(missing) == "—"  # type: ignore[arg-type]
 
 
+@pytest.mark.anyio
+async def test_dashboard_surfaces_project_default_executor_pin() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+
+    from vuzol.projects.executor_preference import (
+        ExecutorPreferenceMode,
+        ExecutorPreferenceView,
+        ExecutorWorkerKey,
+    )
+    from vuzol.storage.types import TaskStatus
+    from vuzol.telegram.projections import build_project_status_dashboard
+
+    task = SimpleNamespace(
+        id=uuid4(),
+        version=1,
+        status=TaskStatus.EXECUTING,
+        project_id="bill-buddy",
+        original_text="fix the form",
+        task_draft={"task_summary": "Fix the form"},
+        topic_task_number=1,
+        public_task_number=200001,
+        source_chat_id=-100,
+        source_thread_id=20,
+        created_at=None,
+    )
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [task]))
+    session.get = AsyncMock(return_value=None)
+
+    async def fake_active(_session: object, _task_id: object) -> None:
+        return None
+
+    async def fake_step_model(_session: object, _task_id: object) -> None:
+        return None
+
+    async def fake_pref(_session: object, project_id: str) -> ExecutorPreferenceView:
+        assert project_id == "bill-buddy"
+        return ExecutorPreferenceView(
+            project_id=project_id,
+            mode=ExecutorPreferenceMode.PIN,
+            worker_key=ExecutorWorkerKey.GROK,
+            reasoning_effort=None,
+            revision=2,
+        )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("vuzol.telegram.projections._active_executor_profile", fake_active)
+    monkeypatch.setattr("vuzol.telegram.projections._latest_step_model", fake_step_model)
+    monkeypatch.setattr("vuzol.telegram.projections.load_preference", fake_pref)
+    monkeypatch.setattr(
+        "vuzol.telegram.projections.load_subscription_limits",
+        AsyncMock(return_value=()),
+    )
+    try:
+        card = await build_project_status_dashboard(
+            session,
+            chat_id=-100,
+            project_names={"bill-buddy": "Bill Buddy"},
+        )
+    finally:
+        monkeypatch.undo()
+    assert "Grok (project default)" in card.html
+
+
 def test_model_label_is_english_and_friendly() -> None:
     from vuzol.telegram.projections import format_executor_model, model_label_for_profile
 

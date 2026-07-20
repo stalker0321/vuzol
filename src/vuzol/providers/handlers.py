@@ -25,6 +25,7 @@ from vuzol.execution.finalization import (
 from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import get_logger
+from vuzol.projects.executor_preference import apply_profile_overrides
 from vuzol.providers.budgets import account_usage, reconcile_usage, release_reservation
 from vuzol.providers.domain import (
     ContextItem,
@@ -93,7 +94,9 @@ class ProviderStepHandler:
                 reservation_id,
                 _configuration_revision,
             ) = await self._build_request(request)
-            profile = self._registries.profiles.get(profile_id)
+            profile = apply_profile_overrides(
+                self._registries.profiles.get(profile_id), request.payload
+            )
             adapter = self._adapters.get(profile_id)
         except PlannerHandoffFenced as error:
             return await self._pre_provider_failure(

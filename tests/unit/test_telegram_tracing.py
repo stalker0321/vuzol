@@ -138,9 +138,19 @@ def test_interpreter_trace_shows_raw_and_policy_adjusted_drafts() -> None:
     assert "Policy summary" in html
 
 
-def test_planner_trace_makes_empty_truncated_success_visible() -> None:
+def test_planner_trace_makes_empty_truncated_failure_visible() -> None:
     task = _task()
-    step = _plan_step()
+    step = _plan_step(status=StepStatus.QUEUED)
+    step.result = {
+        "model": "gpt-5-nano-2025-08-07",
+        "profile_id": "openai-planner-prod",
+        "text": "",
+        "finish_reason": "length",
+        "structured_output": None,
+        "handoff": {"status": "rejected", "reason": "planner_truncated"},
+    }
+    step.failure_category = "planner_truncated"
+    step.failure_summary = "planner output stopped at the token limit"
     usage = cast(
         UsageRecord,
         SimpleNamespace(
@@ -157,9 +167,25 @@ def test_planner_trace_makes_empty_truncated_success_visible() -> None:
     assert "Планировщик · #730010" in html
     assert "375 in / 1,000 out · лимит 1,000 out" in html
     assert "finish_reason=length" in html
-    assert "План пустой, хотя шаг отмечен как completed" in html
     assert "Пустой вывод" in html
-    assert "Handoff воркеру: <b>не подключён</b>" in html
+    assert "Handoff воркеру: <b>ожидает retry</b>" in html
+    assert "planner_truncated" in html
+
+
+def test_planner_trace_reports_ready_handoff_on_completed_plan() -> None:
+    task = _task()
+    step = _plan_step()
+    step.result = {
+        "model": "gpt-5-nano-2025-08-07",
+        "profile_id": "openai-planner-prod",
+        "text": "1. Inspect\n2. Edit\n3. Validate",
+        "finish_reason": "stop",
+        "handoff": {"status": "ready"},
+    }
+    html = build_planner_trace_html(task, step, usage=None, reservation=None)
+    assert "Handoff воркеру: <b>подключён</b>" in html
+    assert "ProviderRequest" in html
+    assert "1. Inspect" in html
 
 
 def test_planner_trace_bounds_structured_failure_output() -> None:
@@ -169,6 +195,7 @@ def test_planner_trace_bounds_structured_failure_output() -> None:
         "text": "x" * 2_500,
         "structured_output": {"steps": ["inspect", "edit", "verify"]},
         "finish_reason": "stop",
+        "handoff": {"status": "rejected", "reason": "planner_invalid"},
     }
     step.failure_category = "planner_invalid"
     step.failure_summary = "unsafe <shape>"
@@ -177,6 +204,7 @@ def test_planner_trace_bounds_structured_failure_output() -> None:
     assert "unsafe &lt;shape&gt;" in html
     assert "Structured output" in html
     assert "…</pre>" in html
+    assert "Handoff воркеру: <b>не выполнен</b>" in html
 
 
 def test_interpreter_trace_handles_unknown_metrics_without_policy_change() -> None:

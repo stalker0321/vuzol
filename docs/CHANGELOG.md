@@ -8,6 +8,9 @@ This file records completed implementation changes, not plans or speculative ide
   batches, advisory locking, crash-recoverable intent/external/finalize phases, protected-runtime
   rechecks, shared-content handling, and orphan quarantine; the checked-in apply service/timer are
   templates only and are not installed or enabled by this release;
+- rebuilt and repinned the offline validation image so its attested `pyproject.toml` includes the
+  new retention CLI entrypoint; the locked dependency set is unchanged and the image build audit
+  found no known vulnerabilities;
 - added a narrow approval-visible warning when a docs-only or explicitly named single-file request
   produces an unmentioned new executable, script, build, or CI path; warnings use measured Git
   additions, remain non-blocking, and are carried in hash-bound review evidence;

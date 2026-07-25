@@ -490,10 +490,14 @@ def test_resolve_script_location_explicit_and_walk(tmp_path: Path) -> None:
     assert walked == (tmp_path / "alembic").resolve()
 
 
-def test_resolve_script_location_missing_raises(tmp_path: Path) -> None:
+def test_resolve_script_location_missing_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     start = tmp_path / "orphan" / "file.py"
     start.parent.mkdir(parents=True)
     start.write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "is_dir", lambda _path: False)
     with pytest.raises(MigrationHeadError) as excinfo:
         resolve_alembic_script_location(start=start)
     assert excinfo.value.code == CODE_SCRIPTS_UNAVAILABLE

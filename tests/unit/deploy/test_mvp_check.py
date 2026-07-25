@@ -107,6 +107,37 @@ def test_mvp_check_inspects_protected_runtime_without_direct_traversal(
     ]
 
 
+def test_mvp_check_requires_connected_managed_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("mvp_check_mirror_connected", ROOT / "deploy/mvp/check.py")
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def git(repository: Path, *argv: str) -> str:
+        calls.append((repository, argv))
+        return ""
+
+    monkeypatch.setattr(module, "_git", git)
+    module._managed_mirror_is_connected()
+
+    assert calls == [
+        (module.MIRROR, ("fsck", "--connectivity-only", "--no-dangling")),
+    ]
+
+
+def test_mvp_check_rejects_incomplete_managed_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("mvp_check_mirror_incomplete", ROOT / "deploy/mvp/check.py")
+
+    def git(_repository: Path, *_argv: str) -> str:
+        raise module.MvpCheckError("command failed (git): missing tree deadbeef")
+
+    monkeypatch.setattr(module, "_git", git)
+    with pytest.raises(module.MvpCheckError, match="missing tree deadbeef"):
+        module._managed_mirror_is_connected()
+
+
 def test_mvp_check_accepts_current_interpreter_prompt_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

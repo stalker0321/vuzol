@@ -635,7 +635,7 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
         html = client.sent[0][2]
         assert client.sent[0][0] == chat_id
         assert client.sent[0][1] == dashboard_thread
-        assert "Project status" in html
+        assert "Статус проектов" in html
         assert "#100001" in html
         assert "Build a dashboard" in html
         assert "Codex" in html
@@ -682,7 +682,7 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
         assert len(client.sent) == 1
         assert len(client.edited) == 1
         assert client.edited[0][1] == 200
-        assert "No active tasks right now." in client.edited[0][2]
+        assert "Сейчас нет активных задач." in client.edited[0][2]
         async with factory() as session:
             links = (
                 await session.scalars(

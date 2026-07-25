@@ -2,6 +2,7 @@
 
 from vuzol.config import TopicConfig, TopicKind
 from vuzol.telegram.layout import (
+    DASHBOARD_CARD_TITLE,
     STATUS_DASHBOARD_TOPIC_KIND,
     SYSTEM_PINNED_TOPIC_ORDER,
     SYSTEM_TOPIC_DISPLAY_NAMES,
@@ -15,6 +16,10 @@ from vuzol.telegram.layout import (
     system_pin_rank,
     topic_wants_pin,
 )
+
+
+def test_dashboard_title_is_canonical_russian_label() -> None:
+    assert DASHBOARD_CARD_TITLE == "Статус проектов"
 
 
 def test_system_pin_order_is_history_status_approvals_inbox() -> None:

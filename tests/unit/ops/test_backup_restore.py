@@ -7,6 +7,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
+import vuzol.ops.backup.restore as restore_module
 from vuzol.ops.backup.manifest import (
     SCHEMA_VERSION,
     ArtifactReconciliation,
@@ -385,6 +388,26 @@ def test_preflight_nonpositive_hash_read_size(tmp_path: Path) -> None:
         assert "hash read size" in report.message
 
 
+@pytest.mark.parametrize("bad", [1.5, "64", True])
+def test_preflight_rejects_noninteger_hash_read_size(
+    tmp_path: Path,
+    bad: object,
+) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+        hash_read_size=bad,  # type: ignore[arg-type]
+    )
+    assert report.code == CODE_PACKAGE
+    assert report.message == "invalid hash read size"
+
+
 def test_preflight_refuses_escaping_runs_symlink(tmp_path: Path) -> None:
     """C3: runs/{id} symlink resolving outside staging → path conflict, no leak."""
 
@@ -571,3 +594,264 @@ def test_preflight_manifest_invalid_utf8_taxonomy(tmp_path: Path) -> None:
     assert "UTF-8" in report.message or "validation" in report.message
     assert "\xff" not in report.message
     assert str(manifest_path) not in report.message
+
+
+def test_preflight_refuses_missing_and_non_directory_publish(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+
+    missing_id = uuid.uuid4()
+    missing_run = _write_published_package(staging, missing_id)
+    publish = missing_run / "publish"
+    for child in publish.iterdir():
+        child.unlink()
+    publish.rmdir()
+    missing = preflight_published_package(
+        staging_root=staging,
+        run_id=missing_id,
+        production=production,
+    )
+    assert missing.code == CODE_PACKAGE
+    assert "publish directory" in missing.message
+
+    file_id = uuid.uuid4()
+    file_run = _write_published_package(staging, file_id)
+    publish = file_run / "publish"
+    for child in publish.iterdir():
+        child.unlink()
+    publish.rmdir()
+    publish.write_bytes(b"not-a-directory")
+    non_directory = preflight_published_package(
+        staging_root=staging,
+        run_id=file_id,
+        production=production,
+    )
+    assert non_directory.code == CODE_PACKAGE
+    assert "publish directory" in non_directory.message
+
+
+def test_preflight_refuses_nonregular_required_file(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    run_dir = _write_published_package(staging, run_id)
+    wrap = run_dir / "publish" / "dek.wrap"
+    wrap.unlink()
+    wrap.mkdir()
+
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+    )
+    assert report.code == CODE_PACKAGE
+    assert "regular file" in report.message
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"{", "UTF-8 JSON"),
+        (b"[]", "validation"),
+        (b"{}", "validation"),
+    ],
+)
+def test_preflight_rejects_invalid_manifest_shapes(
+    tmp_path: Path,
+    payload: bytes,
+    message: str,
+) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    run_dir = _write_published_package(staging, run_id)
+    (run_dir / "publish" / "manifest.v1.json").write_bytes(payload)
+
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+    )
+    assert report.code == CODE_MANIFEST_INVALID
+    assert message in report.message
+
+
+@pytest.mark.parametrize(
+    ("filename", "cipher"),
+    [
+        ("wrong.dump.enc", "aes-256-gcm"),
+        ("postgres.dump.enc", "unsupported"),
+    ],
+)
+def test_preflight_rejects_component_filename_and_cipher(
+    tmp_path: Path,
+    filename: str,
+    cipher: str,
+) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    run_dir, tmp, publish = ensure_staging_tree(staging, run_id)
+    ciphertext = b"ciphertext"
+    manifest = _partial_manifest(
+        run_id,
+        ciphertext=ciphertext,
+        filename=filename,
+        cipher=cipher,
+    )
+    digest = store_manifest(tmp / "manifest.v1.json", manifest)
+    (tmp / "manifest.sha256").write_text(digest + "\n", encoding="utf-8")
+    (tmp / "postgres.dump.enc").write_bytes(ciphertext)
+    (tmp / "dek.wrap").write_bytes(b"x" * 86)
+    for name in ("manifest.v1.json", "manifest.sha256", "postgres.dump.enc", "dek.wrap"):
+        (tmp / name).replace(publish / name)
+    write_state(run_dir, STATE_PUBLISHED)
+
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+    )
+    assert report.code == CODE_COMPONENT
+
+
+def test_preflight_detects_same_size_blob_hash_mismatch(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(
+        staging,
+        run_id,
+        ciphertext=b"expected",
+        wrong_blob_bytes=b"tampered",
+    )
+
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+    )
+    assert report.code == CODE_BLOB
+    assert "hash mismatch" in report.message
+
+
+def test_preflight_maps_ciphertext_read_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+
+    def fail_hash(path: Path, *, read_size: int) -> tuple[str, int]:
+        del path, read_size
+        raise OSError("sensitive filesystem detail")
+
+    monkeypatch.setattr(restore_module, "_stream_sha256", fail_hash)
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+    )
+    assert report.code == CODE_BLOB
+    assert report.message == "ciphertext unreadable"
+
+
+def test_sidecar_helper_refuses_missing_symlink_and_nonregular(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest"
+    manifest.write_bytes(b"{}")
+    missing = tmp_path / "missing"
+    with pytest.raises(restore_module.BackupRestorePreflightError) as missing_error:
+        restore_module._check_manifest_sidecar_hash(manifest, missing)
+    assert missing_error.value.code == CODE_PACKAGE
+
+    target = tmp_path / "target"
+    target.write_text("0" * 64, encoding="utf-8")
+    symlink = tmp_path / "symlink"
+    symlink.symlink_to(target)
+    with pytest.raises(restore_module.BackupRestorePreflightError) as symlink_error:
+        restore_module._check_manifest_sidecar_hash(manifest, symlink)
+    assert symlink_error.value.code == CODE_PACKAGE
+
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    with pytest.raises(restore_module.BackupRestorePreflightError) as directory_error:
+        restore_module._check_manifest_sidecar_hash(manifest, directory)
+    assert directory_error.value.code == CODE_PACKAGE
+
+
+def test_manifest_helper_refuses_missing_symlink_and_nonregular(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    with pytest.raises(restore_module.BackupRestorePreflightError) as missing_error:
+        restore_module._load_manifest_bounded(missing)
+    assert missing_error.value.code == CODE_PACKAGE
+
+    target = tmp_path / "target"
+    target.write_text("{}", encoding="utf-8")
+    symlink = tmp_path / "symlink"
+    symlink.symlink_to(target)
+    with pytest.raises(restore_module.BackupRestorePreflightError) as symlink_error:
+        restore_module._load_manifest_bounded(symlink)
+    assert symlink_error.value.code == CODE_PACKAGE
+
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    with pytest.raises(restore_module.BackupRestorePreflightError) as directory_error:
+        restore_module._load_manifest_bounded(directory)
+    assert directory_error.value.code == CODE_PACKAGE
+
+
+def test_sidecar_helper_rejects_nonhex_digest(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest"
+    manifest.write_bytes(b"{}")
+    sidecar = tmp_path / "sidecar"
+    sidecar.write_text("z" * 64, encoding="utf-8")
+
+    with pytest.raises(restore_module.BackupRestorePreflightError) as error:
+        restore_module._check_manifest_sidecar_hash(manifest, sidecar)
+    assert error.value.code == CODE_MANIFEST_HASH
+
+
+def test_bounded_reader_rejects_invalid_and_exceeded_bounds(tmp_path: Path) -> None:
+    path = tmp_path / "input"
+    path.write_bytes(b"ab")
+
+    with pytest.raises(restore_module.BackupRestorePreflightError) as invalid:
+        restore_module._read_file_bounded(path, max_bytes=-1, read_size=1)
+    assert invalid.value.code == CODE_PACKAGE
+
+    with pytest.raises(restore_module.BackupRestorePreflightError) as exceeded:
+        restore_module._read_file_bounded(path, max_bytes=1, read_size=1)
+    assert exceeded.value.code == CODE_PACKAGE
+    assert "exceeds" in str(exceeded.value)
+
+
+def test_internal_io_errors_are_mapped_to_bounded_taxonomy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = tmp_path / "run"
+    state_dir.mkdir()
+    (state_dir / "STATE").write_text(STATE_PUBLISHED, encoding="utf-8")
+
+    def fail_read(path: Path, *, max_bytes: int, read_size: int) -> bytes:
+        del path, max_bytes, read_size
+        raise OSError("sensitive filesystem detail")
+
+    monkeypatch.setattr(restore_module, "_read_file_bounded", fail_read)
+    with pytest.raises(restore_module.BackupRestorePreflightError) as state_error:
+        restore_module._read_state_bound(state_dir)
+    assert str(state_error.value) == "STATE unreadable"
+
+    manifest = tmp_path / "manifest"
+    manifest.write_bytes(b"{}")
+    with pytest.raises(restore_module.BackupRestorePreflightError) as manifest_error:
+        restore_module._load_manifest_bounded(manifest)
+    assert str(manifest_error.value) == "manifest unreadable"
+
+    sidecar = tmp_path / "sidecar"
+    sidecar.write_text("0" * 64, encoding="utf-8")
+    with pytest.raises(restore_module.BackupRestorePreflightError) as sidecar_error:
+        restore_module._check_manifest_sidecar_hash(manifest, sidecar)
+    assert str(sidecar_error.value) == "manifest hash sidecar unreadable"

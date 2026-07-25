@@ -109,7 +109,12 @@ def preflight_published_package(
     evidence, or delete files. Failures never include absolute paths.
     """
 
-    if hash_read_size < 1 or hash_read_size > MAX_HASH_READ_SIZE:
+    if (
+        isinstance(hash_read_size, bool)
+        or not isinstance(hash_read_size, int)
+        or hash_read_size < 1
+        or hash_read_size > MAX_HASH_READ_SIZE
+    ):
         return _fail(CODE_PACKAGE, "invalid hash read size")
 
     try:

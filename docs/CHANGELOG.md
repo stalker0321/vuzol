@@ -4,6 +4,9 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- rebuilt and repinned the offline validation image for the B2 cryptography lockfile; its
+  build-time audit found no known vulnerabilities across 74 locked packages;
+- added backup B2 manual local encrypted PostgreSQL capture (partial manifests, chunked AES-GCM, capture_cli_permitted default false, no timer/sink/restore);
 - corrected backup foundation isolation guards (F1–F5): resolve missing-leaf paths through real parents, default PostgreSQL port identity, explicit drill DB naming, broader secret-value scan (postgres://, Bearer/JWT), token-boundary field names; also partial manifests, UTC-aware timestamps, socket/driver DSN variants, and strict canonical JSON;
 - added Step 10 backup foundation (B1): typed `backup-manifest.v1` models, pure
   load/store/hash helpers, fail-closed restore path and isolated-DSN guards, and

@@ -1,8 +1,15 @@
-"""Backup foundation: typed manifests, pure validation, and restore path/DSN guards.
+"""Backup foundation (B1) plus partial local encrypted PG capture (B2)."""
 
-Slice B1 only — no crypto, capture, sink, dump, restore runtime, CLI, or systemd.
-"""
-
+from vuzol.ops.backup.capture import BackupCaptureRunner, CaptureMode, CaptureReport
+from vuzol.ops.backup.crypto import (
+    CHUNK_PLAINTEXT_MAX,
+    BackupCryptoError,
+    decrypt_blob_stream,
+    encrypt_blob_stream,
+    generate_dek,
+    unwrap_dek,
+    wrap_dek,
+)
 from vuzol.ops.backup.manifest import (
     SCHEMA_VERSION,
     ArtifactReconciliation,
@@ -34,13 +41,17 @@ from vuzol.ops.backup.paths import (
     resolve_isolation_path,
 )
 from vuzol.ops.backup.settings import BackupSettings
+from vuzol.ops.backup.staging import assert_safe_staging_root
 
 __all__ = [
+    "CHUNK_PLAINTEXT_MAX",
     "SCHEMA_VERSION",
     "ArtifactReconciliation",
     "BackupAppIdentity",
+    "BackupCaptureRunner",
     "BackupComponent",
     "BackupConfigSnapshot",
+    "BackupCryptoError",
     "BackupManifest",
     "BackupManifestError",
     "BackupPathError",
@@ -49,18 +60,26 @@ __all__ = [
     "BackupRpoRto",
     "BackupSchemaIdentity",
     "BackupSettings",
+    "CaptureMode",
+    "CaptureReport",
     "ConfigFileHash",
     "MissingBlobRecord",
     "OrphanFileRecord",
     "ProductionRoots",
     "assert_isolated_restore_dsn",
     "assert_safe_restore_paths",
+    "assert_safe_staging_root",
     "canonical_manifest_json",
     "database_name_is_isolated",
+    "decrypt_blob_stream",
+    "encrypt_blob_stream",
+    "generate_dek",
     "load_manifest",
     "manifest_sha256",
     "normalize_dsn_identity",
     "resolve_isolation_path",
     "store_manifest",
+    "unwrap_dek",
     "validate_manifest",
+    "wrap_dek",
 ]

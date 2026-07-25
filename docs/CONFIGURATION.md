@@ -79,16 +79,22 @@ or blocked worktree retention cannot be shorter than completed-worktree retentio
 not installed or enabled production units; enabling scheduled apply requires a separate operator
 decision after an isolated dry-run/apply drill.
 
-## Backup foundation
+## Backup capture foundation
 
-`VUZOL_BACKUP__ENABLED` is fail-closed and cannot be set to true while only the B1 foundation is
-present. B1 provides typed manifests plus path and isolated-DSN guards; it does not capture,
-encrypt, publish, restore, schedule, or contact an off-host destination.
+`VUZOL_BACKUP__ENABLED` remains fail-closed and cannot be set to true. Manual capture has a separate
+gate, `VUZOL_BACKUP__CAPTURE_CLI_PERMITTED`, which defaults to false. `vuzol-backup capture`
+defaults to dry-run and requires both that configuration gate and `--apply` before it can write a
+local package.
 
 Optional staging and drill roots must be absolute. Retention counts and RPO/RTO targets are bounded,
-and drill database names require the configured suffix (default `_restore`). Later capture and
-restore slices must re-run the guards against live production roots; configuration alone never
-authorizes a backup operation.
+and drill database names require the configured suffix (default `_restore`). Capture re-runs the
+production-root isolation guards, streams a PostgreSQL custom dump directly into chunked
+AES-256-GCM ciphertext, and publishes an explicitly partial manifest. A KEK reference uses only
+`env:` or a file beneath the configured secret root.
+
+This B2 slice is manual and local only: it installs no timer, contacts no off-host destination, and
+provides no restore operation. A local encrypted package is therefore not evidence of durable
+backup or recoverability.
 
 ## Workflow runtime
 

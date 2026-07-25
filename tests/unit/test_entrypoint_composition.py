@@ -158,6 +158,10 @@ async def test_project_provisioner_fails_closed_before_loop_when_migration_head_
         order.append("bot")
         raise AssertionError("Bot must not start after migration head failure")
 
+    def boom_factory(*_args: object, **_kwargs: object) -> object:
+        order.append("create_session_factory")
+        raise AssertionError("session factory must not run after migration head failure")
+
     async def never_loop(*_args: object, **_kwargs: object) -> None:
         order.append("run_provisioning_loop")
         raise AssertionError("provision loop must not start after migration head failure")
@@ -171,6 +175,7 @@ async def test_project_provisioner_fails_closed_before_loop_when_migration_head_
     monkeypatch.setattr(provisioner_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(provisioner_cli, "create_engine", lambda *_args: Engine())
     monkeypatch.setattr(provisioner_cli, "require_migration_head", refuse)
+    monkeypatch.setattr(provisioner_cli, "create_session_factory", boom_factory)
     monkeypatch.setattr(provisioner_cli, "Bot", boom_bot)
     monkeypatch.setattr(provisioner_cli, "run_provisioning_loop", never_loop)
     monkeypatch.setattr(provisioner_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))

@@ -797,14 +797,14 @@ async def test_capture_connection_failure_is_reported_and_disposed(tmp_path: Pat
     with patch("vuzol.ops.backup.capture.create_async_engine", return_value=engine):
         report = await BackupCaptureRunner(
             settings,
-            dsn="postgresql://vuzol:secret@127.0.0.1/vuzol",
+            dsn="postgresql://vuzol@127.0.0.1/vuzol",
             kek_bytes=bytes(range(32)),
         ).run(CaptureMode.APPLY)
 
     assert report.ok is False
     assert report.code == "capture_failed"
     assert report.message == "RuntimeError"
-    assert "secret" not in str(report.to_operational_payload())
+    assert "database details" not in str(report.to_operational_payload())
     assert engine.disposed is True
 
 
@@ -818,14 +818,14 @@ async def test_capture_engine_factory_failure_is_reported(tmp_path: Path) -> Non
     ):
         report = await BackupCaptureRunner(
             settings,
-            dsn="postgresql://vuzol:secret@127.0.0.1/vuzol",
+            dsn="postgresql://vuzol@127.0.0.1/vuzol",
             kek_bytes=bytes(range(32)),
         ).run(CaptureMode.APPLY)
 
     assert report.ok is False
     assert report.code == "capture_failed"
     assert report.message == "RuntimeError"
-    assert "secret" not in str(report.to_operational_payload())
+    assert "database details" not in str(report.to_operational_payload())
 
 
 @pytest.mark.anyio

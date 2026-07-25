@@ -306,13 +306,13 @@ def _control_markup(
     if not actions:
         return None
     labels = {
-        "start": "Start",
-        "pause": "Pause",
-        "resume": "Resume",
-        "cancel": "Cancel",
-        "approve": "Approve",
-        "redo": "Redo",
-        "reject": "Reject",
+        "start": "Старт",
+        "pause": "Пауза",
+        "resume": "Продолжить",
+        "cancel": "Отмена",
+        "approve": "Принять",
+        "redo": "Переделать",
+        "reject": "Отклонить",
     }
     approval_actions = {"approve", "redo", "reject"}
     targets = {action: approval_id if action in approval_actions else task_id for action in actions}

@@ -438,3 +438,255 @@ def test_wrap_invariant_guards(tmp_path: Path) -> None:
         instance.encrypt.return_value = b"too-short"
         with pytest.raises(BackupCryptoError, match="unexpected wrap"):
             wrap_dek(kek=_KEK, dek=_DEK, run_id=_RUN, out_path=path)
+
+
+class _BoundedReadWrapper:
+    """File-like wrapper that refuses unbounded ``read()`` / ``read(-1)`` / ``read(0)``."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.max_request = 0
+        self.calls = 0
+
+    def read(self, size: int = -1, /) -> bytes:
+        self.calls += 1
+        if size is None or size <= 0:
+            raise AssertionError(f"unbounded read refused: size={size!r}")
+        if size > self.max_request:
+            self.max_request = size
+        return self._inner.read(size)  # type: ignore[no-any-return]
+
+
+def test_decrypt_uses_only_bounded_reads(tmp_path: Path) -> None:
+    """Streaming decrypt must never call handle.read() without a positive size."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    from vuzol.ops.backup import crypto as crypto_mod
+
+    out = tmp_path / "blob.enc"
+    payload = b"bounded-read-proof"
+    encrypt_blob_stream(
+        dek=_DEK,
+        run_id=_RUN,
+        component="postgres",
+        fmt="pg_custom",
+        plaintext_iter=[payload],
+        out_path=out,
+    )
+    with out.open("rb") as raw:
+        wrapper = _BoundedReadWrapper(raw)
+        plain = b"".join(
+            crypto_mod._decrypt_blob_stream_from_handle(
+                wrapper,
+                aead=AESGCM(_DEK),
+                run_id=_RUN,
+                component="postgres",
+                fmt="pg_custom",
+            )
+        )
+    assert plain == payload
+    assert wrapper.calls > 0
+    assert wrapper.max_request > 0
+    assert wrapper.max_request <= crypto_mod._STREAM_READ_MAX
+
+
+def test_decrypt_multi_chunk_yields_per_chunk(tmp_path: Path) -> None:
+    """Multi-chunk ciphertext yields one plaintext piece per framed chunk."""
+    out = tmp_path / "blob.enc"
+    payload = b"A" * CHUNK_PLAINTEXT_MAX + b"BCD"
+    encrypt_blob_stream(
+        dek=_DEK,
+        run_id=_RUN,
+        component="postgres",
+        fmt="pg_custom",
+        plaintext_iter=[payload],
+        out_path=out,
+    )
+    pieces = list(
+        decrypt_blob_stream(
+            dek=_DEK, blob_path=out, run_id=_RUN, component="postgres", fmt="pg_custom"
+        )
+    )
+    assert len(pieces) == 2
+    assert pieces[0] == b"A" * CHUNK_PLAINTEXT_MAX
+    assert pieces[1] == b"BCD"
+    assert b"".join(pieces) == payload
+
+
+def test_decrypt_exact_max_has_empty_final_chunk(tmp_path: Path) -> None:
+    """Plaintext of exactly CHUNK_PLAINTEXT_MAX ends with an empty final chunk (E2)."""
+    out = tmp_path / "blob.enc"
+    payload = b"Z" * CHUNK_PLAINTEXT_MAX
+    encrypt_blob_stream(
+        dek=_DEK,
+        run_id=_RUN,
+        component="postgres",
+        fmt="pg_custom",
+        plaintext_iter=[payload],
+        out_path=out,
+    )
+    pieces = list(
+        decrypt_blob_stream(
+            dek=_DEK, blob_path=out, run_id=_RUN, component="postgres", fmt="pg_custom"
+        )
+    )
+    assert len(pieces) == 2
+    assert pieces[0] == payload
+    assert pieces[1] == b""
+
+
+def test_decrypt_truncated_chunk_header(tmp_path: Path) -> None:
+    out = tmp_path / "blob.enc"
+    encrypt_blob_stream(
+        dek=_DEK,
+        run_id=_RUN,
+        component="postgres",
+        fmt="pg_custom",
+        plaintext_iter=[b"data"],
+        out_path=out,
+    )
+    raw = out.read_bytes()
+    # Keep full header, append only 2 of the 4-byte chunk length prefix.
+    offset = 8 + 2 + 16
+    c_len = raw[offset]
+    offset += 1 + c_len
+    f_len = raw[offset]
+    offset += 1 + f_len + 4 + 8
+    out.write_bytes(raw[:offset] + raw[offset : offset + 2])
+    with pytest.raises(BackupCryptoError, match="truncated chunk header"):
+        list(
+            decrypt_blob_stream(
+                dek=_DEK, blob_path=out, run_id=_RUN, component="postgres", fmt="pg_custom"
+            )
+        )
+
+
+def test_decrypt_no_chunks_after_header(tmp_path: Path) -> None:
+    out = tmp_path / "blob.enc"
+    encrypt_blob_stream(
+        dek=_DEK,
+        run_id=_RUN,
+        component="postgres",
+        fmt="pg_custom",
+        plaintext_iter=[b"x"],
+        out_path=out,
+    )
+    raw = out.read_bytes()
+    offset = 8 + 2 + 16
+    c_len = raw[offset]
+    offset += 1 + c_len
+    f_len = raw[offset]
+    offset += 1 + f_len + 4 + 8
+    out.write_bytes(raw[:offset])
+    with pytest.raises(BackupCryptoError, match="no chunks"):
+        list(
+            decrypt_blob_stream(
+                dek=_DEK, blob_path=out, run_id=_RUN, component="postgres", fmt="pg_custom"
+            )
+        )
+
+
+def test_decrypt_invalid_utf8_component_name(tmp_path: Path) -> None:
+    """Invalid UTF-8 in component name → BackupCryptoError, no raw-byte leak."""
+    from vuzol.ops.backup import crypto as crypto_mod
+
+    out = tmp_path / "blob.enc"
+    bad_comp = b"\xff\xfe"
+    fmt = b"pg_custom"
+    header = (
+        crypto_mod.BLOB_MAGIC
+        + bytes([crypto_mod.BLOB_HEADER_VERSION, 0x00])
+        + _RUN.bytes
+        + bytes([len(bad_comp)])
+        + bad_comp
+        + bytes([len(fmt)])
+        + fmt
+        + struct.pack(">I", CHUNK_PLAINTEXT_MAX)
+        + struct.pack(">Q", 0)
+    )
+    out.write_bytes(header)
+    with pytest.raises(BackupCryptoError, match="header encoding invalid") as raised:
+        list(
+            decrypt_blob_stream(
+                dek=_DEK,
+                blob_path=out,
+                run_id=_RUN,
+                component="postgres",
+                fmt="pg_custom",
+            )
+        )
+    message = str(raised.value)
+    assert "\xff" not in message
+    assert "\\xff" not in message
+    assert bad_comp.decode("latin-1") not in message
+
+
+def test_decrypt_invalid_utf8_format_name(tmp_path: Path) -> None:
+    """Invalid UTF-8 in format name maps to the same stable encoding error."""
+    from vuzol.ops.backup import crypto as crypto_mod
+
+    out = tmp_path / "blob.enc"
+    comp = b"postgres"
+    bad_fmt = b"pg_\xff"
+    header = (
+        crypto_mod.BLOB_MAGIC
+        + bytes([crypto_mod.BLOB_HEADER_VERSION, 0x00])
+        + _RUN.bytes
+        + bytes([len(comp)])
+        + comp
+        + bytes([len(bad_fmt)])
+        + bad_fmt
+        + struct.pack(">I", CHUNK_PLAINTEXT_MAX)
+        + struct.pack(">Q", 0)
+    )
+    out.write_bytes(header)
+    with pytest.raises(BackupCryptoError, match="header encoding invalid") as raised:
+        list(
+            decrypt_blob_stream(
+                dek=_DEK,
+                blob_path=out,
+                run_id=_RUN,
+                component="postgres",
+                fmt="pg_custom",
+            )
+        )
+    assert "\xff" not in str(raised.value)
+
+
+def test_decrypt_max_chunks_boundary_synthetic(tmp_path: Path) -> None:
+    """Decrypt raises chunk limit after MAX_CHUNKS full-size chunks (synthetic ceilings).
+
+    Monkeypatches small CHUNK_PLAINTEXT_MAX and MAX_CHUNKS so the test never
+    allocates or iterates millions of real-size chunks.
+    """
+    from vuzol.ops.backup import crypto as crypto_mod
+
+    out = tmp_path / "blob.enc"
+    small_max = 32
+    # Encrypt under a small full-chunk size so two full chunks are tiny.
+    with patch.object(crypto_mod, "CHUNK_PLAINTEXT_MAX", small_max):
+        payload = b"A" * (small_max * 2) + b"z"
+        encrypt_blob_stream(
+            dek=_DEK,
+            run_id=_RUN,
+            component="postgres",
+            fmt="pg_custom",
+            plaintext_iter=[payload],
+            out_path=out,
+        )
+    # Decrypt with same frame size but a ceiling of two full chunks: after the
+    # second full chunk, decrypt must refuse before consuming the short final.
+    with (
+        patch.object(crypto_mod, "CHUNK_PLAINTEXT_MAX", small_max),
+        patch.object(crypto_mod, "MAX_CHUNKS", 2),
+        pytest.raises(BackupCryptoError, match="chunk limit exceeded"),
+    ):
+        list(
+            decrypt_blob_stream(
+                dek=_DEK,
+                blob_path=out,
+                run_id=_RUN,
+                component="postgres",
+                fmt="pg_custom",
+            )
+        )

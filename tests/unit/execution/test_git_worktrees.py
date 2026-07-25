@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from vuzol.config.settings import Settings
+
 from ._execution_helpers import (
     Any,
     AsyncMock,
@@ -291,7 +293,20 @@ async def test_prepare_worktree_handler_cancel_and_missing(tmp_path: Path) -> No
     mock_factory = MagicMock()
     mock_reg = MagicMock()
     mock_wts = AsyncMock()
-    h = PrepareWorktreeHandler(mock_factory, mock_reg, mock_wts, owner="exec")
+    settings = Settings(
+        environment="test",
+        repository_root=tmp_path / "repositories",
+        worktree_root=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts",
+        secret_file_root=tmp_path / "secrets",
+    )
+    h = PrepareWorktreeHandler(
+        mock_factory,
+        mock_reg,
+        mock_wts,
+        owner="exec",
+        settings=settings,
+    )
 
     cancel = CancellationContext()
     cancel.request()

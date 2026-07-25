@@ -107,3 +107,10 @@ Control, light, heavy, and privileged concurrency use `VUZOL_CONCURRENCY__*`. St
 both the queue-class limit and any assigned provider-profile concurrency limit transactionally.
 `VUZOL_INTERPRETATION__AUTOMATIC_EXECUTION_ENABLED=false` materializes interpreted workflows but
 leaves them waiting for an authenticated `start` control.
+
+Optional disk low-watermark for **new heavy** work uses `VUZOL_DISK_PRESSURE__MIN_FREE_BYTES`
+(default `0` = disabled). When positive, free space is measured with `statvfs` on
+`VUZOL_DISK_PRESSURE__PATHS` if set, otherwise on `worktree_root` and `artifact_root`. HEAVY
+claims are deferred without leasing; control/light work, recovery, and retention are not gated.
+Probe failures fail closed for new heavy work only. Residual race after claim is re-checked before
+worktree preparation and requeued as retryable `disk_pressure` (attempt refunded).

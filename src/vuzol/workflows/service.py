@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.ops.disk_pressure import DISK_PRESSURE_CATEGORY
 from vuzol.storage.errors import EntityNotFound, LeaseLost
 from vuzol.storage.models import (
     Event,
@@ -199,11 +200,17 @@ async def commit_step_outcome(
     if outcome.kind is OutcomeKind.SUCCEEDED:
         await transition_step(session, step, StepStatus.COMPLETED, actor_type="worker")
         step.result = outcome.result
-    elif outcome.kind is OutcomeKind.TRANSIENT_FAILURE and _can_retry(step):
+    elif outcome.kind is OutcomeKind.TRANSIENT_FAILURE and (
+        outcome.category == DISK_PRESSURE_CATEGORY or _can_retry(step)
+    ):
+        # disk_pressure is host backpressure: always requeue (even NEVER/ISOLATED_RETRYABLE
+        # heavy steps such as prepare_worktree) and refund the claim attempt burn.
         await transition_step(session, step, StepStatus.QUEUED, actor_type="worker")
         step.available_at = func.now() + timedelta(seconds=retry_delay_seconds)
         step.failure_category = outcome.category
         step.failure_summary = outcome.summary
+        if outcome.category == DISK_PRESSURE_CATEGORY and step.attempt_count > 0:
+            step.attempt_count -= 1
         if step.step_type == "plan" and outcome.result:
             # Retry diagnostics only for plan outcomes (handoff rejection payload).
             step.result = outcome.result

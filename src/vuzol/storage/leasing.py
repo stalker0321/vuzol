@@ -6,6 +6,12 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.config.settings import Settings
+from vuzol.ops.disk_pressure import (
+    FreeSpaceProbe,
+    assess_heavy_claim_gate,
+    report_claim_disk_pressure_deferred,
+)
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import Run, Step, TransactionalOutbox
 from vuzol.storage.records import LeaseToken, OutboxLeaseToken, StepRecord
@@ -26,7 +32,17 @@ async def claim_step(
     profile_limits: dict[str, int] | None = None,
     step_types: frozenset[str] | None = None,
     candidate_limit: int = 20,
+    settings: Settings | None = None,
+    free_space_probe: FreeSpaceProbe | None = None,
 ) -> LeaseToken | None:
+    """Claim a QUEUED step with fencing.
+
+    For HEAVY steps, pass ``settings`` so the disk-pressure gate can run.
+    Omitting ``settings`` fails closed for HEAVY (skips without leasing). When
+    ``settings`` is provided, ``disk_pressure.min_free_bytes=0`` disables the
+    free-space check (default-off compatibility).
+    """
+
     if not queue_classes or candidate_limit < 1:
         return None
     await session.execute(select(func.pg_advisory_xact_lock(STEP_CLAIM_LOCK_KEY)))
@@ -50,7 +66,17 @@ async def claim_step(
             return None
         statement = statement.where(Step.step_type.in_(sorted(step_types)))
     candidates = tuple((await session.scalars(statement)).all())
+    heavy_disk_blocked: bool | None = None
     for step in candidates:
+        if step.queue_class is QueueClass.HEAVY:
+            if heavy_disk_blocked is None:
+                assessment = assess_heavy_claim_gate(settings, probe=free_space_probe)
+                heavy_disk_blocked = assessment.blocked
+                if heavy_disk_blocked:
+                    report_claim_disk_pressure_deferred(assessment)
+            if heavy_disk_blocked:
+                # Skip without leasing: no attempt_count / lease burn.
+                continue
         if class_limits is not None:
             class_limit = class_limits.get(step.queue_class)
             if class_limit is not None:

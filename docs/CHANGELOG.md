@@ -7,6 +7,17 @@ This file records completed implementation changes, not plans or speculative ide
 - rebuilt and repinned the offline validation image for the B2 cryptography lockfile; its
   build-time audit found no known vulnerabilities across 74 locked packages;
 - added backup B2 manual local encrypted PostgreSQL capture (partial manifests, chunked AES-GCM, capture_cli_permitted default false, no timer/sink/restore);
+- corrected S10-3a disk-pressure review findings: PostgreSQL coverage for
+  `claim_routed_step` (no lease/attempt/budget under low disk; claim resumes after
+  free space returns), rate-limited claim-time `ops.disk_pressure.deferred` logs
+  without path leakage, and fail-closed HEAVY claims when `settings` is omitted
+  (explicit `min_free_bytes=0` remains the off switch);
+- added S10-3a disk low-watermark gate for **new heavy** work: optional
+  `VUZOL_DISK_PRESSURE__MIN_FREE_BYTES` (default `0` = disabled) measured via
+  injectable `statvfs` on configured paths or worktree/artifact roots; HEAVY
+  claims are skipped without attempt/budget burn; worktree prepare re-checks and
+  requeues with `disk_pressure` (attempt refunded). Control/light/recovery/retention
+  paths are not blocked by the gate;
 - corrected backup foundation isolation guards (F1–F5): resolve missing-leaf paths through real parents, default PostgreSQL port identity, explicit drill DB naming, broader secret-value scan (postgres://, Bearer/JWT), token-boundary field names; also partial manifests, UTC-aware timestamps, socket/driver DSN variants, and strict canonical JSON;
 - added Step 10 backup foundation (B1): typed `backup-manifest.v1` models, pure
   load/store/hash helpers, fail-closed restore path and isolated-DSN guards, and

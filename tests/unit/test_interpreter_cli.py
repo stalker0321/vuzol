@@ -2,7 +2,9 @@ import asyncio
 import signal
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
+import pytest
 from pydantic import HttpUrl, SecretStr
 from pytest import MonkeyPatch
 
@@ -17,6 +19,7 @@ from vuzol.config import (
     Settings,
     build_bundle,
 )
+from vuzol.storage.migration_preflight import MigrationHeadError
 
 
 class FakeEngine:
@@ -93,10 +96,12 @@ def test_interpreter_runtime_composes_and_stops_cleanly(
             handlers[signal.SIGTERM](signal.SIGTERM, None)
             return True
 
+    migration_head = AsyncMock()
     monkeypatch.setenv("MODEL_KEY", "model-key")
     monkeypatch.setattr(interpreter_cli, "get_runtime_configuration", lambda **_kwargs: configured)
     monkeypatch.setattr(interpreter_cli, "configure_logging", lambda **_kwargs: None)
     monkeypatch.setattr(interpreter_cli, "create_engine", lambda *_args: engine)
+    monkeypatch.setattr(interpreter_cli, "require_migration_head", migration_head)
     monkeypatch.setattr(interpreter_cli, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(interpreter_cli, "resolve_database_dsn", lambda _settings: SecretStr("dsn"))
     monkeypatch.setattr(
@@ -120,4 +125,73 @@ def test_interpreter_runtime_composes_and_stops_cleanly(
     asyncio.run(interpreter_cli.run())
 
     assert set(handlers) == {signal.SIGTERM, signal.SIGINT}
+    migration_head.assert_awaited_once_with(engine)
+    assert engine.disposed
+
+
+def test_interpreter_fails_closed_disposes_once_without_pipeline(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """S-2.2b: gate refusal starts no Bot/pipeline and disposes engine exactly once."""
+
+    configured = runtime(tmp_path)
+
+    class CountingEngine(FakeEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dispose_calls = 0
+
+        async def dispose(self) -> None:
+            self.dispose_calls += 1
+            await super().dispose()
+
+    engine = CountingEngine()
+    order: list[str] = []
+
+    async def refuse(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        raise MigrationHeadError(
+            "migration_head_behind",
+            "database schema is behind this release",
+        )
+
+    def boom_pipeline(*_args: object, **_kwargs: object) -> object:
+        order.append("InterpretationPipeline")
+        raise AssertionError("pipeline must not start after migration head failure")
+
+    def boom_bot(*_args: object, **_kwargs: object) -> object:
+        order.append("Bot")
+        raise AssertionError("Bot must not start after migration head failure")
+
+    def boom_factory(*_args: object, **_kwargs: object) -> object:
+        order.append("create_session_factory")
+        raise AssertionError("session factory must not run after migration head failure")
+
+    monkeypatch.setenv("MODEL_KEY", "model-key")
+    monkeypatch.setattr(interpreter_cli, "get_runtime_configuration", lambda **_kwargs: configured)
+    monkeypatch.setattr(interpreter_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(interpreter_cli, "create_engine", lambda *_args: engine)
+    monkeypatch.setattr(interpreter_cli, "require_migration_head", refuse)
+    monkeypatch.setattr(interpreter_cli, "create_session_factory", boom_factory)
+    monkeypatch.setattr(interpreter_cli, "resolve_database_dsn", lambda _settings: SecretStr("dsn"))
+    monkeypatch.setattr(
+        interpreter_cli,
+        "resolve_bot_token",
+        lambda _settings: SecretStr("telegram-token"),
+    )
+    monkeypatch.setattr(
+        interpreter_cli,
+        "OpenAICompatibleInterpreter",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(interpreter_cli, "Bot", boom_bot)
+    monkeypatch.setattr(interpreter_cli, "InterpretationPipeline", boom_pipeline)
+    monkeypatch.setattr(signal, "signal", lambda *_args: None)
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        asyncio.run(interpreter_cli.run())
+
+    assert excinfo.value.code == "migration_head_behind"
+    assert order == ["require_migration_head"]
+    assert engine.dispose_calls == 1
     assert engine.disposed

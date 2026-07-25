@@ -18,6 +18,7 @@ from vuzol.interpretation.ports import SemanticInterpreter
 from vuzol.interpretation.service import InterpretationPipeline
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
+from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.telegram.adapter import PythonTelegramClient, resolve_bot_token
 
 
@@ -88,6 +89,8 @@ async def run() -> None:
     signal.signal(signal.SIGINT, request_stop)
     owner = f"{socket.gethostname()}:{os.getpid()}"
     try:
+        # S-2.2b: fail closed before session factory, Bot, pipeline, or poll loop.
+        await require_migration_head(engine)
         async with Bot(resolve_bot_token(settings).get_secret_value()) as bot:
             pipeline = InterpretationPipeline(
                 runtime,

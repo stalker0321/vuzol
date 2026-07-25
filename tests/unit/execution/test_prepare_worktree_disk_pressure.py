@@ -66,6 +66,27 @@ def test_prepare_worktree_defers_when_disk_low(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_prepare_worktree_missing_settings_fails_closed() -> None:
+    async def scenario() -> None:
+        worktrees = MagicMock()
+        worktrees.prepare = AsyncMock()
+        handler = PrepareWorktreeHandler(
+            MagicMock(),
+            MagicMock(),
+            worktrees,
+            owner="test",
+            settings=None,
+        )
+
+        outcome = await handler.execute(_request(), CancellationContext())
+
+        assert outcome.kind is OutcomeKind.TRANSIENT_FAILURE
+        assert outcome.category == DISK_PRESSURE_CATEGORY
+        worktrees.prepare.assert_not_called()
+
+    asyncio.run(scenario())
+
+
 def test_prepare_worktree_proceeds_when_disk_ok(tmp_path: Path) -> None:
     async def scenario() -> None:
         settings = Settings(

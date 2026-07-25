@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -180,6 +180,7 @@ async def test_refresh_subscription_limits_tick_force(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from vuzol.cli.executor import _refresh_subscription_limits_tick
+    from vuzol.config import SubscriptionLimitSettings
     from vuzol.storage.records import OutboxLeaseToken
     from vuzol.storage.types import DeliveryStatus
 
@@ -214,12 +215,20 @@ async def test_refresh_subscription_limits_tick_force(
         enqueue,
     )
 
-    forced = await _refresh_subscription_limits_tick(factory, registries, due_periodic=False)
+    forced = await _refresh_subscription_limits_tick(
+        factory,
+        registries,
+        due_periodic=False,
+        settings=SubscriptionLimitSettings(),
+    )
     assert forced is True
     refresh.assert_awaited_once()
-    # No settings → S1c legacy defaults (no keyword override).
     assert refresh.await_args is not None
-    assert refresh.await_args.kwargs == {}
+    assert refresh.await_args.kwargs == {
+        "grok_limit_source": "legacy",
+        "grok_limit_snapshot_file": None,
+        "grok_limit_snapshot_max_age": timedelta(seconds=900),
+    }
     enqueue.assert_awaited_once()
     assert enqueue.await_args is not None
     assert enqueue.await_args.args[1] == -100
@@ -229,11 +238,10 @@ async def test_refresh_subscription_limits_tick_force(
 async def test_refresh_subscription_limits_tick_forwards_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from datetime import timedelta
     from pathlib import Path
 
     from vuzol.cli.executor import _refresh_subscription_limits_tick
-    from vuzol.config import Settings, SubscriptionLimitSettings
+    from vuzol.config import SubscriptionLimitSettings
     from vuzol.storage.records import OutboxLeaseToken
     from vuzol.storage.types import DeliveryStatus
 
@@ -268,13 +276,10 @@ async def test_refresh_subscription_limits_tick_forwards_settings(
         enqueue,
     )
 
-    settings = Settings(
-        environment="test",
-        subscription_limits=SubscriptionLimitSettings(
-            source="snapshot_required",
-            snapshot_file=Path("/var/lib/vuzol-subscription-limits/grok.json"),
-            snapshot_max_age_seconds=450,
-        ),
+    settings = SubscriptionLimitSettings(
+        source="snapshot_required",
+        snapshot_file=Path("/var/lib/vuzol-subscription-limits/grok.json"),
+        snapshot_max_age_seconds=450,
     )
     forced = await _refresh_subscription_limits_tick(
         factory, registries, due_periodic=False, settings=settings
@@ -288,6 +293,19 @@ async def test_refresh_subscription_limits_tick_forwards_settings(
         "/var/lib/vuzol-subscription-limits/grok.json"
     )
     assert kwargs["grok_limit_snapshot_max_age"] == timedelta(seconds=450)
+
+
+@pytest.mark.anyio
+async def test_run_loop_requires_limit_settings_when_refresh_is_enabled() -> None:
+    from vuzol.cli.executor import _run_loop
+
+    with pytest.raises(ValueError, match="subscription limit settings are required"):
+        await _run_loop(
+            MagicMock(),
+            0.01,
+            session_factory=MagicMock(),
+            registries=MagicMock(),
+        )
 
 
 @pytest.mark.anyio

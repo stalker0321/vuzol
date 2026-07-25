@@ -536,6 +536,45 @@ def test_decrypt_exact_max_has_empty_final_chunk(tmp_path: Path) -> None:
     assert pieces[1] == b""
 
 
+def test_decrypt_eof_after_full_chunk_requires_final_frame(tmp_path: Path) -> None:
+    """EOF after an authenticated full frame is truncated (missing empty terminator).
+
+    Encrypt always writes a final remainder record (20 bytes for empty final:
+    BE32(0) + 16-byte tag). Stripping it must not succeed on full consumption.
+    Prior authenticated full-chunk data may still be yielded.
+    """
+
+    out = tmp_path / "blob.enc"
+    payload = b"Q" * CHUNK_PLAINTEXT_MAX
+    encrypt_blob_stream(
+        dek=_DEK,
+        run_id=_RUN,
+        component="postgres",
+        fmt="pg_custom",
+        plaintext_iter=[payload],
+        out_path=out,
+    )
+    raw = out.read_bytes()
+    # Empty final frame is 4-byte length + 16-byte GCM tag.
+    assert len(raw) >= 20
+    out.write_bytes(raw[:-20])
+
+    stream = decrypt_blob_stream(
+        dek=_DEK, blob_path=out, run_id=_RUN, component="postgres", fmt="pg_custom"
+    )
+    first = next(stream)
+    assert first == payload
+    with pytest.raises(BackupCryptoError, match="missing final chunk"):
+        next(stream)
+
+    with pytest.raises(BackupCryptoError, match="missing final chunk"):
+        list(
+            decrypt_blob_stream(
+                dek=_DEK, blob_path=out, run_id=_RUN, component="postgres", fmt="pg_custom"
+            )
+        )
+
+
 def test_decrypt_truncated_chunk_header(tmp_path: Path) -> None:
     out = tmp_path / "blob.enc"
     encrypt_blob_stream(

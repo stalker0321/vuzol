@@ -9,6 +9,7 @@ size/hash via bounded streaming reads.
 from __future__ import annotations
 
 import hashlib
+import json
 import stat
 import uuid
 from dataclasses import dataclass
@@ -17,10 +18,10 @@ from pathlib import Path
 from vuzol.ops.backup.manifest import (
     BackupManifest,
     BackupManifestError,
-    load_manifest,
+    validate_manifest,
 )
 from vuzol.ops.backup.paths import BackupPathError, ProductionRoots, resolve_isolation_path
-from vuzol.ops.backup.staging import STATE_PUBLISHED, assert_safe_staging_root, read_state
+from vuzol.ops.backup.staging import STATE_PUBLISHED, assert_safe_staging_root
 
 # Stable operational codes — never embed absolute paths in messages.
 CODE_OK = "package_ok"
@@ -50,7 +51,16 @@ _POSTGRES_CIPHER = "aes-256-gcm"
 _POSTGRES_FORMAT = "pg_custom"
 
 # Bounded stream read size for integrity hashing (never load whole blob).
+# Callers may not request larger chunks than this default/max.
 DEFAULT_HASH_READ_SIZE = 65_536
+MAX_HASH_READ_SIZE = DEFAULT_HASH_READ_SIZE
+
+# Align with manifest.load_manifest size bound without calling unbounded read_bytes.
+MANIFEST_MAX_BYTES = 2_000_000
+# STATE is a short token line (e.g. "published"); refuse oversized/non-UTF-8.
+STATE_MAX_BYTES = 64
+# Sidecar is 64 hex chars + optional newline/whitespace.
+SIDECAR_MAX_BYTES = 128
 
 
 class BackupRestorePreflightError(ValueError):
@@ -99,7 +109,7 @@ def preflight_published_package(
     evidence, or delete files. Failures never include absolute paths.
     """
 
-    if hash_read_size < 1:
+    if hash_read_size < 1 or hash_read_size > MAX_HASH_READ_SIZE:
         return _fail(CODE_PACKAGE, "invalid hash read size")
 
     try:
@@ -124,7 +134,10 @@ def preflight_published_package(
     if not resolved_run.is_dir():
         return _fail(CODE_PACKAGE, "run directory missing")
 
-    state = read_state(resolved_run)
+    try:
+        state = _read_state_bound(resolved_run)
+    except BackupRestorePreflightError as error:
+        return _fail(error.code, str(error) or error.code)
     if state != STATE_PUBLISHED:
         return _fail(CODE_PACKAGE, "run is not published")
 
@@ -140,16 +153,11 @@ def preflight_published_package(
     except BackupRestorePreflightError as error:
         return _fail(error.code, str(error) or error.code)
 
-    # C2: I/O failures → preflight_package; schema/JSON → manifest_invalid.
-    # load_manifest wraps OSError as BackupManifestError; inspect __cause__.
+    # Bounded manifest load (no unbounded read_bytes); I/O vs schema taxonomy.
     try:
-        manifest = load_manifest(paths[PUBLISH_MANIFEST])
-    except BackupManifestError as error:
-        if isinstance(error.__cause__, OSError):
-            return _fail(CODE_PACKAGE, "manifest unreadable")
-        return _fail(CODE_MANIFEST_INVALID, "manifest validation failed")
-    except OSError:
-        return _fail(CODE_PACKAGE, "manifest unreadable")
+        manifest = _load_manifest_bounded(paths[PUBLISH_MANIFEST])
+    except BackupRestorePreflightError as error:
+        return _fail(error.code, str(error) or error.code)
 
     try:
         _check_manifest_sidecar_hash(paths[PUBLISH_MANIFEST], paths[PUBLISH_MANIFEST_SHA])
@@ -190,6 +198,36 @@ def preflight_published_package(
 
 def _fail(code: str, message: str) -> PackagePreflightReport:
     return PackagePreflightReport(ok=False, code=code, message=message)
+
+
+def _read_state_bound(resolved_run: Path) -> str:
+    """Read STATE as a regular non-symlink file with bounded positive reads.
+
+    Does not use staging.read_state (which follows links / unbounded text read).
+    """
+
+    path = resolved_run / "STATE"
+    try:
+        st = path.lstat()
+    except OSError as error:
+        raise BackupRestorePreflightError(CODE_PACKAGE, "STATE missing or unreadable") from error
+    if stat.S_ISLNK(st.st_mode):
+        raise BackupRestorePreflightError(CODE_PACKAGE, "STATE must not be a symlink")
+    if not stat.S_ISREG(st.st_mode):
+        raise BackupRestorePreflightError(CODE_PACKAGE, "STATE must be a regular file")
+    if st.st_size > STATE_MAX_BYTES:
+        raise BackupRestorePreflightError(CODE_PACKAGE, "STATE exceeds size bound")
+    try:
+        raw = _read_file_bounded(path, max_bytes=STATE_MAX_BYTES, read_size=STATE_MAX_BYTES)
+    except BackupRestorePreflightError:
+        raise
+    except OSError as error:
+        raise BackupRestorePreflightError(CODE_PACKAGE, "STATE unreadable") from error
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise BackupRestorePreflightError(CODE_PACKAGE, "STATE encoding invalid") from error
+    return text.strip()
 
 
 def _bind_publish_dir(resolved_run: Path) -> Path:
@@ -241,14 +279,94 @@ def _require_regular_publish_files(publish: Path) -> dict[str, Path]:
     return found
 
 
+def _load_manifest_bounded(manifest_path: Path) -> BackupManifest:
+    """Load/validate manifest with pre-size check and bounded reads (no full unbounded load)."""
+
+    try:
+        st = manifest_path.lstat()
+    except OSError as error:
+        raise BackupRestorePreflightError(CODE_PACKAGE, "manifest unreadable") from error
+    if stat.S_ISLNK(st.st_mode):
+        raise BackupRestorePreflightError(CODE_PACKAGE, "manifest must not be a symlink")
+    if not stat.S_ISREG(st.st_mode):
+        raise BackupRestorePreflightError(CODE_PACKAGE, "manifest must be a regular file")
+    if st.st_size > MANIFEST_MAX_BYTES:
+        # Fail before allocating the whole file into memory.
+        raise BackupRestorePreflightError(CODE_MANIFEST_INVALID, "manifest exceeds size bound")
+    try:
+        raw = _read_file_bounded(
+            manifest_path,
+            max_bytes=MANIFEST_MAX_BYTES,
+            read_size=DEFAULT_HASH_READ_SIZE,
+        )
+    except BackupRestorePreflightError as error:
+        if error.code == CODE_PACKAGE and "exceeds" in str(error):
+            raise BackupRestorePreflightError(
+                CODE_MANIFEST_INVALID, "manifest exceeds size bound"
+            ) from error
+        raise BackupRestorePreflightError(CODE_PACKAGE, "manifest unreadable") from error
+    except OSError as error:
+        raise BackupRestorePreflightError(CODE_PACKAGE, "manifest unreadable") from error
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise BackupRestorePreflightError(
+            CODE_MANIFEST_INVALID, "manifest is not valid UTF-8 JSON"
+        ) from error
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise BackupRestorePreflightError(
+            CODE_MANIFEST_INVALID, "manifest is not valid UTF-8 JSON"
+        ) from error
+    if not isinstance(payload, dict):
+        raise BackupRestorePreflightError(CODE_MANIFEST_INVALID, "manifest validation failed")
+    try:
+        return validate_manifest(payload)
+    except BackupManifestError as error:
+        raise BackupRestorePreflightError(
+            CODE_MANIFEST_INVALID, "manifest validation failed"
+        ) from error
+
+
 def _check_manifest_sidecar_hash(manifest_path: Path, sha_path: Path) -> None:
     """Compare on-disk manifest bytes to sidecar digest (do not re-canonicalize)."""
 
     try:
-        expected = sha_path.read_text(encoding="utf-8").strip().lower()
+        st = sha_path.lstat()
     except OSError as error:
         raise BackupRestorePreflightError(
             CODE_PACKAGE, "manifest hash sidecar unreadable"
+        ) from error
+    if stat.S_ISLNK(st.st_mode):
+        raise BackupRestorePreflightError(
+            CODE_PACKAGE, "manifest hash sidecar must not be a symlink"
+        )
+    if not stat.S_ISREG(st.st_mode):
+        raise BackupRestorePreflightError(
+            CODE_PACKAGE, "manifest hash sidecar must be a regular file"
+        )
+    if st.st_size > SIDECAR_MAX_BYTES:
+        raise BackupRestorePreflightError(CODE_MANIFEST_HASH, "manifest hash sidecar invalid")
+    try:
+        raw = _read_file_bounded(
+            sha_path,
+            max_bytes=SIDECAR_MAX_BYTES,
+            read_size=SIDECAR_MAX_BYTES,
+        )
+    except BackupRestorePreflightError as error:
+        raise BackupRestorePreflightError(
+            CODE_PACKAGE, "manifest hash sidecar unreadable"
+        ) from error
+    except OSError as error:
+        raise BackupRestorePreflightError(
+            CODE_PACKAGE, "manifest hash sidecar unreadable"
+        ) from error
+    try:
+        expected = raw.decode("utf-8").strip().lower()
+    except UnicodeDecodeError as error:
+        raise BackupRestorePreflightError(
+            CODE_MANIFEST_HASH, "manifest hash sidecar invalid"
         ) from error
     if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
         raise BackupRestorePreflightError(CODE_MANIFEST_HASH, "manifest hash sidecar invalid")
@@ -260,12 +378,38 @@ def _check_manifest_sidecar_hash(manifest_path: Path, sha_path: Path) -> None:
                 block = handle.read(DEFAULT_HASH_READ_SIZE)
                 if not block:
                     break
+                if len(block) > DEFAULT_HASH_READ_SIZE:
+                    raise BackupRestorePreflightError(CODE_PACKAGE, "manifest unreadable for hash")
                 digest.update(block)
     except OSError as error:
         raise BackupRestorePreflightError(CODE_PACKAGE, "manifest unreadable for hash") from error
 
     if digest.hexdigest() != expected:
         raise BackupRestorePreflightError(CODE_MANIFEST_HASH, "manifest content hash mismatch")
+
+
+def _read_file_bounded(path: Path, *, max_bytes: int, read_size: int) -> bytes:
+    """Read at most ``max_bytes`` with positive bounded ``read`` calls only."""
+
+    if max_bytes < 0 or read_size < 1:
+        raise BackupRestorePreflightError(CODE_PACKAGE, "invalid read bound")
+    parts = bytearray()
+    with path.open("rb") as handle:
+        while True:
+            # Read one extra byte past max so oversize is detected without trusting st_size alone.
+            room = max_bytes - len(parts) + 1
+            if room <= 0:
+                raise BackupRestorePreflightError(CODE_PACKAGE, "file exceeds size bound")
+            to_read = min(read_size, room)
+            chunk = handle.read(to_read)
+            if not chunk:
+                break
+            if len(chunk) > to_read:
+                raise BackupRestorePreflightError(CODE_PACKAGE, "oversized read")
+            parts.extend(chunk)
+            if len(parts) > max_bytes:
+                raise BackupRestorePreflightError(CODE_PACKAGE, "file exceeds size bound")
+    return bytes(parts)
 
 
 def _check_b3_postgres_shape(manifest: BackupManifest) -> PackagePreflightReport | None:
@@ -294,6 +438,8 @@ def _stream_sha256(path: Path, *, read_size: int) -> tuple[str, int]:
             block = handle.read(read_size)
             if not block:
                 break
+            if len(block) > read_size:
+                raise OSError("oversized read from ciphertext")
             digest.update(block)
             size += len(block)
     return digest.hexdigest(), size

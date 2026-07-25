@@ -24,12 +24,15 @@ from vuzol.ops.backup.restore import (
     CODE_BLOB,
     CODE_COMPONENT,
     CODE_MANIFEST_HASH,
+    CODE_MANIFEST_INVALID,
     CODE_OK,
     CODE_PACKAGE,
     CODE_PARTIAL,
     CODE_PATH_CONFLICT,
     CODE_RUN_ID,
     CODE_UNSUPPORTED,
+    DEFAULT_HASH_READ_SIZE,
+    MANIFEST_MAX_BYTES,
     PackagePreflightReport,
     preflight_published_package,
 )
@@ -407,3 +410,164 @@ def test_preflight_refuses_escaping_runs_symlink(tmp_path: Path) -> None:
     assert str(staging) not in report.message
     # Outside package must remain untouched (no delete/mutation).
     assert (outside_run / "publish" / "postgres.dump.enc").is_file()
+
+
+def test_preflight_rejects_oversized_hash_read_size(tmp_path: Path) -> None:
+    """hash_read_size above DEFAULT/MAX is rejected without path leak."""
+
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+        hash_read_size=DEFAULT_HASH_READ_SIZE + 1,
+    )
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "hash read size" in report.message
+    assert str(staging) not in report.message
+
+
+def test_preflight_state_symlink_refused(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    run_dir = staging / "runs" / str(run_id)
+    state_path = run_dir / "STATE"
+    target = run_dir / "STATE.target"
+    target.write_text("published\n", encoding="utf-8")
+    state_path.unlink()
+    state_path.symlink_to(target)
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "symlink" in report.message
+    assert str(staging) not in report.message
+    assert str(state_path) not in report.message
+
+
+def test_preflight_state_nonregular_refused(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    run_dir = staging / "runs" / str(run_id)
+    state_path = run_dir / "STATE"
+    state_path.unlink()
+    state_path.mkdir()
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "regular" in report.message
+    assert str(state_path) not in report.message
+
+
+def test_preflight_state_oversize_refused(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    run_dir = staging / "runs" / str(run_id)
+    (run_dir / "STATE").write_text("x" * 200, encoding="utf-8")
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "size" in report.message
+    assert str(staging) not in report.message
+
+
+def test_preflight_state_invalid_utf8_refused(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    run_dir = staging / "runs" / str(run_id)
+    (run_dir / "STATE").write_bytes(b"published\xff\xfe\n")
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "encoding" in report.message
+    assert "\xff" not in report.message
+    assert str(staging) not in report.message
+
+
+def test_preflight_state_missing_refused(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    (staging / "runs" / str(run_id) / "STATE").unlink()
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "STATE" in report.message
+    assert str(staging) not in report.message
+
+
+def test_preflight_sidecar_invalid_utf8_refused(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    sha = staging / "runs" / str(run_id) / "publish" / "manifest.sha256"
+    sha.write_bytes(b"\xff" * 64)
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_MANIFEST_HASH
+    assert "sidecar" in report.message
+    assert "\xff" not in report.message
+    assert str(sha) not in report.message
+
+
+def test_preflight_sidecar_oversize_refused(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    sha = staging / "runs" / str(run_id) / "publish" / "manifest.sha256"
+    sha.write_text(("a" * 64) + ("b" * 200), encoding="utf-8")
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_MANIFEST_HASH
+    assert str(staging) not in report.message
+
+
+def test_preflight_manifest_oversize_refused_without_full_load(tmp_path: Path) -> None:
+    """st_size > 2 MiB fails as manifest_invalid before unbounded allocation."""
+
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    manifest_path = staging / "runs" / str(run_id) / "publish" / "manifest.v1.json"
+    # Oversized regular file: sparse seek write avoids multi-MiB RAM in the test process.
+    with manifest_path.open("wb") as handle:
+        handle.seek(MANIFEST_MAX_BYTES)
+        handle.write(b"x")
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_MANIFEST_INVALID
+    assert "size bound" in report.message
+    assert str(manifest_path) not in report.message
+    assert str(staging) not in report.message
+
+
+def test_preflight_manifest_invalid_utf8_taxonomy(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+    manifest_path = staging / "runs" / str(run_id) / "publish" / "manifest.v1.json"
+    manifest_path.write_bytes(b'{"schema_version": "\xff"}')
+    # Sidecar still present but content hash will not matter if UTF-8 fails first;
+    # keep sidecar so order is load-then-hash; invalid UTF-8 fails at load.
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_MANIFEST_INVALID
+    assert "UTF-8" in report.message or "validation" in report.message
+    assert "\xff" not in report.message
+    assert str(manifest_path) not in report.message

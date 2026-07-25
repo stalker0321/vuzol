@@ -245,8 +245,10 @@ def _decrypt_blob_stream_from_handle(
         if not length_bytes:
             if chunk_index == 0:
                 raise BackupCryptoError("blob has no chunks")
-            # Ended after one or more full-size chunks with no short final — valid.
-            return
+            # Encrypt always writes a short final remainder (including empty
+            # terminator after exact CHUNK_PLAINTEXT_MAX multiples). EOF after
+            # any authenticated full frame is truncated / incomplete.
+            raise BackupCryptoError("truncated blob: missing final chunk")
         if len(length_bytes) < 4:
             raise BackupCryptoError("truncated chunk header")
         (plain_len,) = struct.unpack(">I", length_bytes)

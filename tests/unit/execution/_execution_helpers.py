@@ -87,6 +87,8 @@ from vuzol.execution.sandbox import (
 )
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.experiments.domain import (
+    AgentCheckResult,
+    AgentCheckStatus,
     BoundedLevel,
     ContextManifest,
     ExecutionMode,
@@ -385,6 +387,13 @@ def _edit_report(*, attempt: int = 1, claimed_complete: bool = False) -> WorkerE
         attempt=attempt,
         claimed_complete=claimed_complete,
         implementation_summary="Implemented the requested bounded change.",
+        agent_checks=(
+            AgentCheckResult(
+                name="focused test",
+                status=AgentCheckStatus.PASSED,
+                detail="Provider-local execution only.",
+            ),
+        ),
         limitations=("Provider-authored limitation retained as context.",),
         usage=ReportedUsage(input_tokens=999, output_tokens=999),
     )

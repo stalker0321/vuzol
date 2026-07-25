@@ -287,6 +287,29 @@ class ReportedUsage(FrozenModel):
         return self
 
 
+class AgentCheckStatus(StrEnum):
+    """Provider-reported local-check outcome; never trusted validation."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_RUN = "not_run"
+    UNAVAILABLE = "unavailable"
+
+
+class AgentCheckResult(FrozenModel):
+    """A bounded, explicitly non-authoritative check claim from the worker."""
+
+    name: str = Field(min_length=1, max_length=100)
+    status: AgentCheckStatus
+    detail: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def require_named_check(self) -> Self:
+        if not self.name.strip():
+            raise ValueError("agent check name cannot be blank")
+        return self
+
+
 class WorkerEditReport(FrozenModel):
     """Bounded, non-authoritative facts returned by an implementation provider."""
 
@@ -296,6 +319,7 @@ class WorkerEditReport(FrozenModel):
     attempt: int = Field(default=1, ge=1, le=3)
     claimed_complete: bool
     implementation_summary: str = Field(min_length=1, max_length=2_000)
+    agent_checks: tuple[AgentCheckResult, ...] = Field(default=(), max_length=12)
     limitations: tuple[str, ...] = Field(default=(), max_length=30)
     failure_classification: str | None = Field(default=None, max_length=200)
     usage: ReportedUsage | None = None
@@ -311,6 +335,7 @@ class WorkerResultManifest(FrozenModel):
     branch: str
     changed_files: tuple[str, ...]
     claimed_complete: bool
+    agent_checks: tuple[AgentCheckResult, ...] = Field(default=(), max_length=12)
     gates: tuple[GateResult, ...]
     total_worker_duration_ms: int = Field(ge=0)
     usage: ReportedUsage

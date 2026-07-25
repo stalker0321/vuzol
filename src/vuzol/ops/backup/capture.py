@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from vuzol.config.settings import BackupSettings, Settings
 from vuzol.ops.backup.crypto import (
@@ -207,11 +207,24 @@ class BackupCaptureRunner:
                     message=type(error).__name__,
                 )
 
-        engine = create_async_engine(dsn, pool_pre_ping=True)
+        engine: AsyncEngine | None = None
+        try:
+            engine = create_async_engine(dsn, pool_pre_ping=True)
+            connection = await engine.connect()
+        except Exception as error:
+            if engine is not None:
+                with contextlib.suppress(Exception):
+                    await engine.dispose()
+            return CaptureReport(
+                ok=False,
+                mode=mode,
+                code="capture_failed",
+                message=type(error).__name__,
+            )
+
         run_id = uuid.uuid4()
         run_dir: Path | None = None
         backup_locked = False
-        connection = await engine.connect()
         try:
             # E1: probe retention first (same connection briefly is ok for try+unlock)
             retention_held = await try_advisory_lock(connection, RETENTION_SWEEP_LOCK_KEY)

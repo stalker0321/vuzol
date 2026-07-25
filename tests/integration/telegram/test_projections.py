@@ -137,7 +137,7 @@ def test_completed_agent_result_is_rendered_in_project_topic(postgres_dsn: str) 
             card = await build_status_card(session, task.id)
             assert "<b>Отчёт о выполнении</b>" in card.html  # noqa: RUF001
             assert "Use &lt;ports&gt; and adapters." in card.html
-            assert "Worker: Codex Sol" in card.html
+            assert "Исполнитель: Codex Sol" in card.html
             assert "Rewrite the service next" not in card.html
         await engine.dispose()
 
@@ -184,7 +184,7 @@ def test_failed_result_reports_stage_and_reason_in_project_topic(postgres_dsn: s
             card = await build_status_card(session, task.id)
             assert "Завершена неудачно" in card.html
             assert "<b>Отчёт о завершении</b>" in card.html  # noqa: RUF001
-            assert "<b>Этап:</b> validate" in card.html
+            assert "<b>Этап:</b> Проверка" in card.html
             assert "API contract test failed." in card.html
         await engine.dispose()
 

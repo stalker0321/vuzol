@@ -1,4 +1,5 @@
 """Subscription format persist tests (split for cohesion)."""
+# ruff: noqa: RUF001
 
 from __future__ import annotations
 
@@ -59,16 +60,16 @@ def test_format_subscription_limits_html() -> None:
     assert "OpenAI" in lines[0]
     assert "Plus" in lines[0]
     assert "5h" not in joined
-    assert "week" in joined
+    assert "неделя" in joined
     assert "[███████░░░]" in joined
-    assert "28% left" in joined
-    assert "reset 2026-07-19 12:00 UTC" in joined
+    assert "28% осталось" in joined
+    assert "сброс 2026-07-19 12:00 UTC" in joined
     assert snap.fingerprint()
 
 
 def test_format_empty_and_unavailable_and_both_windows() -> None:
     empty = format_subscription_limits_html((), html_escape=telegram_html)
-    assert "No subscription" in empty[0]
+    assert "Нет подключённых профилей подписки" in empty[0]
     bad = SubscriptionLimitSnapshot(
         profile_id="x",
         company="OpenAI",
@@ -80,7 +81,7 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
         detail="auth missing",
     )
     bad_lines = format_subscription_limits_html((bad,), html_escape=telegram_html)
-    assert "unavailable" in bad_lines[1]
+    assert "лимиты недоступны" in bad_lines[1]
     both = SubscriptionLimitSnapshot(
         profile_id="codex",
         company="OpenAI",
@@ -95,9 +96,9 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
         ok=True,
     )
     both_lines = "\n".join(format_subscription_limits_html((both,), html_escape=telegram_html))
-    assert "5h" in both_lines
-    assert "week" in both_lines
-    assert "50% left" in both_lines
+    assert "5 ч" in both_lines
+    assert "неделя" in both_lines
+    assert "50% осталось" in both_lines
     no_windows = SubscriptionLimitSnapshot(
         profile_id="codex",
         company="OpenAI",
@@ -107,7 +108,7 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
         observed_at=datetime(2026, 7, 16, tzinfo=UTC),
         ok=True,
     )
-    assert "no limit windows" in "\n".join(
+    assert "нет данных по окнам лимитов" in "\n".join(
         format_subscription_limits_html((no_windows,), html_escape=telegram_html)
     )
 
@@ -449,7 +450,7 @@ async def test_dashboard_loads_limits_from_db_not_filesystem() -> None:
     ) as load_mock:
         card = await build_project_status_dashboard(session, chat_id=1)
     load_mock.assert_awaited_once()
-    assert "Subscription limits" in card.html
-    assert "28% left" in card.html
+    assert "Лимиты подписки" in card.html
+    assert "28% осталось" in card.html
     assert "OpenAI" in card.html
     assert "auth.json" not in card.html

@@ -1,4 +1,5 @@
 """Reconstructable and revision-safe Telegram projections."""
+# ruff: noqa: RUF001
 
 import asyncio
 import hashlib
@@ -39,6 +40,7 @@ from vuzol.storage.types import (
     ApprovalStatus,
     StepStatus,
     TaskStatus,
+    WorktreeDeliveryState,
 )
 from vuzol.telegram.layout import (
     DASHBOARD_CARD_TITLE,
@@ -114,7 +116,107 @@ def task_number_label(task: Task) -> str:
         return str(task.public_task_number)
     if task.topic_task_number is not None:
         return f"{task.topic_task_number:04d}"
-    return "—"
+    return f"·{task.id.hex[-8:]}"
+
+
+_TASK_STATUS_LABELS: dict[TaskStatus, str] = {
+    TaskStatus.RECEIVED: "Получена",
+    TaskStatus.INTERPRETED: "Разобрана",
+    TaskStatus.CONTEXT_PREPARED: "Контекст готов",
+    TaskStatus.PLANNED: "План готов",
+    TaskStatus.WAITING_APPROVAL: "Ждёт решения",
+    TaskStatus.EXECUTING: "Выполняется",
+    TaskStatus.VALIDATING: "Проверяется",
+    TaskStatus.REVIEWING: "На ревью",
+    TaskStatus.AWAITING_USER: "Ждёт ответа",
+    TaskStatus.PAUSED: "На паузе",
+    TaskStatus.RETRYING: "Повтор выполнения",
+    TaskStatus.QUOTA_EXHAUSTED: "Лимит исчерпан",
+    TaskStatus.BLOCKED: "Заблокирована",
+    TaskStatus.FAILED: "Ошибка",
+    TaskStatus.CANCELLED: "Отменена",
+    TaskStatus.ROLLED_BACK: "Откат",
+    TaskStatus.COMPLETED: "Завершена",
+}
+
+_STEP_STATUS_LABELS: dict[StepStatus, str] = {
+    StepStatus.PENDING: "Ожидает",
+    StepStatus.QUEUED: "В очереди",
+    StepStatus.LEASED: "Захвачен",
+    StepStatus.RUNNING: "Идёт",
+    StepStatus.WAITING_APPROVAL: "Ждёт решения",
+    StepStatus.AWAITING_USER: "Ждёт пользователя",
+    StepStatus.BLOCKED: "Блок",
+    StepStatus.FAILED: "Ошибка",
+    StepStatus.CANCELLED: "Отменён",
+    StepStatus.COMPLETED: "Готово",
+}
+
+_STEP_TYPE_LABELS = {
+    "interpret": "Интерпретация",
+    "execute_model": "Вызов модели",
+    "format_result": "Форматирование результата",
+    "finalize": "Завершение",
+    "plan": "Планирование",
+    "prepare_context": "Подготовка контекста",
+    "prepare_worktree": "Подготовка рабочей копии",
+    "execute_code": "Выполнение кода",
+    "validate": "Проверка",
+    "review": "Ревью",
+    "approval": "Решение / апрув",
+    "execute_agent": "Агент",
+    "research_execute": "Исследование",
+    "synthesize": "Синтез",
+    "inspect": "Инспекция",
+    "privileged_execute": "Привилегированное выполнение",
+    "complete_or_block": "Завершение или блок",
+}
+
+_DELIVERY_STATE_LABELS: dict[WorktreeDeliveryState, str] = {
+    WorktreeDeliveryState.ACTIVE: "активна",
+    WorktreeDeliveryState.WORKTREE_RETAINED: "рабочая копия сохранена",
+    WorktreeDeliveryState.PATCH_DELIVERED: "патч доставлен",
+    WorktreeDeliveryState.APPLIED: "применено",
+    WorktreeDeliveryState.MERGED: "влито",
+    WorktreeDeliveryState.PUSHED: "отправлено в remote",
+    WorktreeDeliveryState.CLEANED: "очищено",
+}
+
+
+def user_status_label(status: TaskStatus | str) -> str:
+    try:
+        known = status if isinstance(status, TaskStatus) else TaskStatus(status)
+    except ValueError:
+        return telegram_html(status)
+    return _TASK_STATUS_LABELS[known]
+
+
+def step_status_label(status: StepStatus | str) -> str:
+    try:
+        known = status if isinstance(status, StepStatus) else StepStatus(status)
+    except ValueError:
+        return telegram_html(status)
+    return _STEP_STATUS_LABELS[known]
+
+
+def step_type_label(step_type: str) -> str:
+    return telegram_html(_STEP_TYPE_LABELS.get(step_type, step_type))
+
+
+def delivery_state_label(state: WorktreeDeliveryState | str) -> str:
+    try:
+        known = state if isinstance(state, WorktreeDeliveryState) else WorktreeDeliveryState(state)
+    except ValueError:
+        return telegram_html(state)
+    return _DELIVERY_STATE_LABELS[known]
+
+
+def _task_identity_footer(task: Task) -> str | None:
+    if task.public_task_number is not None:
+        return None
+    if task.topic_task_number is not None:
+        return f"<i>локальный №{task.topic_task_number:04d}</i>"
+    return f"<i>код ·{task.id.hex[-8:]}</i>"
 
 
 def task_sense_sentence(task: Task) -> str:
@@ -139,7 +241,7 @@ def task_sense_sentence(task: Task) -> str:
     text = text.rstrip(".!?").strip()
     if len(text) > 160:
         text = text[:157].rstrip() + "…"
-    return text or "No description"
+    return text or "Без описания"
 
 
 def model_label_for_profile(
@@ -159,7 +261,7 @@ def model_label_for_profile(
     """
 
     if not profile_id and not model:
-        return "not assigned yet"
+        return "ещё не назначен"
     resolved_model = model
     if resolved_model is None and profile_id and profile_models is not None:
         resolved_model = profile_models.get(profile_id)
@@ -201,7 +303,7 @@ def format_executor_model(
             provider_key = "grok"
 
     if not slug and not profile_id:
-        return "not assigned yet"
+        return "ещё не назначен"
 
     base: str
     is_codex = provider_key == "codex" or (
@@ -223,7 +325,7 @@ def format_executor_model(
     elif profile_id:
         base = profile_id
     else:
-        base = "not assigned yet"
+        base = "ещё не назначен"
 
     if effort_label:
         return f"{base} · {effort_label}"
@@ -337,7 +439,7 @@ async def build_project_status_dashboard(
     model_by_task: dict[uuid.UUID, str] = {}
     lines = [f"<b>{telegram_html(DASHBOARD_CARD_TITLE)}</b>", ""]
     if not tasks:
-        lines.append("No active tasks right now.")
+        lines.append("Сейчас нет активных задач.")
     else:
         for task in tasks:
             profile_id = await _active_executor_profile(session, task.id)
@@ -350,22 +452,22 @@ async def build_project_status_dashboard(
                 model=step_model,
             )
             # Before an executor step is claimed, surface the durable project /model pin.
-            if model == "not assigned yet" and task.project_id is not None:
+            if model == "ещё не назначен" and task.project_id is not None:
                 preference = await load_preference(session, task.project_id)
                 if not preference.is_auto:
-                    model = f"{format_preference_label(preference)} (project default)"
+                    model = f"{format_preference_label(preference)} (по умолчанию для проекта)"
             model_by_task[task.id] = model
             project_id = task.project_id
             if project_id and project_names is not None and project_id in project_names:
                 project_label = project_names[project_id]
             else:
-                project_label = project_id or "no project"
+                project_label = project_id or "без проекта"
             lines.append(
                 f"• <b>{telegram_html(project_label)}</b> · "
                 f"#{telegram_html(task_number_label(task))}"
             )
             lines.append(f"  {telegram_html(task_sense_sentence(task))}")
-            lines.append(f"  Model: {telegram_html(model)}")
+            lines.append(f"  Модель: {telegram_html(model)}")
             lines.append("")
 
     # Delivery must not open provider state dirs (no auth ACL). Prefer DB snapshots
@@ -374,7 +476,7 @@ async def build_project_status_dashboard(
         subscription_snapshots = await load_subscription_limits(session)
     del subscription_profiles  # reserved for tests / offline collectors
     if subscription_snapshots:
-        lines.append(f"<b>{telegram_html('Subscription limits')}</b>")
+        lines.append("<b>Лимиты подписки</b>")
         lines.extend(
             format_subscription_limits_html(subscription_snapshots, html_escape=telegram_html)
         )
@@ -384,7 +486,7 @@ async def build_project_status_dashboard(
                 updated_at = updated_at.replace(tzinfo=UTC)
             stamp = updated_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
             lines.append("")
-            lines.append(f"<i>Updated {telegram_html(stamp)}</i>")
+            lines.append(f"<i>Обновлено {telegram_html(stamp)}</i>")
 
     fingerprints = tuple(snap.fingerprint() for snap in (subscription_snapshots or ()))
     html_body = "\n".join(lines).rstrip()
@@ -496,7 +598,7 @@ async def build_task_history_report(
     if mapping is None:
         return None
 
-    project_id = task.project_id or "no project"
+    project_id = task.project_id or "без проекта"
     if project_names is not None and task.project_id and task.project_id in project_names:
         project_label = project_names[task.project_id]
     else:
@@ -526,19 +628,19 @@ async def build_task_history_report(
         stage, reason = await _failure_details(session, task)
         lines.append(f"<b>Итог:</b> {_task_outcome_label(task.status)}")
         if stage:
-            lines.append(f"<b>Этап:</b> {telegram_html(stage)}")
+            lines.append(f"<b>Этап:</b> {step_type_label(stage)}")
         lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
     if worker is not None:
-        lines.append(f"<b>Worker:</b> {telegram_html(worker)}")
+        lines.append(f"<b>Исполнитель:</b> {telegram_html(worker)}")
     lines.extend(
         (
             "",
             (
-                f"Tokens: <code>{telegram_html(_format_count(tokens_in))}</code> in / "
-                f"<code>{telegram_html(_format_count(tokens_out))}</code> out / "
-                f"<code>{telegram_html(_format_count(tokens_cached))}</code> cached"
+                f"Токены: <code>{telegram_html(_format_count(tokens_in))}</code> вх / "
+                f"<code>{telegram_html(_format_count(tokens_out))}</code> вых / "
+                f"<code>{telegram_html(_format_count(tokens_cached))}</code> кэш"
             ),
-            f"Work: <code>{telegram_html(_format_duration(work_seconds))}</code>",
+            f"Работа: <code>{telegram_html(_format_duration_ru(work_seconds))}</code>",
         )
     )
     return HistoryReport(
@@ -734,7 +836,7 @@ def _agent_check_html(check: Mapping[str, str | None]) -> str:
     }
     status = check.get("status") or "unavailable"
     line = (
-        f"• {telegram_html(check.get('name') or 'check')} — "
+        f"• {telegram_html(check.get('name') or 'проверка')} — "
         f"{telegram_html(labels.get(status, status))}"
     )
     detail = check.get("detail")
@@ -777,6 +879,45 @@ def _review_warning_html(warning: Mapping[str, str | int | None]) -> str:
     location = f"{path}:{warning['line']}" if path and warning.get("line") else path
     prefix = f"<code>{telegram_html(location)}</code> — " if location else ""
     return f"⚠️ {prefix}{telegram_html(warning.get('summary') or 'Review warning')}"
+
+
+def _approval_fact_lines(
+    envelope: Mapping[str, object],
+    human_summary: str,
+) -> list[str]:
+    """One canonical fact block shared by project and global approval cards."""
+
+    lines = ["<b>Что сделано</b>", telegram_html(human_summary)]
+    agent_checks = _envelope_agent_checks(envelope)
+    if agent_checks:
+        lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
+        lines.extend(_agent_check_html(check) for check in agent_checks)
+    review_warnings = _envelope_review_warnings(envelope)
+    if review_warnings:
+        lines.extend(("", "<b>Предупреждения ревью</b>"))
+        lines.extend(_review_warning_html(warning) for warning in review_warnings)
+    lines.extend(("", "<b>Проверки Vuzol (доверенные)</b>"))
+    raw_gates = envelope.get("gates")
+    gates = raw_gates if isinstance(raw_gates, list) else []
+    for gate in gates:
+        if not isinstance(gate, dict):
+            continue
+        duration = int(gate.get("duration_ms", 0)) / 1000
+        lines.append(
+            f"✅ {telegram_html(gate.get('name', 'проверка'))} — пройдено ({duration:.1f} с)"
+        )
+    lines.extend(("", "Применить этот результат локально?"))
+    return lines
+
+
+def _approval_status_label(status: ApprovalStatus) -> str:
+    return {
+        ApprovalStatus.PENDING: "Ждёт решения",
+        ApprovalStatus.APPROVED: "Принято",
+        ApprovalStatus.CONSUMED: "Принято",
+        ApprovalStatus.REJECTED: "Отклонено",
+        ApprovalStatus.EXPIRED: "Истекло",
+    }[status]
 
 
 async def _failure_details(session: AsyncSession, task: Task) -> tuple[str | None, str]:
@@ -986,6 +1127,17 @@ def _format_duration(seconds: int) -> str:
     return f"{secs}s"
 
 
+def _format_duration_ru(seconds: int) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours} ч {minutes} мин"
+    if minutes:
+        return f"{minutes} мин {secs} с"
+    return f"{secs} с"
+
+
 async def enqueue_project_status_dashboard(session: AsyncSession, chat_id: int) -> None:
     """Queue a refresh of the existing «Статус проектов» topic (kind=task_dashboard).
 
@@ -1125,7 +1277,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         select(Event).where(Event.entity_id == task_id).order_by(Event.created_at.desc()).limit(1)
     )
     title = task_title(task)
-    scope = task.project_id or "personal"
+    scope = task.project_id or "личный"
     lines = [f"<b>{telegram_html(title)}</b>"]
     draft = task.task_draft if isinstance(task.task_draft, dict) else {}
     if any(draft.get(key) for key in ("task_summary", "normalized_title", "goal", "title")):
@@ -1133,20 +1285,19 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     status_label = (
         _task_outcome_label(task.status)
         if task.status in USER_REPORTABLE_TASK_STATUSES
-        else telegram_html(task.status.value)
+        else user_status_label(task.status)
     )
     lines.extend(
         (
-            f"<code>{task.id}</code>",
-            f"Scope: {telegram_html(scope)}",
-            f"Status: <b>{status_label}</b>",
+            f"Проект: {telegram_html(scope)}",
+            f"Статус: <b>{status_label}</b>",
         )
     )
     if step is not None:
-        lines.append(f"Step: {telegram_html(step.step_type)} ({telegram_html(step.status.value)})")
+        lines.append(f"Этап: {step_type_label(step.step_type)} ({step_status_label(step.status)})")
     worker = await _task_worker_label(session, task.id) if run is not None else None
     if worker is not None:
-        lines.append(f"Worker: {telegram_html(worker)}")
+        lines.append(f"Исполнитель: {telegram_html(worker)}")
     approval = None
     if step is not None and step.status.value == "waiting_approval":
         approval = await session.scalar(
@@ -1162,10 +1313,10 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             or run.selected_route.get("profile_id")
         )
         if executor and worker is None:
-            lines.append(f"Executor: {telegram_html(executor)}")
+            lines.append(f"Маршрут: {telegram_html(executor)}")
         worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
         if worktree is not None and worktree.result_commit and approval is None:
-            lines.append(f"Delivery: {telegram_html(worktree.delivery_state.value)}")
+            lines.append(f"Доставка: {delivery_state_label(worktree.delivery_state)}")
         usage = await session.scalar(
             select(UsageRecord)
             .where(UsageRecord.run_id == run.id)
@@ -1174,12 +1325,12 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         )
         if usage is not None and usage.input_tokens is not None:
             lines.append(
-                f"Usage: {telegram_html(usage.input_tokens)} in / "
-                f"{telegram_html(usage.output_tokens or 0)} out"
+                f"Токены: {telegram_html(usage.input_tokens)} вх / "
+                f"{telegram_html(usage.output_tokens or 0)} вых"
             )
     if task.status is TaskStatus.COMPLETED:
         report, agent_checks, gates = await _completion_report(session, task)
-        lines.extend(("", "<b>Отчёт о выполнении</b>", telegram_html(report)))  # noqa: RUF001
+        lines.extend(("", "<b>Отчёт о выполнении</b>", telegram_html(report)))
         if agent_checks:
             lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
             lines.extend(_agent_check_html(check) for check in agent_checks)
@@ -1188,34 +1339,23 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             lines.extend(f"✅ {telegram_html(gate)}" for gate in gates)
     elif task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
         failed_stage, reason = await _failure_details(session, task)
-        lines.extend(("", "<b>Отчёт о завершении</b>"))  # noqa: RUF001
+        lines.extend(("", "<b>Отчёт о завершении</b>"))
         if failed_stage:
-            lines.append(f"<b>Этап:</b> {telegram_html(failed_stage)}")
+            lines.append(f"<b>Этап:</b> {step_type_label(failed_stage)}")
         lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
     elapsed = max(0, int((datetime.now(UTC) - task.created_at).total_seconds()))
-    lines.append(f"Elapsed: {elapsed}s")
-    if event is not None:
-        lines.append(f"Latest: {telegram_html(event.event_type)}")
-        if event.event_type == "result.redo_requested":
-            lines.append("Send a new bounded /sol request with the corrected instructions.")
+    lines.append(f"Прошло: {_format_duration_ru(elapsed)}")
+    identity_footer = _task_identity_footer(task)
+    if identity_footer is not None:
+        lines.append(identity_footer)
+    if event is not None and event.event_type == "result.redo_requested":
+        lines.append(
+            "Отправьте исправленное описание задачи в топик проекта. "
+            "При необходимости можно использовать /sol."
+        )
     if approval is not None and step is not None:
         envelope = verified_envelope(step, approval)
-        lines.extend(("", "<b>What was done</b>", telegram_html(approval.human_summary)))
-        agent_checks = _envelope_agent_checks(envelope)
-        if agent_checks:
-            lines.extend(("", "<b>Agent checks (untrusted)</b>"))
-            lines.extend(_agent_check_html(check) for check in agent_checks)
-        review_warnings = _envelope_review_warnings(envelope)
-        if review_warnings:
-            lines.extend(("", "<b>Review warnings</b>"))
-            lines.extend(_review_warning_html(warning) for warning in review_warnings)
-        lines.extend(("", "<b>Vuzol checks (trusted)</b>"))
-        for gate in envelope["gates"]:
-            duration = int(gate.get("duration_ms", 0)) / 1000
-            lines.append(
-                f"✅ {telegram_html(gate.get('name', 'check'))} — passed ({duration:.1f}s)"
-            )
-        lines.extend(("", "Approve this result for safe local apply?"))
+        lines.extend(("", *_approval_fact_lines(envelope, approval.human_summary)))
         buttons: tuple[str, ...] = ("approve", "redo", "reject")
     else:
         buttons = (
@@ -1253,30 +1393,24 @@ async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> Stat
     envelope = verified_envelope(step, approval)
     title = task_title(task)
     lines = [
-        f"<b>{telegram_html(task.project_id or 'personal')} · {telegram_html(title)}</b>",
-        f"<code>{task.id}</code>",
-        "",
-        "<b>Что сделано</b>",
-        telegram_html(approval.human_summary),
+        f"<b>{telegram_html(task.project_id or 'личный')} · {telegram_html(title)}</b>",
     ]
-    agent_checks = _envelope_agent_checks(envelope)
-    if agent_checks:
-        lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
-        lines.extend(_agent_check_html(check) for check in agent_checks)
-    review_warnings = _envelope_review_warnings(envelope)
-    if review_warnings:
-        lines.extend(("", "<b>Предупреждения ревью</b>"))
-        lines.extend(_review_warning_html(warning) for warning in review_warnings)
-    lines.extend(("", "<b>Проверки Vuzol (доверенные)</b>"))
-    for gate in envelope["gates"]:
-        duration = int(gate.get("duration_ms", 0)) / 1000
-        lines.append(f"✅ {telegram_html(gate.get('name', 'check'))} — {duration:.1f}s")
+    identity_footer = _task_identity_footer(task)
+    if identity_footer is not None:
+        lines.append(identity_footer)
     buttons: tuple[str, ...]
     if approval.status is ApprovalStatus.PENDING:
-        lines.extend(("", "Применить этот результат локально?"))
+        lines.extend(("", *_approval_fact_lines(envelope, approval.human_summary)))
         buttons = ("approve", "redo", "reject")
     else:
-        lines.extend(("", f"Решение: <b>{telegram_html(approval.status.value)}</b>"))
+        lines.extend(
+            (
+                "",
+                *_approval_fact_lines(envelope, approval.human_summary)[:-2],
+                "",
+                f"Решение: <b>{_approval_status_label(approval.status)}</b>",
+            )
+        )
         buttons = ()
     return StatusCard(
         task_id=task.id,

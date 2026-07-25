@@ -34,10 +34,11 @@ def test_status_dashboard_binds_to_existing_task_dashboard_kind() -> None:
 def test_task_number_prefers_public_then_local() -> None:
     public = SimpleNamespace(public_task_number=730001, topic_task_number=1)
     local = SimpleNamespace(public_task_number=None, topic_task_number=7)
-    missing = SimpleNamespace(public_task_number=None, topic_task_number=None)
+    missing_id = uuid.uuid4()
+    missing = SimpleNamespace(id=missing_id, public_task_number=None, topic_task_number=None)
     assert task_number_label(public) == "730001"  # type: ignore[arg-type]
     assert task_number_label(local) == "0007"  # type: ignore[arg-type]
-    assert task_number_label(missing) == "—"  # type: ignore[arg-type]
+    assert task_number_label(missing) == f"·{missing_id.hex[-8:]}"  # type: ignore[arg-type]
 
 
 @pytest.mark.anyio
@@ -103,13 +104,13 @@ async def test_dashboard_surfaces_project_default_executor_pin() -> None:
         )
     finally:
         monkeypatch.undo()
-    assert "Grok (project default)" in card.html
+    assert "Grok (по умолчанию для проекта)" in card.html
 
 
-def test_model_label_is_english_and_friendly() -> None:
+def test_model_label_is_friendly() -> None:
     from vuzol.telegram.projections import format_executor_model, model_label_for_profile
 
-    assert model_label_for_profile(None) == "not assigned yet"
+    assert model_label_for_profile(None) == "ещё не назначен"
     assert (
         model_label_for_profile(
             "codex-subscription-prod",
@@ -164,12 +165,12 @@ def test_format_executor_model_edge_branches() -> None:
     assert format_executor_model("gpt-5.6-luna", provider="codex", effort="low") == (
         "Codex Luna · low"
     )
-    assert format_executor_model(None) == "not assigned yet"
+    assert format_executor_model(None) == "ещё не назначен"
     assert format_executor_model("", profile_id="other") == "other"
 
 
 def test_model_label_uses_registry_model() -> None:
-    assert model_label_for_profile(None) == "not assigned yet"
+    assert model_label_for_profile(None) == "ещё не назначен"
     assert model_label_for_profile("other-profile") == "other-profile"
     assert (
         model_label_for_profile("other-profile", profile_models={"other-profile": "gpt-5.1-codex"})

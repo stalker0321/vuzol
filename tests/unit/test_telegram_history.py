@@ -1,4 +1,5 @@
 """History topic completion report helpers."""
+# ruff: noqa: RUF001
 
 from __future__ import annotations
 
@@ -387,7 +388,7 @@ async def test_failed_task_history_reports_stage_and_reason() -> None:
 
     assert report is not None
     assert "Завершена неудачно" in report.html
-    assert "Этап:</b> validate" in report.html
+    assert "Этап:</b> Проверка" in report.html
     assert "API contract test failed on the response schema" in report.html
     assert "Результат:</b>" not in report.html
 
@@ -475,12 +476,12 @@ async def test_build_and_enqueue_history_report() -> None:
     assert "Bill Buddy" in report.html
     assert "Задача:</b> Build a responsive landing page for Bill Buddy" in report.html
     assert "Результат:</b> Landing page implemented" in report.html
-    assert "Worker:</b> Codex Sol" in report.html
+    assert "Исполнитель:</b> Codex Sol" in report.html
     assert "Landing page implemented" in report.html
     assert "1,000" in report.html
     assert "200" in report.html
     assert "50" in report.html
-    assert "1m 30s" in report.html
+    assert "1 мин 30 с" in report.html
 
     async def scalar2(stmt: object) -> object:
         text = str(stmt).lower()

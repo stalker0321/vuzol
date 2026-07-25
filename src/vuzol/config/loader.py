@@ -63,6 +63,9 @@ def _secret_access_policy(
             allow(profile.credential_reference, f"profile:{profile.id}")
     if settings.database_dsn_reference is not None:
         allow(settings.database_dsn_reference, "system:database")
+        allow(settings.database_dsn_reference, "system:backup")
+    if settings.backup.kek_reference is not None:
+        allow(settings.backup.kek_reference, "system:backup")
     if settings.telegram_bot_token_reference is not None:
         allow(settings.telegram_bot_token_reference, "system:telegram")
     return {reference: frozenset(consumers) for reference, consumers in policy.items()}

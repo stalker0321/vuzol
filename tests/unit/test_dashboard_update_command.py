@@ -217,9 +217,77 @@ async def test_refresh_subscription_limits_tick_force(
     forced = await _refresh_subscription_limits_tick(factory, registries, due_periodic=False)
     assert forced is True
     refresh.assert_awaited_once()
+    # No settings → S1c legacy defaults (no keyword override).
+    assert refresh.await_args is not None
+    assert refresh.await_args.kwargs == {}
     enqueue.assert_awaited_once()
     assert enqueue.await_args is not None
     assert enqueue.await_args.args[1] == -100
+
+
+@pytest.mark.anyio
+async def test_refresh_subscription_limits_tick_forwards_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+    from pathlib import Path
+
+    from vuzol.cli.executor import _refresh_subscription_limits_tick
+    from vuzol.config import Settings, SubscriptionLimitSettings
+    from vuzol.storage.records import OutboxLeaseToken
+    from vuzol.storage.types import DeliveryStatus
+
+    token = OutboxLeaseToken(
+        item_id=uuid4(),
+        status=DeliveryStatus.LEASED,
+        owner="vuzol-executor-limits",
+        generation=1,
+        lease_expires_at=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+    item = SimpleNamespace(payload={"chat_id": -100})
+    session = MagicMock()
+    session.get = AsyncMock(return_value=item)
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock()
+    factory.begin.return_value = session_cm
+    registries = MagicMock()
+    registries.profiles.items.return_value = ()
+
+    monkeypatch.setattr("vuzol.storage.leasing.claim_outbox_item", AsyncMock(return_value=token))
+    monkeypatch.setattr("vuzol.storage.leasing.complete_outbox_item", AsyncMock(return_value=None))
+    refresh = AsyncMock(return_value=())
+    enqueue = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "vuzol.providers.subscription_limits.refresh_and_store_subscription_limits",
+        refresh,
+    )
+    monkeypatch.setattr(
+        "vuzol.telegram.projections.enqueue_project_status_dashboard",
+        enqueue,
+    )
+
+    settings = Settings(
+        environment="test",
+        subscription_limits=SubscriptionLimitSettings(
+            source="snapshot_required",
+            snapshot_file=Path("/var/lib/vuzol-subscription-limits/grok.json"),
+            snapshot_max_age_seconds=450,
+        ),
+    )
+    forced = await _refresh_subscription_limits_tick(
+        factory, registries, due_periodic=False, settings=settings
+    )
+    assert forced is True
+    refresh.assert_awaited_once()
+    assert refresh.await_args is not None
+    kwargs = refresh.await_args.kwargs
+    assert kwargs["grok_limit_source"] == "snapshot_required"
+    assert kwargs["grok_limit_snapshot_file"] == Path(
+        "/var/lib/vuzol-subscription-limits/grok.json"
+    )
+    assert kwargs["grok_limit_snapshot_max_age"] == timedelta(seconds=450)
 
 
 @pytest.mark.anyio

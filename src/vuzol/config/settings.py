@@ -40,6 +40,36 @@ class DiskPressureSettings(BaseModel):
         return value
 
 
+class SubscriptionLimitSettings(BaseModel):
+    """Grok dashboard limit source (S1d wiring; default preserves legacy host collect).
+
+    ``source=legacy`` ignores ``snapshot_file`` (S1c API). ``snapshot_required``
+    needs an absolute configured path; the file need not exist at process start
+    (exporter may publish later). No isolation claim while default is legacy.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: Literal["legacy", "snapshot_required"] = "legacy"
+    snapshot_file: Path | None = None
+    snapshot_max_age_seconds: int = Field(default=900, ge=1, le=86_400)
+
+    @model_validator(mode="after")
+    def require_absolute_snapshot_when_required(self) -> "SubscriptionLimitSettings":
+        if self.source != "snapshot_required":
+            return self
+        if self.snapshot_file is None:
+            raise ValueError(
+                "subscription_limits.snapshot_file is required when source is snapshot_required"
+            )
+        if not self.snapshot_file.is_absolute():
+            raise ValueError(
+                "subscription_limits.snapshot_file must be absolute "
+                "when source is snapshot_required"
+            )
+        return self
+
+
 class RetentionDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -313,6 +343,9 @@ class Settings(BaseSettings):
     redaction_patterns: tuple[str, ...] = ()
     backup: BackupSettings = Field(default_factory=BackupSettings)
     disk_pressure: DiskPressureSettings = Field(default_factory=DiskPressureSettings)
+    subscription_limits: SubscriptionLimitSettings = Field(
+        default_factory=SubscriptionLimitSettings
+    )
 
     @field_validator(
         "repository_root",

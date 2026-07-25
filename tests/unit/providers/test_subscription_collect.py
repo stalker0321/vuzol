@@ -399,3 +399,336 @@ def test_codex_window_edges_and_invalid_percents() -> None:
     )
     assert weekly.remaining_percent is None
     assert weekly.reset_at is not None
+
+
+# --- S1c: Grok snapshot_required consumer (API-level, code-dark) ---
+
+
+def _write_snapshot_0640(
+    path: Path,
+    *,
+    profile_id: str,
+    principal: str = "prin-a",
+    remaining: int = 80,
+    plan: str = "Super",
+    generated_at: datetime | None = None,
+) -> None:
+    import os
+
+    from vuzol.providers.grok_limit_snapshot import SNAPSHOT_SCHEMA_VERSION, principal_digest
+
+    observed = generated_at or datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+    document = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "generated_at": observed.isoformat(),
+        "entries": [
+            {
+                "profile_id": profile_id,
+                "principal_digest": principal_digest(principal),
+                "remaining_percent": remaining,
+                "reset_at": "2026-08-01T00:00:00+00:00",
+                "plan_label": plan,
+                "observed_at": observed.isoformat(),
+            }
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o640)
+    try:
+        os.write(
+            fd,
+            (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        )
+        os.fchmod(fd, 0o640)
+    finally:
+        os.close(fd)
+
+
+def _grok_profile_no_state(profile_id: str = "grok-sub-a") -> ProviderProfileConfig:
+    return ProviderProfileConfig.model_construct(
+        id=profile_id,
+        provider="grok",
+        model="grok-build",
+        launch_mode=LaunchMode.CLI,
+        credential_required=False,
+        capabilities=frozenset({Capability.CODE_EDIT}),
+        concurrency_limit=1,
+        cost_class=CostClass.STRONG,
+        roles=frozenset({ProviderRole.EXECUTOR}),
+        routing_priority=100,
+        supported_task_types=frozenset({"coding"}),
+        sandbox_required=True,
+        runtime_identity=f"id-{profile_id}",
+        state_directory=None,
+        enabled=True,
+    )
+
+
+def _install_legacy_hooks_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any legacy Grok host entrypoint call is a hard failure (hook proof)."""
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("legacy Grok host entrypoint must not be called")
+
+    mod = "vuzol.providers.subscription_limits"
+    for name in (
+        "_grok_access_token",
+        "_grok_auth_entries",
+        "_jwt_subject",
+        "_latest_grok_billing_from_logs",
+        "_billing_ctx_from_log_file",
+        "_host_grok_billing_log_paths",
+        "_host_account_matches_subjects",
+        "_log_contains_any_subject",
+        "_collect_grok",
+        "_http_json",
+    ):
+        monkeypatch.setattr(f"{mod}.{name}", boom)
+
+
+def test_s1c_legacy_default_ignores_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy (default) Grok path ignores snapshot file and keeps log-based collect."""
+
+    state = tmp_path / "grok"
+    logs = state / "logs"
+    logs.mkdir(parents=True)
+    line = {
+        "msg": "billing: fetched credits config",
+        "ctx": {
+            "subscriptionTier": "SuperGrok",
+            "config": {
+                "creditUsagePercent": 40,
+                "billingPeriodEnd": "2026-08-01T00:00:00+00:00",
+            },
+        },
+    }
+    (logs / "unified.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
+    profile = _cli_profile("grok-subscription-a", "grok", state)
+    snap_file = tmp_path / "snap.json"
+    # Deliberately wrong remaining so snapshot must not be used in legacy.
+    _write_snapshot_0640(snap_file, profile_id=profile.id, remaining=1)
+    snap = collect_profile_limits(
+        profile,
+        now=datetime(2026, 7, 16, tzinfo=UTC),
+        grok_limit_snapshot_file=snap_file,
+        grok_limit_source="legacy",
+    )
+    assert snap.ok
+    assert snap.weekly.remaining_percent == 60  # from log used 40%, not snapshot 1%
+
+
+def test_s1c_snapshot_required_happy_no_state_zero_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _grok_profile_no_state("grok-sub-a")
+    snap_file = tmp_path / "limits" / "grok.json"
+    _write_snapshot_0640(snap_file, profile_id="grok-sub-a", remaining=77, plan="Super")
+    _install_legacy_hooks_raise(monkeypatch)
+    snap = collect_profile_limits(
+        profile,
+        now=datetime(2026, 7, 16, 12, 0, tzinfo=UTC),
+        grok_limit_source="snapshot_required",
+        grok_limit_snapshot_file=snap_file,
+    )
+    assert snap.ok
+    assert snap.company == "xAI"
+    assert snap.plan_label == "Super"
+    assert snap.weekly.remaining_percent == 77
+    assert snap.weekly.available is True
+    assert snap.five_hour.available is False
+    assert snap.five_hour.detail == "no 5h data"
+    assert snap.detail == ""
+
+
+def test_s1c_snapshot_required_failures_fixed_codes_zero_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vuzol.providers.grok_limit_snapshot import (
+        CODE_SNAPSHOT_STALE,
+        CODE_SNAPSHOT_UNBOUND,
+        CODE_SNAPSHOT_UNREADABLE,
+    )
+    from vuzol.providers.subscription_limits import CODE_LIMITS_SOURCE_UNKNOWN
+
+    profile = _grok_profile_no_state("grok-sub-a")
+    _install_legacy_hooks_raise(monkeypatch)
+    now = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+
+    missing = collect_profile_limits(
+        profile,
+        now=now,
+        grok_limit_source="snapshot_required",
+        grok_limit_snapshot_file=None,
+    )
+    assert missing.ok is False
+    assert missing.detail == CODE_SNAPSHOT_UNREADABLE
+
+    absent = collect_profile_limits(
+        profile,
+        now=now,
+        grok_limit_source="snapshot_required",
+        grok_limit_snapshot_file=tmp_path / "nope.json",
+    )
+    assert absent.detail == CODE_SNAPSHOT_UNREADABLE
+
+    snap_file = tmp_path / "snap.json"
+    _write_snapshot_0640(
+        snap_file,
+        profile_id="other-id",
+        remaining=50,
+        generated_at=now,
+    )
+    unbound = collect_profile_limits(
+        profile,
+        now=now,
+        grok_limit_source="snapshot_required",
+        grok_limit_snapshot_file=snap_file,
+    )
+    assert unbound.detail == CODE_SNAPSHOT_UNBOUND
+
+    from datetime import timedelta
+
+    _write_snapshot_0640(
+        snap_file,
+        profile_id="grok-sub-a",
+        remaining=50,
+        generated_at=now - timedelta(hours=2),
+    )
+    stale = collect_profile_limits(
+        profile,
+        now=now,
+        grok_limit_source="snapshot_required",
+        grok_limit_snapshot_file=snap_file,
+        grok_limit_snapshot_max_age=timedelta(minutes=15),
+    )
+    assert stale.detail == CODE_SNAPSHOT_STALE
+
+    unknown = collect_profile_limits(
+        profile,
+        now=now,
+        grok_limit_source="not-a-mode",
+        grok_limit_snapshot_file=snap_file,
+    )
+    assert unknown.detail == CODE_LIMITS_SOURCE_UNKNOWN
+
+    def loader_boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("private path")
+
+    monkeypatch.setattr(
+        "vuzol.providers.subscription_limits.load_grok_limit_entry",
+        loader_boom,
+    )
+    defensive = collect_profile_limits(
+        profile,
+        now=now,
+        grok_limit_source="snapshot_required",
+        grok_limit_snapshot_file=snap_file,
+    )
+    assert defensive.detail == "limits_snapshot_invalid"
+
+
+def test_s1c_codex_unchanged_under_snapshot_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "codex"
+    state.mkdir()
+    (state / "auth.json").write_text(
+        json.dumps({"tokens": {"access_token": "tok", "account_id": "acc"}}),
+        encoding="utf-8",
+    )
+    profile = _cli_profile("codex-subscription-prod", "codex", state)
+
+    def fake_http(url: str, *, headers: dict[str, str]) -> dict[str, object]:
+        return {
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 10,
+                    "limit_window_seconds": 604_800,
+                    "reset_at": 1_800_000_000,
+                },
+                "secondary_window": {
+                    "used_percent": 25,
+                    "limit_window_seconds": 18_000,
+                    "reset_after_seconds": 100,
+                },
+            },
+        }
+
+    monkeypatch.setattr("vuzol.providers.subscription_limits._http_json", fake_http)
+    snap = collect_profile_limits(
+        profile,
+        now=datetime(2026, 7, 16, tzinfo=UTC),
+        grok_limit_source="snapshot_required",
+        grok_limit_snapshot_file=tmp_path / "unused.json",
+    )
+    assert snap.ok
+    assert snap.company == "OpenAI"
+    assert snap.five_hour.remaining_percent == 75
+
+
+def test_s1c_subscription_profiles_snapshot_allows_grok_without_state(
+    tmp_path: Path,
+) -> None:
+    from vuzol.providers.subscription_limits import subscription_profiles
+
+    grok = _grok_profile_no_state("grok-sub-a")
+    assert subscription_profiles((grok,), grok_limit_source="legacy") == ()
+    assert [
+        p.id for p in subscription_profiles((grok,), grok_limit_source="snapshot_required")
+    ] == ["grok-sub-a"]
+
+
+def test_s1c_collect_and_refresh_pass_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from vuzol.providers.subscription_limits import (
+        collect_subscription_limits,
+        refresh_and_store_subscription_limits,
+    )
+
+    profile = _grok_profile_no_state("grok-sub-a")
+    snap_file = tmp_path / "s.json"
+    # generated_at must be fresh relative to refresh()'s datetime.now()
+    _write_snapshot_0640(
+        snap_file,
+        profile_id="grok-sub-a",
+        remaining=55,
+        generated_at=datetime.now(UTC),
+    )
+    _install_legacy_hooks_raise(monkeypatch)
+
+    async def scenario() -> None:
+        snaps = await collect_subscription_limits(
+            (profile,),
+            now=datetime.now(UTC),
+            grok_limit_source="snapshot_required",
+            grok_limit_snapshot_file=snap_file,
+        )
+        assert len(snaps) == 1
+        assert snaps[0].weekly.remaining_percent == 55
+
+        persisted: list[object] = []
+
+        async def fake_persist(session: object, snapshots: object) -> None:
+            del session
+            persisted.append(snapshots)
+
+        monkeypatch.setattr(
+            "vuzol.providers.subscription_limits.persist_subscription_limits",
+            fake_persist,
+        )
+        out = await refresh_and_store_subscription_limits(
+            object(),  # type: ignore[arg-type]
+            (profile,),
+            grok_limit_source="snapshot_required",
+            grok_limit_snapshot_file=snap_file,
+        )
+        assert out[0].weekly.remaining_percent == 55
+        assert persisted
+
+    asyncio.run(scenario())

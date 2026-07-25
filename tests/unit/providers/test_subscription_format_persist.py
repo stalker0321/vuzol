@@ -113,6 +113,32 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("limits_snapshot_unreadable", "снимок лимитов недоступен"),
+        ("limits_snapshot_stale", "данные лимитов устарели"),
+        ("/home/private/auth.json?token=secret", "неизвестная ошибка"),
+    ],
+)
+def test_unavailable_detail_is_fixed_and_never_leaks(detail: str, expected: str) -> None:
+    snapshot = SubscriptionLimitSnapshot(
+        profile_id="grok-sub-a",
+        company="xAI",
+        plan_label="Super",
+        five_hour=LimitWindow(None, None, available=False),
+        weekly=LimitWindow(None, None, available=False),
+        observed_at=datetime(2026, 7, 16, tzinfo=UTC),
+        ok=False,
+        detail=detail,
+    )
+    rendered = "\n".join(format_subscription_limits_html((snapshot,), html_escape=telegram_html))
+    assert expected in rendered
+    assert "/home/private" not in rendered
+    assert "auth.json" not in rendered
+    assert "token=secret" not in rendered
+
+
 def test_parse_datetime_and_http_json_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -406,8 +432,9 @@ async def test_persist_and_load_subscription_limits() -> None:
     from vuzol.providers import subscription_limits as limits_mod
 
     async def fake_collect(
-        profiles: object, *, now: object = None
+        profiles: object, *, now: object = None, **kwargs: object
     ) -> tuple[SubscriptionLimitSnapshot, ...]:
+        del profiles, now, kwargs
         return (snap,)
 
     original = limits_mod.collect_subscription_limits

@@ -54,10 +54,12 @@ async def test_project_provisioner_composes_and_disposes(monkeypatch: MonkeyPatc
     runtime = runtime_configuration(settings)
     calls: dict[str, object] = {}
     handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
+    order: list[str] = []
 
     class Engine:
         async def dispose(self) -> None:
             calls["disposed"] = True
+            order.append("dispose")
 
     class BotContext:
         async def __aenter__(self) -> object:
@@ -70,13 +72,20 @@ async def test_project_provisioner_composes_and_disposes(monkeypatch: MonkeyPatc
 
     def bot_factory(token: str) -> BotContext:
         calls["token"] = token
+        order.append("bot")
         return bot_context
 
     service = object()
+
+    async def pass_head(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        return object()
+
     monkeypatch.setattr(provisioner_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
     monkeypatch.setattr(provisioner_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
     monkeypatch.setattr(provisioner_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(provisioner_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(provisioner_cli, "require_migration_head", pass_head)
     monkeypatch.setattr(provisioner_cli, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(provisioner_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
     monkeypatch.setattr(provisioner_cli, "Bot", bot_factory)
@@ -92,6 +101,7 @@ async def test_project_provisioner_composes_and_disposes(monkeypatch: MonkeyPatc
     )
 
     async def run_loop(actual: object, **kwargs: object) -> None:
+        order.append("run_provisioning_loop")
         calls["service"] = actual
         calls.update(kwargs)
         handler = handlers[signal.SIGTERM]
@@ -114,6 +124,68 @@ async def test_project_provisioner_composes_and_disposes(monkeypatch: MonkeyPatc
     assert stop_event.is_set()
     assert calls["disposed"] is True
     assert calls["level"] == "INFO"
+    assert order == [
+        "require_migration_head",
+        "bot",
+        "run_provisioning_loop",
+        "dispose",
+    ]
+
+
+@pytest.mark.anyio
+async def test_project_provisioner_fails_closed_before_loop_when_migration_head_refuses(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """S-2.2c: gate refusal disposes once; no Bot/factory/provision loop."""
+
+    from vuzol.storage.migration_preflight import MigrationHeadError
+
+    settings = Settings(environment="test")
+    order: list[str] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            order.append("dispose")
+
+    async def refuse(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        raise MigrationHeadError(
+            "migration_head_behind",
+            "database schema is behind this release",
+        )
+
+    def boom_bot(*_args: object, **_kwargs: object) -> object:
+        order.append("bot")
+        raise AssertionError("Bot must not start after migration head failure")
+
+    def boom_factory(*_args: object, **_kwargs: object) -> object:
+        order.append("create_session_factory")
+        raise AssertionError("session factory must not run after migration head failure")
+
+    async def never_loop(*_args: object, **_kwargs: object) -> None:
+        order.append("run_provisioning_loop")
+        raise AssertionError("provision loop must not start after migration head failure")
+
+    monkeypatch.setattr(
+        provisioner_cli,
+        "get_runtime_configuration",
+        lambda **_kwargs: runtime_configuration(settings),
+    )
+    monkeypatch.setattr(provisioner_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(provisioner_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(provisioner_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(provisioner_cli, "require_migration_head", refuse)
+    monkeypatch.setattr(provisioner_cli, "create_session_factory", boom_factory)
+    monkeypatch.setattr(provisioner_cli, "Bot", boom_bot)
+    monkeypatch.setattr(provisioner_cli, "run_provisioning_loop", never_loop)
+    monkeypatch.setattr(provisioner_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
+    monkeypatch.setattr(signal, "signal", lambda *_args: None)
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        await provisioner_cli.run()
+
+    assert excinfo.value.code == "migration_head_behind"
+    assert order == ["require_migration_head", "dispose"]
 
 
 def test_worker_main_composes_runtime_and_handles_stop(

@@ -96,6 +96,7 @@ async def test_typed_git_creates_isolated_worktree_and_collects_diff(tmp_path: P
     assert "new-untracked.txt" in names
     assert "to-delete.txt" in names
     assert "renamed.txt" in names
+    assert inspection.added_files == ("new-untracked.txt",)
     assert b"changed" in inspection.diff
     assert b"new content" in inspection.diff or b"new-untracked.txt" in inspection.diff
     assert b"deleted file mode" in inspection.diff or b"to-delete.txt" in inspection.diff
@@ -117,6 +118,7 @@ async def test_typed_git_creates_isolated_worktree_and_collects_diff(tmp_path: P
     assert _git(worktree, "rev-parse", "HEAD").strip() != new_primary
     committed = await git.inspect(worktree, new_primary)
     assert set(committed.changed_files) == names
+    assert committed.added_files == ("new-untracked.txt",)
     assert b"changed" in committed.diff
     await git.remove_worktree(repository, worktree)
 

@@ -71,6 +71,7 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
         task_id = uuid.uuid4()
         run_id = uuid.uuid4()
         source_step_id = uuid.uuid4()
+        review_step_id = uuid.uuid4()
         approval_step_id = uuid.uuid4()
         git = LocalGit()
         worktree_path = tmp_path / "result-worktree"
@@ -144,8 +145,8 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             approval_step = Step(
                 id=approval_step_id,
                 run_id=run_id,
-                ordinal=3,
-                dependency_metadata={"predecessor_ordinals": [2]},
+                ordinal=4,
+                dependency_metadata={"predecessor_ordinals": [3]},
                 step_type="approval",
                 queue_class=QueueClass.PRIVILEGED,
                 status=StepStatus.WAITING_APPROVAL,
@@ -155,6 +156,41 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
                 idempotency_class=IdempotencyClass.IDEMPOTENT,
                 max_attempts=1,
                 timeout_seconds=120,
+            )
+            review_step = Step(
+                id=review_step_id,
+                run_id=run_id,
+                ordinal=3,
+                dependency_metadata={"predecessor_ordinals": [2]},
+                step_type="review",
+                queue_class=QueueClass.HEAVY,
+                status=StepStatus.COMPLETED,
+                required_capabilities=[],
+                payload={},
+                result={
+                    "structured_output": {
+                        "schema_version": "result-review.v1",
+                        "verdict": "pass_with_warnings",
+                        "review_kind": "mechanical",
+                        "risk": "low",
+                        "base_commit": base,
+                        "result_commit": result_commit,
+                        "diff_hash": inspection.diff_hash,
+                        "findings": [
+                            {
+                                "severity": "warning",
+                                "classification": "unexpected_executable_file",
+                                "summary": "New executable path was not explicitly requested.",
+                                "path": "<verify.sh>",
+                                "line": None,
+                            }
+                        ],
+                    }
+                },
+                retry_class=RetryClass.NEVER,
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                max_attempts=1,
+                timeout_seconds=60,
             )
             worktree = Worktree(
                 task_id=task_id,
@@ -176,13 +212,13 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             await session.flush()
             session.add(run)
             await session.flush()
-            session.add_all((source_step, approval_step, worktree))
+            session.add_all((source_step, review_step, approval_step, worktree))
             await session.flush()
             approval = await ensure_result_approval(
                 session,
                 run=run,
                 approval_step=approval_step,
-                steps_by_ordinal={2: source_step, 3: approval_step},
+                steps_by_ordinal={2: source_step, 3: review_step, 4: approval_step},
             )
             assert approval is not None
             assert approval_step.external_idempotency_key == (
@@ -195,6 +231,8 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             assert "Agent checks (untrusted)" in card.html
             assert "make test — не запускалось" in card.html
             assert "Vuzol checks (trusted)" in card.html
+            assert "Review warnings" in card.html
+            assert "&lt;verify.sh&gt;" in card.html
             assert "tests — passed (1.2s)" in card.html
             assert result_commit not in card.html
             assert "diff" not in card.html.lower()
@@ -205,6 +243,8 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             assert "Added the requested validator &lt;safely&gt;." in approval_card.html
             assert "Проверки агента (не доверенные)" in approval_card.html
             assert "Проверки Vuzol (доверенные)" in approval_card.html
+            assert "Предупреждения ревью" in approval_card.html
+            assert "&lt;verify.sh&gt;" in approval_card.html
             assert "tests — 1.2s" in approval_card.html
             assert approval_card.buttons == ("approve", "redo", "reject")
 

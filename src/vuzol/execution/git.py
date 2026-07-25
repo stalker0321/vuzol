@@ -132,12 +132,31 @@ class LocalGit:
             "--no-renames",
             comparison,
         )
+        added_names = await self._run(
+            worktree,
+            "diff",
+            "--name-only",
+            "--diff-filter=A",
+            "-z",
+            "--no-ext-diff",
+            "--find-renames",
+            comparison,
+        )
         untracked = await self._run(worktree, "ls-files", "--others", "--exclude-standard", "-z")
         changed = tuple(
             sorted(
                 {
                     item.decode("utf-8", "surrogateescape")
                     for item in (*names.split(b"\0"), *untracked.split(b"\0"))
+                    if item
+                }
+            )
+        )
+        added = tuple(
+            sorted(
+                {
+                    item.decode("utf-8", "surrogateescape")
+                    for item in (*added_names.split(b"\0"), *untracked.split(b"\0"))
                     if item
                 }
             )
@@ -170,7 +189,13 @@ class LocalGit:
                 path,
             )
             diff += addition
-        return GitInspection(head=head, branch=branch, changed_files=changed, diff=diff)
+        return GitInspection(
+            head=head,
+            branch=branch,
+            changed_files=changed,
+            diff=diff,
+            added_files=added,
+        )
 
     async def stage_paths(self, worktree: Path, paths: tuple[str, ...]) -> None:
         if not paths:

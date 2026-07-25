@@ -18,11 +18,13 @@ from vuzol.telegram.projections import (
     _completion_report,
     _concise_completion_report,
     _envelope_agent_checks,
+    _envelope_review_warnings,
     _failure_details,
     _format_count,
     _format_duration,
     _history_work_seconds,
     _one_line_summary,
+    _review_warning_html,
     _task_outcome_label,
     _task_worker_label,
     build_task_history_report,
@@ -80,6 +82,27 @@ def test_agent_checks_are_bounded_to_envelope_claims_and_html_escaped() -> None:
     assert "&lt;make test&gt;" in rendered
     assert "&lt;dependency missing&gt;" in rendered
     assert "<make test>" not in rendered
+
+
+def test_review_warning_is_loaded_from_envelope_and_html_escaped() -> None:
+    warnings = _envelope_review_warnings(
+        {
+            "review_evidence": {
+                "warnings": [
+                    {
+                        "classification": "unexpected_executable_file",
+                        "summary": "<unexpected script>",
+                        "path": "<verify.sh>",
+                        "line": 3,
+                    }
+                ]
+            }
+        }
+    )
+    assert len(warnings) == 1
+    rendered = _review_warning_html(warnings[0])
+    assert "&lt;verify.sh&gt;:3" in rendered
+    assert "&lt;unexpected script&gt;" in rendered
 
 
 def test_completion_report_keeps_facts_and_drops_handoff_sections() -> None:

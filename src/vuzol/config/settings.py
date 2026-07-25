@@ -187,6 +187,48 @@ class ExecutionSettings(BaseModel):
         return self
 
 
+class BackupSettings(BaseModel):
+    """Minimal backup foundation settings (capture not implemented; default off)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    staging_root: Path | None = None
+    drill_root: Path | None = None
+    keep_local_runs: int = Field(default=3, ge=1, le=100)
+    keep_offhost_days: int = Field(default=28, ge=1, le=3_650)
+    rpo_seconds_target: int = Field(default=86_400, ge=60, le=604_800)
+    rto_seconds_target: int = Field(default=7_200, ge=60, le=86_400)
+    drill_database_name_suffix: str = Field(default="_restore", min_length=1, max_length=32)
+
+    @field_validator("staging_root", "drill_root")
+    @classmethod
+    def require_absolute_optional_root(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        if not value.is_absolute():
+            raise ValueError("backup roots must be absolute when configured")
+        return value
+
+    @field_validator("drill_database_name_suffix")
+    @classmethod
+    def normalize_suffix(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("drill database name suffix must not be empty")
+        if any(character.isspace() for character in cleaned):
+            raise ValueError("drill database name suffix must not contain whitespace")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_enabled_requires_capture(self) -> "BackupSettings":
+        if self.enabled:
+            raise ValueError(
+                "backup.enabled cannot be true until capture/encrypt slices are implemented"
+            )
+        return self
+
+
 class Settings(BaseSettings):
     """Process settings loaded at the composition boundary."""
 
@@ -224,6 +266,7 @@ class Settings(BaseSettings):
     execution: ExecutionSettings = ExecutionSettings()
     limits: HardLimits = HardLimits()
     redaction_patterns: tuple[str, ...] = ()
+    backup: BackupSettings = Field(default_factory=BackupSettings)
 
     @field_validator(
         "repository_root",

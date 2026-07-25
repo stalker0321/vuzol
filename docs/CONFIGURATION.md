@@ -79,6 +79,17 @@ or blocked worktree retention cannot be shorter than completed-worktree retentio
 not installed or enabled production units; enabling scheduled apply requires a separate operator
 decision after an isolated dry-run/apply drill.
 
+## Backup foundation
+
+`VUZOL_BACKUP__ENABLED` is fail-closed and cannot be set to true while only the B1 foundation is
+present. B1 provides typed manifests plus path and isolated-DSN guards; it does not capture,
+encrypt, publish, restore, schedule, or contact an off-host destination.
+
+Optional staging and drill roots must be absolute. Retention counts and RPO/RTO targets are bounded,
+and drill database names require the configured suffix (default `_restore`). Later capture and
+restore slices must re-run the guards against live production roots; configuration alone never
+authorizes a backup operation.
+
 ## Workflow runtime
 
 `VUZOL_WORKFLOW__*` settings bound polling, lease and heartbeat timing, retry backoff, recovery batch

@@ -36,6 +36,7 @@ from vuzol.config.revision import RunConfigurationSnapshot, SnapshotCompatibilit
 from vuzol.config.runtime import RuntimeConfiguration, get_runtime_configuration
 from vuzol.config.secrets import ScopedSecretResolver, SecretResolutionError
 from vuzol.config.settings import (
+    BackupSettings,
     ConcurrencyLimits,
     DatabaseSettings,
     ExecutionSettings,
@@ -51,6 +52,7 @@ from vuzol.config.settings import (
 __all__ = [
     "AgentEditMechanism",
     "AgentRuntimeContract",
+    "BackupSettings",
     "BudgetMode",
     "Capability",
     "CommandDefinition",

@@ -353,15 +353,30 @@ async def test_applier_chain_prioritizes_controls() -> None:
     worker.process_one.assert_awaited_once()
 
 
-@pytest.mark.anyio
-async def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
+def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
+    """One owned loop: gate → run_polling(close_loop=False) → dispose."""
+
     settings = Settings(environment="test")
     application = MagicMock()
     callbacks: dict[str, object] = {}
+    polling_kwargs: dict[str, object] = {}
     ingress = MagicMock()
     ingress.accept_message = AsyncMock()
     dogfood = MagicMock()
     dogfood.accept_message = AsyncMock(return_value=None)
+    order: list[str] = []
+    loop_ids: list[int] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            order.append("dispose")
+            loop_ids.append(id(asyncio.get_running_loop()))
+
+    async def pass_head(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        loop_ids.append(id(asyncio.get_running_loop()))
+        return object()
+
     monkeypatch.setattr(
         telegram_cli,
         "get_runtime_configuration",
@@ -369,7 +384,8 @@ async def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> 
     )
     monkeypatch.setattr(telegram_cli, "configure_logging", lambda **_kwargs: None)
     monkeypatch.setattr(telegram_cli, "resolve_database_dsn", lambda _settings: object())
-    monkeypatch.setattr(telegram_cli, "create_engine", lambda *_args: object())
+    monkeypatch.setattr(telegram_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(telegram_cli, "require_migration_head", pass_head)
     monkeypatch.setattr(telegram_cli, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(telegram_cli, "TelegramIngressService", lambda *_args: ingress)
     monkeypatch.setattr(telegram_cli, "TelegramDogfoodIngressService", lambda *_args: dogfood)
@@ -377,25 +393,83 @@ async def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> 
     monkeypatch.setattr(telegram_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
 
     def build(_token: str, **kwargs: object) -> object:
+        order.append("build_application")
         callbacks.update(kwargs)
         return application
 
+    def run_polling(*_args: object, **_kwargs: object) -> None:
+        order.append("run_polling")
+        polling_kwargs.update(_kwargs)
+
+    application.run_polling = run_polling
     monkeypatch.setattr(telegram_cli, "build_long_polling_application", build)
     telegram_cli.main()
-    application.run_polling.assert_called_once()
+    assert order == ["require_migration_head", "build_application", "run_polling", "dispose"]
+    assert polling_kwargs.get("close_loop") is False
+    # Gate and dispose share the same owned loop identity.
+    assert len(loop_ids) == 2
+    assert loop_ids[0] == loop_ids[1]
     assert callbacks["bot_id"] == "main"
     on_message = callbacks["on_message"]
     assert callable(on_message)
     update = MagicMock()
-    await on_message(update)
+    asyncio.run(on_message(update))
     dogfood.accept_message.assert_awaited_once_with(update)
     ingress.accept_message.assert_awaited_once_with(update)
 
     dogfood.accept_message.reset_mock(return_value=True)
     dogfood.accept_message.return_value = object()
     ingress.accept_message.reset_mock()
-    await on_message(update)
+    asyncio.run(on_message(update))
     ingress.accept_message.assert_not_awaited()
+
+
+def test_telegram_fails_closed_before_polling_when_migration_head_refuses(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """S-2.2a: MigrationHeadError before run_polling; engine disposed once on same loop."""
+
+    from vuzol.storage.migration_preflight import MigrationHeadError
+
+    settings = Settings(environment="test")
+    order: list[str] = []
+    loop_ids: list[int] = []
+    application = MagicMock()
+
+    class Engine:
+        async def dispose(self) -> None:
+            order.append("dispose")
+            loop_ids.append(id(asyncio.get_running_loop()))
+
+    async def refuse(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        loop_ids.append(id(asyncio.get_running_loop()))
+        raise MigrationHeadError("migration_head_behind", "database schema is behind this release")
+
+    def never_build(*_args: object, **_kwargs: object) -> object:
+        order.append("build_application")
+        raise AssertionError("application must not be built after migration head failure")
+
+    monkeypatch.setattr(
+        telegram_cli,
+        "get_runtime_configuration",
+        lambda **_kwargs: runtime_configuration(settings),
+    )
+    monkeypatch.setattr(telegram_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(telegram_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(telegram_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(telegram_cli, "require_migration_head", refuse)
+    monkeypatch.setattr(telegram_cli, "create_session_factory", never_build)
+    monkeypatch.setattr(telegram_cli, "build_long_polling_application", never_build)
+    monkeypatch.setattr(telegram_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        telegram_cli.main()
+
+    assert excinfo.value.code == "migration_head_behind"
+    assert order == ["require_migration_head", "dispose"]
+    assert loop_ids[0] == loop_ids[1]
+    application.run_polling.assert_not_called()
 
 
 @pytest.mark.anyio
@@ -404,6 +478,7 @@ async def test_telegram_delivery_composes_and_disposes(monkeypatch: MonkeyPatch)
     engine = MagicMock()
     engine.dispose = AsyncMock()
     bot = MagicMock()
+    order: list[str] = []
 
     class BotContext:
         async def __aenter__(self) -> object:
@@ -411,6 +486,10 @@ async def test_telegram_delivery_composes_and_disposes(monkeypatch: MonkeyPatch)
 
         async def __aexit__(self, *_args: object) -> None:
             return None
+
+    async def pass_head(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        return object()
 
     monkeypatch.setattr(
         delivery_cli,
@@ -420,14 +499,65 @@ async def test_telegram_delivery_composes_and_disposes(monkeypatch: MonkeyPatch)
     monkeypatch.setattr(delivery_cli, "configure_logging", lambda **_kwargs: None)
     monkeypatch.setattr(delivery_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(delivery_cli, "create_engine", lambda *_args: engine)
+    monkeypatch.setattr(delivery_cli, "require_migration_head", pass_head)
     monkeypatch.setattr(delivery_cli, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(delivery_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
     monkeypatch.setattr(delivery_cli, "Bot", lambda _token: BotContext())
     monkeypatch.setattr(delivery_cli, "TelegramDeliveryService", MagicMock())
     loop = AsyncMock()
-    monkeypatch.setattr(delivery_cli, "run_delivery_loop", loop)
+
+    async def run_loop(*_args: object, **_kwargs: object) -> None:
+        order.append("run_delivery_loop")
+        await loop(*_args, **_kwargs)
+
+    monkeypatch.setattr(delivery_cli, "run_delivery_loop", run_loop)
     monkeypatch.setattr(signal, "signal", lambda *_args: None)
 
     await delivery_cli.run()
+    assert order == ["require_migration_head", "run_delivery_loop"]
     loop.assert_awaited_once()
     engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_telegram_delivery_fails_closed_before_loop_when_migration_head_refuses(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from vuzol.storage.migration_preflight import MigrationHeadError
+
+    settings = Settings(environment="test")
+    order: list[str] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            order.append("dispose")
+
+    async def refuse(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        raise MigrationHeadError(
+            "migration_head_mismatch",
+            "database revision set does not match this code tree heads",
+        )
+
+    async def never_loop(*_args: object, **_kwargs: object) -> None:
+        order.append("run_delivery_loop")
+        raise AssertionError("delivery loop must not start after migration head failure")
+
+    monkeypatch.setattr(
+        delivery_cli,
+        "get_runtime_configuration",
+        lambda **_kwargs: runtime_configuration(settings),
+    )
+    monkeypatch.setattr(delivery_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(delivery_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(delivery_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(delivery_cli, "require_migration_head", refuse)
+    monkeypatch.setattr(delivery_cli, "run_delivery_loop", never_loop)
+    monkeypatch.setattr(delivery_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
+    monkeypatch.setattr(signal, "signal", lambda *_args: None)
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        await delivery_cli.run()
+
+    assert excinfo.value.code == "migration_head_mismatch"
+    assert order == ["require_migration_head", "dispose"]

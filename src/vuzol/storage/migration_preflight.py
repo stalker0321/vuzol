@@ -167,9 +167,21 @@ def load_known_revisions(script_location: Path) -> frozenset[str]:
 def make_strict_ancestor_predicate(script_location: Path) -> _IsAncestor:
     """Build ``is_strict_ancestor(rev, head)`` using the local script graph only."""
 
-    from alembic.script import ScriptDirectory
+    try:
+        from alembic.script import ScriptDirectory
+    except ImportError as error:
+        raise MigrationHeadError(
+            CODE_SCRIPTS_UNAVAILABLE,
+            "alembic package is unavailable",
+        ) from error
 
-    scripts = ScriptDirectory(str(script_location))
+    try:
+        scripts = ScriptDirectory(str(script_location))
+    except Exception as error:
+        raise MigrationHeadError(
+            CODE_SCRIPTS_UNAVAILABLE,
+            "alembic revision graph could not be loaded",
+        ) from error
 
     def is_strict_ancestor(revision: str, head: str) -> bool:
         if revision == head:
@@ -240,17 +252,22 @@ def is_undefined_table_error(error: BaseException) -> bool:
 
     current: BaseException | None = error
     seen: set[int] = set()
+    saw_sqlstate = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         for attr in ("sqlstate", "pgcode"):
             value = getattr(current, attr, None)
-            if value is not None and str(value) == _PG_UNDEFINED_TABLE:
-                return True
+            if value is not None:
+                saw_sqlstate = True
+                if str(value) == _PG_UNDEFINED_TABLE:
+                    return True
         diag = getattr(current, "diag", None)
         if diag is not None:
             sqlstate = getattr(diag, "sqlstate", None)
-            if sqlstate is not None and str(sqlstate) == _PG_UNDEFINED_TABLE:
-                return True
+            if sqlstate is not None:
+                saw_sqlstate = True
+                if str(sqlstate) == _PG_UNDEFINED_TABLE:
+                    return True
         current = getattr(current, "orig", None)
         if current is None:
             # Only walk __cause__ after orig chain ends.
@@ -261,21 +278,26 @@ def is_undefined_table_error(error: BaseException) -> bool:
         seen.add(id(current))
         for attr in ("sqlstate", "pgcode"):
             value = getattr(current, attr, None)
-            if value is not None and str(value) == _PG_UNDEFINED_TABLE:
-                return True
+            if value is not None:
+                saw_sqlstate = True
+                if str(value) == _PG_UNDEFINED_TABLE:
+                    return True
         diag = getattr(current, "diag", None)
         if diag is not None:
             sqlstate = getattr(diag, "sqlstate", None)
-            if sqlstate is not None and str(sqlstate) == _PG_UNDEFINED_TABLE:
-                return True
+            if sqlstate is not None:
+                saw_sqlstate = True
+                if str(sqlstate) == _PG_UNDEFINED_TABLE:
+                    return True
         current = getattr(current, "orig", None) or getattr(current, "__cause__", None)
 
+    # A driver-provided SQLSTATE is authoritative. Message matching is only for
+    # drivers/wrappers that expose no structured state anywhere in the chain.
+    if saw_sqlstate:
+        return False
     message = str(getattr(error, "orig", error)).lower()
-    return (
-        "alembic_version" in message
-        or "does not exist" in message
-        or "undefinedtable" in message
-        or "undefined table" in message
+    return "alembic_version" in message and (
+        "does not exist" in message or "undefinedtable" in message or "undefined table" in message
     )
 
 
@@ -327,7 +349,9 @@ async def verify_migration_head(
     """Verify DB revision set equals script heads; never mutates schema.
 
     Dependency injection (``expected_heads``, ``fetch_observed``, graph helpers)
-    allows unit tests without a database.
+    allows unit tests without a database. ``timeout_seconds`` bounds awaitable
+    database/fetch work; trusted local Alembic graph discovery is synchronous and
+    expected to remain small.
 
     **Production path:** pass ``engine`` only (optional explicit
     ``alembic_script_location``). The helper always resolves the script

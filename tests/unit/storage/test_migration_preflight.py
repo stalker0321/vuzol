@@ -24,6 +24,7 @@ from vuzol.storage.migration_preflight import (
     classify_migration_head,
     fetch_observed_revisions,
     is_undefined_table_error,
+    make_strict_ancestor_predicate,
     require_migration_head,
     resolve_alembic_script_location,
     verify_migration_head,
@@ -276,6 +277,28 @@ def test_c2_non_undefined_programming_error_not_missing_table() -> None:
     assert is_undefined_table_error(error) is False
 
 
+def test_c2_explicit_non_42p01_overrides_missing_table_words() -> None:
+    error = ProgrammingError(
+        "stmt",
+        {},
+        _OrigSqlState(
+            "column version_num does not exist in alembic_version",
+            sqlstate="42703",
+            pgcode="42703",
+        ),
+    )
+    assert is_undefined_table_error(error) is False
+
+
+def test_c2_unrelated_does_not_exist_message_is_not_missing_table() -> None:
+    error = ProgrammingError(
+        "stmt",
+        {},
+        Exception('database "unrelated" does not exist'),
+    )
+    assert is_undefined_table_error(error) is False
+
+
 def test_c2_string_fallback_still_works() -> None:
     error = ProgrammingError(
         "stmt",
@@ -480,3 +503,19 @@ def test_resolve_explicit_missing_directory(tmp_path: Path) -> None:
     with pytest.raises(MigrationHeadError) as excinfo:
         resolve_alembic_script_location(tmp_path / "nope")
     assert excinfo.value.code == CODE_SCRIPTS_UNAVAILABLE
+
+
+def test_ancestor_predicate_wraps_graph_constructor_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def broken_scripts(_location: str) -> object:
+        raise ValueError("malformed graph with sensitive-looking diagnostics")
+
+    monkeypatch.setattr("alembic.script.ScriptDirectory", broken_scripts)
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        make_strict_ancestor_predicate(tmp_path)
+
+    assert excinfo.value.code == CODE_SCRIPTS_UNAVAILABLE
+    assert str(excinfo.value) == "alembic revision graph could not be loaded"

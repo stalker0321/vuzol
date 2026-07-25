@@ -37,6 +37,7 @@ from vuzol.providers.health import synchronize_profiles
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
+from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
 from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.worker import RoutedWorkflowWorker, WorkflowWorker
@@ -103,9 +104,11 @@ async def run() -> None:
         )
     )
     engine = create_engine(settings, resolve_database_dsn(settings))
-    factory = create_session_factory(engine)
-    owner = f"{socket.gethostname()}:{os.getpid()}:executor"
     try:
+        # S-2.1: fail closed before profile sync, proxy reconcile, ready, or claim loops.
+        await require_migration_head(engine)
+        factory = create_session_factory(engine)
+        owner = f"{socket.gethostname()}:{os.getpid()}:executor"
         async with factory.begin() as session:
             await synchronize_profiles(
                 session,

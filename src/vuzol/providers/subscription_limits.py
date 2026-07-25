@@ -20,13 +20,23 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal
 from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig
+from vuzol.providers.grok_limit_snapshot import (
+    CODE_BINDING_MISMATCH,
+    CODE_SNAPSHOT_INVALID,
+    CODE_SNAPSHOT_STALE,
+    CODE_SNAPSHOT_UNBOUND,
+    CODE_SNAPSHOT_UNREADABLE,
+    DEFAULT_MAX_AGE,
+    GrokLimitEntry,
+    load_grok_limit_entry,
+)
 from vuzol.storage.models import SubscriptionLimitSnapshotRow
 
 # Outbox destination claimed by the executor (provider-state ACL for auth/logs).
@@ -40,6 +50,25 @@ GROK_BILLING_URLS = (
 _FIVE_HOUR_SECONDS = 5 * 3600
 _WEEKLY_SECONDS = 7 * 24 * 3600
 _FETCH_TIMEOUT_SECONDS = 4.0
+
+# API-level Grok source mode (settings wiring is a later slice; default preserves legacy).
+GrokLimitSource = Literal["legacy", "snapshot_required"]
+GROK_LIMIT_SOURCE_LEGACY: Final = "legacy"
+GROK_LIMIT_SOURCE_SNAPSHOT_REQUIRED: Final = "snapshot_required"
+CODE_LIMITS_SOURCE_UNKNOWN: Final = "limits_source_unknown"
+_SAFE_UNAVAILABLE_DETAILS: Final = {
+    "state_directory missing": "каталог профиля недоступен",
+    "auth.json unreadable": "авторизация профиля недоступна",
+    "usage endpoint failed": "сервис лимитов не ответил",
+    "billing unavailable": "данные лимитов недоступны",
+    "billing shape unknown": "формат данных лимитов не распознан",
+    CODE_SNAPSHOT_UNREADABLE: "снимок лимитов недоступен",
+    CODE_SNAPSHOT_INVALID: "снимок лимитов повреждён",
+    CODE_SNAPSHOT_STALE: "данные лимитов устарели",
+    CODE_SNAPSHOT_UNBOUND: "профиль отсутствует в снимке лимитов",
+    CODE_BINDING_MISMATCH: "привязка профиля не совпадает",
+    CODE_LIMITS_SOURCE_UNKNOWN: "источник лимитов настроен неверно",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,29 +106,53 @@ class SubscriptionLimitSnapshot:
 
 def subscription_profiles(
     profiles: Iterable[ProviderProfileConfig],
+    *,
+    grok_limit_source: str = GROK_LIMIT_SOURCE_LEGACY,
 ) -> tuple[ProviderProfileConfig, ...]:
-    """Enabled CLI subscription identities that own isolated state directories."""
+    """Enabled CLI subscription identities for limit collection.
 
-    return tuple(
-        profile
-        for profile in profiles
-        if profile.enabled
-        and profile.launch_mode is LaunchMode.CLI
-        and profile.provider in {"codex", "grok"}
-        and profile.state_directory is not None
-    )
+    Legacy (default) requires ``state_directory`` for Codex and Grok.
+    ``snapshot_required`` still requires ``state_directory`` for Codex, but Grok
+    profiles may omit it (snapshot lookup is by ``profile.id`` only).
+    """
+
+    selected: list[ProviderProfileConfig] = []
+    for profile in profiles:
+        if not profile.enabled or profile.launch_mode is not LaunchMode.CLI:
+            continue
+        if profile.provider == "codex":
+            if profile.state_directory is None:
+                continue
+            selected.append(profile)
+        elif profile.provider == "grok":
+            if grok_limit_source == GROK_LIMIT_SOURCE_LEGACY and profile.state_directory is None:
+                continue
+            selected.append(profile)
+    return tuple(selected)
 
 
 async def collect_subscription_limits(
     profiles: Sequence[ProviderProfileConfig],
     *,
     now: datetime | None = None,
+    grok_limit_source: str = GROK_LIMIT_SOURCE_LEGACY,
+    grok_limit_snapshot_file: Path | None = None,
+    grok_limit_snapshot_max_age: timedelta | None = None,
 ) -> tuple[SubscriptionLimitSnapshot, ...]:
     """Fetch limit snapshots for every configured subscription profile."""
 
     observed = now or datetime.now(UTC)
-    selected = subscription_profiles(profiles)
-    return tuple(collect_profile_limits(profile, now=observed) for profile in selected)
+    selected = subscription_profiles(profiles, grok_limit_source=grok_limit_source)
+    return tuple(
+        collect_profile_limits(
+            profile,
+            now=observed,
+            grok_limit_source=grok_limit_source,
+            grok_limit_snapshot_file=grok_limit_snapshot_file,
+            grok_limit_snapshot_max_age=grok_limit_snapshot_max_age,
+        )
+        for profile in selected
+    )
 
 
 async def persist_subscription_limits(
@@ -192,28 +245,135 @@ async def load_subscription_limits(
 async def refresh_and_store_subscription_limits(
     session: AsyncSession,
     profiles: Sequence[ProviderProfileConfig],
+    *,
+    grok_limit_source: str = GROK_LIMIT_SOURCE_LEGACY,
+    grok_limit_snapshot_file: Path | None = None,
+    grok_limit_snapshot_max_age: timedelta | None = None,
 ) -> tuple[SubscriptionLimitSnapshot, ...]:
-    """Collect host-visible limits and persist them for Telegram delivery."""
+    """Collect limits (legacy host and/or Grok snapshot) and persist for delivery."""
 
-    snapshots = await collect_subscription_limits(profiles)
+    snapshots = await collect_subscription_limits(
+        profiles,
+        grok_limit_source=grok_limit_source,
+        grok_limit_snapshot_file=grok_limit_snapshot_file,
+        grok_limit_snapshot_max_age=grok_limit_snapshot_max_age,
+    )
     await persist_subscription_limits(session, snapshots)
     return snapshots
 
 
 def collect_profile_limits(
-    profile: ProviderProfileConfig, *, now: datetime | None = None
+    profile: ProviderProfileConfig,
+    *,
+    now: datetime | None = None,
+    grok_limit_source: str = GROK_LIMIT_SOURCE_LEGACY,
+    grok_limit_snapshot_file: Path | None = None,
+    grok_limit_snapshot_max_age: timedelta | None = None,
 ) -> SubscriptionLimitSnapshot:
+    """Collect one profile's limits.
+
+    ``grok_limit_source`` defaults to ``legacy`` (current in-process Grok path).
+    ``snapshot_required`` uses the S1a file snapshot by ``profile.id`` only and
+    never opens auth/logs or calls Grok billing HTTP. Codex always uses legacy
+    host collection and ignores Grok source options.
+    """
+
     observed = now or datetime.now(UTC)
-    if profile.state_directory is None:
-        return _unavailable(profile, observed, "state_directory missing")
     try:
         if profile.provider == "codex":
+            if profile.state_directory is None:
+                return _unavailable(profile, observed, "state_directory missing")
             return _collect_codex(profile, observed)
         if profile.provider == "grok":
-            return _collect_grok(profile, observed)
+            return _collect_grok_with_source(
+                profile,
+                observed,
+                grok_limit_source=grok_limit_source,
+                grok_limit_snapshot_file=grok_limit_snapshot_file,
+                grok_limit_snapshot_max_age=grok_limit_snapshot_max_age,
+            )
     except Exception as error:  # pragma: no cover - defensive boundary
         return _unavailable(profile, observed, type(error).__name__)
     return _unavailable(profile, observed, f"unsupported provider {profile.provider}")
+
+
+def _collect_grok_with_source(
+    profile: ProviderProfileConfig,
+    observed: datetime,
+    *,
+    grok_limit_source: str,
+    grok_limit_snapshot_file: Path | None,
+    grok_limit_snapshot_max_age: timedelta | None,
+) -> SubscriptionLimitSnapshot:
+    if grok_limit_source == GROK_LIMIT_SOURCE_LEGACY:
+        # Byte-compatible with pre-S1c: ignore snapshot options entirely.
+        if profile.state_directory is None:
+            return _unavailable(profile, observed, "state_directory missing")
+        return _collect_grok(profile, observed)
+    if grok_limit_source == GROK_LIMIT_SOURCE_SNAPSHOT_REQUIRED:
+        return _collect_grok_from_snapshot(
+            profile,
+            observed,
+            snapshot_file=grok_limit_snapshot_file,
+            max_age=grok_limit_snapshot_max_age,
+        )
+    return _unavailable(profile, observed, CODE_LIMITS_SOURCE_UNKNOWN)
+
+
+def _collect_grok_from_snapshot(
+    profile: ProviderProfileConfig,
+    observed: datetime,
+    *,
+    snapshot_file: Path | None,
+    max_age: timedelta | None,
+) -> SubscriptionLimitSnapshot:
+    """Grok limits from S1a snapshot only — zero host auth/log/HTTP/JWT access."""
+
+    if snapshot_file is None:
+        return _unavailable(profile, observed, CODE_SNAPSHOT_UNREADABLE)
+    age = DEFAULT_MAX_AGE if max_age is None else max_age
+    try:
+        result = load_grok_limit_entry(
+            snapshot_file,
+            profile.id,
+            now=observed,
+            max_age=age,
+        )
+    except Exception:  # pragma: no cover - defensive fixed-code boundary
+        return _unavailable(profile, observed, CODE_SNAPSHOT_INVALID)
+    if not result.ok or result.entry is None:
+        detail = result.code or CODE_SNAPSHOT_INVALID
+        return _unavailable(profile, observed, detail)
+    return _snapshot_entry_to_subscription(profile, result.entry)
+
+
+def _snapshot_entry_to_subscription(
+    profile: ProviderProfileConfig,
+    entry: GrokLimitEntry,
+) -> SubscriptionLimitSnapshot:
+    company, _default_plan = _company_and_default_plan("grok")
+    five = LimitWindow(
+        remaining_percent=None,
+        reset_at=None,
+        available=False,
+        detail="no 5h data",
+    )
+    weekly = LimitWindow(
+        remaining_percent=entry.remaining_percent,
+        reset_at=entry.reset_at,
+        window_seconds=_WEEKLY_SECONDS,
+        available=True,
+    )
+    return SubscriptionLimitSnapshot(
+        profile_id=profile.id,
+        company=company,
+        plan_label=_human_plan("grok", entry.plan_label),
+        five_hour=five,
+        weekly=weekly,
+        observed_at=entry.observed_at,
+        ok=True,
+        detail="",
+    )
 
 
 _BAR_WIDTH = 10
@@ -238,7 +398,7 @@ def format_subscription_limits_html(
         )
         lines.append(title)
         if not snap.ok:
-            detail = html_escape(snap.detail or "unknown")
+            detail = html_escape(_safe_unavailable_detail(snap.detail))
             lines.append(f"  лимиты недоступны ({detail})")
             continue
         window_lines = (
@@ -250,6 +410,12 @@ def format_subscription_limits_html(
             continue
         lines.extend(window_lines)
     return lines
+
+
+def _safe_unavailable_detail(detail: str) -> str:
+    """Map internal detail to fixed user text; never render arbitrary diagnostics."""
+
+    return _SAFE_UNAVAILABLE_DETAILS.get(detail, "неизвестная ошибка")
 
 
 def progress_bar(remaining_percent: int, *, width: int = _BAR_WIDTH) -> str:

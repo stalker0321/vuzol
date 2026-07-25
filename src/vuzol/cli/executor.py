@@ -7,6 +7,7 @@ import socket
 import time
 import uuid
 from contextlib import suppress
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
 from vuzol.config.models import SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.config.settings import SubscriptionLimitSettings
 from vuzol.execution.access import RootlessIdentityResolver, WorktreeAccessManager
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
@@ -234,6 +236,7 @@ async def run() -> None:
             settings.workflow.poll_interval_seconds,
             session_factory=factory,
             registries=runtime.registries,
+            subscription_limit_settings=settings.subscription_limits,
         )
     finally:
         await engine.dispose()
@@ -244,6 +247,7 @@ async def _refresh_subscription_limits_tick(
     registries: object,
     *,
     due_periodic: bool,
+    settings: SubscriptionLimitSettings,
 ) -> bool:
     """Claim optional /update refresh requests, collect host limits, refresh dashboards.
 
@@ -278,7 +282,13 @@ async def _refresh_subscription_limits_tick(
             if token is None and not due_periodic:
                 return False
             profiles = registries.profiles.items()  # type: ignore[attr-defined]
-            await refresh_and_store_subscription_limits(session, profiles)
+            await refresh_and_store_subscription_limits(
+                session,
+                profiles,
+                grok_limit_source=settings.source,
+                grok_limit_snapshot_file=settings.snapshot_file,
+                grok_limit_snapshot_max_age=timedelta(seconds=settings.snapshot_max_age_seconds),
+            )
             if force_chat_ids:
                 chats: list[int] = force_chat_ids
             else:
@@ -316,7 +326,14 @@ async def _run_loop(
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     registries: object | None = None,
+    subscription_limit_settings: SubscriptionLimitSettings | None = None,
 ) -> None:
+    if (
+        session_factory is not None
+        and registries is not None
+        and subscription_limit_settings is None
+    ):
+        raise ValueError("subscription limit settings are required when limit refresh is enabled")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -330,8 +347,12 @@ async def _run_loop(
         now = time.monotonic()
         due_periodic = now - last_limit_refresh >= limit_refresh_seconds
         if session_factory is not None and registries is not None:
+            assert subscription_limit_settings is not None
             forced = await _refresh_subscription_limits_tick(
-                session_factory, registries, due_periodic=due_periodic
+                session_factory,
+                registries,
+                due_periodic=due_periodic,
+                settings=subscription_limit_settings,
             )
             if forced or due_periodic:
                 last_limit_refresh = now

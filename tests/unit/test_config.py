@@ -3,7 +3,12 @@ from pathlib import Path
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
-from vuzol.config import ExecutionSettings, InterpretationSettings, Settings
+from vuzol.config import (
+    ExecutionSettings,
+    InterpretationSettings,
+    Settings,
+    SubscriptionLimitSettings,
+)
 
 
 def test_settings_accept_valid_values() -> None:
@@ -11,6 +16,9 @@ def test_settings_accept_valid_values() -> None:
 
     assert settings.environment == "test"
     assert settings.port == 9000
+    assert settings.subscription_limits.source == "legacy"
+    assert settings.subscription_limits.snapshot_file is None
+    assert settings.subscription_limits.snapshot_max_age_seconds == 900
 
 
 def test_settings_reject_invalid_port() -> None:
@@ -27,12 +35,62 @@ def test_nested_settings_load_from_environment(monkeypatch: MonkeyPatch) -> None
     monkeypatch.setenv("VUZOL_CONCURRENCY__HEAVY", "2")
     monkeypatch.setenv("VUZOL_LIMITS__PROVIDER_ATTEMPTS", "5")
     monkeypatch.setenv("VUZOL_DATABASE__POOL_SIZE", "7")
+    monkeypatch.setenv("VUZOL_SUBSCRIPTION_LIMITS__SOURCE", "legacy")
+    monkeypatch.setenv("VUZOL_SUBSCRIPTION_LIMITS__SNAPSHOT_MAX_AGE_SECONDS", "1200")
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.concurrency.heavy == 2
     assert settings.limits.provider_attempts == 5
     assert settings.database.pool_size == 7
+    assert settings.subscription_limits.source == "legacy"
+    assert settings.subscription_limits.snapshot_max_age_seconds == 1200
+
+
+def test_subscription_limits_snapshot_required_needs_absolute_path() -> None:
+    with raises(ValidationError, match="snapshot_file is required"):
+        SubscriptionLimitSettings(source="snapshot_required")
+
+    with raises(ValidationError, match="must be absolute"):
+        SubscriptionLimitSettings(
+            source="snapshot_required",
+            snapshot_file=Path("relative/snap.json"),
+        )
+
+    # Path need not exist at parse time (exporter may publish later).
+    configured = SubscriptionLimitSettings(
+        source="snapshot_required",
+        snapshot_file=Path("/var/lib/vuzol-subscription-limits/grok.json"),
+        snapshot_max_age_seconds=600,
+    )
+    assert configured.snapshot_file is not None
+    assert configured.snapshot_file.is_absolute()
+    assert configured.snapshot_max_age_seconds == 600
+
+
+def test_subscription_limits_legacy_allows_unset_snapshot() -> None:
+    # Relative snapshot under legacy is unused and not rejected at settings parse.
+    legacy = SubscriptionLimitSettings(
+        source="legacy",
+        snapshot_file=Path("unused-relative.json"),
+    )
+    assert legacy.source == "legacy"
+    assert Settings(_env_file=None).subscription_limits.source == "legacy"  # type: ignore[call-arg]
+
+
+def test_subscription_limits_env_snapshot_required(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("VUZOL_SUBSCRIPTION_LIMITS__SOURCE", "snapshot_required")
+    monkeypatch.setenv(
+        "VUZOL_SUBSCRIPTION_LIMITS__SNAPSHOT_FILE",
+        "/var/lib/vuzol-subscription-limits/grok.json",
+    )
+    monkeypatch.setenv("VUZOL_SUBSCRIPTION_LIMITS__SNAPSHOT_MAX_AGE_SECONDS", "450")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.subscription_limits.source == "snapshot_required"
+    assert settings.subscription_limits.snapshot_file == Path(
+        "/var/lib/vuzol-subscription-limits/grok.json"
+    )
+    assert settings.subscription_limits.snapshot_max_age_seconds == 450
 
 
 def test_automatic_interpretation_requires_evaluation_report() -> None:

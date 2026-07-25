@@ -537,6 +537,8 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     sandbox.preflight.assert_awaited_once()
     worktree_access.preflight.assert_awaited_once()
     run_loop.assert_awaited_once()
+    assert run_loop.await_args is not None
+    assert run_loop.await_args.kwargs["subscription_limit_settings"] is settings.subscription_limits
     engine.dispose.assert_awaited_once()
 
 
@@ -562,6 +564,44 @@ async def test_executor_loop_stops_on_registered_signal(
     monkeypatch.setattr("vuzol.cli.executor.asyncio.get_running_loop", lambda: LoopProxy())
     await executor_cli._run_loop(processor, 0.01)
     assert set(callbacks) == {signal.SIGTERM, signal.SIGINT}
+
+
+@pytest.mark.anyio
+async def test_executor_loop_forwards_explicit_limit_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vuzol.cli import executor as executor_cli
+    from vuzol.config import SubscriptionLimitSettings
+
+    callbacks: dict[int, Any] = {}
+
+    class LoopProxy:
+        def add_signal_handler(self, signum: int, callback: Any) -> None:
+            callbacks[signum] = callback
+
+    processor = MagicMock()
+
+    async def process_one() -> bool:
+        callbacks[signal.SIGTERM]()
+        return False
+
+    processor.process_one = process_one
+    refresh = AsyncMock(return_value=False)
+    monkeypatch.setattr("vuzol.cli.executor.asyncio.get_running_loop", lambda: LoopProxy())
+    monkeypatch.setattr(executor_cli, "_refresh_subscription_limits_tick", refresh)
+    limits = SubscriptionLimitSettings()
+
+    await executor_cli._run_loop(
+        processor,
+        0.01,
+        session_factory=MagicMock(),
+        registries=MagicMock(),
+        subscription_limit_settings=limits,
+    )
+
+    refresh.assert_awaited_once()
+    assert refresh.await_args is not None
+    assert refresh.await_args.kwargs["settings"] is limits
 
 
 def test_unknown_effects_step_outcome() -> None:

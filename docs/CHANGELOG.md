@@ -4,6 +4,9 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- rebuilt and repinned the provider sandbox with the minimal Grok iteration toolchain: Git and
+  GNU Make are present, Python remains absent, and CI now verifies the non-root/read-only/no-socket
+  image contract;
 - updated both production Grok subscription profiles to the current `grok-4.5` model id; the
   retired `grok-build` id made pinned `/model` tasks fail before inference;
 - rebuilt and repinned the offline validation image for the R1 testing-policy inputs; the image

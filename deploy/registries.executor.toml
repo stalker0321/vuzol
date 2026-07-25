@@ -1,6 +1,6 @@
 [[sandboxes]]
 id = "project-default"
-image = "vuzol-sandbox@sha256:608384bad9e900e0e85dfcdcd2763a0c81c27ed4190a0b0c6ad6ff0a483700df"
+image = "vuzol-sandbox@sha256:f9febc02fac6547ade58dab77c4806fcc5de1d772907139de310453abee8ee3c"
 uid = 10001
 gid = 10001
 cpu_count = 1.0

@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodic Vuzol retention sweep
+# Template only for S10-2A. Do not install, enable, or start on production hosts
+# from this slice.
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=vuzol-retention.service
+
+[Install]
+WantedBy=timers.target

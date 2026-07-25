@@ -68,6 +68,17 @@ affect preference but cannot bypass hard limits or security policy.
 See [Provider routing](PROVIDERS.md) for profile fields, deterministic precedence, health, quota,
 fallback, and Codex isolation rules.
 
+## Retention maintenance
+
+`VUZOL_RETENTION__SWEEP_BATCH_SIZE` bounds the number of cleanup actions in one sweep (default 50);
+`VUZOL_RETENTION__SWEEP_LOCK_TIMEOUT_SECONDS` bounds lock acquisition (default 5 seconds). Failed
+or blocked worktree retention cannot be shorter than completed-worktree retention.
+
+`vuzol-retention` is dry-run by default. Filesystem and database mutation requires the explicit
+`--apply` flag. The checked-in `vuzol-retention.service` and `.timer` files are deployment templates,
+not installed or enabled production units; enabling scheduled apply requires a separate operator
+decision after an isolated dry-run/apply drill.
+
 ## Workflow runtime
 
 `VUZOL_WORKFLOW__*` settings bound polling, lease and heartbeat timing, retry backoff, recovery batch

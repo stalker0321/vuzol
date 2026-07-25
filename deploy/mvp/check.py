@@ -346,6 +346,11 @@ def _proxy_runtime_is_empty() -> bool:
     return not output
 
 
+def _managed_mirror_is_connected() -> None:
+    """Require every object reachable from a managed mirror ref to exist."""
+    _git(MIRROR, "fsck", "--connectivity-only", "--no-dangling")
+
+
 def check(expected_sha: str) -> dict[str, object]:
     if _git(ROOT, "status", "--short"):
         raise MvpCheckError("public checkout is dirty")
@@ -357,6 +362,7 @@ def check(expected_sha: str) -> dict[str, object]:
         raise MvpCheckError("deployed checkout is dirty or at the wrong SHA")
     if _git(MIRROR, "rev-parse", "refs/heads/main") != expected_sha:
         raise MvpCheckError("managed source mirror base ref differs from the deployed SHA")
+    _managed_mirror_is_connected()
     pid_before, restarts_before = _service_snapshot()
     runtime = Path("/run/vuzol/proxy")
     if not runtime.is_dir() or runtime.stat().st_mode & 0o777 != 0o700:

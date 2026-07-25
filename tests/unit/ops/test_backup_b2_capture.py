@@ -481,6 +481,17 @@ class _Engine:
         return None
 
 
+class _FailingConnectEngine:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    async def connect(self) -> _Conn:
+        raise RuntimeError("database details must not escape")
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
 @pytest.mark.anyio
 async def test_capture_dry_run_no_files(tmp_path: Path) -> None:
     settings = _base_settings(tmp_path)
@@ -776,6 +787,45 @@ async def test_capture_generic_exception_path(tmp_path: Path) -> None:
             dump_stream_factory=lambda _a: [b"x"],
         ).run(CaptureMode.APPLY)
     assert report.code == "capture_failed"
+
+
+@pytest.mark.anyio
+async def test_capture_connection_failure_is_reported_and_disposed(tmp_path: Path) -> None:
+    settings = _base_settings(tmp_path)
+    engine = _FailingConnectEngine()
+
+    with patch("vuzol.ops.backup.capture.create_async_engine", return_value=engine):
+        report = await BackupCaptureRunner(
+            settings,
+            dsn="postgresql://vuzol:secret@127.0.0.1/vuzol",
+            kek_bytes=bytes(range(32)),
+        ).run(CaptureMode.APPLY)
+
+    assert report.ok is False
+    assert report.code == "capture_failed"
+    assert report.message == "RuntimeError"
+    assert "secret" not in str(report.to_operational_payload())
+    assert engine.disposed is True
+
+
+@pytest.mark.anyio
+async def test_capture_engine_factory_failure_is_reported(tmp_path: Path) -> None:
+    settings = _base_settings(tmp_path)
+
+    with patch(
+        "vuzol.ops.backup.capture.create_async_engine",
+        side_effect=RuntimeError("database details must not escape"),
+    ):
+        report = await BackupCaptureRunner(
+            settings,
+            dsn="postgresql://vuzol:secret@127.0.0.1/vuzol",
+            kek_bytes=bytes(range(32)),
+        ).run(CaptureMode.APPLY)
+
+    assert report.ok is False
+    assert report.code == "capture_failed"
+    assert report.message == "RuntimeError"
+    assert "secret" not in str(report.to_operational_payload())
 
 
 @pytest.mark.anyio

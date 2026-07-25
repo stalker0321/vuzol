@@ -4,6 +4,8 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- made production readiness fail closed when the managed source mirror has a ref with an incomplete
+  reachable Git object graph; ref equality alone no longer hides missing trees or commits;
 - rebuilt and repinned the provider sandbox with the minimal Grok iteration toolchain: Git and
   GNU Make are present, Python remains absent, and CI now verifies the non-root/read-only/no-socket
   image contract;

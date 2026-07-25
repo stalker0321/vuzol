@@ -1,0 +1,409 @@
+"""Unit tests for B3.0 published-package preflight (no KEK/decrypt/DSN/CLI)."""
+
+from __future__ import annotations
+
+import hashlib
+import uuid
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from vuzol.ops.backup.manifest import (
+    SCHEMA_VERSION,
+    ArtifactReconciliation,
+    BackupAppIdentity,
+    BackupComponent,
+    BackupConfigSnapshot,
+    BackupManifest,
+    BackupRetentionMeta,
+    BackupRpoRto,
+    BackupSchemaIdentity,
+    store_manifest,
+)
+from vuzol.ops.backup.paths import ProductionRoots
+from vuzol.ops.backup.restore import (
+    CODE_BLOB,
+    CODE_COMPONENT,
+    CODE_MANIFEST_HASH,
+    CODE_OK,
+    CODE_PACKAGE,
+    CODE_PARTIAL,
+    CODE_PATH_CONFLICT,
+    CODE_RUN_ID,
+    CODE_UNSUPPORTED,
+    PackagePreflightReport,
+    preflight_published_package,
+)
+from vuzol.ops.backup.staging import STATE_PUBLISHED, ensure_staging_tree, write_state
+
+
+def _production(tmp_path: Path) -> ProductionRoots:
+    roots = ProductionRoots(
+        repository_root=tmp_path / "repos",
+        worktree_root=tmp_path / "wt",
+        artifact_root=tmp_path / "art",
+        secret_file_root=tmp_path / "secrets",
+    )
+    for root in roots.all_roots()[:4]:
+        root.mkdir(parents=True, exist_ok=True)
+    return roots
+
+
+def _safe_staging(tmp_path: Path) -> Path:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    return staging
+
+
+def _partial_manifest(
+    run_id: uuid.UUID,
+    *,
+    ciphertext: bytes,
+    partial: bool = True,
+    extra_components: bool = False,
+    filename: str = "postgres.dump.enc",
+    cipher: str = "aes-256-gcm",
+    fmt: str = "pg_custom",
+) -> BackupManifest:
+    start = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
+    end = start + timedelta(minutes=1)
+    digest = hashlib.sha256(ciphertext).hexdigest()
+    components: dict[str, BackupComponent] = {
+        "postgres": BackupComponent(
+            filename=filename,
+            sha256_ciphertext=digest,
+            size_ciphertext=len(ciphertext),
+            cipher=cipher,
+            format=fmt,
+        )
+    }
+    if extra_components:
+        components["artifacts"] = BackupComponent(
+            filename="artifacts.tar.enc",
+            sha256_ciphertext="b" * 64,
+            size_ciphertext=1,
+            object_count=0,
+            inventory_sha256="c" * 64,
+        )
+    return BackupManifest.model_validate(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": run_id,
+            "created_at": end,
+            "t_start": start,
+            "t_end": end,
+            "hostname": "lab-host",
+            "app": BackupAppIdentity(
+                git_commit="0" * 40,
+                deploy_path="/opt/vuzol",
+                service_name="vuzol",
+            ),
+            "schema_identity": BackupSchemaIdentity(
+                alembic_head_expected="a" * 64,
+                alembic_head_observed="a" * 64,
+            ),
+            "config": BackupConfigSnapshot(registry_revision="0" * 64, files=()),
+            "components": components,
+            "artifact_reconciliation": ArtifactReconciliation(
+                db_rows=0,
+                fs_objects=0,
+                missing_blobs=(),
+                orphan_files=(),
+                skipped_symlinks=0,
+            ),
+            "retention": BackupRetentionMeta(keep_local_runs=3, keep_offhost_days=28),
+            "rpo_rto": BackupRpoRto(rpo_seconds_target=86_400, rto_seconds_target=7_200),
+            "partial": partial,
+        }
+    )
+
+
+def _write_published_package(
+    staging: Path,
+    run_id: uuid.UUID,
+    *,
+    ciphertext: bytes = b"fake-ciphertext-bytes",
+    partial: bool = True,
+    extra_components: bool = False,
+    corrupt_sidecar: bool = False,
+    wrong_blob_bytes: bytes | None = None,
+    symlink_blob: bool = False,
+    state: str = STATE_PUBLISHED,
+    directory_run_id: uuid.UUID | None = None,
+    cipher: str = "aes-256-gcm",
+    fmt: str = "pg_custom",
+) -> Path:
+    dir_id = directory_run_id or run_id
+    run_dir, tmp, publish = ensure_staging_tree(staging, dir_id)
+    manifest = _partial_manifest(
+        run_id,
+        ciphertext=ciphertext,
+        partial=partial,
+        extra_components=extra_components,
+        cipher=cipher,
+        fmt=fmt,
+    )
+    manifest_path = tmp / "manifest.v1.json"
+    digest = store_manifest(manifest_path, manifest)
+    sha_path = tmp / "manifest.sha256"
+    sha_path.write_text(("0" * 64 if corrupt_sidecar else digest) + "\n", encoding="utf-8")
+    blob_path = tmp / "postgres.dump.enc"
+    blob_path.write_bytes(wrong_blob_bytes if wrong_blob_bytes is not None else ciphertext)
+    wrap_path = tmp / "dek.wrap"
+    wrap_path.write_bytes(b"x" * 86)
+    # Move into publish like B2 publish_run (simple rename for tests).
+    for name in ("manifest.v1.json", "manifest.sha256", "postgres.dump.enc", "dek.wrap"):
+        (tmp / name).replace(publish / name)
+    if symlink_blob:
+        target = publish / "postgres.dump.enc"
+        real = publish / "postgres.dump.enc.real"
+        target.replace(real)
+        target.symlink_to(real)
+    write_state(run_dir, state)
+    return run_dir
+
+
+def test_preflight_ok_safe_report_has_no_paths(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    ciphertext = b"stream-me-" + b"\x00" * 100
+    _write_published_package(staging, run_id, ciphertext=ciphertext)
+
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+        hash_read_size=16,
+    )
+    assert report.ok is True
+    assert report.code == CODE_OK
+    assert report.run_id == str(run_id)
+    assert report.partial is True
+    assert report.size_ciphertext == len(ciphertext)
+    assert report.sha256_ciphertext == hashlib.sha256(ciphertext).hexdigest()
+    payload = report.to_operational_payload()
+    assert payload["ok"] is True
+    assert payload["schedule"] == "disabled"
+    text = str(payload)
+    assert str(staging) not in text
+    assert str(tmp_path) not in text
+
+
+def test_preflight_refuses_production_nested_staging(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = production.artifact_root / "nested-staging"
+    staging.mkdir()
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PATH_CONFLICT
+    assert str(staging) not in report.message
+    assert str(production.artifact_root) not in report.message
+
+
+def test_preflight_refuses_unpublished_state(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id, state="dumping")
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+
+
+def test_preflight_refuses_symlink_blob(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id, symlink_blob=True)
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+
+
+def test_preflight_manifest_hash_mismatch(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id, corrupt_sidecar=True)
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_MANIFEST_HASH
+
+
+def test_preflight_run_id_directory_bind(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    manifest_id = uuid.uuid4()
+    dir_id = uuid.uuid4()
+    _write_published_package(staging, manifest_id, directory_run_id=dir_id)
+
+    report = preflight_published_package(staging_root=staging, run_id=dir_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_RUN_ID
+
+
+def test_preflight_requires_partial_postgres_only(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id, partial=False)
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PARTIAL
+
+    run2 = uuid.uuid4()
+    _write_published_package(staging, run2, extra_components=True)
+    report2 = preflight_published_package(staging_root=staging, run_id=run2, production=production)
+    assert report2.ok is False
+    assert report2.code == CODE_UNSUPPORTED
+
+
+def test_preflight_component_labels(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id, fmt="plain")
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_COMPONENT
+
+
+def test_preflight_blob_size_and_hash(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    good = b"good-bytes"
+    _write_published_package(staging, run_id, ciphertext=good, wrong_blob_bytes=b"tampered!")
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_BLOB
+
+
+def test_preflight_missing_run(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    report = preflight_published_package(
+        staging_root=staging, run_id=uuid.uuid4(), production=production
+    )
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+
+
+def test_report_payload_types() -> None:
+    report = PackagePreflightReport(
+        ok=False,
+        code=CODE_PACKAGE,
+        message="run is not published",
+    )
+    payload = report.to_operational_payload()
+    assert payload["ok"] is False
+    assert payload["run_id"] is None
+    assert "message" in payload
+
+
+def test_preflight_refuses_publish_dir_symlink(tmp_path: Path) -> None:
+    """C1/C3: publish/ as symlink is refused before child reads."""
+
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    run_dir = _write_published_package(staging, run_id)
+    publish = run_dir / "publish"
+    real = run_dir / "publish-real"
+    publish.rename(real)
+    publish.symlink_to(real)
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "symlink" in report.message
+    assert str(staging) not in report.message
+    assert str(publish) not in report.message
+
+
+def test_preflight_missing_required_publish_file(tmp_path: Path) -> None:
+    """C3: missing required regular publish file → preflight_package."""
+
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    run_dir = _write_published_package(staging, run_id)
+    (run_dir / "publish" / "dek.wrap").unlink()
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "required publish file" in report.message
+    assert str(run_dir) not in report.message
+
+
+def test_preflight_invalid_run_id_string(tmp_path: Path) -> None:
+    """C3: non-UUID run_id fails closed as package error without path leak."""
+
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id="not-a-uuid",
+        production=production,
+    )
+    assert report.ok is False
+    assert report.code == CODE_PACKAGE
+    assert "UUID" in report.message
+    assert str(staging) not in report.message
+
+
+def test_preflight_nonpositive_hash_read_size(tmp_path: Path) -> None:
+    """C3: hash_read_size < 1 rejected before package walk."""
+
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(staging, run_id)
+
+    for bad in (0, -1):
+        report = preflight_published_package(
+            staging_root=staging,
+            run_id=run_id,
+            production=production,
+            hash_read_size=bad,
+        )
+        assert report.ok is False
+        assert report.code == CODE_PACKAGE
+        assert "hash read size" in report.message
+
+
+def test_preflight_refuses_escaping_runs_symlink(tmp_path: Path) -> None:
+    """C3: runs/{id} symlink resolving outside staging → path conflict, no leak."""
+
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    # Build a complete package outside staging, then point runs/{id} at it.
+    outside = tmp_path / "outside-escape"
+    outside.mkdir()
+    _write_published_package(outside, run_id)
+    outside_run = outside / "runs" / str(run_id)
+
+    runs_root = staging / "runs"
+    runs_root.mkdir(parents=True, exist_ok=True)
+    link = runs_root / str(run_id)
+    link.symlink_to(outside_run)
+
+    report = preflight_published_package(staging_root=staging, run_id=run_id, production=production)
+    assert report.ok is False
+    assert report.code == CODE_PATH_CONFLICT
+    assert str(outside) not in report.message
+    assert str(outside_run) not in report.message
+    assert str(staging) not in report.message
+    # Outside package must remain untouched (no delete/mutation).
+    assert (outside_run / "publish" / "postgres.dump.enc").is_file()

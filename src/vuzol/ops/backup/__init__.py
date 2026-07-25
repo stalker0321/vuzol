@@ -1,4 +1,4 @@
-"""Backup foundation (B1) plus partial local encrypted PG capture (B2)."""
+"""Backup foundation (B1), partial encrypted capture (B2), B3.0 package preflight."""
 
 from vuzol.ops.backup.capture import BackupCaptureRunner, CaptureMode, CaptureReport
 from vuzol.ops.backup.crypto import (
@@ -40,6 +40,11 @@ from vuzol.ops.backup.paths import (
     normalize_dsn_identity,
     resolve_isolation_path,
 )
+from vuzol.ops.backup.restore import (
+    BackupRestorePreflightError,
+    PackagePreflightReport,
+    preflight_published_package,
+)
 from vuzol.ops.backup.settings import BackupSettings
 from vuzol.ops.backup.staging import assert_safe_staging_root
 
@@ -56,6 +61,7 @@ __all__ = [
     "BackupManifestError",
     "BackupPathError",
     "BackupQuiesceInfo",
+    "BackupRestorePreflightError",
     "BackupRetentionMeta",
     "BackupRpoRto",
     "BackupSchemaIdentity",
@@ -65,6 +71,7 @@ __all__ = [
     "ConfigFileHash",
     "MissingBlobRecord",
     "OrphanFileRecord",
+    "PackagePreflightReport",
     "ProductionRoots",
     "assert_isolated_restore_dsn",
     "assert_safe_restore_paths",
@@ -77,6 +84,7 @@ __all__ = [
     "load_manifest",
     "manifest_sha256",
     "normalize_dsn_identity",
+    "preflight_published_package",
     "resolve_isolation_path",
     "store_manifest",
     "unwrap_dek",

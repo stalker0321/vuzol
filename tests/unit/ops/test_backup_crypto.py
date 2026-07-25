@@ -5,6 +5,7 @@ from __future__ import annotations
 import struct
 import uuid
 from pathlib import Path
+from typing import BinaryIO
 from unittest.mock import patch
 
 import pytest
@@ -443,7 +444,7 @@ def test_wrap_invariant_guards(tmp_path: Path) -> None:
 class _BoundedReadWrapper:
     """File-like wrapper that refuses unbounded ``read()`` / ``read(-1)`` / ``read(0)``."""
 
-    def __init__(self, inner: object) -> None:
+    def __init__(self, inner: BinaryIO) -> None:
         self._inner = inner
         self.max_request = 0
         self.calls = 0
@@ -454,7 +455,7 @@ class _BoundedReadWrapper:
             raise AssertionError(f"unbounded read refused: size={size!r}")
         if size > self.max_request:
             self.max_request = size
-        return self._inner.read(size)  # type: ignore[no-any-return]
+        return self._inner.read(size)
 
 
 def test_decrypt_uses_only_bounded_reads(tmp_path: Path) -> None:

@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added a default-dry-run retention CLI for expired managed worktrees and artifacts with bounded
+  batches, advisory locking, crash-recoverable intent/external/finalize phases, protected-runtime
+  rechecks, shared-content handling, and orphan quarantine; the checked-in apply service/timer are
+  templates only and are not installed or enabled by this release;
 - added a narrow approval-visible warning when a docs-only or explicitly named single-file request
   produces an unmentioned new executable, script, build, or CI path; warnings use measured Git
   additions, remain non-blocking, and are carried in hash-bound review evidence;

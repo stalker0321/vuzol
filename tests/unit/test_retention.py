@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -186,6 +187,21 @@ async def test_retention_cli_run_modes(
             RetentionAction("worktree", "w1", RetentionOutcome.WOULD_CLEAN, "retention_expired"),
         ),
     )
+    reports = [
+        report,
+        replace(report, lock_acquired=False, actions=()),
+        replace(
+            report,
+            actions=(
+                RetentionAction(
+                    "worktree",
+                    "w2",
+                    RetentionOutcome.FAILED,
+                    "removal_incomplete",
+                ),
+            ),
+        ),
+    ]
 
     class Engine:
         async def dispose(self) -> None:
@@ -197,7 +213,7 @@ async def test_retention_cli_run_modes(
 
         async def run(self, *, mode: RetentionSweepMode) -> RetentionSweepReport:
             assert mode is RetentionSweepMode.DRY_RUN
-            return report
+            return reports.pop(0)
 
     monkeypatch.setattr(retention_cli, "get_runtime_configuration", lambda **_k: runtime)
     monkeypatch.setattr(retention_cli, "configure_logging", lambda **_k: None)
@@ -210,6 +226,10 @@ async def test_retention_cli_run_modes(
 
     assert await retention_cli._run(retention_cli._parse_args([])) == 0
     assert "would_clean" in capsys.readouterr().out
+    assert await retention_cli._run(retention_cli._parse_args(["--json"])) == 2
+    assert '"lock_acquired": false' in capsys.readouterr().out
+    assert await retention_cli._run(retention_cli._parse_args([])) == 1
+    assert "removal_incomplete" in capsys.readouterr().out
 
 
 def test_retention_unit_templates_disabled_comments() -> None:

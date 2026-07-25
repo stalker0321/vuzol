@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- separated provider-reported local checks from authoritative Vuzol validation: bounded
+  `agent_checks` claims now survive finalization and appear in approval/completion projections
+  under an explicit untrusted label, while only independently measured trusted gates can unlock
+  approval and apply;
 - made production readiness fail closed when the managed source mirror has a ref with an incomplete
   reachable Git object graph; ref equality alone no longer hides missing trees or commits;
 - rebuilt and repinned the provider sandbox with the minimal Grok iteration toolchain: Git and

@@ -462,6 +462,7 @@ class WorkerFinalizer:
             branch=finalized.branch,
             changed_files=finalized.changed_files,
             claimed_complete=True,
+            agent_checks=edit_report.agent_checks,
             gates=tuple(
                 GateResult(
                     name=run.evidence.name,

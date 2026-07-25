@@ -124,7 +124,18 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
     execute = _step(
         step_type="execute_code",
         ordinal=4,
-        result={"text": "Added the requested README check."},
+        result={
+            "text": "Added the requested README check.",
+            "structured_output": {
+                "agent_checks": [
+                    {
+                        "name": "make test",
+                        "status": "not_run",
+                        "detail": "Local dependencies unavailable.",
+                    }
+                ]
+            },
+        },
     )
     review = _step(
         step_type="review",
@@ -175,6 +186,13 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
     assert approval.human_summary == "Added the requested README check."
     assert approval_step.payload["action_envelope"]["project_id"] == "bill-buddy"
     assert approval_step.payload["action_envelope"]["gates"][0]["name"] == "git-facts"
+    assert approval_step.payload["action_envelope"]["agent_checks"] == [
+        {
+            "name": "make test",
+            "status": "not_run",
+            "detail": "Local dependencies unavailable.",
+        }
+    ]
     assert approval_step.payload["action_envelope"]["validation_evidence_hash"]
     assert approval_step.payload["action_envelope"]["review_evidence"]["verdict"] == "pass"
     assert approval_step.payload["action_envelope"]["review_evidence_hash"]

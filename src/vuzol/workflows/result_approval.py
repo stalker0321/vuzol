@@ -42,6 +42,7 @@ async def ensure_result_approval(
 
     evidence = _validation_evidence(steps_by_ordinal, worktree)
     gates = evidence["gates"]
+    agent_checks = evidence["agent_checks"]
     summary = evidence["summary"]
     envelope: dict[str, Any] = {
         "schema_version": RESULT_APPROVAL_SCHEMA,
@@ -56,6 +57,7 @@ async def ensure_result_approval(
         "base_commit": worktree.base_commit,
         "result_commit": worktree.result_commit,
         "diff_hash": worktree.diff_hash,
+        "agent_checks": agent_checks,
         "gates": gates,
         "validation_evidence_hash": evidence["validation_evidence_hash"],
         "review_evidence": evidence["review_evidence"],
@@ -121,8 +123,9 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     execute = next(
         (
             step
-            for step in ordered
-            if step.step_type == "execute_code" and step.status is StepStatus.COMPLETED
+            for step in reversed(ordered)
+            if step.step_type in {"execute_code", "execute_agent"}
+            and step.status is StepStatus.COMPLETED
         ),
         None,
     )
@@ -201,6 +204,7 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
 
     review_result = review.result if review and isinstance(review.result, dict) else {}
     execute_result = execute.result if execute and isinstance(execute.result, dict) else {}
+    agent_checks = _agent_checks(execute_result)
     summary = None
     for candidate in (
         execute_result.get("implementation_summary"),
@@ -216,9 +220,45 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     if summary is None:
         summary = "The requested change was implemented and passed all configured checks."
     return {
+        "agent_checks": agent_checks,
         "gates": gates,
         "summary": summary[:2_000],
         "validation_evidence_hash": envelope_hash(manifest),
         "review_evidence": review_evidence,
         "review_evidence_hash": review_evidence_hash,
     }
+
+
+def _agent_checks(execute_result: dict[str, Any]) -> list[dict[str, str | None]]:
+    """Copy bounded provider claims without treating them as validation evidence."""
+
+    structured = execute_result.get("structured_output")
+    raw = structured.get("agent_checks") if isinstance(structured, dict) else None
+    if not isinstance(raw, list):
+        return []
+    allowed_statuses = {"passed", "failed", "not_run", "unavailable"}
+    checks: list[dict[str, str | None]] = []
+    for item in raw[:12]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        status = item.get("status")
+        detail = item.get("detail")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or len(name) > 100
+            or status not in allowed_statuses
+            or (detail is not None and (not isinstance(detail, str) or len(detail) > 500))
+        ):
+            continue
+        checks.append(
+            {
+                "name": " ".join(name.split()),
+                "status": str(status),
+                "detail": (
+                    " ".join(detail.split()) if isinstance(detail, str) and detail.strip() else None
+                ),
+            }
+        )
+    return checks

@@ -268,9 +268,12 @@ def _result_contract_instruction(request: ProviderRequest) -> str:
             "You may use the separately allowed Git and Make commands to inspect the workspace "
             "and iterate on local checks. Those checks are non-authoritative: Vuzol owns measured "
             "inspection, staging, commit creation, trusted validation, and the authoritative "
-            "result manifest. Return only the small requested edit report; do not claim that a "
-            "local check replaces trusted validation. When all provider usage is unavailable, "
-            "include a concise non-empty unavailable_reason."
+            "result manifest. Return one agent_checks entry for each relevant local check, "
+            "including checks attempted or intentionally not run, using passed, failed, "
+            "unavailable, or not_run honestly; return an empty list when there were no relevant "
+            "check candidates. Never present agent_checks as trusted gates. Return only "
+            "the small requested edit report. When all provider usage is unavailable, include a "
+            "concise non-empty unavailable_reason."
         )
     return (
         "When every provider usage value is unavailable, set unavailable_reason to a concise "

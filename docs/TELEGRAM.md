@@ -190,6 +190,15 @@ and at most six implementation bullets; provider hand-off sections such as plans
 instructions, and suggested next steps are omitted. Project cards and history identify the actual
 execution worker model from `execute_code` / `execute_agent` rather than a planner or reviewer.
 
+Control buttons use Russian labels while keeping stable callback action tokens:
+
+| State | Labels shown | Callback actions |
+|---|---|---|
+| Ready to start | `Старт` | `start` |
+| Active | `Пауза`, `Отмена` | `pause`, `cancel` |
+| Paused | `Продолжить`, `Отмена` | `resume`, `cancel` |
+| Awaiting result decision | `Принять`, `Переделать`, `Отклонить` | `approve`, `redo`, `reject` |
+
 Approve, Redo, and Reject callbacks target the persisted approval ID, not a mutable task label. The
 canonical approval envelope binds the target head, base and result commits, diff hash, gate
 evidence, and configuration/policy revisions.
@@ -197,8 +206,9 @@ evidence, and configuration/policy revisions.
 Approve queues the exact result for the separate `vuzol-applier` process. The applier revalidates
 project policy and repository identity, fetches the retained commit locally, and advances the
 configured branch with Git compare-and-swap. Target drift blocks the step; it never falls back to a
-merge, push, or deployment. Redo rejects and closes the current result, then asks for a new bounded
-`/sol` request with corrected instructions. Reject cancels the result without applying it.
+merge, push, or deployment. Redo rejects and closes the current result, then asks the user to send
+corrected instructions in the project topic; `/sol` remains an optional explicit route. Reject
+cancels the result without applying it.
 
 Status cards are rebuilt from tasks, runs, steps, and events in PostgreSQL. External text is escaped
 centrally for Telegram HTML and bounded to Telegram message limits. Each message link stores the

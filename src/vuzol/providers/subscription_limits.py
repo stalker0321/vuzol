@@ -8,6 +8,7 @@ config`` log line under the profile state directory.
 Network and filesystem failures are non-fatal: the dashboard still renders and
 marks the profile as unavailable.
 """
+# ruff: noqa: RUF001
 
 from __future__ import annotations
 
@@ -228,7 +229,7 @@ def format_subscription_limits_html(
     """Render the limits section as HTML lines (without the section header)."""
 
     if not snapshots:
-        return ["No subscription profiles are connected."]
+        return ["Нет подключённых профилей подписки."]
     lines: list[str] = []
     for snap in snapshots:
         title = (
@@ -238,14 +239,14 @@ def format_subscription_limits_html(
         lines.append(title)
         if not snap.ok:
             detail = html_escape(snap.detail or "unknown")
-            lines.append(f"  limits unavailable ({detail})")
+            lines.append(f"  лимиты недоступны ({detail})")
             continue
         window_lines = (
-            *_format_window_block("5h", snap.five_hour, html_escape),
-            *_format_window_block("week", snap.weekly, html_escape),
+            *_format_window_block("5 ч", snap.five_hour, html_escape),
+            *_format_window_block("неделя", snap.weekly, html_escape),
         )
         if not window_lines:
-            lines.append("  no limit windows reported")
+            lines.append("  нет данных по окнам лимитов")
             continue
         lines.extend(window_lines)
     return lines
@@ -275,11 +276,11 @@ def _format_window_block(
     line = (
         f"  <b>{html_escape(label)}</b>  "
         f"<code>{html_escape(bar)}</code>  "
-        f"{html_escape(f'{window.remaining_percent}% left')}"
+        f"{html_escape(f'{window.remaining_percent}% осталось')}"
     )
     if window.reset_at is None:
         return (line,)
-    reset = f"reset {_format_reset(window.reset_at)}"
+    reset = f"сброс {_format_reset(window.reset_at)}"
     return (line, f"  <i>{html_escape(reset)}</i>")
 
 

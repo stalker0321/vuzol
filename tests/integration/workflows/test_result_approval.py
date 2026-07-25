@@ -1,3 +1,5 @@
+# ruff: noqa: RUF001
+
 import asyncio
 import subprocess
 import uuid
@@ -228,12 +230,13 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
         async with factory() as session:
             card = await build_status_card(session, task_id)
             assert "Added the requested validator &lt;safely&gt;." in card.html
-            assert "Agent checks (untrusted)" in card.html
+            assert "Проверки агента (не доверенные)" in card.html
             assert "make test — не запускалось" in card.html
-            assert "Vuzol checks (trusted)" in card.html
-            assert "Review warnings" in card.html
+            assert "Проверки Vuzol (доверенные)" in card.html
+            assert "Предупреждения ревью" in card.html
             assert "&lt;verify.sh&gt;" in card.html
-            assert "tests — passed (1.2s)" in card.html
+            assert "tests — пройдено (1.2 с)" in card.html
+            assert str(task_id) not in card.html
             assert result_commit not in card.html
             assert "diff" not in card.html.lower()
             assert card.buttons == ("approve", "redo", "reject")
@@ -245,7 +248,11 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             assert "Проверки Vuzol (доверенные)" in approval_card.html
             assert "Предупреждения ревью" in approval_card.html
             assert "&lt;verify.sh&gt;" in approval_card.html
-            assert "tests — 1.2s" in approval_card.html
+            assert "tests — пройдено (1.2 с)" in approval_card.html
+            assert str(task_id) not in approval_card.html
+            project_facts = card.html[card.html.index("<b>Что сделано</b>") :]
+            global_facts = approval_card.html[approval_card.html.index("<b>Что сделано</b>") :]
+            assert project_facts == global_facts
             assert approval_card.buttons == ("approve", "redo", "reject")
 
         async with factory.begin() as session:
@@ -265,7 +272,7 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             assert persisted_step is not None and persisted_step.status is StepStatus.QUEUED
             assert persisted_task is not None and persisted_task.status is TaskStatus.EXECUTING
             decided_card = await build_approval_card(session, task_id)
-            assert "Решение: <b>approved</b>" in decided_card.html
+            assert "Решение: <b>Принято</b>" in decided_card.html
             assert decided_card.buttons == ()
 
         project = SimpleNamespace(

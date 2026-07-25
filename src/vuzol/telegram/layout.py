@@ -34,7 +34,7 @@ UNPINNED_SYSTEM_TOPIC_KINDS: frozenset[TopicKind] = frozenset({TopicKind.SYSTEM}
 # (display name «Статус проектов»). Content is chat-scoped but the role is product-global.
 STATUS_DASHBOARD_TOPIC_KIND = TopicKind.TASK_DASHBOARD
 STATUS_DASHBOARD_DISPLAY_NAME = SYSTEM_TOPIC_DISPLAY_NAMES[STATUS_DASHBOARD_TOPIC_KIND]
-DASHBOARD_CARD_TITLE = "Project status"
+DASHBOARD_CARD_TITLE = "Статус проектов"
 
 # Completed-task reports land in «История» (kind=changelog).
 HISTORY_TOPIC_KIND = TopicKind.CHANGELOG

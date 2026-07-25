@@ -11,6 +11,7 @@ from telegram.error import BadRequest, TimedOut
 from vuzol.config import Settings
 from vuzol.telegram.adapter import (
     PythonTelegramClient,
+    _control_markup,
     build_long_polling_application,
     control_update,
     message_update,
@@ -331,6 +332,11 @@ def test_python_telegram_client_builds_result_decision_markup() -> None:
             approval_id=approval_id,
         )
         markup = bot.send_message.await_args.kwargs["reply_markup"]
+        assert [row[0].text for row in markup.inline_keyboard] == [
+            "Принять",
+            "Переделать",
+            "Отклонить",
+        ]
         assert [row[0].callback_data for row in markup.inline_keyboard] == [
             f"v1:approve:{approval_id}",
             f"v1:redo:{approval_id}",
@@ -338,3 +344,27 @@ def test_python_telegram_client_builds_result_decision_markup() -> None:
         ]
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("actions", "labels"),
+    [
+        (("start",), ("Старт",)),
+        (("pause", "cancel"), ("Пауза", "Отмена")),
+        (("resume", "cancel"), ("Продолжить", "Отмена")),
+    ],
+)
+def test_control_labels_are_russian_and_wire_actions_stay_stable(
+    actions: tuple[str, ...], labels: tuple[str, ...]
+) -> None:
+    task_id = uuid.uuid4()
+    markup = _control_markup(
+        actions,
+        task_id=task_id,
+        approval_id=None,
+    )
+    assert markup is not None
+    assert tuple(row[0].text for row in markup.inline_keyboard) == labels
+    assert tuple(row[0].callback_data for row in markup.inline_keyboard) == tuple(
+        f"v1:{action}:{task_id}" for action in actions
+    )

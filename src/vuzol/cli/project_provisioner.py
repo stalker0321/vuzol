@@ -15,6 +15,7 @@ from vuzol.projects.provisioning import (
     run_provisioning_loop,
 )
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
+from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.telegram.adapter import PythonTelegramClient, resolve_bot_token
 
 
@@ -25,15 +26,17 @@ async def run() -> None:
         service=f"{settings.service_name}-project-provisioner", level=settings.log_level
     )
     engine = create_engine(settings, resolve_database_dsn(settings))
-    stop_event = asyncio.Event()
-
-    def request_stop(_signum: int, _frame: object) -> None:
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, request_stop)
-    signal.signal(signal.SIGINT, request_stop)
-    owner = f"{socket.gethostname()}:{os.getpid()}"
     try:
+        # S-2.2c: fail closed before factory, Bot, provision loop, or schema work.
+        await require_migration_head(engine)
+        stop_event = asyncio.Event()
+
+        def request_stop(_signum: int, _frame: object) -> None:
+            stop_event.set()
+
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+        owner = f"{socket.gethostname()}:{os.getpid()}"
         async with Bot(resolve_bot_token(settings).get_secret_value()) as bot:
             service = ProjectProvisioningService(
                 runtime,

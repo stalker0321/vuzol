@@ -105,3 +105,25 @@ jobs:
 
       - name: Build containers
         run: docker compose build
+
+      - name: Build minimal provider sandbox
+        run: docker build --file Dockerfile.sandbox --tag vuzol-sandbox:ci .
+
+      - name: Verify provider sandbox tool and isolation contract
+        run: |
+          docker run --rm \
+            --network none \
+            --read-only \
+            --user 10001:10001 \
+            --entrypoint /bin/sh \
+            vuzol-sandbox:ci \
+            -ec '
+              test "$(id -u)" = 10001
+              test "$(id -g)" = 10001
+              command -v grok
+              command -v git
+              command -v make
+              ! command -v python3
+              ! test -e /var/run/docker.sock
+              ! touch /workspace/image-must-remain-read-only
+            '

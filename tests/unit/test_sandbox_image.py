@@ -11,13 +11,14 @@ def test_sandbox_image_installs_tls_ca_bundle() -> None:
     first_instruction = next(line for line in content.splitlines() if line.startswith("FROM "))
     assert first_instruction.startswith("FROM node:22-bookworm-slim@sha256:")
     assert len(first_instruction.rsplit("@sha256:", 1)[1]) == 64
-    assert "apt-get install --yes --no-install-recommends ca-certificates curl git" in content
+    assert "apt-get install --yes --no-install-recommends ca-certificates curl git make" in content
     assert "rm -rf /var/lib/apt/lists/*" in content
 
 
-def test_sandbox_image_contains_git_for_isolated_worker_commits() -> None:
+def test_sandbox_image_contains_minimal_grok_iteration_tools() -> None:
     content = DOCKERFILE.read_text()
-    assert "--no-install-recommends ca-certificates curl git" in content
+    assert "--no-install-recommends ca-certificates curl git make" in content
+    assert "python3" not in content
 
 
 def test_sandbox_image_pins_and_verifies_grok_binary() -> None:

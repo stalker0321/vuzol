@@ -190,6 +190,7 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
             for finding in findings
         ):
             raise ValueError("passing review evidence contains blocking findings")
+        warnings = _review_warnings(findings)
         review_evidence_hash = envelope_hash(review_manifest)
         review_evidence = {
             "schema_version": review_manifest.get("schema_version"),
@@ -199,6 +200,7 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
             "base_commit": review_manifest.get("base_commit"),
             "result_commit": review_manifest.get("result_commit"),
             "diff_hash": review_manifest.get("diff_hash"),
+            "warnings": warnings,
             "evidence_hash": review_evidence_hash,
         }
 
@@ -262,3 +264,34 @@ def _agent_checks(execute_result: dict[str, Any]) -> list[dict[str, str | None]]
             }
         )
     return checks
+
+
+def _review_warnings(findings: list[object]) -> list[dict[str, str | int | None]]:
+    """Copy bounded approval-visible warnings from hash-bound review evidence."""
+
+    warnings: list[dict[str, str | int | None]] = []
+    for item in findings[:12]:
+        if not isinstance(item, dict) or item.get("severity") != "warning":
+            continue
+        classification = item.get("classification")
+        summary = item.get("summary")
+        path = item.get("path")
+        line = item.get("line")
+        if (
+            not isinstance(classification, str)
+            or not classification.strip()
+            or not isinstance(summary, str)
+            or not summary.strip()
+            or (path is not None and not isinstance(path, str))
+            or (line is not None and (not isinstance(line, int) or isinstance(line, bool)))
+        ):
+            continue
+        warnings.append(
+            {
+                "classification": " ".join(classification.split())[:100],
+                "summary": " ".join(summary.split())[:500],
+                "path": " ".join(path.split())[:500] if isinstance(path, str) else None,
+                "line": line,
+            }
+        )
+    return warnings

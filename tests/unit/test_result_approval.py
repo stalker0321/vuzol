@@ -144,13 +144,21 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
             "summary": "Mechanical review passed for 2 changed path(s).",
             "structured_output": {
                 "schema_version": "result-review.v1",
-                "verdict": "pass",
+                "verdict": "pass_with_warnings",
                 "review_kind": "mechanical",
                 "risk": "medium",
                 "base_commit": base,
                 "result_commit": result_commit,
                 "diff_hash": "c" * 64,
-                "findings": [],
+                "findings": [
+                    {
+                        "severity": "warning",
+                        "classification": "unexpected_executable_file",
+                        "summary": "New executable path was not explicitly requested.",
+                        "path": "verify.sh",
+                        "line": None,
+                    }
+                ],
             },
         },
     )
@@ -194,7 +202,17 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
         }
     ]
     assert approval_step.payload["action_envelope"]["validation_evidence_hash"]
-    assert approval_step.payload["action_envelope"]["review_evidence"]["verdict"] == "pass"
+    assert approval_step.payload["action_envelope"]["review_evidence"]["verdict"] == (
+        "pass_with_warnings"
+    )
+    assert approval_step.payload["action_envelope"]["review_evidence"]["warnings"] == [
+        {
+            "classification": "unexpected_executable_file",
+            "summary": "New executable path was not explicitly requested.",
+            "path": "verify.sh",
+            "line": None,
+        }
+    ]
     assert approval_step.payload["action_envelope"]["review_evidence_hash"]
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from sqlalchemy import select
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.execution.domain import GitInspection
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.paths import contained, trusted_root
+from vuzol.execution.scaffold import path_is_docs_only, path_is_executable_product
 from vuzol.experiments.review import scan_suspicious_patterns
 from vuzol.review.domain import (
     FindingSeverity,
@@ -98,6 +99,9 @@ _HIGH_RISK_FILENAMES = frozenset(
         "requirements.txt",
         "uv.lock",
     }
+)
+_BUILD_FILENAMES = frozenset(
+    {"dockerfile", "justfile", "makefile", "taskfile.yml", "taskfile.yaml"}
 )
 
 
@@ -213,7 +217,10 @@ class ResultReviewHandler:
             raise ValueError("worktree branch does not match the prepared task branch")
         risk = runtime_risk(risk, inspection)
 
-        findings = mechanical_findings(inspection.diff)
+        findings = (
+            *mechanical_findings(inspection.diff),
+            *unexpected_file_findings(bound_task, inspection),
+        )
         blockers = tuple(item for item in findings if item.severity is FindingSeverity.BLOCKER)
         warnings = tuple(item for item in findings if item.severity is FindingSeverity.WARNING)
         measured_diff_hash = diff_hash or inspection.diff_hash
@@ -319,6 +326,82 @@ def mechanical_findings(diff: bytes) -> tuple[ReviewFinding, ...]:
             )
         )
     return tuple(findings)
+
+
+def unexpected_file_findings(task: Task, inspection: GitInspection) -> tuple[ReviewFinding, ...]:
+    """Warn on new executable/build paths outside a narrow, explicitly named request.
+
+    TaskDraft does not provide an enforceable allowed-path contract. This therefore
+    activates only when task text explicitly names one changed path, or names only
+    documentation paths. It is approval-visible context, never a scope blocker.
+    """
+
+    candidates = tuple(
+        path for path in inspection.added_files if _is_executable_script_build_or_ci(path)
+    )
+    if not candidates:
+        return ()
+    scope_text = _task_scope_text(task)
+    mentioned = tuple(
+        path for path in inspection.changed_files if _path_is_explicitly_named(scope_text, path)
+    )
+    if not mentioned:
+        return ()
+    if len(mentioned) != 1 and not all(path_is_docs_only(path) for path in mentioned):
+        return ()
+    named = set(mentioned)
+    return tuple(
+        ReviewFinding(
+            severity=FindingSeverity.WARNING,
+            classification="unexpected_executable_file",
+            summary=(
+                "New executable, script, build, or CI path was not explicitly named in the "
+                "narrow task request."
+            ),
+            path=path,
+        )
+        for path in candidates
+        if path not in named
+    )
+
+
+def _task_scope_text(task: Task) -> str:
+    raw_draft = getattr(task, "task_draft", None)
+    draft = raw_draft if isinstance(raw_draft, dict) else {}
+    values: list[str] = []
+    original_text = getattr(task, "original_text", None)
+    if isinstance(original_text, str):
+        values.append(original_text)
+    for key in ("goal", "task_summary", "normalized_title"):
+        value = draft.get(key)
+        if isinstance(value, str):
+            values.append(value)
+    for key in ("requested_outcomes", "constraints"):
+        value = draft.get(key)
+        if isinstance(value, (list, tuple)):
+            values.extend(item for item in value if isinstance(item, str))
+    return "\n".join(values)
+
+
+def _path_is_explicitly_named(text: str, path: str) -> bool:
+    candidate = PurePosixPath(path)
+    names = {path, candidate.name}
+    if path_is_docs_only(path) and candidate.suffix:
+        names.add(candidate.stem)
+    return any(
+        re.search(rf"(?<![\w/-]){re.escape(name)}(?![\w/-]|\.\w)", text, re.IGNORECASE)
+        for name in names
+        if len(name) >= 3
+    )
+
+
+def _is_executable_script_build_or_ci(path: str) -> bool:
+    candidate = PurePosixPath(path)
+    return (
+        path_is_executable_product(path)
+        or candidate.name.casefold() in _BUILD_FILENAMES
+        or tuple(part.casefold() for part in candidate.parts[:2]) == (".github", "workflows")
+    )
 
 
 def effective_risk(task: Task) -> RiskLevel:

@@ -25,6 +25,7 @@ from vuzol.providers.registry import AdapterRegistry
 from vuzol.review import ResultReviewHandler
 from vuzol.review.independent import DatabaseReviewAccounting, IndependentModelReviewer
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
+from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.dispatch import WorkflowDispatcher
 from vuzol.workflows.recovery import recover_expired_steps
@@ -82,86 +83,89 @@ async def run() -> None:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     engine = create_engine(settings, resolve_database_dsn(settings))
-    factory = create_session_factory(engine)
-    async with factory.begin() as session:
-        await synchronize_profiles(
-            session,
-            runtime.registries.profiles.items(),
-            configuration_revision=runtime.registries.revision,
+    try:
+        # S-2.1: fail closed before profile sync, recovery, ready, or claim loops.
+        await require_migration_head(engine)
+        factory = create_session_factory(engine)
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session,
+                runtime.registries.profiles.items(),
+                configuration_revision=runtime.registries.revision,
+            )
+        owner = f"{socket.gethostname()}:{os.getpid()}"
+        dispatcher = WorkflowDispatcher(runtime, factory, owner=f"{owner}:dispatch")
+        controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
+        model_roles = frozenset(
+            {
+                ProviderRole.EXECUTOR,
+                ProviderRole.PLANNER,
+                ProviderRole.SUMMARIZER,
+                ProviderRole.REVIEWER,
+            }
         )
-    owner = f"{socket.gethostname()}:{os.getpid()}"
-    dispatcher = WorkflowDispatcher(runtime, factory, owner=f"{owner}:dispatch")
-    controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
-    model_roles = frozenset(
-        {
-            ProviderRole.EXECUTOR,
-            ProviderRole.PLANNER,
-            ProviderRole.SUMMARIZER,
-            ProviderRole.REVIEWER,
+        routable_profiles = tuple(
+            profile
+            for profile in runtime.registries.profiles.items()
+            if profile.enabled
+            and profile.provider == "openai-compatible"
+            and profile.launch_mode is LaunchMode.API
+            and profile.roles.intersection(model_roles)
+        )
+        independent_reviewer: IndependentModelReviewer | None = None
+        adapter_registry: AdapterRegistry | None = None
+        if routable_profiles:
+            resolver = ScopedSecretResolver(
+                access_policy={
+                    profile.credential_reference: frozenset({f"profile:{profile.id}"})
+                    for profile in runtime.registries.profiles.items()
+                    if profile.credential_reference is not None
+                },
+                secret_file_root=settings.secret_file_root,
+            )
+            adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver)
+            independent_reviewer = IndependentModelReviewer(
+                runtime.registries,
+                adapter_registry,
+                DatabaseReviewAccounting(factory, settings.limits),
+                policy_revision=runtime.registries.revision,
+            )
+        handlers = {
+            **BASE_INTERNAL_HANDLERS,
+            "review": ResultReviewHandler(
+                factory,
+                LocalGit(),
+                worktree_root=settings.worktree_root,
+                independent_reviewer=independent_reviewer,
+            ),
         }
-    )
-    routable_profiles = tuple(
-        profile
-        for profile in runtime.registries.profiles.items()
-        if profile.enabled
-        and profile.provider == "openai-compatible"
-        and profile.launch_mode is LaunchMode.API
-        and profile.roles.intersection(model_roles)
-    )
-    independent_reviewer: IndependentModelReviewer | None = None
-    adapter_registry: AdapterRegistry | None = None
-    if routable_profiles:
-        resolver = ScopedSecretResolver(
-            access_policy={
-                profile.credential_reference: frozenset({f"profile:{profile.id}"})
-                for profile in runtime.registries.profiles.items()
-                if profile.credential_reference is not None
-            },
-            secret_file_root=settings.secret_file_root,
-        )
-        adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver)
-        independent_reviewer = IndependentModelReviewer(
-            runtime.registries,
-            adapter_registry,
-            DatabaseReviewAccounting(factory, settings.limits),
-            policy_revision=runtime.registries.revision,
-        )
-    handlers = {
-        **BASE_INTERNAL_HANDLERS,
-        "review": ResultReviewHandler(
-            factory,
-            LocalGit(),
-            worktree_root=settings.worktree_root,
-            independent_reviewer=independent_reviewer,
-        ),
-    }
-    internal_worker = WorkflowWorker(
-        settings,
-        factory,
-        owner=f"{owner}:worker",
-        handlers=handlers,
-        profile_limits={
-            profile.id: profile.concurrency_limit for profile in runtime.registries.profiles.items()
-        },
-    )
-    worker: Processor = internal_worker
-    if adapter_registry is not None:
-        provider_handler = ProviderStepHandler(
-            factory,
-            runtime.registries,
-            adapter_registry,
-            redaction_patterns=settings.redaction_patterns,
-        )
-        routed_worker = RoutedWorkflowWorker(
+        internal_worker = WorkflowWorker(
             settings,
             factory,
-            registries=runtime.registries,
-            owner=f"{owner}:provider",
-            handlers=provider_handlers(provider_handler),
+            owner=f"{owner}:worker",
+            handlers=handlers,
+            profile_limits={
+                profile.id: profile.concurrency_limit
+                for profile in runtime.registries.profiles.items()
+            },
         )
-        worker = ProcessorChain(internal_worker, routed_worker)
-    get_logger(__name__).info("worker ready", extra={"event": "worker.ready"})
-    try:
+        worker: Processor = internal_worker
+        if adapter_registry is not None:
+            provider_handler = ProviderStepHandler(
+                factory,
+                runtime.registries,
+                adapter_registry,
+                redaction_patterns=settings.redaction_patterns,
+            )
+            routed_worker = RoutedWorkflowWorker(
+                settings,
+                factory,
+                registries=runtime.registries,
+                owner=f"{owner}:provider",
+                handlers=provider_handlers(provider_handler),
+            )
+            worker = ProcessorChain(internal_worker, routed_worker)
+        get_logger(__name__).info("worker ready", extra={"event": "worker.ready"})
         await run_runtime(
             controls=controls,
             dispatcher=dispatcher,

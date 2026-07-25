@@ -11,6 +11,7 @@ from vuzol.execution.git import LocalGit
 from vuzol.execution.result_apply import ResultApplyHandler
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
+from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.worker import WorkflowWorker
@@ -34,25 +35,27 @@ async def run() -> None:
     settings = runtime.settings
     configure_logging(service=f"{settings.service_name}-applier", level=settings.log_level)
     engine = create_engine(settings, resolve_database_dsn(settings))
-    factory = create_session_factory(engine)
-    owner = f"{socket.gethostname()}:{os.getpid()}:applier"
-    controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
-    handler = ResultApplyHandler(factory, runtime.registries, LocalGit())
-    worker = WorkflowWorker(
-        settings,
-        factory,
-        owner=f"{owner}:apply",
-        handlers={"approval": handler},
-        capabilities=frozenset({Capability.GIT}),
-        queue_classes=frozenset({QueueClass.PRIVILEGED}),
-    )
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        with suppress(NotImplementedError):
-            loop.add_signal_handler(signum, stop.set)
-    get_logger(__name__).info("applier ready", extra={"event": "applier.ready"})
     try:
+        # S-2.1: fail closed before control/apply workers, ready event, or poll loops.
+        await require_migration_head(engine)
+        factory = create_session_factory(engine)
+        owner = f"{socket.gethostname()}:{os.getpid()}:applier"
+        controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
+        handler = ResultApplyHandler(factory, runtime.registries, LocalGit())
+        worker = WorkflowWorker(
+            settings,
+            factory,
+            owner=f"{owner}:apply",
+            handlers={"approval": handler},
+            capabilities=frozenset({Capability.GIT}),
+            queue_classes=frozenset({QueueClass.PRIVILEGED}),
+        )
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with suppress(NotImplementedError):
+                loop.add_signal_handler(signum, stop.set)
+        get_logger(__name__).info("applier ready", extra={"event": "applier.ready"})
         while not stop.is_set():
             if not await ApplierChain(controls, worker).process_one():
                 with suppress(TimeoutError):

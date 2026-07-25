@@ -218,6 +218,13 @@ async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> Non
         "task_id": "task",
         "claimed_complete": True,
         "implementation_summary": "Implemented the requested change.",
+        "agent_checks": [
+            {
+                "name": "make test",
+                "status": "unavailable",
+                "detail": "Dependencies are not present in the iteration image.",
+            }
+        ],
         "usage": {
             "input_tokens": None,
             "cached_input_tokens": None,
@@ -276,6 +283,8 @@ async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> Non
     assert "Git and Make commands" in instruction
     assert "checks are non-authoritative" in instruction
     assert "trusted validation" in instruction
+    assert "one agent_checks entry for each relevant local check" in instruction
+    assert "Never present agent_checks as trusted gates" in instruction
     assert "Do not invoke shell commands" not in instruction
     shell_instruction = prompt["execution_policy"]["shell_invocation"]
     assert "only separately allowed git or make commands" in shell_instruction

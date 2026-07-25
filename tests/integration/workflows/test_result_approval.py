@@ -119,6 +119,13 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
                     "structured_output": {
                         "base_commit": base,
                         "result_commit": result_commit,
+                        "agent_checks": [
+                            {
+                                "name": "make test",
+                                "status": "not_run",
+                                "detail": "Agent image had no dependencies.",
+                            }
+                        ],
                         "gates": [
                             {
                                 "name": "tests",
@@ -185,6 +192,9 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
         async with factory() as session:
             card = await build_status_card(session, task_id)
             assert "Added the requested validator &lt;safely&gt;." in card.html
+            assert "Agent checks (untrusted)" in card.html
+            assert "make test — не запускалось" in card.html
+            assert "Vuzol checks (trusted)" in card.html
             assert "tests — passed (1.2s)" in card.html
             assert result_commit not in card.html
             assert "diff" not in card.html.lower()
@@ -193,6 +203,8 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             approval_card = await build_approval_card(session, task_id)
             assert "vuzol · Bounded task" in approval_card.html
             assert "Added the requested validator &lt;safely&gt;." in approval_card.html
+            assert "Проверки агента (не доверенные)" in approval_card.html
+            assert "Проверки Vuzol (доверенные)" in approval_card.html
             assert "tests — 1.2s" in approval_card.html
             assert approval_card.buttons == ("approve", "redo", "reject")
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from vuzol.experiments.domain import AgentCheckResult, AgentCheckStatus
+
 from ._test_experiments_helpers import (
     BoundedLevel,
     BoundedRepairContext,
@@ -104,12 +106,12 @@ def test_worker_prompt_contains_exact_boundary_and_structured_result_requirement
     assert "shell-backed repository tools" in prompt
     assert "read files, search repository contents" in prompt
     assert "create and edit ordinary files" in prompt
-    assert "inspect the result of your edits without Git" in prompt
+    assert "inspect the result using only permitted tools" in prompt
     assert "Do not invoke Git, shell commands" not in prompt
     assert "Do not touch another VPS project" in prompt
-    assert "Do not invoke any Git command" in prompt
-    assert "read or write .git" in prompt
-    assert "Do not run required gates or tests" in prompt
+    assert "Provider-specific execution policy determines" in prompt
+    assert "Never stage, commit, reset, clean, push, or write .git" in prompt
+    assert "only an agent-attempted check" in prompt
     assert "install packages" in prompt
     assert "synchronize dependencies" in prompt
     assert "access the network" in prompt
@@ -120,15 +122,22 @@ def test_worker_prompt_contains_exact_boundary_and_structured_result_requirement
     assert "actually inspect and edit those files" in prompt
     assert "claimed_complete=true only after making the intended changes" in prompt
     assert "claimed_complete=false only for a genuine inability" in prompt
-    assert "lack of permission to run Git or tests does not prevent" in prompt
+    assert "Unavailable Git or local checks do not prevent" in prompt
     assert "step09a-worker-edit-report.v1" in prompt
     assert "Do not claim changed files" in prompt
+    assert "agent_checks with one honest bounded entry" in prompt
+    assert "including checks not run" in prompt
     assert "gate results, branch identity, or a result commit" in prompt
     assert '"goal":"Add a pure validator."' in prompt
     assert '"allowed_paths":["src/example.py","tests/test_example.py"]' in prompt
     assert '"acceptance_criteria":["Reject malformed input"]' in prompt
     assert '"forbidden_changes":["Do not relax tests"]' in prompt
     assert "/home/vodkolyan" not in prompt
+
+
+def test_agent_check_requires_a_nonblank_bounded_name() -> None:
+    with pytest.raises(ValidationError, match="cannot be blank"):
+        AgentCheckResult(name="   ", status=AgentCheckStatus.NOT_RUN)
 
 
 def test_trial_seed_request_bounds_repairs_and_context_role() -> None:

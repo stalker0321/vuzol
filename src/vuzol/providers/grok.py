@@ -41,7 +41,19 @@ def canonical_grok_argv(model: str, *, read_only: bool = False) -> tuple[str, ..
         "--sandbox",
         "strict",
         "--allow",
-        "Bash(git *)",
+        "Bash(git status*)",
+        "--allow",
+        "Bash(git diff*)",
+        "--allow",
+        "Bash(git ls-files*)",
+        "--allow",
+        "Bash(git grep*)",
+        "--allow",
+        "Bash(git log*)",
+        "--allow",
+        "Bash(git show*)",
+        "--allow",
+        "Bash(git rev-parse*)",
         "--allow",
         "Bash(make *)",
         "--allow",
@@ -253,10 +265,12 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
 def _result_contract_instruction(request: ProviderRequest) -> str:
     if request.output_schema_version == "step09a-worker-edit-report.v1":
         return (
-            "Do not invoke shell commands, Git, or project gates. Vuzol owns inspection, gates, "
-            "staging, commit creation, and the authoritative result manifest. Return only the "
-            "small requested edit report; when all provider usage is unavailable, include a "
-            "concise non-empty unavailable_reason."
+            "You may use the separately allowed Git and Make commands to inspect the workspace "
+            "and iterate on local checks. Those checks are non-authoritative: Vuzol owns measured "
+            "inspection, staging, commit creation, trusted validation, and the authoritative "
+            "result manifest. Return only the small requested edit report; do not claim that a "
+            "local check replaces trusted validation. When all provider usage is unavailable, "
+            "include a concise non-empty unavailable_reason."
         )
     return (
         "When every provider usage value is unavailable, set unavailable_reason to a concise "
@@ -267,8 +281,11 @@ def _result_contract_instruction(request: ProviderRequest) -> str:
 def _shell_contract_instruction(request: ProviderRequest) -> str:
     if request.output_schema_version == "step09a-worker-edit-report.v1":
         return (
-            "Do not invoke native shell tools. Use repository read, search, and edit tools only; "
-            "the deterministic Vuzol finalizer owns all Git and gate commands."
+            "For workspace inspection and local iteration, invoke only separately allowed git or "
+            "make commands. Run every command separately; do not use cd, command chains, shell "
+            "wrappers, or command substitution. Do not stage, commit, reset, clean, or push. The "
+            "deterministic Vuzol finalizer independently owns measured inspection, staging, commit "
+            "creation, and trusted gates."
         )
     return (
         "Invoke each allowed shell command separately; do not use cd, chains, wrappers, or "

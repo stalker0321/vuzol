@@ -174,6 +174,8 @@ def test_worker_main_composes_runtime_and_handles_stop(
     monkeypatch.setattr(worker_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(worker_cli, "create_engine", lambda *_args: Engine())
     monkeypatch.setattr(worker_cli, "create_session_factory", lambda _engine: Factory())
+    migration_head = AsyncMock()
+    monkeypatch.setattr(worker_cli, "require_migration_head", migration_head)
     monkeypatch.setattr(worker_cli, "WorkflowDispatcher", Dispatcher)
     monkeypatch.setattr(worker_cli, "WorkflowControlConsumer", Controls)
     monkeypatch.setattr(worker_cli, "ResultReviewHandler", MagicMock())
@@ -192,7 +194,57 @@ def test_worker_main_composes_runtime_and_handles_stop(
     assert calls["service"] == "vuzol-worker"
     assert calls["recovery_batch_size"] == 100
     assert calls["disposed"] is True
+    migration_head.assert_awaited()
     assert any(record.__dict__.get("signal") == signal.SIGTERM for record in caplog.records)
+
+
+def test_worker_fails_closed_before_profile_sync_when_migration_head_refuses(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """S-2.1: MigrationHeadError propagates; no synchronize_profiles / ready work."""
+
+    from vuzol.storage.migration_preflight import MigrationHeadError
+
+    settings = Settings(environment="test")
+    order: list[str] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            order.append("dispose")
+
+    class Factory:
+        def begin(self) -> object:
+            order.append("factory_begin")
+            raise AssertionError("session work must not start after migration head failure")
+
+    async def refuse(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        raise MigrationHeadError("migration_head_behind", "database schema is behind this release")
+
+    async def never_sync(*_args: object, **_kwargs: object) -> None:
+        order.append("synchronize_profiles")
+        raise AssertionError("synchronize_profiles must not run")
+
+    monkeypatch.setattr(
+        worker_cli,
+        "get_runtime_configuration",
+        lambda **_kwargs: runtime_configuration(settings),
+    )
+    monkeypatch.setattr(worker_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(worker_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(worker_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(worker_cli, "create_session_factory", lambda _engine: Factory())
+    monkeypatch.setattr(worker_cli, "require_migration_head", refuse)
+    monkeypatch.setattr(worker_cli, "synchronize_profiles", never_sync)
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        asyncio.run(worker_cli.run())
+
+    assert excinfo.value.code == "migration_head_behind"
+    # Gate fails closed before profile sync; engine still disposed in finally.
+    assert order == ["require_migration_head", "dispose"]
+    assert "synchronize_profiles" not in order
 
 
 @pytest.mark.anyio
@@ -228,6 +280,8 @@ async def test_applier_composes_narrow_control_and_privileged_worker(
     monkeypatch.setattr(applier_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
     monkeypatch.setattr(applier_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(applier_cli, "create_engine", lambda *_args: Engine())
+    migration_head = AsyncMock()
+    monkeypatch.setattr(applier_cli, "require_migration_head", migration_head)
     monkeypatch.setattr(applier_cli, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(applier_cli, "WorkflowControlConsumer", lambda *_args, **_kwargs: controls)
     monkeypatch.setattr(applier_cli, "ResultApplyHandler", MagicMock())
@@ -238,8 +292,51 @@ async def test_applier_composes_narrow_control_and_privileged_worker(
 
     assert calls["service"] == "vuzol-applier"
     assert calls["disposed"] is True
+    migration_head.assert_awaited()
     controls.process_one.assert_awaited_once()
     worker.process_one.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_applier_fails_closed_before_workers_when_migration_head_refuses(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from vuzol.storage.migration_preflight import MigrationHeadError
+
+    settings = Settings(environment="test")
+    runtime = runtime_configuration(settings)
+    order: list[str] = []
+
+    class Engine:
+        async def dispose(self) -> None:
+            order.append("dispose")
+
+    async def refuse(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        raise MigrationHeadError(
+            "migration_head_mismatch",
+            "database revision set does not match this code tree heads",
+        )
+
+    def boom_factory(*_args: object, **_kwargs: object) -> object:
+        order.append("worker_or_control")
+        raise AssertionError("workers must not be constructed after migration head failure")
+
+    monkeypatch.setattr(applier_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
+    monkeypatch.setattr(applier_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(applier_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(applier_cli, "create_engine", lambda *_args: Engine())
+    monkeypatch.setattr(applier_cli, "require_migration_head", refuse)
+    monkeypatch.setattr(applier_cli, "create_session_factory", boom_factory)
+    monkeypatch.setattr(applier_cli, "WorkflowControlConsumer", boom_factory)
+    monkeypatch.setattr(applier_cli, "WorkflowWorker", boom_factory)
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        await applier_cli.run()
+
+    assert excinfo.value.code == "migration_head_mismatch"
+    # Gate fails closed before workers; engine still disposed in finally.
+    assert order == ["require_migration_head", "dispose"]
 
 
 @pytest.mark.anyio

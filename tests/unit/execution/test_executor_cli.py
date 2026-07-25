@@ -513,8 +513,11 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(executor_cli, "validate_seccomp_profile", MagicMock())
     monkeypatch.setattr(executor_cli, "resolve_database_dsn", lambda _settings: object())
     monkeypatch.setattr(executor_cli, "create_engine", lambda *_args: engine)
+    migration_head = AsyncMock()
+    monkeypatch.setattr(executor_cli, "require_migration_head", migration_head)
     monkeypatch.setattr(executor_cli, "create_session_factory", lambda _engine: factory)
-    monkeypatch.setattr(executor_cli, "synchronize_profiles", AsyncMock())
+    sync_profiles = AsyncMock()
+    monkeypatch.setattr(executor_cli, "synchronize_profiles", sync_profiles)
     for name in (
         "ScopedSecretResolver",
         "ArtifactStore",
@@ -536,9 +539,81 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     await executor_cli.run()
     sandbox.preflight.assert_awaited_once()
     worktree_access.preflight.assert_awaited_once()
+    migration_head.assert_awaited_once_with(engine)
+    sync_profiles.assert_awaited()
     run_loop.assert_awaited_once()
     assert run_loop.await_args is not None
     assert run_loop.await_args.kwargs["subscription_limit_settings"] is settings.subscription_limits
+    engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_executor_fails_closed_before_profile_sync_when_migration_head_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S-2.1: refuse after engine create; no synchronize_profiles / reconcile / ready loop."""
+
+    from vuzol.cli import executor as executor_cli
+    from vuzol.storage.migration_preflight import MigrationHeadError
+
+    settings = MagicMock()
+    settings.service_name = "vuzol"
+    settings.log_level = "INFO"
+    settings.execution.enabled = True
+    settings.execution.require_preflight = False
+    settings.execution.rootless_docker_socket = Path("/run/executor/docker.sock")
+    settings.execution.sandbox_seccomp_profile = Path("/etc/vuzol/sandbox-seccomp.json")
+    settings.execution.sandbox_seccomp_profile_sha256 = "a" * 64
+    settings.worktree_root = Path("/tmp/worktrees")  # noqa: S108
+    registries = MagicMock()
+    registries.profiles.items.return_value = ()
+    registries.sandboxes.items.return_value = ()
+    registries.revision = "a" * 64
+    runtime = MagicMock(settings=settings, registries=registries)
+
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    order: list[str] = []
+
+    async def refuse(_engine: object, **_kwargs: object) -> object:
+        order.append("require_migration_head")
+        raise MigrationHeadError(
+            "migration_head_empty",
+            "database has no alembic revision rows",
+        )
+
+    async def never_sync(*_args: object, **_kwargs: object) -> None:
+        order.append("synchronize_profiles")
+        raise AssertionError("synchronize_profiles must not run")
+
+    worktree_access = MagicMock()
+    worktree_access.preflight = AsyncMock()
+
+    monkeypatch.setattr(executor_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
+    monkeypatch.setattr(executor_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(executor_cli, "RootlessDockerRuntime", MagicMock())
+    monkeypatch.setattr(executor_cli, "RootlessIdentityResolver", MagicMock())
+    monkeypatch.setattr(
+        executor_cli,
+        "WorktreeAccessManager",
+        lambda *_args: worktree_access,
+    )
+    monkeypatch.setattr(executor_cli, "validate_seccomp_profile", MagicMock())
+    monkeypatch.setattr(executor_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(executor_cli, "create_engine", lambda *_args: engine)
+    monkeypatch.setattr(executor_cli, "require_migration_head", refuse)
+    monkeypatch.setattr(executor_cli, "create_session_factory", MagicMock())
+    monkeypatch.setattr(executor_cli, "synchronize_profiles", never_sync)
+    run_loop = AsyncMock()
+    monkeypatch.setattr(executor_cli, "_run_loop", run_loop)
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        await executor_cli.run()
+
+    assert excinfo.value.code == "migration_head_empty"
+    assert order == ["require_migration_head"]
+    run_loop.assert_not_awaited()
+    # Gate fails closed before profile sync; engine still disposed in finally.
     engine.dispose.assert_awaited_once()
 
 

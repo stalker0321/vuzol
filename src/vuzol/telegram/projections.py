@@ -640,8 +640,10 @@ async def _history_summary(session: AsyncSession, task: Task) -> str:
     return _one_line_summary(task_sense_sentence(task))
 
 
-async def _completion_report(session: AsyncSession, task: Task) -> tuple[str, tuple[str, ...]]:
-    """Return bounded implementation detail and any trusted gate names."""
+async def _completion_report(
+    session: AsyncSession, task: Task
+) -> tuple[str, tuple[dict[str, str | None], ...], tuple[str, ...]]:
+    """Return bounded detail, provider-reported checks, and trusted gate names."""
 
     approval = await session.scalar(
         select(Approval)
@@ -657,16 +659,23 @@ async def _completion_report(session: AsyncSession, task: Task) -> tuple[str, tu
     if approval is not None and approval.human_summary.strip():
         approval_step = await session.get(Step, approval.step_id)
         gates: list[str] = []
+        envelope: dict[str, object] = {}
         if approval_step is not None:
-            envelope = approval_step.payload.get("action_envelope")
-            raw_gates = envelope.get("gates") if isinstance(envelope, dict) else None
+            raw_envelope = approval_step.payload.get("action_envelope")
+            envelope = raw_envelope if isinstance(raw_envelope, dict) else {}
+            raw_gates = envelope.get("gates")
             if isinstance(raw_gates, list):
                 gates = [
                     str(gate.get("name", "check"))
                     for gate in raw_gates
                     if isinstance(gate, dict) and gate.get("name")
                 ]
-        return _concise_completion_report(approval.human_summary), tuple(gates[:12])
+        agent_checks = _envelope_agent_checks(envelope)
+        return (
+            _concise_completion_report(approval.human_summary),
+            agent_checks,
+            tuple(gates[:12]),
+        )
 
     run = await session.scalar(
         select(Run).where(Run.task_id == task.id).order_by(Run.created_at.desc()).limit(1)
@@ -689,8 +698,49 @@ async def _completion_report(session: AsyncSession, task: Task) -> tuple[str, tu
                 for key in ("implementation_summary", "summary", "text"):
                     value = source.get(key)
                     if isinstance(value, str) and value.strip():
-                        return _concise_completion_report(value), ()
-    return task_sense_sentence(task), ()
+                        return _concise_completion_report(value), (), ()
+    return task_sense_sentence(task), (), ()
+
+
+def _envelope_agent_checks(envelope: Mapping[str, object]) -> tuple[dict[str, str | None], ...]:
+    raw = envelope.get("agent_checks")
+    if not isinstance(raw, list):
+        return ()
+    checks: list[dict[str, str | None]] = []
+    for item in raw[:12]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        status = item.get("status")
+        detail = item.get("detail")
+        if not isinstance(name, str) or not isinstance(status, str):
+            continue
+        checks.append(
+            {
+                "name": name,
+                "status": status,
+                "detail": detail if isinstance(detail, str) else None,
+            }
+        )
+    return tuple(checks)
+
+
+def _agent_check_html(check: Mapping[str, str | None]) -> str:
+    labels = {
+        "passed": "заявлено: пройдено",
+        "failed": "заявлено: не пройдено",
+        "not_run": "не запускалось",
+        "unavailable": "недоступно",
+    }
+    status = check.get("status") or "unavailable"
+    line = (
+        f"• {telegram_html(check.get('name') or 'check')} — "
+        f"{telegram_html(labels.get(status, status))}"
+    )
+    detail = check.get("detail")
+    if detail:
+        line += f" ({telegram_html(detail)})"
+    return line
 
 
 async def _failure_details(session: AsyncSession, task: Task) -> tuple[str | None, str]:
@@ -1092,10 +1142,13 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
                 f"{telegram_html(usage.output_tokens or 0)} out"
             )
     if task.status is TaskStatus.COMPLETED:
-        report, gates = await _completion_report(session, task)
+        report, agent_checks, gates = await _completion_report(session, task)
         lines.extend(("", "<b>Отчёт о выполнении</b>", telegram_html(report)))  # noqa: RUF001
+        if agent_checks:
+            lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
+            lines.extend(_agent_check_html(check) for check in agent_checks)
         if gates:
-            lines.extend(("", "<b>Проверки</b>"))
+            lines.extend(("", "<b>Проверки Vuzol (доверенные)</b>"))
             lines.extend(f"✅ {telegram_html(gate)}" for gate in gates)
     elif task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
         failed_stage, reason = await _failure_details(session, task)
@@ -1112,7 +1165,11 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     if approval is not None and step is not None:
         envelope = verified_envelope(step, approval)
         lines.extend(("", "<b>What was done</b>", telegram_html(approval.human_summary)))
-        lines.extend(("", "<b>Checks</b>"))
+        agent_checks = _envelope_agent_checks(envelope)
+        if agent_checks:
+            lines.extend(("", "<b>Agent checks (untrusted)</b>"))
+            lines.extend(_agent_check_html(check) for check in agent_checks)
+        lines.extend(("", "<b>Vuzol checks (trusted)</b>"))
         for gate in envelope["gates"]:
             duration = int(gate.get("duration_ms", 0)) / 1000
             lines.append(
@@ -1161,9 +1218,12 @@ async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> Stat
         "",
         "<b>Что сделано</b>",
         telegram_html(approval.human_summary),
-        "",
-        "<b>Проверки</b>",
     ]
+    agent_checks = _envelope_agent_checks(envelope)
+    if agent_checks:
+        lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
+        lines.extend(_agent_check_html(check) for check in agent_checks)
+    lines.extend(("", "<b>Проверки Vuzol (доверенные)</b>"))
     for gate in envelope["gates"]:
         duration = int(gate.get("duration_ms", 0)) / 1000
         lines.append(f"✅ {telegram_html(gate.get('name', 'check'))} — {duration:.1f}s")

@@ -13,9 +13,11 @@ from vuzol.storage.types import ApprovalStatus, TaskStatus
 from vuzol.telegram.layout import HISTORY_TOPIC_KIND
 from vuzol.telegram.projections import (
     TASK_HISTORY_ROLE,
+    _agent_check_html,
     _bounded_report,
     _completion_report,
     _concise_completion_report,
+    _envelope_agent_checks,
     _failure_details,
     _format_count,
     _format_duration,
@@ -58,6 +60,26 @@ def test_terminal_report_formatting_is_bounded() -> None:
     assert _bounded_report(" first \n\n second ") == "first\nsecond"
     assert _bounded_report("x" * 20, 10) == "xxxxxxxxx…"
     assert _bounded_report("   ") == "Без описания"
+
+
+def test_agent_checks_are_bounded_to_envelope_claims_and_html_escaped() -> None:
+    checks = _envelope_agent_checks(
+        {
+            "agent_checks": [
+                {
+                    "name": "<make test>",
+                    "status": "failed",
+                    "detail": "<dependency missing>",
+                },
+                "invalid",
+            ]
+        }
+    )
+    assert len(checks) == 1
+    rendered = _agent_check_html(checks[0])
+    assert "&lt;make test&gt;" in rendered
+    assert "&lt;dependency missing&gt;" in rendered
+    assert "<make test>" not in rendered
 
 
 def test_completion_report_keeps_facts_and_drops_handoff_sections() -> None:
@@ -104,12 +126,19 @@ async def test_completion_report_prefers_approval_and_gate_names() -> None:
     approval_step = SimpleNamespace(
         payload={
             "action_envelope": {
+                "agent_checks": [
+                    {
+                        "name": "make test",
+                        "status": "not_run",
+                        "detail": "Dependencies unavailable.",
+                    }
+                ],
                 "gates": [
                     {"name": "format-check"},
                     {"name": "test"},
                     {"exit_code": 0},
                     "invalid",
-                ]
+                ],
             }
         }
     )
@@ -117,9 +146,16 @@ async def test_completion_report_prefers_approval_and_gate_names() -> None:
     session.scalar = AsyncMock(return_value=approval)
     session.get = AsyncMock(return_value=approval_step)
 
-    report, gates = await _completion_report(session, task)  # type: ignore[arg-type]
+    report, agent_checks, gates = await _completion_report(session, task)  # type: ignore[arg-type]
 
     assert report == "Implemented the terminal report with bounded details."
+    assert agent_checks == (
+        {
+            "name": "make test",
+            "status": "not_run",
+            "detail": "Dependencies unavailable.",
+        },
+    )
     assert gates == ("format-check", "test")
 
 
@@ -137,8 +173,9 @@ async def test_completion_and_failure_reports_have_canonical_fallbacks() -> None
     session = MagicMock()
     session.scalar = AsyncMock(side_effect=[None, run])
     session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [result_step]))
-    report, gates = await _completion_report(session, task)  # type: ignore[arg-type]
+    report, agent_checks, gates = await _completion_report(session, task)  # type: ignore[arg-type]
     assert report == "Structured result."
+    assert agent_checks == ()
     assert gates == ()
 
     event = SimpleNamespace(payload={"reason": "Project topic creation was ambiguous."})

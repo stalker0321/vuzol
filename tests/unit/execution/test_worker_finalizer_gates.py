@@ -72,6 +72,8 @@ async def test_worker_finalizer_measures_gates_and_creates_exactly_one_commit(
     assert manifest.experiment_id == "step09a-finalizer-test"
     assert manifest.task_id == "bounded-edit"
     assert manifest.claimed_complete is True
+    assert manifest.agent_checks[0].name == "focused test"
+    assert manifest.agent_checks[0].status.value == "passed"
     assert manifest.changed_files == ("src/example.py",)
     assert manifest.usage.input_tokens == 11
     assert manifest.usage.cached_input_tokens == 3

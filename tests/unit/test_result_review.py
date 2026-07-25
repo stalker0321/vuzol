@@ -17,6 +17,7 @@ from vuzol.review.handler import (
     effective_risk,
     mechanical_findings,
     runtime_risk,
+    unexpected_file_findings,
 )
 from vuzol.storage.records import LeaseToken, StepRecord
 from vuzol.storage.types import RiskLevel, StepStatus, WorktreeDeliveryState
@@ -66,6 +67,72 @@ def test_mechanical_findings_classifies_blocking_patterns() -> None:
     findings = mechanical_findings(b"+assert True or True\n")
     assert any(item.classification == "forced_success" for item in findings)
     assert any(item.severity.value == "blocker" for item in findings)
+
+
+def test_docs_request_warns_about_unmentioned_new_verify_script() -> None:
+    task = SimpleNamespace(
+        original_text="Обнови README",
+        task_draft={"goal": "Update README.md with setup notes."},
+    )
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="task",
+        changed_files=("README.md", "verify.sh"),
+        added_files=("verify.sh",),
+        diff=b"+documentation\n",
+    )
+
+    findings = unexpected_file_findings(task, inspection)  # type: ignore[arg-type]
+
+    assert len(findings) == 1
+    assert findings[0].severity.value == "warning"
+    assert findings[0].classification == "unexpected_executable_file"
+    assert findings[0].path == "verify.sh"
+
+
+def test_single_file_request_warns_about_unmentioned_new_test_file() -> None:
+    task = SimpleNamespace(
+        original_text="Fix src/app.py only.",
+        task_draft={"goal": "Fix src/app.py only."},
+    )
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="task",
+        changed_files=("src/app.py", "tests/test_app.py"),
+        added_files=("tests/test_app.py",),
+        diff=b"+change\n",
+    )
+
+    findings = unexpected_file_findings(task, inspection)  # type: ignore[arg-type]
+
+    assert [finding.path for finding in findings] == ["tests/test_app.py"]
+
+
+@pytest.mark.parametrize(
+    ("goal", "changed", "added"),
+    (
+        ("Implement the feature.", ("src/app.py", "tests/test_app.py"), ("tests/test_app.py",)),
+        (
+            "Update src/app.py and add tests/test_app.py.",
+            ("src/app.py", "tests/test_app.py"),
+            ("tests/test_app.py",),
+        ),
+        ("Update README.md.", ("README.md", "docs/setup.md"), ("docs/setup.md",)),
+    ),
+)
+def test_unexpected_file_warning_stays_narrow(
+    goal: str, changed: tuple[str, ...], added: tuple[str, ...]
+) -> None:
+    task = SimpleNamespace(original_text=goal, task_draft={"goal": goal})
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="task",
+        changed_files=changed,
+        added_files=added,
+        diff=b"+change\n",
+    )
+
+    assert unexpected_file_findings(task, inspection) == ()  # type: ignore[arg-type]
 
 
 def test_effective_risk_uses_draft_when_higher() -> None:

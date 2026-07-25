@@ -4,6 +4,9 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added a narrow approval-visible warning when a docs-only or explicitly named single-file request
+  produces an unmentioned new executable, script, build, or CI path; warnings use measured Git
+  additions, remain non-blocking, and are carried in hash-bound review evidence;
 - separated provider-reported local checks from authoritative Vuzol validation: bounded
   `agent_checks` claims now survive finalization and appear in approval/completion projections
   under an explicit untrusted label, while only independently measured trusted gates can unlock

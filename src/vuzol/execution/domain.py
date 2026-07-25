@@ -150,6 +150,7 @@ class GitInspection(FrozenModel):
     branch: str
     changed_files: tuple[str, ...]
     diff: bytes
+    added_files: tuple[str, ...] = ()
 
     @property
     def diff_hash(self) -> str:

@@ -743,6 +743,42 @@ def _agent_check_html(check: Mapping[str, str | None]) -> str:
     return line
 
 
+def _envelope_review_warnings(
+    envelope: Mapping[str, object],
+) -> tuple[dict[str, str | int | None], ...]:
+    review = envelope.get("review_evidence")
+    raw = review.get("warnings") if isinstance(review, dict) else None
+    if not isinstance(raw, list):
+        return ()
+    warnings: list[dict[str, str | int | None]] = []
+    for item in raw[:12]:
+        if not isinstance(item, dict):
+            continue
+        summary = item.get("summary")
+        if not isinstance(summary, str):
+            continue
+        warnings.append(
+            {
+                "classification": (
+                    item.get("classification")
+                    if isinstance(item.get("classification"), str)
+                    else None
+                ),
+                "summary": summary,
+                "path": item.get("path") if isinstance(item.get("path"), str) else None,
+                "line": item.get("line") if isinstance(item.get("line"), int) else None,
+            }
+        )
+    return tuple(warnings)
+
+
+def _review_warning_html(warning: Mapping[str, str | int | None]) -> str:
+    path = warning.get("path")
+    location = f"{path}:{warning['line']}" if path and warning.get("line") else path
+    prefix = f"<code>{telegram_html(location)}</code> — " if location else ""
+    return f"⚠️ {prefix}{telegram_html(warning.get('summary') or 'Review warning')}"
+
+
 async def _failure_details(session: AsyncSession, task: Task) -> tuple[str | None, str]:
     """Find the exact failed/blocked stage and its safest available reason."""
 
@@ -1169,6 +1205,10 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         if agent_checks:
             lines.extend(("", "<b>Agent checks (untrusted)</b>"))
             lines.extend(_agent_check_html(check) for check in agent_checks)
+        review_warnings = _envelope_review_warnings(envelope)
+        if review_warnings:
+            lines.extend(("", "<b>Review warnings</b>"))
+            lines.extend(_review_warning_html(warning) for warning in review_warnings)
         lines.extend(("", "<b>Vuzol checks (trusted)</b>"))
         for gate in envelope["gates"]:
             duration = int(gate.get("duration_ms", 0)) / 1000
@@ -1223,6 +1263,10 @@ async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> Stat
     if agent_checks:
         lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
         lines.extend(_agent_check_html(check) for check in agent_checks)
+    review_warnings = _envelope_review_warnings(envelope)
+    if review_warnings:
+        lines.extend(("", "<b>Предупреждения ревью</b>"))
+        lines.extend(_review_warning_html(warning) for warning in review_warnings)
     lines.extend(("", "<b>Проверки Vuzol (доверенные)</b>"))
     for gate in envelope["gates"]:
         duration = int(gate.get("duration_ms", 0)) / 1000

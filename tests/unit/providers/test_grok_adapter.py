@@ -84,7 +84,18 @@ async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> Non
     assert "dontAsk" in invocation.argv and "strict" in invocation.argv
     assert "Read(/grok-home/**)" in invocation.argv
     assert "Edit(/grok-home/**)" in invocation.argv
-    assert "Bash(git *)" in invocation.argv
+    assert "Bash(git status*)" in invocation.argv
+    assert "Bash(git diff*)" in invocation.argv
+    assert "Bash(git ls-files*)" in invocation.argv
+    assert "Bash(git grep*)" in invocation.argv
+    assert "Bash(git log*)" in invocation.argv
+    assert "Bash(git show*)" in invocation.argv
+    assert "Bash(git rev-parse*)" in invocation.argv
+    assert "Bash(git *)" not in invocation.argv
+    assert not any(
+        item.startswith(("Bash(git add", "Bash(git commit", "Bash(git checkout"))
+        for item in invocation.argv
+    )
     assert "Bash(tail -n 1 README.md)" in invocation.argv
     assert "Bash(date +%s%3N)" in invocation.argv
     assert "Bash(*)" not in invocation.argv
@@ -262,11 +273,15 @@ async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> Non
     assert result.structured_output == manifest
     prompt = json.loads(invocations[-1].stdin)
     instruction = prompt["execution_policy"]["result_manifest"]
-    assert "Do not invoke shell commands, Git, or project gates" in instruction
-    assert "Vuzol owns inspection, gates, staging, commit creation" in instruction
+    assert "Git and Make commands" in instruction
+    assert "checks are non-authoritative" in instruction
+    assert "trusted validation" in instruction
+    assert "Do not invoke shell commands" not in instruction
     shell_instruction = prompt["execution_policy"]["shell_invocation"]
-    assert "Do not invoke native shell tools" in shell_instruction
-    assert "git, make, or ./verify.sh" not in shell_instruction
+    assert "only separately allowed git or make commands" in shell_instruction
+    assert "Run every command separately" in shell_instruction
+    assert "Do not stage, commit, reset, clean, or push" in shell_instruction
+    assert "trusted gates" in shell_instruction
 
     usage = manifest["usage"]
     assert isinstance(usage, dict)

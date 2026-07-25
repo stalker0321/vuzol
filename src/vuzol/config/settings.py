@@ -17,6 +17,29 @@ class ConcurrencyLimits(BaseModel):
     privileged: int = Field(default=1, ge=1, le=10)
 
 
+class DiskPressureSettings(BaseModel):
+    """Low-watermark gate for **new heavy** work only (S10-3a).
+
+    ``min_free_bytes=0`` (default) disables the gate — compatible with prior
+    behavior. When positive, free space on each measured path must be >= the
+    threshold. Empty ``paths`` means measure ``worktree_root`` and
+    ``artifact_root`` from process settings at evaluation time.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    min_free_bytes: int = Field(default=0, ge=0, le=100_000_000_000_000)
+    paths: tuple[Path, ...] = ()
+
+    @field_validator("paths")
+    @classmethod
+    def require_absolute_paths(cls, value: tuple[Path, ...]) -> tuple[Path, ...]:
+        for path in value:
+            if not path.is_absolute():
+                raise ValueError("disk pressure paths must be absolute when configured")
+        return value
+
+
 class RetentionDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -289,6 +312,7 @@ class Settings(BaseSettings):
     limits: HardLimits = HardLimits()
     redaction_patterns: tuple[str, ...] = ()
     backup: BackupSettings = Field(default_factory=BackupSettings)
+    disk_pressure: DiskPressureSettings = Field(default_factory=DiskPressureSettings)
 
     @field_validator(
         "repository_root",

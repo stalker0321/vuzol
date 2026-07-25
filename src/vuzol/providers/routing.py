@@ -15,6 +15,11 @@ from vuzol.config.models import (
 )
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
+from vuzol.ops.disk_pressure import (
+    FreeSpaceProbe,
+    assess_heavy_claim_gate,
+    report_claim_disk_pressure_deferred,
+)
 from vuzol.projects.executor_preference import (
     ExecutorRoutePin,
     load_preference,
@@ -72,6 +77,7 @@ async def claim_routed_step(
     candidate_limit: int,
     class_limits: dict[QueueClass, int] | None = None,
     step_types: frozenset[str] = frozenset(PROVIDER_STEP_ROLES),
+    free_space_probe: FreeSpaceProbe | None = None,
 ) -> LeaseToken | None:
     if candidate_limit < 1 or not step_types:
         return None
@@ -92,7 +98,19 @@ async def claim_routed_step(
         .limit(candidate_limit)
     )
     profiles = registries.profiles.items()
+    heavy_disk_blocked: bool | None = None
     for step, run, task in tuple(rows.all()):
+        if step.queue_class is QueueClass.HEAVY:
+            if heavy_disk_blocked is None:
+                # settings is required on this API; assess_heavy_claim_gate still
+                # fail-closes if a caller ever passes None via type hole.
+                assessment = assess_heavy_claim_gate(settings, probe=free_space_probe)
+                heavy_disk_blocked = assessment.blocked
+                if heavy_disk_blocked:
+                    report_claim_disk_pressure_deferred(assessment)
+            if heavy_disk_blocked:
+                # Defer without routing decision, budget reservation, or attempt burn.
+                continue
         if class_limits is not None and (limit := class_limits.get(step.queue_class)) is not None:
             active_class = int(
                 await session.scalar(

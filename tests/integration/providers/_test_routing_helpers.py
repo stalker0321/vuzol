@@ -72,6 +72,7 @@ from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import (
     BudgetReservationStatus,
     IdempotencyClass,
+    QueueClass,
     RetryClass,
     RunStatus,
     StepStatus,
@@ -119,6 +120,7 @@ __all__ = [
     "ProviderResultStatus",
     "ProviderRole",
     "ProviderStepHandler",
+    "QueueClass",
     "RegistryDocument",
     "RetryClass",
     "RoutedWorkflowWorker",
@@ -234,6 +236,7 @@ async def seed_provider_step(
     *,
     step_type: str = "execute_model",
     capabilities: list[str] | None = None,
+    queue_class: QueueClass = QueueClass.LIGHT,
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     async with UnitOfWork(factory) as uow:
         task = await uow.tasks.create(
@@ -264,6 +267,7 @@ async def seed_provider_step(
             retry_class=RetryClass.TRANSIENT,
             required_capabilities=capabilities,
             status=StepStatus.QUEUED,
+            queue_class=queue_class,
             max_attempts=3,
         )
     return task.id, run_id, step.id

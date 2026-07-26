@@ -17,8 +17,10 @@ from vuzol.ops.backup.restore_target import (
     preflight_restore_target,
 )
 
-_PROD_DSN = "postgresql://prod_user:s3cret@127.0.0.1:5432/vuzol"
-_RESTORE_DSN = "postgresql://restore_user:other@127.0.0.1:5432/vuzol_restore"
+_PROD_DSN = "postgresql://prod_user:s3cret@127.0.0.1:5432/vuzol"  # pragma: allowlist secret
+_RESTORE_DSN = (
+    "postgresql://restore_user:other@127.0.0.1:5432/vuzol_restore"  # pragma: allowlist secret
+)
 
 
 def _production(tmp_path: Path) -> ProductionRoots:
@@ -126,7 +128,7 @@ def test_refuse_equal_identity_with_isolated_name_collision(tmp_path: Path) -> N
     prod = "postgresql://u:p@127.0.0.1:5432/vuzol_restore"
     report = preflight_restore_target(
         production_dsn=prod,
-        restore_dsn="postgresql://u2:p2@127.0.0.1:5432/vuzol_restore",
+        restore_dsn="postgresql://u2:p2@127.0.0.1:5432/vuzol_restore",  # pragma: allowlist secret
         production=production,
         drill_root=drill,
     )
@@ -203,7 +205,9 @@ def test_refuse_malformed_restore_port_redacted(tmp_path: Path) -> None:
 def test_refuse_malformed_production_port_redacted(tmp_path: Path) -> None:
     production = _production(tmp_path)
     drill = _safe_drill(tmp_path)
-    bad_prod = "postgresql://u:s3cret@127.0.0.1:99999999/vuzol"
+    bad_prod = (  # synthetic malformed-port redaction fixture
+        "postgresql://u:s3cret@127.0.0.1:99999999/vuzol"  # pragma: allowlist secret
+    )
     report = preflight_restore_target(
         production_dsn=bad_prod,
         restore_dsn=_RESTORE_DSN,

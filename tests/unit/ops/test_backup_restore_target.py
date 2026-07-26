@@ -591,3 +591,52 @@ def test_invalid_path_runtime_types_return_path_io(tmp_path: Path) -> None:
     payload = report3.to_operational_payload()
     assert payload["host"] is None
     assert str(drill) not in str(payload)
+
+
+def test_embedded_nul_path_maps_to_path_io(tmp_path: Path) -> None:
+    """Path with embedded NUL raises ValueError from resolve → exact CODE_PATH_IO."""
+
+    production = _production(tmp_path)
+    bad_marker = "bad\x00root"
+    drill = Path(str(tmp_path) + "/" + bad_marker)
+    report = preflight_restore_target(
+        production_dsn=_PROD_DSN,
+        restore_dsn=_RESTORE_DSN,
+        production=production,
+        drill_root=drill,
+    )
+    assert report.ok is False
+    assert report.code == CODE_PATH_IO
+    assert report.message == "drill root is not resolvable"
+    assert report.host is None
+    assert "null" not in report.message.lower()
+    assert bad_marker not in report.message
+    assert "\x00" not in report.message
+    assert str(tmp_path) not in report.message
+    payload = report.to_operational_payload()
+    assert payload["code"] == CODE_PATH_IO
+    assert bad_marker not in str(payload)
+    assert "\x00" not in str(payload)
+    assert str(tmp_path) not in str(payload)
+
+    # ProductionRoots member with embedded NUL also stays in PATH_IO contract.
+    broken = ProductionRoots(
+        repository_root=production.repository_root,
+        worktree_root=production.worktree_root,
+        artifact_root=Path(str(tmp_path) + "/art\x00x"),
+        secret_file_root=production.secret_file_root,
+        config_root=production.config_root,
+        deploy_root=production.deploy_root,
+    )
+    report2 = preflight_restore_target(
+        production_dsn=_PROD_DSN,
+        restore_dsn=_RESTORE_DSN,
+        production=broken,
+        drill_root=_safe_drill(tmp_path),
+    )
+    assert report2.ok is False
+    assert report2.code == CODE_PATH_IO
+    assert report2.message == "drill root is not resolvable"
+    assert "\x00" not in report2.message
+    assert "art\x00x" not in report2.message
+    assert str(tmp_path) not in report2.message

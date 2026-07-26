@@ -131,11 +131,9 @@ def preflight_restore_target(
         )
     except BackupPathError:
         return _fail(CODE_PATH_CONFLICT, "drill root conflicts with production roots")
-    except (OSError, RuntimeError):
-        # Resolution I/O / symlink-loop RuntimeError distinct from containment conflict.
-        return _fail(CODE_PATH_IO, "drill root is not resolvable")
-    except (TypeError, AttributeError):
-        # Invalid production/drill_root runtime types (None, bad roots) — fixed PATH_IO.
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+        # Non-BackupPathError path boundary failures: resolution I/O, symlink loops,
+        # embedded NUL ValueError (B1 resolve wraps only OSError), invalid types.
         return _fail(CODE_PATH_IO, "drill root is not resolvable")
 
     return TargetPreflightReport(

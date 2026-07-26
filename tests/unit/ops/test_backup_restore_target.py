@@ -400,7 +400,7 @@ def test_path_resolution_oserror_maps_to_path_io(tmp_path: Path) -> None:
 
 
 def test_path_resolution_runtimeerror_symlink_loop_maps_to_path_io(tmp_path: Path) -> None:
-    """Symlink loop / RuntimeError during resolve → CODE_PATH_IO, no absolute path leak."""
+    """Real symlink loop during resolve → exactly CODE_PATH_IO, no absolute path leak."""
 
     production = _production(tmp_path)
     a = tmp_path / "loop-a"
@@ -415,9 +415,7 @@ def test_path_resolution_runtimeerror_symlink_loop_maps_to_path_io(tmp_path: Pat
         drill_root=a,
     )
     assert report.ok is False
-    # Either PATH_IO (RuntimeError/OSError) or PATH_CONFLICT if resolve maps differently;
-    # report contract: no absolute paths, fixed code family.
-    assert report.code in {CODE_PATH_IO, CODE_PATH_CONFLICT}
+    assert report.code == CODE_PATH_IO
     assert report.host is None
     assert str(a) not in report.message
     assert str(b) not in report.message
@@ -425,6 +423,7 @@ def test_path_resolution_runtimeerror_symlink_loop_maps_to_path_io(tmp_path: Pat
     payload = report.to_operational_payload()
     assert str(a) not in str(payload)
     assert str(tmp_path) not in str(payload)
+    assert payload["code"] == CODE_PATH_IO
 
     # Explicit RuntimeError path (platform-independent).
     def _raise_runtime(**_kwargs: object) -> None:
@@ -474,3 +473,121 @@ def test_non_string_dsn_inputs_return_redacted_dsn_code(tmp_path: Path) -> None:
         assert report2.ok is False
         assert report2.code == CODE_DSN
         assert "s3cret" not in report2.message
+
+
+def test_allow_local_hosts_only_requires_actual_bool(tmp_path: Path) -> None:
+    """None/0/1/strings/containers must fail CODE_HOST without exposing remote host/DSN.
+
+    bool is a subclass of int — 0/1 must not be treated as False/True for local-only.
+    """
+
+    production = _production(tmp_path)
+    drill = _safe_drill(tmp_path)
+    remote = "postgresql://u:p@db.example.com:5432/vuzol_restore"
+    bad_flags: list[object] = [None, 0, 1, "", "true", "false", [], {}, ()]
+    for bad in bad_flags:
+        report = preflight_restore_target(
+            production_dsn=_PROD_DSN,
+            restore_dsn=remote,
+            production=production,
+            drill_root=drill,
+            allow_local_hosts_only=bad,  # type: ignore[arg-type]
+        )
+        assert report.ok is False
+        assert report.code == CODE_HOST
+        assert report.host is None
+        assert report.database is None
+        assert "example.com" not in report.message
+        assert "postgresql://" not in report.message
+        assert "s3cret" not in report.message
+        payload = report.to_operational_payload()
+        assert "example.com" not in str(payload)
+        assert payload["host"] is None
+
+    # True still enforces local-only (remote refused).
+    report_true = preflight_restore_target(
+        production_dsn=_PROD_DSN,
+        restore_dsn=remote,
+        production=production,
+        drill_root=drill,
+        allow_local_hosts_only=True,
+    )
+    assert report_true.ok is False
+    assert report_true.code == CODE_HOST
+
+
+def test_non_string_required_suffix_returns_database_code(tmp_path: Path) -> None:
+    """None/int/bytes/list suffix → fixed CODE_DATABASE, never raise."""
+
+    production = _production(tmp_path)
+    drill = _safe_drill(tmp_path)
+    bad_suffixes: list[object] = [None, 0, 1, b"_restore", ["_restore"], {}]
+    for bad in bad_suffixes:
+        report = preflight_restore_target(
+            production_dsn=_PROD_DSN,
+            restore_dsn=_RESTORE_DSN,
+            production=production,
+            drill_root=drill,
+            required_database_suffix=bad,  # type: ignore[arg-type]
+        )
+        assert report.ok is False
+        assert report.code == CODE_DATABASE
+        assert report.host is None
+        assert "s3cret" not in report.message
+        if bad is not None and not isinstance(bad, int):
+            assert str(bad) not in report.message
+
+
+def test_invalid_path_runtime_types_return_path_io(tmp_path: Path) -> None:
+    """production=None, drill_root=None, ProductionRoots member None → CODE_PATH_IO."""
+
+    production = _production(tmp_path)
+    drill = _safe_drill(tmp_path)
+
+    report = preflight_restore_target(
+        production_dsn=_PROD_DSN,
+        restore_dsn=_RESTORE_DSN,
+        production=None,  # type: ignore[arg-type]
+        drill_root=drill,
+    )
+    assert report.ok is False
+    assert report.code == CODE_PATH_IO
+    assert report.host is None
+    assert "None" not in report.message
+
+    report2 = preflight_restore_target(
+        production_dsn=_PROD_DSN,
+        restore_dsn=_RESTORE_DSN,
+        production=production,
+        drill_root=None,  # type: ignore[arg-type]
+    )
+    assert report2.ok is False
+    assert report2.code == CODE_PATH_IO
+    assert "None" not in report2.message
+    assert str(tmp_path) not in report2.message
+
+    # ProductionRoots with a None member: path boundary must not reflect value/path.
+    broken = ProductionRoots(
+        repository_root=production.repository_root,
+        worktree_root=production.worktree_root,
+        artifact_root=production.artifact_root,
+        secret_file_root=production.secret_file_root,
+        config_root=None,  # type: ignore[arg-type]
+        deploy_root=production.deploy_root,
+    )
+    report3 = preflight_restore_target(
+        production_dsn=_PROD_DSN,
+        restore_dsn=_RESTORE_DSN,
+        production=broken,
+        drill_root=drill,
+    )
+    assert report3.ok is False
+    assert report3.code == CODE_PATH_IO
+    assert report3.host is None
+    assert report3.database is None
+    # Fixed message only — do not reflect path or sentinel values.
+    assert report3.message == "drill root is not resolvable"
+    assert str(drill) not in report3.message
+    payload = report3.to_operational_payload()
+    assert payload["host"] is None
+    assert str(drill) not in str(payload)

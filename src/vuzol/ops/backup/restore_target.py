@@ -72,6 +72,13 @@ def preflight_restore_target(
     process. Path resolution uses existing isolation helpers only.
     """
 
+    # bool is a subclass of int — require an actual bool so 0/1 cannot bypass local-only.
+    if not isinstance(allow_local_hosts_only, bool):
+        return _fail(CODE_HOST, "restore host is not local-only")
+
+    if not isinstance(required_database_suffix, str):
+        return _fail(CODE_DATABASE, "required database suffix is empty")
+
     try:
         prod_host, prod_port, prod_db = normalize_dsn_identity(production_dsn)
     except BackupPathError:
@@ -100,6 +107,7 @@ def preflight_restore_target(
     )
 
     # B1 assert remains final authority; on failure use structural class, else fallback.
+    # Only invoked after bool/str wrapper validation so falsey non-bool cannot bypass.
     try:
         assert_isolated_restore_dsn(
             production_dsn=production_dsn,
@@ -125,6 +133,9 @@ def preflight_restore_target(
         return _fail(CODE_PATH_CONFLICT, "drill root conflicts with production roots")
     except (OSError, RuntimeError):
         # Resolution I/O / symlink-loop RuntimeError distinct from containment conflict.
+        return _fail(CODE_PATH_IO, "drill root is not resolvable")
+    except (TypeError, AttributeError):
+        # Invalid production/drill_root runtime types (None, bad roots) — fixed PATH_IO.
         return _fail(CODE_PATH_IO, "drill root is not resolvable")
 
     return TargetPreflightReport(
@@ -152,7 +163,7 @@ def _classify_dsn_isolation(
 
     Matches ``assert_isolated_restore_dsn`` authority order: identity first,
     then database name (including empty-suffix refuse), then host. Does not use
-    exception message text.
+    exception message text. Caller must pass an actual ``bool`` and ``str``.
     """
 
     if (rest_host, rest_port, rest_db) == (prod_host, prod_port, prod_db):

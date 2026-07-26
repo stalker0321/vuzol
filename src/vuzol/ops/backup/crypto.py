@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -31,6 +32,11 @@ KEK_LEN = 32
 DEK_LEN = 32
 WRAP_NONCE_LEN = 12
 WRAP_FILE_SIZE = 86  # 8+1+1+16+12+48
+# Single read() size bound for streaming decrypt (never unbounded read()).
+_STREAM_READ_MAX = 65_536
+# Max component/format name lengths (matches encrypt_blob_stream).
+_MAX_COMPONENT_LEN = 64
+_MAX_FORMAT_LEN = 32
 
 
 class BackupCryptoError(ValueError):
@@ -197,6 +203,10 @@ def encrypt_blob_stream(
     return EncryptResult(sha256_ciphertext=digest.hexdigest(), size_ciphertext=size)
 
 
+class _Readable(Protocol):
+    def read(self, size: int = -1, /) -> bytes: ...
+
+
 def decrypt_blob_stream(
     *,
     dek: bytes,
@@ -205,25 +215,52 @@ def decrypt_blob_stream(
     component: str,
     fmt: str,
 ) -> Iterator[bytes]:
+    """Decrypt a VBULB002 blob with bounded streaming reads (no full-file read)."""
+
     if len(dek) != DEK_LEN:
         raise BackupCryptoError("DEK must be 32 bytes")
     aead = AESGCM(dek)
     with blob_path.open("rb") as handle:
-        raw = handle.read()
-    offset = _parse_blob_header(raw, run_id=run_id, component=component, fmt=fmt)
+        yield from _decrypt_blob_stream_from_handle(
+            handle,
+            aead=aead,
+            run_id=run_id,
+            component=component,
+            fmt=fmt,
+        )
+
+
+def _decrypt_blob_stream_from_handle(
+    handle: _Readable,
+    *,
+    aead: AESGCM,
+    run_id: uuid.UUID,
+    component: str,
+    fmt: str,
+) -> Iterator[bytes]:
+    _parse_blob_header_stream(handle, run_id=run_id, component=component, fmt=fmt)
     chunk_index = 0
-    while offset < len(raw):
-        if offset + 4 > len(raw):
+    while True:
+        length_bytes = _read_until_eof_or_exact(handle, 4, what="chunk header")
+        if not length_bytes:
+            if chunk_index == 0:
+                raise BackupCryptoError("blob has no chunks")
+            # Encrypt always writes a short final remainder (including empty
+            # terminator after exact CHUNK_PLAINTEXT_MAX multiples). EOF after
+            # any authenticated full frame is truncated / incomplete.
+            raise BackupCryptoError("truncated blob: missing final chunk")
+        if len(length_bytes) < 4:
             raise BackupCryptoError("truncated chunk header")
-        (plain_len,) = struct.unpack_from(">I", raw, offset)
-        offset += 4
+        (plain_len,) = struct.unpack(">I", length_bytes)
         if plain_len > CHUNK_PLAINTEXT_MAX:
             raise BackupCryptoError("chunk plaintext_len exceeds max")
         need = plain_len + 16
-        if offset + need > len(raw):
-            raise BackupCryptoError("truncated chunk ciphertext")
-        ct = raw[offset : offset + need]
-        offset += need
+        try:
+            ct = _read_exact(handle, need, what="chunk ciphertext")
+        except BackupCryptoError as error:
+            if "truncated" in str(error):
+                raise BackupCryptoError("truncated chunk ciphertext") from error
+            raise
         aad = blob_aad(
             run_id=run_id,
             component=component,
@@ -240,11 +277,74 @@ def decrypt_blob_stream(
         yield plain
         chunk_index += 1
         if plain_len < CHUNK_PLAINTEXT_MAX:
-            if offset != len(raw):
+            trailing = _read_at_most(handle, 1, what="trailing probe")
+            if trailing:
                 raise BackupCryptoError("trailing garbage after final chunk")
             return
-    if chunk_index == 0:
-        raise BackupCryptoError("blob has no chunks")
+        if chunk_index >= MAX_CHUNKS:
+            raise BackupCryptoError("chunk limit exceeded")
+
+
+def _read_exact(handle: _Readable, n: int, *, what: str) -> bytes:
+    """Read exactly ``n`` bytes using only bounded positive ``read(size)`` calls."""
+
+    if n < 0:
+        raise BackupCryptoError(f"invalid read size for {what}")
+    if n == 0:
+        return b""
+    parts = bytearray()
+    remaining = n
+    while remaining > 0:
+        to_read = min(remaining, _STREAM_READ_MAX)
+        chunk = handle.read(to_read)
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise BackupCryptoError(f"invalid read result for {what}")
+        if not chunk:
+            raise BackupCryptoError(f"truncated {what}")
+        if len(chunk) > to_read:
+            raise BackupCryptoError(f"oversized read for {what}")
+        parts.extend(chunk)
+        remaining -= len(chunk)
+    return bytes(parts)
+
+
+def _read_until_eof_or_exact(handle: _Readable, n: int, *, what: str) -> bytes:
+    """Read up to ``n`` bytes, accumulating short reads; empty means clean EOF."""
+
+    if n <= 0:
+        return b""
+    parts = bytearray()
+    remaining = n
+    while remaining > 0:
+        to_read = min(remaining, _STREAM_READ_MAX)
+        chunk = handle.read(to_read)
+        if chunk is None:
+            break
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise BackupCryptoError(f"invalid read result for {what}")
+        if not chunk:
+            break
+        if len(chunk) > to_read:
+            raise BackupCryptoError(f"oversized read for {what}")
+        parts.extend(chunk)
+        remaining -= len(chunk)
+    return bytes(parts)
+
+
+def _read_at_most(handle: _Readable, n: int, *, what: str) -> bytes:
+    """Read up to ``n`` bytes with a single bounded ``read`` (may return fewer / empty)."""
+
+    if n <= 0:
+        return b""
+    to_read = min(n, _STREAM_READ_MAX)
+    chunk = handle.read(to_read)
+    if chunk is None:
+        return b""
+    if not isinstance(chunk, (bytes, bytearray)):
+        raise BackupCryptoError(f"invalid read result for {what}")
+    if len(chunk) > to_read:
+        raise BackupCryptoError(f"oversized read for {what}")
+    return bytes(chunk)
 
 
 def _blob_header(*, run_id: uuid.UUID, component: str, fmt: str) -> bytes:
@@ -263,33 +363,53 @@ def _blob_header(*, run_id: uuid.UUID, component: str, fmt: str) -> bytes:
     )
 
 
-def _parse_blob_header(raw: bytes, *, run_id: uuid.UUID, component: str, fmt: str) -> int:
-    if len(raw) < 27:
-        raise BackupCryptoError("blob header truncated")
-    if raw[:8] != BLOB_MAGIC:
+def _parse_blob_header_stream(
+    handle: _Readable, *, run_id: uuid.UUID, component: str, fmt: str
+) -> None:
+    """Parse and validate blob header using only bounded reads."""
+
+    prefix = _read_exact(handle, 26, what="blob header")
+    if prefix[:8] != BLOB_MAGIC:
         raise BackupCryptoError("blob magic mismatch")
-    if raw[8] != BLOB_HEADER_VERSION or raw[9] != 0:
+    if prefix[8] != BLOB_HEADER_VERSION or prefix[9] != 0:
         raise BackupCryptoError("blob version/flags unsupported")
-    file_run = uuid.UUID(bytes=raw[10:26])
+    file_run = uuid.UUID(bytes=prefix[10:26])
     if file_run != run_id:
         raise BackupCryptoError("blob run_id mismatch")
-    offset = 26
-    c_len = raw[offset]
-    offset += 1
-    c_name = raw[offset : offset + c_len].decode("utf-8")
-    offset += c_len
-    f_len = raw[offset]
-    offset += 1
-    f_name = raw[offset : offset + f_len].decode("utf-8")
-    offset += f_len
+    c_len = _read_exact(handle, 1, what="blob header")[0]
+    if c_len > _MAX_COMPONENT_LEN:
+        raise BackupCryptoError("blob component name too long")
+    c_raw = _read_exact(handle, c_len, what="blob header")
+    try:
+        c_name = c_raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        # Stable taxonomy; never embed raw header bytes in the message.
+        raise BackupCryptoError("blob header encoding invalid") from error
+    f_len = _read_exact(handle, 1, what="blob header")[0]
+    if f_len > _MAX_FORMAT_LEN:
+        raise BackupCryptoError("blob format name too long")
+    f_raw = _read_exact(handle, f_len, what="blob header")
+    try:
+        f_name = f_raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise BackupCryptoError("blob header encoding invalid") from error
     if c_name != component or f_name != fmt:
         raise BackupCryptoError("blob component/format mismatch")
-    (chunk_max,) = struct.unpack_from(">I", raw, offset)
-    offset += 4
+    tail = _read_exact(handle, 12, what="blob header")
+    (chunk_max,) = struct.unpack_from(">I", tail, 0)
     if chunk_max != CHUNK_PLAINTEXT_MAX:
         raise BackupCryptoError("blob chunk_size_max mismatch")
-    offset += 8  # reserved
-    return offset
+    # reserved 8 bytes already consumed in tail[4:12]
+
+
+def _parse_blob_header(raw: bytes, *, run_id: uuid.UUID, component: str, fmt: str) -> int:
+    """Parse header from an in-memory buffer (tests / tooling). Returns body offset."""
+
+    from io import BytesIO
+
+    buf = BytesIO(raw)
+    _parse_blob_header_stream(buf, run_id=run_id, component=component, fmt=fmt)
+    return buf.tell()
 
 
 def _encrypt_chunk(

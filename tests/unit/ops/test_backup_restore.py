@@ -33,6 +33,7 @@ from vuzol.ops.backup.restore import (
     CODE_PARTIAL,
     CODE_PATH_CONFLICT,
     CODE_RUN_ID,
+    CODE_SCHEMA_MISMATCH,
     CODE_UNSUPPORTED,
     DEFAULT_HASH_READ_SIZE,
     MANIFEST_MAX_BYTES,
@@ -69,6 +70,8 @@ def _partial_manifest(
     filename: str = "postgres.dump.enc",
     cipher: str = "aes-256-gcm",
     fmt: str = "pg_custom",
+    expected_head: str = "a" * 64,
+    observed_head: str = "a" * 64,
 ) -> BackupManifest:
     start = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
     end = start + timedelta(minutes=1)
@@ -104,8 +107,8 @@ def _partial_manifest(
                 service_name="vuzol",
             ),
             "schema_identity": BackupSchemaIdentity(
-                alembic_head_expected="a" * 64,
-                alembic_head_observed="a" * 64,
+                alembic_head_expected=expected_head,
+                alembic_head_observed=observed_head,
             ),
             "config": BackupConfigSnapshot(registry_revision="0" * 64, files=()),
             "components": components,
@@ -137,6 +140,8 @@ def _write_published_package(
     directory_run_id: uuid.UUID | None = None,
     cipher: str = "aes-256-gcm",
     fmt: str = "pg_custom",
+    expected_head: str = "a" * 64,
+    observed_head: str = "a" * 64,
 ) -> Path:
     dir_id = directory_run_id or run_id
     run_dir, tmp, publish = ensure_staging_tree(staging, dir_id)
@@ -147,6 +152,8 @@ def _write_published_package(
         extra_components=extra_components,
         cipher=cipher,
         fmt=fmt,
+        expected_head=expected_head,
+        observed_head=observed_head,
     )
     manifest_path = tmp / "manifest.v1.json"
     digest = store_manifest(manifest_path, manifest)
@@ -193,6 +200,28 @@ def test_preflight_ok_safe_report_has_no_paths(tmp_path: Path) -> None:
     text = str(payload)
     assert str(staging) not in text
     assert str(tmp_path) not in text
+
+
+def test_preflight_refuses_migration_head_mismatch(tmp_path: Path) -> None:
+    production = _production(tmp_path)
+    staging = _safe_staging(tmp_path)
+    run_id = uuid.uuid4()
+    _write_published_package(
+        staging,
+        run_id,
+        expected_head="a" * 64,
+        observed_head="b" * 64,
+    )
+
+    report = preflight_published_package(
+        staging_root=staging,
+        run_id=run_id,
+        production=production,
+    )
+
+    assert report.ok is False
+    assert report.code == CODE_SCHEMA_MISMATCH
+    assert report.run_id is None
 
 
 def test_preflight_refuses_production_nested_staging(tmp_path: Path) -> None:

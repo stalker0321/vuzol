@@ -46,8 +46,10 @@ _RUN_ID_S = str(_RUN_ID)
 _KEK = b"k" * 32
 _DEK = b"d" * 32
 _STAGING = Path("/lab/staging/vuzol-backup-orch-test")
-_DSN_PROD = "postgresql://prod_user:s3cret@127.0.0.1:5432/vuzol"
-_DSN_RESTORE = "postgresql://restore_user:other@127.0.0.1:5432/vuzol_restore"
+_DSN_PROD = "postgresql://prod_user:s3cret@127.0.0.1:5432/vuzol"  # pragma: allowlist secret
+_DSN_RESTORE = (
+    "postgresql://restore_user:other@127.0.0.1:5432/vuzol_restore"  # pragma: allowlist secret
+)
 _DRILL = Path("/lab/drill/vuzol-backup-orch-test")
 
 _SECRET_MARKERS = (
@@ -1473,7 +1475,7 @@ def test_default_binder_identity_mismatch_never_echoes_secret_run_id() -> None:
     """Malformed injected run_id must not appear on the failure report/payload."""
 
     # Marker must look secret but avoid bandit S105 password heuristics.
-    secret = "exfil-marker-" + "s3cret" + "-not-a-uuid"
+    secret = "exfil-marker-" + "s3cret" + "-not-a-uuid"  # pragma: allowlist secret
     pkg = PackagePreflightReport(
         ok=True,
         code="package_ok",

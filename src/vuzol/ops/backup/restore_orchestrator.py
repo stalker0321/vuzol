@@ -677,6 +677,7 @@ def _default_bind_package_handle(
             package_code=package_report.code,
         )
     # Sealed identity: only a successful second-pass report matching this run_id.
+    # Never echo package_report.run_id on mismatch — injected values may carry secrets.
     if package_report.ok is not True or package_report.run_id != str(run_uuid):
         return _report(
             ok=False,
@@ -684,7 +685,7 @@ def _default_bind_package_handle(
             message="package report identity rejected",
             mode=mode_s,
             package_code=package_report.code,
-            run_id=package_report.run_id if isinstance(package_report.run_id, str) else None,
+            run_id=None,
         )
     try:
         staging = assert_safe_staging_root(staging_root, production)

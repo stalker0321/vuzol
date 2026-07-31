@@ -281,3 +281,44 @@ def test_project_validation_sandbox_fails_closed_on_unsafe_reference(
             settings(tmp_path),
             environment={},
         )
+
+
+def test_restore_dsn_reference_access_policy_backup_only(tmp_path: Path) -> None:
+    from vuzol.config.loader import _secret_access_policy
+    from vuzol.config.settings import BackupSettings
+
+    configured = settings(
+        tmp_path,
+        database_dsn_reference="env:DATABASE_DSN",
+        backup=BackupSettings(restore_dsn_reference="env:RESTORE_DSN"),
+    )
+    policy = _secret_access_policy(RegistryDocument(), configured)
+
+    assert policy["env:RESTORE_DSN"] == frozenset({"system:backup"})
+    assert "system:database" not in policy["env:RESTORE_DSN"]
+    assert policy["env:DATABASE_DSN"] == frozenset({"system:database", "system:backup"})
+
+
+def test_restore_dsn_shared_with_database_dsn_unions_consumers(tmp_path: Path) -> None:
+    from vuzol.config.loader import _secret_access_policy
+    from vuzol.config.settings import BackupSettings
+
+    shared = "env:SHARED_DSN"
+    configured = settings(
+        tmp_path,
+        database_dsn_reference=shared,
+        backup=BackupSettings(restore_dsn_reference=shared),
+    )
+    policy = _secret_access_policy(RegistryDocument(), configured)
+
+    assert policy[shared] == frozenset({"system:database", "system:backup"})
+
+
+def test_restore_dsn_none_omits_extra_policy_entry(tmp_path: Path) -> None:
+    from vuzol.config.loader import _secret_access_policy
+
+    configured = settings(tmp_path, database_dsn_reference="env:DATABASE_DSN")
+    policy = _secret_access_policy(RegistryDocument(), configured)
+
+    assert "env:RESTORE_DSN" not in policy
+    assert policy["env:DATABASE_DSN"] == frozenset({"system:database", "system:backup"})

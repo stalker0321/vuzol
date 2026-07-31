@@ -1273,8 +1273,14 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         step = await session.scalar(
             select(Step).where(Step.run_id == run.id).order_by(Step.ordinal.desc()).limit(1)
         )
-    event = await session.scalar(
-        select(Event).where(Event.entity_id == task_id).order_by(Event.created_at.desc()).limit(1)
+    redo_requested = await session.scalar(
+        select(Event.id)
+        .where(
+            Event.entity_type == "task",
+            Event.entity_id == task_id,
+            Event.event_type == "result.redo_requested",
+        )
+        .limit(1)
     )
     title = task_title(task)
     scope = task.project_id or "личный"
@@ -1348,10 +1354,10 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     identity_footer = _task_identity_footer(task)
     if identity_footer is not None:
         lines.append(identity_footer)
-    if event is not None and event.event_type == "result.redo_requested":
+    if redo_requested is not None:
         lines.append(
-            "Отправьте исправленное описание задачи в топик проекта. "
-            "При необходимости можно использовать /sol."
+            "Чтобы переделать результат, отправьте новую задачу отдельным сообщением "
+            "и укажите, что именно нужно исправить."
         )
     if approval is not None and step is not None:
         envelope = verified_envelope(step, approval)

@@ -450,7 +450,27 @@ class Approval(IdentityMixin, TimestampMixin, Base):
 
 class TelegramMessageLink(IdentityMixin, Base):
     __tablename__ = "telegram_message_links"
-    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="uq_telegram_chat_message"),)
+    __table_args__ = (
+        UniqueConstraint("chat_id", "message_id", name="uq_telegram_chat_message"),
+        ForeignKeyConstraint(
+            ["plan_revision_id", "work_package_id"],
+            ["plan_revisions.id", "plan_revisions.work_package_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(work_package_id IS NULL AND plan_revision_id IS NULL) OR "
+            "(work_package_id IS NOT NULL AND plan_revision_id IS NOT NULL)",
+            name="telegram_message_link_package_revision_shape",
+        ),
+        CheckConstraint(
+            "control_status_generation IS NULL OR control_status_generation >= 1",
+            name="telegram_message_link_control_generation_positive",
+        ),
+        CheckConstraint(
+            "control_status_generation IS NULL OR work_package_id IS NOT NULL",
+            name="telegram_message_link_control_generation_target",
+        ),
+    )
 
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     message_thread_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -461,6 +481,9 @@ class TelegramMessageLink(IdentityMixin, Base):
     approval_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("approvals.id", ondelete="RESTRICT")
     )
+    work_package_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    plan_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    control_status_generation: Mapped[int | None] = mapped_column(Integer)
     message_role: Mapped[str] = mapped_column(String(50), nullable=False)
     projection_revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"

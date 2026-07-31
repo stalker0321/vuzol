@@ -14,6 +14,7 @@ from ._test_runtime_helpers import (
     StepOutcome,
     StepStatus,
     Task,
+    TaskDraft,
     TaskStatus,
     TransactionalOutbox,
     WorkflowDispatcher,
@@ -25,6 +26,7 @@ from ._test_runtime_helpers import (
     commit_step_outcome,
     compile_workflow,
     materialize_run,
+    planned_coding_draft,
     pytest,
     seed_interpreted,
     select,
@@ -67,6 +69,51 @@ def test_dispatcher_materializes_once_and_manual_start_waits(postgres_dsn: str) 
             )
             card = await build_status_card(session, task_id)
             assert card.buttons == ("start",)
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+@pytest.mark.parametrize(
+    ("draft", "expected_budget_mode"),
+    [
+        (simple_draft(), "balanced"),
+        (planned_coding_draft(), "strong"),
+    ],
+)
+def test_dispatcher_uses_strong_budget_only_for_planned_tasks(
+    postgres_dsn: str, draft: TaskDraft, expected_budget_mode: str
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, interpretation_id = await seed_interpreted(factory, draft)
+        async with factory.begin() as session:
+            session.add(
+                TransactionalOutbox(
+                    destination="workflow_dispatch",
+                    operation_type="dispatch_interpretation",
+                    linked_entity_type="interpretation",
+                    linked_entity_id=interpretation_id,
+                    idempotency_key=f"workflow:dispatch:{interpretation_id}",
+                    payload={"task_id": str(task_id)},
+                )
+            )
+        settings = Settings(environment="test")
+        dispatcher = WorkflowDispatcher(
+            RuntimeConfiguration(
+                settings=settings,
+                registries=build_bundle(RegistryDocument(), settings),
+            ),
+            factory,
+            owner="dispatcher",
+        )
+
+        assert await dispatcher.process_one()
+        async with factory() as session:
+            run = await session.scalar(select(Run).where(Run.task_id == task_id))
+            assert run is not None
+            assert run.budget_mode == expected_budget_mode
         await engine.dispose()
 
     asyncio.run(scenario())

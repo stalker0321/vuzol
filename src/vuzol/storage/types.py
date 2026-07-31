@@ -196,6 +196,46 @@ class ProjectNamingStatus(StrEnum):
     FAILED = "failed"
 
 
+class DiscussionSessionStatus(StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+    SUPERSEDED = "superseded"
+
+
+class ConversationTurnRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+class ConversationTurnSource(StrEnum):
+    TELEGRAM_USER = "telegram_user"
+    MODEL = "model"
+    CONTROL = "control"
+
+
+class InteractionMode(StrEnum):
+    DISCUSSION = "discussion"
+    PLAN_REQUEST = "plan_request"
+    TASK_REQUEST = "task_request"
+    PLAN_CONTROL = "plan_control"
+    ITEM_EDIT = "item_edit"
+    QUERY_ONLY = "query_only"
+    QUERY_REFUSE = "query_refuse"
+
+
+class ConversationSummaryGenerator(StrEnum):
+    MODEL = "model"
+    HEURISTIC = "heuristic"
+    USER_EDIT = "user_edit"
+
+
+class AcceptedDecisionStatus(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    RETRACTED = "retracted"
+
+
 def enum_type(enum: type[StrEnum], name: str, *, length: int | None = None) -> SqlEnum:
     if length is not None:
         return SqlEnum(

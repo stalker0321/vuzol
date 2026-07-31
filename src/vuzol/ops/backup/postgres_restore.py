@@ -7,9 +7,9 @@ redacted RestoreProcessResult. No DSN/KEK/CLI/orchestration in this module.
 ``cancel_flag``, when provided, **must be non-blocking** (cheap poll). A blocking
 callback can stall the watchdog and delay cancellation detection.
 
-Stderr: the child pipe is drained to EOF (bounded per-read size, retained body
-capped at ``_STDERR_LIMIT`` bytes discarded) so a chatty pg_restore cannot
-deadlock the process; no stderr content is returned on the result.
+Stderr: the child pipe is drained to EOF with bounded per-read size so a
+chatty pg_restore cannot deadlock; all stderr body is discarded and never
+returned on the result (reads stop after EOF; no retained body is kept).
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+from vuzol.ops.backup.crypto import CHUNK_PLAINTEXT_MAX
 
 _CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$")
@@ -210,9 +212,15 @@ def _validate_run_inputs(
         return CODE_PREFLIGHT
     if not isinstance(write_size, int) or isinstance(write_size, bool) or write_size < 1:
         return CODE_PREFLIGHT
+    if write_size > CHUNK_PLAINTEXT_MAX:
+        return CODE_PREFLIGHT
     if isinstance(write_poll_seconds, bool) or not isinstance(write_poll_seconds, (int, float)):
         return CODE_PREFLIGHT
-    if not math.isfinite(write_poll_seconds) or write_poll_seconds <= 0:
+    if (
+        not math.isfinite(write_poll_seconds)
+        or write_poll_seconds <= 0
+        or write_poll_seconds > _WATCHDOG_POLL_SECONDS
+    ):
         return CODE_PREFLIGHT
     if overall_timeout_seconds is not None:
         if isinstance(overall_timeout_seconds, bool) or not isinstance(
@@ -346,10 +354,15 @@ def run_pg_restore_stdin(
             # cancel_flag must be non-blocking (documented contract).
             if cancel_flag is not None:
                 try:
-                    cancelled = bool(cancel_flag())
+                    cancelled = cancel_flag()
                 except Exception:
                     with wd_lock:
                         wd_ops.append("arm_cancel_flag_failed")
+                    arm(CODE_PROCESS_FAILED)
+                    break
+                if not isinstance(cancelled, bool):
+                    with wd_lock:
+                        wd_ops.append("arm_cancel_flag_non_bool")
                     arm(CODE_PROCESS_FAILED)
                     break
                 if cancelled:
@@ -375,35 +388,115 @@ def run_pg_restore_stdin(
     def drain_stderr() -> None:
         """Drain child stderr to EOF with bounded per-read size.
 
-        At most ``_STDERR_LIMIT`` bytes are retained in a local discard counter
-        (content is never returned on the result). The pipe is still read until
-        EOF so a chatty child cannot deadlock on a full stderr buffer.
+        All body is discarded (never returned). Continue reading to EOF so a
+        chatty child cannot deadlock on a full stderr buffer. Read failures
+        arm process-failure teardown.
         """
 
         assert proc.stderr is not None
         try:
-            total = 0
             while True:
                 block = proc.stderr.read(4096)
                 if not block:
                     break
-                # Bound retained accounting; continue reading to EOF for deadlock safety.
-                if total < _STDERR_LIMIT:
-                    total = min(_STDERR_LIMIT, total + len(block))
+                # Discard immediately; no retained body.
+                del block
         except Exception:
+            arm(CODE_PROCESS_FAILED)
             return
 
     watchdog = threading.Thread(target=watchdog_main, name="pg-restore-watchdog", daemon=False)
     drain = threading.Thread(target=drain_stderr, name="pg-restore-stderr", daemon=False)
-    watchdog.start()
-    drain.start()
+
+    def _teardown_after_spawn(
+        *,
+        join_watchdog: bool,
+        join_drain: bool,
+        close_pt_flag: bool,
+    ) -> tuple[bool, tuple[bool, bool]]:
+        """Stop helpers, close streams, kill/reap child. Returns (kill_ok, liveness)."""
+
+        stop_event.set()
+        if join_watchdog:
+            with contextlib.suppress(Exception):
+                watchdog.join(timeout=_WATCHDOG_JOIN_SECONDS)
+        _close_stdin(proc)
+        if close_pt_flag:
+            _close_plaintext(plaintext_iter)
+        try:
+            kill_ok = _kill_group(proc) if proc.poll() is None else True
+        except Exception:
+            kill_ok = False
+        if join_drain:
+            with contextlib.suppress(Exception):
+                drain.join(timeout=_DRAIN_JOIN_SECONDS)
+        with contextlib.suppress(Exception):
+            if proc.stderr is not None:
+                proc.stderr.close()
+        try:
+            wd_alive = watchdog.is_alive() if join_watchdog else False
+        except Exception:
+            wd_alive = True
+            kill_ok = False
+        try:
+            dr_alive = drain.is_alive() if join_drain else False
+        except Exception:
+            dr_alive = True
+            kill_ok = False
+        return kill_ok, (wd_alive, dr_alive)
+
+    # Staged helper startup: failure after first start joins only started threads.
+    try:
+        watchdog.start()
+    except Exception:
+        kill_ok, liveness = _teardown_after_spawn(
+            join_watchdog=False, join_drain=False, close_pt_flag=close_pt
+        )
+        _thread_local.helper_liveness = liveness
+        _thread_local.watchdog_stats = _WatchdogStats(ops=(), max_sleep_seconds=0.0)
+        return _classify_result(
+            exit_code=proc.poll(),
+            bytes_written=0,
+            process_started=True,
+            reason_cancelled=False,
+            reason_timeout=False,
+            broken_pipe=False,
+            plaintext_failed=False,
+            io_failed=True,
+            kill_confirmed=kill_ok,
+            watchdog_alive=liveness[0],
+            drain_alive=liveness[1],
+        )
+    try:
+        drain.start()
+    except Exception:
+        kill_ok, liveness = _teardown_after_spawn(
+            join_watchdog=True, join_drain=False, close_pt_flag=close_pt
+        )
+        with wd_lock:
+            stats = _WatchdogStats(ops=tuple(wd_ops), max_sleep_seconds=wd_max_sleep)
+        _thread_local.watchdog_stats = stats
+        _thread_local.helper_liveness = liveness
+        return _classify_result(
+            exit_code=proc.poll(),
+            bytes_written=0,
+            process_started=True,
+            reason_cancelled=False,
+            reason_timeout=False,
+            broken_pipe=False,
+            plaintext_failed=False,
+            io_failed=True,
+            kill_confirmed=kill_ok,
+            watchdog_alive=liveness[0],
+            drain_alive=liveness[1],
+        )
 
     bytes_written = 0
     exit_code: int | None = None
     plaintext_failed = False
     broken_pipe = False
     io_failed = False
-    teardown_uncertain = False
+    kill_confirmed = True
 
     try:
         try:
@@ -425,6 +518,10 @@ def run_pg_restore_stdin(
                         break
                     if not chunk:
                         continue
+                    if len(chunk) > CHUNK_PLAINTEXT_MAX:
+                        # Reject oversized chunks before copying into a new bytes object.
+                        plaintext_failed = True
+                        break
                     data = bytes(chunk)
                     try:
                         written, hit_pipe, select_failed = _write_chunk_nonblocking(
@@ -471,7 +568,7 @@ def run_pg_restore_stdin(
                         except subprocess.TimeoutExpired:
                             arm(CODE_TIMEOUT)
                         except Exception:
-                            teardown_uncertain = True
+                            kill_confirmed = False
             except Exception:
                 # Iterator / crypto errors mid-stream → plaintext_failed.
                 plaintext_failed = True
@@ -484,9 +581,9 @@ def run_pg_restore_stdin(
             _close_plaintext(plaintext_iter)
         try:
             if proc.poll() is None:
-                _kill_group(proc)
+                kill_confirmed = _kill_group(proc) and kill_confirmed
         except Exception:
-            teardown_uncertain = True
+            kill_confirmed = False
         with contextlib.suppress(Exception):
             drain.join(timeout=_DRAIN_JOIN_SECONDS)
         with contextlib.suppress(Exception):
@@ -497,11 +594,8 @@ def run_pg_restore_stdin(
                 exit_code = proc.poll()
             except Exception:
                 exit_code = None
-                teardown_uncertain = True
+                kill_confirmed = False
 
-        # Record actual helper liveness after bounded joins (T13). A live helper
-        # prevents restored classification; residual non-daemon join-timeout is a
-        # dump-parity edge case documented for operators.
         with wd_lock:
             stats = _WatchdogStats(
                 ops=tuple(wd_ops),
@@ -512,12 +606,11 @@ def run_pg_restore_stdin(
             helper_liveness = (watchdog.is_alive(), drain.is_alive())
         except Exception:
             helper_liveness = (True, True)
-            teardown_uncertain = True
+            kill_confirmed = False
         _thread_local.helper_liveness = helper_liveness
 
     wd_alive, dr_alive = helper_liveness
-    if teardown_uncertain or reason_watchdog_failed.is_set():
-        io_failed = True
+    io_failed = io_failed or reason_watchdog_failed.is_set()
 
     return _classify_result(
         exit_code=exit_code,
@@ -527,7 +620,8 @@ def run_pg_restore_stdin(
         reason_timeout=reason_timeout.is_set(),
         broken_pipe=broken_pipe,
         plaintext_failed=plaintext_failed and not io_failed,
-        io_failed=io_failed or reason_watchdog_failed.is_set() or teardown_uncertain,
+        io_failed=io_failed,
+        kill_confirmed=kill_confirmed,
         watchdog_alive=wd_alive,
         drain_alive=dr_alive,
     )
@@ -556,6 +650,24 @@ def run_pg_restore_from_path(
             process_started=False,
         )
     if not callable(assert_plaintext_path):
+        return _result(
+            ok=False,
+            code=CODE_PREFLIGHT,
+            exit_code=None,
+            bytes_written=0,
+            process_started=False,
+        )
+
+    # Validate run inputs before callback/open side effects where possible.
+    if _validate_run_inputs(
+        argv,
+        env=env,
+        cancel_flag=cancel_flag,
+        write_size=write_size,
+        write_poll_seconds=write_poll_seconds,
+        overall_timeout_seconds=overall_timeout_seconds,
+        close_plaintext=close_plaintext,
+    ):
         return _result(
             ok=False,
             code=CODE_PREFLIGHT,
@@ -710,26 +822,67 @@ def _close_stdin(proc: subprocess.Popen[bytes]) -> None:
 
 
 def _close_plaintext(plaintext_iter: object) -> None:
-    close = getattr(plaintext_iter, "close", None)
+    """Best-effort close; suppress getattr and invocation failures."""
+
+    try:
+        close = getattr(plaintext_iter, "close", None)
+    except Exception:
+        return
     if callable(close):
         with contextlib.suppress(Exception):
             close()
 
 
-def _kill_group(proc: subprocess.Popen[bytes]) -> None:
-    """Best-effort process-group TERM/KILL/wait; never raises to caller."""
+def _kill_group(proc: subprocess.Popen[bytes]) -> bool:
+    """TERM then KILL process group; return True only if reaped/confirmed dead.
+
+    Never raises. Signal/wait failures are reflected by a False return so callers
+    cannot claim restored/cancelled success under uncertain termination.
+    """
 
     if proc.pid is None:
-        return
-    with contextlib.suppress(Exception):
+        try:
+            return proc.poll() is not None
+        except Exception:
+            return False
+
+    try:
         os.killpg(proc.pid, signal.SIGTERM)
-    with contextlib.suppress(Exception):
+    except ProcessLookupError:
+        try:
+            return proc.poll() is not None
+        except Exception:
+            return True
+    except Exception:
+        # Signal delivery failed; continue wait/KILL path.
+        _ = None
+
+    try:
         proc.wait(timeout=_KILL_WAIT_SECONDS)
-        return
-    with contextlib.suppress(Exception):
+        return True
+    except Exception:
+        # Wait failed; escalate to SIGKILL.
+        _ = None
+
+    try:
         os.killpg(proc.pid, signal.SIGKILL)
-    with contextlib.suppress(Exception):
+    except ProcessLookupError:
+        try:
+            return proc.poll() is not None
+        except Exception:
+            return True
+    except Exception:
+        # Kill delivery failed; final wait/poll.
+        _ = None
+
+    try:
         proc.wait(timeout=_KILL_WAIT_SECONDS)
+        return True
+    except Exception:
+        try:
+            return proc.poll() is not None
+        except Exception:
+            return False
 
 
 def _classify_result(
@@ -742,12 +895,17 @@ def _classify_result(
     broken_pipe: bool,
     plaintext_failed: bool,
     io_failed: bool,
+    kill_confirmed: bool,
     watchdog_alive: bool,
     drain_alive: bool,
 ) -> RestoreProcessResult:
-    # Priority: cancel/timeout > plaintext > broken_pipe > io > restored/process_failed.
-    # Live helpers or incomplete exit knowledge never claim restored.
-    if reason_cancelled:
+    # Unconfirmed termination outranks cancel/timeout/plaintext so uncertainty
+    # never classifies as success or cancel/timeout. Then cancel/timeout >
+    # plaintext > broken_pipe > io > restored/process_failed. Live helpers never
+    # claim restored.
+    if not kill_confirmed or io_failed:
+        code = CODE_PROCESS_FAILED
+    elif reason_cancelled:
         code = CODE_CANCELLED
     elif reason_timeout:
         code = CODE_TIMEOUT
@@ -755,8 +913,6 @@ def _classify_result(
         code = CODE_PLAINTEXT_FAILED
     elif broken_pipe:
         code = CODE_BROKEN_PIPE
-    elif io_failed:
-        code = CODE_PROCESS_FAILED
     elif exit_code == 0 and not watchdog_alive and not drain_alive and exit_code is not None:
         code = CODE_RESTORED
     else:

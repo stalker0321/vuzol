@@ -713,7 +713,7 @@ def test_env_non_string_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_stderr_drain_to_eof_does_not_surface_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drain reads to EOF; retained content is not on the result (honest wording)."""
+    """Drain reads to EOF; all body discarded — nothing retained on the result."""
 
     _patch_popen(monkeypatch, exit_code=0)
     result = run_pg_restore_stdin(["pg_restore"], iter([b"ok"]))
@@ -721,3 +721,305 @@ def test_stderr_drain_to_eof_does_not_surface_body(monkeypatch: pytest.MonkeyPat
     text = str(result) + str(result.to_operational_payload())
     assert "stderr" not in text
     assert "pg_restore:" not in text
+
+
+def test_write_size_above_chunk_max_preflight_no_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vuzol.ops.backup.crypto import CHUNK_PLAINTEXT_MAX
+
+    called = {"n": 0}
+
+    def factory(*_a: object, **_k: object) -> object:
+        called["n"] += 1
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(subprocess, "Popen", factory)
+    it = _CloseableIter([b"x"])
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        it,
+        write_size=CHUNK_PLAINTEXT_MAX + 1,
+    )
+    assert result.code == CODE_PREFLIGHT
+    assert result.process_started is False
+    assert it.closed is True
+    assert called["n"] == 0
+
+
+def test_write_poll_above_watchdog_preflight_no_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"n": 0}
+
+    def factory(*_a: object, **_k: object) -> object:
+        called["n"] += 1
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(subprocess, "Popen", factory)
+    it = _CloseableIter([b"x"])
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        it,
+        write_poll_seconds=0.3,  # > _WATCHDOG_POLL_SECONDS (0.2)
+    )
+    assert result.code == CODE_PREFLIGHT
+    assert result.process_started is False
+    assert it.closed is True
+    assert called["n"] == 0
+
+
+def test_oversized_plaintext_chunk_rejected_before_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vuzol.ops.backup.crypto import CHUNK_PLAINTEXT_MAX
+
+    _patch_popen(monkeypatch, exit_code=0)
+    # Use a memoryview-like oversized bytes once — reject before write loop success.
+    huge = b"x" * (CHUNK_PLAINTEXT_MAX + 1)
+
+    def gen() -> Iterator[bytes]:
+        yield huge
+
+    result = run_pg_restore_stdin(["pg_restore"], gen())
+    assert result.ok is False
+    assert result.code == CODE_PLAINTEXT_FAILED
+    assert result.process_started is True
+
+
+def test_bounded_cancel_under_backpressure_with_max_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vuzol.ops.backup.crypto import CHUNK_PLAINTEXT_MAX
+
+    _patch_popen(monkeypatch, exit_code=0, drain_stdin=False)
+    cancelled = {"v": False}
+
+    def flag() -> bool:
+        return cancelled["v"]
+
+    def gen() -> Iterator[bytes]:
+        # Chunks at the hard max; cancel under backpressure must still terminate.
+        yield b"y" * CHUNK_PLAINTEXT_MAX
+        yield b"z" * CHUNK_PLAINTEXT_MAX
+
+    def arm_cancel() -> None:
+        time.sleep(0.05)
+        cancelled["v"] = True
+
+    threading.Thread(target=arm_cancel, daemon=True).start()
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        gen(),
+        cancel_flag=flag,
+        write_size=CHUNK_PLAINTEXT_MAX,
+        write_poll_seconds=0.05,
+        overall_timeout_seconds=5.0,
+    )
+    assert result.ok is False
+    assert result.code == CODE_CANCELLED
+    assert _get_last_helper_liveness() == (False, False)
+
+
+def test_kill_unconfirmed_prefers_process_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TERM PermissionError + wait TimeoutExpired + KILL failure → PROCESS_FAILED."""
+
+    _patch_popen(monkeypatch, exit_code=0, drain_stdin=False)
+
+    def bad_killpg(pid: int, sig: int) -> None:
+        raise PermissionError("term denied")
+
+    def bad_wait(self: FakePopen, timeout: float | None = None) -> int:
+        self.wait_calls += 1
+        raise subprocess.TimeoutExpired(cmd=self.argv, timeout=timeout or 0)
+
+    monkeypatch.setattr(os, "killpg", bad_killpg)
+    monkeypatch.setattr(FakePopen, "wait", bad_wait)
+    # Keep poll None so process appears live / unreaped.
+    monkeypatch.setattr(FakePopen, "poll", lambda self: None)
+
+    cancelled = {"v": True}
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        iter([b"data"]),
+        cancel_flag=lambda: cancelled["v"],
+        overall_timeout_seconds=2.0,
+    )
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.code != CODE_CANCELLED
+    assert result.code != CODE_RESTORED
+    liveness = _get_last_helper_liveness()
+    assert liveness is not None
+
+
+def test_watchdog_start_failure_cleans_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_popen(monkeypatch, exit_code=0)
+    real_start = threading.Thread.start
+
+    def flaky_start(self: threading.Thread) -> None:
+        name = getattr(self, "name", "") or ""
+        if name == "pg-restore-watchdog":
+            raise RuntimeError("watchdog start failed")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+    it = _CloseableIter([b"x"])
+    result = run_pg_restore_stdin(["pg_restore"], it)
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.process_started is True
+    assert it.closed is True
+
+
+def test_drain_start_failure_joins_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_popen(monkeypatch, exit_code=0)
+    real_start = threading.Thread.start
+
+    def flaky_start(self: threading.Thread) -> None:
+        name = getattr(self, "name", "") or ""
+        if name == "pg-restore-stderr":
+            raise RuntimeError("drain start failed")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+    it = _CloseableIter([b"x"])
+    result = run_pg_restore_stdin(["pg_restore"], it)
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.process_started is True
+    assert it.closed is True
+    assert _get_last_helper_liveness() is not None
+
+
+def test_stderr_read_failure_arms_process_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def factory(*_a: object, **_k: object) -> FakePopen:
+        proc = FakePopen(["pg_restore"], drain_stdin=True, exit_code=0)
+
+        def boom_read(n: int = -1) -> bytes:
+            raise OSError("stderr broken")
+
+        proc.stderr.read = boom_read  # type: ignore[method-assign]
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", factory)
+    result = run_pg_restore_stdin(["pg_restore"], iter([b"ok"]))
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.process_started is True
+
+
+def test_close_plaintext_getattr_failure_prespawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"n": 0}
+
+    def factory(*_a: object, **_k: object) -> object:
+        called["n"] += 1
+        raise AssertionError("spawn")
+
+    monkeypatch.setattr(subprocess, "Popen", factory)
+
+    class Evil:
+        def __iter__(self) -> Evil:
+            return self
+
+        def __next__(self) -> bytes:
+            raise StopIteration
+
+        @property
+        def close(self) -> object:
+            raise RuntimeError("close attr boom")
+
+    # Must not escape; preflight path.
+    result = run_pg_restore_stdin([123], Evil())  # type: ignore[list-item]
+    assert result.code == CODE_PREFLIGHT
+    assert called["n"] == 0
+
+
+def test_close_plaintext_invoke_failure_postspawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_popen(monkeypatch, exit_code=0)
+
+    class BoomClose:
+        def __init__(self) -> None:
+            self._done = False
+
+        def __iter__(self) -> BoomClose:
+            return self
+
+        def __next__(self) -> bytes:
+            if self._done:
+                raise StopIteration
+            self._done = True
+            return b"ok"
+
+        def close(self) -> None:
+            raise RuntimeError("close invoke boom")
+
+    result = run_pg_restore_stdin(["pg_restore"], BoomClose())
+    # Close failure must not escape; happy path still classifies from process.
+    assert result.process_started is True
+    assert result.code in {CODE_RESTORED, CODE_PROCESS_FAILED}
+
+
+def test_stderr_over_8kib_secret_drained_no_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = b"SECRET_STDERR_BODY_" + (b"Z" * 10_000)
+
+    def factory(*_a: object, **_k: object) -> FakePopen:
+        proc = FakePopen(["pg_restore"], drain_stdin=True, exit_code=0)
+        # Replace stderr with a stream that yields a large secret then EOF.
+        data = {"buf": secret}
+
+        class BigErr:
+            def read(self, n: int = -1) -> bytes:
+                buf = data["buf"]
+                if not buf:
+                    return b""
+                if n < 0 or n >= len(buf):
+                    data["buf"] = b""
+                    return buf
+                out, data["buf"] = buf[:n], buf[n:]
+                return out
+
+            def close(self) -> None:
+                return None
+
+        proc.stderr = BigErr()  # type: ignore[assignment]
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", factory)
+    result = run_pg_restore_stdin(["pg_restore"], iter([b"ok"]))
+    text = str(result) + str(result.to_operational_payload())
+    assert b"SECRET_STDERR_BODY_".decode() not in text
+    assert "SECRET" not in text
+    # Result contract still holds (may restore or fail process depending on timing).
+    assert result.process_started is True
+
+
+def test_cancel_flag_non_bool_process_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_popen(monkeypatch, exit_code=0, drain_stdin=False)
+
+    def bad_flag() -> object:
+        return 1  # truthy non-bool
+
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        iter([b"z" * 50_000]),
+        cancel_flag=bad_flag,  # type: ignore[arg-type]
+        write_size=4096,
+        write_poll_seconds=0.05,
+        overall_timeout_seconds=5.0,
+    )
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.process_started is True

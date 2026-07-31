@@ -75,6 +75,16 @@ attempt emits a durable one-shot message into `Система`. These are diagno
 PostgreSQL/outbox state, not best-effort process logs, so a Telegram or service restart does not
 silently lose them.
 
+Delivery is configurable with `VUZOL_TELEGRAM__ORCHESTRATION_TRACE_ENABLED` and deterministic
+task-level sampling through `VUZOL_TELEGRAM__ORCHESTRATION_TRACE_SAMPLE_PERCENT` (`0`–`100`). The
+same task always lands in the same sample bucket across processes and restarts, so its routine
+interpreter and planner story is kept or suppressed together. The default remains `100` for
+backward-compatible visibility. With
+`VUZOL_TELEGRAM__ORCHESTRATION_TRACE_ALWAYS_INCLUDE_ANOMALIES=true` (the default), repair/policy
+changes plus failed, empty, or token-truncated planner outcomes bypass routine sampling. Disabling
+traces suppresses anomalies too. Sampling changes only Telegram projection: the source records and
+outbox item remain durable.
+
 The interpreter trace shows the task number and project, profile/model, prompt and schema versions,
 input/output tokens, duration, repair use, the model-produced `TaskDraft`, and—when different—the
 effective draft after deterministic policy enforcement. The planner trace shows attempt/status,

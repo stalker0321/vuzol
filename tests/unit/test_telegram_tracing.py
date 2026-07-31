@@ -37,6 +37,10 @@ from vuzol.telegram.tracing import (
     build_planner_trace_html,
     enqueue_interpreter_trace,
     enqueue_planner_trace,
+    interpreter_trace_is_anomalous,
+    orchestration_trace_sample_bucket,
+    planner_trace_is_anomalous,
+    should_deliver_orchestration_trace,
 )
 
 
@@ -251,3 +255,62 @@ def test_trace_enqueues_are_durable_and_idempotent() -> None:
     assert first.idempotency_key.endswith(str(interpretation.id))
     assert second.payload["trace_kind"] == PLANNER_TRACE_KIND
     assert ":1:completed" in second.idempotency_key
+
+
+def test_trace_sampling_is_stable_at_task_level_and_anomaly_aware() -> None:
+    task_id = uuid.uuid4()
+    bucket = orchestration_trace_sample_bucket(task_id)
+
+    assert 0 <= bucket < 100
+    assert orchestration_trace_sample_bucket(task_id) == bucket
+    assert not should_deliver_orchestration_trace(
+        task_id,
+        enabled=True,
+        sample_percent=bucket,
+        anomalous=False,
+        always_include_anomalies=True,
+    )
+    assert should_deliver_orchestration_trace(
+        task_id,
+        enabled=True,
+        sample_percent=bucket + 1,
+        anomalous=False,
+        always_include_anomalies=True,
+    )
+    assert should_deliver_orchestration_trace(
+        task_id,
+        enabled=True,
+        sample_percent=0,
+        anomalous=True,
+        always_include_anomalies=True,
+    )
+    assert not should_deliver_orchestration_trace(
+        task_id,
+        enabled=False,
+        sample_percent=100,
+        anomalous=True,
+        always_include_anomalies=True,
+    )
+
+
+def test_trace_anomaly_classification_matches_visible_warnings() -> None:
+    task = _task()
+    interpretation = _interpretation(task)
+    unchanged = {
+        "model_task_draft": interpretation.task_draft,
+        "repaired": False,
+    }
+    assert not interpreter_trace_is_anomalous(interpretation, unchanged)
+    assert interpreter_trace_is_anomalous(
+        interpretation,
+        {**unchanged, "model_task_draft": {"task_type": "research"}},
+    )
+    assert interpreter_trace_is_anomalous(interpretation, {**unchanged, "repaired": True})
+
+    anomalous_plan = _plan_step()
+    assert planner_trace_is_anomalous(anomalous_plan)
+    anomalous_plan.result = {
+        "text": "Inspect, implement, verify.",
+        "finish_reason": "stop",
+    }
+    assert not planner_trace_is_anomalous(anomalous_plan)

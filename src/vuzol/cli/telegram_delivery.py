@@ -51,6 +51,11 @@ async def run() -> None:
                 topics=runtime.registries.topics,
                 projects=runtime.registries.projects,
                 profiles=runtime.registries.profiles,
+                trace_enabled=delivery.orchestration_trace_enabled,
+                trace_sample_percent=delivery.orchestration_trace_sample_percent,
+                trace_always_include_anomalies=(
+                    delivery.orchestration_trace_always_include_anomalies
+                ),
             )
             await run_delivery_loop(
                 service,

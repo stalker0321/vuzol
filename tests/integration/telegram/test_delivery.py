@@ -96,6 +96,9 @@ def service(
     *,
     owner: str = "delivery",
     max_attempts: int = 3,
+    trace_enabled: bool = True,
+    trace_sample_percent: int = 100,
+    trace_always_include_anomalies: bool = True,
 ) -> TelegramDeliveryService:
     return TelegramDeliveryService(
         factory,
@@ -105,6 +108,9 @@ def service(
         max_attempts=max_attempts,
         retry_min_seconds=1,
         retry_max_seconds=10,
+        trace_enabled=trace_enabled,
+        trace_sample_percent=trace_sample_percent,
+        trace_always_include_anomalies=trace_always_include_anomalies,
     )
 
 
@@ -226,10 +232,40 @@ def test_interpreter_trace_is_delivered_to_system_topic(postgres_dsn: str) -> No
                     "repaired": False,
                 },
             )
+            routine_interpretation = Interpretation(
+                task_id=task_row.id,
+                original_input_hash="b" * 64,
+                task_draft={"task_type": "coding", "operation": "modify"},
+                profile_id="openai-interpreter",
+                model="gpt-4o-mini",
+                prompt_version="architecture-routing-v8",
+                schema_version="1.4",
+            )
+            uow.session.add(routine_interpretation)
+            await uow.session.flush()
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="interpretation",
+                entity_id=routine_interpretation.id,
+                idempotency_key=f"trace:{routine_interpretation.id}",
+                payload={
+                    "role": ORCHESTRATION_TRACE_ROLE,
+                    "trace_kind": "interpreter",
+                    "task_id": str(task_row.id),
+                    "model_task_draft": {"task_type": "coding", "operation": "modify"},
+                    "input_tokens": 80,
+                    "output_tokens": 40,
+                    "duration_ms": 700,
+                    "repaired": False,
+                },
+            )
             task_id = task_row.id
         client = FakeTelegramClient(next_message_id=78)
-        delivery = service(factory, client)
+        delivery = service(factory, client, trace_sample_percent=0)
         assert await delivery.deliver_one()
+        assert await delivery.deliver_one()
+        assert len(client.sent) == 1
         assert client.sent[0][0:2] == (-100, 99)
         assert "Интерпретатор · #730010" in client.sent[0][2]
         assert "После deterministic policy" in client.sent[0][2]

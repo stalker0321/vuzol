@@ -135,6 +135,9 @@ class TelegramSettings(BaseModel):
     delivery_max_attempts: int = Field(default=5, ge=1, le=20)
     delivery_retry_min_seconds: float = Field(default=1.0, ge=0.1, le=300)
     delivery_retry_max_seconds: float = Field(default=60.0, ge=0.1, le=3_600)
+    orchestration_trace_enabled: bool = True
+    orchestration_trace_sample_percent: int = Field(default=100, ge=0, le=100)
+    orchestration_trace_always_include_anomalies: bool = True
     allowed_media_types: tuple[str, ...] = (
         "audio/ogg",
         "audio/mpeg",

@@ -104,7 +104,8 @@ async def test_dashboard_surfaces_project_default_executor_pin() -> None:
         )
     finally:
         monkeypatch.undo()
-    assert "Grok (по умолчанию для проекта)" in card.html
+    assert "• <b>Bill Buddy</b> · #200001 · Grok (по умолчанию для проекта)" in card.html
+    assert "Модель:" not in card.html
 
 
 def test_model_label_is_friendly() -> None:

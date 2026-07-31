@@ -47,7 +47,7 @@ async def test_dashboard_includes_updated_timestamp() -> None:
         session, chat_id=-100, subscription_snapshots=(snap,)
     )
     assert "Лимиты подписки" in card.html
-    assert "Обновлено 2026-07-16 22:30 UTC" in card.html
+    assert "Обновлено: 16.07 22:30 UTC" in card.html
 
     # Naive timestamps are treated as UTC.
     naive = SubscriptionLimitSnapshot(
@@ -62,7 +62,7 @@ async def test_dashboard_includes_updated_timestamp() -> None:
     card2 = await build_project_status_dashboard(
         session, chat_id=-100, subscription_snapshots=(naive,)
     )
-    assert "Обновлено 2026-07-16 12:00 UTC" in card2.html
+    assert "Обновлено: 16.07 12:00 UTC" in card2.html
 
 
 @pytest.mark.anyio

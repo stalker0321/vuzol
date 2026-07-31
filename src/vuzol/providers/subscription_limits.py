@@ -57,17 +57,17 @@ GROK_LIMIT_SOURCE_LEGACY: Final = "legacy"
 GROK_LIMIT_SOURCE_SNAPSHOT_REQUIRED: Final = "snapshot_required"
 CODE_LIMITS_SOURCE_UNKNOWN: Final = "limits_source_unknown"
 _SAFE_UNAVAILABLE_DETAILS: Final = {
-    "state_directory missing": "каталог профиля недоступен",
-    "auth.json unreadable": "авторизация профиля недоступна",
-    "usage endpoint failed": "сервис лимитов не ответил",
-    "billing unavailable": "данные лимитов недоступны",
-    "billing shape unknown": "формат данных лимитов не распознан",
-    CODE_SNAPSHOT_UNREADABLE: "снимок лимитов недоступен",
-    CODE_SNAPSHOT_INVALID: "снимок лимитов повреждён",
-    CODE_SNAPSHOT_STALE: "данные лимитов устарели",
-    CODE_SNAPSHOT_UNBOUND: "профиль отсутствует в снимке лимитов",
-    CODE_BINDING_MISMATCH: "привязка профиля не совпадает",
-    CODE_LIMITS_SOURCE_UNKNOWN: "источник лимитов настроен неверно",
+    "state_directory missing": "Профиль не настроен на сервере.",
+    "auth.json unreadable": "Нужно обновить авторизацию профиля.",
+    "usage endpoint failed": "Провайдер не ответил. Повторите /update позже.",
+    "billing unavailable": "Провайдер не отдаёт данные лимитов.",
+    "billing shape unknown": "Формат ответа провайдера изменился.",
+    CODE_SNAPSHOT_UNREADABLE: "Снимок лимитов не читается.",
+    CODE_SNAPSHOT_INVALID: "Снимок лимитов повреждён.",
+    CODE_SNAPSHOT_STALE: "Данные устарели. Повторите /update.",
+    CODE_SNAPSHOT_UNBOUND: "Профиль не найден в снимке лимитов.",
+    CODE_BINDING_MISMATCH: "Привязка профиля не совпадает.",
+    CODE_LIMITS_SOURCE_UNKNOWN: "Источник лимитов настроен неверно.",
 }
 
 
@@ -393,20 +393,20 @@ def format_subscription_limits_html(
     lines: list[str] = []
     for snap in snapshots:
         title = (
-            f"• <b>{html_escape(snap.company)}</b> · {html_escape(snap.plan_label)} · "
+            f"• <b>{html_escape(snap.company)} {html_escape(snap.plan_label)}</b> · "
             f"<code>{html_escape(snap.profile_id)}</code>"
         )
         lines.append(title)
         if not snap.ok:
             detail = html_escape(_safe_unavailable_detail(snap.detail))
-            lines.append(f"  лимиты недоступны ({detail})")
+            lines.append(f"  ⚠️ {detail}")
             continue
         window_lines = (
             *_format_window_block("5 ч", snap.five_hour, html_escape),
             *_format_window_block("неделя", snap.weekly, html_escape),
         )
         if not window_lines:
-            lines.append("  нет данных по окнам лимитов")
+            lines.append("  ⚠️ Провайдер не сообщил данные по лимитам.")
             continue
         lines.extend(window_lines)
     return lines
@@ -415,7 +415,9 @@ def format_subscription_limits_html(
 def _safe_unavailable_detail(detail: str) -> str:
     """Map internal detail to fixed user text; never render arbitrary diagnostics."""
 
-    return _SAFE_UNAVAILABLE_DETAILS.get(detail, "неизвестная ошибка")
+    return _SAFE_UNAVAILABLE_DETAILS.get(
+        detail, "Не удалось получить данные. Проверьте состояние профиля."
+    )
 
 
 def progress_bar(remaining_percent: int, *, width: int = _BAR_WIDTH) -> str:
@@ -447,12 +449,12 @@ def _format_window_block(
     if window.reset_at is None:
         return (line,)
     reset = f"сброс {_format_reset(window.reset_at)}"
-    return (line, f"  <i>{html_escape(reset)}</i>")
+    return (f"{line} · <i>{html_escape(reset)}</i>",)
 
 
 def _format_reset(when: datetime) -> str:
     local = when.astimezone(UTC)
-    return local.strftime("%Y-%m-%d %H:%M UTC")
+    return local.strftime("%d.%m %H:%M UTC")
 
 
 def _unavailable(

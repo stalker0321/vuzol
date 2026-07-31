@@ -108,15 +108,17 @@ not hard-code a chat or thread id: each control forum supplies its own mapping i
 
 That topic holds **one** reconstructable message with two sections:
 
-1. every non-terminal task across all projects in the forum (project, public/local number,
-   one-sentence goal, assigned model);
-2. **subscription limits** (English UI) for every enabled CLI Codex/Grok profile: company, plan
-   (Plus / Super), a monospace used/remaining bar, percent left, and reset time on the next line.
-   Windows without data (for example a missing 5-hour quota) are omitted entirely.
+1. every non-terminal task across all projects in the forum in a compact two-line row (project,
+   public/local number and assigned model; then the one-sentence goal);
+2. **subscription limits** for every enabled CLI Codex/Grok profile: company, plan, a monospace
+   used/remaining bar, percent left, and compact reset time on the same line. Windows without data
+   (for example a missing 5-hour quota) are omitted entirely.
 
 Codex limits are read from ChatGPT usage (`wham/usage`) with the profile state `auth.json`.
 Grok limits prefer the billing credits payload, with a fallback to the latest local billing log
-under the profile state directory. Fetch failures are non-fatal and render as «недоступны».
+under the profile state directory. Fetch failures are non-fatal and render as fixed, secret-safe
+Russian guidance; retryable failures explicitly suggest `/update`, while authorization or profile
+configuration failures do not pretend that a refresh can repair them.
 
 The message is created once and then only edited; new status lines never spam additional messages.
 Delivery uses role `project_status_dashboard` and content-hash revision coalescing.

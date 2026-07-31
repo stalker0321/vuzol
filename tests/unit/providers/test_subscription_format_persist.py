@@ -63,7 +63,8 @@ def test_format_subscription_limits_html() -> None:
     assert "неделя" in joined
     assert "[███████░░░]" in joined
     assert "28% осталось" in joined
-    assert "сброс 2026-07-19 12:00 UTC" in joined
+    assert "сброс 19.07 12:00 UTC" in joined
+    assert len(lines) == 2
     assert snap.fingerprint()
 
 
@@ -81,7 +82,7 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
         detail="auth missing",
     )
     bad_lines = format_subscription_limits_html((bad,), html_escape=telegram_html)
-    assert "лимиты недоступны" in bad_lines[1]
+    assert "⚠️ Не удалось получить данные. Проверьте состояние профиля." in bad_lines[1]
     both = SubscriptionLimitSnapshot(
         profile_id="codex",
         company="OpenAI",
@@ -108,7 +109,7 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
         observed_at=datetime(2026, 7, 16, tzinfo=UTC),
         ok=True,
     )
-    assert "нет данных по окнам лимитов" in "\n".join(
+    assert "Провайдер не сообщил данные по лимитам." in "\n".join(
         format_subscription_limits_html((no_windows,), html_escape=telegram_html)
     )
 
@@ -116,9 +117,15 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
 @pytest.mark.parametrize(
     ("detail", "expected"),
     [
-        ("limits_snapshot_unreadable", "снимок лимитов недоступен"),
-        ("limits_snapshot_stale", "данные лимитов устарели"),
-        ("/home/private/auth.json?token=secret", "неизвестная ошибка"),
+        ("auth.json unreadable", "Нужно обновить авторизацию профиля."),
+        ("usage endpoint failed", "Провайдер не ответил. Повторите /update позже."),
+        ("billing unavailable", "Провайдер не отдаёт данные лимитов."),
+        ("limits_snapshot_unreadable", "Снимок лимитов не читается."),
+        ("limits_snapshot_stale", "Данные устарели. Повторите /update."),
+        (
+            "/home/private/auth.json?token=secret",
+            "Не удалось получить данные. Проверьте состояние профиля.",
+        ),
     ],
 )
 def test_unavailable_detail_is_fixed_and_never_leaks(detail: str, expected: str) -> None:

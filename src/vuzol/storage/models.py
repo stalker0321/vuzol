@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -35,10 +36,14 @@ from vuzol.storage.types import (
     ConversationTurnSource,
     DeliveryStatus,
     DiscussionSessionStatus,
+    EditSessionStatus,
+    EstimatedComplexity,
     IdempotencyClass,
     InboxStatus,
     IntakeStatus,
     InteractionMode,
+    PlanRevisionCreatedBy,
+    PlanRevisionState,
     ProcessOutcome,
     ProcessStatus,
     ProjectNamingStatus,
@@ -50,6 +55,9 @@ from vuzol.storage.types import (
     StepStatus,
     TaskStatus,
     TerminationStage,
+    WorkPackagePauseReason,
+    WorkPackageQueueMode,
+    WorkPackageStatus,
     WorktreeDeliveryState,
     enum_type,
 )
@@ -534,6 +542,13 @@ class ProjectDiscussionSession(IdentityMixin, TimestampMixin, Base):
             postgresql_where=text("status = 'active'"),
         ),
         Index("ix_project_discussion_project_status", "project_id", "status"),
+        ForeignKeyConstraint(
+            ["active_work_package_id", "id"],
+            ["work_packages.id", "work_packages.session_id"],
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_discussion_active_work_package",
+        ),
     )
 
     project_id: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -548,6 +563,7 @@ class ProjectDiscussionSession(IdentityMixin, TimestampMixin, Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    active_work_package_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class ConversationTurn(IdentityMixin, Base):
@@ -667,6 +683,371 @@ class AcceptedDecision(IdentityMixin, TimestampMixin, Base):
         enum_type(AcceptedDecisionStatus, "accepted_decision_status"),
         nullable=False,
         default=AcceptedDecisionStatus.ACTIVE,
+    )
+
+
+class WorkPackage(IdentityMixin, TimestampMixin, Base):
+    __tablename__ = "work_packages"
+    __table_args__ = (
+        CheckConstraint("char_length(title) BETWEEN 1 AND 240", name="work_package_title_bounded"),
+        CheckConstraint("version >= 1", name="work_package_version_positive"),
+        CheckConstraint(
+            "start_generation IS NULL OR start_generation >= 1",
+            name="work_package_start_generation_positive",
+        ),
+        CheckConstraint(
+            "cursor_ordinal IS NULL OR cursor_ordinal >= 1",
+            name="work_package_cursor_ordinal_positive",
+        ),
+        UniqueConstraint("id", "session_id", name="uq_work_package_session_identity"),
+        ForeignKeyConstraint(
+            ["head_revision_id", "id"],
+            ["plan_revisions.id", "plan_revisions.work_package_id"],
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_work_package_head_revision",
+        ),
+        ForeignKeyConstraint(
+            ["approved_revision_id", "id"],
+            ["plan_revisions.id", "plan_revisions.work_package_id"],
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_work_package_approved_revision",
+        ),
+        ForeignKeyConstraint(
+            ["running_revision_id", "id"],
+            ["plan_revisions.id", "plan_revisions.work_package_id"],
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_work_package_running_revision",
+        ),
+        Index(
+            "uq_live_work_package_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text("status IN ('draft', 'approved', 'running', 'paused')"),
+        ),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("project_discussion_sessions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    status: Mapped[WorkPackageStatus] = mapped_column(
+        enum_type(WorkPackageStatus, "work_package_status"),
+        nullable=False,
+        default=WorkPackageStatus.DRAFT,
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    head_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    approved_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    running_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    start_generation: Mapped[int | None] = mapped_column(Integer)
+    cursor_ordinal: Mapped[int | None] = mapped_column(Integer)
+    pause_reason: Mapped[WorkPackagePauseReason | None] = mapped_column(
+        enum_type(WorkPackagePauseReason, "work_package_pause_reason")
+    )
+    last_failure_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT")
+    )
+    queue_mode: Mapped[WorkPackageQueueMode] = mapped_column(
+        enum_type(WorkPackageQueueMode, "work_package_queue_mode"),
+        nullable=False,
+        default=WorkPackageQueueMode.SEQUENTIAL,
+        server_default=WorkPackageQueueMode.SEQUENTIAL.value,
+    )
+
+
+class PlanRevision(IdentityMixin, Base):
+    __tablename__ = "plan_revisions"
+    __table_args__ = (
+        UniqueConstraint("work_package_id", "revision_number", name="uq_plan_revision_number"),
+        UniqueConstraint("id", "work_package_id", name="uq_plan_revision_package_identity"),
+        CheckConstraint("revision_number >= 1", name="plan_revision_number_positive"),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-f]{64}$'", name="plan_revision_content_hash_lower_hex"
+        ),
+        CheckConstraint(
+            "state != 'approved' OR (approved_at IS NOT NULL AND approved_by_user_id IS NOT NULL)",
+            name="plan_revision_approval_provenance",
+        ),
+        CheckConstraint(
+            "approval_token_hash IS NULL OR char_length(approval_token_hash) = 64",
+            name="plan_revision_approval_token_hash_length",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(immutable_body) = 'object'", name="plan_revision_body_object"
+        ),
+        ForeignKeyConstraint(
+            ["parent_revision_id", "work_package_id"],
+            ["plan_revisions.id", "plan_revisions.work_package_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    work_package_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    state: Mapped[PlanRevisionState] = mapped_column(
+        enum_type(PlanRevisionState, "plan_revision_state"),
+        nullable=False,
+        default=PlanRevisionState.DRAFT,
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[PlanRevisionCreatedBy] = mapped_column(
+        enum_type(PlanRevisionCreatedBy, "plan_revision_created_by"), nullable=False
+    )
+    planner_profile: Mapped[str | None] = mapped_column(String(100))
+    prompt_version: Mapped[str | None] = mapped_column(String(100))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    approval_token_hash: Mapped[str | None] = mapped_column(String(64))
+    immutable_body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class WorkItemDraft(IdentityMixin, Base):
+    __tablename__ = "work_item_drafts"
+    __table_args__ = (
+        UniqueConstraint("id", "work_package_id", name="uq_work_item_package_identity"),
+        Index(
+            "uq_work_item_local_id",
+            "work_package_id",
+            "local_id",
+            unique=True,
+            postgresql_where=text("local_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "local_id IS NULL OR (char_length(local_id) BETWEEN 1 AND 64 "
+            "AND local_id ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$')",
+            name="work_item_local_id_slug",
+        ),
+    )
+
+    work_package_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    local_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class PlanRevisionItem(IdentityMixin, Base):
+    __tablename__ = "plan_revision_items"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["plan_revision_id", "work_package_id"],
+            ["plan_revisions.id", "plan_revisions.work_package_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["item_id", "work_package_id"],
+            ["work_item_drafts.id", "work_item_drafts.work_package_id"],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("plan_revision_id", "ordinal", name="uq_plan_revision_item_ordinal"),
+        UniqueConstraint("plan_revision_id", "item_id", name="uq_plan_revision_item_identity"),
+        UniqueConstraint(
+            "plan_revision_id",
+            "item_id",
+            "work_package_id",
+            name="uq_plan_revision_item_package_identity",
+        ),
+        UniqueConstraint(
+            "id",
+            "plan_revision_id",
+            "item_id",
+            "work_package_id",
+            "ordinal",
+            name="uq_plan_revision_item_fenced_identity",
+        ),
+        UniqueConstraint(
+            "plan_revision_id",
+            "item_id",
+            "work_package_id",
+            "ordinal",
+            name="uq_plan_revision_item_fenced_membership",
+        ),
+        CheckConstraint("ordinal >= 1", name="plan_revision_item_ordinal_positive"),
+        CheckConstraint(
+            "char_length(summary) BETWEEN 1 AND 240", name="plan_revision_item_summary_bounded"
+        ),
+        CheckConstraint("char_length(goal) >= 1", name="plan_revision_item_goal_required"),
+        CheckConstraint(
+            "char_length(expected_outcome) >= 1",
+            name="plan_revision_item_expected_outcome_required",
+        ),
+        CheckConstraint(
+            "char_length(allowed_scope) >= 1", name="plan_revision_item_allowed_scope_required"
+        ),
+        CheckConstraint(
+            "jsonb_array_length(completion_criteria) >= 1",
+            name="plan_revision_item_completion_criteria_required",
+        ),
+    )
+
+    work_package_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    plan_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary: Mapped[str] = mapped_column(String(240), nullable=False)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    completion_criteria: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    allowed_scope: Mapped[str] = mapped_column(Text, nullable=False)
+    out_of_scope: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
+    dependencies: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
+    trusted_checks: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
+    suggested_risk: Mapped[RiskLevel] = mapped_column(
+        enum_type(RiskLevel, "plan_item_risk_level"), nullable=False
+    )
+    needs_approval: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    estimated_complexity: Mapped[EstimatedComplexity] = mapped_column(
+        enum_type(EstimatedComplexity, "estimated_complexity"),
+        nullable=False,
+        default=EstimatedComplexity.MEDIUM,
+        server_default=EstimatedComplexity.MEDIUM.value,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class MaterializationLink(IdentityMixin, Base):
+    __tablename__ = "materialization_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "work_package_id", "plan_revision_id", "ordinal", name="uq_materialization_ordinal"
+        ),
+        UniqueConstraint("task_id", name="uq_materialization_task"),
+        CheckConstraint("ordinal >= 1", name="materialization_ordinal_positive"),
+        ForeignKeyConstraint(
+            [
+                "plan_revision_item_id",
+                "plan_revision_id",
+                "work_item_draft_id",
+                "work_package_id",
+                "ordinal",
+            ],
+            [
+                "plan_revision_items.id",
+                "plan_revision_items.plan_revision_id",
+                "plan_revision_items.item_id",
+                "plan_revision_items.work_package_id",
+                "plan_revision_items.ordinal",
+            ],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    work_package_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    plan_revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    work_item_draft_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    plan_revision_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, unique=True
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    materialized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class EditSession(IdentityMixin, TimestampMixin, Base):
+    __tablename__ = "edit_sessions"
+    __table_args__ = (
+        CheckConstraint("plan_revision_number >= 1", name="edit_session_revision_positive"),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="edit_session_hash_lower_hex"),
+        CheckConstraint("ordinal >= 1", name="edit_session_ordinal_positive"),
+        CheckConstraint("session_generation >= 1", name="edit_session_generation_positive"),
+        Index(
+            "uq_open_edit_session_author_package",
+            "package_id",
+            "opened_by_user_id",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+        ForeignKeyConstraint(
+            ["plan_revision_id", "item_id", "package_id", "ordinal"],
+            [
+                "plan_revision_items.plan_revision_id",
+                "plan_revision_items.item_id",
+                "plan_revision_items.work_package_id",
+                "plan_revision_items.ordinal",
+            ],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    package_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    plan_revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    plan_revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    opened_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[EditSessionStatus] = mapped_column(
+        enum_type(EditSessionStatus, "edit_session_status"),
+        nullable=False,
+        default=EditSessionStatus.OPEN,
+    )
+    session_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkPackageOpenDetail(Base):
+    __tablename__ = "work_package_open_details"
+    __table_args__ = (
+        CheckConstraint("plan_revision_number >= 1", name="open_detail_revision_positive"),
+        CheckConstraint("h8 ~ '^[0-9a-f]{8}$'", name="open_detail_h8_lower_hex"),
+        CheckConstraint("ordinal IS NULL OR ordinal >= 1", name="open_detail_ordinal_positive"),
+        ForeignKeyConstraint(
+            ["plan_revision_id", "item_id", "package_id"],
+            [
+                "plan_revision_items.plan_revision_id",
+                "plan_revision_items.item_id",
+                "plan_revision_items.work_package_id",
+            ],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    package_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="RESTRICT"), primary_key=True
+    )
+    plan_revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    plan_revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    h8: Mapped[str] = mapped_column(String(8), nullable=False)
+    ordinal: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"), onupdate=func.now()
     )
 
 

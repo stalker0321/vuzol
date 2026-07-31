@@ -13,6 +13,7 @@ from vuzol.telegram.projections import (
     _format_duration_ru,
     delivery_state_label,
     split_message,
+    status_buttons,
     step_status_label,
     step_type_label,
     telegram_html,
@@ -80,3 +81,24 @@ def test_approval_decision_labels_are_russian() -> None:
     assert _approval_status_label(ApprovalStatus.CONSUMED) == "Принято"
     assert _approval_status_label(ApprovalStatus.REJECTED) == "Отклонено"
     assert _approval_status_label(ApprovalStatus.EXPIRED) == "Истекло"
+
+
+def test_task_status_button_matrix_is_exhaustive_and_has_no_retry_ui() -> None:
+    pause_cancel = {
+        TaskStatus.RECEIVED,
+        TaskStatus.CONTEXT_PREPARED,
+        TaskStatus.PLANNED,
+        TaskStatus.WAITING_APPROVAL,
+        TaskStatus.EXECUTING,
+        TaskStatus.VALIDATING,
+        TaskStatus.REVIEWING,
+        TaskStatus.RETRYING,
+    }
+    expected = {status: ("pause", "cancel") for status in pause_cancel} | {
+        TaskStatus.PAUSED: ("resume", "cancel")
+    }
+
+    for status in TaskStatus:
+        buttons = tuple(status_buttons(status.value))
+        assert buttons == expected.get(status, ())
+        assert "retry" not in buttons

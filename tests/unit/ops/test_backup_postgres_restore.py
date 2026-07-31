@@ -505,7 +505,7 @@ def test_t14_redaction_no_env_leak(monkeypatch: pytest.MonkeyPatch) -> None:
     result = run_pg_restore_stdin(
         ["pg_restore"],
         iter([b"x"]),
-        env={"PGPASSWORD": "super-secret-value"},
+        env={"PGPASSWORD": "super-secret-value"},  # pragma: allowlist secret
     )
     text = str(result) + str(result.to_operational_payload())
     assert "super-secret-value" not in text

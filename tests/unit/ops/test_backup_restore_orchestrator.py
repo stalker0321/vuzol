@@ -1466,6 +1466,35 @@ def test_default_binder_rejects_run_id_mismatch() -> None:
     )
     assert isinstance(handle, RestoreOrchestrationReport)
     assert handle.code == CODE_PACKAGE_REBIND
+    assert handle.run_id is None
+
+
+def test_default_binder_identity_mismatch_never_echoes_secret_run_id() -> None:
+    """Malformed injected run_id must not appear on the failure report/payload."""
+
+    # Marker must look secret but avoid bandit S105 password heuristics.
+    secret = "exfil-marker-" + "s3cret" + "-not-a-uuid"
+    pkg = PackagePreflightReport(
+        ok=True,
+        code="package_ok",
+        message="ok",
+        run_id=secret,
+        partial=True,
+    )
+    handle = _default_bind_package_handle(
+        staging_root=_STAGING,
+        run_id=_RUN_ID,
+        production=_production(),
+        package_report=pkg,
+        mode_s="apply",
+    )
+    assert isinstance(handle, RestoreOrchestrationReport)
+    assert handle.code == CODE_PACKAGE_REBIND
+    assert handle.run_id is None
+    blob = str(handle.to_operational_payload()) + handle.message + str(handle)
+    assert secret not in blob
+    assert "s3cret" not in blob
+    assert "exfil-marker-" not in blob
 
 
 def test_apply_two_pass_binder_receives_exact_second_package_report() -> None:

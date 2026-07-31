@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added the default-off B3 restore path: authenticated encrypted-package verification, isolated target
+  preflight, supervised `pg_restore`, lock/empty-target safety hooks, and `vuzol-backup restore`;
+  dry-run is default and APPLY still requires both configuration permission and explicit
+  partial-PostgreSQL acknowledgement; no timer or production restore was enabled;
 - rebuilt and repinned the offline validation image for the B2 cryptography lockfile; its
   build-time audit found no known vulnerabilities across 74 locked packages;
 - added backup B2 manual local encrypted PostgreSQL capture (partial manifests, chunked AES-GCM, capture_cli_permitted default false, no timer/sink/restore);

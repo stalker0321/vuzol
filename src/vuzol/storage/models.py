@@ -25,14 +25,20 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from vuzol.storage.base import Base
 from vuzol.storage.types import (
+    AcceptedDecisionStatus,
     ApprovalStatus,
     ArtifactStorageState,
     BudgetReservationStatus,
     ControlActionStatus,
+    ConversationSummaryGenerator,
+    ConversationTurnRole,
+    ConversationTurnSource,
     DeliveryStatus,
+    DiscussionSessionStatus,
     IdempotencyClass,
     InboxStatus,
     IntakeStatus,
+    InteractionMode,
     ProcessOutcome,
     ProcessStatus,
     ProjectNamingStatus,
@@ -513,6 +519,155 @@ class TelegramControlAction(IdentityMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProjectDiscussionSession(IdentityMixin, TimestampMixin, Base):
+    __tablename__ = "project_discussion_sessions"
+    __table_args__ = (
+        CheckConstraint("summary_revision >= 0", name="discussion_summary_revision_nonnegative"),
+        CheckConstraint("version >= 1", name="discussion_session_version_positive"),
+        Index(
+            "uq_active_project_discussion_topic",
+            "chat_id",
+            "message_thread_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("ix_project_discussion_project_status", "project_id", "status"),
+    )
+
+    project_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[DiscussionSessionStatus] = mapped_column(
+        enum_type(DiscussionSessionStatus, "discussion_session_status"),
+        nullable=False,
+        default=DiscussionSessionStatus.ACTIVE,
+    )
+    summary_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+
+
+class ConversationTurn(IdentityMixin, Base):
+    __tablename__ = "conversation_turns"
+    __table_args__ = (
+        UniqueConstraint("session_id", "ordinal", name="uq_conversation_turn_ordinal"),
+        CheckConstraint("ordinal >= 1", name="conversation_turn_ordinal_positive"),
+        CheckConstraint(
+            "classifier_confidence IS NULL OR "
+            "(classifier_confidence >= 0 AND classifier_confidence <= 1)",
+            name="conversation_turn_confidence_range",
+        ),
+        CheckConstraint(
+            "NOT should_create_task OR classifier_mode = 'task_request'",
+            name="conversation_turn_task_mode_consistent",
+        ),
+        CheckConstraint(
+            "char_length(content) BETWEEN 1 AND 100000",
+            name="conversation_turn_content_bounded",
+        ),
+        CheckConstraint("char_length(content_hash) = 64", name="conversation_turn_hash_length"),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("project_discussion_sessions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[ConversationTurnRole] = mapped_column(
+        enum_type(ConversationTurnRole, "conversation_turn_role"), nullable=False
+    )
+    source: Mapped[ConversationTurnSource] = mapped_column(
+        enum_type(ConversationTurnSource, "conversation_turn_source"), nullable=False
+    )
+    intake_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("telegram_intake_messages.id", ondelete="RESTRICT"), unique=True
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    classifier_mode: Mapped[InteractionMode] = mapped_column(
+        enum_type(InteractionMode, "interaction_mode"), nullable=False
+    )
+    classifier_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    classifier_prompt_version: Mapped[str | None] = mapped_column(String(100))
+    should_create_task: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    override_kind: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class ConversationSummary(IdentityMixin, Base):
+    __tablename__ = "conversation_summaries"
+    __table_args__ = (
+        UniqueConstraint("session_id", "revision", name="uq_conversation_summary_revision"),
+        CheckConstraint("revision >= 1", name="conversation_summary_revision_positive"),
+        CheckConstraint(
+            "covered_through_turn_ordinal >= 1",
+            name="conversation_summary_covered_turn_positive",
+        ),
+        CheckConstraint(
+            "char_length(body) BETWEEN 1 AND 100000", name="conversation_summary_body_bounded"
+        ),
+        CheckConstraint("char_length(content_hash) = 64", name="conversation_summary_hash_length"),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("project_discussion_sessions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    covered_through_turn_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    generator: Mapped[ConversationSummaryGenerator] = mapped_column(
+        enum_type(ConversationSummaryGenerator, "conversation_summary_generator"), nullable=False
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class AcceptedDecision(IdentityMixin, TimestampMixin, Base):
+    __tablename__ = "accepted_decisions"
+    __table_args__ = (
+        CheckConstraint("char_length(key) BETWEEN 1 AND 64", name="accepted_decision_key_bounded"),
+        CheckConstraint("key ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'", name="accepted_decision_key_slug"),
+        CheckConstraint(
+            "char_length(statement) BETWEEN 1 AND 500",
+            name="accepted_decision_statement_bounded",
+        ),
+        Index(
+            "uq_active_accepted_decision_key",
+            "session_id",
+            "key",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("project_discussion_sessions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    key: Mapped[str] = mapped_column(String(64), nullable=False)
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    source_turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="RESTRICT")
+    )
+    accepted_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[AcceptedDecisionStatus] = mapped_column(
+        enum_type(AcceptedDecisionStatus, "accepted_decision_status"),
+        nullable=False,
+        default=AcceptedDecisionStatus.ACTIVE,
+    )
 
 
 class Artifact(IdentityMixin, TimestampMixin, Base):

@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
 from vuzol.config import (
+    BackupSettings,
     ExecutionSettings,
     InterpretationSettings,
     Settings,
@@ -114,3 +115,61 @@ def test_enabled_execution_requires_paired_seccomp_path_and_digest() -> None:
         sandbox_seccomp_profile_sha256="a" * 64,
     )
     assert configured.sandbox_seccomp_profile_sha256 == "a" * 64
+
+
+def test_backup_restore_settings_default_fail_closed() -> None:
+    backup = BackupSettings()
+
+    assert backup.enabled is False
+    assert backup.capture_cli_permitted is False
+    assert backup.restore_cli_permitted is False
+    assert backup.restore_dsn_reference is None
+    assert backup.restore_overall_timeout_seconds is None
+    assert backup.restore_require_empty_target is True
+    assert backup.restore_probe_capture_lock is True
+
+
+def test_backup_restore_dsn_reference_pattern() -> None:
+    assert BackupSettings(restore_dsn_reference="env:RESTORE_DSN").restore_dsn_reference == (
+        "env:RESTORE_DSN"
+    )
+    assert BackupSettings(restore_dsn_reference="file:restore.dsn").restore_dsn_reference == (
+        "file:restore.dsn"
+    )
+    with raises(ValidationError):
+        BackupSettings(restore_dsn_reference="plaintext-not-allowed")
+    with raises(ValidationError):
+        BackupSettings(restore_dsn_reference="secret:x")
+
+
+def test_backup_restore_timeout_positive_when_set() -> None:
+    assert (
+        BackupSettings(restore_overall_timeout_seconds=3600.0).restore_overall_timeout_seconds
+        == 3600.0
+    )
+    with raises(ValidationError):
+        BackupSettings(restore_overall_timeout_seconds=0)
+    with raises(ValidationError):
+        BackupSettings(restore_overall_timeout_seconds=-1.0)
+
+
+def test_backup_restore_settings_reject_extra_fields() -> None:
+    with raises(ValidationError):
+        BackupSettings.model_validate(
+            {"restore_cli_permitted": False, "unknown_restore_flag": True}
+        )
+
+
+def test_backup_restore_nested_env_load(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("VUZOL_BACKUP__RESTORE_DSN_REFERENCE", "env:LAB_RESTORE_DSN")
+    monkeypatch.setenv("VUZOL_BACKUP__RESTORE_OVERALL_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("VUZOL_BACKUP__RESTORE_REQUIRE_EMPTY_TARGET", "false")
+    monkeypatch.setenv("VUZOL_BACKUP__RESTORE_PROBE_CAPTURE_LOCK", "false")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.backup.restore_dsn_reference == "env:LAB_RESTORE_DSN"
+    assert settings.backup.restore_overall_timeout_seconds == 120.0
+    assert settings.backup.restore_require_empty_target is False
+    assert settings.backup.restore_probe_capture_lock is False
+    assert settings.backup.restore_cli_permitted is False

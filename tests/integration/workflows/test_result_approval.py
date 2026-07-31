@@ -423,6 +423,13 @@ def test_redo_and_reject_do_not_apply_the_retained_result(
             assert persisted_step is not None and persisted_step.status is step_status
             assert persisted_run is not None and persisted_run.status is run_status
             assert persisted_task is not None and persisted_task.status is task_status
+            card = await build_status_card(session, task_id)
+            if decision == "redo":
+                assert "отправьте новую задачу отдельным сообщением" in card.html
+                assert "что именно нужно исправить" in card.html
+                assert "/sol" not in card.html
+            else:
+                assert "отправьте новую задачу" not in card.html
         await engine.dispose()
 
     asyncio.run(scenario())

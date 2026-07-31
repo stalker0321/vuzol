@@ -204,6 +204,25 @@ def _require_provider_profiles(document: dict[str, object]) -> None:
     }
     if any(planner.get(key) != value for key, value in expected.items()):
         raise MvpCheckError("openai-planner-prod does not match the bounded production policy")
+    kimi_profiles = [
+        item for item in profiles if isinstance(item, dict) and item.get("id") == "kimi-k3-free"
+    ]
+    if len(kimi_profiles) != 1:
+        raise MvpCheckError("kimi-k3-free is not uniquely configured")
+    kimi = kimi_profiles[0]
+    kimi_expected = {
+        "provider": "openai-compatible",
+        "model": "moonshotai/kimi-k3-free",
+        "api_base_url": "https://api.tokenrouter.com/v1",
+        "launch_mode": "api",
+        "credential_reference": "env:TOKENROUTER_KIMI_API_KEY",
+        "roles": ["planner"],
+        "cost_class": "strong",
+        "fallback_profile_ids": ["openai-planner-prod"],
+        "enabled": True,
+    }
+    if any(kimi.get(key) != value for key, value in kimi_expected.items()):
+        raise MvpCheckError("kimi-k3-free does not match the bounded production policy")
 
 
 def _validation_gates(image: str) -> None:

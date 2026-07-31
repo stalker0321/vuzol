@@ -71,6 +71,27 @@ destinations = [
 ]
 
 [[profiles]]
+id = "kimi-k3-free"
+provider = "openai-compatible"
+model = "moonshotai/kimi-k3-free"
+api_base_url = "https://api.tokenrouter.com/v1"
+launch_mode = "api"
+credential_reference = "env:TOKENROUTER_KIMI_API_KEY"
+credential_required = true
+capabilities = []
+concurrency_limit = 2
+context_limit = 1000000
+output_limit = 65536
+cost_class = "strong"
+roles = ["planner"]
+routing_priority = 40
+supported_task_types = ["architecture", "coding", "research", "infrastructure", "file_processing", "general"]
+fallback_profile_ids = ["openai-planner-prod"]
+sandbox_required = false
+minimum_unknown_usage_cost = 0.001
+enabled = true
+
+[[profiles]]
 id = "openai-planner-prod"
 provider = "openai-compatible"
 model = "gpt-5-nano-2025-08-07"

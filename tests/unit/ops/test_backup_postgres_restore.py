@@ -1,20 +1,22 @@
-"""Fake-process unit tests for B3.3 supervised pg_restore (no Docker/DB)."""
+"""Fake-process unit tests for B3.2 supervised pg_restore (no Docker/DB)."""
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import select
 import signal
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import pytest
 
+import vuzol.ops.backup.postgres_restore as restore_mod
 from vuzol.ops.backup.postgres_restore import (
     CODE_BROKEN_PIPE,
     CODE_CANCELLED,
@@ -153,6 +155,12 @@ class _FailFileno:
         return None
 
 
+def _as_popen(proc: FakePopen) -> subprocess.Popen[bytes]:
+    """Present the deliberately minimal process double to private helpers."""
+
+    return cast(subprocess.Popen[bytes], proc)
+
+
 @pytest.fixture(autouse=True)
 def _reset_fakes(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     FakePopen.instances.clear()
@@ -167,8 +175,6 @@ def _reset_fakes(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                 proc.returncode = -sig if proc.exit_code == 0 else proc.exit_code
 
     monkeypatch.setattr(os, "killpg", _killpg)
-    import vuzol.ops.backup.postgres_restore as restore_mod
-
     monkeypatch.setattr(restore_mod, "_KILL_WAIT_SECONDS", 0.05)
     yield
     for proc in FakePopen.instances:
@@ -1184,3 +1190,481 @@ def test_cancel_flag_non_bool_process_failed(
     assert result.ok is False
     assert result.code == CODE_PROCESS_FAILED
     assert result.process_started is True
+
+
+@pytest.mark.parametrize(
+    ("argv", "kwargs"),
+    [
+        ([], {}),
+        (["pg_restore"], {"overall_timeout_seconds": True}),
+        (["pg_restore"], {"close_plaintext": 1}),
+        (["pg_restore"], {"cancel_flag": False}),
+        (["pg_restore"], {"env": []}),
+        (["pg_restore"], {"env": {"": "value"}}),
+        (["pg_restore"], {"env": {"KEY": "bad\x00value"}}),
+    ],
+)
+def test_additional_preflight_shapes_never_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    kwargs: dict[str, object],
+) -> None:
+    """Every rejected runtime shape remains a side-effect-free preflight."""
+
+    called = {"spawn": False}
+
+    def factory(*_args: object, **_kwargs: object) -> object:
+        called["spawn"] = True
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(subprocess, "Popen", factory)
+    result = run_pg_restore_stdin(argv, iter([b"x"]), **kwargs)  # type: ignore[arg-type]
+    assert result.code == CODE_PREFLIGHT
+    assert result.process_started is False
+    assert called["spawn"] is False
+
+
+def test_preflight_close_false_leaves_iterator_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("must not spawn"),
+    )
+    iterator = _CloseableIter([b"x"])
+    result = run_pg_restore_stdin([], iterator, close_plaintext=False)
+    assert result.code == CODE_PREFLIGHT
+    assert iterator.closed is False
+
+
+def test_from_path_rejects_invalid_contract_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    called = {"assert": 0, "spawn": 0}
+
+    def asserted(_path: Path) -> None:
+        called["assert"] += 1
+
+    def factory(*_args: object, **_kwargs: object) -> object:
+        called["spawn"] += 1
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(subprocess, "Popen", factory)
+    path = tmp_path / "plain.dump"
+    path.write_bytes(b"x")
+
+    bad_path = run_pg_restore_from_path(
+        ["pg_restore"],
+        cast(Path, "not-a-path"),
+        assert_plaintext_path=asserted,
+    )
+    bad_callback = run_pg_restore_from_path(
+        ["pg_restore"],
+        path,
+        assert_plaintext_path=cast(Callable[[Path], None], None),
+    )
+    bad_runtime = run_pg_restore_from_path(
+        [],
+        path,
+        assert_plaintext_path=asserted,
+    )
+
+    assert {bad_path.code, bad_callback.code, bad_runtime.code} == {CODE_PREFLIGHT}
+    assert called == {"assert": 0, "spawn": 0}
+
+
+def test_write_helper_stops_before_write_for_cancel_and_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "write", lambda *_args: pytest.fail("must not write"))
+    armed: list[str] = []
+
+    cancelled = threading.Event()
+    cancelled.set()
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=cancelled,
+        overdue=lambda: False,
+        arm=armed.append,
+    ) == (0, False, False)
+    assert armed == []
+
+    active = threading.Event()
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=active,
+        overdue=lambda: True,
+        arm=armed.append,
+    ) == (0, False, False)
+    assert armed == [CODE_TIMEOUT]
+
+
+@pytest.mark.parametrize("error_number", [errno.EPIPE, errno.ECONNRESET])
+def test_write_helper_maps_pipe_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    def broken(*_args: object) -> int:
+        raise OSError(error_number, "synthetic pipe failure")
+
+    monkeypatch.setattr(os, "write", broken)
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=threading.Event(),
+        overdue=lambda: False,
+        arm=lambda _reason: None,
+    ) == (0, True, False)
+
+
+def test_write_helper_eagain_and_zero_write_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(restore_mod, "_select_writable", lambda _fd, _timeout: False)
+
+    def again(*_args: object) -> int:
+        raise OSError(errno.EAGAIN, "synthetic backpressure")
+
+    monkeypatch.setattr(os, "write", again)
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=threading.Event(),
+        overdue=lambda: False,
+        arm=lambda _reason: None,
+    ) == (0, False, True)
+
+    monkeypatch.setattr(os, "write", lambda *_args: 0)
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=threading.Event(),
+        overdue=lambda: False,
+        arm=lambda _reason: None,
+    ) == (0, False, True)
+
+
+def test_write_helper_reraises_unknown_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(*_args: object) -> int:
+        raise OSError(errno.EBADF, "synthetic bad fd")
+
+    monkeypatch.setattr(os, "write", denied)
+    with pytest.raises(OSError, match="synthetic bad fd"):
+        restore_mod._write_chunk_nonblocking(
+            9,
+            b"x",
+            write_size=1,
+            write_poll_seconds=0.01,
+            kill_requested=threading.Event(),
+            overdue=lambda: False,
+            arm=lambda _reason: None,
+        )
+
+
+def test_select_failure_and_close_stdin_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        select,
+        "select",
+        lambda *_args: (_ for _ in ()).throw(ValueError("bad fd")),
+    )
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    assert restore_mod._select_writable(9, 0.01) is False
+
+    proc = FakePopen(["pg_restore"])
+    proc.stdin.close()
+    proc.stdin = None  # type: ignore[assignment]
+    restore_mod._close_stdin(_as_popen(proc))
+
+
+def test_kill_group_pid_none_requires_safe_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = FakePopen(["pg_restore"])
+    proc.pid = None  # type: ignore[assignment]
+    proc.returncode = 0
+    assert restore_mod._kill_group(_as_popen(proc)) is True
+
+    monkeypatch.setattr(FakePopen, "poll", lambda _self: (_ for _ in ()).throw(OSError("poll")))
+    assert restore_mod._kill_group(_as_popen(proc)) is False
+
+
+def test_kill_group_process_lookup_wait_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = FakePopen(["pg_restore"])
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(ProcessLookupError(3, "gone")),
+    )
+    assert restore_mod._kill_group(_as_popen(proc)) is True
+
+    proc.returncode = None
+    polls = iter([None, 0])
+    monkeypatch.setattr(FakePopen, "poll", lambda _self: next(polls))
+    monkeypatch.setattr(
+        FakePopen,
+        "wait",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("wait")),
+    )
+    assert restore_mod._kill_group(_as_popen(proc)) is True
+
+
+def test_kill_group_escalation_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = FakePopen(["pg_restore"])
+    signals: list[int] = []
+
+    def delivered(_pid: int, sig: int) -> None:
+        signals.append(sig)
+
+    waits = {"count": 0}
+
+    def delayed_wait(self: FakePopen, timeout: float | None = None) -> int:
+        waits["count"] += 1
+        if waits["count"] == 1:
+            raise subprocess.TimeoutExpired(self.argv, timeout or 0)
+        self.returncode = 0
+        return 0
+
+    monkeypatch.setattr(os, "killpg", delivered)
+    monkeypatch.setattr(FakePopen, "wait", delayed_wait)
+    assert restore_mod._kill_group(_as_popen(proc)) is True
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+    proc.returncode = 0
+    monkeypatch.setattr(
+        FakePopen,
+        "wait",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("wait")),
+    )
+    assert restore_mod._kill_group(_as_popen(proc)) is True
+
+
+def test_public_writer_exception_taxonomy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_popen(monkeypatch, exit_code=0)
+
+    monkeypatch.setattr(
+        restore_mod,
+        "_write_chunk_nonblocking",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(BrokenPipeError()),
+    )
+    broken = run_pg_restore_stdin(["pg_restore"], iter([b"x"]))
+    assert broken.code == CODE_BROKEN_PIPE
+
+    monkeypatch.setattr(
+        restore_mod,
+        "_write_chunk_nonblocking",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
+    )
+    failed = run_pg_restore_stdin(["pg_restore"], iter([b"x"]))
+    assert failed.code == CODE_PROCESS_FAILED
+
+
+@pytest.mark.parametrize(
+    ("wait_error", "expected_code"),
+    [
+        (subprocess.TimeoutExpired(["pg_restore"], 0.01), CODE_TIMEOUT),
+        (OSError("wait failed"), CODE_PROCESS_FAILED),
+    ],
+)
+def test_public_wait_failures_are_classified(
+    monkeypatch: pytest.MonkeyPatch,
+    wait_error: Exception,
+    expected_code: str,
+) -> None:
+    _patch_popen(monkeypatch, exit_code=0)
+
+    def fail_wait(self: FakePopen, timeout: float | None = None) -> int:
+        self.wait_calls += 1
+        raise wait_error
+
+    monkeypatch.setattr(FakePopen, "wait", fail_wait)
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        iter([]),
+        overall_timeout_seconds=1.0,
+    )
+    assert result.code == expected_code
+
+
+def test_helper_liveness_probe_failure_is_process_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_popen(monkeypatch, exit_code=0)
+    real_is_alive = threading.Thread.is_alive
+
+    def fail_restore_probe(self: threading.Thread) -> bool:
+        if (getattr(self, "name", "") or "").startswith("pg-restore-"):
+            raise RuntimeError("liveness unavailable")
+        return real_is_alive(self)
+
+    monkeypatch.setattr(threading.Thread, "is_alive", fail_restore_probe)
+    result = run_pg_restore_stdin(["pg_restore"], iter([b"x"]))
+    assert result.code == CODE_PROCESS_FAILED
+    assert _get_last_helper_liveness() == (True, True)
+
+
+def test_write_helper_post_select_timeout_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks = {"count": 0}
+
+    def overdue() -> bool:
+        checks["count"] += 1
+        return checks["count"] > 1
+
+    monkeypatch.setattr(
+        os,
+        "write",
+        lambda *_args: (_ for _ in ()).throw(BlockingIOError()),
+    )
+    monkeypatch.setattr(restore_mod, "_select_writable", lambda _fd, _timeout: False)
+    armed: list[str] = []
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=threading.Event(),
+        overdue=overdue,
+        arm=armed.append,
+    ) == (0, False, False)
+    assert armed == [CODE_TIMEOUT]
+
+    checks["count"] = 0
+
+    def again(*_args: object) -> int:
+        raise OSError(errno.EAGAIN, "backpressure")
+
+    monkeypatch.setattr(os, "write", again)
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=threading.Event(),
+        overdue=overdue,
+        arm=armed.append,
+    ) == (0, False, False)
+
+
+def test_write_helper_zero_write_cancel_and_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancelled = threading.Event()
+
+    def select_and_cancel(_fd: int, _timeout: float) -> bool:
+        cancelled.set()
+        return True
+
+    monkeypatch.setattr(os, "write", lambda *_args: 0)
+    monkeypatch.setattr(restore_mod, "_select_writable", select_and_cancel)
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=cancelled,
+        overdue=lambda: False,
+        arm=lambda _reason: None,
+    ) == (0, False, False)
+
+    writes = iter([0, 1])
+    monkeypatch.setattr(os, "write", lambda *_args: next(writes))
+    monkeypatch.setattr(restore_mod, "_select_writable", lambda _fd, _timeout: True)
+    assert restore_mod._write_chunk_nonblocking(
+        9,
+        b"x",
+        write_size=1,
+        write_poll_seconds=0.01,
+        kill_requested=threading.Event(),
+        overdue=lambda: False,
+        arm=lambda _reason: None,
+    ) == (1, False, False)
+
+
+def test_kill_group_process_lookup_uncertain_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = FakePopen(["pg_restore"])
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda *_args: (_ for _ in ()).throw(ProcessLookupError(3, "gone")),
+    )
+    monkeypatch.setattr(
+        FakePopen,
+        "poll",
+        lambda _self: (_ for _ in ()).throw(OSError("poll failed")),
+    )
+    assert restore_mod._kill_group(_as_popen(proc)) is False
+
+    polls = iter([None, OSError("final poll failed")])
+
+    def uncertain_poll(_self: FakePopen) -> int | None:
+        value = next(polls)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(FakePopen, "poll", uncertain_poll)
+    monkeypatch.setattr(
+        FakePopen,
+        "wait",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("wait failed")),
+    )
+    assert restore_mod._kill_group(_as_popen(proc)) is False
+
+
+def test_kill_group_kill_process_lookup_and_final_poll_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = FakePopen(["pg_restore"])
+    signals: list[int] = []
+
+    def kill_gone(_pid: int, sig: int) -> None:
+        signals.append(sig)
+        if sig == signal.SIGKILL:
+            raise ProcessLookupError(3, "gone")
+
+    monkeypatch.setattr(os, "killpg", kill_gone)
+    monkeypatch.setattr(
+        FakePopen,
+        "wait",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("wait failed")),
+    )
+    proc.returncode = 0
+    assert restore_mod._kill_group(_as_popen(proc)) is True
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+    signals.clear()
+    proc.returncode = None
+    monkeypatch.setattr(os, "killpg", lambda _pid, sig: signals.append(sig))
+    monkeypatch.setattr(
+        FakePopen,
+        "poll",
+        lambda _self: (_ for _ in ()).throw(OSError("final poll failed")),
+    )
+    assert restore_mod._kill_group(_as_popen(proc)) is False

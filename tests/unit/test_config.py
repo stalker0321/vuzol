@@ -18,6 +18,7 @@ def test_settings_accept_valid_values() -> None:
 
     assert settings.environment == "test"
     assert settings.port == 9000
+    assert settings.project_discussion_enabled is False
     assert settings.subscription_limits.source == "legacy"
     assert settings.subscription_limits.snapshot_file is None
     assert settings.subscription_limits.snapshot_max_age_seconds == 900
@@ -56,6 +57,15 @@ def test_nested_settings_load_from_environment(monkeypatch: MonkeyPatch) -> None
     assert settings.telegram.orchestration_trace_enabled is True
     assert settings.telegram.orchestration_trace_sample_percent == 25
     assert settings.telegram.orchestration_trace_always_include_anomalies is False
+
+
+def test_project_discussion_flag_loads_from_environment_but_defaults_off(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    assert Settings(_env_file=None).project_discussion_enabled is False  # type: ignore[call-arg]
+
+    monkeypatch.setenv("VUZOL_PROJECT_DISCUSSION_ENABLED", "true")
+    assert Settings(_env_file=None).project_discussion_enabled is True  # type: ignore[call-arg]
 
 
 def test_trace_sample_percent_is_bounded() -> None:

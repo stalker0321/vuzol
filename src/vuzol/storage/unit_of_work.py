@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.storage.repositories import (
     ApprovalRepository,
+    DiscussionRepository,
     EventRepository,
     InboxRepository,
     ModelRepository,
@@ -32,6 +33,7 @@ class UnitOfWork:
         self.outbox: OutboxRepository
         self.approvals: ApprovalRepository
         self.evidence: ModelRepository
+        self.discussions: DiscussionRepository
         self.topics: TopicMappingRepository
         self.telegram_links: TelegramMessageLinkRepository
         self.telegram_intake: TelegramIntakeRepository
@@ -48,6 +50,7 @@ class UnitOfWork:
         self.outbox = OutboxRepository(self.session)
         self.approvals = ApprovalRepository(self.session)
         self.evidence = ModelRepository(self.session)
+        self.discussions = DiscussionRepository(self.session)
         self.topics = TopicMappingRepository(self.session)
         self.telegram_links = TelegramMessageLinkRepository(self.session)
         self.telegram_intake = TelegramIntakeRepository(self.session)

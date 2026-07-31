@@ -14,10 +14,12 @@ from vuzol.storage.repositories.delivery import (
     TelegramMessageLinkRepository,
     TopicMappingRepository,
 )
+from vuzol.storage.repositories.discussion import DiscussionRepository
 from vuzol.storage.repositories.evidence import ApprovalRepository, ModelRepository
 
 __all__ = [
     "ApprovalRepository",
+    "DiscussionRepository",
     "EventRepository",
     "InboxRepository",
     "ModelRepository",

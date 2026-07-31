@@ -46,6 +46,11 @@ Unknown lookups raise `RegistryError`; unavailable or unauthorized secrets raise
 
 Registry files contain references such as `env:OPENAI_API_KEY` or `file:openai_api_key`, never values. File references are constrained to `VUZOL_SECRET_FILE_ROOT`. Each provider credential is scoped to `profile:<profile-id>`; system database and Telegram references use their own scopes.
 
+Backup production/restore DSNs and KEKs also use `env:` or `file:` references. Restore DSN and KEK
+references are scoped to `system:backup`; a shared production database reference has the union of
+`system:database` and `system:backup`. File KEKs are resolved beneath `VUZOL_SECRET_FILE_ROOT`
+after symlink-aware containment checks.
+
 Secret values are validated for presence but are not stored in configuration objects, revisions, string representations, or logs.
 
 ## Revisions and reloads
@@ -87,14 +92,74 @@ defaults to dry-run and requires both that configuration gate and `--apply` befo
 local package.
 
 Optional staging and drill roots must be absolute. Retention counts and RPO/RTO targets are bounded,
-and drill database names require the configured suffix (default `_restore`). Capture re-runs the
+and drill database names must satisfy the isolation naming rule documented below. Capture re-runs the
 production-root isolation guards, streams a PostgreSQL custom dump directly into chunked
 AES-256-GCM ciphertext, and publishes an explicitly partial manifest. A KEK reference uses only
 `env:` or a file beneath the configured secret root.
 
-This B2 slice is manual and local only: it installs no timer, contacts no off-host destination, and
-provides no restore operation. A local encrypted package is therefore not evidence of durable
-backup or recoverability.
+Capture remains manual and local only: it installs no timer and contacts no off-host destination.
+A local encrypted package is therefore not evidence of durable backup or recoverability. The B3
+restore drill below tests a local package; it does not create off-host durability.
+
+## Backup restore drills
+
+`vuzol-backup restore` is installed but default-off. Shipping the command does not authorize an
+APPLY restore and does not change production configuration. `VUZOL_BACKUP__RESTORE_CLI_PERMITTED`
+defaults to false, `VUZOL_BACKUP__ENABLED` still cannot be true, and no restore timer is installed.
+
+Restore is deliberately partial PostgreSQL recovery into an isolated drill database. It is not
+full-cluster or full-application disaster recovery. The restore DSN must be local, distinct from
+the production database, and its database name must either end with the configured suffix
+(default `_restore`) or contain an underscore-delimited `drill` segment, such as `vuzol_drill` or
+`vuzol_drill_2026`. Independently, the filesystem `drill_root` must resolve outside all production
+roots. The product path never creates or drops the target database and never adds
+`pg_restore --clean` or free-form restore arguments.
+
+### Restore settings
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `VUZOL_BACKUP__RESTORE_CLI_PERMITTED` | `false` | First APPLY gate; dry-run and crypto verification do not enable it |
+| `VUZOL_BACKUP__RESTORE_DSN_REFERENCE` | unset | `env:`/`file:` reference for the isolated restore DSN; `system:backup` only |
+| `VUZOL_BACKUP__RESTORE_OVERALL_TIMEOUT_SECONDS` | unset | Optional positive finite deadline for the supervised `pg_restore` stage on APPLY |
+| `VUZOL_BACKUP__RESTORE_REQUIRE_EMPTY_TARGET` | `true` | Require no user relations before APPLY |
+| `VUZOL_BACKUP__RESTORE_PROBE_CAPTURE_LOCK` | `true` | Probe the capture lock before APPLY |
+
+Related required values are `staging_root`, `drill_root`, the production database DSN reference,
+and, for crypto verification or APPLY, `kek_reference`. Pure dry-run does not load the KEK.
+
+### Restore command
+
+```text
+vuzol-backup restore --run-id <uuid> [--json]
+vuzol-backup restore --run-id <uuid> --verify-crypto [--json]
+vuzol-backup restore --run-id <uuid> --apply \
+  --i-understand-partial-postgres-only [--json]
+```
+
+| Flag / mode | Contract |
+|-------------|----------|
+| default / `--dry-run` | Package and isolated-target preflight; no `pg_restore` |
+| `--verify-crypto` | Fully consumes and authenticates encrypted PostgreSQL data; no APPLY permission required |
+| `--apply` | Requires `restore_cli_permitted=true` and the acknowledgement flag |
+| `--staging-root` | Optional root override; package selection remains root plus `--run-id` only |
+| `--timeout-seconds` | Positive finite override for the supervised `pg_restore` stage on APPLY; unused by dry-run and verify-crypto |
+| `--allow-non-empty-target` | Lab-only skip of the empty-target check; never performs cleanup or DROP |
+| `--production-dsn-reference` / `--restore-dsn-reference` | Secret references only, never literal DSNs |
+
+Raw `--dsn`, `--password`, and KEK-value flags are not accepted, including argparse
+abbreviations. Reports and logs use fixed operational codes and redacted payloads.
+
+On APPLY, the capture advisory lock is probed and immediately released; it is not held throughout
+restore. A capture can therefore start after a successful probe (known TOCTOU residual). The empty
+target check is on by default. For returned post-spawn APPLY failures, JSON reports
+`target_may_be_dirty`; default text output does not include that field. The CLI currently passes no
+cooperative cancellation callback. A hard interrupt may produce no structured report at all; if
+APPLY may have started, assume the isolated target is dirty and recreate it outside the product
+command.
+
+None of these settings or commands enables production restore, scheduled restore, off-host
+publication, or automatic database creation/deletion.
 
 ## Workflow runtime
 

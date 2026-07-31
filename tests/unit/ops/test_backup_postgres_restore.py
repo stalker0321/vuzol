@@ -855,6 +855,112 @@ def test_kill_unconfirmed_prefers_process_failed(
     assert liveness is not None
 
 
+def test_term_permission_error_successful_wait_is_process_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TERM PermissionError + immediate successful wait must not claim CANCELLED.
+
+    Child reaped alone is insufficient without group-side signal confirmation.
+    """
+
+    _patch_popen(monkeypatch, exit_code=0, drain_stdin=False)
+
+    def bad_term_only(pid: int, sig: int) -> None:
+        if sig == signal.SIGTERM:
+            raise PermissionError("term denied")
+        # SIGKILL also denied so wait path alone would otherwise look "ok".
+        raise PermissionError("kill denied")
+
+    monkeypatch.setattr(os, "killpg", bad_term_only)
+
+    # Successful wait reaps child without any group signal delivery.
+    def ok_wait(self: FakePopen, timeout: float | None = None) -> int:
+        self.wait_calls += 1
+        self.returncode = self.exit_code
+        return self.exit_code
+
+    monkeypatch.setattr(FakePopen, "wait", ok_wait)
+
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        iter([b"data"]),
+        cancel_flag=lambda: True,
+        overall_timeout_seconds=2.0,
+    )
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.code != CODE_CANCELLED
+
+
+def test_process_lookup_plus_poll_error_is_process_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ProcessLookupError + poll exception must never confirm kill (False)."""
+
+    _patch_popen(monkeypatch, exit_code=0, drain_stdin=False)
+
+    def gone_group(pid: int, sig: int) -> None:
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(os, "killpg", gone_group)
+
+    def boom_poll(self: FakePopen) -> int | None:
+        raise OSError("poll failed after ProcessLookup")
+
+    def boom_wait(self: FakePopen, timeout: float | None = None) -> int:
+        self.wait_calls += 1
+        raise OSError("wait failed after ProcessLookup")
+
+    monkeypatch.setattr(FakePopen, "poll", boom_poll)
+    monkeypatch.setattr(FakePopen, "wait", boom_wait)
+
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        iter([b"data"]),
+        cancel_flag=lambda: True,
+        overall_timeout_seconds=2.0,
+    )
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.code != CODE_CANCELLED
+
+
+def test_successful_term_wait_preserves_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmed TERM delivery + wait keeps CANCELLED (not PROCESS_FAILED)."""
+
+    _patch_popen(monkeypatch, exit_code=0, drain_stdin=False)
+    # Default fixture killpg + wait confirm both group and child.
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        iter([b"x" * 20_000]),
+        cancel_flag=lambda: True,
+        write_size=4096,
+        write_poll_seconds=0.05,
+        overall_timeout_seconds=5.0,
+    )
+    assert result.ok is False
+    assert result.code == CODE_CANCELLED
+
+
+def test_successful_term_wait_preserves_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmed TERM delivery + wait keeps TIMEOUT (not PROCESS_FAILED)."""
+
+    _patch_popen(monkeypatch, exit_code=0, drain_stdin=False)
+    result = run_pg_restore_stdin(
+        ["pg_restore"],
+        iter([b"x" * 20_000]),
+        write_size=4096,
+        write_poll_seconds=0.05,
+        overall_timeout_seconds=0.0,
+    )
+    assert result.ok is False
+    assert result.code == CODE_TIMEOUT
+
+
 def test_watchdog_start_failure_cleans_child(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_popen(monkeypatch, exit_code=0)
     real_start = threading.Thread.start
@@ -885,6 +991,61 @@ def test_drain_start_failure_joins_watchdog(monkeypatch: pytest.MonkeyPatch) -> 
         return real_start(self)
 
     monkeypatch.setattr(threading.Thread, "start", flaky_start)
+    it = _CloseableIter([b"x"])
+    result = run_pg_restore_stdin(["pg_restore"], it)
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.process_started is True
+    assert it.closed is True
+    assert _get_last_helper_liveness() is not None
+
+
+def test_watchdog_start_failure_poll_raises_process_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First Thread.start failure: poll exceptions stay inside always-return."""
+
+    _patch_popen(monkeypatch, exit_code=0)
+    real_start = threading.Thread.start
+
+    def flaky_start(self: threading.Thread) -> None:
+        name = getattr(self, "name", "") or ""
+        if name == "pg-restore-watchdog":
+            raise RuntimeError("watchdog start failed")
+        return real_start(self)
+
+    def boom_poll(self: FakePopen) -> int | None:
+        raise OSError("poll boom after start failure")
+
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+    monkeypatch.setattr(FakePopen, "poll", boom_poll)
+    it = _CloseableIter([b"x"])
+    result = run_pg_restore_stdin(["pg_restore"], it)
+    assert result.ok is False
+    assert result.code == CODE_PROCESS_FAILED
+    assert result.process_started is True
+    assert it.closed is True
+
+
+def test_drain_start_failure_poll_raises_process_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Second Thread.start failure: poll exceptions stay inside always-return."""
+
+    _patch_popen(monkeypatch, exit_code=0)
+    real_start = threading.Thread.start
+
+    def flaky_start(self: threading.Thread) -> None:
+        name = getattr(self, "name", "") or ""
+        if name == "pg-restore-stderr":
+            raise RuntimeError("drain start failed")
+        return real_start(self)
+
+    def boom_poll(self: FakePopen) -> int | None:
+        raise OSError("poll boom after drain start failure")
+
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+    monkeypatch.setattr(FakePopen, "poll", boom_poll)
     it = _CloseableIter([b"x"])
     result = run_pg_restore_stdin(["pg_restore"], it)
     assert result.ok is False

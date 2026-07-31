@@ -29,7 +29,12 @@ from vuzol.storage.models import (
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram import TelegramIngressService
 from vuzol.telegram.dogfood import TelegramDogfoodIngressService
-from vuzol.telegram.domain import IngressStatus, MessageUpdate
+from vuzol.telegram.domain import (
+    AttachmentKind,
+    IngressStatus,
+    MessageUpdate,
+    TelegramAttachment,
+)
 
 from ..storage.helpers import storage
 from .helpers import telegram_runtime
@@ -86,6 +91,65 @@ def test_authorized_project_intake_is_atomic_and_duplicate_safe(
             assert await session.scalar(select(func.count()).select_from(ExternalInbox)) == 1
             assert await session.scalar(select(func.count()).select_from(TopicMapping)) == 1
             assert await session.scalar(select(func.count()).select_from(TransactionalOutbox)) == 2
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+@pytest.mark.parametrize(
+    ("content_kind", "expected_outbox_count"),
+    (("text", 2), ("voice", 2), ("document", 3)),
+)
+def test_text_voice_and_document_intake_are_duplicate_safe(
+    postgres_dsn: str,
+    tmp_path: Path,
+    content_kind: str,
+    expected_outbox_count: int,
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        service = TelegramIngressService(telegram_runtime(tmp_path), factory)
+        attachments: tuple[TelegramAttachment, ...] = ()
+        text: str | None = "create a task"
+        if content_kind != "text":
+            attachment_kind = (
+                AttachmentKind.VOICE if content_kind == "voice" else AttachmentKind.DOCUMENT
+            )
+            attachments = (
+                TelegramAttachment(
+                    file_id=f"{content_kind}-file",
+                    file_unique_id=f"{content_kind}-unique",
+                    kind=attachment_kind,
+                    file_size=64,
+                    media_type="audio/ogg" if content_kind == "voice" else "text/plain",
+                    filename=None if content_kind == "voice" else "request.txt",
+                ),
+            )
+            text = None
+        update = message(50, 150, text=text, attachments=attachments)
+
+        first = await service.accept_message(update)
+        duplicate = await service.accept_message(update)
+
+        assert first.status is IngressStatus.CREATED and first.task_id is not None
+        assert duplicate.status is IngressStatus.DUPLICATE
+        async with factory() as session:
+            intake = await session.get(TelegramIntakeMessage, first.intake_id)
+            assert intake is not None
+            assert len(intake.attachments) == len(attachments)
+            if attachments:
+                assert intake.attachments[0]["kind"] == content_kind
+            assert await session.scalar(select(func.count()).select_from(Task)) == 1
+            assert await session.scalar(select(func.count()).select_from(ExternalInbox)) == 1
+            intake_count = await session.scalar(
+                select(func.count()).select_from(TelegramIntakeMessage)
+            )
+            assert intake_count == 1
+            assert (
+                await session.scalar(select(func.count()).select_from(TransactionalOutbox))
+                == expected_outbox_count
+            )
         await engine.dispose()
 
     asyncio.run(scenario())

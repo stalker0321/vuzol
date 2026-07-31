@@ -33,6 +33,7 @@ CODE_COMPONENT = "manifest_component"
 CODE_UNSUPPORTED = "restore_unsupported_components"
 CODE_PARTIAL = "partial_not_accepted"
 CODE_RUN_ID = "run_id_mismatch"
+CODE_SCHEMA_MISMATCH = "migration_head_mismatch"
 CODE_BLOB = "blob_integrity"
 
 PUBLISH_MANIFEST = "manifest.v1.json"
@@ -171,6 +172,12 @@ def preflight_published_package(
 
     if manifest.run_id != run_uuid:
         return _fail(CODE_RUN_ID, "manifest run_id does not match directory id")
+
+    if (
+        manifest.schema_identity.alembic_head_expected
+        != manifest.schema_identity.alembic_head_observed
+    ):
+        return _fail(CODE_SCHEMA_MISMATCH, "manifest migration heads differ")
 
     shape = _check_b3_postgres_shape(manifest)
     if shape is not None:

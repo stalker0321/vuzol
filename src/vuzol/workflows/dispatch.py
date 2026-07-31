@@ -125,6 +125,9 @@ class WorkflowDispatcher:
                 policy_revision=POLICY_REVISION,
                 prompt_revision=interpretation.prompt_version,
                 automatic_start=self._runtime.settings.interpretation.automatic_execution_enabled,
+                # Planning is the existing semantic signal that a task needs a stronger
+                # model-only pass. Coding still routes independently to a sandboxed CLI agent.
+                budget_mode="strong" if draft.needs_planning else "balanced",
             )
             await self._enqueue_task_projection(session, task, run)
             return

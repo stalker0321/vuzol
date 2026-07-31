@@ -134,6 +134,43 @@ def test_acknowledgement_sends_once_and_persists_confirmed_link(postgres_dsn: st
     asyncio.run(scenario())
 
 
+def test_help_card_delivery_is_context_aware(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            inbox_id, _ = await uow.inbox.receive_once(
+                source="telegram",
+                consumer="bot:main",
+                external_event_id="help-1",
+                payload_hash="1" * 64,
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="telegram_inbox",
+                entity_id=inbox_id,
+                idempotency_key="telegram:help:-100:help-1",
+                payload={
+                    "role": "help_card",
+                    "chat_id": -100,
+                    "message_thread_id": 10,
+                    "topic_kind": "project",
+                },
+            )
+
+        client = FakeTelegramClient(next_message_id=78)
+        delivery = service(factory, client)
+        assert await delivery.deliver_one()
+        assert not await delivery.deliver_one()
+        assert len(client.sent) == 1
+        assert client.sent[0][:2] == (-100, 10)
+        assert "/model" in client.sent[0][2]
+        assert "/update" not in client.sent[0][2]
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_interpreter_trace_is_delivered_to_system_topic(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

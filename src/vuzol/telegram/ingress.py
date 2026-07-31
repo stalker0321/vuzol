@@ -12,7 +12,13 @@ from vuzol.storage.models import TelegramIntakeMessage, TelegramMessageLink, Top
 from vuzol.storage.types import IntakeStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
-from vuzol.telegram.layout import is_model_command, is_status_dashboard_topic, is_update_command
+from vuzol.telegram.layout import (
+    HELP_CARD_ROLE,
+    is_help_command,
+    is_model_command,
+    is_status_dashboard_topic,
+    is_update_command,
+)
 from vuzol.telegram.model_command import enqueue_worker_picker
 from vuzol.telegram.policy import TelegramPolicyError, authorize, validate_message
 from vuzol.telegram.projections import enqueue_project_status_dashboard
@@ -40,6 +46,10 @@ class TelegramIngressService:
             topic = self._runtime.registries.topics.resolve(
                 update.chat_id, update.message_thread_id
             )
+            if is_help_command(update.text):
+                if not topic.enabled:
+                    raise TelegramPolicyError("topic is disabled")
+                return await self._handle_help_command(update, topic)
             if is_status_dashboard_topic(topic.kind) and is_update_command(update.text):
                 if not topic.enabled:
                     raise TelegramPolicyError("status dashboard topic is disabled")
@@ -193,6 +203,52 @@ class TelegramIngressService:
             task_id=task_id,
             intake_id=intake_id,
         )
+
+    async def _handle_help_command(
+        self, update: MessageUpdate, topic: TopicConfig
+    ) -> IngressResult:
+        """Show topic-specific help without materializing a Task."""
+
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="telegram_inbox",
+                entity_id=inbox_id,
+                idempotency_key=f"telegram:help:{update.chat_id}:{update.update_id}",
+                payload={
+                    "role": HELP_CARD_ROLE,
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "topic_kind": topic.kind.value,
+                },
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="delete_message",
+                entity_type="telegram_inbox",
+                entity_id=inbox_id,
+                idempotency_key=f"telegram:delete_command:{update.chat_id}:{update.message_id}",
+                payload={
+                    "role": "user_command_delete",
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "message_id": update.message_id,
+                },
+            )
+            await uow.inbox.mark_processed(
+                inbox_id, entity_type="telegram_command", entity_id=inbox_id
+            )
+        return IngressResult(status=IngressStatus.HANDLED)
 
     async def _handle_dashboard_update(
         self, update: MessageUpdate, topic: TopicConfig

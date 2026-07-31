@@ -336,6 +336,7 @@ class Settings(BaseSettings):
     registry_file: Path | None = None
     registry_overlay_file: Path | None = None
     project_template_id: str = Field(default="vuzol", pattern=r"^[a-z][a-z0-9_-]*$")
+    project_discussion_enabled: bool = False
     database_dsn_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
     telegram_bot_token_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
     allowed_user_ids: tuple[int, ...] = ()

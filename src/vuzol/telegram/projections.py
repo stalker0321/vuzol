@@ -464,11 +464,9 @@ async def build_project_status_dashboard(
                 project_label = project_id or "без проекта"
             lines.append(
                 f"• <b>{telegram_html(project_label)}</b> · "
-                f"#{telegram_html(task_number_label(task))}"
+                f"#{telegram_html(task_number_label(task))} · {telegram_html(model)}"
             )
             lines.append(f"  {telegram_html(task_sense_sentence(task))}")
-            lines.append(f"  Модель: {telegram_html(model)}")
-            lines.append("")
 
     # Delivery must not open provider state dirs (no auth ACL). Prefer DB snapshots
     # collected by the executor process; optional live collection is test-only.
@@ -476,6 +474,8 @@ async def build_project_status_dashboard(
         subscription_snapshots = await load_subscription_limits(session)
     del subscription_profiles  # reserved for tests / offline collectors
     if subscription_snapshots:
+        if lines[-1]:
+            lines.append("")
         lines.append("<b>Лимиты подписки</b>")
         lines.extend(
             format_subscription_limits_html(subscription_snapshots, html_escape=telegram_html)
@@ -484,9 +484,9 @@ async def build_project_status_dashboard(
         if updated_at is not None:
             if updated_at.tzinfo is None:
                 updated_at = updated_at.replace(tzinfo=UTC)
-            stamp = updated_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+            stamp = updated_at.astimezone(UTC).strftime("%d.%m %H:%M UTC")
             lines.append("")
-            lines.append(f"<i>Обновлено {telegram_html(stamp)}</i>")
+            lines.append(f"<i>Обновлено: {telegram_html(stamp)}</i>")
 
     fingerprints = tuple(snap.fingerprint() for snap in (subscription_snapshots or ()))
     html_body = "\n".join(lines).rstrip()

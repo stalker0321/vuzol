@@ -32,6 +32,27 @@ def test_environment_secret_is_scoped_and_hidden(tmp_path: Path) -> None:
         )
 
 
+def test_environment_and_file_rotations_are_read_on_each_resolution(tmp_path: Path) -> None:
+    environment = {"API_KEY": "value-one"}  # pragma: allowlist secret
+    environment_resolver = resolver(tmp_path, environment=environment)
+    first_environment = environment_resolver.get("env:API_KEY", "profile:allowed")
+    environment["API_KEY"] = "value-two"  # pragma: allowlist secret
+    second_environment = environment_resolver.get("env:API_KEY", "profile:allowed")
+
+    assert first_environment.get_secret_value() == "value-one"  # pragma: allowlist secret
+    assert second_environment.get_secret_value() == "value-two"  # pragma: allowlist secret
+
+    token = tmp_path / "token"
+    token.write_text("file-value-one\n")
+    file_resolver = resolver(tmp_path)
+    first_file = file_resolver.get("file:token", "profile:file")
+    token.write_text("file-value-two\n")
+    second_file = file_resolver.get("file:token", "profile:file")
+
+    assert first_file.get_secret_value() == "file-value-one"  # pragma: allowlist secret
+    assert second_file.get_secret_value() == "file-value-two"  # pragma: allowlist secret
+
+
 def test_missing_and_invalid_secret_references_fail_precisely(tmp_path: Path) -> None:
     configured = resolver(tmp_path)
     with pytest.raises(SecretResolutionError, match="missing environment secret"):

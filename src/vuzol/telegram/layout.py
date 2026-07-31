@@ -39,6 +39,7 @@ DASHBOARD_CARD_TITLE = "Статус проектов"
 # Completed-task reports land in «История» (kind=changelog).
 HISTORY_TOPIC_KIND = TopicKind.CHANGELOG
 HISTORY_TOPIC_DISPLAY_NAME = SYSTEM_TOPIC_DISPLAY_NAMES[HISTORY_TOPIC_KIND]
+HELP_CARD_ROLE = "help_card"
 
 
 def is_system_workspace_kind(kind: TopicKind) -> bool:
@@ -57,6 +58,18 @@ def is_update_command(text: str | None) -> bool:
     return command == "/update"
 
 
+def is_help_command(text: str | None) -> bool:
+    """True for bare ``/help`` (optional @bot suffix), with no arguments."""
+
+    if text is None:
+        return False
+    parts = text.strip().split()
+    if len(parts) != 1:
+        return False
+    command = parts[0].split("@", 1)[0]
+    return command == "/help"
+
+
 def is_model_command(text: str | None) -> bool:
     """True for bare ``/model`` (optional @bot suffix) with no extra arguments."""
 
@@ -67,6 +80,35 @@ def is_model_command(text: str | None) -> bool:
         return False
     command = parts[0].split("@", 1)[0]
     return command == "/model"
+
+
+def build_help_card(kind: TopicKind) -> str:
+    """Return concise, context-aware help for one forum topic."""
+
+    lines = [
+        "<b>Как пользоваться Vuzol</b>",
+        "",
+    ]
+    if kind is TopicKind.PROJECT:
+        lines.extend(
+            (
+                "Опишите задачу текстом, голосом или приложите документ.",
+                "Ответьте на сообщение задачи, чтобы продолжить её.",
+                "<code>/model</code> — выбрать исполнителя проекта.",
+            )
+        )
+    elif kind is TopicKind.INBOX:
+        lines.append("Опишите идею и цель — Vuzol предложит названия и создаст проект.")
+    elif kind is TopicKind.TASK_DASHBOARD:
+        lines.append("<code>/update</code> — обновить статусы проектов и лимиты.")
+    elif kind is TopicKind.APPROVALS:
+        lines.append("Проверьте описание результата и тестов, затем выберите действие кнопкой.")
+    elif kind is TopicKind.CHANGELOG:
+        lines.append("Здесь сохраняются результаты завершённых задач по всем проектам.")
+    else:
+        lines.append("Отправьте запрос в подходящий топик проекта или управления.")
+    lines.extend(("", "Кнопки под сообщениями управляют задачами."))
+    return "\n".join(lines)
 
 
 def is_status_dashboard_topic(kind: TopicKind | str) -> bool:

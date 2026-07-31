@@ -38,7 +38,12 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import TaskStatus
-from vuzol.telegram.layout import HISTORY_TOPIC_KIND, STATUS_DASHBOARD_TOPIC_KIND
+from vuzol.telegram.layout import (
+    HELP_CARD_ROLE,
+    HISTORY_TOPIC_KIND,
+    STATUS_DASHBOARD_TOPIC_KIND,
+    build_help_card,
+)
 from vuzol.telegram.model_command import PROJECT_MODEL_CONFIRM_ROLE, PROJECT_MODEL_PICKER_ROLE
 from vuzol.telegram.projections import (
     PROJECT_STATUS_DASHBOARD_ROLE,
@@ -69,6 +74,7 @@ class DeliveryAction(StrEnum):
     SEND_PROJECT_WELCOME = "send_project_welcome"
     SEND_PROJECT_NAMES = "send_project_names"
     SEND_MODEL_PICKER = "send_model_picker"
+    SEND_HELP = "send_help"
     DELETE_MESSAGE = "delete_message"
     NOOP = "noop"
 
@@ -127,6 +133,20 @@ async def prepare_delivery(
             chat_id=chat_id,
             thread_id=int(thread_id) if thread_id is not None else None,
             message_id=message_id,
+        )
+    if item.payload.get("role") == HELP_CARD_ROLE:
+        try:
+            chat_id = int(item.payload["chat_id"])
+            thread_id = int(item.payload["message_thread_id"])
+            topic_kind = TopicKind(str(item.payload["topic_kind"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise PermanentDeliveryError("invalid_help_payload") from error
+        return PreparedDelivery(
+            DeliveryAction.SEND_HELP,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            html=build_help_card(topic_kind),
+            message_role=HELP_CARD_ROLE,
         )
     if item.payload.get("role") in {PROJECT_MODEL_PICKER_ROLE, PROJECT_MODEL_CONFIRM_ROLE}:
         return _prepare_project_model_message(item)
@@ -701,6 +721,7 @@ class TelegramDeliveryService:
             DeliveryAction.SEND_PROJECT_WELCOME,
             DeliveryAction.SEND_PROJECT_NAMES,
             DeliveryAction.SEND_MODEL_PICKER,
+            DeliveryAction.SEND_HELP,
         }:
             message_id = await self._client.send_message(
                 chat_id=prepared.chat_id,

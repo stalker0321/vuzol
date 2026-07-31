@@ -97,6 +97,36 @@ def test_authorized_project_intake_is_atomic_and_duplicate_safe(
 
 
 @pytest.mark.postgresql
+def test_help_is_handled_once_without_creating_a_task(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        service = TelegramIngressService(telegram_runtime(tmp_path), factory)
+        update = message(2, 101, text="/help@vuzol_bot")
+
+        first = await service.accept_message(update)
+        duplicate = await service.accept_message(update)
+
+        assert first.status is IngressStatus.HANDLED
+        assert duplicate.status is IngressStatus.DUPLICATE
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(Task)) == 0
+            assert await session.scalar(select(func.count()).select_from(ExternalInbox)) == 1
+            items = (
+                await session.scalars(
+                    select(TransactionalOutbox).order_by(TransactionalOutbox.created_at)
+                )
+            ).all()
+            assert [(item.operation_type, item.payload["role"]) for item in items] == [
+                ("send_message", "help_card"),
+                ("delete_message", "user_command_delete"),
+            ]
+            assert items[0].payload["topic_kind"] == "project"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 @pytest.mark.parametrize(
     ("content_kind", "expected_outbox_count"),
     (("text", 2), ("voice", 2), ("document", 3)),

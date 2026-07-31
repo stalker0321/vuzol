@@ -167,6 +167,15 @@ async def run_restore_orchestration(
     mode_s = resolved_mode.value
     binder = bind_package_handle or _default_bind_package_handle
 
+    # verify_crypto must be an actual bool before any preflight / lower-layer work.
+    if not isinstance(verify_crypto, bool):
+        return _report(
+            ok=False,
+            code=CODE_FAILED,
+            message="invalid verify mode",
+            mode=mode_s,
+        )
+
     # Only actual singleton True authorizes APPLY; truthy 1/"yes"/etc refuse.
     if resolved_mode is RestoreMode.APPLY and apply_authorized is not True:
         return _report(
@@ -196,7 +205,7 @@ async def run_restore_orchestration(
         if not target.ok:
             return _from_target_fail(target, mode_s, package=package)
 
-        if not verify_crypto:
+        if verify_crypto is False:
             return _report(
                 ok=True,
                 code=CODE_WOULD_RESTORE,
@@ -306,7 +315,7 @@ async def run_restore_orchestration(
     if isinstance(handle, RestoreOrchestrationReport):
         return handle
 
-    if kek is None or len(kek) != _KEK_LEN:
+    if not _is_key_bytes32(kek):
         return _report(
             ok=False,
             code=CODE_PREFLIGHT_KEK,
@@ -319,6 +328,8 @@ async def run_restore_orchestration(
             port=target.port,
             database=target.database,
         )
+    # Narrowed for type checkers; runtime already checked actual bytes len 32.
+    assert isinstance(kek, bytes)
 
     try:
         argv = build_argv(
@@ -365,6 +376,19 @@ async def run_restore_orchestration(
                 database=target.database,
             )
         except Exception:
+            return _report(
+                ok=False,
+                code=CODE_CRYPTO,
+                message="unwrap failed",
+                mode=mode_s,
+                run_id=package.run_id,
+                package_code=package.code,
+                target_code=target.code,
+                host=target.host,
+                port=target.port,
+                database=target.database,
+            )
+        if not _is_key_bytes32(dek):
             return _report(
                 ok=False,
                 code=CODE_CRYPTO,
@@ -488,7 +512,7 @@ async def _verify_crypto(
     mode_s: str,
     binder: Callable[..., PublishedPackageHandle | RestoreOrchestrationReport],
 ) -> RestoreOrchestrationReport:
-    if kek is None or len(kek) != _KEK_LEN:
+    if not _is_key_bytes32(kek):
         return _report(
             ok=False,
             code=CODE_PREFLIGHT_KEK,
@@ -501,6 +525,7 @@ async def _verify_crypto(
             port=target.port,
             database=target.database,
         )
+    assert isinstance(kek, bytes)
 
     handle = binder(
         staging_root=staging_root,
@@ -535,6 +560,19 @@ async def _verify_crypto(
                 database=target.database,
             )
         except Exception:
+            return _report(
+                ok=False,
+                code=CODE_CRYPTO,
+                message="unwrap failed",
+                mode=mode_s,
+                run_id=package.run_id,
+                package_code=package.code,
+                target_code=target.code,
+                host=target.host,
+                port=target.port,
+                database=target.database,
+            )
+        if not _is_key_bytes32(dek):
             return _report(
                 ok=False,
                 code=CODE_CRYPTO,
@@ -607,6 +645,12 @@ async def _verify_crypto(
             _zeroize(dek_buf)
 
 
+def _is_key_bytes32(value: object) -> bool:
+    """True only for actual ``bytes`` of length 32 (not bytearray / memoryview)."""
+
+    return isinstance(value, bytes) and len(value) == _KEK_LEN
+
+
 def _default_bind_package_handle(
     *,
     staging_root: Path,
@@ -631,6 +675,16 @@ def _default_bind_package_handle(
             message="run_id is not a valid UUID",
             mode=mode_s,
             package_code=package_report.code,
+        )
+    # Sealed identity: only a successful second-pass report matching this run_id.
+    if package_report.ok is not True or package_report.run_id != str(run_uuid):
+        return _report(
+            ok=False,
+            code=CODE_PACKAGE_REBIND,
+            message="package report identity rejected",
+            mode=mode_s,
+            package_code=package_report.code,
+            run_id=package_report.run_id if isinstance(package_report.run_id, str) else None,
         )
     try:
         staging = assert_safe_staging_root(staging_root, production)

@@ -350,13 +350,15 @@ def test_apply_auth_refuses_non_singleton_true(authorized: object) -> None:
         restore_calls.append(1)
         return _ok_process(process_started=False, bytes_written=0)
 
-    report = _run(
+    # Pass via untyped kwargs so full-project mypy accepts intentional non-bool values.
+    kwargs: dict[str, Any] = _base_kwargs(
         mode=RestoreMode.APPLY,
-        apply_authorized=authorized,  # type: ignore[arg-type]
         package_preflight=pkg,
         unwrap=unwrap,
         run_restore=run_restore,
     )
+    kwargs["apply_authorized"] = authorized
+    report = asyncio.run(run_restore_orchestration(**kwargs))
     assert report.ok is False
     assert report.code == CODE_NOT_PERMITTED
     assert report.mode == "apply"
@@ -1242,3 +1244,434 @@ def test_apply_unwrap_and_decrypt_auth_and_generic() -> None:
         decrypt_stream=lambda **_k: (_ for _ in ()).throw(RuntimeError("dec")),
     )
     assert r4.code == CODE_CRYPTO
+
+
+# ---------------------------------------------------------------------------
+# Correction pass: verify_crypto bool, KEK/DEK bytes, binder identity, cleanup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_verify",
+    ["false", "true", 0, 1, None, object(), "False"],
+)
+def test_verify_crypto_non_bool_fails_closed_zero_calls(bad_verify: object) -> None:
+    pkg_calls: list[Any] = []
+    tgt_calls: list[Any] = []
+    unwrap_calls: list[Any] = []
+    restore_calls: list[Any] = []
+    bind_calls: list[Any] = []
+
+    def pkg(**k: Any) -> PackagePreflightReport:
+        pkg_calls.append(k)
+        return _pkg_ok()
+
+    def tgt(**k: Any) -> TargetPreflightReport:
+        tgt_calls.append(k)
+        return _tgt_ok()
+
+    def unwrap(**k: Any) -> bytes:
+        unwrap_calls.append(k)
+        return _DEK
+
+    def run_restore(*_a: Any, **_k: Any) -> RestoreProcessResult:
+        restore_calls.append(1)
+        return _ok_process()
+
+    def bind(**k: Any) -> PublishedPackageHandle:
+        bind_calls.append(k)
+        return _handle()
+
+    kwargs: dict[str, Any] = _base_kwargs(
+        package_preflight=pkg,
+        target_preflight=tgt,
+        unwrap=unwrap,
+        run_restore=run_restore,
+        bind_package_handle=bind,
+        kek=_KEK,
+    )
+    kwargs["verify_crypto"] = bad_verify
+    report = asyncio.run(run_restore_orchestration(**kwargs))
+    assert report.ok is False
+    assert report.code == CODE_FAILED
+    assert report.message == "invalid verify mode"
+    assert pkg_calls == []
+    assert tgt_calls == []
+    assert unwrap_calls == []
+    assert restore_calls == []
+    assert bind_calls == []
+    _assert_redacted(report)
+
+
+@pytest.mark.parametrize(
+    "bad_kek",
+    [None, b"short", b"k" * 31, b"k" * 33, "k" * 32, bytearray(b"k" * 32), 32, object()],
+)
+def test_verify_invalid_kek_type_or_length(bad_kek: object) -> None:
+    decrypt_calls: list[Any] = []
+    restore_calls: list[Any] = []
+
+    def decrypt(**k: Any) -> _TrackingGen:
+        decrypt_calls.append(k)
+        return _TrackingGen()
+
+    def run_restore(*_a: Any, **_k: Any) -> RestoreProcessResult:
+        restore_calls.append(1)
+        return _ok_process()
+
+    kwargs: dict[str, Any] = _base_kwargs(
+        verify_crypto=True,
+        decrypt_stream=decrypt,
+        run_restore=run_restore,
+    )
+    kwargs["kek"] = bad_kek
+    report = asyncio.run(run_restore_orchestration(**kwargs))
+    assert report.ok is False
+    assert report.code == CODE_PREFLIGHT_KEK
+    assert decrypt_calls == []
+    assert restore_calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_kek",
+    [None, b"short", b"k" * 31, "k" * 32, bytearray(b"k" * 32), 1],
+)
+def test_apply_invalid_kek_type_or_length(bad_kek: object) -> None:
+    unwrap_calls: list[Any] = []
+    restore_calls: list[Any] = []
+
+    def unwrap(**k: Any) -> bytes:
+        unwrap_calls.append(k)
+        return _DEK
+
+    def run_restore(*_a: Any, **_k: Any) -> RestoreProcessResult:
+        restore_calls.append(1)
+        return _ok_process()
+
+    kwargs: dict[str, Any] = _base_kwargs(
+        mode=RestoreMode.APPLY,
+        apply_authorized=True,
+        unwrap=unwrap,
+        run_restore=run_restore,
+    )
+    kwargs["kek"] = bad_kek
+    report = asyncio.run(run_restore_orchestration(**kwargs))
+    assert report.ok is False
+    assert report.code == CODE_PREFLIGHT_KEK
+    assert unwrap_calls == []
+    assert restore_calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_dek",
+    [b"short", b"d" * 31, "d" * 32, bytearray(b"d" * 32), None, 32],
+)
+def test_verify_invalid_unwrap_output_no_decrypt(bad_dek: object) -> None:
+    decrypt_calls: list[Any] = []
+    restore_calls: list[Any] = []
+
+    def unwrap(**_k: Any) -> object:
+        return bad_dek
+
+    def decrypt(**k: Any) -> _TrackingGen:
+        decrypt_calls.append(k)
+        return _TrackingGen()
+
+    def run_restore(*_a: Any, **_k: Any) -> RestoreProcessResult:
+        restore_calls.append(1)
+        return _ok_process()
+
+    kwargs: dict[str, Any] = _base_kwargs(
+        verify_crypto=True,
+        kek=_KEK,
+        decrypt_stream=decrypt,
+        run_restore=run_restore,
+    )
+    kwargs["unwrap"] = unwrap
+    report = asyncio.run(run_restore_orchestration(**kwargs))
+    assert report.ok is False
+    assert report.code == CODE_CRYPTO
+    assert decrypt_calls == []
+    assert restore_calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_dek",
+    [b"short", bytearray(b"d" * 32), "d" * 32, None],
+)
+def test_apply_invalid_unwrap_output_no_decrypt_runner(bad_dek: object) -> None:
+    decrypt_calls: list[Any] = []
+    restore_calls: list[Any] = []
+
+    def unwrap(**_k: Any) -> object:
+        return bad_dek
+
+    def decrypt(**k: Any) -> _TrackingGen:
+        decrypt_calls.append(k)
+        return _TrackingGen()
+
+    def run_restore(*_a: Any, **_k: Any) -> RestoreProcessResult:
+        restore_calls.append(1)
+        return _ok_process()
+
+    kwargs: dict[str, Any] = _base_kwargs(
+        mode=RestoreMode.APPLY,
+        apply_authorized=True,
+        kek=_KEK,
+        decrypt_stream=decrypt,
+        run_restore=run_restore,
+    )
+    kwargs["unwrap"] = unwrap
+    report = asyncio.run(run_restore_orchestration(**kwargs))
+    assert report.ok is False
+    assert report.code == CODE_CRYPTO
+    assert decrypt_calls == []
+    assert restore_calls == []
+
+
+def test_default_binder_rejects_non_ok_package_report() -> None:
+    bad = PackagePreflightReport(
+        ok=False,
+        code="preflight_package",
+        message="nope",
+        run_id=_RUN_ID_S,
+    )
+    handle = _default_bind_package_handle(
+        staging_root=_STAGING,
+        run_id=_RUN_ID,
+        production=_production(),
+        package_report=bad,
+        mode_s="apply",
+    )
+    assert isinstance(handle, RestoreOrchestrationReport)
+    assert handle.code == CODE_PACKAGE_REBIND
+    assert str(_STAGING) not in handle.message
+
+
+def test_default_binder_rejects_run_id_mismatch() -> None:
+    other = uuid.UUID("11111111-2222-3333-4444-555555555555")
+    pkg = PackagePreflightReport(
+        ok=True,
+        code="package_ok",
+        message="ok",
+        run_id=str(other),
+        partial=True,
+    )
+    handle = _default_bind_package_handle(
+        staging_root=_STAGING,
+        run_id=_RUN_ID,
+        production=_production(),
+        package_report=pkg,
+        mode_s="apply",
+    )
+    assert isinstance(handle, RestoreOrchestrationReport)
+    assert handle.code == CODE_PACKAGE_REBIND
+
+
+def test_apply_two_pass_binder_receives_exact_second_package_report() -> None:
+    first = PackagePreflightReport(
+        ok=True,
+        code="package_ok",
+        message="first pass",
+        run_id=_RUN_ID_S,
+        partial=True,
+        size_ciphertext=1,
+    )
+    second = PackagePreflightReport(
+        ok=True,
+        code="package_ok",
+        message="second pass",
+        run_id=_RUN_ID_S,
+        partial=True,
+        size_ciphertext=2,
+    )
+    assert first is not second
+    n = {"i": 0}
+    bound: list[PackagePreflightReport] = []
+
+    def pkg(**_k: Any) -> PackagePreflightReport:
+        n["i"] += 1
+        return first if n["i"] == 1 else second
+
+    def bind(**kwargs: Any) -> PublishedPackageHandle:
+        report = kwargs["package_report"]
+        assert isinstance(report, PackagePreflightReport)
+        bound.append(report)
+        return _handle()
+
+    report = _run(
+        mode=RestoreMode.APPLY,
+        apply_authorized=True,
+        kek=_KEK,
+        package_preflight=pkg,
+        bind_package_handle=bind,
+    )
+    assert report.ok is True
+    assert n["i"] == 2
+    assert len(bound) == 1
+    assert bound[0] is second
+    assert bound[0] is not first
+    assert bound[0].size_ciphertext == 2
+
+
+class _EvilCloseAttrGen:
+    """Iterator whose close attribute lookup raises."""
+
+    def __init__(self) -> None:
+        self.consumed = 0
+
+    def __iter__(self) -> _EvilCloseAttrGen:
+        return self
+
+    def __next__(self) -> bytes:
+        if self.consumed:
+            raise StopIteration
+        self.consumed += 1
+        return b"x"
+
+    @property
+    def close(self) -> object:
+        raise RuntimeError("close attr boom")
+
+
+class _EvilCloseInvokeGen:
+    """Iterator whose close() invocation raises."""
+
+    def __init__(self) -> None:
+        self.consumed = 0
+        self.close_called = False
+
+    def __iter__(self) -> _EvilCloseInvokeGen:
+        return self
+
+    def __next__(self) -> bytes:
+        if self.consumed:
+            raise StopIteration
+        self.consumed += 1
+        return b"x"
+
+    def close(self) -> None:
+        self.close_called = True
+        raise RuntimeError("close invoke boom")
+
+
+def test_close_attr_raises_preserves_result_and_wipes_dek(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vuzol.ops.backup.restore_orchestrator as orch
+
+    wipe_log: list[str] = []
+    real_zeroize = orch._zeroize
+
+    def tracking_zeroize(buf: bytearray) -> None:
+        wipe_log.append("before")
+        real_zeroize(buf)
+        wipe_log.append("after")
+        assert all(b == 0 for b in buf)
+
+    monkeypatch.setattr(orch, "_zeroize", tracking_zeroize)
+    gen = _EvilCloseAttrGen()
+
+    report = _run(
+        mode=RestoreMode.APPLY,
+        apply_authorized=True,
+        kek=_KEK,
+        decrypt_stream=lambda **_k: gen,
+    )
+    assert report.ok is True
+    assert report.code == CODE_RESTORED_ORCH
+    assert wipe_log == ["before", "after"]
+    _assert_redacted(report, "close attr boom")
+
+
+def test_close_invoke_raises_preserves_result_and_wipes_dek(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vuzol.ops.backup.restore_orchestrator as orch
+
+    wipe_log: list[str] = []
+    real_zeroize = orch._zeroize
+
+    def tracking_zeroize(buf: bytearray) -> None:
+        wipe_log.append("before")
+        real_zeroize(buf)
+        wipe_log.append("after")
+        assert all(b == 0 for b in buf)
+
+    monkeypatch.setattr(orch, "_zeroize", tracking_zeroize)
+    gen = _EvilCloseInvokeGen()
+
+    report = _run(
+        mode=RestoreMode.APPLY,
+        apply_authorized=True,
+        kek=_KEK,
+        decrypt_stream=lambda **_k: gen,
+    )
+    assert report.ok is True
+    assert report.code == CODE_RESTORED_ORCH
+    assert gen.close_called is True
+    assert wipe_log == ["before", "after"]
+    _assert_redacted(report, "close invoke boom")
+
+
+def test_close_attr_raises_base_exception_still_wipes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vuzol.ops.backup.restore_orchestrator as orch
+
+    wipe_log: list[str] = []
+    real_zeroize = orch._zeroize
+
+    def tracking_zeroize(buf: bytearray) -> None:
+        wipe_log.append("before")
+        real_zeroize(buf)
+        wipe_log.append("after")
+        assert all(b == 0 for b in buf)
+
+    monkeypatch.setattr(orch, "_zeroize", tracking_zeroize)
+    gen = _EvilCloseAttrGen()
+
+    def raise_base(*_a: Any, **_k: Any) -> RestoreProcessResult:
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(
+            mode=RestoreMode.APPLY,
+            apply_authorized=True,
+            kek=_KEK,
+            decrypt_stream=lambda **_k: gen,
+            run_restore=raise_base,
+        )
+    assert wipe_log == ["before", "after"]
+
+
+def test_close_invoke_raises_base_exception_still_wipes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vuzol.ops.backup.restore_orchestrator as orch
+
+    wipe_log: list[str] = []
+    real_zeroize = orch._zeroize
+
+    def tracking_zeroize(buf: bytearray) -> None:
+        wipe_log.append("before")
+        real_zeroize(buf)
+        wipe_log.append("after")
+        assert all(b == 0 for b in buf)
+
+    monkeypatch.setattr(orch, "_zeroize", tracking_zeroize)
+    gen = _EvilCloseInvokeGen()
+
+    def raise_base(*_a: Any, **_k: Any) -> RestoreProcessResult:
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(
+            mode=RestoreMode.APPLY,
+            apply_authorized=True,
+            kek=_KEK,
+            decrypt_stream=lambda **_k: gen,
+            run_restore=raise_base,
+        )
+    assert gen.close_called is True
+    assert wipe_log == ["before", "after"]

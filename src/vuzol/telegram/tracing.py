@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +24,49 @@ from vuzol.telegram.projections import task_number_label, telegram_html
 ORCHESTRATION_TRACE_ROLE = "orchestration_trace"
 INTERPRETER_TRACE_KIND = "interpreter"
 PLANNER_TRACE_KIND = "planner"
+_TRACE_SAMPLE_NAMESPACE = b"vuzol-orchestration-trace-v1:"
+
+
+def orchestration_trace_sample_bucket(task_id: uuid.UUID) -> int:
+    """Return a stable task-level bucket in ``[0, 99]`` across processes/restarts."""
+
+    digest = hashlib.sha256(_TRACE_SAMPLE_NAMESPACE + task_id.bytes).digest()
+    return int.from_bytes(digest[:8], "big") % 100
+
+
+def should_deliver_orchestration_trace(
+    task_id: uuid.UUID,
+    *,
+    enabled: bool,
+    sample_percent: int,
+    anomalous: bool,
+    always_include_anomalies: bool,
+) -> bool:
+    """Apply fail-stable task sampling while optionally retaining diagnostic anomalies."""
+
+    if not enabled:
+        return False
+    if anomalous and always_include_anomalies:
+        return True
+    return orchestration_trace_sample_bucket(task_id) < sample_percent
+
+
+def interpreter_trace_is_anomalous(interpretation: Interpretation, payload: dict[str, Any]) -> bool:
+    raw = payload.get("model_task_draft")
+    policy_changed = isinstance(raw, dict) and raw != interpretation.task_draft
+    return payload.get("repaired") is True or policy_changed
+
+
+def planner_trace_is_anomalous(step: Step) -> bool:
+    result = step.result if isinstance(step.result, dict) else {}
+    text = result.get("text")
+    plan = text.strip() if isinstance(text, str) else ""
+    return (
+        step.status.value != "completed"
+        or step.failure_category is not None
+        or result.get("finish_reason") == "length"
+        or not plan
+    )
 
 
 def enqueue_interpreter_trace(

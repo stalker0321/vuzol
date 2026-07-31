@@ -575,7 +575,8 @@ async def test_telegram_delivery_composes_and_disposes(monkeypatch: MonkeyPatch)
     monkeypatch.setattr(delivery_cli, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(delivery_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
     monkeypatch.setattr(delivery_cli, "Bot", lambda _token: BotContext())
-    monkeypatch.setattr(delivery_cli, "TelegramDeliveryService", MagicMock())
+    delivery_service = MagicMock()
+    monkeypatch.setattr(delivery_cli, "TelegramDeliveryService", delivery_service)
     loop = AsyncMock()
 
     async def run_loop(*_args: object, **_kwargs: object) -> None:
@@ -588,6 +589,9 @@ async def test_telegram_delivery_composes_and_disposes(monkeypatch: MonkeyPatch)
     await delivery_cli.run()
     assert order == ["require_migration_head", "run_delivery_loop"]
     loop.assert_awaited_once()
+    assert delivery_service.call_args.kwargs["trace_enabled"] is True
+    assert delivery_service.call_args.kwargs["trace_sample_percent"] == 100
+    assert delivery_service.call_args.kwargs["trace_always_include_anomalies"] is True
     engine.dispose.assert_awaited_once()
 
 

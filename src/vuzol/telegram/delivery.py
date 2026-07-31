@@ -62,6 +62,9 @@ from vuzol.telegram.tracing import (
     PLANNER_TRACE_KIND,
     build_interpreter_trace_html,
     build_planner_trace_html,
+    interpreter_trace_is_anomalous,
+    planner_trace_is_anomalous,
+    should_deliver_orchestration_trace,
 )
 
 TELEGRAM_DESTINATIONS = frozenset({"telegram"})
@@ -115,6 +118,9 @@ async def prepare_delivery(
     topics: TopicRegistry | None = None,
     projects: ProjectRegistry | None = None,
     profiles: ProfileRegistry | None = None,
+    trace_enabled: bool = True,
+    trace_sample_percent: int = 100,
+    trace_always_include_anomalies: bool = True,
 ) -> PreparedDelivery:
     if item.operation_type not in {"send_message", "delete_message"}:
         raise PermanentDeliveryError("unsupported_telegram_operation")
@@ -157,7 +163,14 @@ async def prepare_delivery(
     if item.payload.get("role") == TASK_HISTORY_ROLE:
         return await _prepare_task_history_report(session, item, topics=topics, projects=projects)
     if item.payload.get("role") == ORCHESTRATION_TRACE_ROLE:
-        return await _prepare_orchestration_trace(session, item, topics=topics)
+        return await _prepare_orchestration_trace(
+            session,
+            item,
+            topics=topics,
+            trace_enabled=trace_enabled,
+            trace_sample_percent=trace_sample_percent,
+            trace_always_include_anomalies=trace_always_include_anomalies,
+        )
     if item.linked_entity_type == "project_naming":
         naming = await session.get(ProjectNamingRequest, item.linked_entity_id)
         if naming is None:
@@ -399,6 +412,9 @@ async def _prepare_orchestration_trace(
     item: TransactionalOutbox,
     *,
     topics: TopicRegistry | None,
+    trace_enabled: bool,
+    trace_sample_percent: int,
+    trace_always_include_anomalies: bool,
 ) -> PreparedDelivery:
     try:
         task_id = uuid.UUID(str(item.payload["task_id"]))
@@ -407,12 +423,24 @@ async def _prepare_orchestration_trace(
     task = await session.get(Task, task_id)
     if task is None:
         raise PermanentDeliveryError("orchestration_trace_task_missing")
-    thread_id = await _resolve_system_trace_thread(session, task.source_chat_id, topics)
     trace_kind = item.payload.get("trace_kind")
     if trace_kind == INTERPRETER_TRACE_KIND:
         interpretation = await session.get(Interpretation, item.linked_entity_id)
         if interpretation is None or interpretation.task_id != task.id:
             raise PermanentDeliveryError("orchestration_trace_interpretation_missing")
+        if not should_deliver_orchestration_trace(
+            task.id,
+            enabled=trace_enabled,
+            sample_percent=trace_sample_percent,
+            anomalous=interpreter_trace_is_anomalous(interpretation, item.payload),
+            always_include_anomalies=trace_always_include_anomalies,
+        ):
+            return PreparedDelivery(
+                DeliveryAction.NOOP,
+                chat_id=task.source_chat_id,
+                thread_id=None,
+            )
+        thread_id = await _resolve_system_trace_thread(session, task.source_chat_id, topics)
         return PreparedDelivery(
             DeliveryAction.SEND_STATUS,
             chat_id=task.source_chat_id,
@@ -430,6 +458,19 @@ async def _prepare_orchestration_trace(
     run = await session.get(Run, step.run_id)
     if run is None or run.task_id != task.id:
         raise PermanentDeliveryError("orchestration_trace_run_missing")
+    if not should_deliver_orchestration_trace(
+        task.id,
+        enabled=trace_enabled,
+        sample_percent=trace_sample_percent,
+        anomalous=planner_trace_is_anomalous(step),
+        always_include_anomalies=trace_always_include_anomalies,
+    ):
+        return PreparedDelivery(
+            DeliveryAction.NOOP,
+            chat_id=task.source_chat_id,
+            thread_id=None,
+        )
+    thread_id = await _resolve_system_trace_thread(session, task.source_chat_id, topics)
     usage = await session.scalar(
         select(UsageRecord)
         .where(UsageRecord.step_id == step.id)
@@ -653,6 +694,9 @@ class TelegramDeliveryService:
         topics: TopicRegistry | None = None,
         projects: ProjectRegistry | None = None,
         profiles: ProfileRegistry | None = None,
+        trace_enabled: bool = True,
+        trace_sample_percent: int = 100,
+        trace_always_include_anomalies: bool = True,
     ) -> None:
         self._factory = session_factory
         self._client = client
@@ -664,6 +708,9 @@ class TelegramDeliveryService:
         self._topics = topics
         self._projects = projects
         self._profiles = profiles
+        self._trace_enabled = trace_enabled
+        self._trace_sample_percent = trace_sample_percent
+        self._trace_always_include_anomalies = trace_always_include_anomalies
         self._logger = get_logger(__name__)
 
     async def deliver_one(self) -> bool:
@@ -687,6 +734,9 @@ class TelegramDeliveryService:
                     self._topics,
                     projects=self._projects,
                     profiles=self._profiles,
+                    trace_enabled=self._trace_enabled,
+                    trace_sample_percent=self._trace_sample_percent,
+                    trace_always_include_anomalies=self._trace_always_include_anomalies,
                 )
             if prepared.action == DeliveryAction.NOOP:
                 await self._complete(token, prepared, None)

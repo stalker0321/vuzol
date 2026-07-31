@@ -9,6 +9,7 @@ from vuzol.config import (
     InterpretationSettings,
     Settings,
     SubscriptionLimitSettings,
+    TelegramSettings,
 )
 
 
@@ -20,6 +21,9 @@ def test_settings_accept_valid_values() -> None:
     assert settings.subscription_limits.source == "legacy"
     assert settings.subscription_limits.snapshot_file is None
     assert settings.subscription_limits.snapshot_max_age_seconds == 900
+    assert settings.telegram.orchestration_trace_enabled is True
+    assert settings.telegram.orchestration_trace_sample_percent == 100
+    assert settings.telegram.orchestration_trace_always_include_anomalies is True
 
 
 def test_settings_reject_invalid_port() -> None:
@@ -38,6 +42,9 @@ def test_nested_settings_load_from_environment(monkeypatch: MonkeyPatch) -> None
     monkeypatch.setenv("VUZOL_DATABASE__POOL_SIZE", "7")
     monkeypatch.setenv("VUZOL_SUBSCRIPTION_LIMITS__SOURCE", "legacy")
     monkeypatch.setenv("VUZOL_SUBSCRIPTION_LIMITS__SNAPSHOT_MAX_AGE_SECONDS", "1200")
+    monkeypatch.setenv("VUZOL_TELEGRAM__ORCHESTRATION_TRACE_ENABLED", "true")
+    monkeypatch.setenv("VUZOL_TELEGRAM__ORCHESTRATION_TRACE_SAMPLE_PERCENT", "25")
+    monkeypatch.setenv("VUZOL_TELEGRAM__ORCHESTRATION_TRACE_ALWAYS_INCLUDE_ANOMALIES", "false")
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
@@ -46,6 +53,16 @@ def test_nested_settings_load_from_environment(monkeypatch: MonkeyPatch) -> None
     assert settings.database.pool_size == 7
     assert settings.subscription_limits.source == "legacy"
     assert settings.subscription_limits.snapshot_max_age_seconds == 1200
+    assert settings.telegram.orchestration_trace_enabled is True
+    assert settings.telegram.orchestration_trace_sample_percent == 25
+    assert settings.telegram.orchestration_trace_always_include_anomalies is False
+
+
+def test_trace_sample_percent_is_bounded() -> None:
+    with raises(ValidationError):
+        TelegramSettings(orchestration_trace_sample_percent=-1)
+    with raises(ValidationError):
+        TelegramSettings(orchestration_trace_sample_percent=101)
 
 
 def test_subscription_limits_snapshot_required_needs_absolute_path() -> None:

@@ -16,6 +16,7 @@ from vuzol.storage.repositories.delivery import (
 )
 from vuzol.storage.repositories.discussion import DiscussionRepository
 from vuzol.storage.repositories.evidence import ApprovalRepository, ModelRepository
+from vuzol.storage.repositories.work_packages import WorkPackageRepository
 
 __all__ = [
     "ApprovalRepository",
@@ -31,4 +32,5 @@ __all__ = [
     "TelegramIntakeRepository",
     "TelegramMessageLinkRepository",
     "TopicMappingRepository",
+    "WorkPackageRepository",
 ]

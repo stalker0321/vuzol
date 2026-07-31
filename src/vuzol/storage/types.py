@@ -236,6 +236,53 @@ class AcceptedDecisionStatus(StrEnum):
     RETRACTED = "retracted"
 
 
+class WorkPackageStatus(StrEnum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    STOPPED = "stopped"
+    DISCARDED = "discarded"
+
+
+class PlanRevisionState(StrEnum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+    SUPERSEDED = "superseded"
+    DISCARDED = "discarded"
+
+
+class PlanRevisionCreatedBy(StrEnum):
+    USER = "user"
+    PLANNER_MODEL = "planner_model"
+    SYSTEM = "system"
+
+
+class WorkPackagePauseReason(StrEnum):
+    USER = "user"
+    ITEM_FAILED = "item_failed"
+    REPLAN_REQUIRED = "replan_required"
+    POLICY = "policy"
+
+
+class WorkPackageQueueMode(StrEnum):
+    SEQUENTIAL = "sequential"
+
+
+class EstimatedComplexity(StrEnum):
+    SMALL = "small"
+    MEDIUM = "medium"
+    LARGE = "large"
+
+
+class EditSessionStatus(StrEnum):
+    OPEN = "open"
+    ACCEPTED = "accepted"
+    CLOSED = "closed"
+    EXPIRED = "expired"
+
+
 def enum_type(enum: type[StrEnum], name: str, *, length: int | None = None) -> SqlEnum:
     if length is not None:
         return SqlEnum(

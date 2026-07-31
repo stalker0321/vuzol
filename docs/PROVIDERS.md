@@ -75,11 +75,6 @@ research synthesis, and summarization. Automatic workflow start remains disabled
 Production planning uses a dedicated GPT-5 nano API profile with a bounded 1,000-token output;
 empty or token-truncated planner output is rejected rather than completed, and a validated plan is
 handed to downstream `execute_code` / `execute_agent` steps as bounded redacted context items.
-Tasks already classified with `needs_planning=true` use the strong planning budget. In production,
-that budget selects the model-only TokenRouter Kimi K3 profile, while unplanned/simple model work
-continues to prefer GPT-5 nano. Kimi receives no repository or shell capabilities and never replaces
-the sandboxed CLI coding executor. A categorized Kimi transport/provider failure may fall back to
-the nano planner; content-quality failures retry the same planner under the existing bounded policy.
 Content-quality plan rejection is recorded as a provider failure observation (not a success) and
 reconciles usage under the planner failure category, but it does **not** force cross-profile
 fallback—the same planner may retry within attempt limits.

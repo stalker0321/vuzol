@@ -413,8 +413,13 @@ def run_pg_restore_stdin(
         join_watchdog: bool,
         join_drain: bool,
         close_pt_flag: bool,
-    ) -> tuple[bool, tuple[bool, bool]]:
-        """Stop helpers, close streams, kill/reap child. Returns (kill_ok, liveness)."""
+    ) -> tuple[bool, int | None, tuple[bool, bool]]:
+        """Stop helpers, close streams, kill/reap child.
+
+        Returns ``(kill_ok, exit_code, liveness)``. ``exit_code`` is obtained
+        only via guarded poll so callers never call ``proc.poll`` unguarded;
+        poll failures force ``kill_ok=False`` (uncertainty → PROCESS_FAILED).
+        """
 
         stop_event.set()
         if join_watchdog:
@@ -423,10 +428,32 @@ def run_pg_restore_stdin(
         _close_stdin(proc)
         if close_pt_flag:
             _close_plaintext(plaintext_iter)
+
+        kill_ok = False
+        exit_code: int | None = None
         try:
-            kill_ok = _kill_group(proc) if proc.poll() is None else True
+            polled = proc.poll()
         except Exception:
+            # Status unknown: best-effort kill, never claim confirmed termination.
+            with contextlib.suppress(Exception):
+                _kill_group(proc)
             kill_ok = False
+            exit_code = None
+        else:
+            if polled is None:
+                try:
+                    kill_ok = _kill_group(proc)
+                except Exception:
+                    kill_ok = False
+                try:
+                    exit_code = proc.poll()
+                except Exception:
+                    exit_code = None
+                    kill_ok = False
+            else:
+                kill_ok = True
+                exit_code = polled
+
         if join_drain:
             with contextlib.suppress(Exception):
                 drain.join(timeout=_DRAIN_JOIN_SECONDS)
@@ -443,19 +470,19 @@ def run_pg_restore_stdin(
         except Exception:
             dr_alive = True
             kill_ok = False
-        return kill_ok, (wd_alive, dr_alive)
+        return kill_ok, exit_code, (wd_alive, dr_alive)
 
     # Staged helper startup: failure after first start joins only started threads.
     try:
         watchdog.start()
     except Exception:
-        kill_ok, liveness = _teardown_after_spawn(
+        kill_ok, safe_exit, liveness = _teardown_after_spawn(
             join_watchdog=False, join_drain=False, close_pt_flag=close_pt
         )
         _thread_local.helper_liveness = liveness
         _thread_local.watchdog_stats = _WatchdogStats(ops=(), max_sleep_seconds=0.0)
         return _classify_result(
-            exit_code=proc.poll(),
+            exit_code=safe_exit,
             bytes_written=0,
             process_started=True,
             reason_cancelled=False,
@@ -470,7 +497,7 @@ def run_pg_restore_stdin(
     try:
         drain.start()
     except Exception:
-        kill_ok, liveness = _teardown_after_spawn(
+        kill_ok, safe_exit, liveness = _teardown_after_spawn(
             join_watchdog=True, join_drain=False, close_pt_flag=close_pt
         )
         with wd_lock:
@@ -478,7 +505,7 @@ def run_pg_restore_stdin(
         _thread_local.watchdog_stats = stats
         _thread_local.helper_liveness = liveness
         return _classify_result(
-            exit_code=proc.poll(),
+            exit_code=safe_exit,
             bytes_written=0,
             process_started=True,
             reason_cancelled=False,
@@ -834,10 +861,16 @@ def _close_plaintext(plaintext_iter: object) -> None:
 
 
 def _kill_group(proc: subprocess.Popen[bytes]) -> bool:
-    """TERM then KILL process group; return True only if reaped/confirmed dead.
+    """TERM then KILL process group; confirm group-side AND child-side death.
 
-    Never raises. Signal/wait failures are reflected by a False return so callers
-    cannot claim restored/cancelled success under uncertain termination.
+    Returns True only when **both**:
+    (a) process-group absence (``ProcessLookupError``) **or** successful
+        TERM/KILL delivery, and
+    (b) direct child reaped / confirmed exited (``wait`` or ``poll``).
+
+    A non-``ProcessLookupError`` signal failure leaves group confirmation
+    uncertain until a later signal is successfully delivered. ``ProcessLookup``
+    plus poll/wait exception is always False (never True). Never raises.
     """
 
     if proc.pid is None:
@@ -846,41 +879,68 @@ def _kill_group(proc: subprocess.Popen[bytes]) -> bool:
         except Exception:
             return False
 
+    # (a) group absence or successful signal delivery.
+    group_confirmed = False
+
     try:
         os.killpg(proc.pid, signal.SIGTERM)
+        group_confirmed = True
     except ProcessLookupError:
+        # Group already gone counts as group-side confirmation.
+        group_confirmed = True
         try:
-            return proc.poll() is not None
+            if proc.poll() is not None:
+                return True
         except Exception:
+            return False
+        try:
+            proc.wait(timeout=_KILL_WAIT_SECONDS)
             return True
+        except Exception:
+            try:
+                return proc.poll() is not None
+            except Exception:
+                return False
     except Exception:
-        # Signal delivery failed; continue wait/KILL path.
-        _ = None
+        # Non-ProcessLookup delivery failure: group uncertain; try wait then KILL.
+        group_confirmed = False
 
     try:
         proc.wait(timeout=_KILL_WAIT_SECONDS)
-        return True
+        # Child reaped, but only confirmed if group-side is also known.
+        return group_confirmed
     except Exception:
         # Wait failed; escalate to SIGKILL.
         _ = None
 
     try:
         os.killpg(proc.pid, signal.SIGKILL)
+        group_confirmed = True
     except ProcessLookupError:
+        group_confirmed = True
         try:
-            return proc.poll() is not None
+            if proc.poll() is not None:
+                return True
         except Exception:
+            return False
+        try:
+            proc.wait(timeout=_KILL_WAIT_SECONDS)
             return True
+        except Exception:
+            try:
+                return proc.poll() is not None
+            except Exception:
+                return False
     except Exception:
-        # Kill delivery failed; final wait/poll.
+        # KILL delivery failed; group remains as previously recorded.
         _ = None
 
     try:
         proc.wait(timeout=_KILL_WAIT_SECONDS)
-        return True
+        return group_confirmed
     except Exception:
         try:
-            return proc.poll() is not None
+            return group_confirmed and proc.poll() is not None
         except Exception:
             return False
 

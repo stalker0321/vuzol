@@ -161,6 +161,45 @@ class DiscussionRepository:
         await self._session.flush()
         return summary.id, revision
 
+    async def latest_summary(self, *, session_id: uuid.UUID) -> ConversationSummary | None:
+        return cast(
+            ConversationSummary | None,
+            await self._session.scalar(
+                select(ConversationSummary)
+                .where(ConversationSummary.session_id == session_id)
+                .order_by(ConversationSummary.revision.desc())
+                .limit(1)
+            ),
+        )
+
+    async def max_turn_ordinal(self, *, session_id: uuid.UUID) -> int:
+        return cast(
+            int,
+            await self._session.scalar(
+                select(func.coalesce(func.max(ConversationTurn.ordinal), 0)).where(
+                    ConversationTurn.session_id == session_id
+                )
+            ),
+        )
+
+    async def turns_from(
+        self, *, session_id: uuid.UUID, start_ordinal: int, newest_limit: int
+    ) -> tuple[ConversationTurn, ...]:
+        newest = tuple(
+            (
+                await self._session.scalars(
+                    select(ConversationTurn)
+                    .where(
+                        ConversationTurn.session_id == session_id,
+                        ConversationTurn.ordinal >= start_ordinal,
+                    )
+                    .order_by(ConversationTurn.ordinal.desc())
+                    .limit(newest_limit)
+                )
+            ).all()
+        )
+        return tuple(reversed(newest))
+
     async def accept_decision(
         self,
         *,
@@ -187,3 +226,49 @@ class DiscussionRepository:
         self._session.add(decision)
         await self._session.flush()
         return decision.id
+
+    async def active_decision(
+        self, *, session_id: uuid.UUID, key: str, for_update: bool = False
+    ) -> AcceptedDecision | None:
+        statement = select(AcceptedDecision).where(
+            AcceptedDecision.session_id == session_id,
+            AcceptedDecision.key == key,
+            AcceptedDecision.status == AcceptedDecisionStatus.ACTIVE,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return cast(AcceptedDecision | None, await self._session.scalar(statement))
+
+    async def active_decisions(
+        self, *, session_id: uuid.UUID, newest_limit: int
+    ) -> tuple[AcceptedDecision, ...]:
+        return tuple(
+            (
+                await self._session.scalars(
+                    select(AcceptedDecision)
+                    .where(
+                        AcceptedDecision.session_id == session_id,
+                        AcceptedDecision.status == AcceptedDecisionStatus.ACTIVE,
+                    )
+                    .order_by(AcceptedDecision.created_at.desc(), AcceptedDecision.id.desc())
+                    .limit(newest_limit)
+                )
+            ).all()
+        )
+
+    async def get_decision(
+        self, decision_id: uuid.UUID, *, for_update: bool = False
+    ) -> AcceptedDecision:
+        statement = select(AcceptedDecision).where(AcceptedDecision.id == decision_id)
+        if for_update:
+            statement = statement.with_for_update()
+        decision = await self._session.scalar(statement)
+        if decision is None:
+            raise LookupError(f"accepted decision {decision_id} does not exist")
+        return decision
+
+    async def set_decision_status(
+        self, decision: AcceptedDecision, status: AcceptedDecisionStatus
+    ) -> None:
+        decision.status = status
+        await self._session.flush()

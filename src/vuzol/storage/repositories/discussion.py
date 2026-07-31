@@ -45,6 +45,19 @@ class DiscussionRepository:
         await self._session.flush()
         return discussion.id
 
+    async def get_session(
+        self, session_id: uuid.UUID, *, for_update: bool = False
+    ) -> ProjectDiscussionSession:
+        statement = select(ProjectDiscussionSession).where(
+            ProjectDiscussionSession.id == session_id
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        discussion = await self._session.scalar(statement)
+        if discussion is None:
+            raise LookupError(f"discussion session {session_id} does not exist")
+        return discussion
+
     async def active_session_id(self, *, chat_id: int, message_thread_id: int) -> uuid.UUID | None:
         return cast(
             uuid.UUID | None,

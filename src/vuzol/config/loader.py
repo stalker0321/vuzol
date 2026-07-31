@@ -64,6 +64,10 @@ def _secret_access_policy(
     if settings.database_dsn_reference is not None:
         allow(settings.database_dsn_reference, "system:database")
         allow(settings.database_dsn_reference, "system:backup")
+    # A distinct restore DSN is backup-only. A shared database/restore reference
+    # naturally keeps the union of both consumers.
+    if settings.backup.restore_dsn_reference is not None:
+        allow(settings.backup.restore_dsn_reference, "system:backup")
     if settings.backup.kek_reference is not None:
         allow(settings.backup.kek_reference, "system:backup")
     if settings.telegram_bot_token_reference is not None:

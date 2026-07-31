@@ -249,6 +249,15 @@ class BackupSettings(BaseModel):
     enabled: bool = False
     # Manual APPLY capture gate (default off).
     capture_cli_permitted: bool = False
+    # Manual APPLY restore gate (default off).
+    restore_cli_permitted: bool = False
+    # Restore DSN secret ref; loader grants it only to system:backup.
+    restore_dsn_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
+    # Overall restore deadline passthrough; None means no CLI-imposed bound.
+    restore_overall_timeout_seconds: float | None = Field(default=None, gt=0)
+    # APPLY safety probes stay on unless explicitly disabled for a lab.
+    restore_require_empty_target: bool = True
+    restore_probe_capture_lock: bool = True
     staging_root: Path | None = None
     drill_root: Path | None = None
     keep_local_runs: int = Field(default=3, ge=1, le=100)

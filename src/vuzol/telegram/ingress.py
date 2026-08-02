@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.config.models import TopicConfig, TopicKind
+from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
 from vuzol.providers.subscription_limits import SUBSCRIPTION_LIMITS_DESTINATION
 from vuzol.storage.models import TelegramIntakeMessage, TelegramMessageLink, TopicMapping
 from vuzol.storage.types import IntakeStatus, TaskStatus
@@ -64,6 +65,16 @@ class TelegramIngressService:
                 raise TelegramPolicyError("topic does not accept new tasks")
         except (TelegramPolicyError, RegistryError) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
+
+        if (
+            settings.project_discussion_enabled
+            and topic.kind is TopicKind.PROJECT
+            and topic.project_id is not None
+            and update.text is not None
+            and not update.attachments
+            and update.reply_to_message_id is None
+        ):
+            return await self._accept_discussion_message(update, topic)
 
         async with UnitOfWork(self._session_factory) as uow:
             inbox_id, created = await uow.inbox.receive_once(
@@ -203,6 +214,75 @@ class TelegramIngressService:
             task_id=task_id,
             intake_id=intake_id,
         )
+
+    async def _accept_discussion_message(
+        self, update: MessageUpdate, topic: TopicConfig
+    ) -> IngressResult:
+        """Persist default-off discussion intake without materializing a Task."""
+
+        assert topic.project_id is not None
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            await uow.topics.upsert(
+                TopicMapping(
+                    chat_id=update.chat_id,
+                    message_thread_id=update.message_thread_id,
+                    topic_kind=topic.kind.value,
+                    project_id=topic.project_id,
+                    accepts_new_tasks=topic.accepts_new_tasks,
+                    default_workflow=topic.default_workflow,
+                    enabled=topic.enabled,
+                )
+            )
+            session_id = await uow.discussions.active_session_id(
+                chat_id=update.chat_id,
+                message_thread_id=update.message_thread_id,
+            )
+            if session_id is None:
+                session_id = await uow.discussions.create_session(
+                    project_id=topic.project_id,
+                    chat_id=update.chat_id,
+                    message_thread_id=update.message_thread_id,
+                )
+            intake = TelegramIntakeMessage(
+                inbox_id=inbox_id,
+                chat_id=update.chat_id,
+                message_thread_id=update.message_thread_id,
+                message_id=update.message_id,
+                user_id=update.user_id,
+                task_id=None,
+                original_text=update.text,
+                attachments=[],
+                affinity_kind="discussion",
+                ambiguous_task_ids=[],
+                status=IntakeStatus.AWAITING_INTERPRETATION,
+            )
+            intake_id = await uow.telegram_intake.add(intake)
+            await uow.inbox.mark_processed(
+                inbox_id, entity_type="telegram_intake", entity_id=intake_id
+            )
+            await uow.outbox.enqueue(
+                destination=DISCUSSION_CLASSIFY_DESTINATION,
+                operation_type="classify_intake",
+                entity_type="telegram_intake",
+                entity_id=intake_id,
+                idempotency_key=f"discussion:classify:{intake_id}",
+                payload={
+                    "discussion_session_id": str(session_id),
+                    "project_id": topic.project_id,
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "user_id": update.user_id,
+                },
+            )
+        return IngressResult(status=IngressStatus.HANDLED, intake_id=intake_id)
 
     async def _handle_help_command(
         self, update: MessageUpdate, topic: TopicConfig

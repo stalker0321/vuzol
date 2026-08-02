@@ -81,6 +81,13 @@ def test_low_confidence_prefers_discussion_and_strips_action_payloads() -> None:
     assert not result.should_mutate_plan
 
 
+def test_schema_and_prompt_versions_are_exact_literals() -> None:
+    with pytest.raises(ValidationError):
+        envelope(schema_version="discussion-interpret-v2")
+    with pytest.raises(ValidationError):
+        envelope(prompt_version="model-invented")
+
+
 def test_model_plan_control_is_advisory_and_requires_button() -> None:
     candidate = envelope(
         interaction_mode="plan_control",
@@ -289,6 +296,51 @@ def test_plan_request_maps_to_domain_draft_without_control_authority() -> None:
     assert draft.title == "Улучшение интерфейса"
     assert len(draft.items) == 1
     assert draft.items[0].local_id == "telegram-ui"
+
+
+def test_revision_plan_request_uses_only_injected_snapshot_fence() -> None:
+    snapshot = PlanSnapshot(
+        package_id=uuid.uuid4(),
+        revision_id=uuid.uuid4(),
+        revision_number=4,
+        revision_hash="c" * 64,
+        title="Current plan",
+    )
+    candidate = envelope(
+        interaction_mode="plan_request",
+        should_mutate_plan=True,
+        plan_request={
+            "intent": "revise_draft",
+            "base_revision_id": str(uuid.uuid4()),
+            "base_revision_hash": "f" * 64,
+            "title": "Revised plan",
+            "items": [
+                {
+                    "local_id": "one",
+                    "summary": "Первый пункт",
+                    "goal": "Обновить пункт",
+                    "expected_outcome": "Пункт обновлён",
+                    "completion_criteria": ["Изменение видно"],
+                    "allowed_scope": "plan",
+                    "suggested_risk": "low",
+                    "needs_approval": False,
+                    "estimated_complexity": "small",
+                }
+            ],
+        },
+    )
+
+    result = enforce_discussion_policy(request(plan_snapshot=snapshot), candidate)
+
+    assert result.plan_request is not None
+    assert result.plan_request.base_revision_id == snapshot.revision_id
+    assert result.plan_request.base_revision_hash == snapshot.revision_hash
+
+    refused = enforce_discussion_policy(request(), candidate)
+    assert refused.interaction_mode is InteractionMode.QUERY_REFUSE
+    assert refused.plan_request is None
+    assert refused.refusal_code is RefusalCode.PLAN_REVISION_STALE
+    assert not refused.should_mutate_plan
 
 
 def test_fake_pipeline_applies_policy_after_provider_output() -> None:

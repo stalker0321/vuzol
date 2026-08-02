@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from vuzol.interpretation.discussion import DiscussionInterpretRequest
+
 from ._test_interpretation_helpers import (
     Capability,
     EvaluationFixture,
@@ -135,6 +137,58 @@ def test_openai_compatible_adapters_parse_provider_neutral_results() -> None:
                 )
             )
             assert transcribed.transcript == "raw transcript" and transcribed.uncertain
+
+    asyncio.run(scenario())
+
+
+def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
+    async def scenario() -> None:
+        async def handler(provider_request: httpx.Request) -> httpx.Response:
+            body = json.loads(provider_request.content)
+            assert "do not execute" in body["messages"][0]["content"]
+            user_payload = json.loads(body["messages"][1]["content"])
+            assert user_payload["prompt_version"] == "project-discussion-v1"
+            assert user_payload["input"]["project_id"] == "vuzol"
+            assert user_payload["discussion_schema"]["additionalProperties"] is False
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "interaction_mode": "discussion",
+                                        "confidence": 0.91,
+                                        "user_visible_summary": "Обсуждаем вариант интерфейса.",
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
+        async with httpx.AsyncClient(
+            base_url="https://provider.example/v1",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            interpreter = OpenAICompatibleInterpreter(
+                base_url="https://provider.example/v1",
+                credential=SecretStr("key"),
+                profile_id="profile",
+                model="model",
+                client=client,
+            )
+            result = await interpreter.interpret_discussion(
+                DiscussionInterpretRequest(
+                    original_input="как лучше сделать карточку?",
+                    project_id="vuzol",
+                    user_id=42,
+                )
+            )
+            assert result.interaction_mode.value == "discussion"
+            assert not result.should_create_task
 
     asyncio.run(scenario())
 

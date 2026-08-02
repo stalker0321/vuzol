@@ -83,7 +83,7 @@ class TelegramIngressService:
             and topic.project_id is not None
             and update.text is not None
             and not update.attachments
-            and update.reply_to_message_id is None
+            and not await self._reply_targets_task(update)
         ):
             return await self._accept_discussion_message(update, topic)
 
@@ -225,6 +225,17 @@ class TelegramIngressService:
             task_id=task_id,
             intake_id=intake_id,
         )
+
+    async def _reply_targets_task(self, update: MessageUpdate) -> bool:
+        """Keep only replies to canonical Task-linked messages on the legacy task path."""
+
+        if update.reply_to_message_id is None:
+            return False
+        async with UnitOfWork(self._session_factory) as uow:
+            return (
+                await uow.telegram_links.resolve_task(update.chat_id, update.reply_to_message_id)
+                is not None
+            )
 
     async def _accept_discussion_message(
         self, update: MessageUpdate, topic: TopicConfig

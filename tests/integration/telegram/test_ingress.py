@@ -141,6 +141,60 @@ def test_enabled_project_discussion_forks_before_task_creation(
 
 
 @pytest.mark.postgresql
+def test_project_discussion_reply_requires_canonical_task_affinity(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        base = telegram_runtime(tmp_path)
+        runtime = base.model_copy(
+            update={
+                "settings": base.settings.model_copy(update={"project_discussion_enabled": True})
+            }
+        )
+        async with UnitOfWork(factory) as uow:
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                project_id="vuzol",
+                original_text="existing task",
+                task_type="general",
+            )
+            await uow.telegram_links.add(
+                TelegramMessageLink(
+                    chat_id=-100,
+                    message_thread_id=10,
+                    message_id=700,
+                    task_id=task.id,
+                    message_role="task_status",
+                )
+            )
+
+        service = TelegramIngressService(runtime, factory)
+        topic_root_reply = await service.accept_message(
+            message(502, 602, text="обсудим идею", reply_to_message_id=699)
+        )
+        task_reply = await service.accept_message(
+            message(503, 603, text="продолжай задачу", reply_to_message_id=700)
+        )
+
+        assert topic_root_reply.status is IngressStatus.HANDLED
+        assert topic_root_reply.task_id is None
+        assert task_reply.status is IngressStatus.CONTINUATION
+        assert task_reply.task_id == task.id
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(Task)) == 1
+            assert (
+                await session.scalar(select(func.count()).select_from(ProjectDiscussionSession))
+                == 1
+            )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_concurrent_first_discussion_messages_share_one_session(
     postgres_dsn: str, tmp_path: Path
 ) -> None:

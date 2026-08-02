@@ -9,6 +9,7 @@ from typing import Protocol
 from pydantic import Field, model_validator
 
 from vuzol.discussion.domain import PlanDraft, PlanItemDraft
+from vuzol.discussion.memory import MemoryPack
 from vuzol.interpretation.domain import FrozenModel, SuggestedComplexity
 from vuzol.storage.types import EstimatedComplexity, InteractionMode, RiskLevel
 
@@ -65,6 +66,13 @@ class PlanControlAction(StrEnum):
     REQUEST_REPLAN = "request_replan"
 
 
+class ControlOverrideKind(StrEnum):
+    CONTINUE_DISCUSSION = "continue_discussion"
+    CREATE_OR_UPDATE_PLAN = "create_or_update_plan"
+    REPLAN = "replan"
+    EXPLICIT_TASK = "explicit_task"
+
+
 class DecisionCandidate(FrozenModel):
     key: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
     statement: str = Field(min_length=1, max_length=500)
@@ -115,6 +123,26 @@ class EditSessionContext(FrozenModel):
     opened_by_user_id: int
 
 
+class PlanSnapshotItem(FrozenModel):
+    item_id: uuid.UUID
+    local_id: str | None = Field(default=None, max_length=64)
+    ordinal: int = Field(ge=1, le=20)
+    summary: str = Field(min_length=1, max_length=240)
+
+
+class PlanSnapshot(FrozenModel):
+    package_id: uuid.UUID
+    revision_id: uuid.UUID
+    revision_number: int = Field(ge=1)
+    revision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    title: str = Field(min_length=1, max_length=240)
+    items: tuple[PlanSnapshotItem, ...] = Field(default=(), max_length=20)
+
+
+class ControlOverride(FrozenModel):
+    kind: ControlOverrideKind
+
+
 class ItemEditPayload(FrozenModel):
     edit_session_id: uuid.UUID
     package_id: uuid.UUID
@@ -136,7 +164,10 @@ class DiscussionInterpretRequest(FrozenModel):
     user_id: int
     source_is_voice: bool = False
     transcription_uncertain: bool = False
+    memory_pack: MemoryPack | None = None
+    plan_snapshot: PlanSnapshot | None = None
     edit_session: EditSessionContext | None = None
+    control_override: ControlOverride | None = None
 
 
 class DiscussionInterpretation(FrozenModel):
@@ -159,14 +190,21 @@ class DiscussionInterpretation(FrozenModel):
 
     @model_validator(mode="after")
     def validate_mode_payload(self) -> DiscussionInterpretation:
-        expected = {
+        payloads = {
             InteractionMode.PLAN_REQUEST: self.plan_request,
             InteractionMode.PLAN_CONTROL: self.plan_control,
             InteractionMode.ITEM_EDIT: self.item_edit,
             InteractionMode.TASK_REQUEST: self.task_request,
         }
-        if self.interaction_mode in expected and expected[self.interaction_mode] is None:
+        if self.interaction_mode in payloads and payloads[self.interaction_mode] is None:
             raise ValueError(f"{self.interaction_mode.value} requires its matching payload")
+        unexpected = [
+            mode.value
+            for mode, payload in payloads.items()
+            if mode is not self.interaction_mode and payload is not None
+        ]
+        if unexpected:
+            raise ValueError("payload does not match interaction_mode: " + ", ".join(unexpected))
         return self
 
 
@@ -249,22 +287,54 @@ def enforce_discussion_policy(
             }
         )
 
-    if result.interaction_mode in _NON_TASK_MODES:
-        result = result.model_copy(update={"should_create_task": False})
-    if result.interaction_mode is InteractionMode.TASK_REQUEST:
-        # v1 is confirm-first; P8 owns canonical Task materialization.
-        result = result.model_copy(update={"should_create_task": False})
-    if result.interaction_mode is InteractionMode.PLAN_CONTROL:
+    # v1 is confirm-first; P8 owns canonical Task materialization. Draft mutation is
+    # legal only for a plan request or a correctly fenced item-edit hint.
+    result = result.model_copy(
+        update={
+            "should_create_task": False,
+            "should_mutate_plan": (
+                result.should_mutate_plan
+                and result.interaction_mode
+                in {InteractionMode.PLAN_REQUEST, InteractionMode.ITEM_EDIT}
+            ),
+        }
+    )
+
+    if result.plan_control is not None:
         control = result.plan_control
-        assert control is not None
         control = control.model_copy(update={"authoritative": False})
-        updates: dict[str, object] = {"plan_control": control, "should_create_task": False}
+        updates: dict[str, object] = {
+            "plan_control": control,
+            "should_create_task": False,
+            "should_mutate_plan": False,
+        }
         if control.action in _MUTATING_CONTROLS:
             updates.update(
-                should_mutate_plan=False,
                 refusal_code=RefusalCode.CONTROL_REQUIRES_BUTTON,
             )
         result = result.model_copy(update=updates)
+
+    if request.control_override is not None:
+        override_mode = {
+            ControlOverrideKind.CONTINUE_DISCUSSION: InteractionMode.DISCUSSION,
+            ControlOverrideKind.CREATE_OR_UPDATE_PLAN: InteractionMode.PLAN_REQUEST,
+            ControlOverrideKind.REPLAN: InteractionMode.PLAN_REQUEST,
+            ControlOverrideKind.EXPLICIT_TASK: InteractionMode.TASK_REQUEST,
+        }[request.control_override.kind]
+        if override_mode is InteractionMode.DISCUSSION:
+            result = result.model_copy(
+                update={
+                    "interaction_mode": override_mode,
+                    "should_create_task": False,
+                    "should_mutate_plan": False,
+                    "plan_request": None,
+                    "plan_control": None,
+                    "item_edit": None,
+                    "task_request": None,
+                }
+            )
+        elif result.interaction_mode is not override_mode:
+            raise ValueError("control override requires matching structured payload")
     if request.transcription_uncertain:
         flags = set(result.ambiguity_flags)
         flags.add(AmbiguityFlag.VOICE_UNCERTAIN)
@@ -276,6 +346,19 @@ def enforce_discussion_policy(
                 "refusal_code": RefusalCode.CLARIFY_REQUIRED,
             }
         )
+    payload_fields = {
+        InteractionMode.PLAN_REQUEST: "plan_request",
+        InteractionMode.PLAN_CONTROL: "plan_control",
+        InteractionMode.ITEM_EDIT: "item_edit",
+        InteractionMode.TASK_REQUEST: "task_request",
+    }
+    result = result.model_copy(
+        update={
+            field: None
+            for mode, field in payload_fields.items()
+            if mode is not result.interaction_mode
+        }
+    )
     return DiscussionInterpretation.model_validate(result.model_dump(mode="python"))
 
 

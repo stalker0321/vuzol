@@ -45,8 +45,9 @@ class DiscussionEvaluationReport(EvaluationModel):
     mode_mismatches: int
     false_task_creation_violations: int
     authoritative_control_violations: int
+    illegal_plan_mutation_violations: int
     edit_fence_violations: int
-    eligible_for_default_off_integration: bool
+    policy_contract_passed: bool
 
 
 def load_discussion_fixtures(path: Path) -> tuple[DiscussionEvaluationFixture, ...]:
@@ -78,6 +79,11 @@ def evaluate_discussion_fixtures(
             failures.add("false_task_creation")
         if result.plan_control is not None and result.plan_control.authoritative:
             failures.add("authoritative_control")
+        if result.should_mutate_plan and result.interaction_mode not in {
+            InteractionMode.PLAN_REQUEST,
+            InteractionMode.ITEM_EDIT,
+        }:
+            failures.add("illegal_plan_mutation")
         if fixture.edit_session is not None:
             edit = result.item_edit
             if (
@@ -98,7 +104,12 @@ def evaluate_discussion_fixtures(
     pass_rate = passed / total if total else 0.0
     safety_clean = not any(
         violation_counts[name]
-        for name in ("false_task_creation", "authoritative_control", "edit_fence")
+        for name in (
+            "false_task_creation",
+            "authoritative_control",
+            "illegal_plan_mutation",
+            "edit_fence",
+        )
     )
     return DiscussionEvaluationReport(
         version=DISCUSSION_EVALUATION_VERSION,
@@ -109,6 +120,7 @@ def evaluate_discussion_fixtures(
         mode_mismatches=violation_counts["mode_mismatch"],
         false_task_creation_violations=violation_counts["false_task_creation"],
         authoritative_control_violations=violation_counts["authoritative_control"],
+        illegal_plan_mutation_violations=violation_counts["illegal_plan_mutation"],
         edit_fence_violations=violation_counts["edit_fence"],
-        eligible_for_default_off_integration=total > 0 and pass_rate == 1 and safety_clean,
+        policy_contract_passed=total > 0 and pass_rate == 1 and safety_clean,
     )

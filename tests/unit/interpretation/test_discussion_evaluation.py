@@ -28,5 +28,6 @@ def test_versioned_discussion_matrix_has_zero_safety_violations() -> None:
     assert report.pass_rate == 1
     assert report.false_task_creation_violations == 0
     assert report.authoritative_control_violations == 0
+    assert report.illegal_plan_mutation_violations == 0
     assert report.edit_fence_violations == 0
-    assert report.eligible_for_default_off_integration
+    assert report.policy_contract_passed

@@ -141,6 +141,42 @@ def test_enabled_project_discussion_forks_before_task_creation(
 
 
 @pytest.mark.postgresql
+def test_concurrent_first_discussion_messages_share_one_session(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        runtime = telegram_runtime(tmp_path)
+        runtime = runtime.model_copy(
+            update={
+                "settings": runtime.settings.model_copy(update={"project_discussion_enabled": True})
+            }
+        )
+        service = TelegramIngressService(runtime, factory)
+
+        first, second = await asyncio.gather(
+            service.accept_message(message(510, 610, text="первая идея")),
+            service.accept_message(message(511, 611, text="вторая идея")),
+        )
+
+        assert first.status is IngressStatus.HANDLED
+        assert second.status is IngressStatus.HANDLED
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(Task)) == 0
+            assert (
+                await session.scalar(select(func.count()).select_from(ProjectDiscussionSession))
+                == 1
+            )
+            assert (
+                await session.scalar(select(func.count()).select_from(TelegramIntakeMessage)) == 2
+            )
+            assert await session.scalar(select(func.count()).select_from(TransactionalOutbox)) == 2
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_help_is_handled_once_without_creating_a_task(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

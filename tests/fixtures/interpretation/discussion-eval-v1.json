@@ -19,6 +19,7 @@
       "interaction_mode": "query_only",
       "confidence": 0.91,
       "should_create_task": true,
+      "should_mutate_plan": true,
       "user_visible_summary": "Показываю состояние проекта."
     },
     "expected_mode": "query_only"

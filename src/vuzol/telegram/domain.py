@@ -65,6 +65,17 @@ class ControlUpdate(TelegramModel):
     )
 
 
+class WorkPackageControlUpdate(TelegramModel):
+    bot_id: str = Field(min_length=1, max_length=100)
+    update_id: int
+    callback_query_id: str = Field(min_length=1, max_length=255)
+    callback_data: str = Field(min_length=1, max_length=64)
+    chat_id: int
+    message_id: int = Field(ge=1)
+    user_id: int
+    message_thread_id: int | None = Field(default=None, ge=1)
+
+
 class IngressStatus(StrEnum):
     CREATED = "created"
     CONTINUATION = "continuation"

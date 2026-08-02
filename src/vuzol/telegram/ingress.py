@@ -24,6 +24,7 @@ from vuzol.telegram.layout import (
 from vuzol.telegram.model_command import enqueue_worker_picker
 from vuzol.telegram.policy import TelegramPolicyError, authorize, validate_message
 from vuzol.telegram.projections import enqueue_project_status_dashboard
+from vuzol.telegram.work_packages import ContinueDiscussionOverrides
 
 
 def update_hash(update: MessageUpdate) -> str:
@@ -43,9 +44,11 @@ class TelegramIngressService:
         self,
         runtime: RuntimeConfiguration,
         session_factory: async_sessionmaker[AsyncSession],
+        continue_discussion_overrides: ContinueDiscussionOverrides | None = None,
     ) -> None:
         self._runtime = runtime
         self._session_factory = session_factory
+        self._continue_discussion_overrides = continue_discussion_overrides
 
     async def accept_message(self, update: MessageUpdate) -> IngressResult:
         settings = self._runtime.settings
@@ -229,6 +232,15 @@ class TelegramIngressService:
         """Persist default-off discussion intake without materializing a Task."""
 
         assert topic.project_id is not None
+        force_discussion = (
+            False
+            if self._continue_discussion_overrides is None
+            else await self._continue_discussion_overrides.consume(
+                chat_id=update.chat_id,
+                thread_id=update.message_thread_id,
+                user_id=update.user_id,
+            )
+        )
         async with UnitOfWork(self._session_factory) as uow:
             inbox_id, created = await uow.inbox.receive_once(
                 source="telegram",
@@ -296,6 +308,7 @@ class TelegramIngressService:
                     "chat_id": update.chat_id,
                     "message_thread_id": update.message_thread_id,
                     "user_id": update.user_id,
+                    "control_override": "continue_discussion" if force_discussion else None,
                 },
             )
         return IngressResult(status=IngressStatus.HANDLED, intake_id=intake_id)

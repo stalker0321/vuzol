@@ -473,7 +473,7 @@ class WorkPackageService:
         ordinal: int | None,
         cleared: bool,
     ) -> None:
-        await self._event(
+        event_id = await self._event(
             package_id,
             WorkPackageEvent.DETAIL_POINTER_CHANGED,
             "user",
@@ -484,6 +484,14 @@ class WorkPackageService:
                 "ordinal": ordinal,
                 "cleared": cleared,
             },
+        )
+        await self._uow.outbox.enqueue(
+            destination="work_package_projection",
+            operation_type="clear_detail" if cleared else "render_detail",
+            entity_type="work_package",
+            entity_id=package_id,
+            idempotency_key=f"wp:projection:detail:{event_id}",
+            payload={"package_id": str(package_id)},
         )
 
     async def _close_open_edits(self, package_id: uuid.UUID, *, actor_type: str) -> None:
@@ -507,8 +515,8 @@ class WorkPackageService:
         previous_state: str | None = None,
         new_state: str | None = None,
         payload: dict[str, object] | None = None,
-    ) -> None:
-        await self._uow.events.append(
+    ) -> uuid.UUID:
+        return await self._uow.events.append(
             entity_type=entity_type,
             entity_id=entity_id,
             event_type=event_type.value,

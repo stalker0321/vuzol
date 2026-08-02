@@ -15,8 +15,13 @@ from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.interpretation.discussion import (
     DISCUSSION_CLASSIFY_DESTINATION,
     DISCUSSION_REPLY_DESTINATION,
+    ControlOverride,
+    ControlOverrideKind,
     DiscussionInterpretation,
     DiscussionInterpretRequest,
+    EditSessionContext,
+    PlanSnapshot,
+    PlanSnapshotItem,
     SemanticDiscussionInterpreter,
     enforce_discussion_policy,
 )
@@ -48,18 +53,24 @@ from vuzol.storage.leasing import (
 from vuzol.storage.models import (
     Artifact,
     ClarificationDecision,
+    EditSession,
     Interpretation,
+    PlanRevision,
+    PlanRevisionItem,
     ProjectNamingRequest,
     Task,
     TelegramIntakeMessage,
     TopicMapping,
     TransactionalOutbox,
+    WorkItemDraft,
+    WorkPackage,
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import (
     ConversationTurnRole,
     ConversationTurnSource,
     DeliveryStatus,
+    EditSessionStatus,
     ProjectNamingStatus,
     TaskStatus,
 )
@@ -273,11 +284,23 @@ class InterpretationPipeline:
                 raise PermanentPipelineError("discussion_session_mismatch")
             expected_session_version = discussion.version
             memory_pack = await DiscussionMemoryService(uow).load_context(session_id=session_id)
+            plan_snapshot, edit_context = await _load_discussion_plan_context(
+                uow.session,
+                discussion.active_work_package_id,
+                user_id=intake.user_id,
+            )
         request = DiscussionInterpretRequest(
             original_input=intake.original_text,
             project_id=project_id,
             user_id=intake.user_id,
             memory_pack=memory_pack,
+            plan_snapshot=plan_snapshot,
+            edit_session=edit_context,
+            control_override=(
+                ControlOverride(kind=ControlOverrideKind.CONTINUE_DISCUSSION)
+                if item.payload.get("control_override") == "continue_discussion"
+                else None
+            ),
         )
         result = await interpret_discussion_with_recovery(
             self._discussion_interpreter,
@@ -727,6 +750,72 @@ def _required_string(payload: dict[str, object], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise PermanentPipelineError(f"invalid_{key}")
     return value
+
+
+async def _load_discussion_plan_context(
+    session: AsyncSession | None,
+    package_id: uuid.UUID | None,
+    *,
+    user_id: int,
+) -> tuple[PlanSnapshot | None, EditSessionContext | None]:
+    if session is None or package_id is None:
+        return None, None
+    package = await session.get(WorkPackage, package_id)
+    if package is None or package.head_revision_id is None:
+        return None, None
+    revision = await session.get(PlanRevision, package.head_revision_id)
+    if revision is None or revision.work_package_id != package.id:
+        raise PermanentPipelineError("discussion_plan_context_missing")
+    rows = (
+        await session.execute(
+            select(PlanRevisionItem, WorkItemDraft.local_id)
+            .join(WorkItemDraft, WorkItemDraft.id == PlanRevisionItem.item_id)
+            .where(PlanRevisionItem.plan_revision_id == revision.id)
+            .order_by(PlanRevisionItem.ordinal)
+        )
+    ).all()
+    snapshot = PlanSnapshot(
+        package_id=package.id,
+        revision_id=revision.id,
+        revision_number=revision.revision_number,
+        revision_hash=revision.content_hash,
+        status_generation=package.version,
+        title=package.title,
+        items=tuple(
+            PlanSnapshotItem(
+                item_id=item.item_id,
+                local_id=local_id,
+                ordinal=item.ordinal,
+                summary=item.summary,
+            )
+            for item, local_id in rows
+        ),
+    )
+    edit = await session.scalar(
+        select(EditSession).where(
+            EditSession.package_id == package.id,
+            EditSession.opened_by_user_id == user_id,
+            EditSession.status == EditSessionStatus.OPEN,
+            EditSession.expires_at > datetime.now(UTC),
+        )
+    )
+    if edit is None:
+        return snapshot, None
+    local_id = next(
+        (local_id for item, local_id in rows if item.item_id == edit.item_id),
+        None,
+    )
+    return snapshot, EditSessionContext(
+        edit_session_id=edit.id,
+        package_id=edit.package_id,
+        revision_id=edit.plan_revision_id,
+        revision_number=edit.plan_revision_number,
+        revision_hash=edit.content_hash,
+        session_generation=edit.session_generation,
+        item_id=edit.item_id,
+        item_local_id=local_id,
+        opened_by_user_id=edit.opened_by_user_id,
+    )
 
 
 def _required_int(payload: dict[str, object], key: str) -> int:

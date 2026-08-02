@@ -15,8 +15,9 @@ from vuzol.telegram.adapter import (
 )
 from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.dogfood import TelegramDogfoodIngressService
-from vuzol.telegram.domain import ControlUpdate, MessageUpdate
+from vuzol.telegram.domain import ControlUpdate, MessageUpdate, WorkPackageControlUpdate
 from vuzol.telegram.ingress import TelegramIngressService
+from vuzol.telegram.work_packages import ContinueDiscussionOverrides
 from vuzol.telegram.workspace import TelegramWorkspaceService
 
 
@@ -33,16 +34,17 @@ def main() -> None:
         # S-2.2a: fail closed before session factory, Bot wiring, polling, or schema work.
         loop.run_until_complete(require_migration_head(engine))
         factory = create_session_factory(engine)
-        ingress = TelegramIngressService(runtime, factory)
+        continue_discussion_overrides = ContinueDiscussionOverrides()
+        ingress = TelegramIngressService(runtime, factory, continue_discussion_overrides)
         dogfood = TelegramDogfoodIngressService(runtime, factory)
-        controls = TelegramControlService(runtime, factory)
+        controls = TelegramControlService(runtime, factory, continue_discussion_overrides)
         workspace = TelegramWorkspaceService(factory, runtime.registries.topics)
 
         async def on_message(update: MessageUpdate) -> None:
             if await dogfood.accept_message(update) is None:
                 await ingress.accept_message(update)
 
-        async def on_control(update: ControlUpdate) -> None:
+        async def on_control(update: ControlUpdate | WorkPackageControlUpdate) -> None:
             await controls.accept(update)
 
         async def on_startup(bot: Bot) -> None:

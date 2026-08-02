@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
 from vuzol.config import RuntimeConfiguration
 from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+from vuzol.discussion.service import RevisionResult
 from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
 from vuzol.storage.models import (
     EditSession,
@@ -26,7 +29,12 @@ from vuzol.storage.types import (
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram import TelegramControlService, TelegramIngressService
 from vuzol.telegram.delivery import TelegramDeliveryService
-from vuzol.telegram.domain import IngressStatus, MessageUpdate, WorkPackageControlUpdate
+from vuzol.telegram.domain import (
+    IngressResult,
+    IngressStatus,
+    MessageUpdate,
+    WorkPackageControlUpdate,
+)
 from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.telegram.work_package_projections import (
     WORK_PACKAGE_DETAIL_ROLE,
@@ -52,8 +60,10 @@ def _runtime(tmp_path: Path) -> RuntimeConfiguration:
     )
 
 
-async def _seed(factory: object) -> tuple[object, object]:
-    async with UnitOfWork(factory) as uow:  # type: ignore[arg-type]
+async def _seed(
+    factory: async_sessionmaker[AsyncSession],
+) -> tuple[RevisionResult, uuid.UUID]:
+    async with UnitOfWork(factory) as uow:
         session_id = await uow.discussions.create_session(
             project_id="vuzol", chat_id=-100, message_thread_id=10
         )
@@ -201,7 +211,7 @@ async def test_non_mutating_detail_edit_continue_and_clear_lifecycle(
     overrides = ContinueDiscussionOverrides()
     controls = TelegramControlService(runtime, factory, overrides)
 
-    async def press(update_id: int, query_id: str, message_id: int, data: str):
+    async def press(update_id: int, query_id: str, message_id: int, data: str) -> IngressResult:
         return await controls.accept(
             WorkPackageControlUpdate(
                 bot_id="main",

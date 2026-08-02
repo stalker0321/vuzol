@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import storage
 from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+from vuzol.discussion.service import RevisionResult
 from vuzol.storage.models import PlanRevision, Task, WorkPackageOpenDetail
 from vuzol.storage.types import PlanRevisionCreatedBy
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -35,8 +39,10 @@ def _plan() -> PlanDraft:
     )
 
 
-async def _create(factory: object) -> tuple[object, object]:
-    async with UnitOfWork(factory) as uow:  # type: ignore[arg-type]
+async def _create(
+    factory: async_sessionmaker[AsyncSession],
+) -> tuple[uuid.UUID, RevisionResult]:
+    async with UnitOfWork(factory) as uow:
         session_id = await uow.discussions.create_session(
             project_id="vuzol", chat_id=-1001, message_thread_id=91
         )
@@ -55,8 +61,8 @@ async def test_plan_projection_is_pg_reconstructable_and_fenced(postgres_dsn: st
     package_id, result = await _create(factory)
 
     async with factory() as session:
-        first = await build_work_package_plan_card(session, package_id, page=1)  # type: ignore[arg-type]
-        second = await build_work_package_plan_card(session, package_id, page=2)  # type: ignore[arg-type]
+        first = await build_work_package_plan_card(session, package_id, page=1)
+        second = await build_work_package_plan_card(session, package_id, page=2)
 
     assert "Plan &lt;unsafe&gt;" in first.html and "Step &lt;1&gt;" in first.html
     assert "Step &lt;9&gt;" in second.html and first.status_generation == 1
@@ -82,7 +88,7 @@ async def test_detail_projection_uses_stable_fenced_pointer(postgres_dsn: str) -
             ordinal=2,
         )
     async with factory() as session:
-        detail = await build_work_package_detail_card(session, package_id)  # type: ignore[arg-type]
+        detail = await build_work_package_detail_card(session, package_id)
     assert detail is not None
     assert "2. Step &lt;2&gt;" in detail.html
     assert {label for row in detail.callback_buttons for label, _ in row} == {"Изменить", "Закрыть"}
@@ -95,7 +101,7 @@ async def test_detail_projection_uses_stable_fenced_pointer(postgres_dsn: str) -
         )
     async with factory() as session:
         with pytest.raises(WorkPackageProjectionError, match="stale_detail_pointer"):
-            await build_work_package_detail_card(session, package_id)  # type: ignore[arg-type]
+            await build_work_package_detail_card(session, package_id)
     await engine.dispose()
 
 
@@ -103,7 +109,7 @@ async def test_missing_detail_reconstructs_as_clear(postgres_dsn: str) -> None:
     engine, factory = storage(postgres_dsn)
     package_id, _ = await _create(factory)
     async with factory() as session:
-        assert await build_work_package_detail_card(session, package_id) is None  # type: ignore[arg-type]
+        assert await build_work_package_detail_card(session, package_id) is None
         revision_count = await session.scalar(select(func.count()).select_from(PlanRevision))
     assert revision_count == 1
     await engine.dispose()

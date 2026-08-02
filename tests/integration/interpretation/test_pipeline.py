@@ -39,6 +39,7 @@ from vuzol.storage.types import (
     ConversationTurnRole,
     DeliveryStatus,
     IntakeStatus,
+    InteractionMode,
     ProjectNamingStatus,
     RiskLevel,
     TaskStatus,
@@ -186,12 +187,12 @@ def test_discussion_runtime_persists_turns_reuses_memory_and_delivers_replies(
         discussion = FakeDiscussionInterpreter(
             [
                 DiscussionInterpretation(
-                    interaction_mode="discussion",
+                    interaction_mode=InteractionMode.DISCUSSION,
                     confidence=0.91,
                     user_visible_summary="Давайте сначала уточним цель.",
                 ),
                 DiscussionInterpretation(
-                    interaction_mode="query_only",
+                    interaction_mode=InteractionMode.QUERY_ONLY,
                     confidence=0.88,
                     user_visible_summary="Цель зафиксирована.",
                     clarification_question="Какой вариант интерфейса предпочтительнее?",
@@ -345,7 +346,7 @@ def test_concurrent_discussion_consumers_preserve_topic_order_and_refresh_memory
         await ingress.accept_message(text_update(162).model_copy(update={"text": "second message"}))
         first_interpreter = BlockingDiscussionInterpreter(
             DiscussionInterpretation(
-                interaction_mode="discussion",
+                interaction_mode=InteractionMode.DISCUSSION,
                 confidence=0.9,
                 user_visible_summary="first reply",
             )
@@ -353,7 +354,7 @@ def test_concurrent_discussion_consumers_preserve_topic_order_and_refresh_memory
         second_interpreter = FakeDiscussionInterpreter(
             [
                 DiscussionInterpretation(
-                    interaction_mode="discussion",
+                    interaction_mode=InteractionMode.DISCUSSION,
                     confidence=0.9,
                     user_visible_summary="second reply",
                 )

@@ -254,6 +254,7 @@ async def commit_step_outcome(
             await _enqueue_telegram_projection(session, task, run, role="approval_card")
         elif target in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED}:
             await enqueue_terminal_task_projections(session, task, run)
+            await _enqueue_work_package_terminal(session, task)
         else:
             await _enqueue_telegram_projection(session, task, run)
 
@@ -266,6 +267,32 @@ async def _enqueue_telegram_projection(
     role: str | None = None,
 ) -> None:
     await enqueue_task_status_projection(session, task, run, role=role)
+
+
+async def _enqueue_work_package_terminal(session: AsyncSession, task: Task) -> None:
+    """Publish terminal evidence only for Tasks owned by a work-package sequence."""
+
+    from vuzol.storage.models import MaterializationLink, TransactionalOutbox
+
+    link = await session.scalar(
+        select(MaterializationLink).where(MaterializationLink.task_id == task.id)
+    )
+    if link is None:
+        return
+    session.add(
+        TransactionalOutbox(
+            destination="work_package_sequence",
+            operation_type="observe_task_terminal",
+            linked_entity_type="task",
+            linked_entity_id=task.id,
+            idempotency_key=f"work-package:terminal:{task.id}:{task.version}",
+            payload={
+                "work_package_id": str(link.work_package_id),
+                "ordinal": link.ordinal,
+                "task_status": task.status.value,
+            },
+        )
+    )
 
 
 async def finalize_if_complete(session: AsyncSession, run: Run) -> bool:

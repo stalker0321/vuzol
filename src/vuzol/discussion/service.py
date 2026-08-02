@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
+
 from vuzol.discussion.domain import (
     DomainError,
     PackageControlAction,
@@ -22,6 +24,8 @@ from vuzol.storage.models import (
     EditSession,
     PlanRevision,
     PlanRevisionItem,
+    Run,
+    Step,
     WorkPackage,
 )
 from vuzol.storage.types import (
@@ -30,6 +34,7 @@ from vuzol.storage.types import (
     PlanRevisionCreatedBy,
     PlanRevisionState,
     RiskLevel,
+    StepStatus,
     WorkPackagePauseReason,
     WorkPackageStatus,
 )
@@ -446,6 +451,30 @@ class WorkPackageService:
         self._require_failure_pause(package)
         if package.cursor_ordinal is None:
             raise DomainError("failure_context_missing")
+        if (
+            package.pause_reason is not WorkPackagePauseReason.ITEM_BLOCKED
+            or package.last_failure_task_id is None
+        ):
+            raise DomainError("item_not_safely_retryable")
+        assert self._uow.session is not None
+        step_id = await self._uow.session.scalar(
+            select(Step.id)
+            .join(Run, Run.id == Step.run_id)
+            .where(
+                Run.task_id == package.last_failure_task_id,
+                Step.status == StepStatus.BLOCKED,
+            )
+            .order_by(Step.ordinal.desc())
+            .limit(1)
+        )
+        if step_id is None:
+            raise DomainError("item_not_safely_retryable")
+        from vuzol.workflows.controls import retry_blocked_step
+
+        try:
+            await retry_blocked_step(self._uow.session, step_id, actor_id=str(user_id))
+        except ValueError as exc:
+            raise DomainError("item_not_safely_retryable") from exc
         package.status = WorkPackageStatus.RUNNING
         package.pause_reason = None
         package.version += 1

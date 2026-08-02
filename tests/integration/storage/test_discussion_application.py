@@ -25,8 +25,21 @@ from vuzol.interpretation.discussion import (
     ItemEditPayload,
     PlanSnapshot,
 )
-from vuzol.storage.models import PlanRevision, Task, TelegramControlAction, WorkPackage
-from vuzol.storage.types import PlanRevisionCreatedBy, WorkPackageStatus
+from vuzol.storage.models import (
+    Interpretation,
+    MaterializationLink,
+    PlanRevision,
+    Task,
+    TelegramControlAction,
+    TransactionalOutbox,
+    WorkPackage,
+)
+from vuzol.storage.types import (
+    InteractionMode,
+    PlanRevisionCreatedBy,
+    TaskStatus,
+    WorkPackageStatus,
+)
 from vuzol.storage.unit_of_work import UnitOfWork
 
 from .helpers import storage
@@ -66,11 +79,11 @@ def plan_interpretation(
     base_revision_hash: str | None = None,
 ) -> DiscussionInterpretation:
     return DiscussionInterpretation(
-        interaction_mode="plan_request",
+        interaction_mode=InteractionMode.PLAN_REQUEST,
         confidence=0.95,
         should_mutate_plan=True,
         user_visible_summary="План подготовлен.",
-        plan_request={
+        plan_request={  # type: ignore[arg-type]
             "intent": intent,
             "base_revision_id": base_revision_id,
             "base_revision_hash": base_revision_hash,
@@ -199,7 +212,7 @@ async def test_item_edit_application_rejects_changes_outside_fenced_item(
         edit_session=context,
     )
     interpretation = DiscussionInterpretation(
-        interaction_mode="item_edit",
+        interaction_mode=InteractionMode.ITEM_EDIT,
         confidence=0.9,
         should_mutate_plan=True,
         user_visible_summary="Изменение подготовлено.",
@@ -253,7 +266,7 @@ def command(
     )
 
 
-async def test_control_ingress_is_authorized_idempotent_and_never_starts(
+async def test_control_ingress_is_authorized_idempotent_and_starts_atomically(
     postgres_dsn: str,
 ) -> None:
     engine, factory = storage(postgres_dsn)
@@ -281,24 +294,37 @@ async def test_control_ingress_is_authorized_idempotent_and_never_starts(
             key="start-1",
         )
     )
-    assert start.code is PackageControlResultCode.START_NOT_WIRED
-    assert start.status_generation == 2
+    assert start.code is PackageControlResultCode.APPLIED
+    assert start.status_generation == 3
     with pytest.raises(DomainError) as conflict:
         await ingress.apply(
             command(
                 action=PackageControlAction.DISCARD,
                 package_id=package_id,
                 content_hash=content_hash,
-                generation=2,
+                generation=3,
                 key="approve-1",
             )
         )
     assert conflict.value.code == "idempotency_conflict"
     async with factory() as session:
         package = await session.get(WorkPackage, package_id)
-        assert package is not None and package.status is WorkPackageStatus.APPROVED
-        assert package.version == 2
-        assert await session.scalar(select(func.count()).select_from(Task)) == 0
+        assert package is not None and package.status is WorkPackageStatus.RUNNING
+        assert package.version == 3 and package.start_generation == 3
+        assert await session.scalar(select(func.count()).select_from(Task)) == 1
+        task = await session.scalar(select(Task))
+        assert task is not None and task.status is TaskStatus.INTERPRETED
+        assert task.interpreter_profile == "work_package_materializer"
+        assert await session.scalar(select(func.count()).select_from(Interpretation)) == 1
+        assert await session.scalar(select(func.count()).select_from(MaterializationLink)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(TransactionalOutbox)
+                .where(TransactionalOutbox.destination == "workflow_dispatch")
+            )
+            == 1
+        )
         assert await session.scalar(select(func.count()).select_from(TelegramControlAction)) == 2
 
     with pytest.raises(DomainError) as unauthorized:
@@ -307,35 +333,24 @@ async def test_control_ingress_is_authorized_idempotent_and_never_starts(
                 action=PackageControlAction.DISCARD,
                 package_id=package_id,
                 content_hash=content_hash,
-                generation=2,
+                generation=3,
                 key="discard-foreign",
                 user_id=7,
             )
         )
     assert unauthorized.value.code == "control_unauthorized"
 
-    discarded = await ingress.apply(
-        command(
-            action=PackageControlAction.DISCARD,
-            package_id=package_id,
-            content_hash=content_hash,
-            generation=2,
-            key="discard-1",
-        )
-    )
-    assert discarded.code is PackageControlResultCode.APPLIED
-    assert discarded.status_generation == 3
-    with pytest.raises(DomainError) as terminal:
+    with pytest.raises(DomainError) as running:
         await ingress.apply(
             command(
-                action=PackageControlAction.RETRY_ITEM,
+                action=PackageControlAction.DISCARD,
                 package_id=package_id,
                 content_hash=content_hash,
                 generation=3,
-                key="retry-terminal",
+                key="discard-running",
             )
         )
-    assert terminal.value.code == "terminal_package"
+    assert running.value.code == "invalid_transition"
     await engine.dispose()
 
 
@@ -454,11 +469,11 @@ async def test_item_edit_vs_approve_race_has_one_revision_epoch_winner(
         edit_session=context,
     )
     interpretation = DiscussionInterpretation(
-        interaction_mode="item_edit",
+        interaction_mode=InteractionMode.ITEM_EDIT,
         confidence=0.9,
         should_mutate_plan=True,
         user_visible_summary="Edit ready.",
-        item_edit={
+        item_edit={  # type: ignore[arg-type]
             "edit_session_id": edit.id,
             "package_id": package_id,
             "revision_id": revision_id,
@@ -513,10 +528,10 @@ async def test_model_plan_control_has_no_application_mutation_edge(postgres_dsn:
     session_id, package_id, _, _ = await create_package(factory)
     application = DiscussionPlanApplicationService(factory, enabled=True)
     interpretation = DiscussionInterpretation(
-        interaction_mode="plan_control",
+        interaction_mode=InteractionMode.PLAN_CONTROL,
         confidence=0.99,
         user_visible_summary="Approve requested.",
-        plan_control={"action": "approve", "authoritative": True},
+        plan_control={"action": "approve", "authoritative": True},  # type: ignore[arg-type]
     )
     request = DiscussionInterpretRequest(original_input="approve", project_id="vuzol", user_id=42)
     with pytest.raises(DomainError) as rejected:

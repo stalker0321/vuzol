@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import storage
 from vuzol.discussion import (
@@ -17,6 +18,7 @@ from vuzol.discussion.application import (
     PackageControlResultCode,
     PackageControlSource,
 )
+from vuzol.discussion.service import RevisionResult
 from vuzol.storage.models import Event, PlanRevision, PlanRevisionItem, Task, WorkPackage
 from vuzol.storage.types import (
     PlanRevisionCreatedBy,
@@ -46,8 +48,10 @@ def _plan() -> PlanDraft:
     )
 
 
-async def _running_package(factory: object) -> tuple[object, object]:
-    async with UnitOfWork(factory) as uow:  # type: ignore[arg-type]
+async def _running_package(
+    factory: async_sessionmaker[AsyncSession],
+) -> tuple[RevisionResult, object]:
+    async with UnitOfWork(factory) as uow:
         session_id = await uow.discussions.create_session(
             project_id="vuzol", chat_id=-100, message_thread_id=10
         )
@@ -65,7 +69,7 @@ async def _running_package(factory: object) -> tuple[object, object]:
             expected_status_generation=1,
             user_id=42,
         )
-    async with factory.begin() as session:  # type: ignore[union-attr]
+    async with factory.begin() as session:
         package = await session.get(WorkPackage, created.package_id, with_for_update=True)
         assert package is not None
         package.status = WorkPackageStatus.RUNNING
@@ -75,12 +79,14 @@ async def _running_package(factory: object) -> tuple[object, object]:
     return created, session_id
 
 
-def _command(action: PackageControlAction, created: object, generation: int, key: str):
+def _command(
+    action: PackageControlAction, created: RevisionResult, generation: int, key: str
+) -> AuthoritativeControlCommand:
     return AuthoritativeControlCommand(
         action=action,
-        package_id=created.package_id,  # type: ignore[attr-defined]
+        package_id=created.package_id,
         plan_revision_number=1,
-        h8=created.content_hash[:8],  # type: ignore[attr-defined]
+        h8=created.content_hash[:8],
         expected_status_generation=generation,
         user_id=42,
         source=PackageControlSource.TELEGRAM_CALLBACK,
@@ -118,33 +124,25 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
     async with factory() as session:
         card = await build_work_package_plan_card(session, created.package_id)
     assert "Автоматического перехода дальше не будет" in card.html
-    assert {label for row in card.callback_buttons for label, _ in row} >= {
-        "Повторить",
+    labels = {label for row in card.callback_buttons for label, _ in row}
+    assert "Повторить" not in labels
+    assert labels >= {
         "Пропустить",
         "Перепланировать",
         "Остановить",
     }
 
     ingress = PackageControlIngress(factory, enabled=True, authorized_user_ids=frozenset({42}))
-    retried = await ingress.apply(_command(PackageControlAction.RETRY_ITEM, created, 4, "retry-1"))
-    assert retried.code is PackageControlResultCode.APPLIED and retried.status_generation == 5
-    async with UnitOfWork(factory) as uow:
-        blocked_generation = await WorkPackageService(uow).pause_for_item_outcome(
-            package_id=created.package_id,
-            revision_number=1,
-            h8=created.content_hash[:8],
-            expected_status_generation=5,
-            ordinal=1,
-            blocked=True,
-        )
-    assert blocked_generation == 6
-    skipped = await ingress.apply(_command(PackageControlAction.SKIP_ITEM, created, 6, "skip-1"))
-    assert skipped.code is PackageControlResultCode.APPLIED and skipped.status_generation == 7
+    with pytest.raises(DomainError) as unsafe_retry:
+        await ingress.apply(_command(PackageControlAction.RETRY_ITEM, created, 4, "retry-1"))
+    assert unsafe_retry.value.code == "item_not_safely_retryable"
+    skipped = await ingress.apply(_command(PackageControlAction.SKIP_ITEM, created, 4, "skip-1"))
+    assert skipped.code is PackageControlResultCode.APPLIED and skipped.status_generation == 5
     replanned = await ingress.apply(
-        _command(PackageControlAction.REQUEST_REPLAN, created, 7, "replan-1")
+        _command(PackageControlAction.REQUEST_REPLAN, created, 5, "replan-1")
     )
     assert replanned.code is PackageControlResultCode.APPLIED
-    assert replanned.status_generation == 8 and replanned.revision_id is not None
+    assert replanned.status_generation == 6 and replanned.revision_id is not None
 
     async with factory() as session:
         package = await session.get(WorkPackage, created.package_id)
@@ -175,7 +173,7 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
         )
         task_count = await session.scalar(select(func.count()).select_from(Task))
     assert package is not None
-    assert package.status is WorkPackageStatus.DRAFT and package.version == 8
+    assert package.status is WorkPackageStatus.DRAFT and package.version == 6
     assert package.cursor_ordinal == 2
     assert [revision.state for revision in revisions] == [
         PlanRevisionState.SUPERSEDED,
@@ -187,11 +185,10 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
     }
     assert {
         "work_package.paused",
-        "work_package.item_retry_requested",
         "work_package.item_skipped",
         "work_package.replan_requested",
     }.issubset(events)
-    assert task_count == 0
+    assert task_count == 1
     await engine.dispose()
 
 

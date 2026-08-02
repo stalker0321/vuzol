@@ -17,7 +17,7 @@ from vuzol.telegram.adapter import (
     message_update,
     resolve_bot_token,
 )
-from vuzol.telegram.domain import ControlUpdate, MessageUpdate
+from vuzol.telegram.domain import ControlUpdate, MessageUpdate, WorkPackageControlUpdate
 from vuzol.telegram.workspace import (
     TopicCreationOutcomeUnknown,
     TopicPinUnsupported,
@@ -41,7 +41,7 @@ def test_long_polling_application_registers_boundary_handlers() -> None:
     async def message_handler(_update: MessageUpdate) -> None:
         return None
 
-    async def control_handler(_update: ControlUpdate) -> None:
+    async def control_handler(_update: ControlUpdate | WorkPackageControlUpdate) -> None:
         return None
 
     application = build_long_polling_application(
@@ -161,7 +161,7 @@ def test_message_update_collects_document_and_voice() -> None:
         None,
     )
     converted = message_update(update, "main")
-    assert converted is not None
+    assert isinstance(converted, MessageUpdate)
     assert converted.text == "files"
     assert [item.file_id for item in converted.attachments] == ["doc", "voice"]
 
@@ -191,7 +191,7 @@ def test_start_callback_crosses_the_provider_boundary() -> None:
         None,
     )
     converted = control_update(update, "main")
-    assert converted is not None
+    assert isinstance(converted, ControlUpdate)
     assert converted.action_kind == "start"
     assert converted.task_id == task_id
 
@@ -216,7 +216,7 @@ def test_result_decision_callback_targets_the_exact_approval() -> None:
         None,
     )
     converted = control_update(update, "main")
-    assert converted is not None
+    assert isinstance(converted, ControlUpdate)
     assert converted.action_kind == "redo"
     assert converted.approval_id == approval_id
     assert converted.task_id is None
@@ -246,7 +246,7 @@ def test_project_naming_callbacks_include_revision_and_option() -> None:
             None,
         )
         converted = control_update(update, "main")
-        assert converted is not None
+        assert isinstance(converted, ControlUpdate)
         assert converted.action_kind == action
         assert converted.naming_request_id == request_id
         assert converted.naming_revision == 2

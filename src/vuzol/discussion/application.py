@@ -14,6 +14,7 @@ from vuzol.discussion.domain import (
     PlanDraft,
     canonical_plan_body,
 )
+from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.interpretation.discussion import (
     DiscussionInterpretation,
@@ -265,14 +266,16 @@ class PackageControlIngress:
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.START:
-                revision_id = await service.validate_startable(
+                sequence = await WorkPackageSequencer(uow).start(
                     package_id=command.package_id,
                     revision_number=command.plan_revision_number,
                     h8=command.h8,
                     expected_status_generation=command.expected_status_generation,
+                    user_id=command.user_id,
                 )
-                generation = command.expected_status_generation
-                code = PackageControlResultCode.START_NOT_WIRED
+                revision_id = None
+                generation = sequence.status_generation
+                code = PackageControlResultCode.APPLIED
             elif command.action is PackageControlAction.RETRY_ITEM:
                 generation = await service.retry_item(
                     package_id=command.package_id,
@@ -291,6 +294,7 @@ class PackageControlIngress:
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
                 )
+                await WorkPackageSequencer(uow).materialize_running(package_id=command.package_id)
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.STOP_PACKAGE:

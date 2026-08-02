@@ -79,12 +79,12 @@ def test_control_update_parses_model_callbacks() -> None:
     assert auto.message_thread_id == 42
 
     worker = control_update(_Update("v1:pm:w:2:sol"), "bot")  # type: ignore[arg-type]
-    assert worker is not None
+    assert isinstance(worker, ControlUpdate)
     assert worker.action_kind == "project_model_select_worker"
     assert worker.preference_worker == "sol"
 
     effort = control_update(_Update("v1:pm:e:2:terra:high"), "bot")  # type: ignore[arg-type]
-    assert effort is not None
+    assert isinstance(effort, ControlUpdate)
     assert effort.action_kind == "project_model_select_effort"
     assert effort.preference_worker == "terra"
     assert effort.preference_effort == "high"

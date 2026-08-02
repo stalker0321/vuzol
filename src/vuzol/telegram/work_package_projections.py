@@ -16,7 +16,7 @@ from vuzol.storage.models import (
     WorkPackage,
     WorkPackageOpenDetail,
 )
-from vuzol.storage.types import WorkPackageStatus
+from vuzol.storage.types import WorkPackagePauseReason, WorkPackageStatus
 from vuzol.telegram.projections import TELEGRAM_TEXT_LIMIT, telegram_html
 from vuzol.telegram.work_packages import (
     WorkPackageCallback,
@@ -169,9 +169,12 @@ async def build_work_package_plan_card(
             )
         )
     elif package.status is WorkPackageStatus.PAUSED:
+        if package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED:
+            controls.append(
+                ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
+            )
         controls.extend(
             (
-                ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision)),
                 ("Пропустить", _callback(WorkPackageCallbackKind.SKIP_ITEM, package, revision)),
                 (
                     "Перепланировать",

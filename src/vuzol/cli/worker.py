@@ -17,6 +17,7 @@ from vuzol.config import (
     ScopedSecretResolver,
     get_runtime_configuration,
 )
+from vuzol.discussion.sequencer import WorkPackageSequenceConsumer
 from vuzol.execution.git import LocalGit
 from vuzol.observability import configure_logging, get_logger
 from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
@@ -95,7 +96,15 @@ async def run() -> None:
             )
         owner = f"{socket.gethostname()}:{os.getpid()}"
         dispatcher = WorkflowDispatcher(runtime, factory, owner=f"{owner}:dispatch")
-        controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
+        controls = ProcessorChain(
+            WorkflowControlConsumer(settings, factory, owner=f"{owner}:control"),
+            WorkPackageSequenceConsumer(
+                settings,
+                factory,
+                owner=f"{owner}:work-package-sequence",
+                enabled=settings.project_discussion_enabled,
+            ),
+        )
         model_roles = frozenset(
             {
                 ProviderRole.EXECUTOR,

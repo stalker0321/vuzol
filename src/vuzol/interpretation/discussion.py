@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
 
@@ -171,8 +171,8 @@ class DiscussionInterpretRequest(FrozenModel):
 
 
 class DiscussionInterpretation(FrozenModel):
-    schema_version: str = DISCUSSION_SCHEMA_VERSION
-    prompt_version: str = DISCUSSION_PROMPT_VERSION
+    schema_version: Literal["discussion-interpret-v1"] = "discussion-interpret-v1"
+    prompt_version: Literal["project-discussion-v1"] = "project-discussion-v1"
     interaction_mode: InteractionMode
     confidence: float = Field(ge=0, le=1)
     should_create_task: bool = False
@@ -313,6 +313,38 @@ def enforce_discussion_policy(
                 refusal_code=RefusalCode.CONTROL_REQUIRES_BUTTON,
             )
         result = result.model_copy(update=updates)
+
+    if result.interaction_mode is InteractionMode.PLAN_REQUEST and result.plan_request is not None:
+        plan_request = result.plan_request
+        if plan_request.intent is PlanRequestIntent.CREATE_DRAFT:
+            result = result.model_copy(
+                update={
+                    "plan_request": plan_request.model_copy(
+                        update={"base_revision_id": None, "base_revision_hash": None}
+                    )
+                }
+            )
+        elif request.plan_snapshot is None:
+            result = result.model_copy(
+                update={
+                    "interaction_mode": InteractionMode.QUERY_REFUSE,
+                    "should_mutate_plan": False,
+                    "refusal_code": RefusalCode.PLAN_REVISION_STALE,
+                    "plan_request": None,
+                }
+            )
+        else:
+            snapshot = request.plan_snapshot
+            result = result.model_copy(
+                update={
+                    "plan_request": plan_request.model_copy(
+                        update={
+                            "base_revision_id": snapshot.revision_id,
+                            "base_revision_hash": snapshot.revision_hash,
+                        }
+                    )
+                }
+            )
 
     if request.control_override is not None:
         override_mode = {

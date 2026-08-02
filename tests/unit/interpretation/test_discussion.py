@@ -1,8 +1,10 @@
+import asyncio
 import uuid
 
 from vuzol.interpretation.discussion import (
     AmbiguityFlag,
     DiscussionInterpretation,
+    DiscussionInterpretationService,
     DiscussionInterpretRequest,
     EditSessionContext,
     ItemEditPayload,
@@ -189,3 +191,32 @@ def test_plan_request_maps_to_domain_draft_without_control_authority() -> None:
     assert draft.title == "Улучшение интерфейса"
     assert len(draft.items) == 1
     assert draft.items[0].local_id == "telegram-ui"
+
+
+def test_fake_pipeline_applies_policy_after_provider_output() -> None:
+    class FakeDiscussionInterpreter:
+        def __init__(self) -> None:
+            self.requests: list[DiscussionInterpretRequest] = []
+
+        async def interpret_discussion(
+            self, value: DiscussionInterpretRequest
+        ) -> DiscussionInterpretation:
+            self.requests.append(value)
+            return envelope(
+                interaction_mode="plan_control",
+                should_mutate_plan=True,
+                plan_control={"action": "discard", "authoritative": True},
+            )
+
+    async def scenario() -> None:
+        interpreter = FakeDiscussionInterpreter()
+        service = DiscussionInterpretationService(interpreter)
+
+        result = await service.interpret(request())
+
+        assert len(interpreter.requests) == 1
+        assert result.refusal_code is RefusalCode.CONTROL_REQUIRES_BUTTON
+        assert result.plan_control is not None and not result.plan_control.authoritative
+        assert not result.should_mutate_plan
+
+    asyncio.run(scenario())

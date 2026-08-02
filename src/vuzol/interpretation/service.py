@@ -5,11 +5,21 @@ import os
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, RuntimeConfiguration, TopicKind
+from vuzol.discussion.memory_service import DiscussionMemoryService
+from vuzol.interpretation.discussion import (
+    DISCUSSION_CLASSIFY_DESTINATION,
+    DISCUSSION_REPLY_DESTINATION,
+    DiscussionInterpretation,
+    DiscussionInterpretRequest,
+    SemanticDiscussionInterpreter,
+    enforce_discussion_policy,
+)
 from vuzol.interpretation.domain import (
     InterpretationInput,
     InterpretationResult,
@@ -27,10 +37,12 @@ from vuzol.interpretation.ports import (
     Transcriber,
     TranscriptionUnavailable,
 )
+from vuzol.observability import get_logger
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
     dead_letter_outbox_item,
+    defer_outbox_item,
     retry_outbox_item,
 )
 from vuzol.storage.models import (
@@ -44,16 +56,29 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.storage.types import ProjectNamingStatus, TaskStatus
+from vuzol.storage.types import (
+    ConversationTurnRole,
+    ConversationTurnSource,
+    DeliveryStatus,
+    ProjectNamingStatus,
+    TaskStatus,
+)
+from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.tracing import enqueue_interpreter_trace
 
-INTERPRETATION_DESTINATIONS = frozenset({"telegram_file", "interpretation"})
+INTERPRETATION_DESTINATIONS = frozenset(
+    {"telegram_file", "interpretation", DISCUSSION_CLASSIFY_DESTINATION}
+)
 
 
 class PermanentPipelineError(RuntimeError):
     def __init__(self, category: str) -> None:
         super().__init__(category)
         self.category = category
+
+
+class DiscussionContextChanged(RuntimeError):
+    """The model answered against memory superseded by another committed turn."""
 
 
 async def interpret_with_recovery(
@@ -76,6 +101,20 @@ async def interpret_with_recovery(
         except (InvalidInterpreterOutput, InterpreterUnavailable):
             continue
     raise InterpreterUnavailable("all_interpreters_unavailable")
+
+
+async def interpret_discussion_with_recovery(
+    primary: SemanticDiscussionInterpreter,
+    fallbacks: Sequence[SemanticDiscussionInterpreter],
+    request: DiscussionInterpretRequest,
+) -> DiscussionInterpretation:
+    for interpreter in (primary, *fallbacks):
+        try:
+            candidate = await interpreter.interpret_discussion(request)
+            return enforce_discussion_policy(request, candidate)
+        except (InvalidInterpreterOutput, InterpreterUnavailable):
+            continue
+    raise InterpreterUnavailable("all_discussion_interpreters_unavailable")
 
 
 async def regenerate_project_names(
@@ -112,6 +151,8 @@ class InterpretationPipeline:
         *,
         interpreter: SemanticInterpreter,
         fallback_interpreters: Sequence[SemanticInterpreter] = (),
+        discussion_interpreter: SemanticDiscussionInterpreter | None = None,
+        fallback_discussion_interpreters: Sequence[SemanticDiscussionInterpreter] = (),
         downloader: AttachmentDownloader | None = None,
         transcriber: Transcriber | None = None,
         owner: str,
@@ -120,9 +161,12 @@ class InterpretationPipeline:
         self._factory = session_factory
         self._interpreter = interpreter
         self._fallbacks = tuple(fallback_interpreters)
+        self._discussion_interpreter = discussion_interpreter
+        self._discussion_fallbacks = tuple(fallback_discussion_interpreters)
         self._downloader = downloader
         self._transcriber = transcriber
         self._owner = owner
+        self._logger = get_logger(__name__)
 
     async def process_one(self) -> bool:
         settings = self._runtime.settings.interpretation
@@ -149,15 +193,159 @@ class InterpretationPipeline:
                 await self._process_interpretation(token)
             elif destination == "interpretation" and operation_type == "regenerate_project_names":
                 await self._process_project_name_regeneration(token)
+            elif (
+                destination == DISCUSSION_CLASSIFY_DESTINATION
+                and operation_type == "classify_intake"
+            ):
+                await self._process_discussion(token)
             else:
                 raise PermanentPipelineError("unsupported_pipeline_destination")
         except (InterpreterUnavailable, TranscriptionUnavailable):
             await self._retry_or_dead_letter(token, attempt_count, "provider_unavailable")
+        except DiscussionContextChanged:
+            await self._defer_discussion(token)
         except OSError:
             await self._retry_or_dead_letter(token, attempt_count, "artifact_storage_unavailable")
         except PermanentPipelineError as error:
             await self._dead_letter(token, error.category)
         return True
+
+    async def _process_discussion(self, token: OutboxLeaseToken) -> None:
+        if not self._runtime.settings.project_discussion_enabled:
+            raise PermanentPipelineError("project_discussion_disabled")
+        if self._discussion_interpreter is None:
+            raise InterpreterUnavailable("discussion_interpreter_unavailable")
+        async with self._factory() as session:
+            item = await session.get(TransactionalOutbox, token.item_id)
+            assert item is not None
+            intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
+            if (
+                intake is None
+                or intake.task_id is not None
+                or intake.affinity_kind != "discussion"
+                or not intake.original_text
+            ):
+                raise PermanentPipelineError("discussion_intake_invalid")
+            session_id = _required_uuid(item.payload, "discussion_session_id")
+            project_id = _required_string(item.payload, "project_id")
+            if (
+                project_id
+                not in {project.id for project in self._runtime.registries.projects.items()}
+                or _required_int(item.payload, "chat_id") != intake.chat_id
+                or _required_int(item.payload, "message_thread_id") != intake.message_thread_id
+                or _required_int(item.payload, "user_id") != intake.user_id
+            ):
+                raise PermanentPipelineError("discussion_context_mismatch")
+            older_unfinished = await session.scalar(
+                select(TransactionalOutbox.id)
+                .join(
+                    TelegramIntakeMessage,
+                    TelegramIntakeMessage.id == TransactionalOutbox.linked_entity_id,
+                )
+                .where(
+                    TransactionalOutbox.destination == DISCUSSION_CLASSIFY_DESTINATION,
+                    TransactionalOutbox.id != item.id,
+                    TransactionalOutbox.status.in_(
+                        [
+                            DeliveryStatus.PENDING,
+                            DeliveryStatus.LEASED,
+                            DeliveryStatus.AMBIGUOUS,
+                        ]
+                    ),
+                    TelegramIntakeMessage.chat_id == intake.chat_id,
+                    TelegramIntakeMessage.message_thread_id == intake.message_thread_id,
+                    TelegramIntakeMessage.message_id < intake.message_id,
+                )
+                .limit(1)
+            )
+            if older_unfinished is not None:
+                raise DiscussionContextChanged
+        async with UnitOfWork(self._factory) as uow:
+            try:
+                discussion = await uow.discussions.get_session(session_id)
+            except LookupError as error:
+                raise PermanentPipelineError("discussion_session_missing") from error
+            if (
+                discussion.project_id != project_id
+                or discussion.chat_id != intake.chat_id
+                or discussion.message_thread_id != intake.message_thread_id
+            ):
+                raise PermanentPipelineError("discussion_session_mismatch")
+            expected_session_version = discussion.version
+            memory_pack = await DiscussionMemoryService(uow).load_context(session_id=session_id)
+        request = DiscussionInterpretRequest(
+            original_input=intake.original_text,
+            project_id=project_id,
+            user_id=intake.user_id,
+            memory_pack=memory_pack,
+        )
+        result = await interpret_discussion_with_recovery(
+            self._discussion_interpreter,
+            self._discussion_fallbacks,
+            request,
+        )
+        self._logger.info(
+            "Discussion interpretation completed",
+            extra={
+                "event": "discussion.interpretation.completed",
+                "discussion_session_id": str(session_id),
+                "intake_id": str(intake.id),
+                "project_id": project_id,
+                "interaction_mode": result.interaction_mode.value,
+                "confidence": result.confidence,
+                "prompt_version": result.prompt_version,
+                "schema_version": result.schema_version,
+                "should_create_task": result.should_create_task,
+                "should_mutate_plan": result.should_mutate_plan,
+                "refusal_code": (
+                    result.refusal_code.value if result.refusal_code is not None else None
+                ),
+            },
+        )
+        async with UnitOfWork(self._factory) as uow:
+            current = await uow.discussions.get_session(session_id, for_update=True)
+            if current.version != expected_session_version:
+                raise DiscussionContextChanged
+            memory = DiscussionMemoryService(uow)
+            user_turn_id, _ = await memory.append_turn(
+                session_id=session_id,
+                role=ConversationTurnRole.USER,
+                source=ConversationTurnSource.TELEGRAM_USER,
+                content=intake.original_text,
+                classifier_mode=result.interaction_mode,
+                classifier_confidence=Decimal(str(result.confidence)),
+                classifier_prompt_version=result.prompt_version,
+                should_create_task=result.should_create_task,
+                intake_message_id=intake.id,
+            )
+            assistant_turn_id, _ = await memory.append_turn(
+                session_id=session_id,
+                role=ConversationTurnRole.ASSISTANT,
+                source=ConversationTurnSource.MODEL,
+                content=_discussion_reply_text(result),
+                classifier_mode=result.interaction_mode,
+                classifier_confidence=Decimal(str(result.confidence)),
+                classifier_prompt_version=result.prompt_version,
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="conversation_turn",
+                entity_id=assistant_turn_id,
+                idempotency_key=f"{DISCUSSION_REPLY_DESTINATION}:{assistant_turn_id}",
+                payload={
+                    "role": DISCUSSION_REPLY_DESTINATION,
+                    "session_id": str(session_id),
+                    "source_turn_id": str(user_turn_id),
+                    "mode": result.interaction_mode.value,
+                    "confidence": result.confidence,
+                    "refusal_code": (
+                        result.refusal_code.value if result.refusal_code is not None else None
+                    ),
+                },
+            )
+            assert uow.session is not None
+            await complete_outbox_item(uow.session, token)
 
     async def _process_attachment(self, token: OutboxLeaseToken) -> None:
         if self._downloader is None:
@@ -495,6 +683,15 @@ class InterpretationPipeline:
         async with self._factory.begin() as session:
             await retry_outbox_item(session, token, delay_seconds=delay, error_category=category)
 
+    async def _defer_discussion(self, token: OutboxLeaseToken) -> None:
+        async with self._factory.begin() as session:
+            await defer_outbox_item(
+                session,
+                token,
+                delay_seconds=self._runtime.settings.interpretation.retry_min_seconds,
+                reason="discussion_context_changed",
+            )
+
     async def _dead_letter(self, token: OutboxLeaseToken, category: str) -> None:
         async with self._factory.begin() as session:
             item = await session.get(TransactionalOutbox, token.item_id)
@@ -530,6 +727,29 @@ def _required_string(payload: dict[str, object], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise PermanentPipelineError(f"invalid_{key}")
     return value
+
+
+def _required_int(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise PermanentPipelineError(f"invalid_{key}")
+    try:
+        return int(value)
+    except ValueError as error:
+        raise PermanentPipelineError(f"invalid_{key}") from error
+
+
+def _required_uuid(payload: dict[str, object], key: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(_required_string(payload, key))
+    except ValueError as error:
+        raise PermanentPipelineError(f"invalid_{key}") from error
+
+
+def _discussion_reply_text(result: DiscussionInterpretation) -> str:
+    if not result.clarification_question:
+        return result.user_visible_summary
+    return f"{result.user_visible_summary}\n\n{result.clarification_question}"
 
 
 async def _enqueue_interpretation(

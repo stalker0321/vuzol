@@ -14,7 +14,6 @@ from vuzol.interpretation.adapters import (
     OpenAICompatibleTranscriber,
 )
 from vuzol.interpretation.evaluation import require_eligible_report
-from vuzol.interpretation.ports import SemanticInterpreter
 from vuzol.interpretation.service import InterpretationPipeline
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
@@ -57,10 +56,8 @@ async def run() -> None:
             timeout_seconds=config.provider_timeout_seconds,
         )
 
-    interpreter: SemanticInterpreter = build_interpreter(primary_profile.id)
-    fallbacks: tuple[SemanticInterpreter, ...] = tuple(
-        build_interpreter(profile_id) for profile_id in fallback_ids
-    )
+    interpreter = build_interpreter(primary_profile.id)
+    fallbacks = tuple(build_interpreter(profile_id) for profile_id in fallback_ids)
     transcriber = None
     if config.transcription_profile_id is not None:
         profile = runtime.registries.profiles.get(config.transcription_profile_id)
@@ -97,6 +94,8 @@ async def run() -> None:
                 create_session_factory(engine),
                 interpreter=interpreter,
                 fallback_interpreters=fallbacks,
+                discussion_interpreter=interpreter,
+                fallback_discussion_interpreters=fallbacks,
                 downloader=PythonTelegramClient(bot),
                 transcriber=transcriber,
                 owner=owner,

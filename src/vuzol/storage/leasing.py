@@ -330,6 +330,38 @@ async def retry_outbox_item(
         raise LeaseLost(f"outbox lease lost: {token.item_id}")
 
 
+async def defer_outbox_item(
+    session: AsyncSession,
+    token: OutboxLeaseToken,
+    *,
+    delay_seconds: float,
+    reason: str,
+) -> None:
+    """Defer ordered work without consuming a provider-failure attempt."""
+
+    statement = (
+        update(TransactionalOutbox)
+        .where(
+            TransactionalOutbox.id == token.item_id,
+            TransactionalOutbox.lease_owner == token.owner,
+            TransactionalOutbox.lease_generation == token.generation,
+            TransactionalOutbox.status == DeliveryStatus.LEASED,
+        )
+        .values(
+            status=DeliveryStatus.PENDING,
+            attempt_count=func.greatest(TransactionalOutbox.attempt_count - 1, 0),
+            available_at=func.now() + timedelta(seconds=delay_seconds),
+            last_error_category=reason,
+            last_error_ambiguous=False,
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+    )
+    result = cast(CursorResult[Any], await session.execute(statement))
+    if result.rowcount != 1:
+        raise LeaseLost(f"outbox lease lost: {token.item_id}")
+
+
 async def dead_letter_outbox_item(
     session: AsyncSession,
     token: OutboxLeaseToken,

@@ -3,6 +3,7 @@
 import hashlib
 import uuid
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RegistryError, RuntimeConfiguration
@@ -28,6 +29,13 @@ from vuzol.telegram.projections import enqueue_project_status_dashboard
 def update_hash(update: MessageUpdate) -> str:
     payload = update.model_dump_json(exclude_none=False)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _discussion_lock_key(chat_id: int, message_thread_id: int) -> int:
+    digest = hashlib.blake2b(
+        f"{chat_id}:{message_thread_id}".encode(), digest_size=8, person=b"vuzol-p4"
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
 
 
 class TelegramIngressService:
@@ -239,6 +247,14 @@ class TelegramIngressService:
                     accepts_new_tasks=topic.accepts_new_tasks,
                     default_workflow=topic.default_workflow,
                     enabled=topic.enabled,
+                )
+            )
+            assert uow.session is not None
+            await uow.session.execute(
+                select(
+                    func.pg_advisory_xact_lock(
+                        _discussion_lock_key(update.chat_id, update.message_thread_id)
+                    )
                 )
             )
             session_id = await uow.discussions.active_session_id(

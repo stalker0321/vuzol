@@ -1,8 +1,15 @@
 import asyncio
 import uuid
+from datetime import UTC, datetime
 
+import pytest
+from pydantic import ValidationError
+
+from vuzol.discussion.memory import MemoryPack, MemoryTurn
 from vuzol.interpretation.discussion import (
     AmbiguityFlag,
+    ControlOverride,
+    ControlOverrideKind,
     DiscussionInterpretation,
     DiscussionInterpretationService,
     DiscussionInterpretRequest,
@@ -10,12 +17,14 @@ from vuzol.interpretation.discussion import (
     ItemEditPayload,
     PlanControlAction,
     PlanControlPayload,
+    PlanSnapshot,
+    PlanSnapshotItem,
     RefusalCode,
     TaskRequestPayload,
     enforce_discussion_policy,
     plan_draft_from_interpretation,
 )
-from vuzol.storage.types import InteractionMode
+from vuzol.storage.types import ConversationTurnRole, InteractionMode
 
 
 def request(**changes: object) -> DiscussionInterpretRequest:
@@ -91,6 +100,38 @@ def test_model_plan_control_is_advisory_and_requires_button() -> None:
     assert not result.should_mutate_plan
 
 
+def test_mismatched_payload_is_rejected_and_policy_strips_constructed_bypass() -> None:
+    with pytest.raises(ValidationError, match="payload does not match interaction_mode"):
+        envelope(
+            interaction_mode="discussion",
+            plan_control={"action": "start", "authoritative": True},
+        )
+
+    bypass = DiscussionInterpretation.model_construct(
+        interaction_mode=InteractionMode.DISCUSSION,
+        confidence=0.9,
+        should_create_task=True,
+        should_mutate_plan=True,
+        user_visible_summary="Обсуждаем.",
+        plan_control=PlanControlPayload(action=PlanControlAction.START, authoritative=True),
+    )
+    result = enforce_discussion_policy(request(), bypass)
+
+    assert result.plan_control is None
+    assert result.refusal_code is RefusalCode.CONTROL_REQUIRES_BUTTON
+    assert not result.should_create_task
+    assert not result.should_mutate_plan
+
+
+def test_only_plan_draft_and_fenced_item_edit_may_request_draft_mutation() -> None:
+    result = enforce_discussion_policy(
+        request(),
+        envelope(interaction_mode="query_only", should_mutate_plan=True),
+    )
+
+    assert not result.should_mutate_plan
+
+
 def test_open_edit_session_forces_fenced_item_edit() -> None:
     edit = EditSessionContext(
         edit_session_id=uuid.uuid4(),
@@ -161,6 +202,63 @@ def test_uncertain_voice_can_never_create_or_mutate() -> None:
     assert result.refusal_code is RefusalCode.CLARIFY_REQUIRED
     assert not result.should_create_task
     assert not result.should_mutate_plan
+
+
+def test_request_carries_bounded_memory_plan_snapshot_and_override() -> None:
+    session_id = uuid.uuid4()
+    value = request(
+        memory_pack=MemoryPack(
+            session_id=session_id,
+            summary=None,
+            decisions=(),
+            turns=(
+                MemoryTurn(
+                    id=uuid.uuid4(),
+                    ordinal=1,
+                    role=ConversationTurnRole.USER,
+                    content="обсуждаем карточку",
+                    created_at=datetime.now(UTC),
+                ),
+            ),
+            raw_turns_truncated=False,
+            summary_truncated=False,
+            decisions_truncated=False,
+        ),
+        plan_snapshot=PlanSnapshot(
+            package_id=uuid.uuid4(),
+            revision_id=uuid.uuid4(),
+            revision_number=2,
+            revision_hash="a" * 64,
+            title="Telegram UI",
+            items=(
+                PlanSnapshotItem(
+                    item_id=uuid.uuid4(), ordinal=1, local_id="card", summary="Карточка"
+                ),
+            ),
+        ),
+        control_override=ControlOverride(kind=ControlOverrideKind.CONTINUE_DISCUSSION),
+    )
+
+    dumped = value.model_dump(mode="json")
+
+    assert dumped["memory_pack"]["session_id"] == str(session_id)
+    assert dumped["plan_snapshot"]["revision_hash"] == "a" * 64
+    assert dumped["control_override"]["kind"] == "continue_discussion"
+
+
+def test_continue_discussion_override_clears_model_action_payload() -> None:
+    result = enforce_discussion_policy(
+        request(control_override={"kind": "continue_discussion"}),
+        envelope(
+            interaction_mode="task_request",
+            should_create_task=True,
+            task_request={"summary": "Создать задачу", "goal": "Что-то изменить"},
+        ),
+    )
+
+    assert result.interaction_mode is InteractionMode.DISCUSSION
+    assert result.task_request is None
+    assert not result.should_create_task
 
 
 def test_plan_request_maps_to_domain_draft_without_control_authority() -> None:

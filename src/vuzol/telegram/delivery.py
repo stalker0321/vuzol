@@ -69,8 +69,16 @@ from vuzol.telegram.tracing import (
     planner_trace_is_anomalous,
     should_deliver_orchestration_trace,
 )
+from vuzol.telegram.work_package_projections import (
+    WORK_PACKAGE_DETAIL_ROLE,
+    WORK_PACKAGE_PLAN_ROLE,
+    WORK_PACKAGE_PROJECTION_DESTINATION,
+    WorkPackageProjectionError,
+    build_work_package_detail_card,
+    build_work_package_plan_card,
+)
 
-TELEGRAM_DESTINATIONS = frozenset({"telegram"})
+TELEGRAM_DESTINATIONS = frozenset({"telegram", WORK_PACKAGE_PROJECTION_DESTINATION})
 
 
 class DeliveryAction(StrEnum):
@@ -102,6 +110,9 @@ class PreparedDelivery:
     approval_id: uuid.UUID | None = None
     message_role: str | None = None
     callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = ()
+    work_package_id: uuid.UUID | None = None
+    plan_revision_id: uuid.UUID | None = None
+    control_status_generation: int | None = None
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -126,6 +137,8 @@ async def prepare_delivery(
     trace_sample_percent: int = 100,
     trace_always_include_anomalies: bool = True,
 ) -> PreparedDelivery:
+    if getattr(item, "destination", "telegram") == WORK_PACKAGE_PROJECTION_DESTINATION:
+        return await _prepare_work_package_projection(session, item)
     if item.operation_type not in {"send_message", "delete_message"}:
         raise PermanentDeliveryError("unsupported_telegram_operation")
     if (
@@ -366,6 +379,73 @@ async def prepare_delivery(
         buttons=card.buttons,
         approval_id=card.approval_id,
         message_role=message_role,
+    )
+
+
+async def _prepare_work_package_projection(
+    session: AsyncSession, item: TransactionalOutbox
+) -> PreparedDelivery:
+    if item.linked_entity_type != "work_package":
+        raise PermanentDeliveryError("invalid_work_package_projection_entity")
+    package_id = item.linked_entity_id
+    role = (
+        WORK_PACKAGE_PLAN_ROLE if item.operation_type == "render_plan" else WORK_PACKAGE_DETAIL_ROLE
+    )
+    if item.operation_type not in {"render_plan", "render_detail", "clear_detail"}:
+        raise PermanentDeliveryError("invalid_work_package_projection_operation")
+    link = await session.scalar(
+        select(TelegramMessageLink).where(
+            TelegramMessageLink.work_package_id == package_id,
+            TelegramMessageLink.message_role == role,
+        )
+    )
+    if item.operation_type == "clear_detail":
+        if link is None:
+            return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
+        return PreparedDelivery(
+            DeliveryAction.DELETE_MESSAGE,
+            chat_id=link.chat_id,
+            thread_id=link.message_thread_id,
+            link_id=link.id,
+            message_id=link.message_id,
+            work_package_id=package_id,
+        )
+    try:
+        if item.operation_type == "render_plan":
+            raw_page = item.payload.get("page", 1)
+            if not isinstance(raw_page, int):
+                raise WorkPackageProjectionError("invalid_page")
+            card = await build_work_package_plan_card(session, package_id, page=raw_page)
+        else:
+            detail_card = await build_work_package_detail_card(session, package_id)
+            if detail_card is None:
+                if link is None:
+                    return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
+                return PreparedDelivery(
+                    DeliveryAction.DELETE_MESSAGE,
+                    chat_id=link.chat_id,
+                    thread_id=link.message_thread_id,
+                    link_id=link.id,
+                    message_id=link.message_id,
+                    work_package_id=package_id,
+                )
+            card = detail_card
+    except WorkPackageProjectionError as error:
+        raise PermanentDeliveryError(str(error)) from error
+    action = DeliveryAction.SEND_STATUS if link is None else DeliveryAction.EDIT_STATUS
+    return PreparedDelivery(
+        action,
+        chat_id=card.chat_id,
+        thread_id=card.thread_id,
+        html=card.html,
+        revision=card.status_generation,
+        link_id=None if link is None else link.id,
+        message_id=None if link is None else link.message_id,
+        message_role=card.role,
+        callback_buttons=card.callback_buttons,
+        work_package_id=card.package_id,
+        plan_revision_id=card.revision_id,
+        control_status_generation=card.status_generation,
     )
 
 
@@ -845,7 +925,10 @@ class TelegramDeliveryService:
             if prepared.action == DeliveryAction.SEND_STATUS:
                 assert prepared.revision is not None
                 assert confirmed_message_id is not None
-                if prepared.message_role != PROJECT_STATUS_DASHBOARD_ROLE:
+                if (
+                    prepared.message_role != PROJECT_STATUS_DASHBOARD_ROLE
+                    and prepared.work_package_id is None
+                ):
                     assert prepared.task_id is not None
                 session.add(
                     TelegramMessageLink(
@@ -856,6 +939,9 @@ class TelegramDeliveryService:
                         run_id=prepared.run_id,
                         step_id=prepared.step_id,
                         approval_id=prepared.approval_id,
+                        work_package_id=prepared.work_package_id,
+                        plan_revision_id=prepared.plan_revision_id,
+                        control_status_generation=prepared.control_status_generation,
                         message_role=prepared.message_role or "task_status",
                         projection_revision=prepared.revision,
                     )
@@ -866,6 +952,9 @@ class TelegramDeliveryService:
                 if link is None:
                     raise LeaseLost(f"Telegram projection disappeared: {prepared.link_id}")
                 link.projection_revision = prepared.revision
+                if prepared.work_package_id is not None:
+                    link.plan_revision_id = prepared.plan_revision_id
+                    link.control_status_generation = prepared.control_status_generation
             elif prepared.action == DeliveryAction.SEND_CLARIFICATION:
                 assert confirmed_message_id is not None
                 session.add(

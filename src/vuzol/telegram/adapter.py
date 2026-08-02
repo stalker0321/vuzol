@@ -17,7 +17,13 @@ from telegram.ext import (
 )
 
 from vuzol.config import ScopedSecretResolver, Settings
-from vuzol.telegram.domain import AttachmentKind, ControlUpdate, MessageUpdate, TelegramAttachment
+from vuzol.telegram.domain import (
+    AttachmentKind,
+    ControlUpdate,
+    MessageUpdate,
+    TelegramAttachment,
+    WorkPackageControlUpdate,
+)
 from vuzol.telegram.workspace import (
     TopicCreationOutcomeUnknown,
     TopicPinUnsupported,
@@ -25,7 +31,7 @@ from vuzol.telegram.workspace import (
 )
 
 MessageHandlerFn = Callable[[MessageUpdate], Awaitable[None]]
-ControlHandlerFn = Callable[[ControlUpdate], Awaitable[None]]
+ControlHandlerFn = Callable[[ControlUpdate | WorkPackageControlUpdate], Awaitable[None]]
 StartupHandlerFn = Callable[[Bot], Awaitable[None]]
 
 
@@ -187,13 +193,24 @@ def message_update(update: Update, bot_id: str) -> MessageUpdate | None:
     )
 
 
-def control_update(update: Update, bot_id: str) -> ControlUpdate | None:
+def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageControlUpdate | None:
     query = update.callback_query
     user = update.effective_user
     if query is None or user is None or query.message is None or query.data is None:
         return None
     parts = query.data.split(":")
     message_thread_id = getattr(query.message, "message_thread_id", None)
+    if query.data.startswith("v1:wp:"):
+        return WorkPackageControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            callback_data=query.data,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+        )
     if len(parts) == 5 and parts[:2] == ["v1", "pn"]:
         try:
             naming_request_id = uuid.UUID(hex=parts[2])

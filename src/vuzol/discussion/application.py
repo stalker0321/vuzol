@@ -96,7 +96,7 @@ class DiscussionPlanApplicationService:
         async with UnitOfWork(self._factory) as uow:
             service = WorkPackageService(uow)
             if intent is PlanRequestIntent.CREATE_DRAFT:
-                return await service.create_draft(
+                revision_result = await service.create_draft(
                     session_id=session_id,
                     project_id=request.project_id,
                     plan=plan,
@@ -105,6 +105,8 @@ class DiscussionPlanApplicationService:
                     planner_profile=planner_profile,
                     prompt_version=result.prompt_version,
                 )
+                await _enqueue_plan_projection(uow, revision_result)
+                return revision_result
             if intent is PlanRequestIntent.EDIT_ITEM:
                 raise DomainError("edit_session_required")
             snapshot = request.plan_snapshot
@@ -128,7 +130,7 @@ class DiscussionPlanApplicationService:
                 raise DomainError("stale_revision") from error
             if revision.id != snapshot.revision_id or package.head_revision_id != revision.id:
                 raise DomainError("stale_revision")
-            return await service.revise_draft(
+            revision_result = await service.revise_draft(
                 package_id=snapshot.package_id,
                 expected_status_generation=snapshot.status_generation,
                 plan=plan,
@@ -137,6 +139,8 @@ class DiscussionPlanApplicationService:
                 planner_profile=planner_profile,
                 prompt_version=result.prompt_version,
             )
+            await _enqueue_plan_projection(uow, revision_result)
+            return revision_result
 
     async def apply_item_edit(
         self,
@@ -176,16 +180,29 @@ class DiscussionPlanApplicationService:
                 current_body=revision.immutable_body,
                 target_item_id=edit.item_id,
             )
-            return await WorkPackageService(uow).apply_item_edit(
+            revision_result = await WorkPackageService(uow).apply_item_edit(
                 edit_session_id=edit.id,
                 expected_session_generation=context.session_generation,
                 replacement=replacement,
                 user_id=request.user_id,
             )
+            await _enqueue_plan_projection(uow, revision_result)
+            return revision_result
 
     def _require_enabled(self) -> None:
         if not self._enabled:
             raise DomainError("project_discussion_disabled")
+
+
+async def _enqueue_plan_projection(uow: UnitOfWork, result: RevisionResult) -> None:
+    await uow.outbox.enqueue(
+        destination="work_package_projection",
+        operation_type="render_plan",
+        entity_type="work_package",
+        entity_id=result.package_id,
+        idempotency_key=f"wp:projection:revision:{result.revision_id}",
+        payload={"package_id": str(result.package_id)},
+    )
 
 
 class PackageControlIngress:
@@ -271,6 +288,15 @@ class PackageControlIngress:
             }
             persisted.payload = {"command": command_payload, "outcome": outcome}
             persisted.status = ControlActionStatus.PROCESSED
+            if code is PackageControlResultCode.APPLIED:
+                await uow.outbox.enqueue(
+                    destination="work_package_projection",
+                    operation_type="render_plan",
+                    entity_type="work_package",
+                    entity_id=command.package_id,
+                    idempotency_key=f"wp:projection:control:{action_id}:{generation}",
+                    payload={"package_id": str(command.package_id)},
+                )
             return PackageControlResult(
                 action_id=action_id,
                 code=code,

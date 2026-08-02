@@ -9,6 +9,8 @@ def test_interpreter_receives_scoped_openai_credential_from_compose_env() -> Non
         "VUZOL_OPENAI_TRANSCRIPTION_API_KEY: ${VUZOL_OPENAI_TRANSCRIPTION_API_KEY:-}" in interpreter
     )
     assert 'user: "${VUZOL_RUNTIME_UID:-1000}:10001"' in interpreter
+    assert "VUZOL_REGISTRY_OVERLAY_FILE: /app/config/projects.json" in interpreter
+    assert ":/app/config/projects.json:ro" in interpreter
     assert (
         "chmod 0770 /srv/vuzol/artifacts" in (Path(__file__).parents[2] / "Dockerfile").read_text()
     )

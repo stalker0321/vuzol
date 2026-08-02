@@ -243,9 +243,11 @@ def enforce_discussion_policy(
     """Tighten model output; this function can never grant execution authority."""
 
     result = candidate
-    if request.edit_session is not None and (
+    has_authorized_edit_session = request.edit_session is not None and (
         request.edit_session.opened_by_user_id == request.user_id
-    ):
+    )
+    if has_authorized_edit_session:
+        assert request.edit_session is not None
         edit = request.edit_session
         payload = ItemEditPayload(
             edit_session_id=edit.edit_session_id,
@@ -268,6 +270,19 @@ def enforce_discussion_policy(
                 "plan_request": None,
                 "plan_control": None,
                 "task_request": None,
+            }
+        )
+    elif result.interaction_mode is InteractionMode.ITEM_EDIT:
+        flags = set(result.ambiguity_flags)
+        flags.add(AmbiguityFlag.EDIT_SESSION_REQUIRED)
+        result = result.model_copy(
+            update={
+                "interaction_mode": InteractionMode.QUERY_REFUSE,
+                "should_create_task": False,
+                "should_mutate_plan": False,
+                "ambiguity_flags": frozenset(flags),
+                "refusal_code": RefusalCode.CLARIFY_REQUIRED,
+                "item_edit": None,
             }
         )
 

@@ -199,6 +199,47 @@ def test_open_edit_session_replaces_model_invented_fences() -> None:
     assert result.item_edit.refinement_text == invented.refinement_text
 
 
+@pytest.mark.parametrize("session_owner", [None, 99])
+def test_model_item_edit_without_users_open_session_is_refused(
+    session_owner: int | None,
+) -> None:
+    edit = ItemEditPayload(
+        edit_session_id=uuid.uuid4(),
+        package_id=uuid.uuid4(),
+        revision_number=99,
+        revision_hash="f" * 64,
+        item_id=uuid.uuid4(),
+        refinement_text="invented edit",
+    )
+    edit_session = (
+        None
+        if session_owner is None
+        else EditSessionContext(
+            edit_session_id=uuid.uuid4(),
+            package_id=uuid.uuid4(),
+            revision_number=1,
+            revision_hash="a" * 64,
+            item_id=uuid.uuid4(),
+            opened_by_user_id=session_owner,
+        )
+    )
+
+    result = enforce_discussion_policy(
+        request(edit_session=edit_session),
+        envelope(
+            interaction_mode="item_edit",
+            should_mutate_plan=True,
+            item_edit=edit,
+        ),
+    )
+
+    assert result.interaction_mode is InteractionMode.QUERY_REFUSE
+    assert result.item_edit is None
+    assert AmbiguityFlag.EDIT_SESSION_REQUIRED in result.ambiguity_flags
+    assert result.refusal_code is RefusalCode.CLARIFY_REQUIRED
+    assert not result.should_mutate_plan
+
+
 def test_uncertain_voice_can_never_create_or_mutate() -> None:
     result = enforce_discussion_policy(
         request(source_is_voice=True, transcription_uncertain=True),

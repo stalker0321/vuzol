@@ -273,6 +273,47 @@ class PackageControlIngress:
                 )
                 generation = command.expected_status_generation
                 code = PackageControlResultCode.START_NOT_WIRED
+            elif command.action is PackageControlAction.RETRY_ITEM:
+                generation = await service.retry_item(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    user_id=command.user_id,
+                )
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
+            elif command.action is PackageControlAction.SKIP_ITEM:
+                generation = await service.skip_item(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    user_id=command.user_id,
+                )
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
+            elif command.action is PackageControlAction.STOP_PACKAGE:
+                generation = await service.stop_package(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    user_id=command.user_id,
+                )
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
+            elif command.action is PackageControlAction.REQUEST_REPLAN:
+                replan = await service.request_replan(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    user_id=command.user_id,
+                )
+                generation = replan.status_generation
+                code = PackageControlResultCode.APPLIED
+                revision_id = replan.revision_id
             else:
                 revision_id, generation = await service.validate_control_fence(
                     package_id=command.package_id,

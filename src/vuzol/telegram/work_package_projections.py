@@ -104,6 +104,23 @@ async def build_work_package_plan_card(
         f"Статус: <b>{status}</b> · версия плана {revision.revision_number}",
         "",
     ]
+    if package.status is WorkPackageStatus.PAUSED:
+        reason_key = "unknown" if package.pause_reason is None else package.pause_reason.value
+        reason = {
+            "item_failed": "пункт завершился ошибкой",
+            "item_blocked": "пункт заблокирован",
+            "replan_required": "требуется новый план",
+            "policy": "остановлено политикой безопасности",
+            "user": "остановлено пользователем",
+        }.get(reason_key, "причина неизвестна")
+        current = "не определён" if package.cursor_ordinal is None else str(package.cursor_ordinal)
+        lines.extend(
+            (
+                f"Очередь остановлена: <b>{reason}</b>.",
+                f"Текущий пункт: {current}. Автоматического перехода дальше не будет.",
+                "",
+            )
+        )
     lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
     if page_count > 1:
         lines.extend(("", f"Страница {page}/{page_count}"))
@@ -141,6 +158,28 @@ async def build_work_package_plan_card(
     elif package.status is WorkPackageStatus.APPROVED:
         controls.append(("Начать", _callback(WorkPackageCallbackKind.START, package, revision)))
         controls.append(("Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision)))
+    elif package.status is WorkPackageStatus.RUNNING:
+        controls.append(
+            ("Остановить", _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision))
+        )
+        controls.append(
+            (
+                "Перепланировать",
+                _callback(WorkPackageCallbackKind.REQUEST_REPLAN, package, revision),
+            )
+        )
+    elif package.status is WorkPackageStatus.PAUSED:
+        controls.extend(
+            (
+                ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision)),
+                ("Пропустить", _callback(WorkPackageCallbackKind.SKIP_ITEM, package, revision)),
+                (
+                    "Перепланировать",
+                    _callback(WorkPackageCallbackKind.REQUEST_REPLAN, package, revision),
+                ),
+                ("Остановить", _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision)),
+            )
+        )
     if controls:
         buttons.append(tuple(controls))
     buttons.append(

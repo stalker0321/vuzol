@@ -259,17 +259,6 @@ async def test_control_ingress_is_authorized_idempotent_and_never_starts(
     engine, factory = storage(postgres_dsn)
     _, package_id, _, content_hash = await create_package(factory)
     ingress = PackageControlIngress(factory, enabled=True, authorized_user_ids=frozenset({42}))
-    deferred = await ingress.apply(
-        command(
-            action=PackageControlAction.REQUEST_REPLAN,
-            package_id=package_id,
-            content_hash=content_hash,
-            generation=1,
-            key="replan-not-wired",
-        )
-    )
-    assert deferred.code is PackageControlResultCode.ACTION_NOT_WIRED
-    assert deferred.status_generation == 1
     approve = command(
         action=PackageControlAction.APPROVE,
         package_id=package_id,
@@ -310,7 +299,7 @@ async def test_control_ingress_is_authorized_idempotent_and_never_starts(
         assert package is not None and package.status is WorkPackageStatus.APPROVED
         assert package.version == 2
         assert await session.scalar(select(func.count()).select_from(Task)) == 0
-        assert await session.scalar(select(func.count()).select_from(TelegramControlAction)) == 3
+        assert await session.scalar(select(func.count()).select_from(TelegramControlAction)) == 2
 
     with pytest.raises(DomainError) as unauthorized:
         await ingress.apply(

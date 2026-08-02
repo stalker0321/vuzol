@@ -10,6 +10,7 @@ from vuzol.discussion.domain import (
     DomainError,
     PackageControlAction,
     PlanDraft,
+    PlanItemDraft,
     WorkPackageEvent,
     canonical_plan_body,
     canonical_plan_hash,
@@ -25,8 +26,11 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.types import (
     EditSessionStatus,
+    EstimatedComplexity,
     PlanRevisionCreatedBy,
     PlanRevisionState,
+    RiskLevel,
+    WorkPackagePauseReason,
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -377,6 +381,235 @@ class WorkPackageService:
             raise DomainError("stale_revision")
         return revision.id, package.version
 
+    async def pause_for_item_outcome(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        ordinal: int,
+        blocked: bool,
+        failure_task_id: uuid.UUID | None = None,
+    ) -> int:
+        """Record a sequencer-owned failed/blocked outcome without advancing the queue."""
+
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_generation(package.version, expected_status_generation)
+        if package.status is not WorkPackageStatus.RUNNING:
+            raise DomainError("invalid_transition")
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if package.running_revision_id != revision.id or package.head_revision_id != revision.id:
+            raise DomainError("stale_revision")
+        resolved_revision_id, _ = await self._resolve_item(package_id, revision_number, h8, ordinal)
+        if resolved_revision_id != revision.id or (
+            package.cursor_ordinal is not None and package.cursor_ordinal != ordinal
+        ):
+            raise DomainError("stale_cursor")
+        package.status = WorkPackageStatus.PAUSED
+        package.pause_reason = (
+            WorkPackagePauseReason.ITEM_BLOCKED if blocked else WorkPackagePauseReason.ITEM_FAILED
+        )
+        package.cursor_ordinal = ordinal
+        package.last_failure_task_id = failure_task_id
+        package.version += 1
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_PAUSED,
+            "system",
+            previous_state=WorkPackageStatus.RUNNING.value,
+            new_state=WorkPackageStatus.PAUSED.value,
+            payload={
+                "revision_id": str(revision.id),
+                "ordinal": ordinal,
+                "reason": package.pause_reason.value,
+                "failure_task_id": None if failure_task_id is None else str(failure_task_id),
+                "status_generation": package.version,
+            },
+        )
+        await self._enqueue_plan_projection(package.id, package.version, "pause")
+        return package.version
+
+    async def retry_item(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        user_id: int,
+    ) -> int:
+        package, revision = await self._queue_control_package(
+            package_id, revision_number, h8, expected_status_generation
+        )
+        control_transition_target(package.status, PackageControlAction.RETRY_ITEM)
+        self._require_failure_pause(package)
+        if package.cursor_ordinal is None:
+            raise DomainError("failure_context_missing")
+        package.status = WorkPackageStatus.RUNNING
+        package.pause_reason = None
+        package.version += 1
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_RETRIED,
+            "user",
+            previous_state=WorkPackageStatus.PAUSED.value,
+            new_state=WorkPackageStatus.RUNNING.value,
+            payload={
+                "revision_id": str(revision.id),
+                "ordinal": package.cursor_ordinal,
+                "requested_by_user_id": user_id,
+                "status_generation": package.version,
+            },
+        )
+        return package.version
+
+    async def skip_item(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        user_id: int,
+    ) -> int:
+        package, revision = await self._queue_control_package(
+            package_id, revision_number, h8, expected_status_generation
+        )
+        control_transition_target(package.status, PackageControlAction.SKIP_ITEM)
+        self._require_failure_pause(package)
+        if package.cursor_ordinal is None:
+            raise DomainError("failure_context_missing")
+        skipped_ordinal = package.cursor_ordinal
+        package.cursor_ordinal += 1
+        package.status = WorkPackageStatus.RUNNING
+        package.pause_reason = None
+        package.last_failure_task_id = None
+        package.version += 1
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_ITEM_SKIPPED,
+            "user",
+            previous_state=WorkPackageStatus.PAUSED.value,
+            new_state=WorkPackageStatus.RUNNING.value,
+            payload={
+                "revision_id": str(revision.id),
+                "ordinal": skipped_ordinal,
+                "next_ordinal": package.cursor_ordinal,
+                "requested_by_user_id": user_id,
+                "status_generation": package.version,
+            },
+        )
+        return package.version
+
+    async def stop_package(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        user_id: int,
+    ) -> int:
+        package, revision = await self._queue_control_package(
+            package_id, revision_number, h8, expected_status_generation
+        )
+        control_transition_target(package.status, PackageControlAction.STOP_PACKAGE)
+        previous = package.status
+        package.status = WorkPackageStatus.STOPPED
+        package.pause_reason = None
+        package.version += 1
+        await self._close_open_edits(package_id, actor_type="system")
+        await self._uow.work_packages.clear_open_detail(package_id=package_id)
+        await self._detail_event(package_id, None, None, None, None, True)
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_STOPPED,
+            "user",
+            previous_state=previous.value,
+            new_state=WorkPackageStatus.STOPPED.value,
+            payload={
+                "revision_id": str(revision.id),
+                "stopped_by_user_id": user_id,
+                "status_generation": package.version,
+            },
+        )
+        return package.version
+
+    async def request_replan(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        user_id: int,
+    ) -> RevisionResult:
+        package, revision = await self._queue_control_package(
+            package_id, revision_number, h8, expected_status_generation
+        )
+        control_transition_target(package.status, PackageControlAction.REQUEST_REPLAN)
+        previous_status = package.status
+        plan = _plan_from_revision_body(revision.immutable_body)
+        result = await self.revise_draft(
+            package_id=package_id,
+            expected_status_generation=expected_status_generation,
+            plan=plan,
+            created_by=PlanRevisionCreatedBy.USER,
+            actor_type="user",
+        )
+        package.pause_reason = None
+        package.last_failure_task_id = None
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
+            "user",
+            previous_state=previous_status.value,
+            new_state=WorkPackageStatus.DRAFT.value,
+            payload={
+                "previous_revision_id": str(revision.id),
+                "new_revision_id": str(result.revision_id),
+                "requested_by_user_id": user_id,
+                "status_generation": result.status_generation,
+            },
+        )
+        return result
+
+    async def _queue_control_package(
+        self,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+    ) -> tuple[WorkPackage, PlanRevision]:
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_mutable(package.status)
+        require_generation(package.version, expected_status_generation)
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if package.head_revision_id != revision.id:
+            raise DomainError("stale_revision")
+        return package, revision
+
+    @staticmethod
+    def _require_failure_pause(package: WorkPackage) -> None:
+        if package.pause_reason not in {
+            WorkPackagePauseReason.ITEM_FAILED,
+            WorkPackagePauseReason.ITEM_BLOCKED,
+        }:
+            raise DomainError("failure_context_missing")
+
+    async def _enqueue_plan_projection(
+        self, package_id: uuid.UUID, generation: int, reason: str
+    ) -> None:
+        await self._uow.outbox.enqueue(
+            destination="work_package_projection",
+            operation_type="render_plan",
+            entity_type="work_package",
+            entity_id=package_id,
+            idempotency_key=f"wp:projection:{reason}:{package_id}:{generation}",
+            payload={"package_id": str(package_id)},
+        )
+
     async def _create_revision(
         self,
         *,
@@ -525,3 +758,38 @@ class WorkPackageService:
             new_state=new_state,
             payload=payload,
         )
+
+
+def _plan_from_revision_body(body: dict[str, object]) -> PlanDraft:
+    title = body.get("title")
+    items = body.get("items")
+    if not isinstance(title, str) or not isinstance(items, list):
+        raise DomainError("invalid_plan")
+    drafts: list[PlanItemDraft] = []
+    try:
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise DomainError("invalid_plan")
+            raw_local_id = raw.get("local_id")
+            if raw_local_id is not None and not isinstance(raw_local_id, str):
+                raise DomainError("invalid_plan")
+            drafts.append(
+                PlanItemDraft(
+                    item_id=uuid.UUID(str(raw["item_id"])),
+                    local_id=raw_local_id,
+                    summary=str(raw["summary"]),
+                    goal=str(raw["goal"]),
+                    expected_outcome=str(raw["expected_outcome"]),
+                    completion_criteria=tuple(str(value) for value in raw["completion_criteria"]),
+                    allowed_scope=str(raw["allowed_scope"]),
+                    out_of_scope=tuple(str(value) for value in raw.get("out_of_scope", [])),
+                    dependencies=tuple(str(value) for value in raw.get("dependencies", [])),
+                    trusted_checks=tuple(str(value) for value in raw.get("trusted_checks", [])),
+                    suggested_risk=RiskLevel(str(raw["suggested_risk"])),
+                    needs_approval=bool(raw["needs_approval"]),
+                    estimated_complexity=EstimatedComplexity(str(raw["estimated_complexity"])),
+                )
+            )
+    except (KeyError, TypeError, ValueError) as error:
+        raise DomainError("invalid_plan") from error
+    return PlanDraft(title=title, items=tuple(drafts))

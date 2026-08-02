@@ -262,6 +262,7 @@ class PlanRevisionCreatedBy(StrEnum):
 class WorkPackagePauseReason(StrEnum):
     USER = "user"
     ITEM_FAILED = "item_failed"
+    ITEM_BLOCKED = "item_blocked"
     REPLAN_REQUIRED = "replan_required"
     POLICY = "policy"
 

@@ -13,6 +13,7 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Tele
 
 from vuzol.config import TopicKind, TopicRegistry
 from vuzol.config.registries import ProfileRegistry, ProjectRegistry
+from vuzol.interpretation.discussion import DISCUSSION_REPLY_DESTINATION
 from vuzol.observability import get_logger
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
@@ -23,7 +24,9 @@ from vuzol.storage.leasing import (
     retry_outbox_item,
 )
 from vuzol.storage.models import (
+    ConversationTurn,
     Interpretation,
+    ProjectDiscussionSession,
     ProjectNamingRequest,
     ProjectProvisioning,
     ProviderBudgetReservation,
@@ -37,7 +40,7 @@ from vuzol.storage.models import (
     UsageRecord,
 )
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.storage.types import TaskStatus
+from vuzol.storage.types import ConversationTurnRole, ConversationTurnSource, TaskStatus
 from vuzol.telegram.layout import (
     HELP_CARD_ROLE,
     HISTORY_TOPIC_KIND,
@@ -78,6 +81,7 @@ class DeliveryAction(StrEnum):
     SEND_PROJECT_NAMES = "send_project_names"
     SEND_MODEL_PICKER = "send_model_picker"
     SEND_HELP = "send_help"
+    SEND_DISCUSSION_REPLY = "send_discussion_reply"
     DELETE_MESSAGE = "delete_message"
     NOOP = "noop"
 
@@ -171,6 +175,8 @@ async def prepare_delivery(
             trace_sample_percent=trace_sample_percent,
             trace_always_include_anomalies=trace_always_include_anomalies,
         )
+    if item.payload.get("role") == DISCUSSION_REPLY_DESTINATION:
+        return await _prepare_discussion_reply(session, item)
     if item.linked_entity_type == "project_naming":
         naming = await session.get(ProjectNamingRequest, item.linked_entity_id)
         if naming is None:
@@ -385,6 +391,30 @@ async def _resolve_status_dashboard_thread(
     if mapping is None:
         raise PermanentDeliveryError("status_dashboard_topic_missing")
     return mapping.message_thread_id
+
+
+async def _prepare_discussion_reply(
+    session: AsyncSession, item: TransactionalOutbox
+) -> PreparedDelivery:
+    if item.linked_entity_type != "conversation_turn":
+        raise PermanentDeliveryError("invalid_discussion_reply_entity")
+    turn = await session.get(ConversationTurn, item.linked_entity_id)
+    if (
+        turn is None
+        or turn.role is not ConversationTurnRole.ASSISTANT
+        or turn.source is not ConversationTurnSource.MODEL
+    ):
+        raise PermanentDeliveryError("discussion_reply_turn_missing")
+    discussion = await session.get(ProjectDiscussionSession, turn.session_id)
+    if discussion is None or str(discussion.id) != item.payload.get("session_id"):
+        raise PermanentDeliveryError("discussion_reply_session_mismatch")
+    return PreparedDelivery(
+        DeliveryAction.SEND_DISCUSSION_REPLY,
+        chat_id=discussion.chat_id,
+        thread_id=discussion.message_thread_id,
+        html=telegram_html(turn.content),
+        message_role=DISCUSSION_REPLY_DESTINATION,
+    )
 
 
 async def _resolve_system_trace_thread(
@@ -772,6 +802,7 @@ class TelegramDeliveryService:
             DeliveryAction.SEND_PROJECT_NAMES,
             DeliveryAction.SEND_MODEL_PICKER,
             DeliveryAction.SEND_HELP,
+            DeliveryAction.SEND_DISCUSSION_REPLY,
         }:
             message_id = await self._client.send_message(
                 chat_id=prepared.chat_id,
@@ -844,6 +875,17 @@ class TelegramDeliveryService:
                         message_id=confirmed_message_id,
                         task_id=prepared.task_id,
                         message_role="clarification",
+                    )
+                )
+            elif prepared.action == DeliveryAction.SEND_DISCUSSION_REPLY:
+                assert confirmed_message_id is not None
+                session.add(
+                    TelegramMessageLink(
+                        chat_id=prepared.chat_id,
+                        message_thread_id=prepared.thread_id,
+                        message_id=confirmed_message_id,
+                        task_id=None,
+                        message_role=prepared.message_role or DISCUSSION_REPLY_DESTINATION,
                     )
                 )
             elif prepared.action == DeliveryAction.SEND_PROJECT_WELCOME:

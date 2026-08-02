@@ -8,6 +8,11 @@ from sqlalchemy import func, select, update
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
 from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
+from vuzol.interpretation.discussion import (
+    DISCUSSION_REPLY_DESTINATION,
+    DiscussionInterpretation,
+    DiscussionInterpretRequest,
+)
 from vuzol.interpretation.domain import (
     InterpretationResult,
     ProjectNameOption,
@@ -22,6 +27,7 @@ from vuzol.interpretation.ports import InterpreterUnavailable
 from vuzol.interpretation.service import InterpretationPipeline
 from vuzol.storage.models import (
     ClarificationDecision,
+    ConversationTurn,
     Interpretation,
     ProjectNamingRequest,
     Task,
@@ -30,6 +36,7 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.types import (
+    ConversationTurnRole,
     DeliveryStatus,
     IntakeStatus,
     ProjectNamingStatus,
@@ -37,8 +44,10 @@ from vuzol.storage.types import (
     TaskStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
+from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import AttachmentKind, MessageUpdate, TelegramAttachment
 from vuzol.telegram.ingress import TelegramIngressService
+from vuzol.telegram.projections import FakeTelegramClient
 
 pytestmark = pytest.mark.postgresql
 
@@ -47,6 +56,36 @@ class FakeDownloader:
     async def download(self, file_id: str) -> bytes:
         assert file_id == "telegram-file"
         return b"voice-content"
+
+
+class FakeDiscussionInterpreter:
+    def __init__(self, results: list[DiscussionInterpretation | Exception]) -> None:
+        self.results = results
+        self.requests: list[DiscussionInterpretRequest] = []
+
+    async def interpret_discussion(
+        self, request: DiscussionInterpretRequest
+    ) -> DiscussionInterpretation:
+        self.requests.append(request)
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class BlockingDiscussionInterpreter:
+    def __init__(self, result: DiscussionInterpretation) -> None:
+        self.result = result
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def interpret_discussion(
+        self, request: DiscussionInterpretRequest
+    ) -> DiscussionInterpretation:
+        del request
+        self.started.set()
+        await self.release.wait()
+        return self.result
 
 
 def interpreted_result(
@@ -126,6 +165,259 @@ def test_text_interpretation_persists_draft_and_original_input(
             assert trace is not None
             assert trace.payload["model_task_draft"]["task_type"] == "coding"
             assert trace.payload["duration_ms"] == 2
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_discussion_runtime_persists_turns_reuses_memory_and_delivers_replies(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        base_runtime = telegram_runtime(tmp_path)
+        runtime = base_runtime.model_copy(
+            update={
+                "settings": base_runtime.settings.model_copy(
+                    update={"project_discussion_enabled": True}
+                )
+            }
+        )
+        discussion = FakeDiscussionInterpreter(
+            [
+                DiscussionInterpretation(
+                    interaction_mode="discussion",
+                    confidence=0.91,
+                    user_visible_summary="Давайте сначала уточним цель.",
+                ),
+                DiscussionInterpretation(
+                    interaction_mode="query_only",
+                    confidence=0.88,
+                    user_visible_summary="Цель зафиксирована.",
+                    clarification_question="Какой вариант интерфейса предпочтительнее?",
+                ),
+            ]
+        )
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=FakeInterpreter([]),
+            discussion_interpreter=discussion,
+            owner="interpreter-discussion",
+        )
+        ingress = TelegramIngressService(runtime, factory)
+
+        first = await ingress.accept_message(text_update(151))
+        assert first.task_id is None
+        assert await pipeline.process_one()
+        second = await ingress.accept_message(
+            text_update(152).model_copy(update={"text": "Нужен простой интерфейс"})
+        )
+        assert second.task_id is None
+        assert await pipeline.process_one()
+
+        assert len(discussion.requests) == 2
+        assert discussion.requests[0].memory_pack is not None
+        assert discussion.requests[0].memory_pack.turns == ()
+        assert discussion.requests[1].memory_pack is not None
+        assert [turn.content for turn in discussion.requests[1].memory_pack.turns] == [
+            "inspect this project",
+            "Давайте сначала уточним цель.",
+        ]
+
+        client = FakeTelegramClient(next_message_id=500)
+        delivery = TelegramDeliveryService(
+            factory,
+            client,
+            owner="discussion-delivery",
+            lease_seconds=30,
+            max_attempts=3,
+            retry_min_seconds=1,
+            retry_max_seconds=10,
+        )
+        assert await delivery.deliver_one()
+        assert await delivery.deliver_one()
+        assert not await delivery.deliver_one()
+        assert client.sent == [
+            (-100, 10, "Давайте сначала уточним цель."),
+            (-100, 10, "Цель зафиксирована.\n\nКакой вариант интерфейса предпочтительнее?"),  # noqa: RUF001
+        ]
+
+        async with factory() as session:
+            turns = (
+                await session.scalars(select(ConversationTurn).order_by(ConversationTurn.ordinal))
+            ).all()
+            assert [turn.role for turn in turns] == [
+                ConversationTurnRole.USER,
+                ConversationTurnRole.ASSISTANT,
+                ConversationTurnRole.USER,
+                ConversationTurnRole.ASSISTANT,
+            ]
+            assert await session.scalar(select(func.count()).select_from(Task)) == 0
+            replies = (
+                await session.scalars(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.payload["role"].as_string()
+                        == DISCUSSION_REPLY_DESTINATION
+                    )
+                )
+            ).all()
+            assert len(replies) == 2
+            assert all(item.status is DeliveryStatus.DELIVERED for item in replies)
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_discussion_provider_failure_dead_letters_without_partial_turns_or_tasks(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        base_runtime = telegram_runtime(tmp_path)
+        runtime = base_runtime.model_copy(
+            update={
+                "settings": base_runtime.settings.model_copy(
+                    update={
+                        "project_discussion_enabled": True,
+                        "interpretation": base_runtime.settings.interpretation.model_copy(
+                            update={"max_attempts": 1}
+                        ),
+                    }
+                )
+            }
+        )
+        accepted = await TelegramIngressService(runtime, factory).accept_message(text_update(153))
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=FakeInterpreter([]),
+            discussion_interpreter=FakeDiscussionInterpreter(
+                [InterpreterUnavailable("provider offline")]
+            ),
+            owner="interpreter-discussion",
+        )
+
+        assert accepted.task_id is None
+        assert await pipeline.process_one()
+        async with factory() as session:
+            item = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "discussion_classify"
+                )
+            )
+            assert item is not None
+            assert item.status is DeliveryStatus.DEAD_LETTER
+            assert item.last_error_category == "provider_unavailable"
+            assert await session.scalar(select(func.count()).select_from(ConversationTurn)) == 0
+            assert await session.scalar(select(func.count()).select_from(Task)) == 0
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TransactionalOutbox)
+                    .where(
+                        TransactionalOutbox.payload["role"].as_string()
+                        == DISCUSSION_REPLY_DESTINATION
+                    )
+                )
+                == 0
+            )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_discussion_consumers_preserve_topic_order_and_refresh_memory(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        base_runtime = telegram_runtime(tmp_path)
+        runtime = base_runtime.model_copy(
+            update={
+                "settings": base_runtime.settings.model_copy(
+                    update={"project_discussion_enabled": True}
+                )
+            }
+        )
+        ingress = TelegramIngressService(runtime, factory)
+        await ingress.accept_message(text_update(161))
+        await ingress.accept_message(text_update(162).model_copy(update={"text": "second message"}))
+        first_interpreter = BlockingDiscussionInterpreter(
+            DiscussionInterpretation(
+                interaction_mode="discussion",
+                confidence=0.9,
+                user_visible_summary="first reply",
+            )
+        )
+        second_interpreter = FakeDiscussionInterpreter(
+            [
+                DiscussionInterpretation(
+                    interaction_mode="discussion",
+                    confidence=0.9,
+                    user_visible_summary="second reply",
+                )
+            ]
+        )
+        first_pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=FakeInterpreter([]),
+            discussion_interpreter=first_interpreter,
+            owner="discussion-first",
+        )
+        second_pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=FakeInterpreter([]),
+            discussion_interpreter=second_interpreter,
+            owner="discussion-second",
+        )
+
+        first_processing = asyncio.create_task(first_pipeline.process_one())
+        await first_interpreter.started.wait()
+        assert await second_pipeline.process_one()
+        assert second_interpreter.requests == []
+        async with factory() as session:
+            deferred = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "discussion_classify",
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                )
+            )
+            assert deferred is not None
+            assert deferred.attempt_count == 0
+            assert deferred.last_error_category == "discussion_context_changed"
+        first_interpreter.release.set()
+        assert await first_processing
+
+        async with factory.begin() as session:
+            await session.execute(
+                update(TransactionalOutbox)
+                .where(
+                    TransactionalOutbox.destination == "discussion_classify",
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                )
+                .values(available_at=func.now())
+            )
+        assert await second_pipeline.process_one()
+        assert len(second_interpreter.requests) == 1
+        memory = second_interpreter.requests[0].memory_pack
+        assert memory is not None
+        assert [turn.content for turn in memory.turns] == [
+            "inspect this project",
+            "first reply",
+        ]
+        async with factory() as session:
+            turns = (
+                await session.scalars(select(ConversationTurn).order_by(ConversationTurn.ordinal))
+            ).all()
+            assert [turn.content for turn in turns] == [
+                "inspect this project",
+                "first reply",
+                "second message",
+                "second reply",
+            ]
         await engine.dispose()
 
     asyncio.run(scenario())

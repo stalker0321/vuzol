@@ -118,6 +118,7 @@
       "revision_id": "30000000-0000-0000-0000-000000000003",
       "revision_number": 2,
       "revision_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "session_generation": 2,
       "item_id": "40000000-0000-0000-0000-000000000004",
       "item_local_id": "second-item",
       "opened_by_user_id": 42

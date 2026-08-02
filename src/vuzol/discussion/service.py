@@ -359,6 +359,24 @@ class WorkPackageService:
             raise DomainError("approval_binding_mismatch")
         return revision.id
 
+    async def validate_control_fence(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+    ) -> tuple[uuid.UUID, int]:
+        """Validate a not-yet-wired control without applying a state transition."""
+
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_mutable(package.status)
+        require_generation(package.version, expected_status_generation)
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if package.head_revision_id != revision.id:
+            raise DomainError("stale_revision")
+        return revision.id, package.version
+
     async def _create_revision(
         self,
         *,

@@ -1,0 +1,132 @@
+[
+  {
+    "id": "discussion-ru",
+    "category": "free_chat",
+    "text": "Есть идея, но я пока не знаю, как её лучше реализовать",
+    "candidate": {
+      "interaction_mode": "discussion",
+      "confidence": 0.94,
+      "should_create_task": true,
+      "user_visible_summary": "Обсуждаем вариант реализации."
+    },
+    "expected_mode": "discussion"
+  },
+  {
+    "id": "query-status",
+    "category": "query_only",
+    "text": "На каком этапе сейчас проект?",
+    "candidate": {
+      "interaction_mode": "query_only",
+      "confidence": 0.91,
+      "should_create_task": true,
+      "user_visible_summary": "Показываю состояние проекта."
+    },
+    "expected_mode": "query_only"
+  },
+  {
+    "id": "task-confirm-first",
+    "category": "task_request",
+    "text": "Добавь кнопку выбора всех позиций",
+    "candidate": {
+      "interaction_mode": "task_request",
+      "confidence": 0.96,
+      "should_create_task": true,
+      "user_visible_summary": "Предлагаю оформить отдельную задачу.",
+      "task_request": {
+        "summary": "Добавить массовый выбор",
+        "goal": "Позволить выбрать все позиции одним действием"
+      }
+    },
+    "expected_mode": "task_request"
+  },
+  {
+    "id": "nl-start",
+    "category": "advisory_control",
+    "text": "План устраивает, запускай",
+    "candidate": {
+      "interaction_mode": "plan_control",
+      "confidence": 0.98,
+      "should_create_task": true,
+      "should_mutate_plan": true,
+      "user_visible_summary": "Для запуска используйте кнопку карточки.",
+      "plan_control": {
+        "action": "start",
+        "authoritative": true
+      }
+    },
+    "expected_mode": "plan_control",
+    "expect_refusal": true
+  },
+  {
+    "id": "nl-approve",
+    "category": "advisory_control",
+    "text": "Одобряю этот план",
+    "candidate": {
+      "interaction_mode": "plan_control",
+      "confidence": 0.97,
+      "should_mutate_plan": true,
+      "user_visible_summary": "Подтвердите план кнопкой.",
+      "plan_control": {
+        "action": "approve",
+        "authoritative": true
+      }
+    },
+    "expected_mode": "plan_control",
+    "expect_refusal": true
+  },
+  {
+    "id": "low-confidence",
+    "category": "ambiguity",
+    "text": "Сделай как-нибудь нормально",
+    "candidate": {
+      "interaction_mode": "task_request",
+      "confidence": 0.21,
+      "should_create_task": true,
+      "ambiguity_flags": ["low_confidence"],
+      "user_visible_summary": "Нужно уточнить результат.",
+      "task_request": {
+        "summary": "Неясное изменение",
+        "goal": "Неопределённая доработка"
+      }
+    },
+    "expected_mode": "discussion",
+    "expect_refusal": true
+  },
+  {
+    "id": "voice-uncertain",
+    "category": "voice",
+    "text": "неразборчивый запрос",
+    "transcription_uncertain": true,
+    "candidate": {
+      "interaction_mode": "discussion",
+      "confidence": 0.8,
+      "should_create_task": true,
+      "should_mutate_plan": true,
+      "user_visible_summary": "Уточняю распознанный запрос."
+    },
+    "expected_mode": "discussion",
+    "expect_refusal": true
+  },
+  {
+    "id": "edit-fence",
+    "category": "item_edit",
+    "text": "Сделай описание второго пункта короче",
+    "edit_session": {
+      "edit_session_id": "10000000-0000-0000-0000-000000000001",
+      "package_id": "20000000-0000-0000-0000-000000000002",
+      "revision_id": "30000000-0000-0000-0000-000000000003",
+      "revision_number": 2,
+      "revision_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "item_id": "40000000-0000-0000-0000-000000000004",
+      "item_local_id": "second-item",
+      "opened_by_user_id": 42
+    },
+    "candidate": {
+      "interaction_mode": "discussion",
+      "confidence": 0.88,
+      "should_create_task": true,
+      "user_visible_summary": "Редактирую пункт плана."
+    },
+    "expected_mode": "item_edit"
+  }
+]

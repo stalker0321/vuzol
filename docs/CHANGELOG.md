@@ -4,6 +4,11 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- completed the default-off Project Discussions and Work Packages candidate: fenced discussion
+  plans can be edited and separately approved, then a deterministic materializer creates canonical
+  Tasks sequentially through the existing workflow dispatcher; terminal evidence advances exactly
+  one item, failures pause, and retry remains limited to evidence-gated BLOCKED work. The worker
+  consumer is feature-flagged off by default; no production enablement is claimed;
 - added the default-off B3 restore path: authenticated encrypted-package verification, isolated target
   preflight, supervised `pg_restore`, lock/empty-target safety hooks, and `vuzol-backup restore`;
   dry-run is default and APPLY still requires both configuration permission and explicit

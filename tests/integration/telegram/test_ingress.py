@@ -19,6 +19,7 @@ from vuzol.config import (
 )
 from vuzol.storage.models import (
     ExternalInbox,
+    ProjectDiscussionSession,
     Run,
     Task,
     TelegramIntakeMessage,
@@ -91,6 +92,49 @@ def test_authorized_project_intake_is_atomic_and_duplicate_safe(
             assert await session.scalar(select(func.count()).select_from(ExternalInbox)) == 1
             assert await session.scalar(select(func.count()).select_from(TopicMapping)) == 1
             assert await session.scalar(select(func.count()).select_from(TransactionalOutbox)) == 2
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_enabled_project_discussion_forks_before_task_creation(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        runtime = telegram_runtime(tmp_path)
+        runtime = runtime.model_copy(
+            update={
+                "settings": runtime.settings.model_copy(update={"project_discussion_enabled": True})
+            }
+        )
+        service = TelegramIngressService(runtime, factory)
+        first = await service.accept_message(message(501, 601, text="есть идея по интерфейсу"))
+        duplicate = await service.accept_message(message(501, 601, text="есть идея по интерфейсу"))
+
+        assert first.status is IngressStatus.HANDLED
+        assert first.task_id is None and first.intake_id is not None
+        assert duplicate.status is IngressStatus.DUPLICATE
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(Task)) == 0
+            assert (
+                await session.scalar(select(func.count()).select_from(ProjectDiscussionSession))
+                == 1
+            )
+            intake = await session.get(TelegramIntakeMessage, first.intake_id)
+            assert intake is not None
+            assert intake.task_id is None
+            assert intake.affinity_kind == "discussion"
+            items = (
+                await session.scalars(
+                    select(TransactionalOutbox).order_by(TransactionalOutbox.created_at)
+                )
+            ).all()
+            assert [(item.destination, item.operation_type) for item in items] == [
+                ("discussion_classify", "classify_intake")
+            ]
+            assert items[0].payload["project_id"] == "vuzol"
         await engine.dispose()
 
     asyncio.run(scenario())

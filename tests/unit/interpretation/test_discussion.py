@@ -146,6 +146,7 @@ def test_open_edit_session_forces_fenced_item_edit() -> None:
         revision_id=uuid.uuid4(),
         revision_number=2,
         revision_hash="a" * 64,
+        session_generation=2,
         item_id=uuid.uuid4(),
         item_local_id="ui",
         opened_by_user_id=42,
@@ -174,6 +175,7 @@ def test_open_edit_session_replaces_model_invented_fences() -> None:
         package_id=uuid.uuid4(),
         revision_number=3,
         revision_hash="b" * 64,
+        session_generation=3,
         item_id=uuid.uuid4(),
         opened_by_user_id=42,
     )
@@ -219,6 +221,7 @@ def test_model_item_edit_without_users_open_session_is_refused(
             package_id=uuid.uuid4(),
             revision_number=1,
             revision_hash="a" * 64,
+            session_generation=1,
             item_id=uuid.uuid4(),
             opened_by_user_id=session_owner,
         )
@@ -277,6 +280,7 @@ def test_request_carries_bounded_memory_plan_snapshot_and_override() -> None:
             revision_id=uuid.uuid4(),
             revision_number=2,
             revision_hash="a" * 64,
+            status_generation=3,
             title="Telegram UI",
             items=(
                 PlanSnapshotItem(
@@ -345,6 +349,7 @@ def test_revision_plan_request_uses_only_injected_snapshot_fence() -> None:
         revision_id=uuid.uuid4(),
         revision_number=4,
         revision_hash="c" * 64,
+        status_generation=5,
         title="Current plan",
     )
     candidate = envelope(

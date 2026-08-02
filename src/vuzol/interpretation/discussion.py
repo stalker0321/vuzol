@@ -118,6 +118,7 @@ class EditSessionContext(FrozenModel):
     revision_id: uuid.UUID | None = None
     revision_number: int = Field(ge=1)
     revision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    session_generation: int = Field(ge=1)
     item_id: uuid.UUID
     item_local_id: str | None = Field(default=None, max_length=64)
     opened_by_user_id: int
@@ -135,6 +136,7 @@ class PlanSnapshot(FrozenModel):
     revision_id: uuid.UUID
     revision_number: int = Field(ge=1)
     revision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status_generation: int = Field(ge=1)
     title: str = Field(min_length=1, max_length=240)
     items: tuple[PlanSnapshotItem, ...] = Field(default=(), max_length=20)
 

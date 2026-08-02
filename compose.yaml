@@ -132,6 +132,7 @@ services:
     volumes:
       - ${VUZOL_REGISTRY_FILE_HOST:-./config/registries.example.toml}:/app/config/registries.toml:ro
       - ${VUZOL_REGISTRY_OVERLAY_FILE_HOST:-./config/projects.empty.json}:/app/config/projects.json:ro
+      - ${VUZOL_REPOSITORY_ROOT_HOST:-./repositories}:/srv/vuzol/repositories:ro
       - artifact-data:/srv/vuzol/artifacts
     depends_on:
       postgres:

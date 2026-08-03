@@ -167,6 +167,29 @@ def test_grok_adapter_rejects_invalid_discussion_agent_reply() -> None:
         _step09a_structured_output(request, json.dumps({"summary": "wrong field"}))
 
 
+def test_grok_adapter_accepts_plain_discussion_reply() -> None:
+    from vuzol.providers.grok import _step09a_structured_output
+
+    request = provider_request().model_copy(
+        update={"output_schema_version": "discussion-agent-reply.v1"}
+    )
+    assert _step09a_structured_output(request, "  Обычный ответ Grok.  ") == {
+        "reply": "Обычный ответ Grok."
+    }
+
+
+def test_grok_adapter_bounds_plain_discussion_reply() -> None:
+    from vuzol.providers.grok import _step09a_structured_output
+
+    request = provider_request().model_copy(
+        update={"output_schema_version": "discussion-agent-reply.v1"}
+    )
+    result = _step09a_structured_output(request, "слово " * 700)
+    assert result is not None
+    assert len(str(result["reply"])) <= 3_500
+    assert str(result["reply"]).endswith("…")
+
+
 @pytest.mark.anyio
 async def test_grok_adapter_fails_closed_for_invalid_execution(tmp_path: Path) -> None:
     configured = profile(

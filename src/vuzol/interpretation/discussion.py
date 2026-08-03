@@ -182,7 +182,14 @@ class DiscussionInterpretation(FrozenModel):
     should_emit_user_message: bool = True
     ambiguity_flags: frozenset[AmbiguityFlag] = frozenset()
     refusal_code: RefusalCode | None = None
-    user_visible_summary: str = Field(min_length=1, max_length=1_000)
+    user_visible_summary: str = Field(
+        min_length=1,
+        max_length=1_000,
+        description=(
+            "The actual assistant reply shown to the user. Answer directly and contribute "
+            "concrete ideas or a recommendation; never describe this as the user's proposal."
+        ),
+    )
     clarification_question: str | None = Field(default=None, max_length=1_000)
     decision_candidates: tuple[DecisionCandidate, ...] = Field(default=(), max_length=20)
     plan_request: PlanRequestPayload | None = None

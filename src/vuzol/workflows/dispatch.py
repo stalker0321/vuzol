@@ -11,6 +11,7 @@ from vuzol.interpretation.domain import TaskAction, TaskDraft, TaskType
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, dead_letter_outbox_item
 from vuzol.storage.models import (
     Interpretation,
+    MaterializationLink,
     ProjectNamingRequest,
     Run,
     Step,
@@ -29,7 +30,7 @@ from vuzol.storage.types import (
 from vuzol.telegram.projections import enqueue_project_status_dashboard
 from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.controls import cancel_task, pause_task, resume_task
-from vuzol.workflows.service import materialize_run
+from vuzol.workflows.service import materialize_run, start_run
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
 POLICY_REVISION = hashlib.sha256(b"step-06-workflow-policy-v1").hexdigest()
@@ -117,6 +118,15 @@ class WorkflowDispatcher:
                 interpretation_id=interpretation.id,
                 configured_workflow=configured,
             )
+            package_owned = (
+                await session.scalar(
+                    select(MaterializationLink.id).where(MaterializationLink.task_id == task.id)
+                )
+                is not None
+            )
+            automatic_start = (
+                self._runtime.settings.interpretation.automatic_execution_enabled or package_owned
+            )
             run = await materialize_run(
                 session,
                 task_id=task.id,
@@ -124,8 +134,12 @@ class WorkflowDispatcher:
                 configuration_revision=self._runtime.registries.revision,
                 policy_revision=POLICY_REVISION,
                 prompt_revision=interpretation.prompt_version,
-                automatic_start=self._runtime.settings.interpretation.automatic_execution_enabled,
+                automatic_start=automatic_start,
             )
+            # Also repairs a run materialized by an older dispatcher before package
+            # start provenance was recognized.
+            if automatic_start and run.status is RunStatus.CREATED:
+                await start_run(session, run, task=task, actor_type="workflow_manager")
             await self._enqueue_task_projection(session, task, run)
             return
         if draft.action is TaskAction.CONTINUE_TASK:

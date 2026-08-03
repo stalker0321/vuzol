@@ -17,11 +17,26 @@ USER_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/user/vuzol-rootless-docker.servic
 LEGACY_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/vuzol-rootless-docker.service"
 EXECUTOR_UNIT = REPO_ROOT / "deploy/systemd/vuzol-executor.service"
 APPLIER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-applier.service"
+STATIC_PUBLISHER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-static-publisher.service"
+STATIC_PUBLISHER_TIMER = REPO_ROOT / "deploy/systemd/vuzol-static-publisher.timer"
 WORKER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-worker.service"
 TELEGRAM_UNITS = (
     REPO_ROOT / "deploy/systemd/vuzol-telegram.service",
     REPO_ROOT / "deploy/systemd/vuzol-telegram-delivery.service",
 )
+
+
+def test_static_publisher_is_unprivileged_and_path_fenced() -> None:
+    service = _read(STATIC_PUBLISHER_UNIT)
+    timer = _read(STATIC_PUBLISHER_TIMER)
+    assert "User=vuzol-publisher" in service
+    assert "NoNewPrivileges=true" in service
+    assert "ProtectSystem=strict" in service
+    assert "ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol/static-sites.json" in service
+    assert "ReadWritePaths=/srv/vuzol/sites" in service
+    assert "/var/www" not in service
+    assert "OnUnitActiveSec=15s" in timer
+    assert "Persistent=true" in timer
 
 
 def _read(p: Path) -> str:

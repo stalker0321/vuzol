@@ -1,0 +1,12 @@
+[Unit]
+Description=Publish changed Vuzol static projects
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=15s
+AccuracySec=2s
+Persistent=true
+Unit=vuzol-static-publisher.service
+
+[Install]
+WantedBy=timers.target

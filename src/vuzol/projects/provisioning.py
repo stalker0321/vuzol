@@ -17,6 +17,7 @@ from vuzol.config import (
     DeliveryMode,
     RegistryDocument,
     RuntimeConfiguration,
+    StaticDeploymentConfig,
     TopicConfig,
     TopicKind,
     build_bundle,
@@ -63,6 +64,7 @@ class FixedSystemdReloader:
         "vuzol-executor.service",
         "vuzol-worker.service",
         "vuzol-applier.service",
+        "vuzol-static-publisher-worker.service",
         "vuzol-telegram.service",
         "vuzol-telegram-delivery.service",
     )
@@ -126,6 +128,7 @@ class RegistryOverlayWriter:
                         "approval_required": frozenset({DeliveryMode.APPLY}),
                     }
                 ),
+                "static_deployment": StaticDeploymentConfig(url_path=provisioning.project_id),
             }
         )
         topic = TopicConfig(

@@ -35,6 +35,7 @@ vuzol-experiment = "vuzol.cli.experiment:main"
 vuzol-retention = "vuzol.cli.retention:main"
 vuzol-backup = "vuzol.cli.backup:main"
 vuzol-static-publisher = "vuzol.ops.static_publish:main"
+vuzol-static-publisher-worker = "vuzol.cli.static_publisher_worker:main"
 
 [dependency-groups]
 dev = [

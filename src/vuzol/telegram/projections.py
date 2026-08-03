@@ -164,6 +164,7 @@ _STEP_TYPE_LABELS = {
     "validate": "Проверка",
     "review": "Ревью",
     "approval": "Решение / апрув",
+    "publish_static": "Публикация прототипа",
     "execute_agent": "Агент",
     "research_execute": "Исследование",
     "synthesize": "Синтез",
@@ -612,6 +613,7 @@ async def build_task_history_report(
     tokens_in, tokens_out, tokens_cached = await _history_token_totals(session, task.id)
     work_seconds = await _history_work_seconds(session, task)
     worker = await _task_worker_label(session, task.id)
+    preview_url = await _published_preview_url(session, task.id)
 
     number = task_number_label(task)
     lines = [
@@ -633,6 +635,9 @@ async def build_task_history_report(
         lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
     if worker is not None:
         lines.append(f"<b>Исполнитель:</b> {telegram_html(worker)}")
+    if preview_url is not None:
+        escaped_url = telegram_html(preview_url)
+        lines.append(f'<b>Прототип:</b> <a href="{escaped_url}">Открыть</a>')
     lines.extend(
         (
             "",
@@ -1338,6 +1343,10 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     if task.status is TaskStatus.COMPLETED:
         report, agent_checks, gates = await _completion_report(session, task)
         lines.extend(("", "<b>Отчёт о выполнении</b>", telegram_html(report)))
+        preview_url = await _published_preview_url(session, task.id)
+        if preview_url is not None:
+            escaped_url = telegram_html(preview_url)
+            lines.append(f'<b>Прототип:</b> <a href="{escaped_url}">{escaped_url}</a>')
         if agent_checks:
             lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
             lines.extend(_agent_check_html(check) for check in agent_checks)
@@ -1377,6 +1386,25 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         buttons=buttons,
         approval_id=approval.id if approval is not None else None,
     )
+
+
+async def _published_preview_url(session: AsyncSession, task_id: uuid.UUID) -> str | None:
+    step = await session.scalar(
+        select(Step)
+        .join(Run, Step.run_id == Run.id)
+        .where(
+            Run.task_id == task_id,
+            Step.step_type == "publish_static",
+            Step.status == StepStatus.COMPLETED,
+            Step.result.is_not(None),
+        )
+        .order_by(Run.created_at.desc(), Step.ordinal.desc())
+        .limit(1)
+    )
+    raw_result = getattr(step, "result", None)
+    result = raw_result if isinstance(raw_result, dict) else {}
+    url = result.get("public_url")
+    return url if result.get("status") == "published" and isinstance(url, str) else None
 
 
 async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> StatusCard:

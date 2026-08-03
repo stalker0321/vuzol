@@ -106,7 +106,17 @@ WORKFLOW_DEFINITIONS: tuple[WorkflowDefinition, ...] = (
                 timeout=120,
                 attempts=2,
             ),
-            _step("finalize", "approve_result", queue=QueueClass.CONTROL, internal=True),
+            _step(
+                "publish_static",
+                "approve_result",
+                queue=QueueClass.LIGHT,
+                capabilities=frozenset({Capability.FILESYSTEM_WRITE}),
+                retry=RetryClass.TRANSIENT,
+                idempotency=IdempotencyClass.IDEMPOTENT,
+                timeout=120,
+                attempts=3,
+            ),
+            _step("finalize", "publish_static", queue=QueueClass.CONTROL, internal=True),
         ),
     ),
     WorkflowDefinition(

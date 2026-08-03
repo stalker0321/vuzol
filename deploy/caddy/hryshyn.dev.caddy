@@ -1,0 +1,19 @@
+example.com, www.example.com {
+	@projectExact path_regexp projectExact ^/([a-z][a-z0-9-]{0,62})$
+	redir @projectExact {http.request.uri.path}/ 308
+
+	@project path_regexp project ^/([a-z][a-z0-9-]{0,62})/(.*)$
+	handle @project {
+		uri strip_prefix /{re.project.1}
+		root * /srv/vuzol/sites/example.com/{re.project.1}/current
+		encode gzip zstd
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+
+	handle {
+		root * /var/www/example.com
+		encode gzip zstd
+		file_server
+	}
+}

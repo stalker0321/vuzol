@@ -9,6 +9,7 @@ from vuzol.config import (
     NetworkPolicy,
     ProviderProfileConfig,
     SandboxProfileConfig,
+    StaticDeploymentConfig,
     TopicConfig,
 )
 
@@ -83,6 +84,15 @@ def test_git_delivery_approval_must_be_allowed() -> None:
             allowed_modes=frozenset({DeliveryMode.RETAIN}),
             approval_required=frozenset({DeliveryMode.PUSH}),
         )
+
+
+def test_static_deployment_paths_are_relative_and_bounded() -> None:
+    configured = StaticDeploymentConfig(url_path="bill-buddy")
+    assert configured.entrypoint == Path("index.html")
+    with pytest.raises(ValidationError, match="stay relative"):
+        StaticDeploymentConfig(url_path="bill-buddy", source_directory=Path("../secret"))
+    with pytest.raises(ValidationError, match="include list"):
+        StaticDeploymentConfig(url_path="bill-buddy", include=())
 
 
 def test_enabled_profile_requires_credential_reference() -> None:

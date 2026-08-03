@@ -147,6 +147,7 @@ async def test_fixed_systemd_reloader_uses_only_bounded_units(
         "vuzol-executor.service",
         "vuzol-worker.service",
         "vuzol-applier.service",
+        "vuzol-static-publisher-worker.service",
         "vuzol-telegram.service",
         "vuzol-telegram-delivery.service",
         stdout=asyncio.subprocess.DEVNULL,

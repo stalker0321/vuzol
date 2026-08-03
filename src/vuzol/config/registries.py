@@ -259,6 +259,8 @@ class ConfigurationBundle(BaseModel):
                     reasons.append(f"project network policy changed: {current_project.id}")
                 if current_project.git_delivery != snapshot.project.git_delivery:
                     reasons.append(f"project delivery policy changed: {current_project.id}")
+                if current_project.static_deployment != snapshot.project.static_deployment:
+                    reasons.append(f"project static deployment changed: {current_project.id}")
                 removed = (
                     snapshot.project.allowed_capabilities - current_project.allowed_capabilities
                 )

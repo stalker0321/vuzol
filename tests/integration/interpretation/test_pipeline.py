@@ -38,6 +38,7 @@ from vuzol.storage.models import (
     TelegramIntakeMessage,
     TopicMapping,
     TransactionalOutbox,
+    WorkPackage,
 )
 from vuzol.storage.records import LeaseToken, StepRecord
 from vuzol.storage.types import (
@@ -365,6 +366,80 @@ def test_discussion_runtime_hands_user_turn_to_hidden_project_agent(
             CancellationContext(),
         )
         assert missing_task.category == "discussion_task_invalid"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_plan_request_materializes_package_and_queues_card_without_classifier_summary(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        base_runtime = telegram_runtime(tmp_path)
+        runtime = base_runtime.model_copy(
+            update={
+                "settings": base_runtime.settings.model_copy(
+                    update={"project_discussion_enabled": True}
+                )
+            }
+        )
+        result = DiscussionInterpretation(
+            interaction_mode=InteractionMode.PLAN_REQUEST,
+            confidence=0.95,
+            should_mutate_plan=True,
+            user_visible_summary="internal classifier summary",
+            plan_request={  # type: ignore[arg-type]
+                "intent": "create_draft",
+                "title": "Bill Buddy MVP",
+                "items": [
+                    {
+                        "local_id": "prototype",
+                        "summary": "Build interactive prototype",
+                        "goal": "Implement the agreed bill-splitting UX",
+                        "expected_outcome": "A usable static prototype",
+                        "completion_criteria": ["Trusted checks pass"],
+                        "allowed_scope": "index.html, app.js, styles.css",
+                        "trusted_checks": ["make test"],
+                        "suggested_risk": "low",
+                        "needs_approval": True,
+                        "estimated_complexity": "medium",
+                    }
+                ],
+            },
+        )
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=FakeInterpreter([]),
+            discussion_interpreter=FakeDiscussionInterpreter([result]),
+            owner="interpreter-plan",
+        )
+        ingress = TelegramIngressService(runtime, factory)
+        accepted = await ingress.accept_message(
+            text_update(152).model_copy(
+                update={"text": "Оформи согласованный план как пакет задач"}
+            )
+        )
+
+        assert accepted.task_id is None
+        assert await pipeline.process_one()
+        async with factory() as session:
+            package = await session.scalar(select(WorkPackage))
+            projection = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "work_package_projection"
+                )
+            )
+            leaked_summary = await session.scalar(
+                select(ConversationTurn).where(
+                    ConversationTurn.content == "internal classifier summary"
+                )
+            )
+            assert package is not None and package.title == "Bill Buddy MVP"
+            assert projection is not None
+            assert projection.linked_entity_id == package.id
+            assert leaked_summary is None
         await engine.dispose()
 
     asyncio.run(scenario())

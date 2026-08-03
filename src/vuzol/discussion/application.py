@@ -95,53 +95,15 @@ class DiscussionPlanApplicationService:
         plan = plan_draft_from_interpretation(result)
         intent = result.plan_request.intent
         async with UnitOfWork(self._factory) as uow:
-            service = WorkPackageService(uow)
-            if intent is PlanRequestIntent.CREATE_DRAFT:
-                revision_result = await service.create_draft(
-                    session_id=session_id,
-                    project_id=request.project_id,
-                    plan=plan,
-                    created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
-                    actor_type="planner_model",
-                    planner_profile=planner_profile,
-                    prompt_version=result.prompt_version,
-                )
-                await _enqueue_plan_projection(uow, revision_result)
-                return revision_result
-            if intent is PlanRequestIntent.EDIT_ITEM:
-                raise DomainError("edit_session_required")
-            snapshot = request.plan_snapshot
-            if snapshot is None:
-                raise DomainError("stale_revision")
-            if (
-                result.plan_request.base_revision_id != snapshot.revision_id
-                or result.plan_request.base_revision_hash != snapshot.revision_hash
-            ):
-                raise DomainError("stale_revision")
-            package = await uow.work_packages.get_package(snapshot.package_id, for_update=True)
-            if package.session_id != session_id or package.project_id != request.project_id:
-                raise DomainError("package_context_mismatch")
-            try:
-                revision = await uow.work_packages.get_fenced_revision(
-                    package_id=snapshot.package_id,
-                    revision_number=snapshot.revision_number,
-                    h8=snapshot.revision_hash[:8],
-                )
-            except LookupError as error:
-                raise DomainError("stale_revision") from error
-            if revision.id != snapshot.revision_id or package.head_revision_id != revision.id:
-                raise DomainError("stale_revision")
-            revision_result = await service.revise_draft(
-                package_id=snapshot.package_id,
-                expected_status_generation=snapshot.status_generation,
-                plan=plan,
-                created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
-                actor_type="planner_model",
+            return await apply_plan_request_in_uow(
+                uow,
+                session_id=session_id,
+                request=request,
+                result=result,
                 planner_profile=planner_profile,
-                prompt_version=result.prompt_version,
+                plan=plan,
+                intent=intent,
             )
-            await _enqueue_plan_projection(uow, revision_result)
-            return revision_result
 
     async def apply_item_edit(
         self,
@@ -187,7 +149,7 @@ class DiscussionPlanApplicationService:
                 replacement=replacement,
                 user_id=request.user_id,
             )
-            await _enqueue_plan_projection(uow, revision_result)
+            await enqueue_plan_projection(uow, revision_result)
             return revision_result
 
     def _require_enabled(self) -> None:
@@ -195,7 +157,72 @@ class DiscussionPlanApplicationService:
             raise DomainError("project_discussion_disabled")
 
 
-async def _enqueue_plan_projection(uow: UnitOfWork, result: RevisionResult) -> None:
+async def apply_plan_request_in_uow(
+    uow: UnitOfWork,
+    *,
+    session_id: uuid.UUID,
+    request: DiscussionInterpretRequest,
+    result: DiscussionInterpretation,
+    planner_profile: str | None = None,
+    plan: PlanDraft | None = None,
+    intent: PlanRequestIntent | None = None,
+) -> RevisionResult:
+    """Materialize an already policy-fenced plan in the caller's transaction."""
+
+    if result.plan_request is None or not result.should_mutate_plan:
+        raise DomainError("plan_mutation_not_authorized")
+    effective_plan = plan or plan_draft_from_interpretation(result)
+    effective_intent = intent or result.plan_request.intent
+    service = WorkPackageService(uow)
+    if effective_intent is PlanRequestIntent.CREATE_DRAFT:
+        revision_result = await service.create_draft(
+            session_id=session_id,
+            project_id=request.project_id,
+            plan=effective_plan,
+            created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+            actor_type="planner_model",
+            planner_profile=planner_profile,
+            prompt_version=result.prompt_version,
+        )
+        await enqueue_plan_projection(uow, revision_result)
+        return revision_result
+    if effective_intent is PlanRequestIntent.EDIT_ITEM:
+        raise DomainError("edit_session_required")
+    snapshot = request.plan_snapshot
+    if snapshot is None:
+        raise DomainError("stale_revision")
+    if (
+        result.plan_request.base_revision_id != snapshot.revision_id
+        or result.plan_request.base_revision_hash != snapshot.revision_hash
+    ):
+        raise DomainError("stale_revision")
+    package = await uow.work_packages.get_package(snapshot.package_id, for_update=True)
+    if package.session_id != session_id or package.project_id != request.project_id:
+        raise DomainError("package_context_mismatch")
+    try:
+        revision = await uow.work_packages.get_fenced_revision(
+            package_id=snapshot.package_id,
+            revision_number=snapshot.revision_number,
+            h8=snapshot.revision_hash[:8],
+        )
+    except LookupError as error:
+        raise DomainError("stale_revision") from error
+    if revision.id != snapshot.revision_id or package.head_revision_id != revision.id:
+        raise DomainError("stale_revision")
+    revision_result = await service.revise_draft(
+        package_id=snapshot.package_id,
+        expected_status_generation=snapshot.status_generation,
+        plan=effective_plan,
+        created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+        actor_type="planner_model",
+        planner_profile=planner_profile,
+        prompt_version=result.prompt_version,
+    )
+    await enqueue_plan_projection(uow, revision_result)
+    return revision_result
+
+
+async def enqueue_plan_projection(uow: UnitOfWork, result: RevisionResult) -> None:
     await uow.outbox.enqueue(
         destination="work_package_projection",
         operation_type="render_plan",

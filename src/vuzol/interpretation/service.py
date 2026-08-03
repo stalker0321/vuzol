@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, RuntimeConfiguration, TopicKind
 from vuzol.discussion.agent import DISCUSSION_INTERNAL_TASK_TYPE, schedule_discussion_agent
+from vuzol.discussion.application import apply_plan_request_in_uow
+from vuzol.discussion.domain import DomainError
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.interpretation.discussion import (
     DISCUSSION_CLASSIFY_DESTINATION,
@@ -374,6 +376,23 @@ class InterpretationPipeline:
                     classifier_confidence=result.confidence,
                     memory_pack=fresh_memory,
                 )
+                await complete_outbox_item(uow.session, token)
+                return
+            if (
+                result.interaction_mode is InteractionMode.PLAN_REQUEST
+                and result.should_mutate_plan
+            ):
+                try:
+                    await apply_plan_request_in_uow(
+                        uow,
+                        session_id=session_id,
+                        request=request,
+                        result=result,
+                        planner_profile=getattr(self._discussion_interpreter, "profile_id", None),
+                    )
+                except DomainError as error:
+                    raise PermanentPipelineError(f"discussion_plan_{error}") from error
+                assert uow.session is not None
                 await complete_outbox_item(uow.session, token)
                 return
             assistant_turn_id, _ = await memory.append_turn(

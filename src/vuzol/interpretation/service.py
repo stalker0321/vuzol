@@ -56,6 +56,7 @@ from vuzol.storage.leasing import (
 from vuzol.storage.models import (
     Artifact,
     ClarificationDecision,
+    ConversationTurn,
     EditSession,
     Interpretation,
     PlanRevision,
@@ -346,17 +347,30 @@ class InterpretationPipeline:
             if current.version != expected_session_version:
                 raise DiscussionContextChanged
             memory = DiscussionMemoryService(uow)
-            user_turn_id, _ = await memory.append_turn(
-                session_id=session_id,
-                role=ConversationTurnRole.USER,
-                source=ConversationTurnSource.TELEGRAM_USER,
-                content=intake.original_text,
-                classifier_mode=result.interaction_mode,
-                classifier_confidence=Decimal(str(result.confidence)),
-                classifier_prompt_version=result.prompt_version,
-                should_create_task=result.should_create_task,
-                intake_message_id=intake.id,
+            assert uow.session is not None
+            existing_user_turn = await uow.session.scalar(
+                select(ConversationTurn).where(ConversationTurn.intake_message_id == intake.id)
             )
+            if existing_user_turn is None:
+                user_turn_id, _ = await memory.append_turn(
+                    session_id=session_id,
+                    role=ConversationTurnRole.USER,
+                    source=ConversationTurnSource.TELEGRAM_USER,
+                    content=intake.original_text,
+                    classifier_mode=result.interaction_mode,
+                    classifier_confidence=Decimal(str(result.confidence)),
+                    classifier_prompt_version=result.prompt_version,
+                    should_create_task=result.should_create_task,
+                    intake_message_id=intake.id,
+                )
+            elif (
+                existing_user_turn.session_id != session_id
+                or existing_user_turn.role is not ConversationTurnRole.USER
+                or existing_user_turn.content != intake.original_text.strip()
+            ):
+                raise PermanentPipelineError("discussion_turn_idempotency_conflict")
+            else:
+                user_turn_id = existing_user_turn.id
             if result.interaction_mode in {
                 InteractionMode.DISCUSSION,
                 InteractionMode.QUERY_ONLY,

@@ -239,9 +239,13 @@ class ProviderStepHandler:
             await self._retain_active_worktree(request)
             return StepOutcome(
                 kind=(
-                    OutcomeKind.TRANSIENT_FAILURE
-                    if failure.retryable
-                    else OutcomeKind.PERMANENT_FAILURE
+                    OutcomeKind.BLOCKED
+                    if failure.category is ProviderErrorCategory.CANCELLED
+                    else (
+                        OutcomeKind.TRANSIENT_FAILURE
+                        if failure.retryable
+                        else OutcomeKind.PERMANENT_FAILURE
+                    )
                 ),
                 result={},
                 category=failure.category.value,

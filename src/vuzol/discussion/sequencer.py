@@ -119,7 +119,12 @@ class WorkPackageSequencer:
         task = await self._uow.session.get(Task, task_id)
         if task is None:
             raise DomainError("materialized_task_missing")
-        if task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED}:
+        if task.status not in {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.QUOTA_EXHAUSTED,
+        }:
             raise DomainError("task_not_terminal")
         if (
             package.status is not WorkPackageStatus.RUNNING
@@ -134,13 +139,17 @@ class WorkPackageSequencer:
                 package.status is WorkPackageStatus.COMPLETED,
             )
         revision = await self._uow.work_packages.get_revision(link.plan_revision_id)
-        if task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+        if task.status in {
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.QUOTA_EXHAUSTED,
+        }:
             package.status = WorkPackageStatus.PAUSED
             from vuzol.storage.types import WorkPackagePauseReason
 
             package.pause_reason = (
                 WorkPackagePauseReason.ITEM_BLOCKED
-                if task.status is TaskStatus.BLOCKED
+                if task.status in {TaskStatus.BLOCKED, TaskStatus.QUOTA_EXHAUSTED}
                 else WorkPackagePauseReason.ITEM_FAILED
             )
             package.last_failure_task_id = task.id

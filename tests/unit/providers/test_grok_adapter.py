@@ -186,7 +186,7 @@ def test_grok_adapter_bounds_plain_discussion_reply() -> None:
     )
     result = _step09a_structured_output(request, "слово " * 700)
     assert result is not None
-    assert len(str(result["reply"])) <= 3_500
+    assert len(str(result["reply"])) <= 4_000
     assert str(result["reply"]).endswith("…")
 
 

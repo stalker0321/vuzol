@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, RuntimeConfiguration, TopicKind
+from vuzol.discussion.agent import DISCUSSION_INTERNAL_TASK_TYPE, schedule_discussion_agent
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.interpretation.discussion import (
     DISCUSSION_CLASSIFY_DESTINATION,
@@ -67,10 +68,12 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import (
+    USER_TERMINAL_TASK_STATUSES,
     ConversationTurnRole,
     ConversationTurnSource,
     DeliveryStatus,
     EditSessionStatus,
+    InteractionMode,
     ProjectNamingStatus,
     TaskStatus,
 )
@@ -271,6 +274,17 @@ class InterpretationPipeline:
             )
             if older_unfinished is not None:
                 raise DiscussionContextChanged
+            active_agent = await session.scalar(
+                select(Task.id)
+                .where(
+                    Task.task_type == DISCUSSION_INTERNAL_TASK_TYPE,
+                    Task.task_draft["discussion_session_id"].as_string() == str(session_id),
+                    Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
+                )
+                .limit(1)
+            )
+            if active_agent is not None:
+                raise DiscussionContextChanged
         async with UnitOfWork(self._factory) as uow:
             try:
                 discussion = await uow.discussions.get_session(session_id)
@@ -341,6 +355,27 @@ class InterpretationPipeline:
                 should_create_task=result.should_create_task,
                 intake_message_id=intake.id,
             )
+            if result.interaction_mode in {
+                InteractionMode.DISCUSSION,
+                InteractionMode.QUERY_ONLY,
+            }:
+                assert uow.session is not None
+                fresh_memory = await memory.load_context(session_id=session_id)
+                await schedule_discussion_agent(
+                    uow.session,
+                    runtime=self._runtime,
+                    session_id=session_id,
+                    source_turn_id=user_turn_id,
+                    project_id=project_id,
+                    chat_id=intake.chat_id,
+                    thread_id=intake.message_thread_id,
+                    user_id=intake.user_id,
+                    interaction_mode=result.interaction_mode,
+                    classifier_confidence=result.confidence,
+                    memory_pack=fresh_memory,
+                )
+                await complete_outbox_item(uow.session, token)
+                return
             assistant_turn_id, _ = await memory.append_turn(
                 session_id=session_id,
                 role=ConversationTurnRole.ASSISTANT,

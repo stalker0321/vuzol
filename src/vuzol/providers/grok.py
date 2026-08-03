@@ -236,13 +236,20 @@ class GrokProviderCancelled(ValueError):
 
 
 def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str, object] | None:
+    from pydantic import ValidationError
+
+    if request.output_schema_version == "discussion-agent-reply.v1":
+        from vuzol.discussion.agent import DiscussionAgentReply
+
+        try:
+            return DiscussionAgentReply.model_validate_json(value).model_dump(mode="json")
+        except ValidationError as error:
+            raise ValueError("invalid discussion agent reply") from error
     if request.output_schema_version not in {
         "step09a-worker-edit-report.v1",
         "step09a-worker-result.v1",
     }:
         return None
-    from pydantic import ValidationError
-
     from vuzol.experiments.domain import WorkerEditReport, WorkerResultManifest
 
     try:

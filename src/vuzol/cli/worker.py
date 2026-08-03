@@ -17,6 +17,7 @@ from vuzol.config import (
     ScopedSecretResolver,
     get_runtime_configuration,
 )
+from vuzol.discussion.agent import DeliverDiscussionReplyHandler
 from vuzol.discussion.sequencer import WorkPackageSequenceConsumer
 from vuzol.execution.git import LocalGit
 from vuzol.observability import configure_logging, get_logger
@@ -141,6 +142,7 @@ async def run() -> None:
             )
         handlers = {
             **BASE_INTERNAL_HANDLERS,
+            "deliver_discussion_reply": DeliverDiscussionReplyHandler(factory),
             "review": ResultReviewHandler(
                 factory,
                 LocalGit(),

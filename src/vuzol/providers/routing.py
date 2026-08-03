@@ -376,7 +376,7 @@ async def claim_routed_step(
         step.payload = next_payload
         await session.flush()
         await session.refresh(step, attribute_names=["heartbeat_at", "lease_expires_at"])
-        if task.source_chat_id:
+        if task.source_chat_id and task.task_type != "discussion_agent_internal":
             await enqueue_project_status_dashboard(session, task.source_chat_id)
         return LeaseToken(step=step_record(step), owner=owner, generation=step.lease_generation)
     return None

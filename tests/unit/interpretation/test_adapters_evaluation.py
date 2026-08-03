@@ -146,9 +146,7 @@ def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
         async def handler(provider_request: httpx.Request) -> httpx.Response:
             body = json.loads(provider_request.content)
             assert "do not execute" in body["messages"][0]["content"]
-            assert "actual assistant message" in body["messages"][0]["content"]
-            assert "use memory_pack" in body["messages"][0]["content"]
-            assert "propose viable approaches" in body["messages"][0]["content"]
+            assert "separate project-pinned worker" in body["messages"][0]["content"]
             user_payload = json.loads(body["messages"][1]["content"])
             assert user_payload["prompt_version"] == "project-discussion-v1"
             assert user_payload["input"]["project_id"] == "vuzol"
@@ -156,7 +154,7 @@ def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
             reply_schema = user_payload["discussion_schema"]["properties"][
                 "user_visible_summary"
             ]
-            assert "concrete ideas" in reply_schema["description"]
+            assert "not the project worker" in reply_schema["description"]
             return httpx.Response(
                 200,
                 json={

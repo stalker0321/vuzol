@@ -108,6 +108,66 @@ async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> Non
 
 
 @pytest.mark.anyio
+async def test_grok_adapter_validates_discussion_agent_reply(tmp_path: Path) -> None:
+    class DiscussionTransport(FakeCodexTransport):
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            self.invocations.append(invocation)
+            return CodexProcessResult(
+                0,
+                "\n".join(
+                    (
+                        json.dumps(
+                            {
+                                "type": "text",
+                                "data": json.dumps({"reply": "Предлагаю два варианта."}),
+                            }
+                        ),
+                        json.dumps({"type": "end", "stopReason": "EndTurn", "usage": {}}),
+                    )
+                ),
+                "",
+                10,
+            )
+
+    configured = profile(
+        "grok-a",
+        provider="grok",
+        model="grok-build",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="grok-a",
+        state_directory=tmp_path / "grok-a",
+    )
+    result = await GrokCliAdapter(DiscussionTransport()).execute(
+        provider_request().model_copy(
+            update={
+                "sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001",
+                "output_schema_version": "discussion-agent-reply.v1",
+            }
+        ),
+        configured,
+        CancellationContext(),
+    )
+    assert result.structured_output == {"reply": "Предлагаю два варианта."}
+
+
+def test_grok_adapter_rejects_invalid_discussion_agent_reply() -> None:
+    from vuzol.providers.domain import ProviderRequest
+    from vuzol.providers.grok import _step09a_structured_output
+
+    request = provider_request().model_copy(
+        update={"output_schema_version": "discussion-agent-reply.v1"}
+    )
+    assert isinstance(request, ProviderRequest)
+    with pytest.raises(ValueError, match="invalid discussion agent reply"):
+        _step09a_structured_output(request, json.dumps({"summary": "wrong field"}))
+
+
+@pytest.mark.anyio
 async def test_grok_adapter_fails_closed_for_invalid_execution(tmp_path: Path) -> None:
     configured = profile(
         "grok-a",

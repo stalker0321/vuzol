@@ -394,6 +394,81 @@ def test_project_pin_applies_overrides_and_allows_same_family_fallback(
 
 
 @pytest.mark.postgresql
+def test_project_pin_routes_internal_discussion_as_architecture(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        (tmp_path / "grok").mkdir()
+        grok = profile(
+            "grok-subscription",
+            provider="grok",
+            model="grok-build",
+            api_base_url=None,
+            launch_mode="cli",
+            credential_reference=None,
+            credential_required=False,
+            runtime_identity="grok",
+            state_directory=tmp_path / "grok",
+            sandbox_required=True,
+            capabilities=frozenset({Capability.REPOSITORY_READ}),
+            supported_task_types=frozenset({"architecture"}),
+            roles=frozenset({ProviderRole.EXECUTOR}),
+            routing_priority=210,
+            fallback_profile_ids=(),
+        )
+        settings, registries = bundle(tmp_path, grok, projects=(pin_project(),))
+        task_id, _run_id, step_id = await seed_provider_step(
+            factory,
+            step_type="execute_agent",
+            capabilities=[Capability.REPOSITORY_READ.value],
+        )
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            task.project_id = "bill-buddy"
+            task.task_type = "discussion_agent_internal"
+            from vuzol.storage.models import ProjectExecutorPreference
+
+            session.add(
+                ProjectExecutorPreference(
+                    project_id="bill-buddy",
+                    mode="pin",
+                    worker_key="grok",
+                    reasoning_effort=None,
+                    revision=1,
+                )
+            )
+            await synchronize_profiles(
+                session, registries.profiles.items(), configuration_revision="a" * 64
+            )
+
+        async with factory.begin() as session:
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="executor",
+                lease_seconds=60,
+                candidate_limit=20,
+                step_types=frozenset({"execute_agent"}),
+            )
+            step = await session.get(Step, step_id)
+            assert token is not None and token.step.id == step_id
+            assert step is not None
+            assert step.executor_profile_id == "grok-subscription"
+            assert step.payload.get("executor_worker_key") == "grok"
+            decision = await session.scalar(
+                select(RoutingDecision).where(RoutingDecision.step_id == step_id)
+            )
+            assert decision is not None
+            assert decision.inputs.get("task_type") == "architecture"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_project_pin_trusted_payload_carries_codex_overrides(
     postgres_dsn: str, tmp_path: Path
 ) -> None:

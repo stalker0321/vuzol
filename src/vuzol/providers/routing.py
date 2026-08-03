@@ -166,6 +166,9 @@ async def claim_routed_step(
             configuration_revision=run.configuration_revision,
         )
         role = PROVIDER_STEP_ROLES[step.step_type]
+        routing_task_type = (
+            "architecture" if task.task_type == "discussion_agent_internal" else task.task_type
+        )
         estimated_input = _estimated_input_tokens(task)
         requested_output = (
             settings.limits.planner_output_tokens
@@ -214,7 +217,7 @@ async def claim_routed_step(
                         ),
                         request=RoutingRequest(
                             role=role,
-                            task_type=task.task_type,
+                            task_type=routing_task_type,
                             required_capabilities=required,
                             project_allowed_capabilities=project_caps,
                             budget_mode=BudgetMode(run.budget_mode),
@@ -262,7 +265,7 @@ async def claim_routed_step(
         )
         policy_request = RoutingRequest(
             role=role,
-            task_type=task.task_type,
+            task_type=routing_task_type,
             required_capabilities=required,
             project_allowed_capabilities=project_caps,
             budget_mode=BudgetMode(run.budget_mode),
@@ -548,7 +551,7 @@ async def _block_route(
         actor_type="routing_policy",
         payload={"category": category},
     )
-    if not quota:
+    if not quota and task.task_type != "discussion_agent_internal":
         await enqueue_terminal_task_projections(session, task, run)
 
 

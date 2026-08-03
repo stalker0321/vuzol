@@ -65,7 +65,7 @@ def test_publish_rejects_symlinked_allowlisted_content(
     parent = sites / "hryshyn.dev"
     parent.mkdir()
     site = StaticSite("unsafe", source, parent / "unsafe", (Path("index.html"),))
-    with pytest.raises(StaticPublishError, match="missing or unsafe"):
+    with pytest.raises(StaticPublishError, match="unsafe"):
         publish(site)
 
 

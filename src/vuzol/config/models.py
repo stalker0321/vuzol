@@ -214,6 +214,31 @@ class GitDeliveryPolicy(FrozenModel):
         return self
 
 
+class StaticDeploymentConfig(FrozenModel):
+    """A project-owned preview contract executed only by the trusted publisher."""
+
+    enabled: bool = True
+    url_path: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
+    source_directory: Path = Path(".")
+    include: tuple[Path, ...] = (
+        Path("index.html"),
+        Path("app.js"),
+        Path("styles.css"),
+        Path("assets"),
+    )
+    entrypoint: Path = Path("index.html")
+    keep_releases: int = Field(default=5, ge=2, le=20)
+
+    @model_validator(mode="after")
+    def validate_relative_paths(self) -> "StaticDeploymentConfig":
+        paths = (self.source_directory, self.entrypoint, *self.include)
+        if not self.include:
+            raise ValueError("static deployment include list cannot be empty")
+        if any(path.is_absolute() or ".." in path.parts for path in paths):
+            raise ValueError("static deployment paths must stay relative to the repository")
+        return self
+
+
 class ProjectConfig(FrozenModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     display_name: str = Field(min_length=1, max_length=100)
@@ -227,6 +252,7 @@ class ProjectConfig(FrozenModel):
     enabled: bool = True
     git_delivery: GitDeliveryPolicy = GitDeliveryPolicy()
     network: NetworkPolicy = NetworkPolicy()
+    static_deployment: StaticDeploymentConfig | None = None
 
 
 class ProviderProfileConfig(FrozenModel):

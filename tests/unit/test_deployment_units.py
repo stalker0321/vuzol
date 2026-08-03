@@ -19,6 +19,8 @@ EXECUTOR_UNIT = REPO_ROOT / "deploy/systemd/vuzol-executor.service"
 APPLIER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-applier.service"
 STATIC_PUBLISHER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-static-publisher.service"
 STATIC_PUBLISHER_TIMER = REPO_ROOT / "deploy/systemd/vuzol-static-publisher.timer"
+STATIC_PUBLISHER_WORKER = REPO_ROOT / "deploy/systemd/vuzol-static-publisher-worker.service"
+STATIC_SITE_CADDY = REPO_ROOT / "deploy/caddy/hryshyn.dev.caddy"
 WORKER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-worker.service"
 TELEGRAM_UNITS = (
     REPO_ROOT / "deploy/systemd/vuzol-telegram.service",
@@ -37,6 +39,24 @@ def test_static_publisher_is_unprivileged_and_path_fenced() -> None:
     assert "/var/www" not in service
     assert "OnUnitActiveSec=15s" in timer
     assert "Persistent=true" in timer
+
+
+def test_static_publisher_worker_is_unprivileged_and_path_fenced() -> None:
+    service = _read(STATIC_PUBLISHER_WORKER)
+    assert "User=vuzol-publisher" in service
+    assert "NoNewPrivileges=true" in service
+    assert "ProtectSystem=strict" in service
+    assert "ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol /var/lib/vuzol/registry" in service
+    assert "ReadWritePaths=/srv/vuzol/sites" in service
+    assert "Restart=on-failure" in service
+
+
+def test_static_site_caddy_route_is_project_generic() -> None:
+    config = STATIC_SITE_CADDY.read_text()
+
+    assert "path_regexp project" in config
+    assert "/srv/vuzol/sites/hryshyn.dev/{re.project.1}/current" in config
+    assert "bill-buddy" not in config
 
 
 def _read(p: Path) -> str:

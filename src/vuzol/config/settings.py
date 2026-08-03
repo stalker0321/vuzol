@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -344,6 +344,8 @@ class Settings(BaseSettings):
     repository_root: Path = Path("/srv/vuzol/repositories")
     worktree_root: Path = Path("/srv/vuzol/worktrees")
     artifact_root: Path = Path("/srv/vuzol/artifacts")
+    static_site_root: Path = Path("/srv/vuzol/sites/hryshyn.dev")
+    static_site_base_url: HttpUrl = HttpUrl("https://hryshyn.dev")
     secret_file_root: Path = Path("/run/secrets")
     concurrency: ConcurrencyLimits = ConcurrencyLimits()
     database: DatabaseSettings = DatabaseSettings()
@@ -364,6 +366,7 @@ class Settings(BaseSettings):
         "repository_root",
         "worktree_root",
         "artifact_root",
+        "static_site_root",
         "secret_file_root",
         "registry_overlay_file",
     )

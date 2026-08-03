@@ -1,0 +1,31 @@
+[Unit]
+Description=Vuzol trusted static publication workflow worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vuzol-publisher
+Group=vuzol-publisher
+EnvironmentFile=/etc/vuzol/publisher.env
+ExecStart=/opt/vuzol/.venv/bin/vuzol-static-publisher-worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol /var/lib/vuzol/registry
+ReadWritePaths=/srv/vuzol/sites
+
+[Install]
+WantedBy=multi-user.target

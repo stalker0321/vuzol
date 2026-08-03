@@ -56,9 +56,14 @@ def load_sites(path: Path) -> tuple[StaticSite, ...]:
     return sites
 
 
-def publish(site: StaticSite) -> PublishResult:
-    source = _contained_directory(site.source, SOURCE_ROOT, "source")
-    destination = _contained_destination(site.destination, SITE_ROOT)
+def publish(
+    site: StaticSite,
+    *,
+    source_root: Path | None = None,
+    site_root: Path | None = None,
+) -> PublishResult:
+    source = _contained_directory(site.source, source_root or SOURCE_ROOT, "source")
+    destination = _contained_destination(site.destination, site_root or SITE_ROOT)
     releases = destination / "releases"
     releases.mkdir(parents=True, exist_ok=True, mode=0o755)
     staging = releases / f".staging-{uuid.uuid4().hex}"
@@ -82,8 +87,8 @@ def publish(site: StaticSite) -> PublishResult:
         raise
 
 
-def rollback(site: StaticSite) -> PublishResult:
-    destination = _contained_destination(site.destination, SITE_ROOT)
+def rollback(site: StaticSite, *, site_root: Path | None = None) -> PublishResult:
+    destination = _contained_destination(site.destination, site_root or SITE_ROOT)
     releases = destination / "releases"
     current = _current_release(destination)
     candidates = sorted(
@@ -149,8 +154,10 @@ def _copy_allowlist(source: Path, staging: Path, include: tuple[Path, ...]) -> t
     total_bytes = 0
     for relative in include:
         candidate = source / relative
-        if candidate.is_symlink() or not candidate.exists():
-            raise StaticPublishError(f"allowlisted path is missing or unsafe: {relative}")
+        if not candidate.exists():
+            continue
+        if candidate.is_symlink():
+            raise StaticPublishError(f"allowlisted path is unsafe: {relative}")
         paths = (candidate,) if candidate.is_file() else tuple(sorted(candidate.rglob("*")))
         for item in paths:
             if item.is_dir():

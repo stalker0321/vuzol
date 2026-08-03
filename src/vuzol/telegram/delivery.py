@@ -41,6 +41,7 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import ConversationTurnRole, ConversationTurnSource, TaskStatus
+from vuzol.telegram.formatting import telegram_markdown_html
 from vuzol.telegram.layout import (
     HELP_CARD_ROLE,
     HISTORY_TOPIC_KIND,
@@ -100,6 +101,7 @@ class PreparedDelivery:
     chat_id: int
     thread_id: int | None
     html: str = ""
+    fallback_html: str | None = None
     task_id: uuid.UUID | None = None
     run_id: uuid.UUID | None = None
     step_id: uuid.UUID | None = None
@@ -492,7 +494,8 @@ async def _prepare_discussion_reply(
         DeliveryAction.SEND_DISCUSSION_REPLY,
         chat_id=discussion.chat_id,
         thread_id=discussion.message_thread_id,
-        html=telegram_html(turn.content),
+        html=telegram_markdown_html(turn.content),
+        fallback_html=telegram_html(turn.content),
         message_role=DISCUSSION_REPLY_DESTINATION,
     )
 
@@ -884,15 +887,28 @@ class TelegramDeliveryService:
             DeliveryAction.SEND_HELP,
             DeliveryAction.SEND_DISCUSSION_REPLY,
         }:
-            message_id = await self._client.send_message(
-                chat_id=prepared.chat_id,
-                thread_id=prepared.thread_id,
-                html=prepared.html,
-                buttons=prepared.buttons,
-                task_id=prepared.task_id,
-                approval_id=prepared.approval_id,
-                callback_buttons=prepared.callback_buttons,
-            )
+            try:
+                message_id = await self._client.send_message(
+                    chat_id=prepared.chat_id,
+                    thread_id=prepared.thread_id,
+                    html=prepared.html,
+                    buttons=prepared.buttons,
+                    task_id=prepared.task_id,
+                    approval_id=prepared.approval_id,
+                    callback_buttons=prepared.callback_buttons,
+                )
+            except BadRequest:
+                if prepared.fallback_html is None:
+                    raise
+                message_id = await self._client.send_message(
+                    chat_id=prepared.chat_id,
+                    thread_id=prepared.thread_id,
+                    html=prepared.fallback_html,
+                    buttons=prepared.buttons,
+                    task_id=prepared.task_id,
+                    approval_id=prepared.approval_id,
+                    callback_buttons=prepared.callback_buttons,
+                )
             if not message_id:
                 raise LostTelegramResponse("Telegram returned no confirmed message ID")
             return message_id

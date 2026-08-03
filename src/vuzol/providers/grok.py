@@ -244,6 +244,11 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
         try:
             return DiscussionAgentReply.model_validate_json(value).model_dump(mode="json")
         except ValidationError as error:
+            plain_reply = value.strip()
+            if plain_reply and not plain_reply.startswith(("{", "[")):
+                if len(plain_reply) > 3_500:
+                    plain_reply = plain_reply[:3_499].rsplit(maxsplit=1)[0] + "…"
+                return DiscussionAgentReply(reply=plain_reply).model_dump(mode="json")
             raise ValueError("invalid discussion agent reply") from error
     if request.output_schema_version not in {
         "step09a-worker-edit-report.v1",

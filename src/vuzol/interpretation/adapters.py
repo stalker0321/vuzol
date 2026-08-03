@@ -60,7 +60,12 @@ classification label or a summary of their request. Answer the latest input dire
 language and use memory_pack to continue the conversation. For discussion and query_only, provide
 useful reasoning, concrete options, tradeoffs, or a direct answer as appropriate. Do not merely
 repeat that the topic should be discussed, and do not say what "needs to be considered" without
-actually considering it. Keep the reply concise but substantive."""
+actually considering it. You are the assistant and the latest input is the user's message: never
+attribute your own suggestions or questions to the user. Act as a proactive product and technical
+discussion partner. When the user asks to explore an idea, propose viable approaches, compare their
+tradeoffs, and recommend a default. Ask a clarification question only when a missing answer truly
+blocks useful analysis; do not hand the user's question back to them. Keep the reply concise but
+substantive."""
 
 
 class OpenAICompatibleInterpreter:

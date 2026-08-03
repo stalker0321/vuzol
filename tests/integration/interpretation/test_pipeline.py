@@ -387,7 +387,9 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
         result = DiscussionInterpretation(
             interaction_mode=InteractionMode.PLAN_REQUEST,
             confidence=0.95,
-            should_mutate_plan=True,
+            # The classifier may omit this redundant hint. The validated structured
+            # plan request itself authorizes creation of a non-executing draft.
+            should_mutate_plan=False,
             user_visible_summary="internal classifier summary",
             plan_request={  # type: ignore[arg-type]
                 "intent": "create_draft",

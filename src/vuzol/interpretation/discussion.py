@@ -311,15 +311,22 @@ def enforce_discussion_policy(
             }
         )
 
-    # v1 is confirm-first; P8 owns canonical Task materialization. Draft mutation is
-    # legal only for a plan request or a correctly fenced item-edit hint.
+    # v1 is confirm-first; P8 owns canonical Task materialization. A validated plan
+    # envelope may always materialize a non-executing draft. Do not let the model's
+    # redundant boolean suppress the explicit structured request.
     result = result.model_copy(
         update={
             "should_create_task": False,
             "should_mutate_plan": (
-                result.should_mutate_plan
-                and result.interaction_mode
-                in {InteractionMode.PLAN_REQUEST, InteractionMode.ITEM_EDIT}
+                (
+                    result.interaction_mode is InteractionMode.PLAN_REQUEST
+                    and result.plan_request is not None
+                )
+                or (
+                    result.should_mutate_plan
+                    and result.interaction_mode is InteractionMode.ITEM_EDIT
+                    and has_authorized_edit_session
+                )
             ),
         }
     )

@@ -270,8 +270,12 @@ async def retry_blocked_step(
     step = await session.scalar(select(Step).where(Step.id == step_id).with_for_update())
     if step is None or step.status is not StepStatus.BLOCKED:
         raise ValueError("only a blocked step can be retried")
-    if step.unknown_effects or step.attempt_count >= step.max_attempts:
+    provider_cancelled = step.failure_category == "cancelled" and not step.unknown_effects
+    if step.unknown_effects or (step.attempt_count >= step.max_attempts and not provider_cancelled):
         raise ValueError("blocked step is not safely retryable")
+    if provider_cancelled and step.attempt_count >= step.max_attempts:
+        # Each explicit user retry grants exactly one additional bounded attempt.
+        step.max_attempts += 1
     run = await session.scalar(select(Run).where(Run.id == step.run_id).with_for_update())
     assert run is not None
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())

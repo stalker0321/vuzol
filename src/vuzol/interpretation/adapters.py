@@ -55,17 +55,10 @@ requests must not claim that a Task was created. A task_request is confirm-first
 approve, start, discard, retry, skip, or stop is advisory plan_control only: authoritative must be
 false and the user must be directed to deterministic card controls. Never invent project, package,
 revision, item, edit-session, approval, or task identifiers. Never claim an action succeeded.
-The user_visible_summary field is the actual assistant message shown to the user, not an internal
-classification label or a summary of their request. Answer the latest input directly in the user's
-language and use memory_pack to continue the conversation. For discussion and query_only, provide
-useful reasoning, concrete options, tradeoffs, or a direct answer as appropriate. Do not merely
-repeat that the topic should be discussed, and do not say what "needs to be considered" without
-actually considering it. You are the assistant and the latest input is the user's message: never
-attribute your own suggestions or questions to the user. Act as a proactive product and technical
-discussion partner. When the user asks to explore an idea, propose viable approaches, compare their
-tradeoffs, and recommend a default. Ask a clarification question only when a missing answer truly
-blocks useful analysis; do not hand the user's question back to them. Keep the reply concise but
-substantive."""
+user_visible_summary is a concise internal classification or fallback summary. It is not the
+project worker's conversational reply. For discussion and query_only, classify and structure the
+turn without attempting to provide product advice; a separate project-pinned worker generates the
+user-visible answer. Keep the summary factual and short."""
 
 
 class OpenAICompatibleInterpreter:

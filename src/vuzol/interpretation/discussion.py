@@ -186,8 +186,8 @@ class DiscussionInterpretation(FrozenModel):
         min_length=1,
         max_length=1_000,
         description=(
-            "The actual assistant reply shown to the user. Answer directly and contribute "
-            "concrete ideas or a recommendation; never describe this as the user's proposal."
+            "Concise internal classification/fallback summary. It is not the project worker's "
+            "discussion reply and must not be presented as one."
         ),
     )
     clarification_question: str | None = Field(default=None, max_length=1_000)

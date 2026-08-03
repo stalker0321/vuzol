@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from pathlib import Path
 
 import anyio
@@ -7,6 +8,7 @@ from sqlalchemy import func, select, update
 
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
+from vuzol.discussion.agent import DeliverDiscussionReplyHandler
 from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
 from vuzol.interpretation.discussion import (
     DISCUSSION_REPLY_DESTINATION,
@@ -30,11 +32,14 @@ from vuzol.storage.models import (
     ConversationTurn,
     Interpretation,
     ProjectNamingRequest,
+    Run,
+    Step,
     Task,
     TelegramIntakeMessage,
     TopicMapping,
     TransactionalOutbox,
 )
+from vuzol.storage.records import LeaseToken, StepRecord
 from vuzol.storage.types import (
     ConversationTurnRole,
     DeliveryStatus,
@@ -42,13 +47,14 @@ from vuzol.storage.types import (
     InteractionMode,
     ProjectNamingStatus,
     RiskLevel,
+    StepStatus,
     TaskStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import AttachmentKind, MessageUpdate, TelegramAttachment
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
+from vuzol.telegram.projections import build_project_status_dashboard
+from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
 pytestmark = pytest.mark.postgresql
 
@@ -171,7 +177,7 @@ def test_text_interpretation_persists_draft_and_original_input(
     asyncio.run(scenario())
 
 
-def test_discussion_runtime_persists_turns_reuses_memory_and_delivers_replies(
+def test_discussion_runtime_hands_user_turn_to_hidden_project_agent(
     postgres_dsn: str, tmp_path: Path
 ) -> None:
     async def scenario() -> None:
@@ -189,13 +195,7 @@ def test_discussion_runtime_persists_turns_reuses_memory_and_delivers_replies(
                 DiscussionInterpretation(
                     interaction_mode=InteractionMode.DISCUSSION,
                     confidence=0.91,
-                    user_visible_summary="Давайте сначала уточним цель.",
-                ),
-                DiscussionInterpretation(
-                    interaction_mode=InteractionMode.QUERY_ONLY,
-                    confidence=0.88,
-                    user_visible_summary="Цель зафиксирована.",
-                    clarification_question="Какой вариант интерфейса предпочтительнее?",
+                    user_visible_summary="internal classifier summary",
                 ),
             ]
         )
@@ -211,50 +211,36 @@ def test_discussion_runtime_persists_turns_reuses_memory_and_delivers_replies(
         first = await ingress.accept_message(text_update(151))
         assert first.task_id is None
         assert await pipeline.process_one()
-        second = await ingress.accept_message(
-            text_update(152).model_copy(update={"text": "Нужен простой интерфейс"})
-        )
-        assert second.task_id is None
-        assert await pipeline.process_one()
 
-        assert len(discussion.requests) == 2
+        assert len(discussion.requests) == 1
         assert discussion.requests[0].memory_pack is not None
         assert discussion.requests[0].memory_pack.turns == ()
-        assert discussion.requests[1].memory_pack is not None
-        assert [turn.content for turn in discussion.requests[1].memory_pack.turns] == [
-            "inspect this project",
-            "Давайте сначала уточним цель.",
-        ]
-
-        client = FakeTelegramClient(next_message_id=500)
-        delivery = TelegramDeliveryService(
-            factory,
-            client,
-            owner="discussion-delivery",
-            lease_seconds=30,
-            max_attempts=3,
-            retry_min_seconds=1,
-            retry_max_seconds=10,
-        )
-        assert await delivery.deliver_one()
-        assert await delivery.deliver_one()
-        assert not await delivery.deliver_one()
-        assert client.sent == [
-            (-100, 10, "Давайте сначала уточним цель."),
-            (-100, 10, "Цель зафиксирована.\n\nКакой вариант интерфейса предпочтительнее?"),  # noqa: RUF001
-        ]
 
         async with factory() as session:
             turns = (
                 await session.scalars(select(ConversationTurn).order_by(ConversationTurn.ordinal))
             ).all()
-            assert [turn.role for turn in turns] == [
-                ConversationTurnRole.USER,
-                ConversationTurnRole.ASSISTANT,
-                ConversationTurnRole.USER,
-                ConversationTurnRole.ASSISTANT,
+            assert [turn.role for turn in turns] == [ConversationTurnRole.USER]
+            tasks = (await session.scalars(select(Task))).all()
+            assert len(tasks) == 1
+            assert tasks[0].task_type == "discussion_agent_internal"
+            assert tasks[0].topic_task_number is None
+            dashboard = await build_project_status_dashboard(session, -100)
+            assert "Сейчас нет активных задач." in dashboard.html
+            steps = (
+                await session.scalars(
+                    select(Step)
+                    .join(Run, Run.id == Step.run_id)
+                    .where(Run.task_id == tasks[0].id)
+                    .order_by(Step.ordinal)
+                )
+            ).all()
+            assert [step.step_type for step in steps] == [
+                "prepare_worktree",
+                "execute_agent",
+                "deliver_discussion_reply",
+                "finalize",
             ]
-            assert await session.scalar(select(func.count()).select_from(Task)) == 0
             replies = (
                 await session.scalars(
                     select(TransactionalOutbox).where(
@@ -263,8 +249,122 @@ def test_discussion_runtime_persists_turns_reuses_memory_and_delivers_replies(
                     )
                 )
             ).all()
-            assert len(replies) == 2
-            assert all(item.status is DeliveryStatus.DELIVERED for item in replies)
+            assert replies == []
+
+        execute_step = next(step for step in steps if step.step_type == "execute_agent")
+        deliver_step = next(step for step in steps if step.step_type == "deliver_discussion_reply")
+        async with factory.begin() as session:
+            stored_execute = await session.get(Step, execute_step.id, with_for_update=True)
+            assert stored_execute is not None
+            stored_execute.status = StepStatus.COMPLETED
+            stored_execute.result = {
+                "profile_id": "grok-subscription-a",
+                "structured_output": {"reply": "Предлагаю выбирать нужное количество."},
+            }
+        token = LeaseToken(
+            step=StepRecord(
+                id=deliver_step.id,
+                run_id=deliver_step.run_id,
+                status=StepStatus.RUNNING,
+                lease_generation=1,
+                lease_owner="test",
+                lease_expires_at=None,
+            ),
+            owner="test",
+            generation=1,
+        )
+        outcome = await DeliverDiscussionReplyHandler(factory).execute(
+            StepExecutionRequest(
+                task_id=tasks[0].id,
+                run_id=deliver_step.run_id,
+                step_id=deliver_step.id,
+                step_type="deliver_discussion_reply",
+                payload={},
+                timeout_seconds=60,
+                lease=token,
+            ),
+            CancellationContext(),
+        )
+        assert outcome.result["assistant_turn_id"]
+        cancelled = CancellationContext()
+        cancelled.request()
+        cancelled_outcome = await DeliverDiscussionReplyHandler(factory).execute(
+            StepExecutionRequest(
+                task_id=tasks[0].id,
+                run_id=deliver_step.run_id,
+                step_id=deliver_step.id,
+                step_type="deliver_discussion_reply",
+                payload={},
+                timeout_seconds=60,
+                lease=token,
+            ),
+            cancelled,
+        )
+        assert cancelled_outcome.category == "cancelled"
+        async with factory() as session:
+            assistant = await session.scalar(
+                select(ConversationTurn).where(
+                    ConversationTurn.role == ConversationTurnRole.ASSISTANT
+                )
+            )
+            assert assistant is not None
+            assert assistant.content == "Предлагаю выбирать нужное количество."
+
+        async with factory.begin() as session:
+            stored_execute = await session.get(Step, execute_step.id, with_for_update=True)
+            assert stored_execute is not None
+            stored_execute.result = {"structured_output": None}
+        invalid_outcome = await DeliverDiscussionReplyHandler(factory).execute(
+            StepExecutionRequest(
+                task_id=tasks[0].id,
+                run_id=deliver_step.run_id,
+                step_id=deliver_step.id,
+                step_type="deliver_discussion_reply",
+                payload={},
+                timeout_seconds=60,
+                lease=token,
+            ),
+            CancellationContext(),
+        )
+        assert invalid_outcome.category == "discussion_reply_invalid"
+
+        async with factory.begin() as session:
+            stored_execute = await session.get(Step, execute_step.id, with_for_update=True)
+            stored_task = await session.get(Task, tasks[0].id, with_for_update=True)
+            assert stored_execute is not None and stored_task is not None
+            stored_execute.result = {"structured_output": {"reply": "valid"}}
+            stored_task.task_draft = {
+                key: value
+                for key, value in stored_task.task_draft.items()
+                if key != "source_turn_id"
+            }
+        invalid_metadata = await DeliverDiscussionReplyHandler(factory).execute(
+            StepExecutionRequest(
+                task_id=tasks[0].id,
+                run_id=deliver_step.run_id,
+                step_id=deliver_step.id,
+                step_type="deliver_discussion_reply",
+                payload={},
+                timeout_seconds=60,
+                lease=token,
+            ),
+            CancellationContext(),
+        )
+        assert invalid_metadata.category == "discussion_reply_invalid"
+
+        missing_task = await DeliverDiscussionReplyHandler(factory).execute(
+            StepExecutionRequest(
+                task_id=uuid.uuid4(),
+                run_id=deliver_step.run_id,
+                step_id=deliver_step.id,
+                step_type="deliver_discussion_reply",
+                payload={},
+                timeout_seconds=60,
+                lease=token,
+            ),
+            CancellationContext(),
+        )
+        assert missing_task.category == "discussion_task_invalid"
         await engine.dispose()
 
     asyncio.run(scenario())
@@ -402,23 +502,20 @@ def test_concurrent_discussion_consumers_preserve_topic_order_and_refresh_memory
                 .values(available_at=func.now())
             )
         assert await second_pipeline.process_one()
-        assert len(second_interpreter.requests) == 1
-        memory = second_interpreter.requests[0].memory_pack
-        assert memory is not None
-        assert [turn.content for turn in memory.turns] == [
-            "inspect this project",
-            "first reply",
-        ]
+        assert second_interpreter.requests == []
         async with factory() as session:
             turns = (
                 await session.scalars(select(ConversationTurn).order_by(ConversationTurn.ordinal))
             ).all()
-            assert [turn.content for turn in turns] == [
-                "inspect this project",
-                "first reply",
-                "second message",
-                "second reply",
-            ]
+            assert [turn.content for turn in turns] == ["inspect this project"]
+            deferred = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "discussion_classify",
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                )
+            )
+            assert deferred is not None
+            assert deferred.last_error_category == "discussion_context_changed"
         await engine.dispose()
 
     asyncio.run(scenario())

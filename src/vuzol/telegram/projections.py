@@ -431,6 +431,7 @@ async def build_project_status_dashboard(
                 .where(
                     Task.source_chat_id == chat_id,
                     Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
+                    Task.task_type != "discussion_agent_internal",
                 )
                 .order_by(Task.created_at.asc(), Task.id.asc())
             )

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "vuzol"
 version = "0.1.0"
-description = "Personal task execution system"
+description = "Self-hosted AI task orchestrator controlled from Telegram"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

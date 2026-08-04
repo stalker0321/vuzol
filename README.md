@@ -1,141 +1,181 @@
 # Vuzol
 
 [![CI](https://github.com/stalker0321/vuzol/actions/workflows/ci.yml/badge.svg)](https://github.com/stalker0321/vuzol/actions/workflows/ci.yml)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 
-Vuzol is a personal task-intake system controlled through a private Telegram forum group. It uses
-PostgreSQL as its source of truth and keeps Telegram messages as reconstructable projections of
-durable state.
+Vuzol is a self-hosted AI task orchestrator controlled from Telegram. Send a request in a project
+topic, choose an AI provider, and Vuzol turns the conversation into a durable workflow that can
+plan, edit code, run tests, request approval, and safely apply the result.
 
-## Current flow
+It is built for personal infrastructure where convenience matters, but handing an AI agent direct
+access to the host is not acceptable.
 
-The implemented flow is:
+> **Project status:** active development and real-world dogfooding. The core task, discussion,
+> coding, validation, review, and approval flows are implemented. Deployment still assumes an
+> experienced operator and is not yet a one-command install.
+
+## Why Vuzol?
+
+Most chat bots stop at generating an answer. Vuzol manages the work around that answer:
+
+- **Telegram-native workspace** — each forum topic maps to a project, with status cards, history,
+  model selection, approvals, and voice-message intake.
+- **Multi-provider routing** — provider accounts and models are selected independently, with
+  capability, health, budget, project preference, and fallback policies.
+- **Durable workflows** — PostgreSQL-backed tasks, steps, leases, events, inboxes, and outboxes
+  survive restarts without treating Telegram as the source of truth.
+- **Isolated coding agents** — every coding attempt runs in its own Git worktree and rootless
+  container with explicit filesystem, network, and resource boundaries.
+- **Trusted validation** — tests run separately from the model in a pinned validation image; the
+  executor cannot declare its own result valid.
+- **Human approval before apply** — reviewed result commits are applied by a narrow, separate
+  service using compare-and-swap protection.
+- **Operational recovery** — idempotency keys, fenced leases, bounded retries, retention, backup,
+  and restore paths are first-class parts of the design.
+
+## How it works
 
 ```text
-Telegram text or voice message
-→ authorized, deduplicated durable intake
-→ persisted Task and Telegram status card
-→ private attachment storage and transcription when needed
-→ semantic interpretation
-→ validated, provider-neutral TaskDraft
-→ versioned persisted workflow and explicit steps
-→ deterministic capability/health/budget-aware provider routing
-→ atomic budget reservation and fenced execution
-→ coding.v1: isolated worktree + sandbox execute
-→ deterministic validate (trusted gates + measured result commit)
-→ mechanical review when risk ≥ medium
-→ exact-result card in «Апрувы»
-→ privileged local apply after Approve
-→ completion report / dashboard refresh
-→ restart recovery
+Telegram text / voice
+        │
+        ▼
+ durable intake ──► semantic interpretation ──► task or work package
+        │                                            │
+        │                                            ▼
+        │                                  provider routing + budget
+        │                                            │
+        ▼                                            ▼
+ status projection                         isolated worktree execution
+                                                     │
+                                                     ▼
+                                          trusted tests and review
+                                                     │
+                                                     ▼
+                                           Telegram approval card
+                                                     │
+                                                     ▼
+                                           CAS-protected local apply
 ```
 
-Ingress, Telegram delivery, interpretation, and workflow management run as separate processes.
-Their inbox/outbox, step, event, and fenced lease records make completed delivery, transcription,
-interpretation, controls, and workflow progress safe across process restarts.
+Telegram messages are reconstructable projections. PostgreSQL remains the source of truth, so a
+delivery retry or process restart cannot silently lose workflow state.
 
-The current MVP routes and executes safe model-only OpenAI-compatible workflow steps and a
-production **coding.v1** path. Interpreted coding tasks (including the bounded `/sol` intake) run
-in an isolated rootless sandbox and standalone Git worktree. After execution Vuzol:
+## Supported integrations
 
-1. **validates** with measured Git facts and trusted gates in a separate pinned validation image,
-   then retains a host-owned result commit;
-2. **reviews** mechanically for medium risk (pattern/diff inspection; no production secrets);
-3. posts an **exact-result** Approve / Redo / Reject card in the global «Апрувы» topic, bound to
-   base, result, diff identity, gates, and the approved action envelope;
-4. on Approve, a separate **applier** advances only the configured local managed-branch tip with
-   CAS protection (including when that branch is still checked out on a clean primary tree).
+| Area | Current support |
+| --- | --- |
+| Interface | Telegram forum groups, text and voice intake |
+| Coding providers | Codex CLI, Grok CLI, Kimi Code through an OpenAI-compatible gateway |
+| Interpretation | OpenAI-compatible model profiles |
+| Repositories | Local Git repositories with managed branches and isolated worktrees |
+| Execution | Rootless Docker, pinned sandbox and validation images |
+| Persistence | PostgreSQL 16 with Alembic migrations |
+| Operations | systemd units, health checks, retention, encrypted backup and restore |
 
-High and privileged risk additionally require an **independent model-only reviewer** (structured
-JSON verdict over a truncated read-only diff). Mechanical blockers still fail closed without
-calling the model. Redo cancels the retained result for a corrected request; Reject leaves it
-unapplied. Diffs stay private audit artifacts and are not posted to Telegram.
+Provider credentials are kept outside the repository and scoped to the runtime identity that needs
+them. See [Provider routing and budgets](docs/PROVIDERS.md) for the profile model.
 
-This path does **not** push, open merge requests, deploy, or perform general privileged host
-actions. Automatic trust promotion remains outside the supported boundary.
+## Quick start for development
 
-### Production smoke (coding path)
-
-After deploy, one end-to-end check is enough to confirm Step 09 wiring:
-
-1. Send a small coding task in a configured project topic.
-2. Wait for validate + review; confirm a card appears in **Апрувы**.
-3. Press **Approve**; confirm the managed project `main` (or configured branch) advances and the
-   task reaches **completed** (dashboard / История).
-
-## Requirements and setup
+### Prerequisites
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
 - Docker with Compose
 
 ```bash
+git clone https://github.com/stalker0321/vuzol.git
+cd vuzol
 uv sync --frozen
 cp .env.example .env
 make db-up
 make db-migrate
+make check
 ```
 
-Settings use the `VUZOL_` prefix. Registry files contain non-secret project, provider-profile, and
-Telegram-topic configuration; credentials are supplied through scoped environment or file
-references. See [Configuration](docs/CONFIGURATION.md).
-
-## Runtime commands
+Run the health application and worker in separate terminals:
 
 ```bash
-make run-app                  # HTTP health application on 127.0.0.1:8000
-make run-worker               # workflow dispatch, recovery, controls, and registered handlers
-vuzol-telegram                # Telegram long-polling ingress
-vuzol-telegram-delivery       # Telegram outbox delivery
-vuzol-interpreter             # transcription and semantic interpretation
-vuzol-applier                 # controls and approval-gated local result apply
-make check                    # lint, format, types, tests, and security checks
-make test-postgres            # PostgreSQL migration and concurrency tests
+make run-app
+make run-worker
 ```
 
-The health endpoints are `/health/live` and `/health/ready`.
+The health endpoints are available at `http://127.0.0.1:8000/health/live` and
+`http://127.0.0.1:8000/health/ready`.
 
-For containers, the base stack is available through `docker compose up`. Telegram and
-interpretation are optional Compose profiles:
+The base container stack can also be started with Compose. Telegram and interpretation services
+are opt-in profiles because they require credentials:
 
 ```bash
 docker compose --profile telegram --profile interpretation up
 ```
 
-Configure the registry, allowlists, database DSN reference, one shared Telegram bot token, and the
-selected interpretation profiles before enabling them. The default image is non-root and the
-Compose services do not mount the Docker socket or use privileged mode.
+Before enabling them, configure the Telegram allowlist, bot token, project registry, database DSN,
+and provider profiles. The complete setup reference is in
+[Configuration](docs/CONFIGURATION.md).
+
+## Safety model
+
+Vuzol deliberately separates responsibilities instead of running one all-powerful agent process:
+
+1. The **ingress and delivery services** communicate with Telegram but do not edit repositories.
+2. The **worker** owns workflow state and dispatch but has no provider sandbox or repository-write
+   capability.
+3. The **executor** gives a provider access only to a task worktree inside a rootless sandbox.
+4. The **validator** measures the resulting Git state and runs trusted gates independently.
+5. The **applier** can advance configured local branches only after an exact result is approved.
+
+The coding path does not push branches, open pull requests, deploy applications, or grant general
+host access. High-risk results require additional review and mechanical blockers fail closed.
+The stable security contracts are documented in
+[Architecture invariants](docs/ARCHITECTURE_INVARIANTS.md).
+
+## Development commands
+
+```bash
+make lint           # Ruff linting
+make format-check   # formatting verification
+make type-check     # strict mypy checks
+make test           # unit and default integration tests
+make test-postgres  # PostgreSQL migration and concurrency tests
+make security       # secret and dependency checks
+make check          # complete local quality gate
+```
+
+CI runs the quality suite, PostgreSQL integration tests, Compose validation, and container builds.
+
+## Repository map
+
+```text
+src/vuzol/          application, workflow, provider, execution, and Telegram modules
+alembic/            database migrations
+config/             non-secret registry examples
+deploy/             systemd, sandbox, proxy, and validation assets
+docs/               operator guides, architecture decisions, and design invariants
+tests/              unit and integration test suites
+```
 
 ## Documentation
 
 - [Configuration](docs/CONFIGURATION.md)
-- [PostgreSQL storage](docs/STORAGE.md)
-- [Testing policy](docs/TESTING.md)
-
-## Execution (worktrees + sandbox)
-
-The dedicated `vuzol-executor` process (see `src/vuzol/cli/executor.py`) runs `prepare_worktree` and `execute_code` steps using per-task Git worktrees and a rootless Docker sandbox.
-
-Systemd units:
-
-- `deploy/systemd/user/vuzol-rootless-docker.service` — dedicated rootless Docker daemon as a linger-enabled systemd **user** unit (installed to `/etc/systemd/user/vuzol-rootless-docker.service`). Runs inside the `vuzol-executor` user's manager (with `loginctl enable-linger`). Uses `%t` for the socket path under the user's XDG_RUNTIME_DIR. No `User=`/`Group=` lines.
-- `deploy/systemd/vuzol-executor.service` — the system service (with `User=vuzol-executor`) that runs the dedicated executor worker. It no longer declares a direct systemd dependency on the docker unit (user units are in a separate manager). Readiness is provided by an `ExecStartPre` socket wait plus the strict `RootlessDockerRuntime.preflight()` gate inside the process.
-- `deploy/systemd/vuzol-worker.service` — the persistent workflow dispatcher, recovery loop, controls,
-  and internal handlers. It has read-only project visibility and no Docker or repository-write
-  boundary.
-- `deploy/systemd/vuzol-applier.service` — the narrow control/apply service. It can read retained
-  worktrees and write managed repository refs, but it has no provider, Docker, secret-state, push,
-  or deployment capability.
-
-The executor process must not start until the user-managed rootless daemon is up, its socket is present and owned by the executor identity, and the daemon reports rootless mode + seccomp + cgroup v2 with enforceable CPU/memory limits. A root-owned, digest-pinned sandbox seccomp profile from `deploy/seccomp/` is also mandatory; it preserves Moby's allowlist while permitting the trusted Codex `bwrap` launcher to create its nested sandbox. The preflight (and therefore the unit) fails closed on any violation and never falls back to the host root Docker socket. See `deploy/systemd/vuzol-executor.service` comments and the Step 08 handoff reports for the exact portable installation and verification steps.
 - [Telegram workspace](docs/TELEGRAM.md)
 - [Voice and semantic interpretation](docs/INTERPRETATION.md)
 - [Provider routing and budgets](docs/PROVIDERS.md)
+- [PostgreSQL storage](docs/STORAGE.md)
 - [Architecture invariants](docs/ARCHITECTURE_INVARIANTS.md)
 - [Testing policy](docs/TESTING.md)
-- [Accepted architecture decisions](docs/decisions/)
+- [Architecture decisions](docs/decisions/)
 - [Changelog](docs/CHANGELOG.md)
-- [Contributing and documentation policy](CONTRIBUTING.md)
+- [Contributing](CONTRIBUTING.md)
 
-Repository documentation covers the public product, operation, stable architecture, and accepted
-decisions. Internal implementation plans and agent handoffs are maintained outside the repository
-and are never required by the application, build, installation, or tests.
+## Contributing
+
+Vuzol is currently shaped around a single self-hosted deployment, but focused bug reports and pull
+requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and run `make check` before
+submitting a change.
+
+## License
+
+No open-source license has been selected yet. Until one is added, the source is publicly visible
+but standard copyright restrictions apply.

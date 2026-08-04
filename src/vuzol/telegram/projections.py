@@ -894,7 +894,8 @@ def _approval_fact_lines(
 ) -> list[str]:
     """One canonical fact block shared by project and global approval cards."""
 
-    lines = ["<b>Что изменится</b>", f"• {telegram_html(human_summary)}"]
+    display_summary = _approval_display_summary(human_summary)
+    lines = ["<b>Что изменится</b>", f"• {telegram_html(display_summary)}"]
     raw_paths = envelope.get("changed_files")
     paths = (
         [str(path) for path in raw_paths if isinstance(path, str)]
@@ -923,6 +924,20 @@ def _approval_fact_lines(
         )
     lines.extend(("", "Применить этот результат локально?"))
     return lines
+
+
+def _approval_display_summary(summary: str) -> str:
+    """Keep legacy provider transcripts out of approval projections."""
+
+    cleaned = " ".join(summary.split()).strip()
+    looks_like_transcript = (
+        len(cleaned) > 600
+        or cleaned.casefold().count("i'll ") > 1
+        or cleaned.casefold().count("next i'll") > 0
+    )
+    if looks_like_transcript:
+        return "Изменения подготовлены и прошли настроенные проверки."
+    return cleaned.lstrip("#*- ").strip() or "Изменения подготовлены."
 
 
 def _approval_status_label(status: ApprovalStatus) -> str:

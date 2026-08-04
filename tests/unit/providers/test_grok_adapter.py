@@ -402,16 +402,13 @@ async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> Non
     assert result.structured_output == manifest
     prompt = json.loads(invocations[-1].stdin)
     instruction = prompt["execution_policy"]["result_manifest"]
-    assert "Git and Make commands" in instruction
-    assert "checks are non-authoritative" in instruction
+    assert "Do not invoke shell commands" in instruction
     assert "trusted validation" in instruction
     assert "one agent_checks entry for each relevant local check" in instruction
     assert "Never present agent_checks as trusted gates" in instruction
-    assert "Do not invoke shell commands" not in instruction
     shell_instruction = prompt["execution_policy"]["shell_invocation"]
-    assert "only separately allowed git or make commands" in shell_instruction
-    assert "Run every command separately" in shell_instruction
-    assert "Do not stage, commit, reset, clean, or push" in shell_instruction
+    assert "shell tool is unavailable" in shell_instruction
+    assert "native List, Read, and Grep" in shell_instruction
     assert "trusted gates" in shell_instruction
 
     usage = manifest["usage"]

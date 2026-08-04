@@ -40,6 +40,8 @@ def canonical_grok_argv(model: str, *, read_only: bool = False) -> tuple[str, ..
         "dontAsk",
         "--sandbox",
         "strict",
+        "--disallowed-tools",
+        "run_terminal_command",
         "--allow",
         "Bash(git status*)",
         "--allow",
@@ -289,8 +291,7 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
 def _result_contract_instruction(request: ProviderRequest) -> str:
     if request.output_schema_version == "step09a-worker-edit-report.v1":
         return (
-            "You may use the separately allowed Git and Make commands to inspect the workspace "
-            "and iterate on local checks. Those checks are non-authoritative: Vuzol owns measured "
+            "Do not invoke shell commands or run local checks. Vuzol owns measured "
             "inspection, staging, commit creation, trusted validation, and the authoritative "
             "result manifest. Return one agent_checks entry for each relevant local check, "
             "including checks attempted or intentionally not run, using passed, failed, "
@@ -308,11 +309,9 @@ def _result_contract_instruction(request: ProviderRequest) -> str:
 def _shell_contract_instruction(request: ProviderRequest) -> str:
     if request.output_schema_version == "step09a-worker-edit-report.v1":
         return (
-            "For workspace inspection and local iteration, invoke only separately allowed git or "
-            "make commands. Run every command separately; do not use cd, command chains, shell "
-            "wrappers, or command substitution. Never use Bash for ls, cat, find, head, grep, or "
-            "other file discovery/read operations; use the native List, Read, and Grep tools "
-            "instead. Do not stage, commit, reset, clean, or push. The "
+            "The shell tool is unavailable. Inspect files with the native List, Read, and Grep "
+            "tools and make changes with the native Edit tool. Do not attempt git, build, test, "
+            "or other terminal commands. The "
             "deterministic Vuzol finalizer independently owns measured inspection, staging, commit "
             "creation, and trusted gates."
         )

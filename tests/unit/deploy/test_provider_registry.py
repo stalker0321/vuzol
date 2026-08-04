@@ -11,7 +11,7 @@ def test_production_sandbox_uses_minimal_tooling_image() -> None:
 
     assert registry["sandboxes"][0]["id"] == "project-default"
     assert registry["sandboxes"][0]["image"] == (
-        "vuzol-sandbox@sha256:f9febc02fac6547ade58dab77c4806fcc5de1d772907139de310453abee8ee3c"
+        "vuzol-sandbox@sha256:8a32088414ff60dc7e94740811f55c100af7775640666df0ff59587d863a8b02"
     )
 
 
@@ -25,3 +25,12 @@ def test_production_grok_profiles_use_current_model_id() -> None:
 
     assert set(grok_profiles) == {"grok-subscription-a", "grok-subscription-b"}
     assert {profile["model"] for profile in grok_profiles.values()} == {"grok-4.5"}
+
+
+def test_production_kimi_profile_is_pinned_to_free_model() -> None:
+    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
+    profiles = [profile for profile in registry["profiles"] if profile.get("provider") == "kimi"]
+
+    assert len(profiles) == 1
+    assert profiles[0]["id"] == "tokenrouter-kimi-a"
+    assert profiles[0]["model"] == "moonshotai/kimi-k3-free"

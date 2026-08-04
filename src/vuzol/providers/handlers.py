@@ -219,16 +219,19 @@ class ProviderStepHandler:
                     summary=failure.safe_summary,
                 )
             async with self._factory.begin() as session:
+                failure_usage = (
+                    account_usage(profile, failure.usage) if failure.usage is not None else None
+                )
                 await reconcile_usage(
                     session,
                     reservation_id=reservation_id,
                     token=request.lease,
                     provider=profile.provider,
                     model=profile.model,
-                    usage=None,
+                    usage=failure_usage,
                     provider_request_id=None,
                     outcome=failure.category.value,
-                    conservative=True,
+                    conservative=failure_usage is None,
                 )
                 await record_failure_observation(
                     session,

@@ -177,5 +177,5 @@ submitting a change.
 
 ## License
 
-No open-source license has been selected yet. Until one is added, the source is publicly visible
-but standard copyright restrictions apply.
+Vuzol is open-source software licensed under the
+[Apache License 2.0](LICENSE).

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -13,17 +14,18 @@ from vuzol.config.models import (
     ProviderRole,
 )
 from vuzol.providers.domain import ProviderRequest
-from vuzol.providers.domain import ProviderRole as RequestRole
 from vuzol.providers.kimi import KIMI_MODEL, KimiCliAdapter, canonical_kimi_argv
-from vuzol.providers.ports import CodexProcessResult
+from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.workflows.ports import CancellationContext
 
 
 class Transport:
     def __init__(self) -> None:
-        self.invocation = None
+        self.invocation: CodexInvocation | None = None
 
-    async def run(self, invocation, cancellation):
+    async def run(
+        self, invocation: CodexInvocation, cancellation: CancellationContext
+    ) -> CodexProcessResult:
         del cancellation
         self.invocation = invocation
         return CodexProcessResult(
@@ -52,18 +54,19 @@ def profile() -> ProviderProfileConfig:
 
 
 def request() -> ProviderRequest:
-    identity = {name: uuid.uuid4() for name in ("task_id", "run_id", "step_id")}
     return ProviderRequest(
-        **identity,
-        role=RequestRole.EXECUTOR,
+        task_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_id=uuid.uuid4(),
+        role=ProviderRole.EXECUTOR,
         original_input="change it",
         system_policy_revision="test-policy",
         prompt_revision="test-prompt",
         required_capabilities=frozenset({Capability.CODE_EDIT}),
         max_input_tokens=10_000,
         max_output_tokens=1_000,
-        reserved_cost_units=1,
-        reserved_quota_units=1,
+        reserved_cost_units=Decimal(1),
+        reserved_quota_units=Decimal(1),
         timeout_seconds=60,
         sandbox_reference="worktree:" + str(uuid.uuid4()),
         provider_attempt=1,

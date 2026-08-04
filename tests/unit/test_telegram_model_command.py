@@ -292,8 +292,13 @@ async def test_project_model_controller_auto_and_effort_and_grok(
         TopicKind,
         TopicRegistry,
     )
+    from vuzol.projects.executor_preference import ExecutorPreferenceError
     from vuzol.telegram.domain import ControlUpdate
-    from vuzol.telegram.model_command import ModelPickerStage, ProjectModelController
+    from vuzol.telegram.model_command import (
+        ModelPickerStage,
+        ProjectModelController,
+        _selected_profile,
+    )
 
     sandbox = SandboxProfileConfig.model_validate(
         {
@@ -418,6 +423,65 @@ async def test_project_model_controller_auto_and_effort_and_grok(
     session.add = MagicMock()
     session.scalar = AsyncMock(return_value=None)
 
+    connection = await controller.apply(
+        session,
+        ControlUpdate(
+            bot_id="main",
+            update_id=0,
+            callback_query_id="cb-connection",
+            chat_id=-100,
+            user_id=7,
+            message_thread_id=20,
+            action_kind="project_model_select_connection",
+            preference_revision=1,
+            preference_profile_id="grok-subscription-a",
+        ),
+        action_id=uuid4(),
+    )
+    assert connection.stage is ModelPickerStage.MODEL
+    model_picker = session.add.call_args.args[0]
+    assert model_picker.payload["stage"] == ModelPickerStage.MODEL.value
+    assert model_picker.payload["callback_buttons"] == (
+        (("Grok 4.5", "v2:pm:m:1:grok-subscription-a:grok"),),
+    )
+
+    for unavailable_profile in (None, "missing-profile"):
+        with pytest.raises(ExecutorPreferenceError, match="connection"):
+            await controller.apply(
+                session,
+                ControlUpdate(
+                    bot_id="main",
+                    update_id=0,
+                    callback_query_id="cb-bad-connection",
+                    chat_id=-100,
+                    user_id=7,
+                    message_thread_id=20,
+                    action_kind="project_model_select_connection",
+                    preference_revision=1,
+                    preference_profile_id=unavailable_profile,
+                ),
+                action_id=uuid4(),
+            )
+
+    row.revision = 2
+    with pytest.raises(ExecutorPreferenceError, match="stale"):
+        await controller.apply(
+            session,
+            ControlUpdate(
+                bot_id="main",
+                update_id=0,
+                callback_query_id="cb-stale-connection",
+                chat_id=-100,
+                user_id=7,
+                message_thread_id=20,
+                action_kind="project_model_select_connection",
+                preference_revision=1,
+                preference_profile_id="grok-subscription-a",
+            ),
+            action_id=uuid4(),
+        )
+    row.revision = 1
+
     auto = await controller.apply(
         session,
         ControlUpdate(
@@ -497,6 +561,29 @@ async def test_project_model_controller_auto_and_effort_and_grok(
     assert row.worker_key == "grok"
     assert row.reasoning_effort is None
     assert session.add.call_count >= 3
+
+    for action_kind in (
+        "project_model_select_worker",
+        "project_model_select_effort",
+    ):
+        with pytest.raises(ExecutorPreferenceError):
+            await controller.apply(
+                session,
+                ControlUpdate(
+                    bot_id="main",
+                    update_id=5,
+                    callback_query_id="cb-invalid-action",
+                    chat_id=-100,
+                    user_id=7,
+                    message_thread_id=20,
+                    action_kind=action_kind,
+                    preference_revision=row.revision,
+                ),
+                action_id=uuid4(),
+            )
+
+    with pytest.raises(ExecutorPreferenceError, match="connection"):
+        _selected_profile(runtime, profile_id=None, worker=ExecutorWorkerKey.KIMI)
 
 
 @pytest.mark.anyio

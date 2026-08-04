@@ -89,18 +89,25 @@ class PythonTelegramClient:
         approval_id: uuid.UUID | None = None,
         callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
     ) -> None:
-        await self._bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=html,
-            parse_mode=ParseMode.HTML,
-            reply_markup=_control_markup(
-                buttons,
-                task_id=task_id,
-                approval_id=approval_id,
-                callback_buttons=callback_buttons,
-            ),
-        )
+        try:
+            await self._bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=html,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_control_markup(
+                    buttons,
+                    task_id=task_id,
+                    approval_id=approval_id,
+                    callback_buttons=callback_buttons,
+                ),
+            )
+        except BadRequest as error:
+            # Delivery can lose the database acknowledgement after Telegram has already
+            # applied an edit. The fenced retry then receives this response even though
+            # the desired projection is visible, so treat it as an idempotent success.
+            if "message is not modified" not in str(error).lower().replace("_", " "):
+                raise
 
     async def delete_message(self, *, chat_id: int, message_id: int) -> None:
         try:

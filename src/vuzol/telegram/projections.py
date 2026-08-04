@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1073,6 +1074,9 @@ async def _history_work_seconds(session: AsyncSession, task: Task) -> int:
         total_ms = sum(max(0, int(row.duration_ms or 0)) for row in rows)
         return max(0, total_ms // 1000)
 
+    state = sqlalchemy_inspect(task, raiseerr=False)
+    if state is not None and {"created_at", "updated_at"} & state.expired_attributes:
+        await session.refresh(task, attribute_names=("created_at", "updated_at"))
     started = task.created_at
     ended = task.updated_at or datetime.now(UTC)
     if started.tzinfo is None:

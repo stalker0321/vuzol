@@ -241,6 +241,7 @@ class ProviderStepHandler:
                 kind=(
                     OutcomeKind.BLOCKED
                     if failure.category is ProviderErrorCategory.CANCELLED
+                    and not failure.retryable
                     else (
                         OutcomeKind.TRANSIENT_FAILURE
                         if failure.retryable

@@ -182,7 +182,7 @@ class GrokCliAdapter:
         except GrokProviderCancelled as error:
             raise ProviderFailure(
                 ProviderErrorCategory.CANCELLED,
-                retryable=False,
+                retryable=True,
                 request_sent=True,
                 safe_summary="Grok CLI reported provider-originated cancellation",
             ) from error

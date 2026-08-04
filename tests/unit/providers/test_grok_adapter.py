@@ -329,7 +329,7 @@ async def test_grok_adapter_classifies_structured_provider_cancellation(tmp_path
             fenced, configured, CancellationContext()
         )
     assert captured.value.category is ProviderErrorCategory.CANCELLED
-    assert captured.value.retryable is False
+    assert captured.value.retryable is True
 
 
 @pytest.mark.anyio

@@ -321,9 +321,9 @@ def resolve_route_pin(
                 else None
             ),
             worker_key=worker,
-            # An explicitly selected Grok account is the primary account, not a
-            # prohibition on using another Grok account after a bounded failure.
-            allow_same_family_fallbacks=exact_profile.provider == "grok",
+            # An explicitly selected account is a strict identity boundary.
+            # Never cross into another account without a new /model choice.
+            allow_same_family_fallbacks=False,
         )
     if worker is ExecutorWorkerKey.GROK:
         profile = _first_enabled_executor(registries, provider="grok")

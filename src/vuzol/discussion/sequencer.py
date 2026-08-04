@@ -57,6 +57,23 @@ class SequenceResult:
     completed: bool = False
 
 
+def _same_plan_item(left: PlanRevisionItem, right: PlanRevisionItem) -> bool:
+    fields = (
+        "summary",
+        "goal",
+        "expected_outcome",
+        "completion_criteria",
+        "allowed_scope",
+        "out_of_scope",
+        "dependencies",
+        "trusted_checks",
+        "suggested_risk",
+        "needs_approval",
+        "estimated_complexity",
+    )
+    return all(getattr(left, field) == getattr(right, field) for field in fields)
+
+
 class WorkPackageSequencer:
     """Transaction-owned, one-ahead sequencer; it never invokes a model."""
 
@@ -84,7 +101,7 @@ class WorkPackageSequencer:
         previous = package.status
         package.status = WorkPackageStatus.RUNNING
         package.running_revision_id = revision.id
-        package.cursor_ordinal = 1
+        package.cursor_ordinal = await self._first_unfinished_ordinal(package.id, revision)
         package.pause_reason = None
         package.last_failure_task_id = None
         package.version += 1
@@ -103,6 +120,47 @@ class WorkPackageSequencer:
             },
         )
         return await self._materialize_current(package, revision)
+
+    async def _first_unfinished_ordinal(
+        self, package_id: uuid.UUID, revision: PlanRevision
+    ) -> int:
+        """Carry an unchanged, completed prefix across plan revisions."""
+
+        assert self._uow.session is not None
+        current_items = tuple(
+            (
+                await self._uow.session.scalars(
+                    select(PlanRevisionItem)
+                    .where(
+                        PlanRevisionItem.work_package_id == package_id,
+                        PlanRevisionItem.plan_revision_id == revision.id,
+                    )
+                    .order_by(PlanRevisionItem.ordinal)
+                )
+            ).all()
+        )
+        for item in current_items:
+            completed_predecessors = tuple(
+                (
+                    await self._uow.session.scalars(
+                        select(PlanRevisionItem)
+                        .join(
+                            MaterializationLink,
+                            MaterializationLink.plan_revision_item_id == PlanRevisionItem.id,
+                        )
+                        .join(Task, Task.id == MaterializationLink.task_id)
+                        .where(
+                            MaterializationLink.work_package_id == package_id,
+                            MaterializationLink.plan_revision_id != revision.id,
+                            MaterializationLink.work_item_draft_id == item.item_id,
+                            Task.status == TaskStatus.COMPLETED,
+                        )
+                    )
+                ).all()
+            )
+            if not any(_same_plan_item(item, previous) for previous in completed_predecessors):
+                return item.ordinal
+        return len(current_items) + 1
 
     async def observe_terminal(self, *, task_id: uuid.UUID) -> SequenceResult | None:
         """Consume terminal evidence once; duplicate observations are harmless."""

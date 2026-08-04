@@ -355,13 +355,16 @@ class LocalGit:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, _stderr = await asyncio.wait_for(process.communicate(), self._timeout)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), self._timeout)
         except TimeoutError as error:
             process.kill()
             await process.wait()
             raise GitError("Git operation timed out") from error
         if process.returncode not in allowed_returncodes:
-            raise GitError(f"Git operation failed: {args[0]}")
+            diagnostic = stderr or stdout
+            detail = " ".join(diagnostic.decode("utf-8", "replace").split())[:400]
+            suffix = f": {detail}" if detail else ""
+            raise GitError(f"Git operation failed: {args[0]}{suffix}")
         return stdout
 
 

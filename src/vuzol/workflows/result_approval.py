@@ -18,7 +18,7 @@ from vuzol.storage.models import (
     Step,
     Worktree,
 )
-from vuzol.storage.types import ApprovalStatus, RiskLevel, StepStatus
+from vuzol.storage.types import ApprovalStatus, StepStatus
 from vuzol.workflows.transitions import transition_step
 
 RESULT_APPROVAL_SCHEMA = "result-approval.v1"
@@ -124,27 +124,25 @@ async def _plan_approval_covers_intermediate_result(
 ) -> bool:
     """Allow approved plans to apply safe intermediate results without a user pause."""
 
-    row = (
+    link = (
         await session.execute(
-            select(MaterializationLink, PlanRevisionItem)
-            .join(
-                PlanRevisionItem,
-                PlanRevisionItem.id == MaterializationLink.plan_revision_item_id,
-            )
+            select(MaterializationLink)
             .where(MaterializationLink.task_id == task_id)
         )
-    ).one_or_none()
-    if row is None:
+    ).scalar_one_or_none()
+    if link is None:
         return False
-    link, item = row
     item_count = await session.scalar(
         select(func.count())
         .select_from(PlanRevisionItem)
         .where(PlanRevisionItem.plan_revision_id == link.plan_revision_id)
     )
-    is_intermediate = link.ordinal < int(item_count or 0)
-    safe = not item.needs_approval and item.suggested_risk is RiskLevel.LOW
-    return is_intermediate and safe
+    # Approving a package is the user's authorization to run its chain without
+    # stopping after every retained result. The final item remains the single
+    # human result-approval boundary. Item-level risk metadata still informs
+    # planning/review, but must not silently turn an approved chain into a set
+    # of per-item approvals.
+    return link.ordinal < int(item_count or 0)
 
 
 def verified_envelope(step: Step, approval: Approval) -> dict[str, Any]:

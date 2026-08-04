@@ -275,6 +275,52 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
                 preference_effort=parts[5],
             )
         return None
+    if len(parts) >= 5 and parts[:2] == ["v2", "pm"]:
+        try:
+            kind = parts[2]
+            revision = int(parts[3])
+        except (ValueError, TypeError, IndexError):
+            return None
+        if kind == "c" and len(parts) == 5:
+            return ControlUpdate(
+                bot_id=bot_id,
+                update_id=update.update_id,
+                callback_query_id=query.id,
+                chat_id=query.message.chat.id,
+                user_id=user.id,
+                message_thread_id=message_thread_id,
+                action_kind="project_model_select_connection",
+                preference_revision=revision,
+                preference_profile_id=parts[4],
+            )
+        if kind == "m" and len(parts) == 6:
+            return ControlUpdate(
+                bot_id=bot_id,
+                update_id=update.update_id,
+                callback_query_id=query.id,
+                chat_id=query.message.chat.id,
+                user_id=user.id,
+                message_thread_id=message_thread_id,
+                action_kind="project_model_select_worker",
+                preference_revision=revision,
+                preference_profile_id=parts[4],
+                preference_worker=parts[5],
+            )
+        if kind == "e" and len(parts) == 7:
+            return ControlUpdate(
+                bot_id=bot_id,
+                update_id=update.update_id,
+                callback_query_id=query.id,
+                chat_id=query.message.chat.id,
+                user_id=user.id,
+                message_thread_id=message_thread_id,
+                action_kind="project_model_select_effort",
+                preference_revision=revision,
+                preference_profile_id=parts[4],
+                preference_worker=parts[5],
+                preference_effort=parts[6],
+            )
+        return None
     allowed_actions = {
         "approve",
         "redo",

@@ -9,21 +9,23 @@ from enum import StrEnum
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config import RegistryError, RuntimeConfiguration
-from vuzol.config.models import TopicKind
+from vuzol.config.models import ProviderProfileConfig, TopicKind
 from vuzol.projects.executor_preference import (
     REASONING_EFFORTS,
     ExecutorPreferenceError,
     ExecutorWorkerKey,
     WorkerOption,
     auto_callback_data,
-    available_workers,
+    connection_label,
     effort_callback_data,
     ensure_preference_row,
+    executor_connections,
     format_preference_label,
     load_preference,
     set_auto_preference,
     set_worker_preference,
     worker_callback_data,
+    workers_for_profile,
 )
 from vuzol.storage.models import TransactionalOutbox
 from vuzol.telegram.domain import ControlUpdate
@@ -34,7 +36,8 @@ PROJECT_MODEL_CONFIRM_ROLE = "project_model_confirm"
 
 
 class ModelPickerStage(StrEnum):
-    WORKER = "worker"
+    CONNECTION = "connection"
+    MODEL = "model"
     EFFORT = "effort"
     CONFIRM = "confirm"
 
@@ -49,7 +52,7 @@ def build_worker_picker_html(*, project_id: str, current_label: str) -> str:
     return (
         f"<b>Model for project</b> <code>{telegram_html(project_id)}</code>\n"
         f"Current: <b>{telegram_html(current_label)}</b>\n\n"
-        "Choose the default executor for this project. "
+        "Choose a provider account. "
         "The setting applies to future coding tasks until you change it."
     )
 
@@ -59,6 +62,13 @@ def build_effort_picker_html(*, project_id: str, worker_label: str) -> str:
         f"<b>Reasoning effort</b> for <b>{telegram_html(worker_label)}</b>\n"
         f"Project: <code>{telegram_html(project_id)}</code>\n\n"
         "Higher effort is slower and usually more thorough."
+    )
+
+
+def build_model_picker_html(*, project_id: str, connection: str) -> str:
+    return (
+        f"<b>Choose model</b> for <b>{telegram_html(connection)}</b>\n"
+        f"Project: <code>{telegram_html(project_id)}</code>"
     )
 
 
@@ -74,14 +84,23 @@ def build_confirm_html(*, project_id: str, label: str) -> str:
 def worker_keyboard(
     *,
     revision: int,
-    workers: tuple[WorkerOption, ...],
+    connections: tuple[ProviderProfileConfig, ...] = (),
+    workers: tuple[WorkerOption, ...] = (),
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
     rows: list[tuple[tuple[str, str], ...]] = [
         (("Routing (auto)", auto_callback_data(revision)),),
     ]
     current: list[tuple[str, str]] = []
-    for option in workers:
-        current.append((option.label, worker_callback_data(revision, option.key)))
+    choices = (
+        tuple(
+            (connection_label(profile), f"v2:pm:c:{revision}:{profile.id}")
+            for profile in connections
+        )
+        if connections
+        else tuple((option.label, worker_callback_data(revision, option.key)) for option in workers)
+    )
+    for label, callback in choices:
+        current.append((label, callback))
         if len(current) == 2:
             rows.append(tuple(current))
             current = []
@@ -94,9 +113,16 @@ def effort_keyboard(
     *,
     revision: int,
     worker: ExecutorWorkerKey,
+    profile_id: str | None = None,
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
     buttons = [
-        (effort, effort_callback_data(revision, worker, effort)) for effort in REASONING_EFFORTS
+        (
+            effort,
+            f"v2:pm:e:{revision}:{profile_id}:{worker.value}:{effort}"
+            if profile_id
+            else effort_callback_data(revision, worker, effort),
+        )
+        for effort in REASONING_EFFORTS
     ]
     rows: list[tuple[tuple[str, str], ...]] = []
     for index in range(0, len(buttons), 2):
@@ -115,7 +141,7 @@ async def enqueue_worker_picker(
 ) -> None:
     await ensure_preference_row(session, project_id)
     preference = await load_preference(session, project_id)
-    workers = available_workers(runtime.registries)
+    connections = executor_connections(runtime.registries)
     session.add(
         TransactionalOutbox(
             destination="telegram",
@@ -127,7 +153,7 @@ async def enqueue_worker_picker(
             ),
             payload={
                 "role": PROJECT_MODEL_PICKER_ROLE,
-                "stage": ModelPickerStage.WORKER.value,
+                "stage": ModelPickerStage.CONNECTION.value,
                 "chat_id": chat_id,
                 "message_thread_id": message_thread_id,
                 "project_id": project_id,
@@ -136,7 +162,9 @@ async def enqueue_worker_picker(
                     project_id=project_id,
                     current_label=format_preference_label(preference),
                 ),
-                "callback_buttons": worker_keyboard(revision=preference.revision, workers=workers),
+                "callback_buttons": worker_keyboard(
+                    revision=preference.revision, connections=connections
+                ),
             },
         )
     )
@@ -179,12 +207,55 @@ class ProjectModelController:
                 label=format_preference_label(view),
             )
             return ModelCommandOutcome(project_id=project_id, stage=ModelPickerStage.CONFIRM)
+        if update.action_kind == "project_model_select_connection":
+            if update.preference_profile_id is None:
+                raise ExecutorPreferenceError("connection selection is missing")
+            try:
+                profile = self._runtime.registries.profiles.get(update.preference_profile_id)
+            except RegistryError as error:
+                raise ExecutorPreferenceError("that connection is not available") from error
+            if profile not in executor_connections(self._runtime.registries):
+                raise ExecutorPreferenceError("that connection is not available")
+            preference = await load_preference(session, project_id)
+            if preference.revision != update.preference_revision:
+                raise ExecutorPreferenceError("model options are stale; send /model again")
+            options = workers_for_profile(profile)
+            buttons = tuple(
+                ((option.label, f"v2:pm:m:{preference.revision}:{profile.id}:{option.key.value}"),)
+                for option in options
+            )
+            session.add(
+                TransactionalOutbox(
+                    destination="telegram",
+                    operation_type="send_message",
+                    linked_entity_type="telegram_control_action",
+                    linked_entity_id=action_id,
+                    idempotency_key=f"telegram:model_models:{update.callback_query_id}",
+                    payload={
+                        "role": PROJECT_MODEL_PICKER_ROLE,
+                        "stage": ModelPickerStage.MODEL.value,
+                        "chat_id": update.chat_id,
+                        "message_thread_id": update.message_thread_id,
+                        "project_id": project_id,
+                        "revision": preference.revision,
+                        "html": build_model_picker_html(
+                            project_id=project_id, connection=connection_label(profile)
+                        ),
+                        "callback_buttons": buttons,
+                    },
+                )
+            )
+            return ModelCommandOutcome(project_id=project_id, stage=ModelPickerStage.MODEL)
         if update.action_kind == "project_model_select_worker":
             if update.preference_worker is None:
-                raise ExecutorPreferenceError("worker selection is missing")
+                raise ExecutorPreferenceError("model selection is incomplete")
             worker = ExecutorWorkerKey(update.preference_worker)
-            workers = available_workers(self._runtime.registries)
-            option = next((item for item in workers if item.key is worker), None)
+            profile = _selected_profile(
+                self._runtime, profile_id=update.preference_profile_id, worker=worker
+            )
+            option = next(
+                (item for item in workers_for_profile(profile) if item.key is worker), None
+            )
             if option is None:
                 raise ExecutorPreferenceError("that worker is not available")
             if not option.supports_reasoning_effort:
@@ -194,6 +265,7 @@ class ProjectModelController:
                     user_id=update.user_id,
                     expected_revision=update.preference_revision,
                     worker_key=worker,
+                    profile_id=profile.id,
                     reasoning_effort=None,
                     registries=self._runtime.registries,
                 )
@@ -230,7 +302,7 @@ class ProjectModelController:
                             project_id=project_id, worker_label=option.label
                         ),
                         "callback_buttons": effort_keyboard(
-                            revision=preference.revision, worker=worker
+                            revision=preference.revision, worker=worker, profile_id=profile.id
                         ),
                     },
                 )
@@ -238,14 +310,18 @@ class ProjectModelController:
             return ModelCommandOutcome(project_id=project_id, stage=ModelPickerStage.EFFORT)
         if update.action_kind == "project_model_select_effort":
             if update.preference_worker is None or update.preference_effort is None:
-                raise ExecutorPreferenceError("worker and effort are required")
+                raise ExecutorPreferenceError("model and effort are required")
             worker = ExecutorWorkerKey(update.preference_worker)
+            profile = _selected_profile(
+                self._runtime, profile_id=update.preference_profile_id, worker=worker
+            )
             view = await set_worker_preference(
                 session,
                 project_id=project_id,
                 user_id=update.user_id,
                 expected_revision=update.preference_revision,
                 worker_key=worker,
+                profile_id=profile.id if update.preference_profile_id else None,
                 reasoning_effort=update.preference_effort,
                 registries=self._runtime.registries,
             )
@@ -293,3 +369,24 @@ class ProjectModelController:
         # Preference mutations must refresh «Статус проектов» so project-default labels
         # are not stale until an unrelated task event.
         await enqueue_project_status_dashboard(session, update.chat_id)
+
+
+def _selected_profile(
+    runtime: RuntimeConfiguration, *, profile_id: str | None, worker: ExecutorWorkerKey
+) -> ProviderProfileConfig:
+    if profile_id is not None:
+        try:
+            return runtime.registries.profiles.get(profile_id)
+        except RegistryError as error:
+            raise ExecutorPreferenceError("that connection is not available") from error
+    provider = {
+        ExecutorWorkerKey.GROK: "grok",
+        ExecutorWorkerKey.KIMI: "kimi",
+    }.get(worker, "codex")
+    profile = next(
+        (item for item in executor_connections(runtime.registries) if item.provider == provider),
+        None,
+    )
+    if profile is None:
+        raise ExecutorPreferenceError("that connection is not available")
+    return profile

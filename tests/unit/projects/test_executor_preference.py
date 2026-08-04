@@ -26,6 +26,8 @@ from vuzol.projects.executor_preference import (
     apply_profile_overrides,
     available_workers,
     codex_model_for_worker,
+    connection_label,
+    executor_connections,
     format_preference_label,
     preference_payload,
     resolve_route_pin,
@@ -212,6 +214,30 @@ def test_resolve_route_pin_for_sol_and_grok() -> None:
         bundle,
     )
     assert auto is None
+
+
+def test_exact_connection_pin_selects_grok_b_without_fallback() -> None:
+    bundle = _bundle(
+        _grok_profile("grok-subscription-a", priority=210, fallbacks=("grok-subscription-b",)),
+        _grok_profile("grok-subscription-b", priority=220),
+    )
+    connections = executor_connections(bundle)
+    assert [connection_label(profile) for profile in connections] == ["xAI-A", "xAI-B"]
+
+    pin = resolve_route_pin(
+        ExecutorPreferenceView(
+            project_id="bill-buddy",
+            mode=ExecutorPreferenceMode.PIN,
+            worker_key=ExecutorWorkerKey.GROK,
+            profile_id="grok-subscription-b",
+            reasoning_effort=None,
+            revision=2,
+        ),
+        bundle,
+    )
+    assert pin is not None
+    assert pin.trusted_profile_id == "grok-subscription-b"
+    assert pin.allow_same_family_fallbacks is False
 
 
 def test_same_family_fallbacks_drop_cross_provider_edges() -> None:

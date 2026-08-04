@@ -91,6 +91,16 @@ def test_control_update_parses_model_callbacks() -> None:
 
     assert control_update(_Update("v1:pm:e:2:high"), "bot") is None  # type: ignore[arg-type]
 
+    connection = control_update(_Update("v2:pm:c:3:grok-subscription-b"), "bot")  # type: ignore[arg-type]
+    assert isinstance(connection, ControlUpdate)
+    assert connection.action_kind == "project_model_select_connection"
+    assert connection.preference_profile_id == "grok-subscription-b"
+    model = control_update(_Update("v2:pm:m:3:grok-subscription-b:grok"), "bot")  # type: ignore[arg-type]
+    assert isinstance(model, ControlUpdate)
+    assert model.action_kind == "project_model_select_worker"
+    assert model.preference_profile_id == "grok-subscription-b"
+    assert model.preference_worker == "grok"
+
 
 @pytest.mark.anyio
 async def test_accept_message_routes_model_command(

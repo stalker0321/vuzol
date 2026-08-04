@@ -101,7 +101,9 @@ class HardLimits(BaseModel):
     provider_call_input_tokens: int = Field(default=100_000, ge=1)
     provider_call_output_tokens: int = Field(default=25_000, ge=1)
     planner_output_tokens: int = Field(default=1_000, ge=1)
-    provider_attempts: int = Field(default=3, ge=1, le=20)
+    # Primary plus bounded fallbacks. Four leaves room for a provider-originated
+    # cancellation followed by a quota-triggered account failover.
+    provider_attempts: int = Field(default=4, ge=1, le=20)
     fallback_depth: int = Field(default=2, ge=0, le=10)
     daily_cost_units: float = Field(default=100, gt=0)
     daily_quota_units: float = Field(default=100, gt=0)

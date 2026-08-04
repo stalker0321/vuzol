@@ -1,5 +1,7 @@
 """Step 06 handler adapter for safe model-only provider calls."""
 
+import hashlib
+import json
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -240,8 +242,7 @@ class ProviderStepHandler:
             return StepOutcome(
                 kind=(
                     OutcomeKind.BLOCKED
-                    if failure.category is ProviderErrorCategory.CANCELLED
-                    and not failure.retryable
+                    if failure.category is ProviderErrorCategory.CANCELLED and not failure.retryable
                     else (
                         OutcomeKind.TRANSIENT_FAILURE
                         if failure.retryable
@@ -800,6 +801,13 @@ class ProviderStepHandler:
                     plan_step,
                     redaction_patterns=self._redaction_patterns,
                 )
+                delivery = static_delivery_context(
+                    self._registries.projects.get(task.project_id)
+                    if task.project_id is not None
+                    else None
+                )
+                if delivery is not None:
+                    context = (*context, delivery)
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
@@ -837,6 +845,50 @@ class ProviderStepHandler:
 
 
 SAFE_PROVIDER_STEP_TYPES = frozenset({"execute_model", "research_execute", "synthesize", "plan"})
+
+
+def static_delivery_context(project: object | None) -> ContextItem | None:
+    """Load the system-owned static delivery contract deterministically for workers."""
+
+    deployment = getattr(project, "static_deployment", None)
+    if deployment is None or not deployment.enabled:
+        return None
+    contract = {
+        "asset_type": "skill",
+        "id": "static-site-delivery",
+        "version": "1",
+        "status": "verified",
+        "trigger": "task touches a project with configured static delivery",
+        "worker_responsibility": (
+            "prepare repository files that form the configured static source snapshot"
+        ),
+        "publisher_responsibility": (
+            "after human approval, Vuzol publish_static atomically publishes and probes the site"
+        ),
+        "forbidden_worker_actions": [
+            "start or manage a local server",
+            "upload to external hosting or file-sharing services",
+            "claim localhost or a sandbox address is a deployment",
+            "write deployment URL marker files",
+        ],
+        "validation_rules": [
+            "entrypoint exists inside the configured source directory",
+            "entrypoint CSS and script references are relative and included in the release",
+            "trusted project gates pass before approval",
+            "public URL returns a non-empty HTTP 200 response after publication",
+        ],
+        "configured_source_directory": deployment.source_directory.as_posix(),
+        "configured_entrypoint": deployment.entrypoint.as_posix(),
+        "configured_include": [path.as_posix() for path in deployment.include],
+        "configured_url_path": deployment.url_path,
+    }
+    content = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return ContextItem(
+        source="system_skill",
+        reference="skill:static-site-delivery:v1",
+        content=content,
+        content_hash=hashlib.sha256(content.encode()).hexdigest(),
+    )
 
 
 def _reservation_id(payload: dict[str, object]) -> uuid.UUID | None:

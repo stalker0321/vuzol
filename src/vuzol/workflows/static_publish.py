@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
-from vuzol.ops.static_publish import StaticPublishError, StaticSite, publish
+from vuzol.ops.static_publish import StaticPublishError, StaticSite, publish, rollback
 from vuzol.storage.models import Task
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -18,9 +21,11 @@ class StaticPublishHandler:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         runtime: RuntimeConfiguration,
+        probe: Callable[[str], Awaitable[dict[str, object]]] | None = None,
     ) -> None:
         self._factory = session_factory
         self._runtime = runtime
+        self._probe = probe or _probe_public_site
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -70,6 +75,22 @@ class StaticPublishHandler:
                 category="static_publish_failed",
                 summary=str(error)[:500],
             )
+        try:
+            probe = await self._probe(public_url)
+        except (httpx.HTTPError, ValueError) as error:
+            if result.changed:
+                with suppress(StaticPublishError):
+                    await asyncio.to_thread(
+                        rollback,
+                        site,
+                        site_root=self._runtime.settings.static_site_root,
+                    )
+            return StepOutcome(
+                kind=OutcomeKind.BLOCKED,
+                result={"public_url": public_url, "release": result.release},
+                category="static_publish_probe_failed",
+                summary=str(error)[:500],
+            )
         return StepOutcome.succeeded(
             {
                 "status": "published",
@@ -78,5 +99,21 @@ class StaticPublishHandler:
                 "changed": result.changed,
                 "files": result.files,
                 "bytes": result.bytes,
+                "probe": probe,
             }
         )
+
+
+async def _probe_public_site(public_url: str) -> dict[str, object]:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
+        response = await client.get(public_url, headers={"accept": "text/html"})
+    if response.status_code != 200:
+        raise ValueError(f"published site returned HTTP {response.status_code}")
+    if not response.content.strip():
+        raise ValueError("published site returned an empty response")
+    return {
+        "status_code": response.status_code,
+        "content_type": response.headers.get("content-type", "")[:100],
+        "bytes": len(response.content),
+        "final_url": str(response.url),
+    }

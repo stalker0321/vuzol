@@ -10,7 +10,9 @@ import shutil
 import stat
 import uuid
 from dataclasses import asdict, dataclass
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 SOURCE_ROOT = Path("/srv/vuzol/repositories")
 SITE_ROOT = Path("/srv/vuzol/sites")
@@ -72,6 +74,7 @@ def publish(
         files, total_bytes = _copy_allowlist(source, staging, site.include)
         if not _regular_file(staging / site.entrypoint):
             raise StaticPublishError(f"required entrypoint is missing: {site.entrypoint}")
+        _require_closed_html_entrypoint(staging, site.entrypoint)
         digest = _tree_digest(staging)
         release = releases / digest[:20]
         if release.exists():
@@ -194,6 +197,46 @@ def _tree_digest(root: Path) -> str:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
     return digest.hexdigest()
+
+
+class _LocalAssetParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.references: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "script" and values.get("src"):
+            self.references.append(str(values["src"]))
+        elif tag == "link" and values.get("rel") == "stylesheet" and values.get("href"):
+            self.references.append(str(values["href"]))
+
+
+def _require_closed_html_entrypoint(root: Path, entrypoint: Path) -> None:
+    """Reject releases whose HTML points outside the published subpath or snapshot."""
+
+    try:
+        html = (root / entrypoint).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise StaticPublishError("static entrypoint is not readable UTF-8 HTML") from error
+    parser = _LocalAssetParser()
+    parser.feed(html)
+    for reference in parser.references:
+        parsed = urlsplit(reference)
+        if parsed.scheme or parsed.netloc or not parsed.path:
+            continue
+        if parsed.path.startswith("/"):
+            raise StaticPublishError(
+                f"entrypoint asset must be relative for subpath hosting: {reference}"
+            )
+        relative = entrypoint.parent / Path(unquote(parsed.path))
+        candidate = (root / relative).resolve(strict=False)
+        try:
+            candidate.relative_to(root.resolve(strict=True))
+        except ValueError as error:
+            raise StaticPublishError(f"entrypoint asset escapes release: {reference}") from error
+        if not _regular_file(candidate):
+            raise StaticPublishError(f"entrypoint asset is missing from release: {reference}")
 
 
 def _activate(destination: Path, release: Path) -> bool:

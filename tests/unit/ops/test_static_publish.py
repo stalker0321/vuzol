@@ -159,6 +159,40 @@ def test_publish_requires_entrypoint_and_cleans_staging(roots: tuple[Path, Path]
     assert not tuple((site.destination / "releases").glob(".staging-*"))
 
 
+@pytest.mark.parametrize(
+    ("reference", "reason"),
+    (("/src/main.jsx", "must be relative"), ("./missing.js", "missing from release")),
+)
+def test_publish_rejects_broken_entrypoint_assets(
+    roots: tuple[Path, Path], reference: str, reason: str
+) -> None:
+    sources, sites = roots
+    source = sources / "broken-assets"
+    source.mkdir()
+    (source / "index.html").write_text(f'<script type="module" src="{reference}"></script>')
+    parent = sites / "example"
+    parent.mkdir()
+    site = StaticSite("broken", source, parent / "broken", (Path("index.html"),))
+    with pytest.raises(StaticPublishError, match=reason):
+        publish(site)
+
+
+def test_publish_accepts_closed_relative_entrypoint_assets(roots: tuple[Path, Path]) -> None:
+    sources, sites = roots
+    source = sources / "closed-assets"
+    (source / "assets").mkdir(parents=True)
+    (source / "index.html").write_text(
+        '<link rel="stylesheet" href="./assets/app.css">'
+        '<script type="module" src="./assets/app.js"></script>'
+    )
+    (source / "assets/app.css").write_text("body{}")
+    (source / "assets/app.js").write_text("console.log('ok')")
+    parent = sites / "example"
+    parent.mkdir()
+    site = StaticSite("closed", source, parent / "closed", (Path("index.html"), Path("assets")))
+    assert publish(site).files == 3
+
+
 def test_publish_enforces_file_limit_and_skips_missing_allowlist(
     roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

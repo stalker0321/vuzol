@@ -43,7 +43,15 @@ def _handler(
     context.__aenter__.return_value = session
     factory = MagicMock(return_value=context)
     request = SimpleNamespace(task_id=uuid4())
-    return StaticPublishHandler(factory, cast(RuntimeConfiguration, runtime)), request
+    probe = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "content_type": "text/html",
+            "bytes": 13,
+            "final_url": "https://hryshyn.dev/demo/",
+        }
+    )
+    return StaticPublishHandler(factory, cast(RuntimeConfiguration, runtime), probe=probe), request
 
 
 @pytest.mark.anyio
@@ -53,6 +61,7 @@ async def test_handler_publishes_and_returns_public_url(tmp_path: Path) -> None:
     assert outcome.kind is OutcomeKind.SUCCEEDED
     assert outcome.result["status"] == "published"
     assert outcome.result["public_url"] == "https://hryshyn.dev/demo/"
+    assert outcome.result["probe"]["status_code"] == 200
     assert (tmp_path / "sites/demo/current/index.html").read_text() == "<h1>Demo</h1>"
 
 
@@ -66,3 +75,12 @@ async def test_handler_skips_project_without_entrypoint(tmp_path: Path) -> None:
         "reason": "entrypoint_missing",
         "public_url": "https://hryshyn.dev/demo/",
     }
+
+
+@pytest.mark.anyio
+async def test_handler_blocks_when_public_probe_fails(tmp_path: Path) -> None:
+    handler, request = _handler(tmp_path)
+    handler._probe = AsyncMock(side_effect=ValueError("published site returned HTTP 404"))
+    outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
+    assert outcome.kind is OutcomeKind.BLOCKED
+    assert outcome.category == "static_publish_probe_failed"

@@ -6,11 +6,20 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.storage.models import Approval, Run, Step, Worktree
-from vuzol.storage.types import ApprovalStatus, StepStatus
+from vuzol.storage.models import (
+    Approval,
+    Event,
+    MaterializationLink,
+    PlanRevisionItem,
+    Run,
+    Step,
+    Worktree,
+)
+from vuzol.storage.types import ApprovalStatus, RiskLevel, StepStatus
+from vuzol.workflows.transitions import transition_step
 
 RESULT_APPROVAL_SCHEMA = "result-approval.v1"
 RESULT_APPROVAL_TTL = timedelta(days=7)
@@ -87,7 +96,55 @@ async def ensure_result_approval(
     }
     approval_step.external_idempotency_key = f"apply-result:{digest}"
     await session.flush()
+    if await _plan_approval_covers_intermediate_result(session, run.task_id):
+        approval.status = ApprovalStatus.APPROVED
+        approval.decided_at = func.now()
+        await transition_step(
+            session,
+            approval_step,
+            StepStatus.QUEUED,
+            actor_type="workflow_manager",
+            actor_id="approved_plan",
+        )
+        session.add(
+            Event(
+                entity_type="task",
+                entity_id=run.task_id,
+                event_type="result.auto_approved_by_plan",
+                actor_type="workflow_manager",
+                actor_id="approved_plan",
+                payload={"approval_id": str(approval.id)},
+            )
+        )
     return approval
+
+
+async def _plan_approval_covers_intermediate_result(
+    session: AsyncSession, task_id: uuid.UUID
+) -> bool:
+    """Allow approved plans to apply safe intermediate results without a user pause."""
+
+    row = (
+        await session.execute(
+            select(MaterializationLink, PlanRevisionItem)
+            .join(
+                PlanRevisionItem,
+                PlanRevisionItem.id == MaterializationLink.plan_revision_item_id,
+            )
+            .where(MaterializationLink.task_id == task_id)
+        )
+    ).one_or_none()
+    if row is None:
+        return False
+    link, item = row
+    item_count = await session.scalar(
+        select(func.count())
+        .select_from(PlanRevisionItem)
+        .where(PlanRevisionItem.plan_revision_id == link.plan_revision_id)
+    )
+    is_intermediate = link.ordinal < int(item_count or 0)
+    safe = not item.needs_approval and item.suggested_risk is RiskLevel.LOW
+    return is_intermediate and safe
 
 
 def verified_envelope(step: Step, approval: Approval) -> dict[str, Any]:

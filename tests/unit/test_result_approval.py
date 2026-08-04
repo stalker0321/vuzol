@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vuzol.storage.models import Step
-from vuzol.storage.types import StepStatus
+from vuzol.storage.types import RiskLevel, StepStatus
 from vuzol.workflows.result_approval import (
+    _plan_approval_covers_intermediate_result,
     ensure_result_approval,
     envelope_hash,
     verified_envelope,
@@ -177,6 +178,7 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
     )
     session = MagicMock()
     session.scalar = AsyncMock(side_effect=(None, worktree))
+    session.execute = AsyncMock(return_value=MagicMock(one_or_none=lambda: None))
     session.flush = AsyncMock()
     run = MagicMock(
         task_id=uuid.uuid4(),
@@ -302,6 +304,7 @@ async def test_result_approval_uses_a_safe_summary_fallback() -> None:
     )
     session = MagicMock()
     session.scalar = AsyncMock(side_effect=(None, worktree))
+    session.execute = AsyncMock(return_value=MagicMock(one_or_none=lambda: None))
     session.flush = AsyncMock()
     run = MagicMock(
         task_id=uuid.uuid4(),
@@ -330,3 +333,45 @@ def test_verified_envelope_rejects_missing_hash_or_wrong_step() -> None:
             SimpleNamespace(id=uuid.uuid4(), payload={"action_envelope": envelope}),  # type: ignore[arg-type]
             approval,  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("ordinal", "count", "needs_approval", "risk", "expected"),
+    (
+        (1, 3, False, RiskLevel.LOW, True),
+        (3, 3, False, RiskLevel.LOW, False),
+        (1, 3, True, RiskLevel.LOW, False),
+        (1, 3, False, RiskLevel.MEDIUM, False),
+    ),
+)
+async def test_plan_approval_only_covers_safe_intermediate_results(
+    ordinal: int,
+    count: int,
+    needs_approval: bool,
+    risk: RiskLevel,
+    expected: bool,
+) -> None:
+    row = (
+        SimpleNamespace(ordinal=ordinal, plan_revision_id=uuid.uuid4()),
+        SimpleNamespace(needs_approval=needs_approval, suggested_risk=risk),
+    )
+    result = MagicMock()
+    result.one_or_none.return_value = row
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.scalar = AsyncMock(return_value=count)
+
+    assert (
+        await _plan_approval_covers_intermediate_result(session, uuid.uuid4()) is expected
+    )
+
+
+@pytest.mark.anyio
+async def test_plan_approval_does_not_cover_standalone_task() -> None:
+    result = MagicMock()
+    result.one_or_none.return_value = None
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+
+    assert not await _plan_approval_covers_intermediate_result(session, uuid.uuid4())

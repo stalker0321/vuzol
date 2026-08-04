@@ -276,6 +276,11 @@ async def retry_blocked_step(
     if provider_cancelled and step.attempt_count >= step.max_attempts:
         # Each explicit user retry grants exactly one additional bounded attempt.
         step.max_attempts += 1
+    if step.executor_profile_id is not None:
+        step.payload = {
+            **step.payload,
+            "retry_failed_profile_id": step.executor_profile_id,
+        }
     run = await session.scalar(select(Run).where(Run.id == step.run_id).with_for_update())
     assert run is not None
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())

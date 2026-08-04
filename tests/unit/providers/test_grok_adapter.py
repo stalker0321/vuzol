@@ -108,6 +108,45 @@ async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> Non
 
 
 @pytest.mark.anyio
+async def test_grok_adapter_classifies_subscription_exhaustion_as_quota(tmp_path: Path) -> None:
+    class ExhaustedTransport(FakeCodexTransport):
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            return CodexProcessResult(
+                1,
+                "subscription:free-usage-exhausted: tokens (actual/limit): 532378/500000",
+                "",
+                12,
+            )
+
+    configured = profile(
+        "grok-a",
+        provider="grok",
+        model="grok-4.5",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="grok-a",
+        state_directory=tmp_path / "grok-a",
+    )
+    with pytest.raises(ProviderFailure) as captured:
+        await GrokCliAdapter(ExhaustedTransport()).execute(
+            provider_request().model_copy(
+                update={
+                    "sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"
+                }
+            ),
+            configured,
+            CancellationContext(),
+        )
+    assert captured.value.category is ProviderErrorCategory.QUOTA_EXHAUSTED
+    assert captured.value.retryable is True
+
+
+@pytest.mark.anyio
 async def test_grok_adapter_validates_discussion_agent_reply(tmp_path: Path) -> None:
     class DiscussionTransport(FakeCodexTransport):
         async def run(

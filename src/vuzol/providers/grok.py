@@ -162,6 +162,14 @@ class GrokCliAdapter:
                 safe_summary="supervised Grok transport failed after launch was possible",
             ) from error
         if result.exit_code != 0:
+            failure_text = f"{result.stdout}\n{result.stderr}".lower()
+            if "free-usage-exhausted" in failure_text or "usage limit" in failure_text:
+                raise ProviderFailure(
+                    ProviderErrorCategory.QUOTA_EXHAUSTED,
+                    retryable=True,
+                    request_sent=True,
+                    safe_summary="Grok subscription usage is exhausted for the current window",
+                )
             raise ProviderFailure(
                 ProviderErrorCategory.PROVIDER_UNAVAILABLE,
                 retryable=True,

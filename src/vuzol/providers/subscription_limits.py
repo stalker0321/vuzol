@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Sequence
@@ -401,9 +402,12 @@ def format_subscription_limits_html(
             detail = html_escape(_safe_unavailable_detail(snap.detail))
             lines.append(f"  ⚠️ {detail}")
             continue
+        long_window_label = (
+            "24 ч" if snap.weekly.window_seconds == 24 * 3600 else "неделя"
+        )
         window_lines = (
             *_format_window_block("5 ч", snap.five_hour, html_escape),
-            *_format_window_block("неделя", snap.weekly, html_escape),
+            *_format_window_block(long_window_label, snap.weekly, html_escape),
         )
         if not window_lines:
             lines.append("  ⚠️ Провайдер не сообщил данные по лимитам.")
@@ -676,10 +680,15 @@ def _weekly_from_grok_config(config: dict[str, Any], observed: datetime) -> Limi
                 break
     if remaining_percent is None and reset_at is None:
         return LimitWindow(None, None, available=False, detail="no data")
+    window_seconds = config.get("rollingWindowSeconds", _WEEKLY_SECONDS)
+    try:
+        normalized_window_seconds = max(1, int(window_seconds))
+    except (TypeError, ValueError):
+        normalized_window_seconds = _WEEKLY_SECONDS
     return LimitWindow(
         remaining_percent=remaining_percent,
         reset_at=reset_at,
-        window_seconds=_WEEKLY_SECONDS,
+        window_seconds=normalized_window_seconds,
         available=True,
     )
 
@@ -905,6 +914,21 @@ def _billing_ctx_from_log_file(path: Path) -> dict[str, Any] | None:
         return None
     text = raw.decode("utf-8", errors="ignore")
     for line in reversed(text.splitlines()):
+        exhausted = re.search(
+            r"tokens \(actual/limit\):\s*(\d+)\s*/\s*(\d+)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if "free-usage-exhausted" in line and exhausted is not None:
+            actual, limit = (int(value) for value in exhausted.groups())
+            if limit > 0:
+                return {
+                    "subscriptionTier": "free",
+                    "config": {
+                        "creditUsagePercent": actual * 100.0 / limit,
+                        "rollingWindowSeconds": 24 * 3600,
+                    },
+                }
         if "billing: fetched credits config" not in line:
             continue
         try:

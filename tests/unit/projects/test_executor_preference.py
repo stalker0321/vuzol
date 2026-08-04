@@ -216,7 +216,7 @@ def test_resolve_route_pin_for_sol_and_grok() -> None:
     assert auto is None
 
 
-def test_exact_connection_pin_selects_grok_b_without_fallback() -> None:
+def test_exact_connection_pin_selects_grok_b_as_primary_with_grok_fallback() -> None:
     bundle = _bundle(
         _grok_profile("grok-subscription-a", priority=210, fallbacks=("grok-subscription-b",)),
         _grok_profile("grok-subscription-b", priority=220),
@@ -237,7 +237,7 @@ def test_exact_connection_pin_selects_grok_b_without_fallback() -> None:
     )
     assert pin is not None
     assert pin.trusted_profile_id == "grok-subscription-b"
-    assert pin.allow_same_family_fallbacks is False
+    assert pin.allow_same_family_fallbacks is True
 
 
 def test_same_family_fallbacks_drop_cross_provider_edges() -> None:

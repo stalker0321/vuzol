@@ -160,7 +160,7 @@ def test_project_pin_fence_blocks_cross_family_when_primary_unhealthy(
 
 
 @pytest.mark.postgresql
-def test_project_pin_fence_blocks_when_primary_budget_exhausted(
+def test_project_pin_fence_idempotently_blocks_already_quota_exhausted_task(
     postgres_dsn: str, tmp_path: Path
 ) -> None:
     async def scenario() -> None:
@@ -237,6 +237,9 @@ def test_project_pin_fence_blocks_when_primary_budget_exhausted(
             assert task is not None
             task.project_id = "bill-buddy"
             task.task_type = "coding"
+            # A resumed package may materialize another runnable step while the
+            # parent task still records the previous quota-exhausted outcome.
+            task.status = TaskStatus.QUOTA_EXHAUSTED
             from vuzol.storage.models import ProjectExecutorPreference
 
             session.add(
@@ -267,6 +270,8 @@ def test_project_pin_fence_blocks_when_primary_budget_exhausted(
             assert step.status is StepStatus.BLOCKED
             assert step.executor_profile_id is None
             assert step.failure_category in {"budget_exhausted", "no_compatible_profile"}
+            task = await session.get(Task, task_id)
+            assert task is not None and task.status is TaskStatus.QUOTA_EXHAUSTED
         await engine.dispose()
 
     asyncio.run(scenario())

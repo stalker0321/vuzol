@@ -252,10 +252,14 @@ async def claim_routed_step(
                     )
                     continue
                 # Fence: only the pinned profile and same-family fallbacks, every attempt.
-                same_family = same_family_fallback_ids(
-                    registries,
-                    worker_key=project_pin.worker_key,
-                    primary_profile_id=project_pin.trusted_profile_id,
+                same_family = (
+                    same_family_fallback_ids(
+                        registries,
+                        worker_key=project_pin.worker_key,
+                        primary_profile_id=project_pin.trusted_profile_id,
+                    )
+                    if project_pin.allow_same_family_fallbacks
+                    else ()
                 )
                 pin_family_ids = frozenset((project_pin.trusted_profile_id, *same_family))
                 if failed_profile_id is not None:

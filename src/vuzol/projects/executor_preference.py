@@ -50,6 +50,7 @@ class ExecutorPreferenceView:
     worker_key: ExecutorWorkerKey | None
     reasoning_effort: str | None
     revision: int
+    profile_id: str | None = None
 
     @property
     def is_auto(self) -> bool:
@@ -79,6 +80,7 @@ def default_preference(project_id: str) -> ExecutorPreferenceView:
         project_id=project_id,
         mode=ExecutorPreferenceMode.AUTO,
         worker_key=None,
+        profile_id=None,
         reasoning_effort=None,
         revision=1,
     )
@@ -91,6 +93,7 @@ def preference_from_row(row: ProjectExecutorPreference) -> ExecutorPreferenceVie
         project_id=row.project_id,
         mode=mode,
         worker_key=worker,
+        profile_id=getattr(row, "profile_id", None),
         reasoning_effort=row.reasoning_effort,
         revision=row.revision,
     )
@@ -121,6 +124,7 @@ async def ensure_preference_row(
             project_id=project_id,
             mode=ExecutorPreferenceMode.AUTO.value,
             worker_key=None,
+            profile_id=None,
             reasoning_effort=None,
             revision=1,
         )
@@ -144,6 +148,7 @@ async def set_auto_preference(
         raise ExecutorPreferenceError("model options are stale; send /model again")
     row.mode = ExecutorPreferenceMode.AUTO.value
     row.worker_key = None
+    row.profile_id = None
     row.reasoning_effort = None
     row.revision += 1
     row.updated_by_user_id = user_id
@@ -160,11 +165,11 @@ async def set_worker_preference(
     worker_key: ExecutorWorkerKey,
     reasoning_effort: str | None,
     registries: ConfigurationBundle,
+    profile_id: str | None = None,
 ) -> ExecutorPreferenceView:
-    available = available_workers(registries)
-    if worker_key not in {option.key for option in available}:
-        raise ExecutorPreferenceError("that worker is not available")
-    option = next(item for item in available if item.key is worker_key)
+    option = worker_option_for_profile(registries, profile_id=profile_id, worker_key=worker_key)
+    if option is None:
+        raise ExecutorPreferenceError("that model is not available for this connection")
     if option.supports_reasoning_effort:
         if reasoning_effort is None or reasoning_effort not in REASONING_EFFORTS:
             raise ExecutorPreferenceError("reasoning effort is required for this worker")
@@ -175,6 +180,7 @@ async def set_worker_preference(
         raise ExecutorPreferenceError("model options are stale; send /model again")
     row.mode = ExecutorPreferenceMode.PIN.value
     row.worker_key = worker_key.value
+    row.profile_id = profile_id
     row.reasoning_effort = reasoning_effort
     row.revision += 1
     row.updated_by_user_id = user_id
@@ -229,6 +235,57 @@ def available_workers(registries: ConfigurationBundle) -> tuple[WorkerOption, ..
     return tuple(options)
 
 
+def executor_connections(registries: ConfigurationBundle) -> tuple[ProviderProfileConfig, ...]:
+    """Enabled CLI executor accounts, ordered exactly as routing priority declares."""
+    return tuple(
+        sorted(
+            (
+                profile
+                for profile in registries.profiles.items()
+                if profile.enabled
+                and profile.launch_mode is LaunchMode.CLI
+                and ProviderRole.EXECUTOR in profile.roles
+            ),
+            key=lambda item: (item.routing_priority, item.id),
+        )
+    )
+
+
+def connection_label(profile: ProviderProfileConfig) -> str:
+    provider = {"codex": "OpenAI", "grok": "xAI", "kimi": "TokenRouter"}.get(
+        profile.provider, profile.provider
+    )
+    suffix = profile.id.rsplit("-", 1)[-1]
+    account = suffix.upper() if len(suffix) == 1 else "A"
+    return f"{provider}-{account}"
+
+
+def workers_for_profile(profile: ProviderProfileConfig) -> tuple[WorkerOption, ...]:
+    if profile.provider == "codex":
+        return tuple(
+            WorkerOption(ExecutorWorkerKey(key), _worker_label(key), True) for key in CODEX_WORKERS
+        )
+    if profile.provider == "grok":
+        return (WorkerOption(ExecutorWorkerKey.GROK, "Grok 4.5", False),)
+    if profile.provider == "kimi":
+        return (WorkerOption(ExecutorWorkerKey.KIMI, "Kimi K3 Free", False),)
+    return ()
+
+
+def worker_option_for_profile(
+    registries: ConfigurationBundle, *, profile_id: str | None, worker_key: ExecutorWorkerKey
+) -> WorkerOption | None:
+    if profile_id is None:
+        return next(
+            (item for item in available_workers(registries) if item.key is worker_key), None
+        )
+    try:
+        profile = registries.profiles.get(profile_id)
+    except RegistryError:
+        return None
+    return next((item for item in workers_for_profile(profile) if item.key is worker_key), None)
+
+
 def resolve_route_pin(
     preference: ExecutorPreferenceView,
     registries: ConfigurationBundle,
@@ -238,6 +295,34 @@ def resolve_route_pin(
     if preference.is_auto or preference.worker_key is None:
         return None
     worker = preference.worker_key
+    if preference.profile_id is not None:
+        try:
+            exact_profile = registries.profiles.get(preference.profile_id)
+        except RegistryError:
+            return None
+        if not exact_profile.enabled or ProviderRole.EXECUTOR not in exact_profile.roles:
+            return None
+        expected_provider = {
+            ExecutorWorkerKey.GROK: "grok",
+            ExecutorWorkerKey.KIMI: "kimi",
+        }.get(worker, "codex")
+        if exact_profile.provider != expected_provider:
+            return None
+        return ExecutorRoutePin(
+            trusted_profile_id=exact_profile.id,
+            model_override=(
+                codex_model_for_worker(exact_profile.model, worker)
+                if exact_profile.provider == "codex"
+                else None
+            ),
+            reasoning_effort=(
+                preference.reasoning_effort or DEFAULT_REASONING_EFFORT
+                if exact_profile.provider == "codex"
+                else None
+            ),
+            worker_key=worker,
+            allow_same_family_fallbacks=False,
+        )
     if worker is ExecutorWorkerKey.GROK:
         profile = _first_enabled_executor(registries, provider="grok")
         if profile is None:
@@ -367,7 +452,9 @@ def format_preference_label(view: ExecutorPreferenceView) -> str:
     if view.is_auto or view.worker_key is None:
         return "Routing (automatic)"
     label = _worker_label(view.worker_key.value)
-    if view.worker_key is ExecutorWorkerKey.GROK:
+    if view.profile_id:
+        label = f"{view.profile_id} · {label}"
+    if view.worker_key in {ExecutorWorkerKey.GROK, ExecutorWorkerKey.KIMI}:
         return label
     effort = view.reasoning_effort or DEFAULT_REASONING_EFFORT
     return f"{label} · {effort}"

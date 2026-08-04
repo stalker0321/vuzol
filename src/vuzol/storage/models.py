@@ -407,6 +407,7 @@ class ProjectExecutorPreference(TimestampMixin, Base):
     project_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     mode: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
     worker_key: Mapped[str | None] = mapped_column(String(40))
+    profile_id: Mapped[str | None] = mapped_column(String(100))
     reasoning_effort: Mapped[str | None] = mapped_column(String(20))
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_by_user_id: Mapped[int | None] = mapped_column(BigInteger)

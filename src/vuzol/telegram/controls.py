@@ -115,6 +115,7 @@ class TelegramControlService:
                         payload={
                             "preference_revision": update.preference_revision,
                             "preference_worker": update.preference_worker,
+                            "preference_profile_id": update.preference_profile_id,
                             "preference_effort": update.preference_effort,
                             "message_thread_id": update.message_thread_id,
                         },

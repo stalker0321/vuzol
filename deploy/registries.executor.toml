@@ -136,8 +136,8 @@ routing_priority = 210
 supported_task_types = ["architecture", "coding"]
 fallback_profile_ids = ["grok-subscription-b", "tokenrouter-kimi-a"]
 sandbox_required = true
-runtime_identity = "vuzol-grok-a"
-state_directory = "/var/lib/vuzol-provider-state/grok-subscription-a"
+runtime_identity = "vuzol-grok-b"
+state_directory = "/var/lib/vuzol-provider-state/grok-subscription-b"
 enabled = true
 
 [profiles.runtime_network]
@@ -161,8 +161,8 @@ routing_priority = 220
 supported_task_types = ["architecture", "coding"]
 fallback_profile_ids = ["tokenrouter-kimi-a"]
 sandbox_required = true
-runtime_identity = "vuzol-grok-b"
-state_directory = "/var/lib/vuzol-provider-state/grok-subscription-b"
+runtime_identity = "vuzol-grok-a"
+state_directory = "/var/lib/vuzol-provider-state/grok-subscription-a"
 enabled = true
 
 [profiles.runtime_network]

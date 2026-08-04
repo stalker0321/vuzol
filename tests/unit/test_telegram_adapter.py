@@ -93,6 +93,21 @@ def test_python_telegram_client_delegates_send_and_edit() -> None:
     asyncio.run(scenario())
 
 
+def test_python_telegram_client_treats_an_already_applied_edit_as_success() -> None:
+    async def scenario() -> None:
+        bot = AsyncMock()
+        client = PythonTelegramClient(bot)
+        bot.edit_message_text.side_effect = BadRequest("Message_is_not_modified")
+
+        await client.edit_message(chat_id=-100, message_id=17, html="current")
+
+        bot.edit_message_text.side_effect = BadRequest("message to edit not found")
+        with pytest.raises(BadRequest, match="message to edit not found"):
+            await client.edit_message(chat_id=-100, message_id=17, html="new")
+
+    asyncio.run(scenario())
+
+
 def test_python_telegram_client_creates_topic_and_fails_closed_on_unknown_outcome() -> None:
     async def scenario() -> None:
         bot = AsyncMock()

@@ -151,9 +151,7 @@ def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
             assert user_payload["prompt_version"] == "project-discussion-v1"
             assert user_payload["input"]["project_id"] == "vuzol"
             assert user_payload["discussion_schema"]["additionalProperties"] is False
-            reply_schema = user_payload["discussion_schema"]["properties"][
-                "user_visible_summary"
-            ]
+            reply_schema = user_payload["discussion_schema"]["properties"]["user_visible_summary"]
             assert "not the project worker" in reply_schema["description"]
             return httpx.Response(
                 200,

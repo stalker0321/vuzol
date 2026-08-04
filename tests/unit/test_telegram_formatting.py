@@ -14,13 +14,12 @@ def test_renders_common_discussion_markdown() -> None:
         "# Выбор\n\n**Лучший:** первый.\n\n- Просто\n- Быстро\n\n`myQty`"
     )
     assert rendered == (
-        "<b>Выбор</b>\n<b>Лучший:</b> первый.\n\n"
-        "• Просто\n• Быстро\n\n<code>myQty</code>"
+        "<b>Выбор</b>\n<b>Лучший:</b> первый.\n\n• Просто\n• Быстро\n\n<code>myQty</code>"
     )
 
 
 def test_escapes_raw_html_and_unsafe_links() -> None:
-    rendered = telegram_markdown_html('<script>x</script> [bad](javascript:alert(1))')
+    rendered = telegram_markdown_html("<script>x</script> [bad](javascript:alert(1))")
     assert "<script>" not in rendered
     assert "&lt;script&gt;" in rendered
     assert "javascript" in rendered

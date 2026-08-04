@@ -248,9 +248,7 @@ class DeliverDiscussionReplyHandler:
 
 
 def _discussion_prompt(*, project_id: str, memory_pack: MemoryPack) -> str:
-    turns = "\n".join(
-        f"{turn.role.value}: {turn.content}" for turn in memory_pack.turns
-    )
+    turns = "\n".join(f"{turn.role.value}: {turn.content}" for turn in memory_pack.turns)
     decisions = "\n".join(f"- {item.statement}" for item in memory_pack.decisions) or "(none)"
     summary = memory_pack.summary.body if memory_pack.summary is not None else "(none)"
     return f"""You are the project discussion agent for project {project_id}.

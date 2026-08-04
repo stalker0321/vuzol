@@ -310,7 +310,9 @@ def _shell_contract_instruction(request: ProviderRequest) -> str:
         return (
             "For workspace inspection and local iteration, invoke only separately allowed git or "
             "make commands. Run every command separately; do not use cd, command chains, shell "
-            "wrappers, or command substitution. Do not stage, commit, reset, clean, or push. The "
+            "wrappers, or command substitution. Never use Bash for ls, cat, find, head, grep, or "
+            "other file discovery/read operations; use the native List, Read, and Grep tools "
+            "instead. Do not stage, commit, reset, clean, or push. The "
             "deterministic Vuzol finalizer independently owns measured inspection, staging, commit "
             "creation, and trusted gates."
         )

@@ -400,6 +400,8 @@ async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> Non
         request, configured, CancellationContext()
     )
     assert result.structured_output == manifest
+    argv = invocations[-1].argv
+    assert argv[argv.index("--disallowed-tools") + 1] == "run_terminal_cmd"
     prompt = json.loads(invocations[-1].stdin)
     instruction = prompt["execution_policy"]["result_manifest"]
     assert "Do not invoke shell commands" in instruction

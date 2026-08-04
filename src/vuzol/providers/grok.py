@@ -41,7 +41,7 @@ def canonical_grok_argv(model: str, *, read_only: bool = False) -> tuple[str, ..
         "--sandbox",
         "strict",
         "--disallowed-tools",
-        "run_terminal_command",
+        "run_terminal_cmd",
         "--allow",
         "Bash(git status*)",
         "--allow",

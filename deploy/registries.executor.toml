@@ -68,6 +68,7 @@ destinations = [
   { url = "https://chatgpt.com", purpose = "Codex subscription runtime" },
   { url = "https://cli-chat-proxy.grok.com", purpose = "Grok subscription inference" },
   { url = "https://auth.x.ai", purpose = "Grok subscription authentication" },
+  { url = "https://api.tokenrouter.com", purpose = "TokenRouter Kimi inference" },
 ]
 
 [[profiles]]
@@ -106,7 +107,7 @@ cost_class = "strong"
 roles = ["executor", "planner"]
 routing_priority = 200
 supported_task_types = ["architecture", "coding"]
-fallback_profile_ids = ["grok-subscription-a", "grok-subscription-b"]
+fallback_profile_ids = ["grok-subscription-a", "grok-subscription-b", "tokenrouter-kimi-a"]
 sandbox_required = true
 runtime_identity = "vuzol-executor"
 state_directory = "/var/lib/vuzol-provider-state/codex-subscription-prod"
@@ -133,7 +134,7 @@ cost_class = "strong"
 roles = ["executor", "planner"]
 routing_priority = 210
 supported_task_types = ["architecture", "coding"]
-fallback_profile_ids = ["grok-subscription-b"]
+fallback_profile_ids = ["grok-subscription-b", "tokenrouter-kimi-a"]
 sandbox_required = true
 runtime_identity = "vuzol-grok-a"
 state_directory = "/var/lib/vuzol-provider-state/grok-subscription-a"
@@ -158,7 +159,7 @@ cost_class = "strong"
 roles = ["executor", "planner"]
 routing_priority = 220
 supported_task_types = ["architecture", "coding"]
-fallback_profile_ids = []
+fallback_profile_ids = ["tokenrouter-kimi-a"]
 sandbox_required = true
 runtime_identity = "vuzol-grok-b"
 state_directory = "/var/lib/vuzol-provider-state/grok-subscription-b"
@@ -169,6 +170,31 @@ enabled = true
 destinations = [
   { url = "https://cli-chat-proxy.grok.com", purpose = "Grok subscription inference" },
   { url = "https://auth.x.ai", purpose = "Grok subscription authentication" },
+]
+
+[[profiles]]
+id = "tokenrouter-kimi-a"
+provider = "kimi"
+model = "moonshotai/kimi-k3-free"
+launch_mode = "cli"
+credential_required = false
+capabilities = ["repository_read", "code_edit", "git", "project_shell"]
+concurrency_limit = 1
+context_limit = 262144
+cost_class = "cheap"
+roles = ["executor", "planner"]
+routing_priority = 230
+supported_task_types = ["architecture", "coding"]
+fallback_profile_ids = []
+sandbox_required = true
+runtime_identity = "vuzol-kimi-a"
+state_directory = "/var/lib/vuzol-provider-state/tokenrouter-kimi-a"
+enabled = true
+
+[profiles.runtime_network]
+enabled = true
+destinations = [
+  { url = "https://api.tokenrouter.com", purpose = "TokenRouter Kimi inference" },
 ]
 
 [[topics]]

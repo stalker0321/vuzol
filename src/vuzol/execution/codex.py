@@ -39,6 +39,7 @@ from vuzol.providers.grok import (
     staged_grok_diagnostic_paths,
     summarize_grok_events,
 )
+from vuzol.providers.kimi import canonical_kimi_argv
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
@@ -630,13 +631,17 @@ def _require_provider_command(
     reasoning_effort: str | None = None,
 ) -> None:
     effort = reasoning_effort if isinstance(reasoning_effort, str) else None
-    expected = {
-        "codex": {
+    if provider == "codex":
+        expected = {
             canonical_codex_argv(model=model, reasoning_effort=effort),
             canonical_codex_argv(model=model, reasoning_effort=effort, read_only=True),
-        },
-        "grok": {canonical_grok_argv(model), canonical_grok_argv(model, read_only=True)},
-    }.get(provider)
+        }
+    elif provider == "grok":
+        expected = {canonical_grok_argv(model), canonical_grok_argv(model, read_only=True)}
+    elif provider == "kimi":
+        expected = {canonical_kimi_argv(model), canonical_kimi_argv(model, read_only=True)}
+    else:
+        expected = None
     if expected is None or argv not in expected:
         raise ValueError("sandbox rejected a non-canonical provider command")
 
@@ -649,6 +654,11 @@ def _provider_state_runtime(provider: str) -> tuple[Path, dict[str, str]]:
         }
     if provider == "grok":
         return Path("/grok-home"), {"HOME": "/grok-home"}
+    if provider == "kimi":
+        return Path("/kimi-home"), {
+            "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
+            "KIMI_CODE_HOME": "/kimi-home",
+        }
     raise ValueError("sandbox rejected an unsupported CLI provider")
 
 

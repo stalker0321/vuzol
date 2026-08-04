@@ -1219,9 +1219,6 @@ async def enqueue_task_status_projection(
         .order_by(TelegramIntakeMessage.created_at.desc())
         .limit(1)
     )
-    if intake is None:
-        await enqueue_project_status_dashboard(session, chat_id)
-        return
     if role is None:
         pending_approval = None
         if run is not None:
@@ -1247,8 +1244,8 @@ async def enqueue_task_status_projection(
         TransactionalOutbox(
             destination="telegram",
             operation_type="send_message",
-            linked_entity_type="telegram_intake",
-            linked_entity_id=intake.id,
+            linked_entity_type="telegram_intake" if intake is not None else "task",
+            linked_entity_id=intake.id if intake is not None else task.id,
             idempotency_key=f"telegram:{role}:task:{task.id}:revision:{task.version}",
             payload=payload,
         )

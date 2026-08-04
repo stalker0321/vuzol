@@ -2,12 +2,13 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
-from vuzol.config import StaticDeploymentConfig
+from vuzol.config import RuntimeConfiguration, StaticDeploymentConfig
 from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.static_publish import StaticPublishHandler
@@ -42,7 +43,7 @@ def _handler(
     context.__aenter__.return_value = session
     factory = MagicMock(return_value=context)
     request = SimpleNamespace(task_id=uuid4())
-    return StaticPublishHandler(factory, runtime), request
+    return StaticPublishHandler(factory, cast(RuntimeConfiguration, runtime)), request
 
 
 @pytest.mark.anyio

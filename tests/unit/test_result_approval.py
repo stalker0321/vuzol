@@ -107,7 +107,7 @@ async def test_result_approval_requires_validation_evidence(failure: str) -> Non
 
 
 @pytest.mark.anyio
-async def test_result_approval_prefers_executor_summary_and_validate_gates() -> None:
+async def test_result_approval_rejects_raw_executor_transcript_and_keeps_validate_gates() -> None:
     base = "a" * 40
     result_commit = "b" * 40
     validate = _step(
@@ -193,7 +193,9 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
         steps_by_ordinal={4: execute, 5: validate, 6: review},
     )
     assert approval is not None
-    assert approval.human_summary == "Added the requested README check."
+    assert approval.human_summary == (
+        "Изменено файлов: 0. Результат прошёл все настроенные проверки."
+    )
     assert approval_step.payload["action_envelope"]["project_id"] == "bill-buddy"
     assert approval_step.payload["action_envelope"]["gates"][0]["name"] == "git-facts"
     assert approval_step.payload["action_envelope"]["agent_checks"] == [
@@ -319,7 +321,9 @@ async def test_result_approval_uses_a_safe_summary_fallback() -> None:
         steps_by_ordinal={2: source},
     )
     assert approval is not None
-    assert approval.human_summary.startswith("The requested change")
+    assert approval.human_summary == (
+        "Изменено файлов: 0. Результат прошёл все настроенные проверки."
+    )
 
 
 def test_verified_envelope_rejects_missing_hash_or_wrong_step() -> None:
@@ -356,9 +360,7 @@ async def test_plan_approval_covers_every_intermediate_result(
     session.execute = AsyncMock(return_value=result)
     session.scalar = AsyncMock(return_value=count)
 
-    assert (
-        await _plan_approval_covers_intermediate_result(session, uuid.uuid4()) is expected
-    )
+    assert await _plan_approval_covers_intermediate_result(session, uuid.uuid4()) is expected
 
 
 @pytest.mark.anyio

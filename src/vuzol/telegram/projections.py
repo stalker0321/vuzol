@@ -894,16 +894,24 @@ def _approval_fact_lines(
 ) -> list[str]:
     """One canonical fact block shared by project and global approval cards."""
 
-    lines = ["<b>Что сделано</b>", telegram_html(human_summary)]
-    agent_checks = _envelope_agent_checks(envelope)
-    if agent_checks:
-        lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
-        lines.extend(_agent_check_html(check) for check in agent_checks)
-    review_warnings = _envelope_review_warnings(envelope)
+    lines = ["<b>Что изменится</b>", f"• {telegram_html(human_summary)}"]
+    raw_paths = envelope.get("changed_files")
+    paths = (
+        [str(path) for path in raw_paths if isinstance(path, str)]
+        if isinstance(raw_paths, list)
+        else []
+    )
+    if paths:
+        visible = ", ".join(paths[:6])
+        suffix = f" и ещё {len(paths) - 6}" if len(paths) > 6 else ""
+        lines.append(f"• Файлы: <code>{telegram_html(visible)}</code>{suffix}")
+    review_warnings = tuple(
+        warning for warning in _envelope_review_warnings(envelope) if warning.get("path")
+    )
     if review_warnings:
         lines.extend(("", "<b>Предупреждения ревью</b>"))
         lines.extend(_review_warning_html(warning) for warning in review_warnings)
-    lines.extend(("", "<b>Проверки Vuzol (доверенные)</b>"))
+    lines.extend(("", "<b>Проверено Vuzol</b>"))
     raw_gates = envelope.get("gates")
     gates = raw_gates if isinstance(raw_gates, list) else []
     for gate in gates:

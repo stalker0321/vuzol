@@ -68,6 +68,7 @@ async def ensure_result_approval(
         "diff_hash": worktree.diff_hash,
         "agent_checks": agent_checks,
         "gates": gates,
+        "changed_files": list(evidence["changed_files"]),
         "validation_evidence_hash": evidence["validation_evidence_hash"],
         "review_evidence": evidence["review_evidence"],
         "review_evidence_hash": evidence["review_evidence_hash"],
@@ -126,8 +127,7 @@ async def _plan_approval_covers_intermediate_result(
 
     link = (
         await session.execute(
-            select(MaterializationLink)
-            .where(MaterializationLink.task_id == task_id)
+            select(MaterializationLink).where(MaterializationLink.task_id == task_id)
         )
     ).scalar_one_or_none()
     if link is None:
@@ -263,23 +263,21 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     execute_result = execute.result if execute and isinstance(execute.result, dict) else {}
     agent_checks = _agent_checks(execute_result)
     summary = None
-    for candidate in (
-        execute_result.get("implementation_summary"),
-        execute_result.get("text"),
-        result.get("implementation_summary"),
-        result.get("text"),
-        review_result.get("implementation_summary"),
-        review_result.get("summary"),
-    ):
+    for candidate in (execute_result.get("implementation_summary"),):
         if isinstance(candidate, str) and candidate.strip():
-            summary = candidate.strip()
+            summary = " ".join(candidate.split()).strip()
             break
     if summary is None:
-        summary = "The requested change was implemented and passed all configured checks."
+        changed_files = manifest.get("changed_files")
+        changed_count = len(changed_files) if isinstance(changed_files, list) else 0
+        summary = f"Изменено файлов: {changed_count}. Результат прошёл все настроенные проверки."
     return {
         "agent_checks": agent_checks,
         "gates": gates,
         "summary": summary[:2_000],
+        "changed_files": tuple(
+            str(path) for path in manifest.get("changed_files", []) if isinstance(path, str)
+        ),
         "validation_evidence_hash": envelope_hash(manifest),
         "review_evidence": review_evidence,
         "review_evidence_hash": review_evidence_hash,

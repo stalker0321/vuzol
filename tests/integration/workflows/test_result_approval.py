@@ -230,9 +230,9 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
         async with factory() as session:
             card = await build_status_card(session, task_id)
             assert "Added the requested validator &lt;safely&gt;." in card.html
-            assert "Проверки агента (не доверенные)" in card.html
-            assert "make test — не запускалось" in card.html
-            assert "Проверки Vuzol (доверенные)" in card.html
+            assert "Проверки агента" not in card.html
+            assert "make test — не запускалось" not in card.html
+            assert "Проверено Vuzol" in card.html
             assert "Предупреждения ревью" in card.html
             assert "&lt;verify.sh&gt;" in card.html
             assert "tests — пройдено (1.2 с)" in card.html
@@ -244,14 +244,14 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             approval_card = await build_approval_card(session, task_id)
             assert "vuzol · Bounded task" in approval_card.html
             assert "Added the requested validator &lt;safely&gt;." in approval_card.html
-            assert "Проверки агента (не доверенные)" in approval_card.html
-            assert "Проверки Vuzol (доверенные)" in approval_card.html
+            assert "Проверки агента" not in approval_card.html
+            assert "Проверено Vuzol" in approval_card.html
             assert "Предупреждения ревью" in approval_card.html
             assert "&lt;verify.sh&gt;" in approval_card.html
             assert "tests — пройдено (1.2 с)" in approval_card.html
             assert str(task_id) not in approval_card.html
-            project_facts = card.html[card.html.index("<b>Что сделано</b>") :]
-            global_facts = approval_card.html[approval_card.html.index("<b>Что сделано</b>") :]
+            project_facts = card.html[card.html.index("<b>Что изменится</b>") :]
+            global_facts = approval_card.html[approval_card.html.index("<b>Что изменится</b>") :]
             assert project_facts == global_facts
             assert approval_card.buttons == ("approve", "redo", "reject")
 

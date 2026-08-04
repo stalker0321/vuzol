@@ -555,13 +555,15 @@ async def _block_route(
     )
     run.failure_category = category
     run.failure_summary = summary
-    await transition_task(
-        session,
-        task,
-        TaskStatus.QUOTA_EXHAUSTED if quota else TaskStatus.BLOCKED,
-        actor_type="routing_policy",
-        payload={"category": category},
-    )
+    target_task_status = TaskStatus.QUOTA_EXHAUSTED if quota else TaskStatus.BLOCKED
+    if task.status != target_task_status:
+        await transition_task(
+            session,
+            task,
+            target_task_status,
+            actor_type="routing_policy",
+            payload={"category": category},
+        )
     if quota:
         link = await session.scalar(
             select(MaterializationLink).where(MaterializationLink.task_id == task.id)

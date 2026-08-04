@@ -38,8 +38,7 @@ class StaticPublishHandler:
         source = project.repository_path / deployment.source_directory
         entrypoint = source / deployment.entrypoint
         public_url = (
-            f"{str(self._runtime.settings.static_site_base_url).rstrip('/')}"
-            f"/{deployment.url_path}/"
+            f"{str(self._runtime.settings.static_site_base_url).rstrip('/')}/{deployment.url_path}/"
         )
         if not entrypoint.is_file() or entrypoint.is_symlink():
             return StepOutcome.succeeded(

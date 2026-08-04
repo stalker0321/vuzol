@@ -54,9 +54,7 @@ def telegram_markdown_html(markdown: str) -> str:
                 f' class="language-{html.escape(language, quote=True)}"' if language else ""
             )
             escaped_code = html.escape(token.content, quote=False)
-            output.append(
-                f"<pre><code{language_attr}>{escaped_code}</code></pre>\n"
-            )
+            output.append(f"<pre><code{language_attr}>{escaped_code}</code></pre>\n")
         elif kind == "hr":
             output.append("────────\n")
         elif kind in {"html_block"}:

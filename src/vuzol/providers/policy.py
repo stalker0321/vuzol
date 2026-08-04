@@ -31,6 +31,7 @@ class ExclusionReason(StrEnum):
     BUDGET = "budget"
     CONCURRENCY = "concurrency"
     NOT_CONFIGURED_FALLBACK = "not_configured_fallback"
+    PRIOR_FAILURE = "prior_failure"
     PROJECT_PIN = "project_pin"
     LAUNCH_MODE = "launch_mode"
 
@@ -129,6 +130,8 @@ def _exclusions(
     now: datetime,
 ) -> list[ExclusionReason]:
     reasons: list[ExclusionReason] = []
+    if request.failed_profile_id is not None and profile.id == request.failed_profile_id:
+        reasons.append(ExclusionReason.PRIOR_FAILURE)
     if not profile.enabled:
         reasons.append(ExclusionReason.DISABLED)
     if request.role not in profile.roles:

@@ -4,12 +4,14 @@ Revision ID: e8f2a1c4d903
 Revises: d7e9a1c42f60
 """
 
+from collections.abc import Sequence
+
 from alembic import op
 
-revision = "e8f2a1c4d903"
-down_revision = "d7e9a1c42f60"
-branch_labels = None
-depends_on = None
+revision: str = "e8f2a1c4d903"  # pragma: allowlist secret
+down_revision: str | Sequence[str] | None = "d7e9a1c42f60"  # pragma: allowlist secret
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

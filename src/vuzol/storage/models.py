@@ -393,7 +393,7 @@ class ProjectExecutorPreference(TimestampMixin, Base):
             name="project_executor_preference_shape",
         ),
         CheckConstraint(
-            "worker_key IS NULL OR worker_key IN ('sol', 'terra', 'luna', 'grok')",
+            "worker_key IS NULL OR worker_key IN ('sol', 'terra', 'luna', 'grok', 'kimi')",
             name="project_executor_preference_worker",
         ),
         CheckConstraint(

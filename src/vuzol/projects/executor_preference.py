@@ -18,7 +18,7 @@ DEFAULT_CODEX_MODEL_FAMILY = "gpt-5.6"
 DEFAULT_REASONING_EFFORT = "medium"
 REASONING_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 CODEX_WORKERS: tuple[str, ...] = ("sol", "terra", "luna")
-ALL_WORKERS: tuple[str, ...] = (*CODEX_WORKERS, "grok")
+ALL_WORKERS: tuple[str, ...] = (*CODEX_WORKERS, "grok", "kimi")
 
 PAYLOAD_MODEL_OVERRIDE = "executor_model_override"
 PAYLOAD_EFFORT_OVERRIDE = "executor_reasoning_effort"
@@ -36,6 +36,7 @@ class ExecutorWorkerKey(StrEnum):
     TERRA = "terra"
     LUNA = "luna"
     GROK = "grok"
+    KIMI = "kimi"
 
 
 class ExecutorPreferenceError(RuntimeError):
@@ -197,6 +198,9 @@ def available_workers(registries: ConfigurationBundle) -> tuple[WorkerOption, ..
     has_grok = any(
         profile.provider == "grok" and profile.launch_mode is LaunchMode.CLI for profile in profiles
     )
+    has_kimi = any(
+        profile.provider == "kimi" and profile.launch_mode is LaunchMode.CLI for profile in profiles
+    )
     if has_codex:
         options.extend(
             WorkerOption(
@@ -214,6 +218,14 @@ def available_workers(registries: ConfigurationBundle) -> tuple[WorkerOption, ..
                 supports_reasoning_effort=False,
             )
         )
+    if has_kimi:
+        options.append(
+            WorkerOption(
+                key=ExecutorWorkerKey.KIMI,
+                label="Kimi K3 Free",
+                supports_reasoning_effort=False,
+            )
+        )
     return tuple(options)
 
 
@@ -228,6 +240,16 @@ def resolve_route_pin(
     worker = preference.worker_key
     if worker is ExecutorWorkerKey.GROK:
         profile = _first_enabled_executor(registries, provider="grok")
+        if profile is None:
+            return None
+        return ExecutorRoutePin(
+            trusted_profile_id=profile.id,
+            model_override=None,
+            reasoning_effort=None,
+            worker_key=worker,
+        )
+    if worker is ExecutorWorkerKey.KIMI:
+        profile = _first_enabled_executor(registries, provider="kimi")
         if profile is None:
             return None
         return ExecutorRoutePin(
@@ -256,7 +278,10 @@ def same_family_fallback_ids(
     """When pinned, only allow fallbacks inside the same worker family."""
 
     primary = registries.profiles.get(primary_profile_id)
-    provider = "grok" if worker_key is ExecutorWorkerKey.GROK else "codex"
+    provider = {
+        ExecutorWorkerKey.GROK: "grok",
+        ExecutorWorkerKey.KIMI: "kimi",
+    }.get(worker_key, "codex")
     allowed: list[str] = []
     for profile_id in primary.fallback_profile_ids:
         try:
@@ -366,6 +391,7 @@ def _worker_label(key: str) -> str:
         "terra": "Terra",
         "luna": "Luna",
         "grok": "Grok",
+        "kimi": "Kimi K3 Free",
     }.get(key, key)
 
 

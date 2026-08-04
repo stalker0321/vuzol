@@ -59,7 +59,7 @@ class ControlUpdate(TelegramModel):
     naming_revision: int | None = Field(default=None, ge=1)
     naming_option_index: int | None = Field(default=None, ge=0, le=8)
     preference_revision: int | None = Field(default=None, ge=1)
-    preference_worker: str | None = Field(default=None, pattern=r"^(sol|terra|luna|grok)$")
+    preference_worker: str | None = Field(default=None, pattern=r"^(sol|terra|luna|grok|kimi)$")
     preference_effort: str | None = Field(
         default=None, pattern=r"^(low|medium|high|xhigh|max|ultra)$"
     )

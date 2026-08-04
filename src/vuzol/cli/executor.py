@@ -34,6 +34,7 @@ from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.grok import GrokCliAdapter
 from vuzol.providers.handlers import ProviderStepHandler, executor_provider_handlers
 from vuzol.providers.health import synchronize_profiles
+from vuzol.providers.kimi import KimiCliAdapter
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
@@ -175,6 +176,8 @@ async def run() -> None:
                 adapters[profile.id] = CodexCliAdapter(transport)
             elif profile.provider == "grok":
                 adapters[profile.id] = GrokCliAdapter(transport)
+            elif profile.provider == "kimi":
+                adapters[profile.id] = KimiCliAdapter(transport)
         if not adapters:
             raise RuntimeError("execution worker has no enabled CLI profile")
         adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver, adapters=adapters)

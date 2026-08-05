@@ -205,15 +205,23 @@ class LocalGit:
         await self._run(worktree, "add", "--all", "--", *paths)
 
     async def create_commit(self, worktree: Path, message: str) -> str:
-        if not message or len(message) > 200 or "\n" in message or "\r" in message:
+        paragraphs = tuple(part.strip() for part in message.split("\n\n"))
+        if (
+            not message
+            or len(message) > 1_000
+            or "\r" in message
+            or "\x00" in message
+            or not paragraphs
+            or any(not part or "\n\n" in part for part in paragraphs)
+        ):
             raise GitError("commit message is invalid")
+        message_args = tuple(argument for part in paragraphs for argument in ("-m", part))
         await self._run(
             worktree,
             "commit",
             "--no-verify",
             "--no-gpg-sign",
-            "-m",
-            message,
+            *message_args,
             extra_environment={
                 "GIT_AUTHOR_NAME": "Vuzol Worker Finalizer",
                 "GIT_AUTHOR_EMAIL": "vuzol-worker@localhost.invalid",

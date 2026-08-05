@@ -318,6 +318,7 @@ class WorkerFinalizer:
         worker_profile: str,
         provider_usage: NormalizedUsage,
         provider_attempt: int,
+        commit_message: str | None = None,
         gate_context: GateExecutionContext | None = None,
         cancellation: CancellationContext | None = None,
         access: WorktreeAccessLease | None = None,
@@ -437,7 +438,8 @@ class WorkerFinalizer:
         try:
             await self._git.stage_paths(worktree, inspection.changed_files)
             result_commit = await self._git.create_commit(
-                worktree, f"worker({capsule.task_id}): finalize implementation"
+                worktree,
+                commit_message or f"worker({capsule.task_id}): finalize implementation",
             )
             if await self._git.commit_parent(worktree, result_commit) != capsule.base_commit:
                 self._fail(

@@ -63,6 +63,7 @@ async def test_worker_finalizer_measures_gates_and_creates_exactly_one_commit(
         worker_profile="grok-a",
         provider_usage=_normalized_usage(),
         provider_attempt=1,
+        commit_message="task(demo): bounded edit\n\nVuzol-Task: task-id",
         gate_context=_gate_context(),
         cancellation=CancellationContext(),
         access=access,
@@ -82,6 +83,9 @@ async def test_worker_finalizer_measures_gates_and_creates_exactly_one_commit(
     assert _git(repository, "rev-parse", f"{manifest.result_commit}^").strip() == base
     assert _git(repository, "rev-list", "--count", f"{base}..HEAD").strip() == "1"
     assert _git(repository, "status", "--short") == ""
+    assert _git(repository, "show", "-s", "--format=%B").strip() == (
+        "task(demo): bounded edit\n\nVuzol-Task: task-id"
+    )
     assert _git(repository, "show", "-s", "--format=%an <%ae>").strip() == (
         "Vuzol Worker Finalizer <vuzol-worker@localhost.invalid>"
     )

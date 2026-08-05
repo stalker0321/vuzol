@@ -18,6 +18,7 @@ from vuzol.execution.access import (
     WorktreeAccessManager,
 )
 from vuzol.execution.artifacts import ArtifactStore
+from vuzol.execution.commit_messages import DatabaseCommitMessageResolver
 from vuzol.execution.finalization import (
     FinalizedWorkerResult,
     GateExecutionContext,
@@ -84,6 +85,7 @@ class ProviderStepHandler:
         self._worktree_access = worktree_access
         self._agent_certificates = agent_certificates
         self._redaction_patterns = redaction_patterns
+        self._commit_messages = DatabaseCommitMessageResolver(factory)
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -435,6 +437,11 @@ class ProviderStepHandler:
         edit_report = WorkerEditReport.model_validate(result.structured_output)
         async with self._factory() as session:
             worktree = await self._worktrees.reference_for_run(session, run_id=request.run_id)
+        commit_message = await self._commit_messages.resolve(
+            task_id=request.task_id,
+            run_id=request.run_id,
+            project_id=worktree.project_id,
+        )
         return await self._finalizer.finalize(
             worktree=worktree.path,
             capsule=capsule,
@@ -442,6 +449,7 @@ class ProviderStepHandler:
             worker_profile=profile_id,
             provider_usage=result.usage,
             provider_attempt=provider_request.provider_attempt,
+            commit_message=commit_message,
             gate_context=GateExecutionContext(
                 task_id=request.task_id,
                 run_id=request.run_id,

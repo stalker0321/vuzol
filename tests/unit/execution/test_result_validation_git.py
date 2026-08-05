@@ -73,6 +73,7 @@ async def test_validate_commits_measured_result(tmp_path: Path) -> None:
     assert outcome.result["result_commit"] == result
     assert all(gate["exit_code"] == 0 for gate in outcome.result["structured_output"]["gates"])
     git.create_commit.assert_awaited_once()
+    assert git.create_commit.await_args.args[1] == "chore: implement task\n\nVuzol-Task: 42"
     handler._persist.assert_awaited_once()
 
 

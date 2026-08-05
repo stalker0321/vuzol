@@ -52,6 +52,19 @@ def test_local_git_initializes_project_repository_idempotently(tmp_path: Path) -
 
 
 @pytest.mark.anyio
+async def test_diff_check_reports_bounded_git_stderr(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    (repository / "bad.txt").write_text("content\n\n")
+    git = LocalGit()
+    await git.stage_paths(repository, ("bad.txt",))
+
+    with pytest.raises(GitError, match=r"bad\.txt.*blank line at EOF"):
+        await git.require_diff_check(repository)
+
+
+@pytest.mark.anyio
 async def test_typed_git_creates_isolated_worktree_and_collects_diff(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()

@@ -193,6 +193,22 @@ class WorkPackageRepository:
             ),
         )
 
+    async def completed_revision_bodies(
+        self, *, session_id: uuid.UUID, project_id: str, limit: int = 10
+    ) -> tuple[dict[str, object], ...]:
+        rows = await self._session.scalars(
+            select(PlanRevision.immutable_body)
+            .join(WorkPackage, WorkPackage.head_revision_id == PlanRevision.id)
+            .where(
+                WorkPackage.session_id == session_id,
+                WorkPackage.project_id == project_id,
+                WorkPackage.status == WorkPackageStatus.COMPLETED,
+            )
+            .order_by(PlanRevision.created_at.desc())
+            .limit(limit)
+        )
+        return tuple(rows.all())
+
     async def resolve_fenced_item(
         self,
         *,

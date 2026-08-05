@@ -211,4 +211,7 @@ def _handler(
         gate_runner=gate_runner,
         worktree_access=worktree_access,
         artifacts=artifacts,
+        commit_messages=SimpleNamespace(
+            resolve=AsyncMock(return_value="chore: implement task\n\nVuzol-Task: 42")
+        ),
     )

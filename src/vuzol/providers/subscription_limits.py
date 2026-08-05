@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Sequence
@@ -50,6 +51,8 @@ GROK_BILLING_URLS = (
 _FIVE_HOUR_SECONDS = 5 * 3600
 _WEEKLY_SECONDS = 7 * 24 * 3600
 _FETCH_TIMEOUT_SECONDS = 4.0
+_SUBJECT_SCAN_CHUNK_BYTES = 64 * 1024
+_SUBJECT_SCAN_MAX_BYTES = 64 * 1024 * 1024
 
 # API-level Grok source mode (settings wiring is a later slice; default preserves legacy).
 GrokLimitSource = Literal["legacy", "snapshot_required"]
@@ -401,9 +404,10 @@ def format_subscription_limits_html(
             detail = html_escape(_safe_unavailable_detail(snap.detail))
             lines.append(f"  ⚠️ {detail}")
             continue
+        long_window_label = "24 ч" if snap.weekly.window_seconds == 24 * 3600 else "неделя"
         window_lines = (
             *_format_window_block("5 ч", snap.five_hour, html_escape),
-            *_format_window_block("неделя", snap.weekly, html_escape),
+            *_format_window_block(long_window_label, snap.weekly, html_escape),
         )
         if not window_lines:
             lines.append("  ⚠️ Провайдер не сообщил данные по лимитам.")
@@ -676,10 +680,15 @@ def _weekly_from_grok_config(config: dict[str, Any], observed: datetime) -> Limi
                 break
     if remaining_percent is None and reset_at is None:
         return LimitWindow(None, None, available=False, detail="no data")
+    window_seconds = config.get("rollingWindowSeconds", _WEEKLY_SECONDS)
+    try:
+        normalized_window_seconds = max(1, int(window_seconds))
+    except (TypeError, ValueError):
+        normalized_window_seconds = _WEEKLY_SECONDS
     return LimitWindow(
         remaining_percent=remaining_percent,
         reset_at=reset_at,
-        window_seconds=_WEEKLY_SECONDS,
+        window_seconds=normalized_window_seconds,
         available=True,
     )
 
@@ -856,20 +865,32 @@ def _host_account_matches_subjects(
 
 
 def _log_contains_any_subject(path: Path, subjects: set[str]) -> bool:
+    needles = tuple(subject.encode("utf-8") for subject in subjects if subject)
+    if not needles:
+        return False
+    overlap = max(len(needle) for needle in needles) - 1
     try:
         with path.open("rb") as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            # Subject usually appears early (AuthManager::new); scan both ends.
-            handle.seek(0)
-            head = handle.read(min(size, 512_000))
-            handle.seek(max(0, size - 512_000))
-            tail = handle.read()
+            # AuthManager lines are not guaranteed to stay near either edge of a
+            # long-running log. Stream the bounded file instead of sampling only
+            # its head and tail; keep overlap so a subject split across chunks is
+            # still found without loading the whole log into memory.
+            scanned = 0
+            suffix = b""
+            while scanned < _SUBJECT_SCAN_MAX_BYTES:
+                chunk = handle.read(
+                    min(_SUBJECT_SCAN_CHUNK_BYTES, _SUBJECT_SCAN_MAX_BYTES - scanned)
+                )
+                if not chunk:
+                    return False
+                scanned += len(chunk)
+                haystack = suffix + chunk
+                if any(needle in haystack for needle in needles):
+                    return True
+                suffix = haystack[-overlap:] if overlap > 0 else b""
     except OSError:
         return False
-    blob = head + b"\n" + tail
-    text = blob.decode("utf-8", errors="ignore")
-    return any(subject in text for subject in subjects)
+    return False
 
 
 def _latest_grok_billing_from_logs(state_directory: Path) -> dict[str, Any] | None:
@@ -905,6 +926,21 @@ def _billing_ctx_from_log_file(path: Path) -> dict[str, Any] | None:
         return None
     text = raw.decode("utf-8", errors="ignore")
     for line in reversed(text.splitlines()):
+        exhausted = re.search(
+            r"tokens \(actual/limit\):\s*(\d+)\s*/\s*(\d+)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if "free-usage-exhausted" in line and exhausted is not None:
+            actual, limit = (int(value) for value in exhausted.groups())
+            if limit > 0:
+                return {
+                    "subscriptionTier": "free",
+                    "config": {
+                        "creditUsagePercent": actual * 100.0 / limit,
+                        "rollingWindowSeconds": 24 * 3600,
+                    },
+                }
         if "billing: fetched credits config" not in line:
             continue
         try:

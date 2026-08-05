@@ -108,6 +108,43 @@ async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> Non
 
 
 @pytest.mark.anyio
+async def test_grok_adapter_classifies_subscription_exhaustion_as_quota(tmp_path: Path) -> None:
+    class ExhaustedTransport(FakeCodexTransport):
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            return CodexProcessResult(
+                1,
+                "subscription:free-usage-exhausted: tokens (actual/limit): 532378/500000",
+                "",
+                12,
+            )
+
+    configured = profile(
+        "grok-a",
+        provider="grok",
+        model="grok-4.5",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="grok-a",
+        state_directory=tmp_path / "grok-a",
+    )
+    with pytest.raises(ProviderFailure) as captured:
+        await GrokCliAdapter(ExhaustedTransport()).execute(
+            provider_request().model_copy(
+                update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+            ),
+            configured,
+            CancellationContext(),
+        )
+    assert captured.value.category is ProviderErrorCategory.QUOTA_EXHAUSTED
+    assert captured.value.retryable is True
+
+
+@pytest.mark.anyio
 async def test_grok_adapter_validates_discussion_agent_reply(tmp_path: Path) -> None:
     class DiscussionTransport(FakeCodexTransport):
         async def run(
@@ -290,7 +327,7 @@ async def test_grok_adapter_classifies_structured_provider_cancellation(tmp_path
             fenced, configured, CancellationContext()
         )
     assert captured.value.category is ProviderErrorCategory.CANCELLED
-    assert captured.value.retryable is False
+    assert captured.value.retryable is True
 
 
 @pytest.mark.anyio
@@ -361,18 +398,17 @@ async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> Non
         request, configured, CancellationContext()
     )
     assert result.structured_output == manifest
+    argv = invocations[-1].argv
+    assert argv[argv.index("--disallowed-tools") + 1] == "run_terminal_cmd"
     prompt = json.loads(invocations[-1].stdin)
     instruction = prompt["execution_policy"]["result_manifest"]
-    assert "Git and Make commands" in instruction
-    assert "checks are non-authoritative" in instruction
+    assert "Do not invoke shell commands" in instruction
     assert "trusted validation" in instruction
     assert "one agent_checks entry for each relevant local check" in instruction
     assert "Never present agent_checks as trusted gates" in instruction
-    assert "Do not invoke shell commands" not in instruction
     shell_instruction = prompt["execution_policy"]["shell_invocation"]
-    assert "only separately allowed git or make commands" in shell_instruction
-    assert "Run every command separately" in shell_instruction
-    assert "Do not stage, commit, reset, clean, or push" in shell_instruction
+    assert "shell tool is unavailable" in shell_instruction
+    assert "native List, Read, and Grep" in shell_instruction
     assert "trusted gates" in shell_instruction
 
     usage = manifest["usage"]

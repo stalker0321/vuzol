@@ -14,12 +14,24 @@ from vuzol.storage.types import PlanRevisionCreatedBy
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.work_package_projections import (
     WorkPackageProjectionError,
+    _format_count,
+    _route_provider_label,
     build_work_package_detail_card,
     build_work_package_plan_card,
 )
 from vuzol.telegram.work_packages import parse_work_package_callback
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
+
+
+def test_compact_worker_labels_and_token_formatting() -> None:
+    assert _route_provider_label({"trusted_profile_id": "grok-subscription-a"}) == "Grok"
+    assert _route_provider_label({"profile_id": "tokenrouter-kimi-a"}) == "Kimi"
+    assert _route_provider_label({"executor": "openai-codex-a"}) == "Codex"
+    assert _route_provider_label({"executor": "local-worker"}) == "local-worker"
+    assert _route_provider_label(None) is None
+    assert _route_provider_label({"executor": 42}) is None
+    assert _format_count(123456) == "123 456"
 
 
 def _plan() -> PlanDraft:

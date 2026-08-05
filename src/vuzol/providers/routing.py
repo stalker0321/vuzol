@@ -182,12 +182,22 @@ async def claim_routed_step(
             if role is ProviderRole.PLANNER
             else settings.limits.provider_call_output_tokens
         )
+        retry_failed_profile_id = step.payload.get("retry_failed_profile_id")
         failed_profile_id = (
-            step.executor_profile_id
+            (
+                retry_failed_profile_id
+                if isinstance(retry_failed_profile_id, str)
+                else step.executor_profile_id
+            )
             if (
                 attempt > 1
-                and step.failure_category is not None
-                and step.failure_category not in PLANNER_CONTENT_FAILURE_CATEGORIES
+                and (
+                    isinstance(retry_failed_profile_id, str)
+                    or (
+                        step.failure_category is not None
+                        and step.failure_category not in PLANNER_CONTENT_FAILURE_CATEGORIES
+                    )
+                )
             )
             else None
         )

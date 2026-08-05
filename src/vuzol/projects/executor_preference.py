@@ -321,6 +321,8 @@ def resolve_route_pin(
                 else None
             ),
             worker_key=worker,
+            # An explicitly selected account is a strict identity boundary.
+            # Never cross into another account without a new /model choice.
             allow_same_family_fallbacks=False,
         )
     if worker is ExecutorWorkerKey.GROK:

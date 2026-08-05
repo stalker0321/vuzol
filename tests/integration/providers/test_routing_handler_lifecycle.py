@@ -216,6 +216,9 @@ def test_codex_typed_report_reaches_handler_finalization(postgres_dsn: str, tmp_
         handler = ProviderStepHandler(
             factory, registries, MagicMock(), worktrees=worktrees, finalizer=finalizer
         )
+        handler._commit_messages = MagicMock(
+            resolve=AsyncMock(return_value="task(project): bounded task")
+        )
         step_request = StepExecutionRequest(
             task_id=task_id,
             run_id=run_id,
@@ -237,6 +240,9 @@ def test_codex_typed_report_reaches_handler_finalization(postgres_dsn: str, tmp_
         finalized_report = finalizer.finalize.await_args.kwargs["edit_report"]
         assert isinstance(finalized_report, WorkerEditReport)
         assert finalized_report.claimed_complete is True
+        assert finalizer.finalize.await_args.kwargs["commit_message"] == (
+            "task(project): bounded task"
+        )
         await engine.dispose()
 
     asyncio.run(scenario())

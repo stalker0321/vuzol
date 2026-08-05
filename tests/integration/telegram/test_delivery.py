@@ -31,7 +31,11 @@ from vuzol.storage.types import (
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.delivery import TelegramDeliveryService
-from vuzol.telegram.projections import FakeTelegramClient, LostTelegramResponse
+from vuzol.telegram.projections import (
+    FakeTelegramClient,
+    LostTelegramResponse,
+    enqueue_task_status_projection,
+)
 from vuzol.telegram.tracing import ORCHESTRATION_TRACE_ROLE
 
 pytestmark = pytest.mark.postgresql
@@ -112,6 +116,35 @@ def service(
         trace_sample_percent=trace_sample_percent,
         trace_always_include_anomalies=trace_always_include_anomalies,
     )
+
+
+def test_task_without_intake_enqueues_direct_approval_projection(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            created = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                original_text="materialized plan item",
+                task_type="coding",
+            )
+            assert uow.session is not None
+            task = await uow.session.get(Task, created.id)
+            assert task is not None
+            await enqueue_task_status_projection(uow.session, task, role="approval_card")
+        async with factory() as session:
+            item = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.linked_entity_type == "task",
+                    TransactionalOutbox.linked_entity_id == created.id,
+                )
+            )
+        assert item is not None
+        assert item.payload["role"] == "approval_card"
+        await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_acknowledgement_sends_once_and_persists_confirmed_link(postgres_dsn: str) -> None:

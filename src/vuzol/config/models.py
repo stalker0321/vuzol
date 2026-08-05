@@ -3,6 +3,7 @@
 from enum import StrEnum
 from ipaddress import ip_address
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
@@ -227,6 +228,7 @@ class StaticDeploymentConfig(FrozenModel):
         Path("assets"),
     )
     entrypoint: Path = Path("index.html")
+    build_command: Literal["make build"] | None = None
     keep_releases: int = Field(default=5, ge=2, le=20)
 
     @model_validator(mode="after")

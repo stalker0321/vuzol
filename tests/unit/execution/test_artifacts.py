@@ -33,6 +33,7 @@ async def test_artifact_persist_with_mock_session(tmp_path: Path) -> None:
     """Test ArtifactStore.persist path with mock session (real persist logic + redaction)."""
     store = ArtifactStore(tmp_path / "art", max_bytes=10_000, retention_days=1)
     mock_session = AsyncMock()
+    mock_session.scalar.return_value = None
     mock_session.add = MagicMock()
     mock_session.flush = AsyncMock()
 
@@ -48,6 +49,28 @@ async def test_artifact_persist_with_mock_session(tmp_path: Path) -> None:
     assert art is not None
     assert art.content_hash is not None
     mock_session.add.assert_called()
+
+
+@pytest.mark.anyio
+async def test_artifact_persist_is_idempotent_for_same_storage_key(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "art", max_bytes=10_000, retention_days=1)
+    existing = MagicMock()
+    mock_session = AsyncMock()
+    mock_session.scalar.return_value = existing
+    mock_session.add = MagicMock()
+
+    result = await store.persist(
+        mock_session,
+        task_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_id=uuid.uuid4(),
+        artifact_type="worker_finalization_evidence",
+        content=b"same evidence",
+        media_type="application/json",
+    )
+
+    assert result is existing
+    mock_session.add.assert_not_called()
 
 
 def test_artifact_store_size_limit(tmp_path: Path) -> None:

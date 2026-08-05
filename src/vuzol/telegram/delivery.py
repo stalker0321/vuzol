@@ -278,13 +278,26 @@ async def prepare_delivery(
             task_id=provisioning.task_id,
             message_role="project_welcome",
         )
-    if item.linked_entity_type != "telegram_intake":
-        raise PermanentDeliveryError("unsupported_telegram_operation")
-    intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
-    if intake is None:
-        raise PermanentDeliveryError("telegram_intake_missing")
     role = item.payload.get("role")
+    intake: TelegramIntakeMessage | None = None
+    if item.linked_entity_type == "telegram_intake":
+        intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
+        if intake is None:
+            raise PermanentDeliveryError("telegram_intake_missing")
+        task_id = intake.task_id
+        chat_id = intake.chat_id
+        thread_id = intake.message_thread_id
+    elif item.linked_entity_type == "task" and role in {"intake_ack", "approval_card"}:
+        task = await session.get(Task, item.linked_entity_id)
+        if task is None or task.source_chat_id is None or task.source_thread_id is None:
+            raise PermanentDeliveryError("telegram_task_projection_missing")
+        task_id = task.id
+        chat_id = task.source_chat_id
+        thread_id = task.source_thread_id
+    else:
+        raise PermanentDeliveryError("unsupported_telegram_operation")
     if role == "semantic_clarification":
+        assert intake is not None
         raw_id = item.payload.get("interpretation_id")
         try:
             interpretation_id = uuid.UUID(str(raw_id))
@@ -307,6 +320,7 @@ async def prepare_delivery(
             task_id=intake.task_id,
         )
     if role == "clarification":
+        assert intake is not None
         try:
             candidate_ids = [uuid.UUID(value) for value in intake.ambiguous_task_ids]
         except ValueError as error:
@@ -324,17 +338,15 @@ async def prepare_delivery(
             thread_id=intake.message_thread_id,
             html=html,
         )
-    if role not in {"intake_ack", "approval_card"} or intake.task_id is None:
+    if role not in {"intake_ack", "approval_card"} or task_id is None:
         raise PermanentDeliveryError("invalid_telegram_payload")
     approval_projection = role == "approval_card"
     card = (
-        await build_approval_card(session, intake.task_id)
+        await build_approval_card(session, task_id)
         if approval_projection
-        else await build_status_card(session, intake.task_id)
+        else await build_status_card(session, task_id)
     )
     message_role = "approval_card" if approval_projection else "task_status"
-    chat_id = intake.chat_id
-    thread_id = intake.message_thread_id
     if approval_projection:
         destination = topics.system_topic(chat_id, TopicKind.APPROVALS) if topics else None
         if destination is None or not destination.enabled:

@@ -326,8 +326,7 @@ def test_host_grok_billing_logs_matched_by_jwt_subject(
                 "msg": "shell.turn.inference_failed",
                 "ctx": {
                     "message": (
-                        "subscription:free-usage-exhausted: "
-                        "tokens (actual/limit): 532378/500000"
+                        "subscription:free-usage-exhausted: tokens (actual/limit): 532378/500000"
                     )
                 },
             }
@@ -346,12 +345,16 @@ def test_host_grok_billing_logs_matched_by_jwt_subject(
     # Host auth.json may be unreadable (0600); match via subject string in logs.
     (account / "auth.json").unlink()
     (logs / "unified.jsonl").write_text(
-        json.dumps(
+        ("x" * 600_000)
+        + "\n"
+        + json.dumps(
             {
                 "msg": "AuthManager::new",
                 "ctx": {"principal": "user-abc", "sub": "user-abc"},
             }
         )
+        + "\n"
+        + ("y" * 600_000)
         + "\n"
         + billing_line
         + "\n",

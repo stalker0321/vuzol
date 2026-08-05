@@ -51,6 +51,8 @@ GROK_BILLING_URLS = (
 _FIVE_HOUR_SECONDS = 5 * 3600
 _WEEKLY_SECONDS = 7 * 24 * 3600
 _FETCH_TIMEOUT_SECONDS = 4.0
+_SUBJECT_SCAN_CHUNK_BYTES = 64 * 1024
+_SUBJECT_SCAN_MAX_BYTES = 64 * 1024 * 1024
 
 # API-level Grok source mode (settings wiring is a later slice; default preserves legacy).
 GrokLimitSource = Literal["legacy", "snapshot_required"]
@@ -402,9 +404,7 @@ def format_subscription_limits_html(
             detail = html_escape(_safe_unavailable_detail(snap.detail))
             lines.append(f"  ⚠️ {detail}")
             continue
-        long_window_label = (
-            "24 ч" if snap.weekly.window_seconds == 24 * 3600 else "неделя"
-        )
+        long_window_label = "24 ч" if snap.weekly.window_seconds == 24 * 3600 else "неделя"
         window_lines = (
             *_format_window_block("5 ч", snap.five_hour, html_escape),
             *_format_window_block(long_window_label, snap.weekly, html_escape),
@@ -865,20 +865,32 @@ def _host_account_matches_subjects(
 
 
 def _log_contains_any_subject(path: Path, subjects: set[str]) -> bool:
+    needles = tuple(subject.encode("utf-8") for subject in subjects if subject)
+    if not needles:
+        return False
+    overlap = max(len(needle) for needle in needles) - 1
     try:
         with path.open("rb") as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            # Subject usually appears early (AuthManager::new); scan both ends.
-            handle.seek(0)
-            head = handle.read(min(size, 512_000))
-            handle.seek(max(0, size - 512_000))
-            tail = handle.read()
+            # AuthManager lines are not guaranteed to stay near either edge of a
+            # long-running log. Stream the bounded file instead of sampling only
+            # its head and tail; keep overlap so a subject split across chunks is
+            # still found without loading the whole log into memory.
+            scanned = 0
+            suffix = b""
+            while scanned < _SUBJECT_SCAN_MAX_BYTES:
+                chunk = handle.read(
+                    min(_SUBJECT_SCAN_CHUNK_BYTES, _SUBJECT_SCAN_MAX_BYTES - scanned)
+                )
+                if not chunk:
+                    return False
+                scanned += len(chunk)
+                haystack = suffix + chunk
+                if any(needle in haystack for needle in needles):
+                    return True
+                suffix = haystack[-overlap:] if overlap > 0 else b""
     except OSError:
         return False
-    blob = head + b"\n" + tail
-    text = blob.decode("utf-8", errors="ignore")
-    return any(subject in text for subject in subjects)
+    return False
 
 
 def _latest_grok_billing_from_logs(state_directory: Path) -> dict[str, Any] | None:

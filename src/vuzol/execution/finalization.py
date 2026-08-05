@@ -35,6 +35,7 @@ from vuzol.providers.domain import NormalizedUsage
 from vuzol.workflows.ports import CancellationContext
 
 TRUSTED_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
+    "make build": ("/usr/bin/make", "build"),
     "make test": ("/usr/bin/make", "test"),
     "make format-check": ("/usr/bin/make", "format-check"),
     "make lint": ("/usr/bin/make", "lint"),

@@ -72,6 +72,7 @@ async def ensure_result_approval(
         "validation_evidence_hash": evidence["validation_evidence_hash"],
         "review_evidence": evidence["review_evidence"],
         "review_evidence_hash": evidence["review_evidence_hash"],
+        "static_build_evidence": evidence["static_build_evidence"],
         "configuration_revision": run.configuration_revision,
         "policy_revision": run.policy_revision,
     }
@@ -184,6 +185,15 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
         ),
         None,
     )
+    build_steps = [step for step in ordered if step.step_type == "build_static"]
+    build = next(
+        (
+            step
+            for step in build_steps
+            if step.status is StepStatus.COMPLETED
+        ),
+        None,
+    )
 
     source = validate
     if source is None:
@@ -261,6 +271,32 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
 
     review_result = review.result if review and isinstance(review.result, dict) else {}
     execute_result = execute.result if execute and isinstance(execute.result, dict) else {}
+    static_build_evidence: dict[str, Any] | None = None
+    if build_steps:
+        if build is None or not isinstance(build.result, dict):
+            raise ValueError("result approval requires the configured static build to complete")
+        build_result = build.result
+        if build_result.get("status") == "built":
+            if (
+                build_result.get("source_commit") != worktree.result_commit
+                or not isinstance(build_result.get("artifact_hash"), str)
+            ):
+                raise ValueError("static build evidence does not match the retained result")
+            static_build_evidence = {
+                key: build_result[key]
+                for key in (
+                    "source_commit",
+                    "source_directory",
+                    "entrypoint",
+                    "artifact_hash",
+                    "files",
+                    "bytes",
+                    "gate",
+                )
+                if key in build_result
+            }
+        elif build_result.get("status") != "skipped":
+            raise ValueError("static build did not produce a publishable result")
     agent_checks = _agent_checks(execute_result)
     summary = None
     for candidate in (execute_result.get("implementation_summary"),):
@@ -281,6 +317,7 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
         "validation_evidence_hash": envelope_hash(manifest),
         "review_evidence": review_evidence,
         "review_evidence_hash": review_evidence_hash,
+        "static_build_evidence": static_build_evidence,
     }
 
 

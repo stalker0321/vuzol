@@ -164,6 +164,7 @@ _STEP_TYPE_LABELS = {
     "execute_code": "Выполнение кода",
     "validate": "Проверка",
     "review": "Ревью",
+    "build_static": "Сборка сайта",
     "approval": "Решение / апрув",
     "publish_static": "Публикация прототипа",
     "execute_agent": "Агент",

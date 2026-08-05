@@ -58,7 +58,11 @@ revision, item, edit-session, approval, or task identifiers. Never claim an acti
 user_visible_summary is a concise internal classification or fallback summary. It is not the
 project worker's conversational reply. For discussion and query_only, classify and structure the
 turn without attempting to provide product advice; a separate project-pinned worker generates the
-user-visible answer. Keep the summary factual and short."""
+user-visible answer. `original_input` is the current request and is always the sole subject of the
+classification and any newly generated plan. `memory_pack` is supporting context only: never use
+an older turn, task, or plan as the requested work unless `original_input` explicitly refers to it.
+Never repeat a previous plan merely because it is present in memory. Keep the summary factual and
+short."""
 
 
 class OpenAICompatibleInterpreter:

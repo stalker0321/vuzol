@@ -44,6 +44,13 @@ class PublishResult:
     bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class StaticTreeEvidence:
+    digest: str
+    files: int
+    bytes: int
+
+
 def load_sites(path: Path) -> tuple[StaticSite, ...]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -88,6 +95,34 @@ def publish(
         if staging.exists():
             shutil.rmtree(staging)
         raise
+
+
+def measure_static_tree(
+    source: Path, *, entrypoint: Path = Path("index.html")
+) -> StaticTreeEvidence:
+    """Measure a closed, regular-file-only static tree without publishing it."""
+
+    root = source.resolve(strict=True)
+    if source.is_symlink() or not root.is_dir():
+        raise StaticPublishError("static build source must be a real directory")
+    files = 0
+    total_bytes = 0
+    for item in sorted(root.rglob("*")):
+        if item.is_dir():
+            if item.is_symlink():
+                raise StaticPublishError("static build contains a symlink directory")
+            continue
+        info = item.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise StaticPublishError("static build contains a non-regular file")
+        files += 1
+        total_bytes += info.st_size
+        if files > MAX_FILES or total_bytes > MAX_BYTES:
+            raise StaticPublishError("static build exceeds configured size limits")
+    if not _regular_file(root / entrypoint):
+        raise StaticPublishError(f"required entrypoint is missing: {entrypoint}")
+    _require_closed_html_entrypoint(root, entrypoint)
+    return StaticTreeEvidence(_tree_digest(root), files, total_bytes)
 
 
 def rollback(site: StaticSite, *, site_root: Path | None = None) -> PublishResult:

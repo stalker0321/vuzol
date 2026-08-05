@@ -12,6 +12,8 @@ from vuzol.discussion.domain import (
     control_transition_target,
     require_generation,
     require_mutable,
+    semantic_plan_hash,
+    semantic_revision_hash,
 )
 from vuzol.storage.types import WorkPackageStatus
 
@@ -40,6 +42,7 @@ def test_canonical_plan_hash_is_stable_and_binds_item_identity() -> None:
     assert canonical_plan_hash(body) != canonical_plan_hash(
         canonical_plan_body(plan, (uuid.uuid4(),))
     )
+    assert semantic_plan_hash(plan) == semantic_revision_hash(body)
 
 
 def test_plan_validation_rejects_bad_shapes() -> None:

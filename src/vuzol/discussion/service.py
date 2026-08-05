@@ -19,6 +19,8 @@ from vuzol.discussion.domain import (
     control_transition_target,
     require_generation,
     require_mutable,
+    semantic_plan_hash,
+    semantic_revision_hash,
 )
 from vuzol.storage.models import (
     EditSession,
@@ -72,6 +74,15 @@ class WorkPackageService:
             raise DomainError("project_mismatch")
         if await self._uow.work_packages.active_package_id(session_id=session_id) is not None:
             raise DomainError("active_package_exists")
+        fingerprint = semantic_plan_hash(plan)
+        completed = await self._uow.work_packages.completed_revision_bodies(
+            session_id=session_id, project_id=project_id
+        )
+        if any(semantic_revision_hash(body) == fingerprint for body in completed):
+            raise DomainError(
+                "duplicate_completed_plan",
+                "the proposed plan exactly duplicates an already completed plan",
+            )
         package = WorkPackage(
             session_id=session_id,
             project_id=project_id,

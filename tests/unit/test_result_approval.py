@@ -190,7 +190,25 @@ async def test_result_approval_rejects_raw_executor_transcript_and_keeps_validat
         session,
         run=run,
         approval_step=approval_step,
-        steps_by_ordinal={4: execute, 5: validate, 6: review},
+        steps_by_ordinal={
+            4: execute,
+            5: validate,
+            6: review,
+            7: _step(
+                step_type="build_static",
+                ordinal=7,
+                result={
+                    "status": "built",
+                    "source_commit": result_commit,
+                    "source_directory": "dist",
+                    "entrypoint": "index.html",
+                    "artifact_hash": "1" * 64,
+                    "files": 3,
+                    "bytes": 100,
+                    "gate": {"exit_code": 0},
+                },
+            ),
+        },
     )
     assert approval is not None
     assert approval.human_summary == (
@@ -218,6 +236,56 @@ async def test_result_approval_rejects_raw_executor_transcript_and_keeps_validat
         }
     ]
     assert approval_step.payload["action_envelope"]["review_evidence_hash"]
+    assert approval_step.payload["action_envelope"]["static_build_evidence"] == {
+        "source_commit": result_commit,
+        "source_directory": "dist",
+        "entrypoint": "index.html",
+        "artifact_hash": "1" * 64,
+        "files": 3,
+        "bytes": 100,
+        "gate": {"exit_code": 0},
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("build_result", (None, {"status": "failed"}))
+async def test_result_approval_rejects_invalid_static_build(
+    build_result: dict[str, Any] | None,
+) -> None:
+    base = "a" * 40
+    result_commit = "b" * 40
+    worktree = SimpleNamespace(
+        result_commit=result_commit,
+        diff_hash="c" * 64,
+        base_commit=base,
+        project_id="vuzol",
+        repository_identity_hash="d" * 64,
+        default_branch="main",
+        expected_target_head=base,
+    )
+    validate = _step(
+        step_type="validate",
+        result={
+            "structured_output": {
+                "base_commit": base,
+                "result_commit": result_commit,
+                "gates": [{"exit_code": 0}],
+            }
+        },
+    )
+    build = _step(step_type="build_static", result=build_result)
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=(None, worktree))
+
+    with pytest.raises(ValueError, match="static build"):
+        await ensure_result_approval(
+            session,
+            run=MagicMock(),
+            approval_step=MagicMock(
+                id=uuid.uuid4(), payload={"requested_action": "apply_result"}
+            ),
+            steps_by_ordinal={5: validate, 6: build},
+        )
 
 
 @pytest.mark.anyio

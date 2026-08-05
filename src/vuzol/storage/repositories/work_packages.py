@@ -193,7 +193,7 @@ class WorkPackageRepository:
             ),
         )
 
-    async def completed_revision_bodies(
+    async def terminal_revision_bodies(
         self, *, session_id: uuid.UUID, project_id: str, limit: int = 10
     ) -> tuple[dict[str, object], ...]:
         rows = await self._session.scalars(
@@ -202,7 +202,13 @@ class WorkPackageRepository:
             .where(
                 WorkPackage.session_id == session_id,
                 WorkPackage.project_id == project_id,
-                WorkPackage.status == WorkPackageStatus.COMPLETED,
+                WorkPackage.status.in_(
+                    {
+                        WorkPackageStatus.COMPLETED,
+                        WorkPackageStatus.STOPPED,
+                        WorkPackageStatus.DISCARDED,
+                    }
+                ),
             )
             .order_by(PlanRevision.created_at.desc())
             .limit(limit)

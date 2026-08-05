@@ -9,6 +9,7 @@ from sqlalchemy import func, select, update
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
 from vuzol.discussion.agent import DeliverDiscussionReplyHandler
+from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
 from vuzol.interpretation.discussion import (
     DISCUSSION_REPLY_DESTINATION,
@@ -31,6 +32,7 @@ from vuzol.storage.models import (
     ClarificationDecision,
     ConversationTurn,
     Interpretation,
+    PlanRevision,
     ProjectNamingRequest,
     Run,
     Step,
@@ -442,6 +444,95 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
             assert projection is not None
             assert projection.linked_entity_id == package.id
             assert leaked_summary is None
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_repeated_terminal_plan_is_regenerated_without_memory(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    def plan_result(title: str, summary: str, goal: str) -> DiscussionInterpretation:
+        return DiscussionInterpretation(
+            interaction_mode=InteractionMode.PLAN_REQUEST,
+            confidence=0.95,
+            user_visible_summary="plan",
+            plan_request={  # type: ignore[arg-type]
+                "intent": "create_draft",
+                "title": title,
+                "items": [
+                    {
+                        "local_id": "item-1",
+                        "summary": summary,
+                        "goal": goal,
+                        "expected_outcome": "Expected result",
+                        "completion_criteria": ["Trusted checks pass"],
+                        "allowed_scope": "src/**",
+                        "suggested_risk": "low",
+                        "needs_approval": True,
+                        "estimated_complexity": "small",
+                    }
+                ],
+            },
+        )
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        base_runtime = telegram_runtime(tmp_path)
+        runtime = base_runtime.model_copy(
+            update={
+                "settings": base_runtime.settings.model_copy(
+                    update={"project_discussion_enabled": True}
+                )
+            }
+        )
+        repeated = plan_result("Old plan", "Build old UI", "Original wording")
+        paraphrased = plan_result(" old   PLAN ", " BUILD OLD UI ", "Paraphrased wording")
+        fresh = plan_result("New design plan", "Redesign the interface", "Address current request")
+        discussion = FakeDiscussionInterpreter([repeated, paraphrased, fresh])
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=FakeInterpreter([]),
+            discussion_interpreter=discussion,
+            owner="interpreter-plan-freshness",
+        )
+        ingress = TelegramIngressService(runtime, factory)
+
+        await ingress.accept_message(
+            text_update(153).model_copy(update={"text": "Create the original plan"})
+        )
+        assert await pipeline.process_one()
+        async with factory() as session:
+            package = await session.scalar(select(WorkPackage))
+            assert package is not None and package.head_revision_id is not None
+            revision = await session.get(PlanRevision, package.head_revision_id)
+            assert revision is not None
+            package_id = package.id
+            version = package.version
+            revision_number = revision.revision_number
+            h8 = revision.content_hash[:8]
+        async with UnitOfWork(factory) as uow:
+            await WorkPackageService(uow).discard(
+                package_id=package_id,
+                revision_number=revision_number,
+                h8=h8,
+                expected_status_generation=version,
+                user_id=42,
+            )
+
+        await ingress.accept_message(
+            text_update(154).model_copy(update={"text": "Make a completely different design"})
+        )
+        assert await pipeline.process_one()
+
+        assert len(discussion.requests) == 3
+        assert discussion.requests[1].memory_pack is not None
+        assert discussion.requests[2].memory_pack is None
+        async with factory() as session:
+            packages = (await session.scalars(select(WorkPackage))).all()
+            assert len(packages) == 2
+            assert packages[-1].title == "New design plan"
         await engine.dispose()
 
     asyncio.run(scenario())

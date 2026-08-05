@@ -17,8 +17,10 @@ from vuzol.discussion.domain import (
     canonical_plan_body,
     canonical_plan_hash,
     control_transition_target,
+    plan_outline_hash,
     require_generation,
     require_mutable,
+    revision_outline_hash,
     semantic_plan_hash,
     semantic_revision_hash,
 )
@@ -74,14 +76,12 @@ class WorkPackageService:
             raise DomainError("project_mismatch")
         if await self._uow.work_packages.active_package_id(session_id=session_id) is not None:
             raise DomainError("active_package_exists")
-        fingerprint = semantic_plan_hash(plan)
-        completed = await self._uow.work_packages.completed_revision_bodies(
-            session_id=session_id, project_id=project_id
-        )
-        if any(semantic_revision_hash(body) == fingerprint for body in completed):
+        if await self.is_duplicate_terminal_plan(
+            session_id=session_id, project_id=project_id, plan=plan
+        ):
             raise DomainError(
-                "duplicate_completed_plan",
-                "the proposed plan exactly duplicates an already completed plan",
+                "duplicate_terminal_plan",
+                "the proposed plan repeats a terminal plan",
             )
         package = WorkPackage(
             session_id=session_id,
@@ -107,6 +107,19 @@ class WorkPackageService:
         )
         discussion.active_work_package_id = package_id
         return result
+
+    async def is_duplicate_terminal_plan(
+        self, *, session_id: uuid.UUID, project_id: str, plan: PlanDraft
+    ) -> bool:
+        bodies = await self._uow.work_packages.terminal_revision_bodies(
+            session_id=session_id, project_id=project_id
+        )
+        semantic = semantic_plan_hash(plan)
+        outline = plan_outline_hash(plan)
+        return any(
+            semantic_revision_hash(body) == semantic or revision_outline_hash(body) == outline
+            for body in bodies
+        )
 
     async def revise_draft(
         self,

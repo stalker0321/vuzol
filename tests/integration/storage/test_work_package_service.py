@@ -117,24 +117,36 @@ async def test_create_approve_revise_invalidates_approval_without_tasks(postgres
     await engine.dispose()
 
 
-async def test_create_rejects_semantic_duplicate_of_completed_plan(postgres_dsn: str) -> None:
+async def test_create_rejects_duplicate_outline_of_terminal_plan(postgres_dsn: str) -> None:
     engine, factory = storage(postgres_dsn)
     session_id, package_id, _ = await create_package(factory)
     async with factory.begin() as session:
         package = await session.get(WorkPackage, package_id, with_for_update=True)
         assert package is not None
-        package.status = WorkPackageStatus.COMPLETED
+        package.status = WorkPackageStatus.DISCARDED
 
     with pytest.raises(DomainError) as duplicate:
         async with UnitOfWork(factory) as uow:
             await WorkPackageService(uow).create_draft(
                 session_id=session_id,
                 project_id="vuzol",
-                plan=plan(),
+                plan=PlanDraft(
+                    title="  DISCUSSION   MVP ",
+                    items=(
+                        PlanItemDraft(
+                            local_id="different-id",
+                            summary="  IMPLEMENT   LIFECYCLE ",
+                            goal="A slightly rephrased goal",
+                            expected_outcome="Different wording",
+                            completion_criteria=("A different criterion",),
+                            allowed_scope="different/**",
+                        ),
+                    ),
+                ),
                 created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
                 actor_type="planner_model",
             )
-    assert duplicate.value.code == "duplicate_completed_plan"
+    assert duplicate.value.code == "duplicate_terminal_plan"
 
     async with UnitOfWork(factory) as uow:
         created = await WorkPackageService(uow).create_draft(

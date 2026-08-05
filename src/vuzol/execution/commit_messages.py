@@ -32,18 +32,14 @@ class CommitMessageContext:
 
 
 class CommitMessageResolver(Protocol):
-    async def resolve(
-        self, *, task_id: uuid.UUID, run_id: uuid.UUID, project_id: str
-    ) -> str: ...
+    async def resolve(self, *, task_id: uuid.UUID, run_id: uuid.UUID, project_id: str) -> str: ...
 
 
 class DatabaseCommitMessageResolver:
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
         self._factory = factory
 
-    async def resolve(
-        self, *, task_id: uuid.UUID, run_id: uuid.UUID, project_id: str
-    ) -> str:
+    async def resolve(self, *, task_id: uuid.UUID, run_id: uuid.UUID, project_id: str) -> str:
         del run_id
         async with self._factory() as session:
             task = await session.get(Task, task_id)

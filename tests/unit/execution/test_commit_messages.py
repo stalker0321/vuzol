@@ -41,9 +41,7 @@ def test_commit_message_uses_complete_title_and_local_task_number() -> None:
     ("operation", "prefix"),
     (("fix", "fix"), ("explain", "docs"), ("modify", "chore"), (None, "chore")),
 )
-def test_commit_type_follows_normalized_operation(
-    operation: str | None, prefix: str
-) -> None:
+def test_commit_type_follows_normalized_operation(operation: str | None, prefix: str) -> None:
     message = build_commit_message(
         CommitMessageContext(
             task_id=uuid.uuid4(),

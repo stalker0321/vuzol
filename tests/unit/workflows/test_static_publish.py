@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -46,9 +46,7 @@ def _handler(
         "status": "built",
         "source_commit": result_commit,
         "source_directory": ".",
-        "artifact_hash": (
-            measure_static_tree(repository).digest if with_entrypoint else "b" * 64
-        ),
+        "artifact_hash": (measure_static_tree(repository).digest if with_entrypoint else "b" * 64),
     }
     build_step = SimpleNamespace(result=build_result)
     session.get.return_value = SimpleNamespace(project_id="demo")
@@ -103,7 +101,8 @@ async def test_handler_blocks_when_public_probe_fails(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_handler_requires_build_evidence(tmp_path: Path) -> None:
     handler, request = _handler(tmp_path)
-    session = handler._factory.return_value.__aenter__.return_value
+    factory = cast(MagicMock, handler._factory)
+    session = factory.return_value.__aenter__.return_value
     session.scalar.side_effect = [None, None]
 
     outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
@@ -115,16 +114,19 @@ async def test_handler_requires_build_evidence(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_handler_rolls_back_hash_mismatch(tmp_path: Path) -> None:
     handler, request = _handler(tmp_path)
-    session = handler._factory.return_value.__aenter__.return_value
+    factory = cast(MagicMock, handler._factory)
+    session = factory.return_value.__aenter__.return_value
     worktree, build_step = session.scalar.side_effect
     build_step.result["artifact_hash"] = "f" * 64
     session.scalar.side_effect = [worktree, build_step]
-    handler._rollback_changed = AsyncMock()
+    rollback = AsyncMock()
+    handler_mock = cast(object, handler)
+    cast(Any, handler_mock)._rollback_changed = rollback
 
     outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
 
     assert outcome.category == "static_build_hash_mismatch"
-    handler._rollback_changed.assert_awaited_once()
+    rollback.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -141,7 +143,8 @@ async def test_handler_honors_cancellation(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_handler_skips_missing_project(tmp_path: Path) -> None:
     handler, request = _handler(tmp_path)
-    session = handler._factory.return_value.__aenter__.return_value
+    factory = cast(MagicMock, handler._factory)
+    session = factory.return_value.__aenter__.return_value
     session.get.return_value = None
 
     outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]

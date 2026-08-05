@@ -1,17 +1,24 @@
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from vuzol.config import StaticDeploymentConfig
+from vuzol.config.registries import ConfigurationBundle
+from vuzol.execution.access import WorktreeAccessManager
+from vuzol.execution.finalization import GateRunner
+from vuzol.execution.git import LocalGit
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.ports import CancellationContext
 
 
-def _handler(tmp_path: Path, deployment: StaticDeploymentConfig | None):
+def _handler(
+    tmp_path: Path, deployment: StaticDeploymentConfig | None
+) -> tuple[StaticBuildHandler, Any, Any, Any]:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     (worktree / "index.html").write_text("<h1>Demo</h1>")
@@ -30,14 +37,20 @@ def _handler(tmp_path: Path, deployment: StaticDeploymentConfig | None):
     lease = SimpleNamespace(revoke=AsyncMock())
     access = SimpleNamespace(grant=AsyncMock(return_value=lease))
     handler = StaticBuildHandler(
-        MagicMock(), registries, git, gates, access, worktree_root=tmp_path
+        MagicMock(),
+        cast(ConfigurationBundle, registries),
+        cast(LocalGit, git),
+        cast(GateRunner, gates),
+        cast(WorktreeAccessManager, access),
+        worktree_root=tmp_path,
     )
     task = SimpleNamespace(project_id="demo")
     tree = SimpleNamespace(
         id="tree", path=str(worktree), base_commit="base", result_commit="result"
     )
     step = SimpleNamespace(timeout_seconds=60)
-    handler._load = AsyncMock(return_value=(task, tree, step, worktree))
+    handler_mock = cast(Any, handler)
+    handler_mock._load = AsyncMock(return_value=(task, tree, step, worktree))
     request = SimpleNamespace(
         task_id="task",
         run_id="run",
@@ -74,9 +87,7 @@ async def test_static_build_skips_unconfigured_project(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_static_build_requires_trusted_command(tmp_path: Path) -> None:
-    handler, request, _gates, _lease = _handler(
-        tmp_path, StaticDeploymentConfig(url_path="demo")
-    )
+    handler, request, _gates, _lease = _handler(tmp_path, StaticDeploymentConfig(url_path="demo"))
 
     outcome = await handler.execute(request, CancellationContext())
 
@@ -101,7 +112,7 @@ async def test_static_build_blocks_failed_gate_and_revokes_access(tmp_path: Path
 async def test_static_build_fails_closed_on_invalid_state(tmp_path: Path) -> None:
     deployment = StaticDeploymentConfig(url_path="demo", build_command="make build")
     handler, request, _gates, _lease = _handler(tmp_path, deployment)
-    handler._load.side_effect = LookupError("missing worktree")
+    cast(AsyncMock, handler._load).side_effect = LookupError("missing worktree")
 
     outcome = await handler.execute(request, CancellationContext())
 
@@ -113,7 +124,8 @@ async def test_static_build_fails_closed_on_invalid_state(tmp_path: Path) -> Non
 async def test_static_build_rejects_tracked_changes_from_build(tmp_path: Path) -> None:
     deployment = StaticDeploymentConfig(url_path="demo", build_command="make build")
     handler, request, _gates, lease = _handler(tmp_path, deployment)
-    handler._git.inspect.side_effect = [
+    git_mock = cast(Any, handler._git)
+    git_mock.inspect.side_effect = [
         SimpleNamespace(head="a", diff_hash="b", changed_files=("index.html",)),
         SimpleNamespace(head="a", diff_hash="changed", changed_files=("index.html",)),
     ]
@@ -121,7 +133,7 @@ async def test_static_build_rejects_tracked_changes_from_build(tmp_path: Path) -
     outcome = await handler.execute(request, CancellationContext())
 
     assert outcome.category == "static_build_invalid"
-    assert "changed tracked Git facts" in outcome.summary
+    assert "changed tracked Git facts" in (outcome.summary or "")
     lease.revoke.assert_awaited_once()
 
 
@@ -143,7 +155,8 @@ async def test_static_build_loads_active_database_state(tmp_path: Path) -> None:
 
     loaded = await StaticBuildHandler._load(handler, request)
 
-    assert loaded == (task, worktree, step, tmp_path / "worktree")
+    loaded_values = cast(tuple[Any, Any, Any, Path], loaded)
+    assert loaded_values == (task, worktree, step, tmp_path / "worktree")
 
 
 @pytest.mark.anyio

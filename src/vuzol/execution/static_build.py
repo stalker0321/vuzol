@@ -44,7 +44,10 @@ class StaticBuildHandler:
         lease: WorktreeAccessLease | None = None
         try:
             task, worktree, step, path = await self._load(request)
-            project = self._registries.projects.get(task.project_id)
+            project_id = task.project_id
+            if project_id is None:
+                raise LookupError("static build task has no project")
+            project = self._registries.projects.get(project_id)
             deployment = project.static_deployment
             if deployment is None or not deployment.enabled:
                 return StepOutcome.succeeded({"status": "skipped", "reason": "not_configured"})
@@ -56,9 +59,7 @@ class StaticBuildHandler:
                     summary="static delivery requires a trusted build command",
                 )
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
-            lease = await self._access.grant(
-                path, sandbox_uid=sandbox.uid, sandbox_gid=sandbox.gid
-            )
+            lease = await self._access.grant(path, sandbox_uid=sandbox.uid, sandbox_gid=sandbox.gid)
             before = await self._git.inspect(path, worktree.base_commit)
             runs = await self._gates.run(
                 path,
@@ -115,9 +116,7 @@ class StaticBuildHandler:
             if lease is not None:
                 await lease.revoke()
 
-    async def _load(
-        self, request: StepExecutionRequest
-    ) -> tuple[Task, Worktree, Step, Path]:
+    async def _load(self, request: StepExecutionRequest) -> tuple[Task, Worktree, Step, Path]:
         async with self._factory() as session:
             task = await session.get(Task, request.task_id)
             run = await session.get(Run, request.run_id)

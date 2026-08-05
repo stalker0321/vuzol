@@ -187,11 +187,7 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     )
     build_steps = [step for step in ordered if step.step_type == "build_static"]
     build = next(
-        (
-            step
-            for step in build_steps
-            if step.status is StepStatus.COMPLETED
-        ),
+        (step for step in build_steps if step.status is StepStatus.COMPLETED),
         None,
     )
 
@@ -277,9 +273,8 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
             raise ValueError("result approval requires the configured static build to complete")
         build_result = build.result
         if build_result.get("status") == "built":
-            if (
-                build_result.get("source_commit") != worktree.result_commit
-                or not isinstance(build_result.get("artifact_hash"), str)
+            if build_result.get("source_commit") != worktree.result_commit or not isinstance(
+                build_result.get("artifact_hash"), str
             ):
                 raise ValueError("static build evidence does not match the retained result")
             static_build_evidence = {

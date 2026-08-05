@@ -121,9 +121,7 @@ class WorkPackageSequencer:
         )
         return await self._materialize_current(package, revision)
 
-    async def _first_unfinished_ordinal(
-        self, package_id: uuid.UUID, revision: PlanRevision
-    ) -> int:
+    async def _first_unfinished_ordinal(self, package_id: uuid.UUID, revision: PlanRevision) -> int:
         """Carry an unchanged, completed prefix across plan revisions."""
 
         assert self._uow.session is not None

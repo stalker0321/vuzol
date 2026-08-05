@@ -135,9 +135,7 @@ async def test_grok_adapter_classifies_subscription_exhaustion_as_quota(tmp_path
     with pytest.raises(ProviderFailure) as captured:
         await GrokCliAdapter(ExhaustedTransport()).execute(
             provider_request().model_copy(
-                update={
-                    "sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"
-                }
+                update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
             ),
             configured,
             CancellationContext(),

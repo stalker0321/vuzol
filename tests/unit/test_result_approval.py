@@ -281,9 +281,7 @@ async def test_result_approval_rejects_invalid_static_build(
         await ensure_result_approval(
             session,
             run=MagicMock(),
-            approval_step=MagicMock(
-                id=uuid.uuid4(), payload={"requested_action": "apply_result"}
-            ),
+            approval_step=MagicMock(id=uuid.uuid4(), payload={"requested_action": "apply_result"}),
             steps_by_ordinal={5: validate, 6: build},
         )
 

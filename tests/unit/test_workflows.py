@@ -79,9 +79,9 @@ def test_compiler_resolves_optional_predecessors() -> None:
         "prepare_worktree",
         "execute_code",
         "validate",
-            "review",
-            "build_static",
-            "approve_result",
+        "review",
+        "build_static",
+        "approve_result",
         "publish_static",
         "finalize",
     ]

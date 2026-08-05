@@ -396,9 +396,7 @@ class ResultValidationHandler:
                 run_id=request.run_id,
                 project_id=worktree.project_id,
             )
-            result_commit = await self._git.create_commit(
-                path, commit_message
-            )
+            result_commit = await self._git.create_commit(path, commit_message)
             if await self._git.commit_parent(path, result_commit) != worktree.base_commit:
                 raise ResultValidationError(
                     "validation_commit_ancestry",

@@ -39,7 +39,9 @@ the project through a full agent but must not edit it. An explicit imperative re
 modify, add, fix, update, build, write code, or create project files is coding even when it follows
 an architecture discussion.
 Fill task_summary with one concise user-facing line describing what the task asks to achieve. Do
-not include status, identifiers, implementation claims, or claims that the work is complete."""
+not include status, identifiers, implementation claims, or claims that the work is complete. Fill
+normalized_title with a complete, standalone title of at most 80 characters. Never shorten it by
+cutting a word."""
 
 PROJECT_INTAKE_PROMPT = """When topic_kind is inbox, interpret the request as create_project.
 Treat the message as the project's nature and goal. Do not choose final new_project_id or
@@ -62,7 +64,8 @@ user-visible answer. `original_input` is the current request and is always the s
 classification and any newly generated plan. `memory_pack` is supporting context only: never use
 an older turn, task, or plan as the requested work unless `original_input` explicitly refers to it.
 Never repeat a previous plan merely because it is present in memory. Keep the summary factual and
-short."""
+short. Every plan item summary must be a complete, standalone title of at most 80 characters;
+never shorten one by cutting a word."""
 
 
 class OpenAICompatibleInterpreter:

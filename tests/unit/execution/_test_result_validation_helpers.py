@@ -213,7 +213,7 @@ def _handler(
         artifacts=artifacts,
         commit_messages=SimpleNamespace(
             resolve=AsyncMock(
-                return_value="task(bill-buddy): implement task\n\nVuzol-Task: test"
+                return_value="chore: implement task\n\nVuzol-Task: 42"
             )
         ),
     )

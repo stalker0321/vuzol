@@ -9,6 +9,7 @@ import pytest
 from vuzol.storage.types import ApprovalStatus, StepStatus, TaskStatus, WorktreeDeliveryState
 from vuzol.telegram.projections import (
     EditRateLimiter,
+    _approval_display_summary,
     _approval_status_label,
     _format_duration_ru,
     delivery_state_label,
@@ -81,6 +82,14 @@ def test_approval_decision_labels_are_russian() -> None:
     assert _approval_status_label(ApprovalStatus.CONSUMED) == "Принято"
     assert _approval_status_label(ApprovalStatus.REJECTED) == "Отклонено"
     assert _approval_status_label(ApprovalStatus.EXPIRED) == "Истекло"
+
+
+def test_approval_summary_hides_legacy_provider_transcript() -> None:
+    transcript = "I'll inspect first. I'll run tests next. Next I'll deploy. " * 20
+    assert _approval_display_summary(transcript) == (
+        "Изменения подготовлены и прошли настроенные проверки."
+    )
+    assert _approval_display_summary("## Готово") == "Готово"
 
 
 def test_task_status_button_matrix_is_exhaustive_and_has_no_retry_ui() -> None:

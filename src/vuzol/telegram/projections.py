@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -163,6 +164,7 @@ _STEP_TYPE_LABELS = {
     "execute_code": "Выполнение кода",
     "validate": "Проверка",
     "review": "Ревью",
+    "build_static": "Сборка сайта",
     "approval": "Решение / апрув",
     "publish_static": "Публикация прототипа",
     "execute_agent": "Агент",
@@ -893,16 +895,25 @@ def _approval_fact_lines(
 ) -> list[str]:
     """One canonical fact block shared by project and global approval cards."""
 
-    lines = ["<b>Что сделано</b>", telegram_html(human_summary)]
-    agent_checks = _envelope_agent_checks(envelope)
-    if agent_checks:
-        lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
-        lines.extend(_agent_check_html(check) for check in agent_checks)
-    review_warnings = _envelope_review_warnings(envelope)
+    display_summary = _approval_display_summary(human_summary)
+    lines = ["<b>Что изменится</b>", f"• {telegram_html(display_summary)}"]
+    raw_paths = envelope.get("changed_files")
+    paths = (
+        [str(path) for path in raw_paths if isinstance(path, str)]
+        if isinstance(raw_paths, list)
+        else []
+    )
+    if paths:
+        visible = ", ".join(paths[:6])
+        suffix = f" и ещё {len(paths) - 6}" if len(paths) > 6 else ""
+        lines.append(f"• Файлы: <code>{telegram_html(visible)}</code>{suffix}")
+    review_warnings = tuple(
+        warning for warning in _envelope_review_warnings(envelope) if warning.get("path")
+    )
     if review_warnings:
         lines.extend(("", "<b>Предупреждения ревью</b>"))
         lines.extend(_review_warning_html(warning) for warning in review_warnings)
-    lines.extend(("", "<b>Проверки Vuzol (доверенные)</b>"))
+    lines.extend(("", "<b>Проверено Vuzol</b>"))
     raw_gates = envelope.get("gates")
     gates = raw_gates if isinstance(raw_gates, list) else []
     for gate in gates:
@@ -914,6 +925,20 @@ def _approval_fact_lines(
         )
     lines.extend(("", "Применить этот результат локально?"))
     return lines
+
+
+def _approval_display_summary(summary: str) -> str:
+    """Keep legacy provider transcripts out of approval projections."""
+
+    cleaned = " ".join(summary.split()).strip()
+    looks_like_transcript = (
+        len(cleaned) > 600
+        or cleaned.casefold().count("i'll ") > 1
+        or cleaned.casefold().count("next i'll") > 0
+    )
+    if looks_like_transcript:
+        return "Изменения подготовлены и прошли настроенные проверки."
+    return cleaned.lstrip("#*- ").strip() or "Изменения подготовлены."
 
 
 def _approval_status_label(status: ApprovalStatus) -> str:
@@ -1073,6 +1098,9 @@ async def _history_work_seconds(session: AsyncSession, task: Task) -> int:
         total_ms = sum(max(0, int(row.duration_ms or 0)) for row in rows)
         return max(0, total_ms // 1000)
 
+    state = sqlalchemy_inspect(task, raiseerr=False)
+    if state is not None and {"created_at", "updated_at"} & state.expired_attributes:
+        await session.refresh(task, attribute_names=("created_at", "updated_at"))
     started = task.created_at
     ended = task.updated_at or datetime.now(UTC)
     if started.tzinfo is None:
@@ -1219,9 +1247,6 @@ async def enqueue_task_status_projection(
         .order_by(TelegramIntakeMessage.created_at.desc())
         .limit(1)
     )
-    if intake is None:
-        await enqueue_project_status_dashboard(session, chat_id)
-        return
     if role is None:
         pending_approval = None
         if run is not None:
@@ -1247,8 +1272,8 @@ async def enqueue_task_status_projection(
         TransactionalOutbox(
             destination="telegram",
             operation_type="send_message",
-            linked_entity_type="telegram_intake",
-            linked_entity_id=intake.id,
+            linked_entity_type="telegram_intake" if intake is not None else "task",
+            linked_entity_id=intake.id if intake is not None else task.id,
             idempotency_key=f"telegram:{role}:task:{task.id}:revision:{task.version}",
             payload=payload,
         )

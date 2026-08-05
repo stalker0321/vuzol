@@ -6,13 +6,16 @@ import math
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.models import (
+    MaterializationLink,
     PlanRevision,
     PlanRevisionItem,
     ProjectDiscussionSession,
+    Run,
+    UsageRecord,
     WorkPackage,
     WorkPackageOpenDetail,
 )
@@ -99,9 +102,31 @@ async def build_work_package_plan_card(
         WorkPackageStatus.STOPPED: "Остановлен",
         WorkPackageStatus.DISCARDED: "Отменён",
     }[package.status]
+    progress = None
+    if package.status in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}:
+        ordinal = package.cursor_ordinal or 1
+        route = await session.scalar(
+            select(Run.selected_route)
+            .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+            .where(
+                MaterializationLink.plan_revision_id == revision.id,
+                MaterializationLink.ordinal == ordinal,
+            )
+            .order_by(Run.created_at.desc())
+            .limit(1)
+        )
+        worker = _route_provider_label(route)
+        action = "выполняется" if package.status is WorkPackageStatus.RUNNING else "пауза"
+        progress = f"{ordinal}/{len(items)} {action}"
+        if worker is not None:
+            progress += f" | {worker}"
     lines = [
         f"<b>{telegram_html(package.title)}</b>",
-        f"Статус: <b>{status}</b> · версия плана {revision.revision_number}",
+        (
+            f"Статус: <b>{telegram_html(progress)}</b>"
+            if progress is not None
+            else f"Статус: <b>{status}</b> · версия плана {revision.revision_number}"
+        ),
         "",
     ]
     if package.status is WorkPackageStatus.PAUSED:
@@ -122,6 +147,15 @@ async def build_work_package_plan_card(
             )
         )
     lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
+    tokens = await _work_package_token_totals(session, revision.id)
+    if any(tokens):
+        lines.extend(
+            (
+                "",
+                f"Токены: {_format_count(tokens[0])} вх / {_format_count(tokens[1])} вых / "
+                f"{_format_count(tokens[2])} кэш",
+            )
+        )
     if page_count > 1:
         lines.extend(("", f"Страница {page}/{page_count}"))
     html = "\n".join(lines)
@@ -200,6 +234,44 @@ async def build_work_package_plan_card(
         callback_buttons=tuple(buttons),
         page=page,
     )
+
+
+def _route_provider_label(route: object) -> str | None:
+    if not isinstance(route, dict):
+        return None
+    value = route.get("trusted_profile_id") or route.get("profile_id") or route.get("executor")
+    if not isinstance(value, str):
+        return None
+    lowered = value.lower()
+    if "grok" in lowered:
+        return "Grok"
+    if "kimi" in lowered:
+        return "Kimi"
+    if "codex" in lowered or "openai" in lowered:
+        return "Codex"
+    return value
+
+
+async def _work_package_token_totals(
+    session: AsyncSession, revision_id: uuid.UUID
+) -> tuple[int, int, int]:
+    row = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(UsageRecord.input_tokens), 0),
+                func.coalesce(func.sum(UsageRecord.output_tokens), 0),
+                func.coalesce(func.sum(UsageRecord.cached_tokens), 0),
+            )
+            .join(Run, Run.id == UsageRecord.run_id)
+            .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+            .where(MaterializationLink.plan_revision_id == revision_id)
+        )
+    ).one()
+    return int(row[0]), int(row[1]), int(row[2])
+
+
+def _format_count(value: int) -> str:
+    return f"{value:,}".replace(",", " ")
 
 
 async def build_work_package_detail_card(

@@ -28,6 +28,7 @@ from vuzol.execution.reconciliation import ProxyStartupReconciler
 from vuzol.execution.result_validation import ResultValidationHandler
 from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
+from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
 from vuzol.providers.codex import CodexCliAdapter
@@ -219,6 +220,14 @@ async def run() -> None:
             worktree_access=worktree_access,
             artifacts=artifact_store,
         )
+        static_build_handler = StaticBuildHandler(
+            factory,
+            runtime.registries,
+            local_git,
+            TrustedGateRunner(envelope_factory, sandbox_runtime),
+            worktree_access,
+            worktree_root=settings.worktree_root,
+        )
         worktree_worker = WorkflowWorker(
             settings,
             factory,
@@ -226,6 +235,7 @@ async def run() -> None:
             handlers={
                 "prepare_worktree": worktree_handler,
                 "validate": validation_handler,
+                "build_static": static_build_handler,
             },
             queue_classes=frozenset({QueueClass.HEAVY}),
         )

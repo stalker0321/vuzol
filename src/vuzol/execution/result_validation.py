@@ -20,6 +20,10 @@ from vuzol.config.models import ProjectConfig
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.access import WorktreeAccessError, WorktreeAccessLease, WorktreeAccessManager
 from vuzol.execution.artifacts import ArtifactSecretError, ArtifactStore
+from vuzol.execution.commit_messages import (
+    CommitMessageResolver,
+    DatabaseCommitMessageResolver,
+)
 from vuzol.execution.finalization import (
     TRUSTED_GATE_COMMANDS,
     GateEvidence,
@@ -88,6 +92,7 @@ class ResultValidationHandler:
         gate_runner: TrustedGateRunner | None = None,
         worktree_access: WorktreeAccessManager | None = None,
         artifacts: ArtifactStore | None = None,
+        commit_messages: CommitMessageResolver | None = None,
         gate_timeout_seconds: int = 3_600,
     ) -> None:
         self._factory = session_factory
@@ -97,6 +102,7 @@ class ResultValidationHandler:
         self._gates = gate_runner
         self._worktree_access = worktree_access
         self._artifacts = artifacts
+        self._commit_messages = commit_messages or DatabaseCommitMessageResolver(session_factory)
         self._gate_timeout_seconds = gate_timeout_seconds
 
     async def execute(
@@ -385,9 +391,12 @@ class ResultValidationHandler:
         try:
             await self._git.stage_paths(path, inspection.changed_files)
             await self._git.require_diff_check(path)
-            result_commit = await self._git.create_commit(
-                path, f"validate({request.task_id}): retain measured implementation"
+            commit_message = await self._commit_messages.resolve(
+                task_id=request.task_id,
+                run_id=request.run_id,
+                project_id=worktree.project_id,
             )
+            result_commit = await self._git.create_commit(path, commit_message)
             if await self._git.commit_parent(path, result_commit) != worktree.base_commit:
                 raise ResultValidationError(
                     "validation_commit_ancestry",

@@ -121,6 +121,77 @@ async def test_sequencer_is_one_ahead_idempotent_and_completes(postgres_dsn: str
     await engine.dispose()
 
 
+async def test_replanned_sequence_keeps_unchanged_completed_prefix(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    created = await _approved(factory)
+    async with UnitOfWork(factory) as uow:
+        first = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=2,
+            user_id=42,
+        )
+    assert first.task_id is not None
+    async with factory.begin() as session:
+        task = await session.get(Task, first.task_id, with_for_update=True)
+        assert task is not None
+        task.status = TaskStatus.COMPLETED
+    async with UnitOfWork(factory) as uow:
+        second = await WorkPackageSequencer(uow).observe_terminal(task_id=first.task_id)
+    assert second is not None and second.task_id is not None
+    async with factory.begin() as session:
+        task = await session.get(Task, second.task_id, with_for_update=True)
+        assert task is not None
+        task.status = TaskStatus.FAILED
+    async with UnitOfWork(factory) as uow:
+        paused = await WorkPackageSequencer(uow).observe_terminal(task_id=second.task_id)
+    assert paused is not None
+
+    async with UnitOfWork(factory) as uow:
+        revised = await WorkPackageService(uow).revise_draft(
+            package_id=created.package_id,
+            expected_status_generation=paused.status_generation,
+            plan=_plan(),
+            created_by=PlanRevisionCreatedBy.USER,
+            actor_type="user",
+        )
+        approved_generation = await WorkPackageService(uow).approve(
+            package_id=created.package_id,
+            revision_number=2,
+            h8=revised.content_hash[:8],
+            expected_status_generation=revised.status_generation,
+            user_id=42,
+        )
+    async with UnitOfWork(factory) as uow:
+        resumed = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=2,
+            h8=revised.content_hash[:8],
+            expected_status_generation=approved_generation,
+            user_id=42,
+        )
+
+    assert resumed.ordinal == 2 and resumed.task_id is not None
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        links = tuple(
+            (
+                await session.scalars(
+                    select(MaterializationLink).where(
+                        MaterializationLink.work_package_id == created.package_id
+                    )
+                )
+            ).all()
+        )
+    assert package is not None and package.cursor_ordinal == 2
+    assert len(links) == 3
+    assert sum(link.ordinal == 1 for link in links) == 1
+    await engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("task_status", "reason"),
     [

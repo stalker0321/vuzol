@@ -8,6 +8,7 @@ import pytest
 from vuzol.storage.models import Step
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.result_approval import (
+    _plan_approval_covers_intermediate_result,
     ensure_result_approval,
     envelope_hash,
     verified_envelope,
@@ -106,7 +107,7 @@ async def test_result_approval_requires_validation_evidence(failure: str) -> Non
 
 
 @pytest.mark.anyio
-async def test_result_approval_prefers_executor_summary_and_validate_gates() -> None:
+async def test_result_approval_rejects_raw_executor_transcript_and_keeps_validate_gates() -> None:
     base = "a" * 40
     result_commit = "b" * 40
     validate = _step(
@@ -177,6 +178,7 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
     )
     session = MagicMock()
     session.scalar = AsyncMock(side_effect=(None, worktree))
+    session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
     session.flush = AsyncMock()
     run = MagicMock(
         task_id=uuid.uuid4(),
@@ -188,10 +190,30 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
         session,
         run=run,
         approval_step=approval_step,
-        steps_by_ordinal={4: execute, 5: validate, 6: review},
+        steps_by_ordinal={
+            4: execute,
+            5: validate,
+            6: review,
+            7: _step(
+                step_type="build_static",
+                ordinal=7,
+                result={
+                    "status": "built",
+                    "source_commit": result_commit,
+                    "source_directory": "dist",
+                    "entrypoint": "index.html",
+                    "artifact_hash": "1" * 64,
+                    "files": 3,
+                    "bytes": 100,
+                    "gate": {"exit_code": 0},
+                },
+            ),
+        },
     )
     assert approval is not None
-    assert approval.human_summary == "Added the requested README check."
+    assert approval.human_summary == (
+        "Изменено файлов: 0. Результат прошёл все настроенные проверки."
+    )
     assert approval_step.payload["action_envelope"]["project_id"] == "bill-buddy"
     assert approval_step.payload["action_envelope"]["gates"][0]["name"] == "git-facts"
     assert approval_step.payload["action_envelope"]["agent_checks"] == [
@@ -214,6 +236,54 @@ async def test_result_approval_prefers_executor_summary_and_validate_gates() -> 
         }
     ]
     assert approval_step.payload["action_envelope"]["review_evidence_hash"]
+    assert approval_step.payload["action_envelope"]["static_build_evidence"] == {
+        "source_commit": result_commit,
+        "source_directory": "dist",
+        "entrypoint": "index.html",
+        "artifact_hash": "1" * 64,
+        "files": 3,
+        "bytes": 100,
+        "gate": {"exit_code": 0},
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("build_result", (None, {"status": "failed"}))
+async def test_result_approval_rejects_invalid_static_build(
+    build_result: dict[str, Any] | None,
+) -> None:
+    base = "a" * 40
+    result_commit = "b" * 40
+    worktree = SimpleNamespace(
+        result_commit=result_commit,
+        diff_hash="c" * 64,
+        base_commit=base,
+        project_id="vuzol",
+        repository_identity_hash="d" * 64,
+        default_branch="main",
+        expected_target_head=base,
+    )
+    validate = _step(
+        step_type="validate",
+        result={
+            "structured_output": {
+                "base_commit": base,
+                "result_commit": result_commit,
+                "gates": [{"exit_code": 0}],
+            }
+        },
+    )
+    build = _step(step_type="build_static", result=build_result)
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=(None, worktree))
+
+    with pytest.raises(ValueError, match="static build"):
+        await ensure_result_approval(
+            session,
+            run=MagicMock(),
+            approval_step=MagicMock(id=uuid.uuid4(), payload={"requested_action": "apply_result"}),
+            steps_by_ordinal={5: validate, 6: build},
+        )
 
 
 @pytest.mark.anyio
@@ -302,6 +372,7 @@ async def test_result_approval_uses_a_safe_summary_fallback() -> None:
     )
     session = MagicMock()
     session.scalar = AsyncMock(side_effect=(None, worktree))
+    session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
     session.flush = AsyncMock()
     run = MagicMock(
         task_id=uuid.uuid4(),
@@ -316,7 +387,9 @@ async def test_result_approval_uses_a_safe_summary_fallback() -> None:
         steps_by_ordinal={2: source},
     )
     assert approval is not None
-    assert approval.human_summary.startswith("The requested change")
+    assert approval.human_summary == (
+        "Изменено файлов: 0. Результат прошёл все настроенные проверки."
+    )
 
 
 def test_verified_envelope_rejects_missing_hash_or_wrong_step() -> None:
@@ -330,3 +403,37 @@ def test_verified_envelope_rejects_missing_hash_or_wrong_step() -> None:
             SimpleNamespace(id=uuid.uuid4(), payload={"action_envelope": envelope}),  # type: ignore[arg-type]
             approval,  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("ordinal", "count", "expected"),
+    (
+        (1, 3, True),
+        (2, 3, True),
+        (3, 3, False),
+    ),
+)
+async def test_plan_approval_covers_every_intermediate_result(
+    ordinal: int,
+    count: int,
+    expected: bool,
+) -> None:
+    link = SimpleNamespace(ordinal=ordinal, plan_revision_id=uuid.uuid4())
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = link
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.scalar = AsyncMock(return_value=count)
+
+    assert await _plan_approval_covers_intermediate_result(session, uuid.uuid4()) is expected
+
+
+@pytest.mark.anyio
+async def test_plan_approval_does_not_cover_standalone_task() -> None:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+
+    assert not await _plan_approval_covers_intermediate_result(session, uuid.uuid4())

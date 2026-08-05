@@ -205,15 +205,23 @@ class LocalGit:
         await self._run(worktree, "add", "--all", "--", *paths)
 
     async def create_commit(self, worktree: Path, message: str) -> str:
-        if not message or len(message) > 200 or "\n" in message or "\r" in message:
+        paragraphs = tuple(part.strip() for part in message.split("\n\n"))
+        if (
+            not message
+            or len(message) > 1_000
+            or "\r" in message
+            or "\x00" in message
+            or not paragraphs
+            or any(not part or "\n\n" in part for part in paragraphs)
+        ):
             raise GitError("commit message is invalid")
+        message_args = tuple(argument for part in paragraphs for argument in ("-m", part))
         await self._run(
             worktree,
             "commit",
             "--no-verify",
             "--no-gpg-sign",
-            "-m",
-            message,
+            *message_args,
             extra_environment={
                 "GIT_AUTHOR_NAME": "Vuzol Worker Finalizer",
                 "GIT_AUTHOR_EMAIL": "vuzol-worker@localhost.invalid",
@@ -355,13 +363,16 @@ class LocalGit:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, _stderr = await asyncio.wait_for(process.communicate(), self._timeout)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), self._timeout)
         except TimeoutError as error:
             process.kill()
             await process.wait()
             raise GitError("Git operation timed out") from error
         if process.returncode not in allowed_returncodes:
-            raise GitError(f"Git operation failed: {args[0]}")
+            diagnostic = stderr or stdout
+            detail = " ".join(diagnostic.decode("utf-8", "replace").split())[:400]
+            suffix = f": {detail}" if detail else ""
+            raise GitError(f"Git operation failed: {args[0]}{suffix}")
         return stdout
 
 

@@ -379,7 +379,11 @@ def _build_request(
             "You are an independent code reviewer. The change already passed trusted "
             "validation gates. Decide whether the retained result is safe to present for "
             "human apply approval. Be conservative for high/privileged risk. Do not claim "
-            "to have executed tools. Return only the required JSON object."
+            "to have executed tools. Warnings must identify a concrete defect or risk in the "
+            "retained diff, its practical consequence, and the affected path/line when one "
+            "exists. Do not emit generic, hypothetical, best-practice, or 'ensure/consider' "
+            "warnings merely because build, deploy, network, or dependency scripts exist. "
+            "Return only the required JSON object."
         ),
         "risk": risk.value,
         "goal": goal,

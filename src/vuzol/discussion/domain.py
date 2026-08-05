@@ -143,6 +143,49 @@ def canonical_plan_hash(body: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def semantic_plan_hash(plan: PlanDraft) -> str:
+    """Fingerprint user-visible plan meaning without package-local identities."""
+
+    body = {
+        "title": plan.title.strip(),
+        "items": [
+            {
+                "local_id": item.local_id,
+                "summary": item.summary.strip(),
+                "goal": item.goal.strip(),
+                "expected_outcome": item.expected_outcome.strip(),
+                "completion_criteria": list(item.completion_criteria),
+                "allowed_scope": item.allowed_scope.strip(),
+                "out_of_scope": list(item.out_of_scope),
+                "dependencies": list(item.dependencies),
+                "trusted_checks": list(item.trusted_checks),
+                "suggested_risk": item.suggested_risk.value,
+                "needs_approval": item.needs_approval,
+                "estimated_complexity": item.estimated_complexity.value,
+            }
+            for item in plan.items
+        ],
+    }
+    return canonical_plan_hash(body)
+
+
+def semantic_revision_hash(body: dict[str, Any]) -> str:
+    """Fingerprint a stored canonical revision using the same semantic projection."""
+
+    raw_items = body.get("items")
+    if not isinstance(raw_items, list):
+        raise DomainError("invalid_plan", "stored plan body has no items")
+    projected = {
+        "title": str(body.get("title", "")).strip(),
+        "items": [
+            {key: value for key, value in item.items() if key not in {"item_id", "ordinal"}}
+            for item in raw_items
+            if isinstance(item, dict)
+        ],
+    }
+    return canonical_plan_hash(projected)
+
+
 def require_mutable(status: WorkPackageStatus) -> None:
     if status in TERMINAL_PACKAGE_STATUSES:
         raise DomainError("terminal_package", f"package is terminal: {status.value}")

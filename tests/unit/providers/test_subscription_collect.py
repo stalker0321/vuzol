@@ -318,15 +318,43 @@ def test_host_grok_billing_logs_matched_by_jwt_subject(
     assert snap.ok
     assert snap.weekly.remaining_percent == 85
 
+    (logs / "unified.jsonl").write_text(
+        billing_line
+        + "\n"
+        + json.dumps(
+            {
+                "msg": "shell.turn.inference_failed",
+                "ctx": {
+                    "message": (
+                        "subscription:free-usage-exhausted: tokens (actual/limit): 532378/500000"
+                    )
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    exhausted = _billing_ctx_from_log_file(logs / "unified.jsonl")
+    assert exhausted is not None
+    assert exhausted["subscriptionTier"] == "free"
+    assert exhausted["config"]["creditUsagePercent"] > 100
+    snap = collect_profile_limits(profile, now=datetime(2026, 7, 16, tzinfo=UTC))
+    assert snap.ok
+    assert snap.weekly.remaining_percent == 0
+
     # Host auth.json may be unreadable (0600); match via subject string in logs.
     (account / "auth.json").unlink()
     (logs / "unified.jsonl").write_text(
-        json.dumps(
+        ("x" * 600_000)
+        + "\n"
+        + json.dumps(
             {
                 "msg": "AuthManager::new",
                 "ctx": {"principal": "user-abc", "sub": "user-abc"},
             }
         )
+        + "\n"
+        + ("y" * 600_000)
         + "\n"
         + billing_line
         + "\n",

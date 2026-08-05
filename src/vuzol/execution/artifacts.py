@@ -7,7 +7,7 @@ import uuid
 from datetime import timedelta
 from pathlib import Path
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.execution.paths import contained, trusted_root
@@ -77,6 +77,9 @@ class ArtifactStore:
         digest = hashlib.sha256(content).hexdigest()
         relative = Path(digest[:2]) / digest
         storage_key = f"{task_id}/{run_id}/{step_id}/{artifact_type}/{digest}"
+        existing = await session.scalar(select(Artifact).where(Artifact.storage_key == storage_key))
+        if existing is not None:
+            return existing
         destination = self._root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         contained(self._root, destination.parent)

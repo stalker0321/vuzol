@@ -117,6 +117,37 @@ async def test_create_approve_revise_invalidates_approval_without_tasks(postgres
     await engine.dispose()
 
 
+async def test_create_rejects_semantic_duplicate_of_completed_plan(postgres_dsn: str) -> None:
+    engine, factory = storage(postgres_dsn)
+    session_id, package_id, _ = await create_package(factory)
+    async with factory.begin() as session:
+        package = await session.get(WorkPackage, package_id, with_for_update=True)
+        assert package is not None
+        package.status = WorkPackageStatus.COMPLETED
+
+    with pytest.raises(DomainError) as duplicate:
+        async with UnitOfWork(factory) as uow:
+            await WorkPackageService(uow).create_draft(
+                session_id=session_id,
+                project_id="vuzol",
+                plan=plan(),
+                created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+                actor_type="planner_model",
+            )
+    assert duplicate.value.code == "duplicate_completed_plan"
+
+    async with UnitOfWork(factory) as uow:
+        created = await WorkPackageService(uow).create_draft(
+            session_id=session_id,
+            project_id="vuzol",
+            plan=plan("A genuinely new plan"),
+            created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+            actor_type="planner_model",
+        )
+    assert created.package_id != package_id
+    await engine.dispose()
+
+
 async def test_fences_edit_session_and_detail_events_fail_closed(postgres_dsn: str) -> None:
     engine, factory = storage(postgres_dsn)
     _, package_id, content_hash = await create_package(factory)

@@ -80,6 +80,7 @@ def test_compiler_resolves_optional_predecessors() -> None:
         "execute_code",
         "validate",
         "review",
+        "build_static",
         "approve_result",
         "publish_static",
         "finalize",

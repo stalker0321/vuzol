@@ -17,7 +17,13 @@ from vuzol.config.models import (
 )
 from vuzol.providers.domain import ProviderErrorCategory, ProviderRequest
 from vuzol.providers.errors import ProviderFailure
-from vuzol.providers.kimi import KIMI_MODEL, KimiCliAdapter, canonical_kimi_argv
+from vuzol.providers.kimi import (
+    KIMI_MODEL,
+    KimiCliAdapter,
+    _read_wire_usage,
+    _snapshot_wire_usage,
+    canonical_kimi_argv,
+)
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.workflows.ports import CancellationContext
 
@@ -271,3 +277,62 @@ async def test_adapter_propagates_transport_value_error_and_rejects_empty_respon
         request(), profile(), CancellationContext()
     )
     assert result.text == "part one part two"
+
+
+def test_kimi_wire_usage_is_summed_from_only_new_records(tmp_path: Path) -> None:
+    wire = (
+        tmp_path / "sessions" / "workspace-1" / "session-1" / "agents" / "main" / "wire.jsonl"
+    )
+    wire.parent.mkdir(parents=True)
+    wire.write_text(
+        json.dumps(
+            {
+                "type": "usage.record",
+                "usage": {
+                    "inputOther": 100,
+                    "inputCacheRead": 20,
+                    "inputCacheCreation": 5,
+                    "output": 7,
+                },
+            }
+        )
+        + "\n"
+    )
+    snapshot = _snapshot_wire_usage(tmp_path)
+    with wire.open("a") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "type": "usage.record",
+                    "usage": {
+                        "inputOther": 30,
+                        "inputCacheRead": 10,
+                        "inputCacheCreation": 2,
+                        "output": 4,
+                    },
+                }
+            )
+            + "\n"
+        )
+        stream.write('{"type":"unrelated"}\n')
+
+    usage = _read_wire_usage(tmp_path, snapshot, 123)
+
+    assert usage is not None
+    assert usage.input_tokens == 42
+    assert usage.cached_tokens == 10
+    assert usage.output_tokens == 4
+    assert usage.duration_ms == 123
+
+
+def test_kimi_wire_usage_rejects_malformed_and_unsafe_files(tmp_path: Path) -> None:
+    wire = (
+        tmp_path / "sessions" / "workspace-1" / "session-1" / "agents" / "main" / "wire.jsonl"
+    )
+    wire.parent.mkdir(parents=True)
+    wire.write_text("not-json\n")
+    assert _read_wire_usage(tmp_path, {}, 1) is None
+
+    wire.unlink()
+    wire.symlink_to(tmp_path / "missing")
+    assert _snapshot_wire_usage(tmp_path) == {}

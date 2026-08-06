@@ -1,6 +1,8 @@
 """Kimi Code CLI adapter for TokenRouter-backed coding execution."""
 
 import json
+import stat
+from pathlib import Path
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
@@ -19,6 +21,7 @@ from vuzol.providers.ports import CodexInvocation, CodexProcessTransport
 from vuzol.workflows.ports import CancellationContext
 
 KIMI_MODEL = "moonshotai/kimi-k3-free"
+_MAX_WIRE_APPEND_BYTES = 16 * 1024 * 1024
 
 
 def canonical_kimi_argv(model: str, *, read_only: bool = False) -> tuple[str, ...]:
@@ -101,6 +104,7 @@ class KimiCliAdapter:
             provider_attempt=request.provider_attempt,
             lease_generation=request.lease_generation,
         )
+        usage_snapshot = _snapshot_wire_usage(Path(profile.state_directory))
         try:
             result = await self._transport.run(invocation, cancellation)
         except ValueError:
@@ -111,13 +115,16 @@ class KimiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="supervised Kimi transport failed after launch was possible",
+                usage=_read_wire_usage(Path(profile.state_directory), usage_snapshot, 0),
             ) from error
+        usage = _read_wire_usage(Path(profile.state_directory), usage_snapshot, result.duration_ms)
         if result.exit_code != 0:
             raise ProviderFailure(
                 ProviderErrorCategory.PROVIDER_UNAVAILABLE,
                 retryable=True,
                 request_sent=True,
                 safe_summary="Kimi Code CLI invocation failed",
+                usage=usage,
             )
         try:
             decoded_text = _decode_output(result.stdout)
@@ -148,7 +155,7 @@ class KimiCliAdapter:
             status=ProviderResultStatus.SUCCEEDED,
             text=text,
             structured_output=structured,
-            usage=NormalizedUsage(duration_ms=result.duration_ms),
+            usage=usage or NormalizedUsage(duration_ms=result.duration_ms),
             adapter_version=self.adapter_version,
         )
 
@@ -168,3 +175,73 @@ def _decode_output(stdout: str) -> str:
     if not chunks:
         raise ValueError("Kimi stream contains no assistant response")
     return "".join(chunks).strip()
+
+
+def _snapshot_wire_usage(root: Path) -> dict[Path, int]:
+    return {path: path.stat().st_size for path in _wire_files(root)}
+
+
+def _read_wire_usage(
+    root: Path, snapshot: dict[Path, int], duration_ms: int
+) -> NormalizedUsage | None:
+    input_tokens = 0
+    cached_tokens = 0
+    output_tokens = 0
+    found = False
+    for path in _wire_files(root):
+        offset = snapshot.get(path, 0)
+        size = path.stat().st_size
+        if size < offset or size - offset > _MAX_WIRE_APPEND_BYTES:
+            continue
+        with path.open("rb") as stream:
+            stream.seek(offset)
+            for raw_line in stream:
+                try:
+                    event = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if not isinstance(event, dict) or event.get("type") != "usage.record":
+                    continue
+                usage = event.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                values = {
+                    key: _nonnegative_int(usage.get(key))
+                    for key in ("inputOther", "inputCacheRead", "inputCacheCreation", "output")
+                }
+                if any(value is None for value in values.values()):
+                    continue
+                found = True
+                cached_tokens += values["inputCacheRead"] or 0
+                input_tokens += sum(
+                    values[key] or 0
+                    for key in ("inputOther", "inputCacheRead", "inputCacheCreation")
+                )
+                output_tokens += values["output"] or 0
+    if not found:
+        return None
+    return NormalizedUsage(
+        input_tokens=input_tokens,
+        cached_tokens=cached_tokens,
+        output_tokens=output_tokens,
+        duration_ms=duration_ms,
+    )
+
+
+def _wire_files(root: Path) -> tuple[Path, ...]:
+    sessions = root / "sessions"
+    if not sessions.is_dir() or sessions.is_symlink():
+        return ()
+    files: list[Path] = []
+    for path in sessions.glob("*/*/agents/main/wire.jsonl"):
+        try:
+            metadata = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(metadata.st_mode) and not path.is_symlink():
+            files.append(path)
+    return tuple(sorted(files))
+
+
+def _nonnegative_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None

@@ -76,6 +76,7 @@ def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
         "codex-subscription-prod",
         "grok-subscription-a",
         "grok-subscription-b",
+        "tokenrouter-kimi-a",
     }:
         contract = profiles[profile_id]["agent_runtime_contract"]
         assert contract["working_directory"] == "/workspace"

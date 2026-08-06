@@ -23,7 +23,7 @@ from vuzol.experiments.domain import (
     BoundedLevel,
     ContextEntry,
     ContextManifest,
-    ExecutionMode,
+    ExecutionStrategy,
     ExperimentTelemetry,
     RepairSeverity,
     RequiredGate,
@@ -41,8 +41,9 @@ from .helpers import storage
 
 
 @pytest.mark.postgresql
+@pytest.mark.parametrize("provider", ["grok", "kimi"])
 def test_trial_seed_uses_existing_workflow_records_and_profile_pin(
-    postgres_dsn: str, tmp_path: Path
+    postgres_dsn: str, tmp_path: Path, provider: str
 ) -> None:
     repository_root = tmp_path / "repositories"
     repository_root.mkdir()
@@ -81,9 +82,9 @@ def test_trial_seed_uses_existing_workflow_records_and_profile_pin(
             artifact_root=artifact_root,
         )
         profile = ProviderProfileConfig(
-            id="grok-subscription-a",
-            provider="grok",
-            model="grok-build",
+            id=f"{provider}-worker-a",
+            provider=provider,
+            model=f"{provider}-model",
             launch_mode=LaunchMode.CLI,
             credential_required=False,
             capabilities=frozenset(
@@ -98,7 +99,7 @@ def test_trial_seed_uses_existing_workflow_records_and_profile_pin(
             cost_class=CostClass.STRONG,
             roles=frozenset({ProviderRole.EXECUTOR}),
             supported_task_types=frozenset({"coding"}),
-            runtime_identity="grok-a",
+            runtime_identity=f"{provider}-a",
             state_directory=state_root / "a",
         )
         document = RegistryDocument(
@@ -191,8 +192,8 @@ def test_trial_seed_uses_existing_workflow_records_and_profile_pin(
             experiment_id="step09a-integration",
             task_id="validator",
             task_class=TaskClass.PURE_MODEL_VALIDATOR,
-            predicted_mode=ExecutionMode.GROK_REVIEWED,
-            actual_mode=ExecutionMode.GROK_REVIEWED,
+            predicted_strategy=ExecutionStrategy.REVIEWED,
+            actual_strategy=ExecutionStrategy.REVIEWED,
             worker_profile=profile.id,
             base_commit=base_commit,
             allowed_paths=("src/a.py",),

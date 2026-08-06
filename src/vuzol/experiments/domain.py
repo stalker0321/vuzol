@@ -8,18 +8,32 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class ExecutionMode(StrEnum):
-    SOL_SOLO = "sol_solo"
-    GROK_REVIEWED = "grok_reviewed"
-    GROK_GATED_SHADOW = "grok_gated_shadow"
-    MULTI_GROK_REVIEWED = "multi_grok_reviewed"
+class ExecutionStrategy(StrEnum):
+    """Provider-neutral orchestration strategy for a worker trial."""
+
+    SOLO = "solo"
+    REVIEWED = "reviewed"
+    GATED = "gated"
+    MULTI_AGENT = "multi_agent"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "ExecutionStrategy | None":
+        # Historical capsules remain readable while every newly persisted route uses
+        # provider-neutral vocabulary.
+        legacy = {
+            "sol_solo": cls.SOLO,
+            "grok_reviewed": cls.REVIEWED,
+            "grok_gated_shadow": cls.GATED,
+            "multi_grok_reviewed": cls.MULTI_AGENT,
+        }
+        return legacy.get(value) if isinstance(value, str) else None
 
 
 class TaskClass(StrEnum):
@@ -219,8 +233,12 @@ class WorkerTaskCapsule(FrozenModel):
     target_branch: str = Field(min_length=1, max_length=255)
     goal: str = Field(min_length=1, max_length=4_000)
     classification: TaskClassification
-    predicted_mode: ExecutionMode
-    actual_mode: ExecutionMode
+    predicted_strategy: ExecutionStrategy = Field(
+        validation_alias=AliasChoices("predicted_strategy", "predicted_mode")
+    )
+    actual_strategy: ExecutionStrategy = Field(
+        validation_alias=AliasChoices("actual_strategy", "actual_mode")
+    )
     override_reason: str | None = Field(default=None, max_length=1_000)
     allowed_paths: tuple[str, ...] = Field(min_length=1, max_length=100)
     relevant_symbols: tuple[str, ...] = Field(default=(), max_length=100)
@@ -251,8 +269,8 @@ class WorkerTaskCapsule(FrozenModel):
             raise ValueError("task capsule contains a prohibited credential or host reference")
         if any(path.startswith("/") or ".." in path.split("/") for path in self.allowed_paths):
             raise ValueError("allowed paths must be repository-relative and contained")
-        if self.predicted_mode != self.actual_mode and not self.override_reason:
-            raise ValueError("execution-mode override requires a reason")
+        if self.predicted_strategy != self.actual_strategy and not self.override_reason:
+            raise ValueError("execution-strategy override requires a reason")
         if self.context_manifest.role != "worker":
             raise ValueError("task capsule requires a worker context manifest")
         if self.parent_attempt is None and self.repair_context is not None:
@@ -367,8 +385,12 @@ class ExperimentTelemetry(FrozenModel):
     experiment_id: str
     task_id: str
     task_class: TaskClass
-    predicted_mode: ExecutionMode
-    actual_mode: ExecutionMode
+    predicted_strategy: ExecutionStrategy = Field(
+        validation_alias=AliasChoices("predicted_strategy", "predicted_mode")
+    )
+    actual_strategy: ExecutionStrategy = Field(
+        validation_alias=AliasChoices("actual_strategy", "actual_mode")
+    )
     override_reason: str | None = None
     worker_profile: str
     reviewer_profile: str | None = None

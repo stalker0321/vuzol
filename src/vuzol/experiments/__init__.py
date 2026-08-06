@@ -2,22 +2,22 @@
 
 from vuzol.experiments.domain import (
     ContextManifest,
-    ExecutionMode,
+    ExecutionStrategy,
     ReviewOutcome,
     TaskClassification,
     WorkerEditReport,
     WorkerResultManifest,
     WorkerTaskCapsule,
 )
-from vuzol.experiments.policy import classify_execution_mode
+from vuzol.experiments.policy import classify_execution_strategy
 
 __all__ = [
     "ContextManifest",
-    "ExecutionMode",
+    "ExecutionStrategy",
     "ReviewOutcome",
     "TaskClassification",
     "WorkerEditReport",
     "WorkerResultManifest",
     "WorkerTaskCapsule",
-    "classify_execution_mode",
+    "classify_execution_strategy",
 ]

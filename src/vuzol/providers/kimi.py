@@ -25,9 +25,10 @@ def canonical_kimi_argv(model: str, *, read_only: bool = False) -> tuple[str, ..
     """Keep the potentially large task prompt on stdin and out of process metadata."""
     if model != KIMI_MODEL:
         raise ValueError("Kimi model is not allowlisted")
+    plan = " --plan" if read_only else ""
     script = (
-        'prompt="$(cat)"; exec kimi --model tokenrouter/kimi-k3-free '
-        '--prompt "$prompt" --output-format stream-json'
+        'prompt="$(cat)"; exec kimi --auto --model tokenrouter/kimi-k3-free '
+        f'--prompt "$prompt" --output-format stream-json{plan}'
     )
     mode = "plan" if read_only else "execute"
     return ("sh", "-c", script, f"vuzol-kimi-{mode}")
@@ -106,18 +107,38 @@ class KimiCliAdapter:
         except ValueError:
             raise
         except RuntimeError as error:
+            timed_out = "timed out" in str(error).lower()
             raise ProviderFailure(
-                ProviderErrorCategory.PROVIDER_UNAVAILABLE,
+                ProviderErrorCategory.TIMEOUT
+                if timed_out
+                else ProviderErrorCategory.PROVIDER_UNAVAILABLE,
                 retryable=True,
                 request_sent=True,
-                safe_summary="supervised Kimi transport failed after launch was possible",
+                safe_summary=(
+                    "Kimi Code CLI timed out waiting for the provider"
+                    if timed_out
+                    else "supervised Kimi transport failed after launch was possible"
+                ),
             ) from error
         if result.exit_code != 0:
+            failure = f"{result.stdout}\n{result.stderr}".lower()
+            if "connection_error" in failure or "connection error" in failure:
+                category = ProviderErrorCategory.PROVIDER_UNAVAILABLE
+                summary = "Kimi Code CLI could not connect to TokenRouter"
+            elif "401" in failure or "authentication" in failure or "unauthorized" in failure:
+                category = ProviderErrorCategory.AUTHENTICATION
+                summary = "TokenRouter rejected Kimi authentication"
+            elif "429" in failure or "rate limit" in failure:
+                category = ProviderErrorCategory.RATE_LIMITED
+                summary = "TokenRouter rate-limited Kimi"
+            else:
+                category = ProviderErrorCategory.PROVIDER_UNAVAILABLE
+                summary = "Kimi Code CLI invocation failed"
             raise ProviderFailure(
-                ProviderErrorCategory.PROVIDER_UNAVAILABLE,
+                category,
                 retryable=True,
                 request_sent=True,
-                safe_summary="Kimi Code CLI invocation failed",
+                safe_summary=summary,
             )
         try:
             decoded_text = _decode_output(result.stdout)

@@ -149,7 +149,7 @@ def _canary(
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, dict):
         raise RuntimeError("agent certification canary returned invalid evidence")
-    cleanup = subprocess.run(  # noqa: S603 - fixed executable and bounded arguments
+    cleanup = subprocess.run(
         ("/usr/bin/git", "status", "--porcelain"),
         cwd=repository_path,
         check=False,

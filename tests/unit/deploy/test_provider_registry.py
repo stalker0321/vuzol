@@ -45,3 +45,29 @@ def test_nvidia_glm_worker_profile_is_prepared_but_not_routable_without_agent_tr
     assert profile["credential_reference"] == "env:VUZOL_NVIDIA_API_KEY"
     assert profile["roles"] == ["executor"]
     assert profile["enabled"] is False
+
+
+def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
+    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
+    profiles = {
+        profile["id"]: profile
+        for profile in registry["profiles"]
+        if profile.get("provider") in {"codex", "grok", "kimi"}
+    }
+
+    assert set(profiles) == {
+        "codex-subscription-prod",
+        "grok-subscription-a",
+        "grok-subscription-b",
+        "tokenrouter-kimi-a",
+    }
+    for profile in profiles.values():
+        assert profile["launch_mode"] == "cli"
+        assert profile["sandbox_required"] is True
+        assert "executor" in profile["roles"]
+        assert set(profile["capabilities"]) >= {
+            "repository_read",
+            "code_edit",
+            "git",
+            "project_shell",
+        }

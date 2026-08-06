@@ -149,6 +149,7 @@ def test_agent_certification_command_builds_fixed_disposable_task(
     assert isinstance(captured_request, TrialSeedRequest)
     assert captured_request.runtime_certification is True
     assert captured_request.allowed_paths == ("certification/agent-runtime-probe.txt",)
+    assert captured_request.maximum_execution_seconds == 20
     assert captured_request.maximum_repair_count == 0
     output = json.loads(capsys.readouterr().out)
     assert output["task_uuid"] == "task"

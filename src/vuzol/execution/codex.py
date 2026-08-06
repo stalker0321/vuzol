@@ -645,7 +645,10 @@ def _require_provider_command(
     elif provider == "grok":
         expected = {canonical_grok_argv(model), canonical_grok_argv(model, read_only=True)}
     elif provider == "kimi":
-        expected = {canonical_kimi_argv(model), canonical_kimi_argv(model, read_only=True)}
+        expected = {
+            canonical_kimi_argv(model, reasoning_effort=effort or "low"),
+            canonical_kimi_argv(model, reasoning_effort=effort or "low", read_only=True),
+        }
     else:
         expected = None
     if expected is None or argv not in expected:

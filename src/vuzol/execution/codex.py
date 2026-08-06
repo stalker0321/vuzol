@@ -590,9 +590,11 @@ class SandboxCodexTransport:
                 raise RuntimeError("controlled proxy exited during sandbox execution")
             return await run_task
         finally:
+            if not run_task.done():
+                run_task.cancel()
             if not proxy_task.done():
                 proxy_task.cancel()
-            await asyncio.gather(proxy_task, return_exceptions=True)
+            await asyncio.gather(run_task, proxy_task, return_exceptions=True)
 
 
 def _require_invocation_identity(invocation: CodexInvocation) -> None:

@@ -96,7 +96,7 @@ def test_canonical_kimi_command_is_model_allowlisted() -> None:
     execute = canonical_kimi_argv(KIMI_MODEL)
     plan = canonical_kimi_argv(KIMI_MODEL, read_only=True)
     assert execute[0:2] == ("sh", "-c")
-    assert "--auto" in execute[2]
+    assert "--auto" not in execute[2]
     assert "--plan" not in execute[2]
     assert "--plan" in plan[2]
     assert canonical_kimi_argv(KIMI_MODEL, reasoning_effort="low") == execute

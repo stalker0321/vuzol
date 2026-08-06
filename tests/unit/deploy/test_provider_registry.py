@@ -71,3 +71,18 @@ def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
             "git",
             "project_shell",
         }
+
+    for profile_id in {
+        "codex-subscription-prod",
+        "grok-subscription-a",
+        "grok-subscription-b",
+    }:
+        contract = profiles[profile_id]["agent_runtime_contract"]
+        assert contract["working_directory"] == "/workspace"
+        assert contract["writable_roots"] == ["/workspace"]
+        assert contract["protected_roots"] == ["/workspace/.git"]
+        assert contract["supports_read"] is True
+        assert contract["supports_search"] is True
+        assert contract["supports_edit"] is True
+        assert contract["supports_git"] is False
+        assert contract["supports_network"] is False

@@ -11,7 +11,7 @@ def test_production_sandbox_uses_minimal_tooling_image() -> None:
 
     assert registry["sandboxes"][0]["id"] == "project-default"
     assert registry["sandboxes"][0]["image"] == (
-        "vuzol-sandbox@sha256:8a32088414ff60dc7e94740811f55c100af7775640666df0ff59587d863a8b02"
+        "vuzol-sandbox@sha256:cc7ce7ecc67abc52000a53bc2efe1d3bf975d8f7ce1282fb37f37ade53125897"
     )
 
 
@@ -34,3 +34,14 @@ def test_production_kimi_profile_is_pinned_to_free_model() -> None:
     assert len(profiles) == 1
     assert profiles[0]["id"] == "tokenrouter-kimi-a"
     assert profiles[0]["model"] == "moonshotai/kimi-k3-free"
+
+
+def test_nvidia_glm_worker_profile_is_prepared_but_not_routable_without_agent_transport() -> None:
+    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
+    profile = next(profile for profile in registry["profiles"] if profile["id"] == "nvidia-glm-5-2")
+
+    assert profile["model"] == "z-ai/glm-5.2"
+    assert profile["api_base_url"] == "https://integrate.api.nvidia.com/v1"
+    assert profile["credential_reference"] == "env:VUZOL_NVIDIA_API_KEY"
+    assert profile["roles"] == ["executor"]
+    assert profile["enabled"] is False

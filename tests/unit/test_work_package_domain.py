@@ -80,6 +80,11 @@ def test_generation_and_terminal_mutations_fail_closed() -> None:
         (WorkPackageStatus.PAUSED, PackageControlAction.RETRY_ITEM, WorkPackageStatus.RUNNING),
         (WorkPackageStatus.PAUSED, PackageControlAction.SKIP_ITEM, WorkPackageStatus.RUNNING),
         (WorkPackageStatus.RUNNING, PackageControlAction.STOP_PACKAGE, WorkPackageStatus.STOPPED),
+        (
+            WorkPackageStatus.STOPPED,
+            PackageControlAction.RESTART_PACKAGE,
+            WorkPackageStatus.RUNNING,
+        ),
         (WorkPackageStatus.RUNNING, PackageControlAction.REQUEST_REPLAN, WorkPackageStatus.DRAFT),
     ],
 )

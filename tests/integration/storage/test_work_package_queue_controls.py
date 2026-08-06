@@ -129,7 +129,7 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
     assert labels >= {
         "Пропустить",
         "Перепланировать",
-        "Остановить",
+        "Завершить цепочку",
     }
 
     ingress = PackageControlIngress(factory, enabled=True, authorized_user_ids=frozenset({42}))
@@ -212,4 +212,23 @@ async def test_stop_is_terminal_and_queue_controls_require_failure_pause(
         package = await session.get(WorkPackage, created.package_id)
     assert package is not None and package.status is WorkPackageStatus.STOPPED
     assert package.pause_reason is None
+    restarted = await ingress.apply(
+        _command(PackageControlAction.RESTART_PACKAGE, created, 4, "restart-stopped")
+    )
+    assert restarted.code is PackageControlResultCode.APPLIED
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        revisions = tuple(
+            (
+                await session.scalars(
+                    select(PlanRevision)
+                    .where(PlanRevision.work_package_id == created.package_id)
+                    .order_by(PlanRevision.revision_number)
+                )
+            ).all()
+        )
+        tasks = tuple((await session.scalars(select(Task))).all())
+    assert package is not None and package.status is WorkPackageStatus.RUNNING
+    assert len(revisions) == 2 and revisions[-1].state is PlanRevisionState.APPROVED
+    assert len(tasks) == 1
     await engine.dispose()

@@ -15,7 +15,12 @@ from vuzol.telegram.adapter import (
 )
 from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.dogfood import TelegramDogfoodIngressService
-from vuzol.telegram.domain import ControlUpdate, MessageUpdate, WorkPackageControlUpdate
+from vuzol.telegram.domain import (
+    ControlUpdate,
+    IngressResult,
+    MessageUpdate,
+    WorkPackageControlUpdate,
+)
 from vuzol.telegram.ingress import TelegramIngressService
 from vuzol.telegram.work_packages import ContinueDiscussionOverrides
 from vuzol.telegram.workspace import TelegramWorkspaceService
@@ -44,8 +49,10 @@ def main() -> None:
             if await dogfood.accept_message(update) is None:
                 await ingress.accept_message(update)
 
-        async def on_control(update: ControlUpdate | WorkPackageControlUpdate) -> None:
-            await controls.accept(update)
+        async def on_control(
+            update: ControlUpdate | WorkPackageControlUpdate,
+        ) -> IngressResult:
+            return await controls.accept(update)
 
         async def on_startup(bot: Bot) -> None:
             await workspace.synchronize(PythonTelegramClient(bot))

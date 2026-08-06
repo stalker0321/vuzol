@@ -20,6 +20,8 @@ from vuzol.config import ScopedSecretResolver, Settings
 from vuzol.telegram.domain import (
     AttachmentKind,
     ControlUpdate,
+    IngressResult,
+    IngressStatus,
     MessageUpdate,
     TelegramAttachment,
     WorkPackageControlUpdate,
@@ -31,8 +33,18 @@ from vuzol.telegram.workspace import (
 )
 
 MessageHandlerFn = Callable[[MessageUpdate], Awaitable[None]]
-ControlHandlerFn = Callable[[ControlUpdate | WorkPackageControlUpdate], Awaitable[None]]
+ControlHandlerFn = Callable[
+    [ControlUpdate | WorkPackageControlUpdate], Awaitable[IngressResult | None]
+]
 StartupHandlerFn = Callable[[Bot], Awaitable[None]]
+
+
+def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
+    if result is not None and result.status is IngressStatus.REJECTED:
+        return "Действие уже недоступно. Обновите карточку.", True
+    if result is not None and result.reason == "continue_discussion":
+        return "Напишите следующим сообщением, что хотите обсудить.", False
+    return None, False
 
 
 def resolve_bot_token(
@@ -423,7 +435,11 @@ def build_long_polling_application(
     async def handle_control(update: Update, _context: object) -> None:
         converted = control_update(update, bot_id)
         if converted is not None:
-            await on_control(converted)
+            result = await on_control(converted)
+            query = update.callback_query
+            if query is not None:
+                text, show_alert = _callback_answer(result)
+                await query.answer(text=text, show_alert=show_alert)
 
     application.add_handler(CallbackQueryHandler(handle_control, pattern=r"^v1:"))
     application.add_handler(MessageHandler(filters.ALL, handle_message))

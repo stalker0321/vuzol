@@ -166,6 +166,9 @@ async def test_validate_trusted_gates_pass_and_revoke_access(tmp_path: Path) -> 
     outcome = await handler.execute(_request(worktree), CancellationContext())
     assert outcome.kind is OutcomeKind.SUCCEEDED
     assert any(g["command_id"] == "make test" for g in outcome.result["gates"])
+    requested_gates = gate_runner.run.await_args.args[1]
+    assert requested_gates[0].command_id == "vuzol secret-scan"
+    assert requested_gates[1].command_id == "make test"
     access.grant.assert_awaited_once()
     lease.revoke.assert_awaited_once()
 

@@ -105,6 +105,37 @@ async def test_sandbox_codex_transport_records_success_and_failure(tmp_path: Pat
 
 
 @pytest.mark.anyio
+async def test_sandbox_transport_closes_process_when_outer_deadline_cancels_it(
+    tmp_path: Path,
+) -> None:
+    configured = envelope(tmp_path)
+    process_id = uuid.uuid4()
+    envelopes = MagicMock()
+    envelopes.proxy_targets = AsyncMock(return_value=())
+    envelopes.build = AsyncMock(return_value=(configured, process_id))
+    envelopes.mark_running = AsyncMock()
+    envelopes.complete = AsyncMock()
+    envelopes.fail_unknown = AsyncMock()
+    runtime = MagicMock()
+
+    async def running(*_args: object) -> CodexProcessResult:
+        await asyncio.Event().wait()
+        raise AssertionError("cancelled sandbox must not return")
+
+    runtime.run = AsyncMock(side_effect=running)
+    transport = SandboxCodexTransport(runtime, envelopes, MagicMock())
+
+    task = asyncio.create_task(transport.run(MagicMock(), CancellationContext()))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    envelopes.fail_unknown.assert_awaited_once_with(process_id)
+    envelopes.complete.assert_not_awaited()
+
+
+@pytest.mark.anyio
 async def test_sandbox_transport_materializes_and_cleans_controlled_proxy(
     tmp_path: Path,
 ) -> None:

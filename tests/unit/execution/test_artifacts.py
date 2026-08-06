@@ -28,6 +28,18 @@ def test_artifact_redaction_and_secret_rejection(tmp_path: Path) -> None:
     store.reject_secrets(b"safe content")
 
 
+def test_artifact_store_always_redacts_common_credentials(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "artifacts", max_bytes=1000, retention_days=1)
+    credential = b"sk-" + (b"a" * 32)  # pragma: allowlist secret
+    redacted, revision = store.redact(b"Authorization: Bearer " + credential)
+
+    assert credential not in redacted
+    assert b"[REDACTED]" in redacted
+    assert revision is not None
+    with pytest.raises(ArtifactSecretError):
+        store.reject_secrets(b"diff=" + credential)
+
+
 @pytest.mark.anyio
 async def test_artifact_persist_with_mock_session(tmp_path: Path) -> None:
     """Test ArtifactStore.persist path with mock session (real persist logic + redaction)."""

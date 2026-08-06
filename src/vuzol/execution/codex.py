@@ -548,7 +548,13 @@ class SandboxCodexTransport:
             return result
         except BaseException as error:
             primary = error
-            if process_id is not None and isinstance(error, RuntimeError):
+            if process_id is not None:
+                # The workflow deadline can cancel this transport at the same instant as
+                # the sandbox deadline.  CancelledError is not a RuntimeError, so limiting
+                # finalization to RuntimeError leaves an already-cleaned container recorded
+                # as running forever.  Any exception after the process row is created means
+                # the normal, evidence-backed completion path did not finish; close it as
+                # unknown so reconciliation can reason about a terminal process record.
                 await self._envelopes.fail_unknown(process_id)
             raise
         finally:

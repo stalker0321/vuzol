@@ -35,6 +35,7 @@ from vuzol.providers.domain import NormalizedUsage
 from vuzol.workflows.ports import CancellationContext
 
 TRUSTED_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
+    "vuzol secret-scan": ("/usr/local/bin/vuzol-secret-scan",),
     "make build": ("/usr/bin/make", "build"),
     "make test": ("/usr/bin/make", "test"),
     "make format-check": ("/usr/bin/make", "format-check"),
@@ -42,6 +43,10 @@ TRUSTED_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
     "make type-check": ("/usr/bin/make", "type-check"),
     "make security": ("/usr/bin/make", "security"),
 }
+MANDATORY_SECURITY_GATE = RequiredGate(
+    name="secret-scan",
+    command_id="vuzol secret-scan",
+)
 TRUSTED_PYTHON_FORMATTER = ("/opt/vuzol-validation/bin/ruff", "format", "--")
 
 

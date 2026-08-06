@@ -25,6 +25,7 @@ from vuzol.execution.commit_messages import (
     DatabaseCommitMessageResolver,
 )
 from vuzol.execution.finalization import (
+    MANDATORY_SECURITY_GATE,
     TRUSTED_GATE_COMMANDS,
     GateEvidence,
     GateExecutionContext,
@@ -112,6 +113,8 @@ class ResultValidationHandler:
         try:
             worktree, project, path = await self._load(request)
             trusted = resolve_trusted_gates(project)
+            if project.validation_sandbox_profile is not None:
+                trusted = (MANDATORY_SECURITY_GATE, *trusted)
             if trusted:
                 access = await self._grant_access(path, project)
             evidence = await self._validate(

@@ -23,6 +23,18 @@ class ArtifactSecretError(ArtifactError):
     """Artifact content matched a configured secret pattern."""
 
 
+BUILTIN_SECRET_PATTERNS = (
+    r"AKIA[0-9A-Z]{16}",
+    r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})",
+    r"sk-[A-Za-z0-9_-]{20,}",
+    r"(?i:authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/-]{20,}",
+    (
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?"
+        r"-----END [A-Z0-9 ]*PRIVATE KEY-----"
+    ),
+)
+
+
 class ArtifactStore:
     def __init__(
         self,
@@ -35,12 +47,11 @@ class ArtifactStore:
         self._root = trusted_root(root, create=True)
         self._max_bytes = max_bytes
         self._retention_days = retention_days
-        self._redactors = tuple(re.compile(pattern.encode()) for pattern in redaction_patterns)
-        self._redaction_revision = (
-            hashlib.sha256("\0".join(redaction_patterns).encode()).hexdigest()
-            if redaction_patterns
-            else None
-        )
+        effective_patterns = tuple(dict.fromkeys((*BUILTIN_SECRET_PATTERNS, *redaction_patterns)))
+        self._redactors = tuple(re.compile(pattern.encode()) for pattern in effective_patterns)
+        self._redaction_revision = hashlib.sha256(
+            "\0".join(effective_patterns).encode()
+        ).hexdigest()
 
     def reject_secrets(self, content: bytes) -> None:
         if any(pattern.search(content) for pattern in self._redactors):

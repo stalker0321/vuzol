@@ -1,6 +1,7 @@
 """Kimi Code CLI adapter for TokenRouter-backed coding execution."""
 
 import json
+import time
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
@@ -19,6 +20,10 @@ from vuzol.providers.ports import CodexInvocation, CodexProcessTransport
 from vuzol.workflows.ports import CancellationContext
 
 KIMI_MODEL = "moonshotai/kimi-k3-free"
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def canonical_kimi_argv(
@@ -109,12 +114,16 @@ class KimiCliAdapter:
             provider_attempt=request.provider_attempt,
             lease_generation=request.lease_generation,
         )
+        started = _monotonic()
         try:
             result = await self._transport.run(invocation, cancellation)
         except ValueError:
             raise
         except RuntimeError as error:
-            timed_out = "timed out" in str(error).lower()
+            elapsed = _monotonic() - started
+            timed_out = "timed out" in str(error).lower() or elapsed >= max(
+                1.0, request.timeout_seconds - 15.0
+            )
             raise ProviderFailure(
                 ProviderErrorCategory.TIMEOUT
                 if timed_out

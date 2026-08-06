@@ -225,6 +225,20 @@ async def test_adapter_normalizes_transport_and_output_failures(
 
 
 @pytest.mark.anyio
+async def test_adapter_recovers_timeout_classification_when_cleanup_masks_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = iter((100.0, 155.0))
+    monkeypatch.setattr("vuzol.providers.kimi._monotonic", lambda: next(clock))
+    with pytest.raises(ProviderFailure) as caught:
+        await KimiCliAdapter(ResultTransport(RuntimeError("cleanup failed"))).execute(
+            request(), profile(), CancellationContext()
+        )
+    assert caught.value.category is ProviderErrorCategory.TIMEOUT
+    assert "timed out" in caught.value.safe_summary
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("stderr", "category"),
     [

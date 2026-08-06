@@ -97,7 +97,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="vuzol-agent-certification-") as directory:
         request_path = Path(directory) / "request.json"
         request_path.write_text(request.model_dump_json(indent=2))
-        result = _canary(request_path, timeout_seconds=args.timeout_seconds)
+        result = _canary(
+            request_path,
+            timeout_seconds=args.timeout_seconds,
+            repository_path=project.repository_path,
+        )
     task_uuid, run_uuid = _verify_result(result, runtime.settings.artifact_root)
     certificate = new_certificate(
         key=certification_key(profile, sandbox),
@@ -123,7 +127,12 @@ def main() -> None:
     )
 
 
-def _canary(request: Path, *, timeout_seconds: int) -> dict[str, object]:
+def _canary(
+    request: Path,
+    *,
+    timeout_seconds: int,
+    repository_path: Path = ROOT,
+) -> dict[str, object]:
     command = (
         str(ROOT / ".venv/bin/python"),
         str(ROOT / "deploy/mvp/canary.py"),
@@ -140,15 +149,15 @@ def _canary(request: Path, *, timeout_seconds: int) -> dict[str, object]:
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, dict):
         raise RuntimeError("agent certification canary returned invalid evidence")
-    cleanup = subprocess.run(
-        ("/usr/bin/make", "mvp-check"),
-        cwd=ROOT,
+    cleanup = subprocess.run(  # noqa: S603 - fixed executable and bounded arguments
+        ("/usr/bin/git", "status", "--porcelain"),
+        cwd=repository_path,
         check=False,
         capture_output=True,
         text=True,
     )
-    if cleanup.returncode:
-        raise RuntimeError("agent certification cleanup verification failed")
+    if cleanup.returncode or cleanup.stdout.strip():
+        raise RuntimeError("agent certification changed the configured source repository")
     return decoded
 
 

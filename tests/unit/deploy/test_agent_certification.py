@@ -50,7 +50,22 @@ def test_agent_certification_accepts_complete_measured_canary(tmp_path: Path) ->
 
     artifact("git_diff", f"-{BEFORE}\n+{AFTER}\n".encode())
     artifact("provider_edit_report", b'{"claimed_complete":true}')
-    artifact("worker_finalization_evidence", b'{"verification":{"passed":true}}')
+    artifact(
+        "worker_finalization_evidence",
+        json.dumps(
+            {
+                "verification": {
+                    "exact_base": True,
+                    "exact_branch": True,
+                    "commit_exists": True,
+                    "changed_files_match": True,
+                    "allowed_scope": True,
+                    "gates_match": True,
+                    "findings": [],
+                }
+            }
+        ).encode(),
+    )
     result = {
         "seed": {"task_uuid": "task", "run_uuid": "run"},
         "inspect": {
@@ -353,7 +368,22 @@ def test_agent_certification_rejects_incomplete_finalization_evidence(
     )
     artifact("git_diff", diff)
     artifact("provider_edit_report", report)
-    artifact("worker_finalization_evidence", b'{"verification":{"passed":true}}')
+    artifact(
+        "worker_finalization_evidence",
+        json.dumps(
+            {
+                "verification": {
+                    "exact_base": True,
+                    "exact_branch": True,
+                    "commit_exists": True,
+                    "changed_files_match": True,
+                    "allowed_scope": True,
+                    "gates_match": True,
+                    "findings": [],
+                }
+            }
+        ).encode(),
+    )
     if failure == "missing_artifact":
         artifacts.pop()
     worktree = {

@@ -197,6 +197,29 @@ destinations = [
   { url = "https://api.tokenrouter.com", purpose = "TokenRouter Kimi inference" },
 ]
 
+# Prepared for NVIDIA-hosted GLM-5.2. Keep disabled until a key is installed and
+# the model-only OpenAI-compatible endpoint receives a sandboxed worker tool loop.
+[[profiles]]
+id = "nvidia-glm-5-2"
+provider = "openai-compatible"
+model = "z-ai/glm-5.2"
+api_base_url = "https://integrate.api.nvidia.com/v1"
+launch_mode = "api"
+credential_reference = "env:VUZOL_NVIDIA_API_KEY"
+credential_required = true
+capabilities = []
+concurrency_limit = 1
+context_limit = 1000000
+output_limit = 16384
+cost_class = "cheap"
+roles = ["executor"]
+routing_priority = 240
+supported_task_types = ["architecture", "coding"]
+fallback_profile_ids = []
+sandbox_required = false
+minimum_unknown_usage_cost = 0.001
+enabled = false
+
 [[topics]]
 chat_id = -1003950752781
 message_thread_id = 3

@@ -334,6 +334,32 @@ class PackageControlIngress:
                 )
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
+            elif command.action is PackageControlAction.RESTART_PACKAGE:
+                restart = await service.restart_plan(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    user_id=command.user_id,
+                )
+                restarted_revision = await uow.work_packages.get_revision(restart.revision_id)
+                approved_generation = await service.approve(
+                    package_id=command.package_id,
+                    revision_number=restarted_revision.revision_number,
+                    h8=restarted_revision.content_hash[:8],
+                    expected_status_generation=restart.status_generation,
+                    user_id=command.user_id,
+                )
+                sequence = await WorkPackageSequencer(uow).start(
+                    package_id=command.package_id,
+                    revision_number=restarted_revision.revision_number,
+                    h8=restarted_revision.content_hash[:8],
+                    expected_status_generation=approved_generation,
+                    user_id=command.user_id,
+                )
+                generation = sequence.status_generation
+                revision_id = restarted_revision.id
+                code = PackageControlResultCode.APPLIED
             elif command.action is PackageControlAction.REQUEST_REPLAN:
                 replan = await service.request_replan(
                     package_id=command.package_id,

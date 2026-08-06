@@ -43,6 +43,7 @@ _MUTATING_PACKAGE_KINDS = {
     WorkPackageCallbackKind.RETRY_ITEM: PackageControlAction.RETRY_ITEM,
     WorkPackageCallbackKind.SKIP_ITEM: PackageControlAction.SKIP_ITEM,
     WorkPackageCallbackKind.STOP_PACKAGE: PackageControlAction.STOP_PACKAGE,
+    WorkPackageCallbackKind.RESTART_PACKAGE: PackageControlAction.RESTART_PACKAGE,
     WorkPackageCallbackKind.REQUEST_REPLAN: PackageControlAction.REQUEST_REPLAN,
 }
 

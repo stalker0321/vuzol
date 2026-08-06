@@ -48,7 +48,7 @@ def main() -> None:
         raise RuntimeError("agent certification probe has unexpected base content")
     marker = uuid.uuid4().hex[:12]
     request = TrialSeedRequest(
-        experiment_id=f"agent-certification-{profile.id}-{marker}",
+        experiment_id=f"agent-certification-canary-{profile.id}-{marker}",
         task_id=f"agent-certification-{marker}",
         worker_profile=profile.id,
         project_id=project.id,
@@ -68,6 +68,7 @@ def main() -> None:
             expected_file_count=1,
         ),
         actual_mode=ExecutionMode.SOL_SOLO,
+        override_reason="explicit bounded agent runtime certification canary",
         allowed_paths=(PROBE_PATH.as_posix(),),
         acceptance_criteria=(
             "The ordinary probe file is read and its exact before marker becomes after.",
@@ -129,7 +130,8 @@ def _canary(request: Path, *, timeout_seconds: int) -> dict[str, object]:
         command, check=False, capture_output=True, text=True
     )
     if completed.returncode:
-        raise RuntimeError("agent certification canary failed")
+        detail = (completed.stderr or completed.stdout).strip()[-2000:]
+        raise RuntimeError(f"agent certification canary failed: {detail}")
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, dict):
         raise RuntimeError("agent certification canary returned invalid evidence")

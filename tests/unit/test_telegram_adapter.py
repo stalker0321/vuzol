@@ -11,13 +11,20 @@ from telegram.error import BadRequest, TimedOut
 from vuzol.config import Settings
 from vuzol.telegram.adapter import (
     PythonTelegramClient,
+    _callback_answer,
     _control_markup,
     build_long_polling_application,
     control_update,
     message_update,
     resolve_bot_token,
 )
-from vuzol.telegram.domain import ControlUpdate, MessageUpdate, WorkPackageControlUpdate
+from vuzol.telegram.domain import (
+    ControlUpdate,
+    IngressResult,
+    IngressStatus,
+    MessageUpdate,
+    WorkPackageControlUpdate,
+)
 from vuzol.telegram.workspace import (
     TopicCreationOutcomeUnknown,
     TopicPinUnsupported,
@@ -51,6 +58,16 @@ def test_long_polling_application_registers_boundary_handlers() -> None:
         on_control=control_handler,
     )
     assert len(application.handlers[0]) == 2
+
+
+def test_callback_answer_explains_discussion_mode_and_rejections() -> None:
+    assert _callback_answer(
+        IngressResult(status=IngressStatus.HANDLED, reason="continue_discussion")
+    ) == ("Напишите следующим сообщением, что хотите обсудить.", False)
+    assert _callback_answer(IngressResult(status=IngressStatus.REJECTED)) == (
+        "Действие уже недоступно. Обновите карточку.",
+        True,
+    )
 
 
 def test_python_telegram_client_delegates_send_and_edit() -> None:

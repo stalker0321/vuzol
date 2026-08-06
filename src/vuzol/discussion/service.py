@@ -131,9 +131,11 @@ class WorkPackageService:
         actor_type: str,
         planner_profile: str | None = None,
         prompt_version: str | None = None,
+        _allow_stopped: bool = False,
     ) -> RevisionResult:
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
-        require_mutable(package.status)
+        if not (_allow_stopped and package.status is WorkPackageStatus.STOPPED):
+            require_mutable(package.status)
         require_generation(package.version, expected_status_generation)
         previous = await self._uow.work_packages.get_head_revision(package)
         if previous is None:
@@ -160,6 +162,49 @@ class WorkPackageService:
             actor_type,
             entity_type="plan_revision",
             payload={"package_id": str(package_id), "revision_number": previous.revision_number},
+        )
+        return result
+
+    async def restart_plan(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        user_id: int,
+    ) -> RevisionResult:
+        """Clone a stopped approved revision so a fresh task can be materialized safely."""
+
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_generation(package.version, expected_status_generation)
+        control_transition_target(package.status, PackageControlAction.RESTART_PACKAGE)
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if package.head_revision_id != revision.id or package.approved_revision_id != revision.id:
+            raise DomainError("approval_binding_mismatch")
+        result = await self.revise_draft(
+            package_id=package_id,
+            expected_status_generation=expected_status_generation,
+            plan=_plan_from_revision_body(revision.immutable_body),
+            created_by=PlanRevisionCreatedBy.USER,
+            actor_type="user",
+            _allow_stopped=True,
+        )
+        package.pause_reason = None
+        package.last_failure_task_id = None
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
+            "user",
+            previous_state=WorkPackageStatus.STOPPED.value,
+            new_state=WorkPackageStatus.DRAFT.value,
+            payload={
+                "previous_revision_id": str(revision.id),
+                "new_revision_id": str(result.revision_id),
+                "requested_by_user_id": user_id,
+                "restart": True,
+                "status_generation": result.status_generation,
+            },
         )
         return result
 

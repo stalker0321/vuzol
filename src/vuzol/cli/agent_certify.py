@@ -17,7 +17,7 @@ from vuzol.experiments.domain import (
     BoundedLevel,
     ContextEntry,
     ContextManifest,
-    ExecutionMode,
+    ExecutionStrategy,
     RequiredGate,
     RiskLevel,
     TaskClass,
@@ -67,7 +67,7 @@ def main() -> None:
             novelty=BoundedLevel.LOW,
             expected_file_count=1,
         ),
-        actual_mode=ExecutionMode.SOL_SOLO,
+        actual_strategy=ExecutionStrategy.SOLO,
         override_reason="explicit bounded agent runtime certification canary",
         allowed_paths=(PROBE_PATH.as_posix(),),
         acceptance_criteria=(

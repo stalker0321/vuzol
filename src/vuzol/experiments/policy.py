@@ -2,13 +2,13 @@
 
 from vuzol.experiments.domain import (
     BoundedLevel,
-    ExecutionMode,
+    ExecutionStrategy,
     RiskLevel,
     TaskClass,
     TaskClassification,
 )
 
-SOL_ONLY_CLASSES = frozenset(
+GATED_CLASSES = frozenset(
     {
         TaskClass.SECURITY,
         TaskClass.RUNTIME_LIFECYCLE,
@@ -19,10 +19,10 @@ SOL_ONLY_CLASSES = frozenset(
 )
 
 
-def classify_execution_mode(classification: TaskClassification) -> ExecutionMode:
-    """Recommend a mode; this function grants no capability or permission."""
-    if classification.task_class in SOL_ONLY_CLASSES:
-        return ExecutionMode.SOL_SOLO
+def classify_execution_strategy(classification: TaskClassification) -> ExecutionStrategy:
+    """Recommend provider-neutral orchestration; this grants no capability."""
+    if classification.task_class in GATED_CLASSES:
+        return ExecutionStrategy.GATED
     if (
         classification.risk in {RiskLevel.HIGH, RiskLevel.PRIVILEGED}
         or classification.credentials
@@ -37,18 +37,32 @@ def classify_execution_mode(classification: TaskClassification) -> ExecutionMode
         or classification.testability is BoundedLevel.LOW
         or classification.expected_file_count > 8
     ):
-        return ExecutionMode.SOL_SOLO
-    return ExecutionMode.GROK_REVIEWED
+        return ExecutionStrategy.GATED
+    if (
+        classification.complexity is BoundedLevel.LOW
+        and classification.risk is RiskLevel.LOW
+        and classification.testability is BoundedLevel.HIGH
+        and classification.blast_radius is BoundedLevel.LOW
+        and classification.coupling is BoundedLevel.LOW
+        and classification.novelty is BoundedLevel.LOW
+        and classification.expected_file_count <= 2
+    ):
+        return ExecutionStrategy.SOLO
+    return ExecutionStrategy.REVIEWED
 
 
 def enforce_security_escalation(
-    classification: TaskClassification, requested: ExecutionMode
-) -> ExecutionMode:
-    """Prevent model output or an operator hint from lowering classified risk."""
-    recommended = classify_execution_mode(classification)
-    if recommended is ExecutionMode.SOL_SOLO:
-        return recommended
-    return requested
+    classification: TaskClassification, requested: ExecutionStrategy
+) -> ExecutionStrategy:
+    """Prevent an operator hint from lowering classified review intensity."""
+    recommended = classify_execution_strategy(classification)
+    rank = {
+        ExecutionStrategy.SOLO: 0,
+        ExecutionStrategy.REVIEWED: 1,
+        ExecutionStrategy.GATED: 2,
+        ExecutionStrategy.MULTI_AGENT: 2,
+    }
+    return recommended if rank[requested] < rank[recommended] else requested
 
 
 def scopes_conflict(first: tuple[str, ...], second: tuple[str, ...]) -> bool:

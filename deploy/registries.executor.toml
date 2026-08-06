@@ -35,7 +35,7 @@ enabled = true
 [[projects]]
 id = "vuzol"
 display_name = "Vuzol"
-repository_path = "vuzol"
+repository_path = "vuzol-main"
 default_branch = "main"
 allowed_capabilities = ["repository_read", "code_edit", "git", "project_shell"]
 sandbox_profile = "project-default"

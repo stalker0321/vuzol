@@ -34,7 +34,7 @@ def canonical_kimi_argv(
         raise ValueError("Kimi reasoning effort is not supported")
     plan = " --plan" if read_only else ""
     script = (
-        'prompt="$(cat)"; exec kimi --auto --model tokenrouter/kimi-k3-free '
+        'prompt="$(cat)"; exec kimi --model tokenrouter/kimi-k3-free '
         f'--prompt "$prompt" --output-format stream-json{plan}'
     )
     mode = "plan" if read_only else "execute"

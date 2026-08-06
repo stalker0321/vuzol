@@ -133,12 +133,15 @@ def test_agent_certification_command_builds_fixed_disposable_task(
     runtime.registries.sandboxes.get.return_value = sandbox
     captured_request: object | None = None
 
-    def canary(request: Path, *, timeout_seconds: int) -> dict[str, object]:
+    def canary(
+        request: Path, *, timeout_seconds: int, repository_path: Path
+    ) -> dict[str, object]:
         nonlocal captured_request
         from vuzol.experiments.service import TrialSeedRequest
 
         captured_request = TrialSeedRequest.model_validate_json(request.read_text())
         assert timeout_seconds == 20
+        assert repository_path == ROOT
         return {"safe": True}
 
     monkeypatch.setattr(agent_certify, "get_runtime_configuration", lambda **_kwargs: runtime)
@@ -216,7 +219,7 @@ def test_agent_certification_canary_requires_canary_and_cleanup_success(
     monkeypatch.setattr("vuzol.cli.agent_certify.subprocess.run", run)
     result = agent_certify._canary(tmp_path / "request.json", timeout_seconds=30)
     assert result == {"seed": {}, "inspect": {}}
-    assert calls[1] == ("/usr/bin/make", "mvp-check")
+    assert calls[1] == ("/usr/bin/git", "status", "--porcelain")
 
     monkeypatch.setattr(
         "vuzol.cli.agent_certify.subprocess.run",
@@ -241,7 +244,7 @@ def test_agent_certification_canary_requires_canary_and_cleanup_success(
     monkeypatch.setattr(
         "vuzol.cli.agent_certify.subprocess.run", lambda *_args, **_kwargs: next(responses)
     )
-    with pytest.raises(RuntimeError, match="cleanup verification failed"):
+    with pytest.raises(RuntimeError, match="changed the configured source"):
         agent_certify._canary(tmp_path / "request.json", timeout_seconds=30)
 
 

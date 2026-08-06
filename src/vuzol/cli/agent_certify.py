@@ -76,7 +76,11 @@ def main() -> None:
         ),
         forbidden_changes=("No Git, tests, gates, network, dependencies, or other paths.",),
         required_gates=(RequiredGate(name="format-check", command_id="make format-check"),),
-        maximum_execution_seconds=min(args.timeout_seconds, 3_600),
+        # Leave the observer enough time to persist and inspect the durable outcome.
+        maximum_execution_seconds=max(
+            1,
+            min(args.timeout_seconds - min(30, args.timeout_seconds // 4), 3_600),
+        ),
         maximum_repair_count=0,
         context_manifest=ContextManifest(
             role="worker",

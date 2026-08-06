@@ -157,7 +157,11 @@ async def seed_trial(
     )
     session.add(interpretation)
     await session.flush()
-    workflow = _trial_workflow(interpretation_uuid, request.maximum_execution_seconds)
+    workflow = _trial_workflow(
+        interpretation_uuid,
+        request.maximum_execution_seconds,
+        runtime_certification=request.runtime_certification,
+    )
     run = await materialize_run(
         session,
         task_id=task_uuid,
@@ -280,7 +284,26 @@ def _draft(request: TrialSeedRequest) -> TaskDraft:
     )
 
 
-def _trial_workflow(interpretation_id: uuid.UUID, timeout: int) -> MaterializedWorkflow:
+def _trial_workflow(
+    interpretation_id: uuid.UUID,
+    timeout: int,
+    *,
+    runtime_certification: bool = False,
+) -> MaterializedWorkflow:
+    approval = MaterializedStep(
+        ordinal=3,
+        key="approve_result",
+        step_type="approval",
+        predecessor_ordinals=(2,),
+        queue_class=QueueClass.PRIVILEGED,
+        capabilities=frozenset({Capability.GIT}),
+        retry_class=RetryClass.NEVER,
+        idempotency_class=IdempotencyClass.IDEMPOTENT,
+        timeout_seconds=120,
+        max_attempts=2,
+        priority=100,
+        payload={"requested_action": "apply_result"},
+    )
     return MaterializedWorkflow(
         workflow_type="adaptive_worker_trial",
         version="1",
@@ -326,19 +349,6 @@ def _trial_workflow(interpretation_id: uuid.UUID, timeout: int) -> MaterializedW
                 max_attempts=1,
                 priority=100,
             ),
-            MaterializedStep(
-                ordinal=3,
-                key="approve_result",
-                step_type="approval",
-                predecessor_ordinals=(2,),
-                queue_class=QueueClass.PRIVILEGED,
-                capabilities=frozenset({Capability.GIT}),
-                retry_class=RetryClass.NEVER,
-                idempotency_class=IdempotencyClass.IDEMPOTENT,
-                timeout_seconds=120,
-                max_attempts=2,
-                priority=100,
-                payload={"requested_action": "apply_result"},
-            ),
-        ),
+        )
+        + (() if runtime_certification else (approval,)),
     )

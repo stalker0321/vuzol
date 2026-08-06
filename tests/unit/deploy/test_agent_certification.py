@@ -20,6 +20,22 @@ def test_agent_certification_keeps_production_runtime_loading_unchanged() -> Non
     assert "VUZOL_REGISTRY_FILE" not in content
 
 
+def test_runtime_certification_workflow_never_waits_for_human_approval() -> None:
+    import uuid
+
+    from vuzol.experiments.service import _trial_workflow
+
+    ordinary = _trial_workflow(uuid.uuid4(), 120)
+    certification = _trial_workflow(uuid.uuid4(), 120, runtime_certification=True)
+
+    assert [step.step_type for step in ordinary.steps][-1] == "approval"
+    assert [step.step_type for step in certification.steps] == [
+        "interpret",
+        "prepare_worktree",
+        "execute_code",
+    ]
+
+
 def test_agent_certification_accepts_complete_measured_canary(tmp_path: Path) -> None:
     from vuzol.cli.agent_certify import AFTER, BEFORE, _verify_result
 
@@ -149,7 +165,7 @@ def test_agent_certification_command_builds_fixed_disposable_task(
     assert isinstance(captured_request, TrialSeedRequest)
     assert captured_request.runtime_certification is True
     assert captured_request.allowed_paths == ("certification/agent-runtime-probe.txt",)
-    assert captured_request.maximum_execution_seconds == 20
+    assert captured_request.maximum_execution_seconds == 15
     assert captured_request.maximum_repair_count == 0
     output = json.loads(capsys.readouterr().out)
     assert output["task_uuid"] == "task"

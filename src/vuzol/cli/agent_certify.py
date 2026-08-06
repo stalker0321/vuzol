@@ -197,14 +197,31 @@ def _verify_result(result: dict[str, object], artifact_root: Path) -> tuple[str,
         raise RuntimeError("agent certification did not prove probe read/edit behavior")
     report = json.loads(_artifact_bytes(artifact_root, by_type["provider_edit_report"]))
     evidence = json.loads(_artifact_bytes(artifact_root, by_type["worker_finalization_evidence"]))
-    if (
-        report.get("claimed_complete") is not True
-        or evidence.get("verification", {}).get("passed") is not True
-    ):
+    if report.get("claimed_complete") is not True or not _verification_passed(evidence):
         raise RuntimeError("agent certification structured output or Git verification failed")
     if worktree.get("delivery_state") == "active":
         raise RuntimeError("agent certification cleanup left an active worktree")
     return str(seed["task_uuid"]), str(seed["run_uuid"])
+
+
+def _verification_passed(evidence: object) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    verification = evidence.get("verification")
+    if not isinstance(verification, dict):
+        return False
+    required = {
+        "exact_base",
+        "exact_branch",
+        "commit_exists",
+        "changed_files_match",
+        "allowed_scope",
+        "gates_match",
+    }
+    return (
+        all(verification.get(key) is True for key in required)
+        and verification.get("findings") == []
+    )
 
 
 def _artifact_bytes(root: Path, metadata: object) -> bytes:

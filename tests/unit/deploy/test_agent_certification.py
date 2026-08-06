@@ -133,9 +133,7 @@ def test_agent_certification_command_builds_fixed_disposable_task(
     runtime.registries.sandboxes.get.return_value = sandbox
     captured_request: object | None = None
 
-    def canary(
-        request: Path, *, timeout_seconds: int, repository_path: Path
-    ) -> dict[str, object]:
+    def canary(request: Path, *, timeout_seconds: int, repository_path: Path) -> dict[str, object]:
         nonlocal captured_request
         from vuzol.experiments.service import TrialSeedRequest
 

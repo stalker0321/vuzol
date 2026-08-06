@@ -99,8 +99,11 @@ def test_canonical_kimi_command_is_model_allowlisted() -> None:
     assert "--auto" in execute[2]
     assert "--plan" not in execute[2]
     assert "--plan" in plan[2]
+    assert canonical_kimi_argv(KIMI_MODEL, reasoning_effort="low") == execute
     with pytest.raises(ValueError, match="allowlisted"):
         canonical_kimi_argv("another-model")
+    with pytest.raises(ValueError, match="effort"):
+        canonical_kimi_argv(KIMI_MODEL, reasoning_effort="medium")
 
 
 @pytest.mark.anyio

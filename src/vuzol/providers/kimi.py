@@ -21,10 +21,17 @@ from vuzol.workflows.ports import CancellationContext
 KIMI_MODEL = "moonshotai/kimi-k3-free"
 
 
-def canonical_kimi_argv(model: str, *, read_only: bool = False) -> tuple[str, ...]:
+def canonical_kimi_argv(
+    model: str,
+    *,
+    reasoning_effort: str = "low",
+    read_only: bool = False,
+) -> tuple[str, ...]:
     """Keep the potentially large task prompt on stdin and out of process metadata."""
     if model != KIMI_MODEL:
         raise ValueError("Kimi model is not allowlisted")
+    if reasoning_effort not in {"low", "high", "max"}:
+        raise ValueError("Kimi reasoning effort is not supported")
     plan = " --plan" if read_only else ""
     script = (
         'prompt="$(cat)"; exec kimi --auto --model tokenrouter/kimi-k3-free '

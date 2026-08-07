@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from pydantic import HttpUrl
 from sqlalchemy import func, select
 
 from vuzol.config import (
@@ -13,14 +14,17 @@ from vuzol.config import (
     ProviderRole,
     RegistryDocument,
     RuntimeConfiguration,
+    Settings,
     TopicConfig,
     TopicKind,
     build_bundle,
 )
+from vuzol.config.settings import SecretIngressSettings
 from vuzol.storage.models import (
     ExternalInbox,
     ProjectDiscussionSession,
     Run,
+    SecretIngressRequest,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
@@ -69,6 +73,57 @@ def message(update_id: int, message_id: int, **changes: object) -> MessageUpdate
     }
     values.update(changes)
     return MessageUpdate.model_validate(values)
+
+
+@pytest.mark.postgresql
+def test_secret_command_is_system_only_and_never_persists_a_value(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        settings = Settings(
+            environment="test",
+            allowed_user_ids=(42,),
+            allowed_chat_ids=(-100,),
+            repository_root=tmp_path / "repositories",
+            artifact_root=tmp_path / "artifacts",
+            secret_file_root=tmp_path / "secrets",
+            secret_ingress=SecretIngressSettings(
+                enabled=True,
+                public_base_url=HttpUrl("https://vuzol.example"),
+                storage_root=tmp_path / "managed-secrets",
+                allowed_names=("TOKENROUTER_API_KEY",),
+            ),
+        )
+        document = RegistryDocument(
+            topics=(
+                TopicConfig(
+                    chat_id=-100,
+                    message_thread_id=10,
+                    kind=TopicKind.SYSTEM,
+                    accepts_new_tasks=False,
+                    default_workflow="simple_model_task",
+                ),
+            )
+        )
+        runtime = RuntimeConfiguration(
+            settings=settings, registries=build_bundle(document, settings)
+        )
+        result = await TelegramIngressService(runtime, factory).accept_message(
+            message(101, 201, text="/secret TOKENROUTER_API_KEY")
+        )
+        assert result.status is IngressStatus.HANDLED
+        async with factory() as session:
+            request = await session.scalar(select(SecretIngressRequest))
+            outbox = (await session.scalars(select(TransactionalOutbox))).all()
+            assert request is not None
+            assert request.secret_name == "TOKENROUTER_API_KEY"  # noqa: S105  # pragma: allowlist secret
+            assert len(outbox) == 2
+            serialized = " ".join(str(item.payload) for item in outbox)
+            assert "TOKENROUTER_API_KEY=" not in serialized
+        await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.postgresql

@@ -175,6 +175,25 @@ async def prepare_delivery(
         )
     if item.payload.get("role") in {PROJECT_MODEL_PICKER_ROLE, PROJECT_MODEL_CONFIRM_ROLE}:
         return _prepare_project_model_message(item)
+    if item.payload.get("role") == "secret_ingress":
+        try:
+            chat_id = int(item.payload["chat_id"])
+            thread_id = int(item.payload["message_thread_id"])
+            html_body = str(item.payload["html"])
+            raw_buttons = item.payload["callback_buttons"]
+            buttons = tuple(
+                tuple((str(label), str(data)) for label, data in row) for row in raw_buttons
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise PermanentDeliveryError("invalid_secret_ingress_payload") from error
+        return PreparedDelivery(
+            DeliveryAction.SEND_STATUS,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            html=html_body,
+            message_role="secret_ingress",
+            callback_buttons=buttons,
+        )
     if item.payload.get("role") == PROJECT_STATUS_DASHBOARD_ROLE:
         return await _prepare_project_status_dashboard(
             session, item, topics=topics, projects=projects, profiles=profiles

@@ -44,6 +44,8 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
         return "Действие уже недоступно. Обновите карточку.", True
     if result is not None and result.reason == "continue_discussion":
         return "Напишите следующим сообщением, что хотите обсудить.", False
+    if result is not None and result.reason == "secret_cancelled":
+        return "Ссылка отменена.", False
     return None, False
 
 
@@ -229,6 +231,22 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
             message_id=query.message.message_id,
             user_id=user.id,
             message_thread_id=message_thread_id,
+        )
+    if len(parts) == 3 and parts[:2] == ["v1", "secret_cancel"]:
+        try:
+            request_id = uuid.UUID(parts[2])
+        except ValueError:
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+            message_id=query.message.message_id,
+            action_kind="secret_cancel",
+            secret_request_id=request_id,
         )
     if len(parts) == 5 and parts[:2] == ["v1", "pn"]:
         try:

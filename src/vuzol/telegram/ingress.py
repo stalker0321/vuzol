@@ -1,6 +1,7 @@
 """Authorized Telegram ingress with persisted inbox and task affinity."""
 
 import hashlib
+import html
 import uuid
 
 from sqlalchemy import func, select
@@ -10,6 +11,7 @@ from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.config.models import TopicConfig, TopicKind
 from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
 from vuzol.providers.subscription_limits import SUBSCRIPTION_LIMITS_DESTINATION
+from vuzol.security.secret_ingress import create_request, parse_secret_command
 from vuzol.storage.models import TelegramIntakeMessage, TelegramMessageLink, TopicMapping
 from vuzol.storage.types import IntakeStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -58,6 +60,21 @@ class TelegramIngressService:
             topic = self._runtime.registries.topics.resolve(
                 update.chat_id, update.message_thread_id
             )
+            if (
+                update.text is not None
+                and update.text.split(maxsplit=1)[0].split("@")[0] == "/secret"
+            ):
+                if topic.kind is not TopicKind.SYSTEM:
+                    raise TelegramPolicyError("/secret is only available in the System topic")
+                secret_name = parse_secret_command(update.text)
+                if secret_name is None:
+                    raise TelegramPolicyError("usage: /secret NAME")
+                if (
+                    not settings.secret_ingress.enabled
+                    or secret_name not in settings.secret_ingress.allowed_names
+                ):
+                    raise TelegramPolicyError("secret name is not enabled")
+                return await self._handle_secret_command(update, secret_name)
             if is_help_command(update.text):
                 if not topic.enabled:
                     raise TelegramPolicyError("topic is disabled")
@@ -225,6 +242,55 @@ class TelegramIngressService:
             task_id=task_id,
             intake_id=intake_id,
         )
+
+    async def _handle_secret_command(
+        self, update: MessageUpdate, secret_name: str
+    ) -> IngressResult:
+        configured = self._runtime.settings.secret_ingress
+        async with UnitOfWork(self._session_factory) as uow:
+            assert uow.session is not None
+            request, token = await create_request(
+                uow.session,
+                configured,
+                secret_name=secret_name,
+                user_id=update.user_id,
+                chat_id=update.chat_id,
+                thread_id=update.message_thread_id,
+            )
+            base = str(configured.public_base_url).rstrip("/")
+            url = f"{base}/secret/{token}"
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="delete_message",
+                entity_type="secret_ingress_request",
+                entity_id=request.id,
+                idempotency_key=f"telegram:secret_command_delete:{update.chat_id}:{update.message_id}",
+                payload={
+                    "role": "user_command_delete",
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "message_id": update.message_id,
+                },
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="secret_ingress_request",
+                entity_id=request.id,
+                idempotency_key=f"telegram:secret_ingress:{request.id}",
+                payload={
+                    "role": "secret_ingress",
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "html": (
+                        f"🔐 <b>{html.escape(secret_name)}</b>\n"
+                        f'<a href="{html.escape(url, quote=True)}">Открыть защищённую форму</a>\n'
+                        "Ссылка одноразовая и действует несколько минут."
+                    ),
+                    "callback_buttons": (("Отменить", f"v1:secret_cancel:{request.id}"),),
+                },
+            )
+        return IngressResult(status=IngressStatus.HANDLED)
 
     async def _reply_targets_task(self, update: MessageUpdate) -> bool:
         """Keep only replies to canonical Task-linked messages on the legacy task path."""

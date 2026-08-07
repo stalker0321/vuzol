@@ -15,6 +15,7 @@ from vuzol.discussion.domain import DomainError, PackageControlAction
 from vuzol.discussion.service import WorkPackageService
 from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.naming import ProjectNamingControlError, ProjectNamingController
+from vuzol.security.secret_ingress import cancel_request
 from vuzol.storage.errors import EntityNotFound
 from vuzol.storage.models import Approval, EditSession, TelegramControlAction
 from vuzol.storage.types import EditSessionStatus
@@ -72,11 +73,13 @@ class TelegramControlService:
             )
             naming_action = update.action_kind.startswith("project_name_")
             model_action = update.action_kind.startswith("project_model_")
+            secret_action = update.action_kind == "secret_cancel"
             if (
                 update.task_id is None
                 and update.approval_id is None
                 and not naming_action
                 and not model_action
+                and not secret_action
             ):
                 raise TelegramPolicyError("control action requires a persisted target")
             if update.action_kind in {"approve", "redo", "reject"} and update.approval_id is None:
@@ -133,6 +136,32 @@ class TelegramControlService:
                         status=IngressStatus.CREATED if action_created else IngressStatus.DUPLICATE,
                         action_id=action_id,
                     )
+                if secret_action:
+                    assert uow.session is not None
+                    if update.secret_request_id is None or not await cancel_request(
+                        uow.session, update.secret_request_id, user_id=update.user_id
+                    ):
+                        raise TelegramPolicyError("secret request is unavailable")
+                    await uow.inbox.mark_processed(
+                        inbox_id,
+                        entity_type="secret_ingress_request",
+                        entity_id=update.secret_request_id,
+                    )
+                    if update.message_id is not None:
+                        await uow.outbox.enqueue(
+                            destination="telegram",
+                            operation_type="delete_message",
+                            entity_type="secret_ingress_request",
+                            entity_id=update.secret_request_id,
+                            idempotency_key=f"telegram:secret_cancel_delete:{update.callback_query_id}",
+                            payload={
+                                "role": "user_command_delete",
+                                "chat_id": update.chat_id,
+                                "message_thread_id": update.message_thread_id,
+                                "message_id": update.message_id,
+                            },
+                        )
+                    return IngressResult(status=IngressStatus.HANDLED, reason="secret_cancelled")
                 if update.task_id is not None:
                     await uow.tasks.get(update.task_id, for_update=True)
                 elif update.approval_id is not None:
@@ -164,7 +193,12 @@ class TelegramControlService:
                     entity_type="telegram_control_action",
                     entity_id=action_id,
                 )
-        except (EntityNotFound, ProjectNamingControlError, ExecutorPreferenceError) as error:
+        except (
+            EntityNotFound,
+            ProjectNamingControlError,
+            ExecutorPreferenceError,
+            TelegramPolicyError,
+        ) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 
         return IngressResult(

@@ -30,7 +30,9 @@ def test_app_main_composes_server(monkeypatch: MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
     monkeypatch.setattr(
-        app_cli, "get_runtime_configuration", lambda: runtime_configuration(settings)
+        app_cli,
+        "get_runtime_configuration",
+        lambda **_kwargs: runtime_configuration(settings),
     )
     monkeypatch.setattr(app_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
     monkeypatch.setattr(

@@ -333,6 +333,20 @@ class TopicMapping(IdentityMixin, TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class SecretIngressRequest(IdentityMixin, TimestampMixin, Base):
+    __tablename__ = "secret_ingress_requests"
+
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    secret_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    requested_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ProjectProvisioning(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "project_provisioning"
 

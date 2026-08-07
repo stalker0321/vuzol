@@ -70,6 +70,38 @@ class SubscriptionLimitSettings(BaseModel):
         return self
 
 
+class SecretIngressSettings(BaseModel):
+    """Portable one-time web ingress for allowlisted deployment secrets."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    public_base_url: HttpUrl | None = None
+    storage_root: Path = Path("/var/lib/vuzol-managed-secrets")
+    allowed_names: tuple[str, ...] = ()
+    ttl_seconds: int = Field(default=300, ge=60, le=3_600)
+    maximum_secret_bytes: int = Field(default=16_384, ge=1, le=65_536)
+
+    @field_validator("allowed_names")
+    @classmethod
+    def validate_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        import re
+
+        if len(set(value)) != len(value) or any(
+            re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", name) is None for name in value
+        ):
+            raise ValueError("secret ingress names must be unique uppercase identifiers")
+        return value
+
+    @model_validator(mode="after")
+    def validate_enabled_configuration(self) -> "SecretIngressSettings":
+        if not self.storage_root.is_absolute():
+            raise ValueError("secret ingress storage_root must be absolute")
+        if self.enabled and (self.public_base_url is None or not self.allowed_names):
+            raise ValueError("enabled secret ingress requires public_base_url and allowed_names")
+        return self
+
+
 class RetentionDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -363,6 +395,7 @@ class Settings(BaseSettings):
     subscription_limits: SubscriptionLimitSettings = Field(
         default_factory=SubscriptionLimitSettings
     )
+    secret_ingress: SecretIngressSettings = Field(default_factory=SecretIngressSettings)
 
     @field_validator(
         "repository_root",

@@ -68,6 +68,9 @@ def test_callback_answer_explains_discussion_mode_and_rejections() -> None:
         "Действие уже недоступно. Обновите карточку.",
         True,
     )
+    assert _callback_answer(
+        IngressResult(status=IngressStatus.HANDLED, reason="secret_cancelled")
+    ) == ("Ссылка отменена.", False)
 
 
 def test_python_telegram_client_delegates_send_and_edit() -> None:
@@ -226,6 +229,38 @@ def test_start_callback_crosses_the_provider_boundary() -> None:
     assert isinstance(converted, ControlUpdate)
     assert converted.action_kind == "start"
     assert converted.task_id == task_id
+
+
+def test_secret_cancel_callback_targets_the_exact_request() -> None:
+    request_id = uuid.uuid4()
+
+    def update(data: str) -> Update:
+        return Update.de_json(
+            {
+                "update_id": 3,
+                "callback_query": {
+                    "id": "secret-cancel",
+                    "from": {"id": 7, "is_bot": False, "first_name": "User"},
+                    "chat_instance": "instance",
+                    "data": data,
+                    "message": {
+                        "message_id": 11,
+                        "message_thread_id": 12,
+                        "date": 0,
+                        "chat": {"id": -100, "type": "supergroup"},
+                    },
+                },
+            },
+            None,
+        )
+
+    converted = control_update(update(f"v1:secret_cancel:{request_id}"), "main")
+
+    assert isinstance(converted, ControlUpdate)
+    assert converted.action_kind == "secret_cancel"
+    assert converted.secret_request_id == request_id
+    assert converted.message_id == 11
+    assert control_update(update("v1:secret_cancel:not-a-uuid"), "main") is None
 
 
 def test_result_decision_callback_targets_the_exact_approval() -> None:

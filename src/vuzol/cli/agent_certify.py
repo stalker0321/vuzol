@@ -17,7 +17,7 @@ from vuzol.experiments.domain import (
     BoundedLevel,
     ContextEntry,
     ContextManifest,
-    ExecutionMode,
+    ExecutionStrategy,
     RequiredGate,
     RiskLevel,
     TaskClass,
@@ -48,7 +48,7 @@ def main() -> None:
         raise RuntimeError("agent certification probe has unexpected base content")
     marker = uuid.uuid4().hex[:12]
     request = TrialSeedRequest(
-        experiment_id=f"agent-certification-{profile.id}-{marker}",
+        experiment_id=f"agent-certification-canary-{profile.id}-{marker}",
         task_id=f"agent-certification-{marker}",
         worker_profile=profile.id,
         project_id=project.id,
@@ -67,7 +67,8 @@ def main() -> None:
             novelty=BoundedLevel.LOW,
             expected_file_count=1,
         ),
-        actual_mode=ExecutionMode.SOL_SOLO,
+        actual_strategy=ExecutionStrategy.SOLO,
+        override_reason="explicit bounded agent runtime certification canary",
         allowed_paths=(PROBE_PATH.as_posix(),),
         acceptance_criteria=(
             "The ordinary probe file is read and its exact before marker becomes after.",
@@ -75,6 +76,11 @@ def main() -> None:
         ),
         forbidden_changes=("No Git, tests, gates, network, dependencies, or other paths.",),
         required_gates=(RequiredGate(name="format-check", command_id="make format-check"),),
+        # Leave the observer enough time to persist and inspect the durable outcome.
+        maximum_execution_seconds=max(
+            1,
+            min(args.timeout_seconds - min(30, args.timeout_seconds // 4), 3_600),
+        ),
         maximum_repair_count=0,
         context_manifest=ContextManifest(
             role="worker",
@@ -91,7 +97,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="vuzol-agent-certification-") as directory:
         request_path = Path(directory) / "request.json"
         request_path.write_text(request.model_dump_json(indent=2))
-        result = _canary(request_path, timeout_seconds=args.timeout_seconds)
+        result = _canary(
+            request_path,
+            timeout_seconds=args.timeout_seconds,
+            repository_path=project.repository_path,
+        )
     task_uuid, run_uuid = _verify_result(result, runtime.settings.artifact_root)
     certificate = new_certificate(
         key=certification_key(profile, sandbox),
@@ -117,7 +127,12 @@ def main() -> None:
     )
 
 
-def _canary(request: Path, *, timeout_seconds: int) -> dict[str, object]:
+def _canary(
+    request: Path,
+    *,
+    timeout_seconds: int,
+    repository_path: Path = ROOT,
+) -> dict[str, object]:
     command = (
         str(ROOT / ".venv/bin/python"),
         str(ROOT / "deploy/mvp/canary.py"),
@@ -129,19 +144,20 @@ def _canary(request: Path, *, timeout_seconds: int) -> dict[str, object]:
         command, check=False, capture_output=True, text=True
     )
     if completed.returncode:
-        raise RuntimeError("agent certification canary failed")
+        detail = (completed.stderr or completed.stdout).strip()[-2000:]
+        raise RuntimeError(f"agent certification canary failed: {detail}")
     decoded = json.loads(completed.stdout)
     if not isinstance(decoded, dict):
         raise RuntimeError("agent certification canary returned invalid evidence")
     cleanup = subprocess.run(
-        ("/usr/bin/make", "mvp-check"),
-        cwd=ROOT,
+        ("/usr/bin/git", "status", "--porcelain"),
+        cwd=repository_path,
         check=False,
         capture_output=True,
         text=True,
     )
-    if cleanup.returncode:
-        raise RuntimeError("agent certification cleanup verification failed")
+    if cleanup.returncode or cleanup.stdout.strip():
+        raise RuntimeError("agent certification changed the configured source repository")
     return decoded
 
 
@@ -181,14 +197,31 @@ def _verify_result(result: dict[str, object], artifact_root: Path) -> tuple[str,
         raise RuntimeError("agent certification did not prove probe read/edit behavior")
     report = json.loads(_artifact_bytes(artifact_root, by_type["provider_edit_report"]))
     evidence = json.loads(_artifact_bytes(artifact_root, by_type["worker_finalization_evidence"]))
-    if (
-        report.get("claimed_complete") is not True
-        or evidence.get("verification", {}).get("passed") is not True
-    ):
+    if report.get("claimed_complete") is not True or not _verification_passed(evidence):
         raise RuntimeError("agent certification structured output or Git verification failed")
     if worktree.get("delivery_state") == "active":
         raise RuntimeError("agent certification cleanup left an active worktree")
     return str(seed["task_uuid"]), str(seed["run_uuid"])
+
+
+def _verification_passed(evidence: object) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    verification = evidence.get("verification")
+    if not isinstance(verification, dict):
+        return False
+    required = {
+        "exact_base",
+        "exact_branch",
+        "commit_exists",
+        "changed_files_match",
+        "allowed_scope",
+        "gates_match",
+    }
+    return (
+        all(verification.get(key) is True for key in required)
+        and verification.get("findings") == []
+    )
 
 
 def _artifact_bytes(root: Path, metadata: object) -> bytes:

@@ -194,7 +194,10 @@ async def build_work_package_plan_card(
         controls.append(("Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision)))
     elif package.status is WorkPackageStatus.RUNNING:
         controls.append(
-            ("Остановить", _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision))
+            (
+                "Завершить цепочку",
+                _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision),
+            )
         )
         controls.append(
             (
@@ -214,7 +217,19 @@ async def build_work_package_plan_card(
                     "Перепланировать",
                     _callback(WorkPackageCallbackKind.REQUEST_REPLAN, package, revision),
                 ),
-                ("Остановить", _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision)),
+                (
+                    "Завершить цепочку",
+                    _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision),
+                ),
+            )
+        )
+    elif (
+        package.status is WorkPackageStatus.STOPPED and package.approved_revision_id == revision.id
+    ):
+        controls.append(
+            (
+                "Запустить снова",
+                _callback(WorkPackageCallbackKind.RESTART_PACKAGE, package, revision),
             )
         )
     if controls:

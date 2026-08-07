@@ -20,6 +20,22 @@ def test_agent_certification_keeps_production_runtime_loading_unchanged() -> Non
     assert "VUZOL_REGISTRY_FILE" not in content
 
 
+def test_runtime_certification_workflow_never_waits_for_human_approval() -> None:
+    import uuid
+
+    from vuzol.experiments.service import _trial_workflow
+
+    ordinary = _trial_workflow(uuid.uuid4(), 120)
+    certification = _trial_workflow(uuid.uuid4(), 120, runtime_certification=True)
+
+    assert [step.step_type for step in ordinary.steps][-1] == "approval"
+    assert [step.step_type for step in certification.steps] == [
+        "interpret",
+        "prepare_worktree",
+        "execute_code",
+    ]
+
+
 def test_agent_certification_accepts_complete_measured_canary(tmp_path: Path) -> None:
     from vuzol.cli.agent_certify import AFTER, BEFORE, _verify_result
 
@@ -34,7 +50,22 @@ def test_agent_certification_accepts_complete_measured_canary(tmp_path: Path) ->
 
     artifact("git_diff", f"-{BEFORE}\n+{AFTER}\n".encode())
     artifact("provider_edit_report", b'{"claimed_complete":true}')
-    artifact("worker_finalization_evidence", b'{"verification":{"passed":true}}')
+    artifact(
+        "worker_finalization_evidence",
+        json.dumps(
+            {
+                "verification": {
+                    "exact_base": True,
+                    "exact_branch": True,
+                    "commit_exists": True,
+                    "changed_files_match": True,
+                    "allowed_scope": True,
+                    "gates_match": True,
+                    "findings": [],
+                }
+            }
+        ).encode(),
+    )
     result = {
         "seed": {"task_uuid": "task", "run_uuid": "run"},
         "inspect": {
@@ -117,12 +148,13 @@ def test_agent_certification_command_builds_fixed_disposable_task(
     runtime.registries.sandboxes.get.return_value = sandbox
     captured_request: object | None = None
 
-    def canary(request: Path, *, timeout_seconds: int) -> dict[str, object]:
+    def canary(request: Path, *, timeout_seconds: int, repository_path: Path) -> dict[str, object]:
         nonlocal captured_request
         from vuzol.experiments.service import TrialSeedRequest
 
         captured_request = TrialSeedRequest.model_validate_json(request.read_text())
         assert timeout_seconds == 20
+        assert repository_path == ROOT
         return {"safe": True}
 
     monkeypatch.setattr(agent_certify, "get_runtime_configuration", lambda **_kwargs: runtime)
@@ -149,6 +181,7 @@ def test_agent_certification_command_builds_fixed_disposable_task(
     assert isinstance(captured_request, TrialSeedRequest)
     assert captured_request.runtime_certification is True
     assert captured_request.allowed_paths == ("certification/agent-runtime-probe.txt",)
+    assert captured_request.maximum_execution_seconds == 15
     assert captured_request.maximum_repair_count == 0
     output = json.loads(capsys.readouterr().out)
     assert output["task_uuid"] == "task"
@@ -199,7 +232,7 @@ def test_agent_certification_canary_requires_canary_and_cleanup_success(
     monkeypatch.setattr("vuzol.cli.agent_certify.subprocess.run", run)
     result = agent_certify._canary(tmp_path / "request.json", timeout_seconds=30)
     assert result == {"seed": {}, "inspect": {}}
-    assert calls[1] == ("/usr/bin/make", "mvp-check")
+    assert calls[1] == ("/usr/bin/git", "status", "--porcelain")
 
     monkeypatch.setattr(
         "vuzol.cli.agent_certify.subprocess.run",
@@ -224,7 +257,7 @@ def test_agent_certification_canary_requires_canary_and_cleanup_success(
     monkeypatch.setattr(
         "vuzol.cli.agent_certify.subprocess.run", lambda *_args, **_kwargs: next(responses)
     )
-    with pytest.raises(RuntimeError, match="cleanup verification failed"):
+    with pytest.raises(RuntimeError, match="changed the configured source"):
         agent_certify._canary(tmp_path / "request.json", timeout_seconds=30)
 
 
@@ -335,7 +368,22 @@ def test_agent_certification_rejects_incomplete_finalization_evidence(
     )
     artifact("git_diff", diff)
     artifact("provider_edit_report", report)
-    artifact("worker_finalization_evidence", b'{"verification":{"passed":true}}')
+    artifact(
+        "worker_finalization_evidence",
+        json.dumps(
+            {
+                "verification": {
+                    "exact_base": True,
+                    "exact_branch": True,
+                    "commit_exists": True,
+                    "changed_files_match": True,
+                    "allowed_scope": True,
+                    "gates_match": True,
+                    "findings": [],
+                }
+            }
+        ).encode(),
+    )
     if failure == "missing_artifact":
         artifacts.pop()
     worktree = {

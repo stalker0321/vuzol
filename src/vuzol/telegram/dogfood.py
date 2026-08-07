@@ -11,7 +11,7 @@ from vuzol.execution.git import LocalGit
 from vuzol.experiments.domain import (
     BoundedLevel,
     ContextManifest,
-    ExecutionMode,
+    ExecutionStrategy,
     RequiredGate,
     RiskLevel,
     TaskClass,
@@ -125,7 +125,7 @@ class TelegramDogfoodIngressService:
                 novelty=BoundedLevel.LOW,
                 expected_file_count=len(command.allowed_paths),
             ),
-            actual_mode=ExecutionMode.SOL_SOLO,
+            actual_strategy=ExecutionStrategy.SOLO,
             override_reason="Explicit bounded Telegram MVP dogfood command",
             allowed_paths=command.allowed_paths,
             acceptance_criteria=(

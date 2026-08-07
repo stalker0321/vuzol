@@ -15,6 +15,7 @@ from vuzol.discussion.agent import DISCUSSION_INTERNAL_TASK_TYPE, schedule_discu
 from vuzol.discussion.application import apply_plan_request_in_uow
 from vuzol.discussion.domain import DomainError
 from vuzol.discussion.memory_service import DiscussionMemoryService
+from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.discussion import (
     DISCUSSION_CLASSIFY_DESTINATION,
     DISCUSSION_REPLY_DESTINATION,
@@ -23,10 +24,12 @@ from vuzol.interpretation.discussion import (
     DiscussionInterpretation,
     DiscussionInterpretRequest,
     EditSessionContext,
+    PlanRequestIntent,
     PlanSnapshot,
     PlanSnapshotItem,
     SemanticDiscussionInterpreter,
     enforce_discussion_policy,
+    plan_draft_from_interpretation,
 )
 from vuzol.interpretation.domain import (
     InterpretationInput,
@@ -324,6 +327,25 @@ class InterpretationPipeline:
             self._discussion_fallbacks,
             request,
         )
+        if (
+            result.interaction_mode is InteractionMode.PLAN_REQUEST
+            and result.plan_request is not None
+            and result.plan_request.intent is PlanRequestIntent.CREATE_DRAFT
+        ):
+            candidate_plan = plan_draft_from_interpretation(result)
+            async with UnitOfWork(self._factory) as uow:
+                repeated = await WorkPackageService(uow).is_duplicate_terminal_plan(
+                    session_id=session_id,
+                    project_id=project_id,
+                    plan=candidate_plan,
+                )
+            if repeated:
+                request = request.model_copy(update={"memory_pack": None})
+                result = await interpret_discussion_with_recovery(
+                    self._discussion_interpreter,
+                    self._discussion_fallbacks,
+                    request,
+                )
         self._logger.info(
             "Discussion interpretation completed",
             extra={

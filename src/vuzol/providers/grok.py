@@ -277,7 +277,11 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
             if request.output_schema_version == "step09a-worker-edit-report.v1"
             else WorkerResultManifest
         )
-        manifest = contract.model_validate_json(value)
+        # Grok occasionally emits one short progress sentence before the requested
+        # JSON object. Accept only that bounded shape; trailing prose still fails.
+        object_start = value.find("{")
+        candidate = value[object_start:] if object_start > 0 else value
+        manifest = contract.model_validate_json(candidate)
     except ValidationError as error:
         raise ProviderFailure(
             ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,

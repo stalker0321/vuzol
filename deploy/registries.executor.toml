@@ -1,6 +1,6 @@
 [[sandboxes]]
 id = "project-default"
-image = "vuzol-sandbox@sha256:8a32088414ff60dc7e94740811f55c100af7775640666df0ff59587d863a8b02"
+image = "vuzol-sandbox@sha256:cc7ce7ecc67abc52000a53bc2efe1d3bf975d8f7ce1282fb37f37ade53125897"
 uid = 10001
 gid = 10001
 cpu_count = 1.0
@@ -17,7 +17,7 @@ enabled = true
 
 [[sandboxes]]
 id = "vuzol-validation"
-image = "vuzol-validation@sha256:e6ee46d6ef30e9d125d89e0600163a60aabacb2c36f8aabf0f1477f677c32616"
+image = "vuzol-validation@sha256:04b5e60ded7a49a7c4828b5446c58bea4de645782ac847895c2c74f7fc1163e6"
 uid = 10001
 gid = 10001
 cpu_count = 1.0
@@ -35,7 +35,7 @@ enabled = true
 [[projects]]
 id = "vuzol"
 display_name = "Vuzol"
-repository_path = "vuzol"
+repository_path = "vuzol-main"
 default_branch = "main"
 allowed_capabilities = ["repository_read", "code_edit", "git", "project_shell"]
 sandbox_profile = "project-default"
@@ -113,8 +113,20 @@ runtime_identity = "vuzol-executor"
 state_directory = "/var/lib/vuzol-provider-state/codex-subscription-prod"
 enabled = true
 
-# Exact-tuple agent certification remains experimental and non-blocking for MVP dogfood.
-# The ordinary provider sandbox and trusted finalizer continue to enforce runtime invariants.
+[profiles.agent_runtime_contract]
+cli_version = "codex-cli 0.144.1"
+edit_mechanism = "shell_backed_repository_tools"
+working_directory = "/workspace"
+writable_roots = ["/workspace"]
+protected_roots = ["/workspace/.git"]
+structured_output_source = "final_agent_message_json"
+inner_sandbox_mode = "provider_managed"
+supports_read = true
+supports_search = true
+supports_edit = true
+supports_git = false
+supports_network = false
+supports_local_checks = false
 
 [profiles.runtime_network]
 enabled = true
@@ -140,6 +152,21 @@ runtime_identity = "vuzol-grok-a"
 state_directory = "/var/lib/vuzol-provider-state/grok-subscription-a"
 enabled = true
 
+[profiles.agent_runtime_contract]
+cli_version = "grok 0.2.99 (b1b49ccb71)"
+edit_mechanism = "shell_backed_repository_tools"
+working_directory = "/workspace"
+writable_roots = ["/workspace"]
+protected_roots = ["/workspace/.git"]
+structured_output_source = "final_agent_message_json"
+inner_sandbox_mode = "provider_managed"
+supports_read = true
+supports_search = true
+supports_edit = true
+supports_git = false
+supports_network = false
+supports_local_checks = false
+
 [profiles.runtime_network]
 enabled = true
 destinations = [
@@ -164,6 +191,21 @@ sandbox_required = true
 runtime_identity = "vuzol-grok-b"
 state_directory = "/var/lib/vuzol-provider-state/grok-subscription-b"
 enabled = true
+
+[profiles.agent_runtime_contract]
+cli_version = "grok 0.2.99 (b1b49ccb71)"
+edit_mechanism = "shell_backed_repository_tools"
+working_directory = "/workspace"
+writable_roots = ["/workspace"]
+protected_roots = ["/workspace/.git"]
+structured_output_source = "final_agent_message_json"
+inner_sandbox_mode = "provider_managed"
+supports_read = true
+supports_search = true
+supports_edit = true
+supports_git = false
+supports_network = false
+supports_local_checks = false
 
 [profiles.runtime_network]
 enabled = true
@@ -191,11 +233,49 @@ runtime_identity = "vuzol-kimi-a"
 state_directory = "/var/lib/vuzol-provider-state/tokenrouter-kimi-a"
 enabled = true
 
+[profiles.agent_runtime_contract]
+cli_version = "0.31.1"
+edit_mechanism = "shell_backed_repository_tools"
+working_directory = "/workspace"
+writable_roots = ["/workspace"]
+protected_roots = ["/workspace/.git"]
+structured_output_source = "final_agent_message_json"
+inner_sandbox_mode = "provider_managed"
+supports_read = true
+supports_search = true
+supports_edit = true
+supports_git = false
+supports_network = false
+supports_local_checks = true
+
 [profiles.runtime_network]
 enabled = true
 destinations = [
   { url = "https://api.tokenrouter.com", purpose = "TokenRouter Kimi inference" },
 ]
+
+# Prepared for NVIDIA-hosted GLM-5.2. Keep disabled until a key is installed and
+# the model-only OpenAI-compatible endpoint receives a sandboxed worker tool loop.
+[[profiles]]
+id = "nvidia-glm-5-2"
+provider = "openai-compatible"
+model = "z-ai/glm-5.2"
+api_base_url = "https://integrate.api.nvidia.com/v1"
+launch_mode = "api"
+credential_reference = "env:VUZOL_NVIDIA_API_KEY"
+credential_required = true
+capabilities = []
+concurrency_limit = 1
+context_limit = 1000000
+output_limit = 16384
+cost_class = "cheap"
+roles = ["executor"]
+routing_priority = 240
+supported_task_types = ["architecture", "coding"]
+fallback_profile_ids = []
+sandbox_required = false
+minimum_unknown_usage_cost = 0.001
+enabled = false
 
 [[topics]]
 chat_id = -1003950752781

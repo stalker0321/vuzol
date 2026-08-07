@@ -93,9 +93,17 @@ def request() -> ProviderRequest:
 
 
 def test_canonical_kimi_command_is_model_allowlisted() -> None:
-    assert canonical_kimi_argv(KIMI_MODEL)[0:2] == ("sh", "-c")
+    execute = canonical_kimi_argv(KIMI_MODEL)
+    plan = canonical_kimi_argv(KIMI_MODEL, read_only=True)
+    assert execute[0:2] == ("sh", "-c")
+    assert "--auto" not in execute[2]
+    assert "--plan" not in execute[2]
+    assert "--plan" in plan[2]
+    assert canonical_kimi_argv(KIMI_MODEL, reasoning_effort="low") == execute
     with pytest.raises(ValueError, match="allowlisted"):
         canonical_kimi_argv("another-model")
+    with pytest.raises(ValueError, match="effort"):
+        canonical_kimi_argv(KIMI_MODEL, reasoning_effort="medium")
 
 
 @pytest.mark.anyio
@@ -152,6 +160,7 @@ async def test_adapter_builds_read_only_structured_request() -> None:
     assert result.usage.duration_ms == 8
     assert transport.invocation is not None
     assert transport.invocation.argv[-1] == "vuzol-kimi-plan"
+    assert "--plan" in transport.invocation.argv[2]
     assert "Inspect only" in transport.invocation.stdin
 
 
@@ -173,6 +182,11 @@ async def test_adapter_rejects_invalid_output_schema(monkeypatch: pytest.MonkeyP
     ("transport_result", "category", "summary"),
     [
         (RuntimeError("transport"), ProviderErrorCategory.PROVIDER_UNAVAILABLE, "transport"),
+        (
+            RuntimeError("sandbox execution timed out after start"),
+            ProviderErrorCategory.TIMEOUT,
+            "timed out",
+        ),
         (
             CodexProcessResult(exit_code=2, stdout="", stderr="failed", duration_ms=1),
             ProviderErrorCategory.PROVIDER_UNAVAILABLE,
@@ -208,6 +222,40 @@ async def test_adapter_normalizes_transport_and_output_failures(
     assert caught.value.retryable is True
     assert caught.value.request_sent is True
     assert summary in caught.value.safe_summary
+
+
+@pytest.mark.anyio
+async def test_adapter_recovers_timeout_classification_when_cleanup_masks_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = iter((100.0, 155.0))
+    monkeypatch.setattr("vuzol.providers.kimi._monotonic", lambda: next(clock))
+    with pytest.raises(ProviderFailure) as caught:
+        await KimiCliAdapter(ResultTransport(RuntimeError("cleanup failed"))).execute(
+            request(), profile(), CancellationContext()
+        )
+    assert caught.value.category is ProviderErrorCategory.TIMEOUT
+    assert "timed out" in caught.value.safe_summary
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("stderr", "category"),
+    [
+        ("provider.connection_error: Connection error", ProviderErrorCategory.PROVIDER_UNAVAILABLE),
+        ("401 unauthorized", ProviderErrorCategory.AUTHENTICATION),
+        ("429 rate limit", ProviderErrorCategory.RATE_LIMITED),
+    ],
+)
+async def test_adapter_classifies_tokenrouter_cli_failures(
+    stderr: str, category: ProviderErrorCategory
+) -> None:
+    failed = CodexProcessResult(exit_code=1, stdout="", stderr=stderr, duration_ms=1)
+    with pytest.raises(ProviderFailure) as caught:
+        await KimiCliAdapter(ResultTransport(failed)).execute(
+            request(), profile(), CancellationContext()
+        )
+    assert caught.value.category is category
 
 
 @pytest.mark.anyio

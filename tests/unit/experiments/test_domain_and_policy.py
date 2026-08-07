@@ -9,7 +9,7 @@ from ._test_experiments_helpers import (
     BoundedRepairContext,
     ContextEntry,
     ContextManifest,
-    ExecutionMode,
+    ExecutionStrategy,
     Path,
     RepairGateDiagnostic,
     RepairSeverity,
@@ -24,7 +24,7 @@ from ._test_experiments_helpers import (
     _trusted_profile_id,
     capsule,
     classification,
-    classify_execution_mode,
+    classify_execution_strategy,
     enforce_security_escalation,
     path_is_allowed,
     pytest,
@@ -147,22 +147,37 @@ def test_trial_seed_request_bounds_repairs_and_context_role() -> None:
         TrialSeedRequest.model_validate(request.model_dump() | {"maximum_repair_count": 3})
 
 
-def test_mode_policy_is_explicit_and_security_cannot_be_lowered() -> None:
-    assert classify_execution_mode(classification()) is ExecutionMode.GROK_REVIEWED
+def test_strategy_policy_is_provider_neutral_and_security_cannot_be_lowered() -> None:
+    assert classify_execution_strategy(classification()) is ExecutionStrategy.SOLO
     risky = classification(security_boundary=True)
-    assert classify_execution_mode(risky) is ExecutionMode.SOL_SOLO
+    assert classify_execution_strategy(risky) is ExecutionStrategy.GATED
+    assert enforce_security_escalation(risky, ExecutionStrategy.SOLO) is ExecutionStrategy.GATED
     assert (
-        enforce_security_escalation(risky, ExecutionMode.GROK_GATED_SHADOW)
-        is ExecutionMode.SOL_SOLO
+        classify_execution_strategy(classification(testability=BoundedLevel.LOW))
+        is ExecutionStrategy.GATED
     )
     assert (
-        classify_execution_mode(classification(testability=BoundedLevel.LOW))
-        is ExecutionMode.SOL_SOLO
+        classify_execution_strategy(classification(task_class=TaskClass.SECURITY))
+        is ExecutionStrategy.GATED
     )
-    assert (
-        classify_execution_mode(classification(task_class=TaskClass.SECURITY))
-        is ExecutionMode.SOL_SOLO
-    )
+
+
+def test_legacy_provider_named_strategies_remain_readable() -> None:
+    assert ExecutionStrategy("sol_solo") is ExecutionStrategy.SOLO
+    assert ExecutionStrategy("grok_reviewed") is ExecutionStrategy.REVIEWED
+    assert ExecutionStrategy("grok_gated_shadow") is ExecutionStrategy.GATED
+    assert ExecutionStrategy("multi_grok_reviewed") is ExecutionStrategy.MULTI_AGENT
+    current = capsule("a" * 40)
+    legacy = current.model_dump()
+    legacy["predicted_mode"] = "grok_reviewed"
+    legacy["actual_mode"] = "sol_solo"
+    legacy["override_reason"] = "historical experiment override"
+    del legacy["predicted_strategy"]
+    del legacy["actual_strategy"]
+    loaded = WorkerTaskCapsule.model_validate(legacy)
+    assert loaded.predicted_strategy is ExecutionStrategy.REVIEWED
+    assert loaded.actual_strategy is ExecutionStrategy.SOLO
+    assert "predicted_strategy" in loaded.model_dump()
 
 
 def test_profile_pin_only_accepts_internal_versioned_route() -> None:
@@ -230,7 +245,7 @@ def test_capsule_repair_limit_and_override_reason() -> None:
         WorkerTaskCapsule.model_validate(data | {"maximum_repair_count": 3})
     with pytest.raises(ValidationError, match="override"):
         WorkerTaskCapsule.model_validate(
-            data | {"actual_mode": ExecutionMode.SOL_SOLO, "override_reason": None}
+            data | {"actual_strategy": ExecutionStrategy.SOLO, "override_reason": None}
         )
     with pytest.raises(ValidationError, match="repository-relative"):
         WorkerTaskCapsule.model_validate(data | {"allowed_paths": ("/etc/passwd",)})

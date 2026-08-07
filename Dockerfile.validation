@@ -5,14 +5,25 @@ FROM python:3.12.11-slim-bookworm@sha256:c00fc7b44d844b6da22861ec24af43968a5200e
 
 COPY --from=uv /uv /usr/local/bin/uv
 
+ARG GITLEAKS_VERSION=8.28.0
+ARG GITLEAKS_SHA256=a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends acl git make postgresql-15 \
+    && apt-get install --yes --no-install-recommends acl ca-certificates curl git make postgresql-15 \
+    && curl --fail --silent --show-error --location \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+        --output /tmp/gitleaks.tar.gz \
+    && echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum --check --strict \
+    && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+    && chmod 0555 /usr/local/bin/gitleaks \
+    && rm /tmp/gitleaks.tar.gz \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 COPY deploy/validation/verify_dependency_audit.py /usr/local/bin/vuzol-offline-dependency-audit
 COPY deploy/validation/run_tests.py /usr/local/bin/vuzol-offline-test
+COPY deploy/validation/secret_scan.sh /usr/local/bin/vuzol-secret-scan
 
 ENV UV_PROJECT_ENVIRONMENT=/opt/vuzol-validation \
     UV_LINK_MODE=copy \
@@ -32,6 +43,7 @@ RUN UV_NO_SYNC=0 UV_OFFLINE=0 uv sync \
         --output /opt/vuzol-validation-audit/pip-audit.json \
     && chmod 0555 /usr/local/bin/vuzol-offline-dependency-audit \
     && chmod 0555 /usr/local/bin/vuzol-offline-test \
+    && chmod 0555 /usr/local/bin/vuzol-secret-scan \
     && find /opt/vuzol-validation -type d -name __pycache__ -prune -exec rm -rf {} + \
     && chmod -R a-w /opt/vuzol-validation /opt/vuzol-validation-audit \
     && rm -rf /build /root/.cache

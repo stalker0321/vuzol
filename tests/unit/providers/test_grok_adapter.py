@@ -398,6 +398,16 @@ async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> Non
         request, configured, CancellationContext()
     )
     assert result.structured_output == manifest
+    from vuzol.providers.grok import _step09a_structured_output
+
+    assert (
+        _step09a_structured_output(
+            request, "I'll make the exact requested edit." + json.dumps(manifest)
+        )
+        == manifest
+    )
+    with pytest.raises(ProviderFailure):
+        _step09a_structured_output(request, json.dumps(manifest) + " trailing prose")
     argv = invocations[-1].argv
     assert argv[argv.index("--disallowed-tools") + 1] == "run_terminal_cmd"
     prompt = json.loads(invocations[-1].stdin)

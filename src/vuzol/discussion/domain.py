@@ -46,6 +46,7 @@ class PackageControlAction(StrEnum):
     RETRY_ITEM = "retry_item"
     SKIP_ITEM = "skip_item"
     STOP_PACKAGE = "stop_package"
+    RESTART_PACKAGE = "restart_package"
     REQUEST_REPLAN = "request_replan"
 
 
@@ -186,6 +187,40 @@ def semantic_revision_hash(body: dict[str, Any]) -> str:
     return canonical_plan_hash(projected)
 
 
+def plan_outline_hash(plan: PlanDraft) -> str:
+    """Fingerprint the stable user-visible outline, ignoring model paraphrases."""
+
+    return canonical_plan_hash(
+        {
+            "title": _normalized_outline_text(plan.title),
+            "items": [_normalized_outline_text(item.summary) for item in plan.items],
+        }
+    )
+
+
+def revision_outline_hash(body: dict[str, Any]) -> str:
+    """Project a stored revision onto the same stable outline fingerprint."""
+
+    raw_items = body.get("items")
+    if not isinstance(raw_items, list):
+        raise DomainError("invalid_plan", "stored plan body has no items")
+    summaries = [
+        _normalized_outline_text(str(item.get("summary", "")))
+        for item in raw_items
+        if isinstance(item, dict)
+    ]
+    return canonical_plan_hash(
+        {
+            "title": _normalized_outline_text(str(body.get("title", ""))),
+            "items": summaries,
+        }
+    )
+
+
+def _normalized_outline_text(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
 def require_mutable(status: WorkPackageStatus) -> None:
     if status in TERMINAL_PACKAGE_STATUSES:
         raise DomainError("terminal_package", f"package is terminal: {status.value}")
@@ -231,6 +266,10 @@ def control_transition_target(
                 }
             ),
             WorkPackageStatus.STOPPED,
+        ),
+        PackageControlAction.RESTART_PACKAGE: (
+            frozenset({WorkPackageStatus.STOPPED}),
+            WorkPackageStatus.RUNNING,
         ),
         PackageControlAction.REQUEST_REPLAN: (
             frozenset(

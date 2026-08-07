@@ -4,23 +4,23 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.config import Capability
+from vuzol.config import Capability, LaunchMode, ProviderRole
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.git import LocalGit
 from vuzol.execution.paths import worktree_branch
 from vuzol.experiments.domain import (
     BoundedRepairContext,
     ContextManifest,
-    ExecutionMode,
+    ExecutionStrategy,
     FrozenModel,
     RequiredGate,
     TaskClassification,
     WorkerTaskCapsule,
 )
-from vuzol.experiments.policy import classify_execution_mode, enforce_security_escalation
+from vuzol.experiments.policy import classify_execution_strategy, enforce_security_escalation
 from vuzol.interpretation.domain import (
     SuggestedComplexity,
     TaskAction,
@@ -51,7 +51,9 @@ class TrialSeedRequest(FrozenModel):
     base_commit: str = Field(pattern=r"^[0-9a-f]{40,64}$")
     goal: str = Field(min_length=1, max_length=4_000)
     classification: TaskClassification
-    actual_mode: ExecutionMode | None = None
+    actual_strategy: ExecutionStrategy | None = Field(
+        default=None, validation_alias=AliasChoices("actual_strategy", "actual_mode")
+    )
     override_reason: str | None = Field(default=None, max_length=1_000)
     allowed_paths: tuple[str, ...] = Field(min_length=1, max_length=100)
     relevant_symbols: tuple[str, ...] = Field(default=(), max_length=100)
@@ -97,18 +99,26 @@ async def seed_trial(
         raise ValueError("trial project and worker profile must be enabled")
     if "coding" not in profile.supported_task_types:
         raise ValueError("trial worker profile does not support coding")
-    predicted = classify_execution_mode(request.classification)
-    desired = request.actual_mode or predicted
+    predicted = classify_execution_strategy(request.classification)
+    desired = request.actual_strategy or predicted
     actual = enforce_security_escalation(request.classification, desired)
     override = request.override_reason
     if actual != predicted and not override:
-        raise ValueError("trial mode override requires an explicit reason")
+        raise ValueError("trial strategy override requires an explicit reason")
     if actual != desired:
         override = override or "security policy escalated the requested execution mode"
-    if actual is ExecutionMode.SOL_SOLO and profile.provider != "codex":
-        raise ValueError("SOL_SOLO requires the isolated Sol/Codex worker profile")
-    if actual is not ExecutionMode.SOL_SOLO and profile.provider != "grok":
-        raise ValueError("Grok execution modes require an isolated Grok worker profile")
+    required_capabilities = frozenset(
+        {Capability.REPOSITORY_READ, Capability.CODE_EDIT, Capability.GIT, Capability.PROJECT_SHELL}
+    )
+    if (
+        ProviderRole.EXECUTOR not in profile.roles
+        or profile.launch_mode is not LaunchMode.CLI
+        or not profile.sandbox_required
+        or not required_capabilities.issubset(profile.capabilities)
+    ):
+        raise ValueError(
+            "trial worker profile requires executor role, CLI sandbox, and coding capabilities"
+        )
     git = LocalGit()
     await git.require_clean_source(project.repository_path)
     actual_base = await git.resolve_commit(project.repository_path, project.default_branch)
@@ -147,7 +157,11 @@ async def seed_trial(
     )
     session.add(interpretation)
     await session.flush()
-    workflow = _trial_workflow(interpretation_uuid, request.maximum_execution_seconds)
+    workflow = _trial_workflow(
+        interpretation_uuid,
+        request.maximum_execution_seconds,
+        runtime_certification=request.runtime_certification,
+    )
     run = await materialize_run(
         session,
         task_id=task_uuid,
@@ -166,8 +180,8 @@ async def seed_trial(
         target_branch=worktree_branch(task_uuid, run.id),
         goal=request.goal,
         classification=request.classification,
-        predicted_mode=predicted,
-        actual_mode=actual,
+        predicted_strategy=predicted,
+        actual_strategy=actual,
         override_reason=override,
         allowed_paths=request.allowed_paths,
         relevant_symbols=request.relevant_symbols,
@@ -191,7 +205,7 @@ async def seed_trial(
         "experiment_id": request.experiment_id,
         "experiment_task_id": request.task_id,
         "trusted_profile_id": request.worker_profile,
-        "execution_mode": actual.value,
+        "execution_strategy": actual.value,
     }
     await session.flush()
     return SeededTrial(
@@ -270,7 +284,26 @@ def _draft(request: TrialSeedRequest) -> TaskDraft:
     )
 
 
-def _trial_workflow(interpretation_id: uuid.UUID, timeout: int) -> MaterializedWorkflow:
+def _trial_workflow(
+    interpretation_id: uuid.UUID,
+    timeout: int,
+    *,
+    runtime_certification: bool = False,
+) -> MaterializedWorkflow:
+    approval = MaterializedStep(
+        ordinal=3,
+        key="approve_result",
+        step_type="approval",
+        predecessor_ordinals=(2,),
+        queue_class=QueueClass.PRIVILEGED,
+        capabilities=frozenset({Capability.GIT}),
+        retry_class=RetryClass.NEVER,
+        idempotency_class=IdempotencyClass.IDEMPOTENT,
+        timeout_seconds=120,
+        max_attempts=2,
+        priority=100,
+        payload={"requested_action": "apply_result"},
+    )
     return MaterializedWorkflow(
         workflow_type="adaptive_worker_trial",
         version="1",
@@ -316,19 +349,6 @@ def _trial_workflow(interpretation_id: uuid.UUID, timeout: int) -> MaterializedW
                 max_attempts=1,
                 priority=100,
             ),
-            MaterializedStep(
-                ordinal=3,
-                key="approve_result",
-                step_type="approval",
-                predecessor_ordinals=(2,),
-                queue_class=QueueClass.PRIVILEGED,
-                capabilities=frozenset({Capability.GIT}),
-                retry_class=RetryClass.NEVER,
-                idempotency_class=IdempotencyClass.IDEMPOTENT,
-                timeout_seconds=120,
-                max_attempts=2,
-                priority=100,
-                payload={"requested_action": "apply_result"},
-            ),
-        ),
+        )
+        + (() if runtime_certification else (approval,)),
     )

@@ -548,7 +548,13 @@ class SandboxCodexTransport:
             return result
         except BaseException as error:
             primary = error
-            if process_id is not None and isinstance(error, RuntimeError):
+            if process_id is not None:
+                # The workflow deadline can cancel this transport at the same instant as
+                # the sandbox deadline.  CancelledError is not a RuntimeError, so limiting
+                # finalization to RuntimeError leaves an already-cleaned container recorded
+                # as running forever.  Any exception after the process row is created means
+                # the normal, evidence-backed completion path did not finish; close it as
+                # unknown so reconciliation can reason about a terminal process record.
                 await self._envelopes.fail_unknown(process_id)
             raise
         finally:
@@ -584,9 +590,11 @@ class SandboxCodexTransport:
                 raise RuntimeError("controlled proxy exited during sandbox execution")
             return await run_task
         finally:
+            if not run_task.done():
+                run_task.cancel()
             if not proxy_task.done():
                 proxy_task.cancel()
-            await asyncio.gather(proxy_task, return_exceptions=True)
+            await asyncio.gather(run_task, proxy_task, return_exceptions=True)
 
 
 def _require_invocation_identity(invocation: CodexInvocation) -> None:
@@ -639,7 +647,10 @@ def _require_provider_command(
     elif provider == "grok":
         expected = {canonical_grok_argv(model), canonical_grok_argv(model, read_only=True)}
     elif provider == "kimi":
-        expected = {canonical_kimi_argv(model), canonical_kimi_argv(model, read_only=True)}
+        expected = {
+            canonical_kimi_argv(model, reasoning_effort=effort or "low"),
+            canonical_kimi_argv(model, reasoning_effort=effort or "low", read_only=True),
+        }
     else:
         expected = None
     if expected is None or argv not in expected:

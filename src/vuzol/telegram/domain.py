@@ -45,12 +45,13 @@ class ControlUpdate(TelegramModel):
     chat_id: int
     user_id: int
     message_thread_id: int | None = Field(default=None, ge=1)
+    message_id: int | None = Field(default=None, ge=1)
     action_kind: str = Field(
         pattern=(
             r"^(approve|redo|reject|start|pause|resume|cancel|retry|"
             r"project_name_select|project_name_regenerate|"
             r"project_model_select_auto|project_model_select_connection|"
-            r"project_model_select_worker|project_model_select_effort)$"
+            r"project_model_select_worker|project_model_select_effort|secret_cancel)$"
         )
     )
     task_id: uuid.UUID | None = None
@@ -65,6 +66,7 @@ class ControlUpdate(TelegramModel):
     preference_effort: str | None = Field(
         default=None, pattern=r"^(low|medium|high|xhigh|max|ultra)$"
     )
+    secret_request_id: uuid.UUID | None = None
 
 
 class WorkPackageControlUpdate(TelegramModel):

@@ -20,6 +20,8 @@ from vuzol.config import ScopedSecretResolver, Settings
 from vuzol.telegram.domain import (
     AttachmentKind,
     ControlUpdate,
+    IngressResult,
+    IngressStatus,
     MessageUpdate,
     TelegramAttachment,
     WorkPackageControlUpdate,
@@ -31,8 +33,20 @@ from vuzol.telegram.workspace import (
 )
 
 MessageHandlerFn = Callable[[MessageUpdate], Awaitable[None]]
-ControlHandlerFn = Callable[[ControlUpdate | WorkPackageControlUpdate], Awaitable[None]]
+ControlHandlerFn = Callable[
+    [ControlUpdate | WorkPackageControlUpdate], Awaitable[IngressResult | None]
+]
 StartupHandlerFn = Callable[[Bot], Awaitable[None]]
+
+
+def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
+    if result is not None and result.status is IngressStatus.REJECTED:
+        return "Действие уже недоступно. Обновите карточку.", True
+    if result is not None and result.reason == "continue_discussion":
+        return "Напишите следующим сообщением, что хотите обсудить.", False
+    if result is not None and result.reason == "secret_cancelled":
+        return "Ссылка отменена.", False
+    return None, False
 
 
 def resolve_bot_token(
@@ -217,6 +231,22 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
             message_id=query.message.message_id,
             user_id=user.id,
             message_thread_id=message_thread_id,
+        )
+    if len(parts) == 3 and parts[:2] == ["v1", "secret_cancel"]:
+        try:
+            request_id = uuid.UUID(parts[2])
+        except ValueError:
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+            message_id=query.message.message_id,
+            action_kind="secret_cancel",
+            secret_request_id=request_id,
         )
     if len(parts) == 5 and parts[:2] == ["v1", "pn"]:
         try:
@@ -423,7 +453,11 @@ def build_long_polling_application(
     async def handle_control(update: Update, _context: object) -> None:
         converted = control_update(update, bot_id)
         if converted is not None:
-            await on_control(converted)
+            result = await on_control(converted)
+            query = update.callback_query
+            if query is not None:
+                text, show_alert = _callback_answer(result)
+                await query.answer(text=text, show_alert=show_alert)
 
     application.add_handler(CallbackQueryHandler(handle_control, pattern=r"^v1:"))
     application.add_handler(MessageHandler(filters.ALL, handle_message))

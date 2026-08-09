@@ -266,6 +266,19 @@ class ResultValidationHandler:
                 "validation_precommitted",
                 "provider changed worktree HEAD before validation",
             )
+        if not is_finalized:
+            normalized = _normalize_blank_lines_at_eof(path, inspection.changed_files)
+            if normalized:
+                inspection = await self._git.inspect(path, worktree.base_commit)
+                system_checks.append(
+                    SystemCheck(
+                        name="canonicalize-eof",
+                        command_id=f"{SYSTEM_GATE_PREFIX}canonicalize-eof",
+                        exit_code=0,
+                        duration_ms=_elapsed_ms(started),
+                        detail=f"files={len(normalized)}",
+                    )
+                )
         if not inspection.changed_files:
             raise ResultValidationError(
                 "validation_empty_change",
@@ -540,6 +553,39 @@ def resolve_trusted_gates(project: ProjectConfig) -> tuple[RequiredGate, ...]:
             )
         gates.append(RequiredGate(name=command.name, command_id=command_id))
     return tuple(gates)
+
+
+def _normalize_blank_lines_at_eof(root: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Remove only redundant terminal blank lines from changed UTF-8 text files."""
+
+    trusted = root.resolve()
+    changed: list[str] = []
+    for raw in paths:
+        relative = PurePosixPath(raw)
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        candidate = root.joinpath(*relative.parts)
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(trusted)
+        except ValueError:
+            continue
+        content = candidate.read_bytes()
+        if b"\x00" in content or not content.endswith(b"\n"):
+            continue
+        line_ending = b"\r\n" if content.endswith(b"\r\n") else b"\n"
+        body = content
+        while body.endswith(b"\n"):
+            body = body[:-1]
+            if body.endswith(b"\r"):
+                body = body[:-1]
+        normalized = body + line_ending
+        if normalized != content:
+            candidate.write_bytes(normalized)
+            changed.append(raw)
+    return tuple(changed)
 
 
 def prohibited_paths(paths: tuple[str, ...]) -> tuple[str, ...]:

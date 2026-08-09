@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from vuzol.interpretation.discussion import ControlOverrideKind
+
 MAX_CALLBACK_BYTES = 64
 _PKG32 = re.compile(r"^[0-9a-f]{32}$")
 _H8 = re.compile(r"^[0-9a-f]{8}$")
@@ -26,22 +28,37 @@ class WorkPackageCallbackError(ValueError):
 
 
 class ContinueDiscussionOverrides:
-    """Process-local, one-turn F1 overrides; restart safely clears every entry."""
+    """Process-local, one-turn intent overrides; restart safely clears every entry."""
 
     def __init__(self, *, ttl: timedelta = timedelta(minutes=20)) -> None:
         self._ttl = ttl
-        self._entries: dict[tuple[int, int, int], datetime] = {}
+        self._entries: dict[tuple[int, int, int], tuple[datetime, ControlOverrideKind]] = {}
         self._lock = asyncio.Lock()
 
-    async def arm(self, *, chat_id: int, thread_id: int, user_id: int) -> None:
+    async def arm(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        user_id: int,
+        kind: ControlOverrideKind = ControlOverrideKind.CONTINUE_DISCUSSION,
+    ) -> None:
         async with self._lock:
-            self._entries[(chat_id, thread_id, user_id)] = datetime.now(UTC) + self._ttl
+            self._entries[(chat_id, thread_id, user_id)] = (
+                datetime.now(UTC) + self._ttl,
+                kind,
+            )
 
-    async def consume(self, *, chat_id: int, thread_id: int, user_id: int) -> bool:
+    async def consume(
+        self, *, chat_id: int, thread_id: int, user_id: int
+    ) -> ControlOverrideKind | None:
         key = (chat_id, thread_id, user_id)
         async with self._lock:
-            expires_at = self._entries.pop(key, None)
-        return expires_at is not None and expires_at > datetime.now(UTC)
+            entry = self._entries.pop(key, None)
+        if entry is None:
+            return None
+        expires_at, kind = entry
+        return kind if expires_at > datetime.now(UTC) else None
 
 
 class WorkPackageCallbackKind(StrEnum):

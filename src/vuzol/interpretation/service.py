@@ -317,9 +317,9 @@ class InterpretationPipeline:
             plan_snapshot=plan_snapshot,
             edit_session=edit_context,
             control_override=(
-                ControlOverride(kind=ControlOverrideKind.CONTINUE_DISCUSSION)
-                if item.payload.get("control_override") == "continue_discussion"
-                else None
+                None
+                if item.payload.get("control_override") is None
+                else ControlOverride(kind=ControlOverrideKind(item.payload["control_override"]))
             ),
         )
         result = await interpret_discussion_with_recovery(

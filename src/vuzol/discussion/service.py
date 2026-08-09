@@ -26,19 +26,23 @@ from vuzol.discussion.domain import (
 )
 from vuzol.storage.models import (
     EditSession,
+    MaterializationLink,
     PlanRevision,
     PlanRevisionItem,
     Run,
     Step,
+    Task,
     WorkPackage,
 )
 from vuzol.storage.types import (
+    USER_TERMINAL_TASK_STATUSES,
     EditSessionStatus,
     EstimatedComplexity,
     PlanRevisionCreatedBy,
     PlanRevisionState,
     RiskLevel,
     StepStatus,
+    TaskStatus,
     WorkPackagePauseReason,
     WorkPackageStatus,
 )
@@ -614,6 +618,7 @@ class WorkPackageService:
         )
         control_transition_target(package.status, PackageControlAction.STOP_PACKAGE)
         previous = package.status
+        cancelled_task_id = await self._cancel_current_task(package, actor_id=str(user_id))
         package.status = WorkPackageStatus.STOPPED
         package.pause_reason = None
         package.version += 1
@@ -629,10 +634,52 @@ class WorkPackageService:
             payload={
                 "revision_id": str(revision.id),
                 "stopped_by_user_id": user_id,
+                "cancelled_task_id": (
+                    None if cancelled_task_id is None else str(cancelled_task_id)
+                ),
                 "status_generation": package.version,
             },
         )
         return package.version
+
+    async def _cancel_current_task(
+        self, package: WorkPackage, *, actor_id: str
+    ) -> uuid.UUID | None:
+        """Fence stop against duplicate execution before a later resume."""
+
+        if package.running_revision_id is None or package.cursor_ordinal is None:
+            return None
+        assert self._uow.session is not None
+        link = await self._uow.session.scalar(
+            select(MaterializationLink).where(
+                MaterializationLink.work_package_id == package.id,
+                MaterializationLink.plan_revision_id == package.running_revision_id,
+                MaterializationLink.ordinal == package.cursor_ordinal,
+            )
+        )
+        if link is None:
+            return None
+        task = await self._uow.session.get(Task, link.task_id, with_for_update=True)
+        if task is None or task.status in USER_TERMINAL_TASK_STATUSES:
+            return None
+        run_id = await self._uow.session.scalar(
+            select(Run.id).where(Run.task_id == task.id).order_by(Run.created_at.desc()).limit(1)
+        )
+        if run_id is None:
+            from vuzol.workflows.transitions import transition_task
+
+            await transition_task(
+                self._uow.session,
+                task,
+                TaskStatus.CANCELLED,
+                actor_type="user",
+                actor_id=actor_id,
+            )
+        else:
+            from vuzol.workflows.controls import cancel_task
+
+            await cancel_task(self._uow.session, task.id, actor_id=actor_id)
+        return task.id
 
     async def request_replan(
         self,
@@ -642,36 +689,30 @@ class WorkPackageService:
         h8: str,
         expected_status_generation: int,
         user_id: int,
-    ) -> RevisionResult:
+    ) -> int:
+        """Pause the queue until the next model-backed replacement plan is ready."""
+
         package, revision = await self._queue_control_package(
             package_id, revision_number, h8, expected_status_generation
         )
         control_transition_target(package.status, PackageControlAction.REQUEST_REPLAN)
         previous_status = package.status
-        plan = _plan_from_revision_body(revision.immutable_body)
-        result = await self.revise_draft(
-            package_id=package_id,
-            expected_status_generation=expected_status_generation,
-            plan=plan,
-            created_by=PlanRevisionCreatedBy.USER,
-            actor_type="user",
-        )
-        package.pause_reason = None
-        package.last_failure_task_id = None
+        package.status = WorkPackageStatus.PAUSED
+        package.pause_reason = WorkPackagePauseReason.REPLAN_REQUIRED
+        package.version += 1
         await self._event(
             package.id,
             WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
             "user",
             previous_state=previous_status.value,
-            new_state=WorkPackageStatus.DRAFT.value,
+            new_state=WorkPackageStatus.PAUSED.value,
             payload={
                 "previous_revision_id": str(revision.id),
-                "new_revision_id": str(result.revision_id),
                 "requested_by_user_id": user_id,
-                "status_generation": result.status_generation,
+                "status_generation": package.version,
             },
         )
-        return result
+        return package.version
 
     async def _queue_control_package(
         self,

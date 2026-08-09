@@ -85,7 +85,7 @@ def test_generation_and_terminal_mutations_fail_closed() -> None:
             PackageControlAction.RESTART_PACKAGE,
             WorkPackageStatus.RUNNING,
         ),
-        (WorkPackageStatus.RUNNING, PackageControlAction.REQUEST_REPLAN, WorkPackageStatus.DRAFT),
+        (WorkPackageStatus.RUNNING, PackageControlAction.REQUEST_REPLAN, WorkPackageStatus.PAUSED),
     ],
 )
 def test_authoritative_control_state_machine(

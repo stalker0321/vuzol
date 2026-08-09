@@ -25,6 +25,7 @@ from vuzol.storage.types import (
     TaskStatus,
 )
 from vuzol.workflows.result_approval import verified_envelope
+from vuzol.workflows.retry_policy import blocked_step_is_retryable
 from vuzol.workflows.service import (
     _enqueue_telegram_projection,
     activate_ready_steps,
@@ -270,13 +271,13 @@ async def retry_blocked_step(
     step = await session.scalar(select(Step).where(Step.id == step_id).with_for_update())
     if step is None or step.status is not StepStatus.BLOCKED:
         raise ValueError("only a blocked step can be retried")
-    provider_cancelled = step.failure_category == "cancelled" and not step.unknown_effects
-    if step.unknown_effects or (step.attempt_count >= step.max_attempts and not provider_cancelled):
+    explicit_retry = not step.unknown_effects and step.attempt_count >= step.max_attempts
+    if not blocked_step_is_retryable(step):
         raise ValueError("blocked step is not safely retryable")
-    if provider_cancelled and step.attempt_count >= step.max_attempts:
+    if explicit_retry and step.attempt_count >= step.max_attempts:
         # Each explicit user retry grants exactly one additional bounded attempt.
         step.max_attempts += 1
-    if step.executor_profile_id is not None and not provider_cancelled:
+    if step.executor_profile_id is not None and step.failure_category != "cancelled":
         step.payload = {
             **step.payload,
             "retry_failed_profile_id": step.executor_profile_id,
@@ -292,7 +293,7 @@ async def retry_blocked_step(
         await transition_run(session, run, RunStatus.RUNNING, actor_type="user", actor_id=actor_id)
         run.failure_category = None
         run.failure_summary = None
-    if task.status is TaskStatus.BLOCKED:
+    if task.status in {TaskStatus.BLOCKED, TaskStatus.QUOTA_EXHAUSTED}:
         await transition_task(
             session, task, TaskStatus.RETRYING, actor_type="user", actor_id=actor_id
         )

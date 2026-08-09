@@ -309,8 +309,8 @@ class TelegramIngressService:
         """Persist default-off discussion intake without materializing a Task."""
 
         assert topic.project_id is not None
-        force_discussion = (
-            False
+        control_override = (
+            None
             if self._continue_discussion_overrides is None
             else await self._continue_discussion_overrides.consume(
                 chat_id=update.chat_id,
@@ -385,7 +385,9 @@ class TelegramIngressService:
                     "chat_id": update.chat_id,
                     "message_thread_id": update.message_thread_id,
                     "user_id": update.user_id,
-                    "control_override": "continue_discussion" if force_discussion else None,
+                    "control_override": (
+                        None if control_override is None else control_override.value
+                    ),
                 },
             )
         return IngressResult(status=IngressStatus.HANDLED, intake_id=intake_id)

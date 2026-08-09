@@ -361,16 +361,15 @@ class PackageControlIngress:
                 revision_id = restarted_revision.id
                 code = PackageControlResultCode.APPLIED
             elif command.action is PackageControlAction.REQUEST_REPLAN:
-                replan = await service.request_replan(
+                generation = await service.request_replan(
                     package_id=command.package_id,
                     revision_number=command.plan_revision_number,
                     h8=command.h8,
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
                 )
-                generation = replan.status_generation
                 code = PackageControlResultCode.APPLIED
-                revision_id = replan.revision_id
+                revision_id = None
             else:
                 revision_id, generation = await service.validate_control_fence(
                     package_id=command.package_id,

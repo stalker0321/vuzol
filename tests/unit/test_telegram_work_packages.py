@@ -1,8 +1,11 @@
 import uuid
+from datetime import timedelta
 
 import pytest
 
+from vuzol.interpretation.discussion import ControlOverrideKind
 from vuzol.telegram.work_packages import (
+    ContinueDiscussionOverrides,
     WorkPackageCallback,
     WorkPackageCallbackError,
     WorkPackageCallbackKind,
@@ -11,6 +14,30 @@ from vuzol.telegram.work_packages import (
 )
 
 PACKAGE_ID = uuid.UUID("12345678-1234-5678-9abc-def012345678")
+
+
+@pytest.mark.anyio
+async def test_one_turn_override_preserves_kind_and_is_consumed() -> None:
+    overrides = ContinueDiscussionOverrides()
+    await overrides.arm(
+        chat_id=-100,
+        thread_id=7,
+        user_id=42,
+        kind=ControlOverrideKind.REPLAN,
+    )
+
+    assert (
+        await overrides.consume(chat_id=-100, thread_id=7, user_id=42) is ControlOverrideKind.REPLAN
+    )
+    assert await overrides.consume(chat_id=-100, thread_id=7, user_id=42) is None
+
+
+@pytest.mark.anyio
+async def test_one_turn_override_expires_fail_closed() -> None:
+    overrides = ContinueDiscussionOverrides(ttl=timedelta(microseconds=-1))
+    await overrides.arm(chat_id=-100, thread_id=7, user_id=42)
+
+    assert await overrides.consume(chat_id=-100, thread_id=7, user_id=42) is None
 
 
 @pytest.mark.parametrize("kind", list(WorkPackageCallbackKind))

@@ -225,7 +225,7 @@ class LocalGit:
         await self._run(
             worktree,
             "commit",
-            *(('--amend',) if amend else ()),
+            *(("--amend",) if amend else ()),
             "--no-verify",
             "--no-gpg-sign",
             *message_args,

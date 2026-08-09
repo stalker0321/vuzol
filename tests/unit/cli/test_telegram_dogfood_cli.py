@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 from vuzol.cli import telegram_dogfood
 from vuzol.cli.telegram_dogfood import _parse_args, _run
 from vuzol.config import TopicKind
+from vuzol.execution.git import LocalGit
 from vuzol.ops.telegram_dogfood import DogfoodFault
 
 
@@ -56,7 +58,7 @@ async def test_dogfood_cli_executes_each_operator_command(
     session = MagicMock()
 
     @asynccontextmanager
-    async def context():
+    async def context() -> AsyncIterator[MagicMock]:
         yield session
 
     factory = MagicMock()
@@ -80,9 +82,7 @@ async def test_dogfood_cli_executes_each_operator_command(
     monkeypatch.setattr(telegram_dogfood, "resolve_database_dsn", lambda _settings: "dsn")
     monkeypatch.setattr(telegram_dogfood, "create_session_factory", lambda _engine: factory)
     monkeypatch.setattr(telegram_dogfood, "require_migration_head", AsyncMock())
-    monkeypatch.setattr(
-        telegram_dogfood.LocalGit, "resolve_commit", AsyncMock(return_value="a" * 40)
-    )
+    monkeypatch.setattr(LocalGit, "resolve_commit", AsyncMock(return_value="a" * 40))
     monkeypatch.setattr(telegram_dogfood, "start_session", AsyncMock(return_value=entity_id))
     monkeypatch.setattr(telegram_dogfood, "arm_fault", AsyncMock(return_value=entity_id))
     report = SimpleNamespace(to_dict=lambda: {"session_id": str(entity_id)})

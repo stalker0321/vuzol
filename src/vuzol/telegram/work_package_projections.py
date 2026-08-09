@@ -16,6 +16,9 @@ from vuzol.storage.models import (
     ProjectDiscussionSession,
     Run,
     Step,
+    TelegramMessageLink,
+    TopicMapping,
+    TransactionalOutbox,
     UsageRecord,
     WorkPackage,
     WorkPackageOpenDetail,
@@ -34,6 +37,58 @@ WORK_PACKAGE_STATUS_ROLE = "work_package_status"
 WORK_PACKAGE_DETAIL_ROLE = "work_package_detail"
 WORK_PACKAGE_PROJECTION_DESTINATION = "work_package_projection"
 PLAN_PAGE_SIZE = 8
+
+
+async def enqueue_project_topic_status(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    thread_id: int,
+    project_id: str,
+    revision: int,
+) -> None:
+    mapping = await session.scalar(
+        select(TopicMapping).where(
+            TopicMapping.chat_id == chat_id,
+            TopicMapping.message_thread_id == thread_id,
+            TopicMapping.project_id == project_id,
+            TopicMapping.enabled.is_(True),
+        )
+    )
+    if mapping is None:
+        return
+    existing_link = await session.scalar(
+        select(TelegramMessageLink.id).where(
+            TelegramMessageLink.chat_id == chat_id,
+            TelegramMessageLink.message_thread_id == thread_id,
+            TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
+        )
+    )
+    pending_bootstrap = await session.scalar(
+        select(TransactionalOutbox.id).where(
+            TransactionalOutbox.destination == WORK_PACKAGE_PROJECTION_DESTINATION,
+            TransactionalOutbox.operation_type == "render_topic_status",
+            TransactionalOutbox.payload["chat_id"].astext == str(chat_id),
+            TransactionalOutbox.payload["thread_id"].astext == str(thread_id),
+        )
+    )
+    if existing_link is not None or pending_bootstrap is not None:
+        return
+    session.add(
+        TransactionalOutbox(
+            destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+            operation_type="render_topic_status",
+            linked_entity_type="topic_mapping",
+            linked_entity_id=mapping.id,
+            idempotency_key=f"topic-status:{chat_id}:{thread_id}:{revision}",
+            payload={
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "project_id": project_id,
+                "revision": revision,
+            },
+        )
+    )
 
 
 class WorkPackageProjectionError(RuntimeError):

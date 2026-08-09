@@ -425,6 +425,8 @@ async def prepare_delivery(
 async def _prepare_work_package_projection(
     session: AsyncSession, item: TransactionalOutbox
 ) -> PreparedDelivery:
+    if item.operation_type == "render_topic_status":
+        return await _prepare_project_topic_status(session, item)
     if item.linked_entity_type != "work_package":
         raise PermanentDeliveryError("invalid_work_package_projection_entity")
     package_id = item.linked_entity_id
@@ -436,12 +438,14 @@ async def _prepare_work_package_projection(
     }.get(item.operation_type)
     if role is None:
         raise PermanentDeliveryError("invalid_work_package_projection_operation")
-    link = await session.scalar(
-        select(TelegramMessageLink).where(
-            TelegramMessageLink.work_package_id == package_id,
-            TelegramMessageLink.message_role == role,
+    link = None
+    if role != WORK_PACKAGE_STATUS_ROLE:
+        link = await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.work_package_id == package_id,
+                TelegramMessageLink.message_role == role,
+            )
         )
-    )
     if item.operation_type == "clear_detail":
         if link is None:
             return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
@@ -477,6 +481,14 @@ async def _prepare_work_package_projection(
             card = detail_card
     except WorkPackageProjectionError as error:
         raise PermanentDeliveryError(str(error)) from error
+    if role == WORK_PACKAGE_STATUS_ROLE:
+        link = await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.chat_id == card.chat_id,
+                TelegramMessageLink.message_thread_id == card.thread_id,
+                TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
+            )
+        )
     action = DeliveryAction.SEND_STATUS if link is None else DeliveryAction.EDIT_STATUS
     return PreparedDelivery(
         action,
@@ -492,6 +504,53 @@ async def _prepare_work_package_projection(
         plan_revision_id=card.revision_id,
         control_status_generation=card.status_generation,
         pin_after_send=role == WORK_PACKAGE_STATUS_ROLE and link is None,
+    )
+
+
+async def _prepare_project_topic_status(
+    session: AsyncSession, item: TransactionalOutbox
+) -> PreparedDelivery:
+    if item.linked_entity_type != "topic_mapping":
+        raise PermanentDeliveryError("invalid_topic_status_entity")
+    mapping = await session.get(TopicMapping, item.linked_entity_id)
+    if mapping is None or not mapping.enabled or mapping.project_id is None:
+        raise PermanentDeliveryError("topic_status_mapping_missing")
+    try:
+        chat_id = int(item.payload["chat_id"])
+        thread_id = int(item.payload["thread_id"])
+        revision = int(item.payload["revision"])
+        project_id = str(item.payload["project_id"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise PermanentDeliveryError("invalid_topic_status_payload") from error
+    if (
+        mapping.chat_id != chat_id
+        or mapping.message_thread_id != thread_id
+        or mapping.project_id != project_id
+    ):
+        raise PermanentDeliveryError("topic_status_mapping_mismatch")
+    link = await session.scalar(
+        select(TelegramMessageLink).where(
+            TelegramMessageLink.chat_id == chat_id,
+            TelegramMessageLink.message_thread_id == thread_id,
+            TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
+        )
+    )
+    if link is not None and link.projection_revision >= revision:
+        return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
+    return PreparedDelivery(
+        DeliveryAction.SEND_STATUS if link is None else DeliveryAction.EDIT_STATUS,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        html=(
+            f"<b>{telegram_html(project_id)}</b>\n"
+            "Статус: <b>Обрабатываю сообщение…</b>"
+        ),
+        revision=revision,
+        link_id=None if link is None else link.id,
+        message_id=None if link is None else link.message_id,
+        message_role=WORK_PACKAGE_STATUS_ROLE,
+        pin_after_send=link is None,
+        project_id=project_id,
     )
 
 
@@ -1026,7 +1085,8 @@ class TelegramDeliveryService:
                 assert prepared.revision is not None
                 assert confirmed_message_id is not None
                 if (
-                    prepared.message_role != PROJECT_STATUS_DASHBOARD_ROLE
+                    prepared.message_role
+                    not in {PROJECT_STATUS_DASHBOARD_ROLE, WORK_PACKAGE_STATUS_ROLE}
                     and prepared.work_package_id is None
                 ):
                     assert prepared.task_id is not None
@@ -1052,7 +1112,11 @@ class TelegramDeliveryService:
                 if link is None:
                     raise LeaseLost(f"Telegram projection disappeared: {prepared.link_id}")
                 link.projection_revision = prepared.revision
-                if prepared.work_package_id is not None:
+                if prepared.message_role == WORK_PACKAGE_STATUS_ROLE:
+                    link.work_package_id = prepared.work_package_id
+                    link.plan_revision_id = prepared.plan_revision_id
+                    link.control_status_generation = prepared.control_status_generation
+                elif prepared.work_package_id is not None:
                     link.plan_revision_id = prepared.plan_revision_id
                     link.control_status_generation = prepared.control_status_generation
             elif prepared.action == DeliveryAction.SEND_CLARIFICATION:

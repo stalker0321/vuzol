@@ -129,6 +129,16 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
     assert client.pinned == []
     assert link.control_status_generation == 1 and link.plan_revision_id == result.revision_id
     assert outbox is not None and outbox.status is DeliveryStatus.DELIVERED
+    async with factory.begin() as session:
+        session.add(
+            TelegramMessageLink(
+                chat_id=-100,
+                message_thread_id=10,
+                message_id=700,
+                message_role=WORK_PACKAGE_STATUS_ROLE,
+                projection_revision=99,
+            )
+        )
 
     data = encode_work_package_callback(
         WorkPackageCallback(
@@ -201,8 +211,8 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
                 TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
             )
         )
-    assert status_link is not None and status_link.message_id == 702
-    assert client.pinned == [(-100, 702)]
+    assert status_link is not None and status_link.message_id == 700
+    assert client.pinned == []
     await engine.dispose()
 
 
@@ -285,6 +295,7 @@ async def test_non_mutating_detail_edit_continue_and_clear_lifecycle(
     close_data = next(data for row in detail_keyboard for label, data in row if label == "Закрыть")
     closed = await press(63, "wp-close-1", 802, close_data)
     assert closed.status is IngressStatus.HANDLED and closed.reason == "clear_detail"
+    assert await delivery.deliver_one()
     assert await delivery.deliver_one()
     assert client.deleted == [(-100, 802)]
     async with factory() as session:

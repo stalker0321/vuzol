@@ -82,7 +82,8 @@ async def test_dogfood_cli_executes_each_operator_command(
     monkeypatch.setattr(telegram_dogfood, "resolve_database_dsn", lambda _settings: "dsn")
     monkeypatch.setattr(telegram_dogfood, "create_session_factory", lambda _engine: factory)
     monkeypatch.setattr(telegram_dogfood, "require_migration_head", AsyncMock())
-    monkeypatch.setattr(LocalGit, "resolve_commit", AsyncMock(return_value="a" * 40))
+    resolve_commit = AsyncMock(return_value="a" * 40)
+    monkeypatch.setattr(LocalGit, "resolve_commit", resolve_commit)
     monkeypatch.setattr(telegram_dogfood, "start_session", AsyncMock(return_value=entity_id))
     monkeypatch.setattr(telegram_dogfood, "arm_fault", AsyncMock(return_value=entity_id))
     report = SimpleNamespace(to_dict=lambda: {"session_id": str(entity_id)})
@@ -105,6 +106,8 @@ async def test_dogfood_cli_executes_each_operator_command(
 
     assert await _run(_parse_args(args)) == 0
     assert str(entity_id) in capsys.readouterr().out
+    if command == "start":
+        resolve_commit.assert_awaited_once_with(telegram_dogfood.SOURCE_CHECKOUT, "HEAD")
     engine.dispose.assert_awaited_once()
 
 

@@ -7,6 +7,7 @@ import asyncio
 import getpass
 import json
 import uuid
+from pathlib import Path
 
 from vuzol.config import TopicKind, get_runtime_configuration
 from vuzol.execution.git import LocalGit
@@ -19,6 +20,8 @@ from vuzol.ops.telegram_dogfood import (
 )
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
+
+SOURCE_CHECKOUT = Path(__file__).resolve().parents[3]
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -55,9 +58,7 @@ async def _run(args: argparse.Namespace) -> int:
             )
             if len(topics) != 1:
                 raise ValueError("dogfood project must have exactly one enabled project topic")
-            git_sha = await LocalGit().resolve_commit(
-                project.repository_path, project.default_branch
-            )
+            git_sha = await LocalGit().resolve_commit(SOURCE_CHECKOUT, "HEAD")
             async with factory.begin() as session:
                 session_id = await start_session(
                     session,

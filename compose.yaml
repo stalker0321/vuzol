@@ -111,7 +111,10 @@ services:
   interpreter:
     profiles: [interpretation]
     image: vuzol:local
-    build: .
+    build:
+      context: .
+      args:
+        VUZOL_BUILD_GIT_SHA: ${VUZOL_BUILD_GIT_SHA:-unknown}
     command: ["vuzol-interpreter"]
     user: "${VUZOL_RUNTIME_UID:-1000}:10001"
     env_file:

@@ -44,6 +44,7 @@ from vuzol.telegram.work_package_projections import (
     WORK_PACKAGE_DETAIL_ROLE,
     WORK_PACKAGE_PLAN_ROLE,
     WORK_PACKAGE_PROJECTION_DESTINATION,
+    WORK_PACKAGE_STATUS_ROLE,
 )
 from vuzol.telegram.work_packages import (
     ContinueDiscussionOverrides,
@@ -125,7 +126,7 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
         )
         outbox = await session.get(TransactionalOutbox, outbox_id)
     assert link is not None and link.message_id == 701
-    assert client.pinned == [(-100, 701)]
+    assert client.pinned == []
     assert link.control_status_generation == 1 and link.plan_revision_id == result.revision_id
     assert outbox is not None and outbox.status is DeliveryStatus.DELIVERED
 
@@ -190,8 +191,18 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
     async with factory() as session:
         package = await session.get(WorkPackage, result.package_id)
         task_count = await session.scalar(select(func.count()).select_from(Task))
-    assert package is not None and package.status is WorkPackageStatus.APPROVED
-    assert package.version == 2 and task_count == 0
+    assert package is not None and package.status is WorkPackageStatus.RUNNING
+    assert package.version == 3 and task_count == 1
+    assert await delivery.deliver_one()
+    async with factory() as session:
+        status_link = await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.work_package_id == result.package_id,
+                TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
+            )
+        )
+    assert status_link is not None and status_link.message_id == 702
+    assert client.pinned == [(-100, 702)]
     await engine.dispose()
 
 

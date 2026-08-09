@@ -273,13 +273,21 @@ class PackageControlIngress:
                 return _duplicate_result(persisted, command_payload, command)
             service = WorkPackageService(uow)
             if command.action is PackageControlAction.APPROVE:
-                generation = await service.approve(
+                approved_generation = await service.approve(
                     package_id=command.package_id,
                     revision_number=command.plan_revision_number,
                     h8=command.h8,
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
                 )
+                sequence = await WorkPackageSequencer(uow).start(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=approved_generation,
+                    user_id=command.user_id,
+                )
+                generation = sequence.status_generation
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.DISCARD:
@@ -388,7 +396,12 @@ class PackageControlIngress:
             if code is PackageControlResultCode.APPLIED:
                 await uow.outbox.enqueue(
                     destination="work_package_projection",
-                    operation_type="render_plan",
+                    operation_type=(
+                        "render_plan"
+                        if command.action
+                        in {PackageControlAction.APPROVE, PackageControlAction.DISCARD}
+                        else "render_status"
+                    ),
                     entity_type="work_package",
                     entity_id=command.package_id,
                     idempotency_key=f"wp:projection:control:{action_id}:{generation}",

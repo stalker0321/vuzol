@@ -282,20 +282,8 @@ async def test_control_ingress_is_authorized_idempotent_and_starts_atomically(
     applied = await ingress.apply(approve)
     duplicate = await ingress.apply(approve)
     assert applied.code is PackageControlResultCode.APPLIED
-    assert applied.status_generation == 2
+    assert applied.status_generation == 3
     assert duplicate.duplicate and duplicate.action_id == applied.action_id
-
-    start = await ingress.apply(
-        command(
-            action=PackageControlAction.START,
-            package_id=package_id,
-            content_hash=content_hash,
-            generation=2,
-            key="start-1",
-        )
-    )
-    assert start.code is PackageControlResultCode.APPLIED
-    assert start.status_generation == 3
     with pytest.raises(DomainError) as conflict:
         await ingress.apply(
             command(
@@ -325,7 +313,7 @@ async def test_control_ingress_is_authorized_idempotent_and_starts_atomically(
             )
             == 1
         )
-        assert await session.scalar(select(func.count()).select_from(TelegramControlAction)) == 2
+        assert await session.scalar(select(func.count()).select_from(TelegramControlAction)) == 1
 
     with pytest.raises(DomainError) as unauthorized:
         await ingress.apply(
@@ -380,9 +368,9 @@ async def test_control_ingress_concurrent_button_epoch_has_one_effect(
     assert sorted(outcomes) == ["applied", "stale_generation"]
     async with factory() as session:
         package = await session.get(WorkPackage, package_id)
-        assert package is not None and package.version == 2
-        assert package.status is WorkPackageStatus.APPROVED
-        assert await session.scalar(select(func.count()).select_from(Task)) == 0
+        assert package is not None and package.version == 3
+        assert package.status is WorkPackageStatus.RUNNING
+        assert await session.scalar(select(func.count()).select_from(Task)) == 1
     await engine.dispose()
 
 

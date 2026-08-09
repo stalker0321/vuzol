@@ -31,7 +31,10 @@ from vuzol.storage.types import (
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram.work_package_projections import build_work_package_plan_card
+from vuzol.telegram.work_package_projections import (
+    build_work_package_plan_card,
+    build_work_package_status_card,
+)
 from vuzol.workflows.service import _enqueue_work_package_terminal
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
@@ -156,27 +159,6 @@ async def test_default_off_composed_discussion_to_sequential_completion(
             key="approve",
         )
     )
-    started = await ingress.apply(
-        _control(
-            PackageControlAction.START,
-            package_id=created.package_id,
-            revision_number=2,
-            content_hash=revised.content_hash,
-            generation=approved.status_generation,
-            key="start",
-        )
-    )
-    with pytest.raises(DomainError, match="stale_generation"):
-        await ingress.apply(
-            _control(
-                PackageControlAction.START,
-                package_id=created.package_id,
-                revision_number=2,
-                content_hash=revised.content_hash,
-                generation=approved.status_generation,
-                key="stale-start",
-            )
-        )
 
     async with factory() as session:
         card = await build_work_package_plan_card(session, created.package_id)
@@ -212,9 +194,9 @@ async def test_default_off_composed_discussion_to_sequential_completion(
     ).process_one()
     async with factory() as session:
         package = await session.get(WorkPackage, created.package_id)
-        final_card = await build_work_package_plan_card(session, created.package_id)
+        final_card = await build_work_package_status_card(session, created.package_id)
         assert package is not None and package.status is WorkPackageStatus.COMPLETED
-        assert package.version > started.status_generation
+        assert package.version > approved.status_generation
         assert "Завершён" in final_card.html
         assert await session.scalar(select(func.count()).select_from(Task)) == 2
     await engine.dispose()

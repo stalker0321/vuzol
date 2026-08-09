@@ -31,7 +31,7 @@ from vuzol.storage.types import (
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.work_package_projections import (
     _work_package_token_totals,
-    build_work_package_plan_card,
+    build_work_package_status_card,
 )
 from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.service import materialize_run
@@ -91,7 +91,7 @@ async def test_sequencer_is_one_ahead_idempotent_and_completes(postgres_dsn: str
         )
     assert first.ordinal == 1 and first.task_id is not None
     async with factory() as session:
-        status_card = await build_work_package_plan_card(session, created.package_id)
+        status_card = await build_work_package_status_card(session, created.package_id)
     assert status_card.html.startswith("<b>1/2 выполняется</b>\nImplement step 1")
 
     async with factory.begin() as session:

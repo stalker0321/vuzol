@@ -30,6 +30,7 @@ from vuzol.telegram.work_packages import (
 from vuzol.workflows.retry_policy import blocked_step_is_retryable
 
 WORK_PACKAGE_PLAN_ROLE = "work_package_plan"
+WORK_PACKAGE_STATUS_ROLE = "work_package_status"
 WORK_PACKAGE_DETAIL_ROLE = "work_package_detail"
 WORK_PACKAGE_PROJECTION_DESTINATION = "work_package_projection"
 PLAN_PAGE_SIZE = 8
@@ -71,7 +72,11 @@ def _callback(
 
 
 async def build_work_package_plan_card(
-    session: AsyncSession, package_id: uuid.UUID, *, page: int = 1
+    session: AsyncSession,
+    package_id: uuid.UUID,
+    *,
+    page: int = 1,
+    _status_card: bool = False,
 ) -> WorkPackageCard:
     if page < 1 or page > 999:
         raise WorkPackageProjectionError("invalid_page")
@@ -122,7 +127,7 @@ async def build_work_package_plan_card(
         progress = f"{ordinal}/{len(items)} {action}"
         if worker is not None:
             progress += f" | {worker}"
-    if progress is not None:
+    if _status_card and progress is not None:
         current_item = next(
             (item for item in items if item.ordinal == (package.cursor_ordinal or 1)), None
         )
@@ -143,7 +148,7 @@ async def build_work_package_plan_card(
             f"Статус: <b>{status}</b> · версия плана {revision.revision_number}",
             "",
         ]
-    if package.status is WorkPackageStatus.PAUSED:
+    if _status_card and package.status is WorkPackageStatus.PAUSED:
         reason_key = "unknown" if package.pause_reason is None else package.pause_reason.value
         reason = {
             "item_failed": "пункт завершился ошибкой",
@@ -160,9 +165,10 @@ async def build_work_package_plan_card(
                 "",
             )
         )
-    lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
+    if not _status_card:
+        lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
     tokens = await _work_package_token_totals(session, package.id)
-    if any(tokens):
+    if _status_card and any(tokens):
         lines.extend(
             (
                 "",
@@ -170,23 +176,26 @@ async def build_work_package_plan_card(
                 f"{_format_count(tokens[2])} кэш",
             )
         )
-    if page_count > 1:
+    if not _status_card and page_count > 1:
         lines.extend(("", f"Страница {page}/{page_count}"))
     html = "\n".join(lines)
     if len(html) > TELEGRAM_TEXT_LIMIT:
         raise WorkPackageProjectionError("plan_card_too_long")
     buttons: list[tuple[tuple[str, str], ...]] = []
-    for offset in range(0, len(visible), 4):
-        buttons.append(
-            tuple(
-                (
-                    str(item.ordinal),
-                    _callback(WorkPackageCallbackKind.OPEN_ITEM, package, revision, item.ordinal),
+    if not _status_card:
+        for offset in range(0, len(visible), 4):
+            buttons.append(
+                tuple(
+                    (
+                        str(item.ordinal),
+                        _callback(
+                            WorkPackageCallbackKind.OPEN_ITEM, package, revision, item.ordinal
+                        ),
+                    )
+                    for item in visible[offset : offset + 4]
                 )
-                for item in visible[offset : offset + 4]
             )
-        )
-    if page_count > 1:
+    if not _status_card and page_count > 1:
         navigation: list[tuple[str, str]] = []
         if page > 1:
             navigation.append(
@@ -198,15 +207,12 @@ async def build_work_package_plan_card(
             )
         buttons.append(tuple(navigation))
     controls: list[tuple[str, str]] = []
-    if package.status is WorkPackageStatus.DRAFT:
+    if not _status_card and package.status is WorkPackageStatus.DRAFT:
         controls.append(
             ("Принять план", _callback(WorkPackageCallbackKind.APPROVE, package, revision))
         )
         controls.append(("Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision)))
-    elif package.status is WorkPackageStatus.APPROVED:
-        controls.append(("Начать", _callback(WorkPackageCallbackKind.START, package, revision)))
-        controls.append(("Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision)))
-    elif package.status is WorkPackageStatus.RUNNING:
+    elif _status_card and package.status is WorkPackageStatus.RUNNING:
         controls.append(
             (
                 "Завершить цепочку",
@@ -219,7 +225,7 @@ async def build_work_package_plan_card(
                 _callback(WorkPackageCallbackKind.REQUEST_REPLAN, package, revision),
             )
         )
-    elif package.status is WorkPackageStatus.PAUSED:
+    elif _status_card and package.status is WorkPackageStatus.PAUSED:
         if await _package_retry_available(session, package):
             controls.append(
                 ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
@@ -237,7 +243,7 @@ async def build_work_package_plan_card(
                 ),
             )
         )
-    elif (
+    elif _status_card and (
         package.status is WorkPackageStatus.STOPPED and package.approved_revision_id == revision.id
     ):
         controls.append(
@@ -258,11 +264,17 @@ async def build_work_package_plan_card(
         status_generation=package.version,
         chat_id=discussion.chat_id,
         thread_id=discussion.message_thread_id,
-        role=WORK_PACKAGE_PLAN_ROLE,
+        role=WORK_PACKAGE_STATUS_ROLE if _status_card else WORK_PACKAGE_PLAN_ROLE,
         html=html,
         callback_buttons=tuple(buttons),
         page=page,
     )
+
+
+async def build_work_package_status_card(
+    session: AsyncSession, package_id: uuid.UUID
+) -> WorkPackageCard:
+    return await build_work_package_plan_card(session, package_id, _status_card=True)
 
 
 def _route_provider_label(route: object) -> str | None:

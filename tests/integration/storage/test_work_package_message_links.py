@@ -96,3 +96,44 @@ async def test_message_link_rejects_incomplete_or_nonpositive_control_fence(
                 )
             )
     await engine.dispose()
+
+
+async def test_topic_allows_only_one_work_package_status_link(postgres_dsn: str) -> None:
+    engine, factory = storage(postgres_dsn)
+    async with UnitOfWork(factory) as uow:
+        await uow.telegram_links.add(
+            TelegramMessageLink(
+                chat_id=-1001,
+                message_thread_id=93,
+                message_id=701,
+                message_role="work_package_status",
+            )
+        )
+        await uow.telegram_links.add(
+            TelegramMessageLink(
+                chat_id=-1001,
+                message_thread_id=93,
+                message_id=702,
+                message_role="work_package_plan",
+            )
+        )
+        await uow.telegram_links.add(
+            TelegramMessageLink(
+                chat_id=-1001,
+                message_thread_id=94,
+                message_id=703,
+                message_role="work_package_status",
+            )
+        )
+
+    with pytest.raises(IntegrityError):
+        async with UnitOfWork(factory) as uow:
+            await uow.telegram_links.add(
+                TelegramMessageLink(
+                    chat_id=-1001,
+                    message_thread_id=93,
+                    message_id=704,
+                    message_role="work_package_status",
+                )
+            )
+    await engine.dispose()

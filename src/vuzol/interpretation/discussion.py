@@ -17,6 +17,7 @@ DISCUSSION_SCHEMA_VERSION = "discussion-interpret-v1"
 DISCUSSION_PROMPT_VERSION = "project-discussion-v1"
 DISCUSSION_CLASSIFY_DESTINATION = "discussion_classify"
 DISCUSSION_REPLY_DESTINATION = "discussion_reply"
+DISCUSSION_THINKING_ROLE = "discussion_thinking"
 DISCUSSION_CONFIDENCE_FLOOR = 0.55
 
 

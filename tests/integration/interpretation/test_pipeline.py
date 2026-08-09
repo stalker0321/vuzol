@@ -13,6 +13,7 @@ from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
 from vuzol.interpretation.discussion import (
     DISCUSSION_REPLY_DESTINATION,
+    DISCUSSION_THINKING_ROLE,
     DiscussionInterpretation,
     DiscussionInterpretRequest,
 )
@@ -38,6 +39,7 @@ from vuzol.storage.models import (
     Step,
     Task,
     TelegramIntakeMessage,
+    TelegramMessageLink,
     TopicMapping,
     TransactionalOutbox,
     WorkPackage,
@@ -54,9 +56,10 @@ from vuzol.storage.types import (
     TaskStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
+from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import AttachmentKind, MessageUpdate, TelegramAttachment
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import build_project_status_dashboard
+from vuzol.telegram.projections import FakeTelegramClient, build_project_status_dashboard
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
 pytestmark = pytest.mark.postgresql
@@ -215,6 +218,20 @@ def test_discussion_runtime_hands_user_turn_to_hidden_project_agent(
         assert first.task_id is None
         assert await pipeline.process_one()
 
+        client = FakeTelegramClient(next_message_id=900)
+        delivery = TelegramDeliveryService(
+            factory,
+            client,
+            owner="discussion-thinking-delivery",
+            lease_seconds=30,
+            max_attempts=3,
+            retry_min_seconds=1,
+            retry_max_seconds=10,
+        )
+        assert await delivery.deliver_one()
+        assert await delivery.deliver_one()
+        assert any("Думаю" in message[2] for message in client.sent)
+
         assert len(discussion.requests) == 1
         assert discussion.requests[0].memory_pack is not None
         assert discussion.requests[0].memory_pack.turns == ()
@@ -253,6 +270,19 @@ def test_discussion_runtime_hands_user_turn_to_hidden_project_agent(
                 )
             ).all()
             assert replies == []
+            thinking_outbox = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.payload["role"].as_string() == DISCUSSION_THINKING_ROLE
+                )
+            )
+            thinking_link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.message_role.like("thinking:%")
+                )
+            )
+            assert thinking_outbox is not None
+            assert thinking_link is not None and thinking_link.message_id == 901
+            thinking_message_id = thinking_link.message_id
 
         execute_step = next(step for step in steps if step.step_type == "execute_agent")
         deliver_step = next(step for step in steps if step.step_type == "deliver_discussion_reply")
@@ -289,6 +319,9 @@ def test_discussion_runtime_hands_user_turn_to_hidden_project_agent(
             CancellationContext(),
         )
         assert outcome.result["assistant_turn_id"]
+        assert await delivery.deliver_one()
+        assert client.edited[-1][1] == thinking_message_id
+        assert "Предлагаю выбирать нужное количество" in client.edited[-1][2]
         cancelled = CancellationContext()
         cancelled.request()
         cancelled_outcome = await DeliverDiscussionReplyHandler(factory).execute(

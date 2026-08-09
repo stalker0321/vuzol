@@ -13,7 +13,10 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Tele
 
 from vuzol.config import TelegramDogfoodSettings, TopicKind, TopicRegistry
 from vuzol.config.registries import ProfileRegistry, ProjectRegistry
-from vuzol.interpretation.discussion import DISCUSSION_REPLY_DESTINATION
+from vuzol.interpretation.discussion import (
+    DISCUSSION_REPLY_DESTINATION,
+    DISCUSSION_THINKING_ROLE,
+)
 from vuzol.observability import get_logger
 from vuzol.ops.telegram_dogfood import DogfoodFault, consume_fault
 from vuzol.storage.errors import LeaseLost
@@ -218,6 +221,8 @@ async def prepare_delivery(
         )
     if item.payload.get("role") == DISCUSSION_REPLY_DESTINATION:
         return await _prepare_discussion_reply(session, item)
+    if item.payload.get("role") == DISCUSSION_THINKING_ROLE:
+        return await _prepare_discussion_thinking(session, item)
     if item.linked_entity_type == "project_naming":
         naming = await session.get(ProjectNamingRequest, item.linked_entity_id)
         if naming is None:
@@ -592,6 +597,32 @@ async def _prepare_discussion_reply(
     discussion = await session.get(ProjectDiscussionSession, turn.session_id)
     if discussion is None or str(discussion.id) != item.payload.get("session_id"):
         raise PermanentDeliveryError("discussion_reply_session_mismatch")
+    source_turn_id = item.payload.get("source_turn_id")
+    thinking_link = None
+    if isinstance(source_turn_id, str):
+        try:
+            thinking_role = _discussion_thinking_message_role(uuid.UUID(source_turn_id))
+        except ValueError:
+            thinking_role = ""
+        if thinking_role:
+            thinking_link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.chat_id == discussion.chat_id,
+                    TelegramMessageLink.message_thread_id == discussion.message_thread_id,
+                    TelegramMessageLink.message_role == thinking_role,
+                )
+            )
+    if thinking_link is not None:
+        return PreparedDelivery(
+            DeliveryAction.EDIT_MESSAGE,
+            chat_id=discussion.chat_id,
+            thread_id=discussion.message_thread_id,
+            html=telegram_markdown_html(turn.content),
+            fallback_html=telegram_html(turn.content),
+            link_id=thinking_link.id,
+            message_id=thinking_link.message_id,
+            message_role=DISCUSSION_REPLY_DESTINATION,
+        )
     return PreparedDelivery(
         DeliveryAction.SEND_DISCUSSION_REPLY,
         chat_id=discussion.chat_id,
@@ -600,6 +631,44 @@ async def _prepare_discussion_reply(
         fallback_html=telegram_html(turn.content),
         message_role=DISCUSSION_REPLY_DESTINATION,
     )
+
+
+async def _prepare_discussion_thinking(
+    session: AsyncSession, item: TransactionalOutbox
+) -> PreparedDelivery:
+    if item.linked_entity_type != "conversation_turn":
+        raise PermanentDeliveryError("invalid_discussion_thinking_entity")
+    turn = await session.get(ConversationTurn, item.linked_entity_id)
+    if turn is None or turn.role is not ConversationTurnRole.USER:
+        raise PermanentDeliveryError("discussion_thinking_turn_missing")
+    discussion = await session.get(ProjectDiscussionSession, turn.session_id)
+    if discussion is None or str(discussion.id) != item.payload.get("session_id"):
+        raise PermanentDeliveryError("discussion_thinking_session_mismatch")
+    role = _discussion_thinking_message_role(turn.id)
+    existing = await session.scalar(
+        select(TelegramMessageLink).where(
+            TelegramMessageLink.chat_id == discussion.chat_id,
+            TelegramMessageLink.message_thread_id == discussion.message_thread_id,
+            TelegramMessageLink.message_role == role,
+        )
+    )
+    if existing is not None:
+        return PreparedDelivery(
+            DeliveryAction.NOOP,
+            chat_id=discussion.chat_id,
+            thread_id=discussion.message_thread_id,
+        )
+    return PreparedDelivery(
+        DeliveryAction.SEND_DISCUSSION_REPLY,
+        chat_id=discussion.chat_id,
+        thread_id=discussion.message_thread_id,
+        html="<i>Думаю…</i>",
+        message_role=role,
+    )
+
+
+def _discussion_thinking_message_role(turn_id: uuid.UUID) -> str:
+    return f"thinking:{turn_id.hex}"
 
 
 async def _resolve_system_trace_thread(

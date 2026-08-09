@@ -19,6 +19,7 @@ from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.discussion import (
     DISCUSSION_CLASSIFY_DESTINATION,
     DISCUSSION_REPLY_DESTINATION,
+    DISCUSSION_THINKING_ROLE,
     ControlOverride,
     ControlOverrideKind,
     DiscussionInterpretation,
@@ -398,6 +399,17 @@ class InterpretationPipeline:
                 InteractionMode.QUERY_ONLY,
             }:
                 assert uow.session is not None
+                await uow.outbox.enqueue(
+                    destination="telegram",
+                    operation_type="send_message",
+                    entity_type="conversation_turn",
+                    entity_id=user_turn_id,
+                    idempotency_key=f"{DISCUSSION_THINKING_ROLE}:{user_turn_id}",
+                    payload={
+                        "role": DISCUSSION_THINKING_ROLE,
+                        "session_id": str(session_id),
+                    },
+                )
                 fresh_memory = await memory.load_context(session_id=session_id)
                 await schedule_discussion_agent(
                     uow.session,

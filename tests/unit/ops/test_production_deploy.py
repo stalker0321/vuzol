@@ -168,6 +168,11 @@ def test_attestation_rejects_image_service_and_container_mismatch(tmp_path: Path
     deployment = config(tmp_path)
     runner = FakeRunner(deployment.source, deployment.deployed)
     deployer = ProductionDeployer(deployment, runner)
+    runner.current = NEW
+    with pytest.raises(DeploymentError, match="checkout SHA mismatch"):
+        deployer._attest(OLD)
+
+    runner.current = OLD
     runner.image = NEW
     with pytest.raises(DeploymentError, match="image SHA mismatch"):
         deployer._attest(OLD)

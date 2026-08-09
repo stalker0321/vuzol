@@ -23,6 +23,7 @@ from vuzol.storage.models import Event, PlanRevision, PlanRevisionItem, Task, Wo
 from vuzol.storage.types import (
     PlanRevisionCreatedBy,
     PlanRevisionState,
+    WorkPackagePauseReason,
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -142,7 +143,7 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
         _command(PackageControlAction.REQUEST_REPLAN, created, 5, "replan-1")
     )
     assert replanned.code is PackageControlResultCode.APPLIED
-    assert replanned.status_generation == 6 and replanned.revision_id is not None
+    assert replanned.status_generation == 6 and replanned.revision_id is None
 
     async with factory() as session:
         package = await session.get(WorkPackage, created.package_id)
@@ -173,16 +174,11 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
         )
         task_count = await session.scalar(select(func.count()).select_from(Task))
     assert package is not None
-    assert package.status is WorkPackageStatus.DRAFT and package.version == 6
+    assert package.status is WorkPackageStatus.PAUSED and package.version == 6
+    assert package.pause_reason is WorkPackagePauseReason.REPLAN_REQUIRED
     assert package.cursor_ordinal == 2
-    assert [revision.state for revision in revisions] == [
-        PlanRevisionState.SUPERSEDED,
-        PlanRevisionState.DRAFT,
-    ]
-    assert len(revision_items) == 4
-    assert {item.item_id for item in revision_items[:2]} == {
-        item.item_id for item in revision_items[2:]
-    }
+    assert [revision.state for revision in revisions] == [PlanRevisionState.APPROVED]
+    assert len(revision_items) == 2
     assert {
         "work_package.paused",
         "work_package.item_skipped",

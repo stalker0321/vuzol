@@ -13,6 +13,7 @@ from vuzol.discussion.application import (
 )
 from vuzol.discussion.domain import DomainError, PackageControlAction
 from vuzol.discussion.service import WorkPackageService
+from vuzol.interpretation.discussion import ControlOverrideKind
 from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.naming import ProjectNamingControlError, ProjectNamingController
 from vuzol.security.secret_ingress import cancel_request
@@ -45,7 +46,6 @@ _MUTATING_PACKAGE_KINDS = {
     WorkPackageCallbackKind.SKIP_ITEM: PackageControlAction.SKIP_ITEM,
     WorkPackageCallbackKind.STOP_PACKAGE: PackageControlAction.STOP_PACKAGE,
     WorkPackageCallbackKind.RESTART_PACKAGE: PackageControlAction.RESTART_PACKAGE,
-    WorkPackageCallbackKind.REQUEST_REPLAN: PackageControlAction.REQUEST_REPLAN,
 }
 
 
@@ -335,6 +335,16 @@ class TelegramControlService:
                         edit_session_id=edit_id, user_id=update.user_id
                     )
                 operation = "continue_discussion"
+            elif callback.kind is WorkPackageCallbackKind.REQUEST_REPLAN:
+                await service.request_replan(
+                    package_id=callback.package_id,
+                    revision_number=callback.revision_number,
+                    h8=callback.h8,
+                    expected_status_generation=generation,
+                    user_id=update.user_id,
+                )
+                operation = "request_replan"
+                enqueue_projection = True
             else:
                 raise DomainError("unsupported_control")
             if enqueue_projection:
@@ -350,7 +360,7 @@ class TelegramControlService:
                 inbox_id, entity_type="work_package", entity_id=callback.package_id
             )
         if (
-            operation == "continue_discussion"
+            operation in {"continue_discussion", "request_replan"}
             and self._continue_discussion_overrides is not None
             and update.message_thread_id is not None
         ):
@@ -358,5 +368,10 @@ class TelegramControlService:
                 chat_id=update.chat_id,
                 thread_id=update.message_thread_id,
                 user_id=update.user_id,
+                kind=(
+                    ControlOverrideKind.REPLAN
+                    if operation == "request_replan"
+                    else ControlOverrideKind.CONTINUE_DISCUSSION
+                ),
             )
         return IngressResult(status=IngressStatus.HANDLED, reason=operation)

@@ -15,17 +15,19 @@ from vuzol.storage.models import (
     PlanRevisionItem,
     ProjectDiscussionSession,
     Run,
+    Step,
     UsageRecord,
     WorkPackage,
     WorkPackageOpenDetail,
 )
-from vuzol.storage.types import WorkPackagePauseReason, WorkPackageStatus
+from vuzol.storage.types import StepStatus, WorkPackagePauseReason, WorkPackageStatus
 from vuzol.telegram.projections import TELEGRAM_TEXT_LIMIT, telegram_html
 from vuzol.telegram.work_packages import (
     WorkPackageCallback,
     WorkPackageCallbackKind,
     encode_work_package_callback,
 )
+from vuzol.workflows.retry_policy import blocked_step_is_retryable
 
 WORK_PACKAGE_PLAN_ROLE = "work_package_plan"
 WORK_PACKAGE_DETAIL_ROLE = "work_package_detail"
@@ -147,7 +149,7 @@ async def build_work_package_plan_card(
             )
         )
     lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
-    tokens = await _work_package_token_totals(session, revision.id)
+    tokens = await _work_package_token_totals(session, package.id)
     if any(tokens):
         lines.extend(
             (
@@ -206,7 +208,7 @@ async def build_work_package_plan_card(
             )
         )
     elif package.status is WorkPackageStatus.PAUSED:
-        if package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED:
+        if await _package_retry_available(session, package):
             controls.append(
                 ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
             )
@@ -228,7 +230,7 @@ async def build_work_package_plan_card(
     ):
         controls.append(
             (
-                "Запустить снова",
+                "Возобновить",
                 _callback(WorkPackageCallbackKind.RESTART_PACKAGE, package, revision),
             )
         )
@@ -268,7 +270,7 @@ def _route_provider_label(route: object) -> str | None:
 
 
 async def _work_package_token_totals(
-    session: AsyncSession, revision_id: uuid.UUID
+    session: AsyncSession, package_id: uuid.UUID
 ) -> tuple[int, int, int]:
     row = (
         await session.execute(
@@ -279,10 +281,29 @@ async def _work_package_token_totals(
             )
             .join(Run, Run.id == UsageRecord.run_id)
             .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
-            .where(MaterializationLink.plan_revision_id == revision_id)
+            .where(MaterializationLink.work_package_id == package_id)
         )
     ).one()
     return int(row[0]), int(row[1]), int(row[2])
+
+
+async def _package_retry_available(session: AsyncSession, package: WorkPackage) -> bool:
+    if (
+        package.pause_reason is not WorkPackagePauseReason.ITEM_BLOCKED
+        or package.last_failure_task_id is None
+    ):
+        return False
+    step = await session.scalar(
+        select(Step)
+        .join(Run, Run.id == Step.run_id)
+        .where(
+            Run.task_id == package.last_failure_task_id,
+            Step.status == StepStatus.BLOCKED,
+        )
+        .order_by(Step.ordinal.desc())
+        .limit(1)
+    )
+    return step is not None and blocked_step_is_retryable(step)
 
 
 def _format_count(value: int) -> str:

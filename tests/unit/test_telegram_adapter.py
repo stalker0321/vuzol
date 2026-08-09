@@ -71,6 +71,9 @@ def test_callback_answer_explains_discussion_mode_and_rejections() -> None:
     assert _callback_answer(
         IngressResult(status=IngressStatus.HANDLED, reason="secret_cancelled")
     ) == ("Ссылка отменена.", False)
+    assert _callback_answer(
+        IngressResult(status=IngressStatus.HANDLED, reason="request_replan")
+    ) == ("Напишите следующим сообщением, что изменить в оставшейся части плана.", False)
 
 
 def test_python_telegram_client_delegates_send_and_edit() -> None:

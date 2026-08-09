@@ -427,7 +427,19 @@ def test_continuation_resumes_awaiting_step(postgres_dsn: str) -> None:
 
 
 @pytest.mark.postgresql
-def test_explicit_retry_requeues_only_safe_blocked_step(postgres_dsn: str) -> None:
+@pytest.mark.parametrize(
+    ("failure_category", "task_status", "exhausted"),
+    (
+        ("provider_unavailable", TaskStatus.BLOCKED, False),
+        ("quota_exhausted", TaskStatus.QUOTA_EXHAUSTED, True),
+    ),
+)
+def test_explicit_retry_requeues_only_safe_blocked_step(
+    postgres_dsn: str,
+    failure_category: str,
+    task_status: TaskStatus,
+    exhausted: bool,
+) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         task_id, interpretation_id = await seed_interpreted(factory)
@@ -447,13 +459,15 @@ def test_explicit_retry_requeues_only_safe_blocked_step(postgres_dsn: str) -> No
             task = await session.get(Task, task_id)
             assert step is not None and task is not None
             step.status = StepStatus.BLOCKED
-            step.failure_category = "provider_unavailable"
+            step.failure_category = failure_category
             step.failure_summary = "provider temporarily unavailable"
             step.executor_profile_id = "grok-subscription-a"
+            if exhausted:
+                step.attempt_count = step.max_attempts
             run.status = RunStatus.BLOCKED
-            run.failure_category = "provider_unavailable"
+            run.failure_category = failure_category
             run.failure_summary = "provider temporarily unavailable"
-            task.status = TaskStatus.BLOCKED
+            task.status = task_status
             await session.flush()
             step_id = step.id
             action = TelegramControlAction(
@@ -484,6 +498,7 @@ def test_explicit_retry_requeues_only_safe_blocked_step(postgres_dsn: str) -> No
             assert step is not None and step.status is StepStatus.QUEUED
             assert step.failure_category is None and step.failure_summary is None
             assert step.payload["retry_failed_profile_id"] == "grok-subscription-a"
+            assert step.max_attempts == (4 if exhausted else 3)
             assert loaded_run is not None and loaded_run.status is RunStatus.RUNNING
             assert loaded_run.failure_category is None and loaded_run.failure_summary is None
             assert task is not None and task.status is TaskStatus.RETRYING

@@ -13,9 +13,11 @@ from vuzol.storage.models import (
     Event,
     Interpretation,
     MaterializationLink,
+    Run,
     Step,
     Task,
     TransactionalOutbox,
+    UsageRecord,
     WorkPackage,
 )
 from vuzol.storage.types import (
@@ -27,6 +29,7 @@ from vuzol.storage.types import (
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
+from vuzol.telegram.work_package_projections import _work_package_token_totals
 from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.service import materialize_run
 
@@ -175,6 +178,128 @@ async def test_replanned_sequence_keeps_unchanged_completed_prefix(
         )
 
     assert resumed.ordinal == 2 and resumed.task_id is not None
+    async with factory.begin() as session:
+        runs: list[Run] = []
+        for task_id in (first.task_id, resumed.task_id):
+            run = Run(
+                task_id=task_id,
+                workflow_type="coding",
+                workflow_version="1",
+                status=RunStatus.COMPLETED,
+                selected_route={},
+                budget_mode="balanced",
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+            )
+            session.add(run)
+            await session.flush()
+            runs.append(run)
+        session.add_all(
+            [
+                UsageRecord(
+                    provider="test",
+                    profile_id="test-a",
+                    model="test-model",
+                    task_id=first.task_id,
+                    run_id=runs[0].id,
+                    input_tokens=100,
+                    output_tokens=20,
+                    cached_tokens=5,
+                    duration_ms=1,
+                    outcome="success",
+                ),
+                UsageRecord(
+                    provider="test",
+                    profile_id="test-a",
+                    model="test-model",
+                    task_id=resumed.task_id,
+                    run_id=runs[1].id,
+                    input_tokens=200,
+                    output_tokens=40,
+                    cached_tokens=10,
+                    duration_ms=1,
+                    outcome="success",
+                ),
+            ]
+        )
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        links = tuple(
+            (
+                await session.scalars(
+                    select(MaterializationLink).where(
+                        MaterializationLink.work_package_id == created.package_id
+                    )
+                )
+            ).all()
+        )
+        token_totals = await _work_package_token_totals(session, created.package_id)
+    assert package is not None and package.cursor_ordinal == 2
+    assert len(links) == 3
+    assert sum(link.ordinal == 1 for link in links) == 1
+    assert token_totals == (300, 60, 15)
+    await engine.dispose()
+
+
+async def test_stop_cancels_current_item_and_resume_keeps_completed_prefix(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    created = await _approved(factory)
+    async with UnitOfWork(factory) as uow:
+        first = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=2,
+            user_id=42,
+        )
+    assert first.task_id is not None
+    async with factory.begin() as session:
+        task = await session.get(Task, first.task_id, with_for_update=True)
+        assert task is not None
+        task.status = TaskStatus.COMPLETED
+    async with UnitOfWork(factory) as uow:
+        second = await WorkPackageSequencer(uow).observe_terminal(task_id=first.task_id)
+    assert second is not None and second.task_id is not None and second.ordinal == 2
+
+    async with UnitOfWork(factory) as uow:
+        stopped_generation = await WorkPackageService(uow).stop_package(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=second.status_generation,
+            user_id=42,
+        )
+    async with factory() as session:
+        stopped_task = await session.get(Task, second.task_id)
+        assert stopped_task is not None and stopped_task.status is TaskStatus.CANCELLED
+
+    async with UnitOfWork(factory) as uow:
+        restarted = await WorkPackageService(uow).restart_plan(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=stopped_generation,
+            user_id=42,
+        )
+        approved = await WorkPackageService(uow).approve(
+            package_id=created.package_id,
+            revision_number=restarted.revision_number,
+            h8=restarted.content_hash[:8],
+            expected_status_generation=restarted.status_generation,
+            user_id=42,
+        )
+    async with UnitOfWork(factory) as uow:
+        resumed = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=restarted.revision_number,
+            h8=restarted.content_hash[:8],
+            expected_status_generation=approved,
+            user_id=42,
+        )
+
+    assert resumed.ordinal == 2 and resumed.task_id not in {None, second.task_id}
     async with factory() as session:
         package = await session.get(WorkPackage, created.package_id)
         links = tuple(

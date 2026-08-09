@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from vuzol.discussion.service import RevisionResult
 from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
 from vuzol.storage.models import (
     EditSession,
+    PlanRevision,
     Task,
     TelegramMessageLink,
     TransactionalOutbox,
@@ -24,6 +26,8 @@ from vuzol.storage.types import (
     DeliveryStatus,
     EditSessionStatus,
     PlanRevisionCreatedBy,
+    PlanRevisionState,
+    WorkPackagePauseReason,
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -293,4 +297,96 @@ async def test_non_mutating_detail_edit_continue_and_clear_lifecycle(
         "continue_discussion",
         None,
     ]
+    await engine.dispose()
+
+
+async def test_replan_button_waits_for_real_instruction_and_routes_next_turn(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    result, _ = await _seed(factory)
+    async with factory.begin() as session:
+        package = await session.get(WorkPackage, result.package_id, with_for_update=True)
+        revision = await session.get(PlanRevision, result.revision_id, with_for_update=True)
+        assert package is not None and revision is not None
+        revision.state = PlanRevisionState.APPROVED
+        revision.approved_at = datetime.now(UTC)
+        revision.approved_by_user_id = 42
+        package.status = WorkPackageStatus.RUNNING
+        package.approved_revision_id = revision.id
+        package.running_revision_id = revision.id
+        package.cursor_ordinal = 1
+        package.version = 3
+
+    client = FakeTelegramClient(next_message_id=901)
+    delivery = TelegramDeliveryService(
+        factory,
+        client,
+        owner="wp-replan-delivery",
+        lease_seconds=30,
+        max_attempts=3,
+        retry_min_seconds=1,
+        retry_max_seconds=10,
+    )
+    assert await delivery.deliver_one()
+    runtime = _runtime(tmp_path)
+    overrides = ContinueDiscussionOverrides()
+    controls = TelegramControlService(runtime, factory, overrides)
+    callback = encode_work_package_callback(
+        WorkPackageCallback(
+            WorkPackageCallbackKind.REQUEST_REPLAN,
+            result.package_id,
+            result.revision_number,
+            result.content_hash[:8],
+        )
+    )
+
+    replanning = await controls.accept(
+        WorkPackageControlUpdate(
+            bot_id="main",
+            update_id=70,
+            callback_query_id="wp-replan-real",
+            callback_data=callback,
+            chat_id=-100,
+            message_id=901,
+            message_thread_id=10,
+            user_id=42,
+        )
+    )
+    assert replanning.status is IngressStatus.HANDLED
+    assert replanning.reason == "request_replan"
+
+    ingress = TelegramIngressService(runtime, factory, overrides)
+    message = await ingress.accept_message(
+        MessageUpdate(
+            bot_id="main",
+            update_id=71,
+            chat_id=-100,
+            message_thread_id=10,
+            message_id=902,
+            user_id=42,
+            text="Оставь готовый первый пункт и раздели оставшуюся работу на два шага",
+        )
+    )
+    assert message.status is IngressStatus.HANDLED
+
+    async with factory() as session:
+        package = await session.get(WorkPackage, result.package_id)
+        revisions = tuple(
+            (
+                await session.scalars(
+                    select(PlanRevision).where(PlanRevision.work_package_id == result.package_id)
+                )
+            ).all()
+        )
+        classify = await session.scalar(
+            select(TransactionalOutbox)
+            .where(TransactionalOutbox.destination == DISCUSSION_CLASSIFY_DESTINATION)
+            .order_by(TransactionalOutbox.created_at.desc())
+            .limit(1)
+        )
+    assert package is not None and package.status is WorkPackageStatus.PAUSED
+    assert package.pause_reason is WorkPackagePauseReason.REPLAN_REQUIRED
+    assert len(revisions) == 1
+    assert classify is not None and classify.payload["control_override"] == "replan"
     await engine.dispose()

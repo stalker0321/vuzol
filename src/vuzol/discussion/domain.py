@@ -280,7 +280,7 @@ def control_transition_target(
                     WorkPackageStatus.PAUSED,
                 }
             ),
-            WorkPackageStatus.DRAFT,
+            WorkPackageStatus.PAUSED,
         ),
     }
     sources, target = allowed[action]

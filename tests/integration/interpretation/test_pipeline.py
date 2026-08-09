@@ -432,7 +432,8 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
             package = await session.scalar(select(WorkPackage))
             projection = await session.scalar(
                 select(TransactionalOutbox).where(
-                    TransactionalOutbox.destination == "work_package_projection"
+                    TransactionalOutbox.destination == "work_package_projection",
+                    TransactionalOutbox.operation_type == "render_plan",
                 )
             )
             leaked_summary = await session.scalar(

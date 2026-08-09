@@ -26,6 +26,7 @@ from vuzol.telegram.layout import (
 from vuzol.telegram.model_command import enqueue_worker_picker
 from vuzol.telegram.policy import TelegramPolicyError, authorize, validate_message
 from vuzol.telegram.projections import enqueue_project_status_dashboard
+from vuzol.telegram.work_package_projections import enqueue_project_topic_status
 from vuzol.telegram.work_packages import ContinueDiscussionOverrides
 
 
@@ -389,6 +390,13 @@ class TelegramIngressService:
                         None if control_override is None else control_override.value
                     ),
                 },
+            )
+            await enqueue_project_topic_status(
+                uow.session,
+                chat_id=update.chat_id,
+                thread_id=update.message_thread_id,
+                project_id=topic.project_id,
+                revision=update.message_id,
             )
         return IngressResult(status=IngressStatus.HANDLED, intake_id=intake_id)
 

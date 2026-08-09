@@ -33,6 +33,11 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram import TelegramIngressService
+from vuzol.telegram.delivery import (
+    PermanentDeliveryError,
+    TelegramDeliveryService,
+    prepare_delivery,
+)
 from vuzol.telegram.dogfood import TelegramDogfoodIngressService
 from vuzol.telegram.domain import (
     AttachmentKind,
@@ -40,6 +45,8 @@ from vuzol.telegram.domain import (
     MessageUpdate,
     TelegramAttachment,
 )
+from vuzol.telegram.projections import FakeTelegramClient
+from vuzol.telegram.work_package_projections import WORK_PACKAGE_STATUS_ROLE
 
 from ..storage.helpers import storage
 from .helpers import telegram_runtime
@@ -187,9 +194,88 @@ def test_enabled_project_discussion_forks_before_task_creation(
                 )
             ).all()
             assert [(item.destination, item.operation_type) for item in items] == [
-                ("discussion_classify", "classify_intake")
+                ("discussion_classify", "classify_intake"),
+                ("work_package_projection", "render_topic_status"),
             ]
             assert items[0].payload["project_id"] == "vuzol"
+        client = FakeTelegramClient(next_message_id=777)
+        delivery = TelegramDeliveryService(
+            factory,
+            client,
+            owner="topic-status-delivery",
+            lease_seconds=30,
+            max_attempts=3,
+            retry_min_seconds=1,
+            retry_max_seconds=10,
+        )
+        assert await delivery.deliver_one()
+        assert client.pinned == [(-100, 777)]
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE
+                )
+            )
+            assert link is not None and link.message_id == 777
+            assert link.work_package_id is None
+            mapping = await session.scalar(select(TopicMapping))
+            assert mapping is not None
+            invalid_entity = TransactionalOutbox(
+                destination="work_package_projection",
+                operation_type="render_topic_status",
+                linked_entity_type="work_package",
+                linked_entity_id=mapping.id,
+                idempotency_key="topic-status:invalid-entity",
+                payload={},
+            )
+            with pytest.raises(PermanentDeliveryError, match="invalid_topic_status_entity"):
+                await prepare_delivery(session, invalid_entity)
+            mismatched = TransactionalOutbox(
+                destination="work_package_projection",
+                operation_type="render_topic_status",
+                linked_entity_type="topic_mapping",
+                linked_entity_id=mapping.id,
+                idempotency_key="topic-status:mismatch",
+                payload={
+                    "chat_id": -100,
+                    "thread_id": 10,
+                    "project_id": "another-project",
+                    "revision": 1,
+                },
+            )
+            with pytest.raises(PermanentDeliveryError, match="topic_status_mapping_mismatch"):
+                await prepare_delivery(session, mismatched)
+        async with factory.begin() as session:
+            mapping = await session.scalar(select(TopicMapping))
+            assert mapping is not None
+            session.add(
+                TransactionalOutbox(
+                    destination="work_package_projection",
+                    operation_type="render_topic_status",
+                    linked_entity_type="topic_mapping",
+                    linked_entity_id=mapping.id,
+                    idempotency_key="topic-status:stale",
+                    payload={
+                        "chat_id": -100,
+                        "thread_id": 10,
+                        "project_id": "vuzol",
+                        "revision": 600,
+                    },
+                )
+            )
+        assert await delivery.deliver_one()
+        assert client.edited == []
+        follow_up = await service.accept_message(
+            message(502, 602, text="ещё одна деталь идеи")
+        )
+        assert follow_up.status is IngressStatus.HANDLED
+        async with factory() as session:
+            bootstraps = await session.scalar(
+                select(func.count()).select_from(TransactionalOutbox).where(
+                    TransactionalOutbox.operation_type == "render_topic_status"
+                )
+            )
+            assert bootstraps == 2
         await engine.dispose()
 
     asyncio.run(scenario())
@@ -279,7 +365,7 @@ def test_concurrent_first_discussion_messages_share_one_session(
             assert (
                 await session.scalar(select(func.count()).select_from(TelegramIntakeMessage)) == 2
             )
-            assert await session.scalar(select(func.count()).select_from(TransactionalOutbox)) == 2
+            assert await session.scalar(select(func.count()).select_from(TransactionalOutbox)) == 3
         await engine.dispose()
 
     asyncio.run(scenario())

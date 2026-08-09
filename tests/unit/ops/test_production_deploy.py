@@ -38,8 +38,8 @@ class FakeRunner:
         if command[:3] == ("git", "-C", str(self.source)):
             if command[3:5] == ("status", "--porcelain"):
                 return ""
-            if command[3:] == ("rev-parse", f"{NEW}^{{commit}}"):
-                return NEW
+            if command[3] == "rev-parse" and command[4].endswith("^{commit}"):
+                return command[4][:-9]
         if command[:3] == ("git", "-C", str(self.deployed)):
             operation = command[3:]
             if operation == ("status", "--porcelain"):
@@ -136,3 +136,57 @@ def test_environment_parser_preserves_secrets_without_expansion(tmp_path: Path) 
     assert loaded["PLAIN"] == "value"
     assert loaded["QUOTED"] == "value with spaces"
     assert loaded["EMPTY"] == ""
+
+
+def test_same_release_is_attested_without_reinstallation(tmp_path: Path) -> None:
+    deployment = config(tmp_path)
+    runner = FakeRunner(deployment.source, deployment.deployed)
+
+    result = ProductionDeployer(deployment, runner).deploy(OLD)
+
+    assert result.previous_sha == result.deployed_sha == OLD
+    assert not any("checkout" in call for call in runner.calls)
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("BROKEN", "invalid environment assignment"),
+        ("BAD-KEY=value", "invalid environment key"),
+        ("KEY=two words", "invalid environment value"),
+    ],
+)
+def test_environment_parser_fails_closed(tmp_path: Path, content: str, message: str) -> None:
+    environment = tmp_path / "broken.env"
+    environment.write_text(content)
+
+    with pytest.raises(DeploymentError, match=message):
+        load_environment(environment)
+
+
+def test_attestation_rejects_image_service_and_container_mismatch(tmp_path: Path) -> None:
+    deployment = config(tmp_path)
+    runner = FakeRunner(deployment.source, deployment.deployed)
+    deployer = ProductionDeployer(deployment, runner)
+    runner.image = NEW
+    with pytest.raises(DeploymentError, match="image SHA mismatch"):
+        deployer._attest(OLD)
+
+    runner.image = OLD
+
+    def inactive(argv: Sequence[str], cwd: Path | None, env: Mapping[str, str] | None) -> str:
+        if tuple(argv)[:2] == ("systemctl", "is-active"):
+            return "active\nfailed"
+        return runner(argv, cwd, env)
+
+    with pytest.raises(DeploymentError, match="services are not active"):
+        ProductionDeployer(deployment, inactive)._attest(OLD)
+
+    def stopped(argv: Sequence[str], cwd: Path | None, env: Mapping[str, str] | None) -> str:
+        command = tuple(argv)
+        if command[:2] == ("docker", "inspect") and "Labels" not in command[-1]:
+            return "exited"
+        return runner(argv, cwd, env)
+
+    with pytest.raises(DeploymentError, match="container is not running"):
+        ProductionDeployer(deployment, stopped)._attest(OLD)

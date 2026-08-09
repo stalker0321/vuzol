@@ -86,6 +86,10 @@ make test-postgres     # PostgreSQL-marked integration
 make check             # lint, format, types, tests, security
 ```
 
+Real Telegram release checks are tracked separately in
+[`TELEGRAM_DOGFOOD.md`](TELEGRAM_DOGFOOD.md). They use a disposable project topic and controlled,
+default-off faults; live Telegram and provider calls do not belong in the hermetic CI suite.
+
 ## Managed projects (provisioned by Vuzol)
 
 ### Scaffold

@@ -33,6 +33,27 @@ class DogfoodFault(StrEnum):
     TELEGRAM_TRANSIENT_BEFORE_REQUEST = "telegram_transient_before_request"
 
 
+class DogfoodCase(StrEnum):
+    T01 = "T01"
+    T02 = "T02"
+    T03 = "T03"
+    T04 = "T04"
+    T05 = "T05"
+    T06 = "T06"
+    T07 = "T07"
+    T08 = "T08"
+    T09 = "T09"
+    T10 = "T10"
+    T11 = "T11"
+    T12 = "T12"
+
+
+class DogfoodCaseResult(StrEnum):
+    SUCCESS = "pass"
+    FAIL = "fail"
+    SKIP = "skip"
+
+
 @dataclass(frozen=True, slots=True)
 class DogfoodReport:
     session_id: uuid.UUID
@@ -42,6 +63,8 @@ class DogfoodReport:
     task_counts: dict[str, int]
     armed_faults: int
     consumed_faults: int
+    case_results: dict[str, str]
+    release_ready: bool
 
     def to_dict(self) -> dict[str, object]:
         value = asdict(self)
@@ -146,6 +169,44 @@ async def arm_fault(
     return fault_id
 
 
+async def record_case_result(
+    session: AsyncSession,
+    settings: TelegramDogfoodSettings,
+    *,
+    session_id: uuid.UUID,
+    case: DogfoodCase,
+    result: DogfoodCaseResult,
+    actor_id: str,
+    package_id: uuid.UUID | None = None,
+) -> None:
+    """Record bounded human UI evidence without accepting free-form or secret-bearing text."""
+
+    started = await _session_event(session, session_id)
+    project_id = str(started.payload["project_id"])
+    _authorize(settings, project_id)
+    if package_id is not None:
+        package = await session.get(WorkPackage, package_id)
+        if package is None or package.project_id != project_id:
+            raise DogfoodError("checkpoint package belongs to another project")
+    session.add(
+        Event(
+            entity_type="telegram_dogfood_case",
+            entity_id=uuid.uuid4(),
+            event_type="telegram_dogfood.case_recorded",
+            actor_type="operator",
+            actor_id=actor_id,
+            correlation_id=str(session_id),
+            payload={
+                "case": case.value,
+                "result": result.value,
+                "project_id": project_id,
+                "package_id": None if package_id is None else str(package_id),
+            },
+        )
+    )
+    await session.flush()
+
+
 async def consume_fault(
     session: AsyncSession,
     settings: TelegramDogfoodSettings,
@@ -224,6 +285,25 @@ async def build_report(
         .group_by(Event.event_type)
     )
     faults = {str(kind): int(count) for kind, count in fault_rows}
+    case_rows = await session.execute(
+        select(Event)
+        .where(
+            Event.entity_type == "telegram_dogfood_case",
+            Event.event_type == "telegram_dogfood.case_recorded",
+            Event.correlation_id == str(session_id),
+        )
+        .order_by(Event.created_at, Event.id)
+    )
+    case_results: dict[str, str] = {}
+    for event in case_rows.scalars():
+        case_results[str(event.payload["case"])] = str(event.payload["result"])
+    expected_cases = {case.value for case in DogfoodCase}
+    release_ready = (
+        set(case_results) == expected_cases
+        and set(case_results.values()) == {DogfoodCaseResult.SUCCESS.value}
+        and faults.get("telegram_dogfood.fault_armed", 0)
+        == faults.get("telegram_dogfood.fault_consumed", 0)
+    )
     return DogfoodReport(
         session_id=session_id,
         project_id=project_id,
@@ -232,6 +312,8 @@ async def build_report(
         task_counts={status.value: int(count) for status, count in task_rows},
         armed_faults=faults.get("telegram_dogfood.fault_armed", 0),
         consumed_faults=faults.get("telegram_dogfood.fault_consumed", 0),
+        case_results=case_results,
+        release_ready=release_ready,
     )
 
 

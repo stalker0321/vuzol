@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from vuzol.execution.result_validation import _normalize_blank_lines_at_eof
+
 from ._test_result_validation_helpers import (
     ArtifactSecretError,
     AsyncMock,
@@ -18,6 +20,30 @@ from ._test_result_validation_helpers import (
     _worktree,
     pytest,
 )
+
+
+def test_normalize_blank_lines_at_eof_is_bounded_to_changed_text(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    redundant = source / "styles.css"
+    redundant.write_bytes(b"body {}\n\n")
+    crlf = source / "windows.txt"
+    crlf.write_bytes(b"value\r\n\r\n")
+    binary = source / "image.bin"
+    binary.write_bytes(b"\x00\n\n")
+    unchanged = source / "single.txt"
+    unchanged.write_bytes(b"single\n")
+
+    changed = _normalize_blank_lines_at_eof(
+        tmp_path,
+        ("src/styles.css", "src/windows.txt", "src/image.bin", "src/single.txt"),
+    )
+
+    assert changed == ("src/styles.css", "src/windows.txt")
+    assert redundant.read_bytes() == b"body {}\n"
+    assert crlf.read_bytes() == b"value\r\n"
+    assert binary.read_bytes() == b"\x00\n\n"
+    assert unchanged.read_bytes() == b"single\n"
 
 
 @pytest.mark.anyio

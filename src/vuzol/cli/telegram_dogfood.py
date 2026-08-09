@@ -12,10 +12,13 @@ from pathlib import Path
 from vuzol.config import TopicKind, get_runtime_configuration
 from vuzol.execution.git import LocalGit
 from vuzol.ops.telegram_dogfood import (
+    DogfoodCase,
+    DogfoodCaseResult,
     DogfoodFault,
     arm_fault,
     build_report,
     diagnose_package,
+    record_case_result,
     start_session,
 )
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
@@ -35,6 +38,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     fault.add_argument("--session", required=True, type=uuid.UUID)
     fault.add_argument("--project", required=True)
     fault.add_argument("--fault", required=True, choices=tuple(DogfoodFault))
+    checkpoint = subparsers.add_parser("checkpoint")
+    checkpoint.add_argument("--session", required=True, type=uuid.UUID)
+    checkpoint.add_argument("--case", required=True, choices=tuple(DogfoodCase))
+    checkpoint.add_argument("--result", required=True, choices=tuple(DogfoodCaseResult))
+    checkpoint.add_argument("--package", type=uuid.UUID)
     diagnose = subparsers.add_parser("diagnose")
     diagnose.add_argument("--package", required=True, type=uuid.UUID)
     return parser.parse_args(argv)
@@ -81,6 +89,23 @@ async def _run(args: argparse.Namespace) -> int:
                     actor_id=getpass.getuser(),
                 )
             print(json.dumps({"fault_id": str(fault_id), "fault": args.fault}))
+            return 0
+        if args.command == "checkpoint":
+            async with factory.begin() as session:
+                await record_case_result(
+                    session,
+                    settings.telegram_dogfood,
+                    session_id=args.session,
+                    case=DogfoodCase(args.case),
+                    result=DogfoodCaseResult(args.result),
+                    actor_id=getpass.getuser(),
+                    package_id=args.package,
+                )
+            print(
+                json.dumps(
+                    {"session_id": str(args.session), "case": args.case, "result": args.result}
+                )
+            )
             return 0
         async with factory() as session:
             payload = (

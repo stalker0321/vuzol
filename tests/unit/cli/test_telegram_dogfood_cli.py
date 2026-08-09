@@ -11,7 +11,7 @@ from vuzol.cli import telegram_dogfood
 from vuzol.cli.telegram_dogfood import _parse_args, _run
 from vuzol.config import TopicKind
 from vuzol.execution.git import LocalGit
-from vuzol.ops.telegram_dogfood import DogfoodFault
+from vuzol.ops.telegram_dogfood import DogfoodCase, DogfoodCaseResult, DogfoodFault
 
 
 def test_dogfood_cli_has_explicit_session_report_diagnostic_and_fault_commands() -> None:
@@ -31,6 +31,18 @@ def test_dogfood_cli_has_explicit_session_report_diagnostic_and_fault_commands()
         ]
     )
     assert fault.fault == DogfoodFault.PROVIDER_TIMEOUT_BEFORE_EFFECTS.value
+    checkpoint = _parse_args(
+        [
+            "checkpoint",
+            "--session",
+            str(session_id),
+            "--case",
+            DogfoodCase.T01.value,
+            "--result",
+            DogfoodCaseResult.SUCCESS.value,
+        ]
+    )
+    assert checkpoint.case == "T01" and checkpoint.result == "pass"
 
 
 def test_dogfood_cli_rejects_unknown_fault() -> None:
@@ -49,7 +61,9 @@ def test_dogfood_cli_rejects_unknown_fault() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("command", ["start", "arm-fault", "diagnose", "report"])
+@pytest.mark.parametrize(
+    "command", ["start", "arm-fault", "checkpoint", "diagnose", "report"]
+)
 async def test_dogfood_cli_executes_each_operator_command(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str
 ) -> None:
@@ -86,6 +100,7 @@ async def test_dogfood_cli_executes_each_operator_command(
     monkeypatch.setattr(LocalGit, "resolve_commit", resolve_commit)
     monkeypatch.setattr(telegram_dogfood, "start_session", AsyncMock(return_value=entity_id))
     monkeypatch.setattr(telegram_dogfood, "arm_fault", AsyncMock(return_value=entity_id))
+    monkeypatch.setattr(telegram_dogfood, "record_case_result", AsyncMock())
     report = SimpleNamespace(to_dict=lambda: {"session_id": str(entity_id)})
     monkeypatch.setattr(telegram_dogfood, "build_report", AsyncMock(return_value=report))
     monkeypatch.setattr(telegram_dogfood, "diagnose_package", AsyncMock(return_value=report))
@@ -101,6 +116,15 @@ async def test_dogfood_cli_executes_each_operator_command(
             DogfoodFault.PROVIDER_QUOTA_BEFORE_EFFECTS.value,
         ],
         "diagnose": ["diagnose", "--package", str(entity_id)],
+        "checkpoint": [
+            "checkpoint",
+            "--session",
+            str(entity_id),
+            "--case",
+            "T01",
+            "--result",
+            "pass",
+        ],
         "report": ["report", "--session", str(entity_id)],
     }[command]
 

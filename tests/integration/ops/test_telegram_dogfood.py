@@ -7,12 +7,15 @@ from tests.integration.storage.helpers import storage
 from vuzol.config import Settings, TelegramDogfoodSettings
 from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
 from vuzol.ops.telegram_dogfood import (
+    DogfoodCase,
+    DogfoodCaseResult,
     DogfoodError,
     DogfoodFault,
     arm_fault,
     build_report,
     consume_fault,
     diagnose_package,
+    record_case_result,
     start_session,
 )
 from vuzol.storage.models import Run, Step, Task, TransactionalOutbox
@@ -84,6 +87,50 @@ async def test_session_fault_is_audited_and_consumed_once(postgres_dsn: str) -> 
     assert report.project_id == "vuzol-test"
     assert report.armed_faults == report.consumed_faults == 1
     assert report.package_counts == report.task_counts == {}
+    assert report.case_results == {} and not report.release_ready
+    await engine.dispose()
+
+
+async def test_all_latest_checkpoints_are_required_for_release_readiness(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    async with factory.begin() as session:
+        session_id = await start_session(
+            session,
+            _settings(),
+            project_id="vuzol-test",
+            configuration_revision="a" * 64,
+            git_sha="b" * 40,
+            actor_id="tester",
+        )
+        for case in DogfoodCase:
+            await record_case_result(
+                session,
+                _settings(),
+                session_id=session_id,
+                case=case,
+                result=DogfoodCaseResult.SUCCESS,
+                actor_id="tester",
+            )
+    async with factory() as session:
+        ready = await build_report(session, _settings(), session_id)
+    assert ready.release_ready
+    assert ready.case_results == {case.value: "pass" for case in DogfoodCase}
+
+    async with factory.begin() as session:
+        await record_case_result(
+            session,
+            _settings(),
+            session_id=session_id,
+            case=DogfoodCase.T06,
+            result=DogfoodCaseResult.FAIL,
+            actor_id="tester",
+        )
+    async with factory() as session:
+        failed = await build_report(session, _settings(), session_id)
+    assert failed.case_results["T06"] == "fail"
+    assert not failed.release_ready
     await engine.dispose()
 
 

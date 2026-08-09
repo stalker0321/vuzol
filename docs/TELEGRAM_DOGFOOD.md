@@ -55,12 +55,19 @@ Start a recorded session and retain the returned UUID:
 ```console
 vuzol-telegram-dogfood start --project vuzol-test
 vuzol-telegram-dogfood arm-fault --session UUID --project vuzol-test --fault provider_timeout_before_effects
+vuzol-telegram-dogfood checkpoint --session UUID --case T01 --result pass --package PACKAGE_UUID
 vuzol-telegram-dogfood diagnose --package PACKAGE_UUID
 vuzol-telegram-dogfood report --session UUID
 ```
 
 Every command validates the migration head and project binding. Output is JSON and diagnostics
 contain only canonical statuses and bounded failure summaries.
+
+`checkpoint` accepts only the fixed T01–T12 identifier, `pass`/`fail`/`skip`, and an optional
+same-project package UUID. It deliberately accepts no free-form note that could leak prompt or
+credential material. Re-recording a case supersedes its earlier result in the report without
+destroying the audit event. `release_ready` becomes true only when all twelve latest results are
+`pass` and every armed fault in the session was consumed.
 
 ## Controlled faults
 

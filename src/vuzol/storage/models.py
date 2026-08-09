@@ -467,6 +467,13 @@ class TelegramMessageLink(IdentityMixin, Base):
     __tablename__ = "telegram_message_links"
     __table_args__ = (
         UniqueConstraint("chat_id", "message_id", name="uq_telegram_chat_message"),
+        Index(
+            "uq_telegram_topic_work_package_status",
+            "chat_id",
+            "message_thread_id",
+            unique=True,
+            postgresql_where=text("message_role = 'work_package_status'"),
+        ),
         ForeignKeyConstraint(
             ["plan_revision_id", "work_package_id"],
             ["plan_revisions.id", "plan_revisions.work_package_id"],

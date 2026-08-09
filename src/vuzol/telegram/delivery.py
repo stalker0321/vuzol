@@ -541,7 +541,9 @@ async def _prepare_project_topic_status(
         DeliveryAction.SEND_STATUS if link is None else DeliveryAction.EDIT_STATUS,
         chat_id=chat_id,
         thread_id=thread_id,
-        html=(f"<b>{telegram_html(project_id)}</b>\nСтатус: <b>Обрабатываю сообщение…</b>"),
+        html=(
+            f"<b>{telegram_html(project_id)}</b>\nСтатус: <b>Обрабатываю сообщение…</b>"  # noqa: RUF001
+        ),
         revision=revision,
         link_id=None if link is None else link.id,
         message_id=None if link is None else link.message_id,

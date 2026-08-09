@@ -382,12 +382,15 @@ async def _resume_repaired_step(session: AsyncSession, run: Run, repair_step: St
         )
         if validation is None:
             return False
-        ordinal = int(
-            await session.scalar(
-                select(func.coalesce(func.max(Step.ordinal), 0)).where(Step.run_id == run.id)
+        ordinal = (
+            int(
+                await session.scalar(
+                    select(func.coalesce(func.max(Step.ordinal), 0)).where(Step.run_id == run.id)
+                )
+                or 0
             )
-            or 0
-        ) + 1
+            + 1
+        )
         revalidation = Step(
             run_id=run.id,
             ordinal=ordinal,

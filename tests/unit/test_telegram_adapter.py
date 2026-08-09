@@ -112,6 +112,12 @@ def test_python_telegram_client_delegates_send_and_edit() -> None:
             f"v1:pause:{task_id}",
             f"v1:cancel:{task_id}",
         ]
+        assert await client.pin_message(chat_id=-100, message_id=17)
+        bot.pin_chat_message.assert_awaited_once_with(
+            chat_id=-100, message_id=17, disable_notification=True
+        )
+        bot.pin_chat_message.side_effect = BadRequest("not enough rights")
+        assert not await client.pin_message(chat_id=-100, message_id=17)
 
     asyncio.run(scenario())
 

@@ -56,6 +56,7 @@ async def run() -> None:
                 trace_always_include_anomalies=(
                     delivery.orchestration_trace_always_include_anomalies
                 ),
+                dogfood_settings=settings.telegram_dogfood,
             )
             await run_delivery_loop(
                 service,

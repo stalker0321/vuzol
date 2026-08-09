@@ -125,6 +125,7 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
         )
         outbox = await session.get(TransactionalOutbox, outbox_id)
     assert link is not None and link.message_id == 701
+    assert client.pinned == [(-100, 701)]
     assert link.control_status_generation == 1 and link.plan_revision_id == result.revision_id
     assert outbox is not None and outbox.status is DeliveryStatus.DELIVERED
 

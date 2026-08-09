@@ -268,6 +268,11 @@ def test_prepare_model_picker_delivery() -> None:
     assert prepared.thread_id == 20
     assert prepared.callback_buttons[0][0][1] == "v1:pm:a:1"
 
+    item.payload["message_id"] = 88
+    edited = _prepare_project_model_message(item)  # type: ignore[arg-type]
+    assert edited.action is DeliveryAction.EDIT_MESSAGE
+    assert edited.message_id == 88
+
 
 @pytest.mark.anyio
 async def test_project_model_controller_auto_and_effort_and_grok(

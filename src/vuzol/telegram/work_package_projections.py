@@ -122,15 +122,27 @@ async def build_work_package_plan_card(
         progress = f"{ordinal}/{len(items)} {action}"
         if worker is not None:
             progress += f" | {worker}"
-    lines = [
-        f"<b>{telegram_html(package.title)}</b>",
-        (
-            f"Статус: <b>{telegram_html(progress)}</b>"
-            if progress is not None
-            else f"Статус: <b>{status}</b> · версия плана {revision.revision_number}"
-        ),
-        "",
-    ]
+    if progress is not None:
+        current_item = next(
+            (item for item in items if item.ordinal == (package.cursor_ordinal or 1)), None
+        )
+        lines = [
+            f"<b>{telegram_html(progress)}</b>",
+            (
+                telegram_html(current_item.summary)
+                if current_item is not None
+                else telegram_html(package.title)
+            ),
+            "",
+            f"<b>{telegram_html(package.title)}</b>",
+            "",
+        ]
+    else:
+        lines = [
+            f"<b>{telegram_html(package.title)}</b>",
+            f"Статус: <b>{status}</b> · версия плана {revision.revision_number}",
+            "",
+        ]
     if package.status is WorkPackageStatus.PAUSED:
         reason_key = "unknown" if package.pause_reason is None else package.pause_reason.value
         reason = {

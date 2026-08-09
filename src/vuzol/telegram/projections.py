@@ -1508,6 +1508,8 @@ class TelegramClient(Protocol):
 
     async def delete_message(self, *, chat_id: int, message_id: int) -> None: ...
 
+    async def pin_message(self, *, chat_id: int, message_id: int) -> bool: ...
+
 
 class LostTelegramResponse(RuntimeError):
     """Telegram may have accepted a send, but no message ID was received."""
@@ -1520,6 +1522,7 @@ class FakeTelegramClient:
     sent: list[tuple[int, int | None, str]] = field(default_factory=list, init=False)
     edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
     deleted: list[tuple[int, int]] = field(default_factory=list, init=False)
+    pinned: list[tuple[int, int]] = field(default_factory=list, init=False)
     sent_keyboards: list[tuple[tuple[tuple[str, str], ...], ...]] = field(
         default_factory=list, init=False
     )
@@ -1564,6 +1567,10 @@ class FakeTelegramClient:
         if self.fail:
             raise self.fail
         self.deleted.append((chat_id, message_id))
+
+    async def pin_message(self, *, chat_id: int, message_id: int) -> bool:
+        self.pinned.append((chat_id, message_id))
+        return True
 
 
 async def apply_status_projection(

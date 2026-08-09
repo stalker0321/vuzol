@@ -4,15 +4,17 @@ import asyncio
 import uuid
 from collections.abc import Mapping
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, Settings
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.ops.disk_pressure import FreeSpaceProbe
+from vuzol.ops.telegram_dogfood import DogfoodFault, consume_fault
 from vuzol.providers.routing import claim_routed_step
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_step, heartbeat_step, start_step
-from vuzol.storage.models import Run, Step
+from vuzol.storage.models import Run, Step, Task
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import QueueClass
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
@@ -61,10 +63,12 @@ class WorkflowWorker:
         heartbeat = asyncio.create_task(self._heartbeat(token, cancellation))
         commit_after_cancellation = False
         try:
-            handler = self._handlers[request.step_type]
-            outcome = await asyncio.wait_for(
-                handler.execute(request, cancellation), timeout=request.timeout_seconds
-            )
+            outcome = await self._dogfood_fault_outcome(request)
+            if outcome is None:
+                handler = self._handlers[request.step_type]
+                outcome = await asyncio.wait_for(
+                    handler.execute(request, cancellation), timeout=request.timeout_seconds
+                )
         except TimeoutError:
             outcome = StepOutcome(
                 kind=OutcomeKind.BLOCKED,
@@ -103,6 +107,54 @@ class WorkflowWorker:
                 retry_delay_seconds=self._retry_delay(token.step.id, token.step.lease_generation),
             )
         return True
+
+    async def _dogfood_fault_outcome(self, request: StepExecutionRequest) -> StepOutcome | None:
+        if request.step_type not in {
+            "execute_agent",
+            "execute_code",
+            "execute_model",
+            "plan",
+            "research_execute",
+            "synthesize",
+        }:
+            return None
+        async with self._factory.begin() as session:
+            project_id = await session.scalar(
+                select(Task.project_id).where(Task.id == request.task_id)
+            )
+            if project_id is None:
+                return None
+            timeout_fault = await consume_fault(
+                session,
+                self._settings.telegram_dogfood,
+                project_id=project_id,
+                fault=DogfoodFault.PROVIDER_TIMEOUT_BEFORE_EFFECTS,
+                consumer=self._owner,
+            )
+            if timeout_fault is not None:
+                return StepOutcome(
+                    kind=OutcomeKind.BLOCKED,
+                    result={"dogfood_fault_id": str(timeout_fault)},
+                    category="timeout",
+                    summary="controlled dogfood timeout before provider effects",
+                    unknown_effects=False,
+                )
+            quota_fault = await consume_fault(
+                session,
+                self._settings.telegram_dogfood,
+                project_id=project_id,
+                fault=DogfoodFault.PROVIDER_QUOTA_BEFORE_EFFECTS,
+                consumer=self._owner,
+            )
+            if quota_fault is not None:
+                return StepOutcome(
+                    kind=OutcomeKind.BLOCKED,
+                    result={"dogfood_fault_id": str(quota_fault)},
+                    category="quota_exhausted",
+                    summary="controlled dogfood quota failure before provider effects",
+                    unknown_effects=False,
+                )
+        return None
 
     async def _claim(
         self, session: AsyncSession, class_limits: Mapping[QueueClass, int]

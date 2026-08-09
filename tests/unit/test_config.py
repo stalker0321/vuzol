@@ -9,6 +9,7 @@ from vuzol.config import (
     InterpretationSettings,
     Settings,
     SubscriptionLimitSettings,
+    TelegramDogfoodSettings,
     TelegramSettings,
 )
 
@@ -30,6 +31,25 @@ def test_settings_accept_valid_values() -> None:
 def test_settings_reject_invalid_port() -> None:
     with raises(ValidationError, match="less than or equal to 65535"):
         Settings(port=70000)
+
+
+def test_telegram_dogfood_requires_explicit_safe_allowlist() -> None:
+    assert not TelegramDogfoodSettings().enabled
+    configured = TelegramDogfoodSettings(
+        enabled=True,
+        fault_injection_enabled=True,
+        allowed_project_ids=("vuzol-test",),
+    )
+    assert configured.allowed_project_ids == ("vuzol-test",)
+    with raises(ValidationError):
+        TelegramDogfoodSettings(enabled=True)
+    with raises(ValidationError):
+        TelegramDogfoodSettings(
+            fault_injection_enabled=True,
+            allowed_project_ids=("vuzol-test",),
+        )
+    with raises(ValidationError):
+        TelegramDogfoodSettings(enabled=True, allowed_project_ids=("Bad Project",))
 
 
 def test_settings_reject_invalid_log_level() -> None:

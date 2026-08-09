@@ -179,3 +179,10 @@ Optional disk low-watermark for **new heavy** work uses `VUZOL_DISK_PRESSURE__MI
 claims are deferred without leasing; control/light work, recovery, and retention are not gated.
 Probe failures fail closed for new heavy work only. Residual race after claim is re-checked before
 worktree preparation and requeued as retryable `disk_pressure` (attempt refunded).
+
+## Telegram dogfood
+
+Live Telegram verification is guarded by `VUZOL_TELEGRAM_DOGFOOD__ENABLED` and an explicit JSON
+allowlist in `VUZOL_TELEGRAM_DOGFOOD__ALLOWED_PROJECT_IDS`. One-shot provider and delivery faults
+also require `VUZOL_TELEGRAM_DOGFOOD__FAULT_INJECTION_ENABLED=true`. Keep all three unset in normal
+operation. See [TELEGRAM_DOGFOOD.md](TELEGRAM_DOGFOOD.md) for the disposable-topic workflow.

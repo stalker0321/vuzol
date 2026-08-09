@@ -96,6 +96,7 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         {
             TaskStatus.EXECUTING,
             TaskStatus.VALIDATING,
+            TaskStatus.RETRYING,
             TaskStatus.WAITING_APPROVAL,
             TaskStatus.AWAITING_USER,
             TaskStatus.QUOTA_EXHAUSTED,
@@ -138,6 +139,7 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.PLANNED,
             TaskStatus.EXECUTING,
             TaskStatus.VALIDATING,
+            TaskStatus.REVIEWING,
             TaskStatus.AWAITING_USER,
             TaskStatus.QUOTA_EXHAUSTED,
             TaskStatus.PAUSED,

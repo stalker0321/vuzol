@@ -50,34 +50,33 @@ class ModelCommandOutcome:
 
 def build_worker_picker_html(*, project_id: str, current_label: str) -> str:
     return (
-        f"<b>Model for project</b> <code>{telegram_html(project_id)}</code>\n"
-        f"Current: <b>{telegram_html(current_label)}</b>\n\n"
-        "Choose a provider account. "
-        "The setting applies to future coding tasks until you change it."
+        f"<b>Модель проекта</b> <code>{telegram_html(project_id)}</code>\n"
+        f"Сейчас: <b>{telegram_html(current_label)}</b>\n\n"
+        "Выберите подключение. Настройка применяется к новым задачам, пока вы её не измените."
     )
 
 
 def build_effort_picker_html(*, project_id: str, worker_label: str) -> str:
     return (
-        f"<b>Reasoning effort</b> for <b>{telegram_html(worker_label)}</b>\n"
-        f"Project: <code>{telegram_html(project_id)}</code>\n\n"
-        "Higher effort is slower and usually more thorough."
+        f"<b>Глубина рассуждения</b> · <b>{telegram_html(worker_label)}</b>\n"
+        f"Проект: <code>{telegram_html(project_id)}</code>\n\n"
+        "Чем выше уровень, тем медленнее и обычно тщательнее работа."
     )
 
 
 def build_model_picker_html(*, project_id: str, connection: str) -> str:
     return (
-        f"<b>Choose model</b> for <b>{telegram_html(connection)}</b>\n"
-        f"Project: <code>{telegram_html(project_id)}</code>"
+        f"<b>Выберите модель</b> · <b>{telegram_html(connection)}</b>\n"
+        f"Проект: <code>{telegram_html(project_id)}</code>"
     )
 
 
 def build_confirm_html(*, project_id: str, label: str) -> str:
     return (
-        f"<b>Executor updated</b>\n"
-        f"Project: <code>{telegram_html(project_id)}</code>\n"
-        f"Worker: <b>{telegram_html(label)}</b>\n\n"
-        "New coding tasks in this project will use this selection."
+        f"<b>Модель изменена</b>\n"
+        f"Проект: <code>{telegram_html(project_id)}</code>\n"
+        f"Воркер: <b>{telegram_html(label)}</b>\n\n"
+        "Выбор применяется к новым задачам проекта."
     )
 
 
@@ -236,6 +235,7 @@ class ProjectModelController:
                         "stage": ModelPickerStage.MODEL.value,
                         "chat_id": update.chat_id,
                         "message_thread_id": update.message_thread_id,
+                        "message_id": update.message_id,
                         "project_id": project_id,
                         "revision": preference.revision,
                         "html": build_model_picker_html(
@@ -295,6 +295,7 @@ class ProjectModelController:
                         "stage": ModelPickerStage.EFFORT.value,
                         "chat_id": update.chat_id,
                         "message_thread_id": update.message_thread_id,
+                        "message_id": update.message_id,
                         "project_id": project_id,
                         "revision": preference.revision,
                         "worker_key": worker.value,
@@ -360,6 +361,7 @@ class ProjectModelController:
                     "stage": ModelPickerStage.CONFIRM.value,
                     "chat_id": update.chat_id,
                     "message_thread_id": update.message_thread_id,
+                    "message_id": update.message_id,
                     "project_id": project_id,
                     "html": build_confirm_html(project_id=project_id, label=label),
                     "callback_buttons": (),

@@ -228,6 +228,7 @@ class ResultValidationHandler:
         await self._git.require_no_remotes(path)
         inspection = await self._git.inspect(path, worktree.base_commit)
         system_checks: list[SystemCheck] = []
+        amend_repair = request.payload.get("amend_repaired_result") is True
 
         if inspection.branch != worktree.branch:
             raise ResultValidationError(
@@ -237,7 +238,24 @@ class ResultValidationHandler:
 
         is_finalized = False
         recovered = False
-        if inspection.head != worktree.base_commit:
+        if amend_repair:
+            if not worktree.result_commit or inspection.head != worktree.result_commit:
+                raise ResultValidationError(
+                    "validation_repair_head_mismatch",
+                    "review repair is not based on the retained result commit",
+                )
+            try:
+                parent = await self._git.commit_parent(path, inspection.head)
+            except GitError as error:
+                raise ResultValidationError(
+                    "validation_git_finalization", str(error)[:500]
+                ) from error
+            if parent != worktree.base_commit:
+                raise ResultValidationError(
+                    "validation_commit_ancestry",
+                    "retained result commit is not a direct child of base",
+                )
+        elif not amend_repair and inspection.head != worktree.base_commit:
             # A retry may observe the host-created commit before the transaction
             # that records it. Execute retained the measured diff hash and base
             # commit first, which forms the recovery marker.
@@ -261,7 +279,7 @@ class ResultValidationHandler:
                     "validation_commit_ancestry",
                     "retained result commit is not a direct child of base",
                 )
-        elif inspection.head != worktree.base_commit:
+        elif not amend_repair and inspection.head != worktree.base_commit:
             raise ResultValidationError(
                 "validation_precommitted",
                 "provider changed worktree HEAD before validation",
@@ -412,7 +430,11 @@ class ResultValidationHandler:
                 run_id=request.run_id,
                 project_id=worktree.project_id,
             )
-            result_commit = await self._git.create_commit(path, commit_message)
+            result_commit = (
+                await self._git.amend_commit(path, commit_message)
+                if amend_repair
+                else await self._git.create_commit(path, commit_message)
+            )
             if await self._git.commit_parent(path, result_commit) != worktree.base_commit:
                 raise ResultValidationError(
                     "validation_commit_ancestry",

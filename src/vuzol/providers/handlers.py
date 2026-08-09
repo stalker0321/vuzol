@@ -816,6 +816,9 @@ class ProviderStepHandler:
                 )
                 if delivery is not None:
                     context = (*context, delivery)
+                repair = repair_context_item(step)
+                if repair is not None:
+                    context = (*context, repair)
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
@@ -853,6 +856,37 @@ class ProviderStepHandler:
 
 
 SAFE_PROVIDER_STEP_TYPES = frozenset({"execute_model", "research_execute", "synthesize", "plan"})
+
+
+def repair_context_item(step: Step) -> ContextItem | None:
+    """Expose only bounded, system-produced repair evidence to a coding worker."""
+
+    raw = step.payload.get("repair_context")
+    if not isinstance(raw, dict) or step.step_type != "execute_code":
+        return None
+    allowed = {
+        key: raw.get(key)
+        for key in ("source", "category", "summary", "validation_result")
+        if raw.get(key) is not None
+    }
+    content = json.dumps(
+        {
+            "instruction": (
+                "Repair the existing worktree so the reported local validation/review findings "
+                "pass. Keep the original task scope; do not replace or bypass trusted gates."
+            ),
+            "evidence": allowed,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )[:4_000]
+    return ContextItem(
+        source="system_repair",
+        reference=f"repair:{step.id}:1",
+        content=content,
+        content_hash=hashlib.sha256(content.encode()).hexdigest(),
+    )
 
 
 def static_delivery_context(project: object | None) -> ContextItem | None:

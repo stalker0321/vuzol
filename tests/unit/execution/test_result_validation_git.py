@@ -104,6 +104,51 @@ async def test_validate_commits_measured_result(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_review_repair_amends_existing_result_commit(tmp_path: Path) -> None:
+    worktree_path = tmp_path / "wt"
+    worktree_path.mkdir()
+    base = "a" * 40
+    previous = "b" * 40
+    amended = "c" * 40
+    inspection = _inspection(head=previous, files=("app.js",), diff=b"+fixed\n")
+    git = MagicMock()
+    git.require_clean_source = AsyncMock()
+    git.require_no_remotes = AsyncMock()
+    git.inspect = AsyncMock(
+        side_effect=[
+            inspection,
+            GitInspection(
+                head=amended,
+                branch="task-branch",
+                changed_files=("app.js",),
+                diff=inspection.diff,
+            ),
+        ]
+    )
+    git.commit_parent = AsyncMock(return_value=base)
+    git.stage_paths = AsyncMock()
+    git.require_diff_check = AsyncMock()
+    git.amend_commit = AsyncMock(return_value=amended)
+    git.create_commit = AsyncMock()
+    git.require_clean_worktree = AsyncMock()
+    worktree = _worktree(
+        worktree_path, base_commit=base, result_commit=previous, diff_hash="d" * 64
+    )
+    request = _request(worktree)
+    request.payload["amend_repaired_result"] = True
+    handler = _handler(git=git, worktree_root=tmp_path)
+    handler._load = AsyncMock(return_value=(worktree, _project(tmp_path), worktree_path))  # type: ignore[method-assign]
+    handler._persist = AsyncMock()  # type: ignore[method-assign]
+
+    outcome = await handler.execute(request, CancellationContext())
+
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    assert outcome.result["result_commit"] == amended
+    git.amend_commit.assert_awaited_once()
+    git.create_commit.assert_not_awaited()
+
+
+@pytest.mark.anyio
 async def test_validate_blocks_precommitted_head(tmp_path: Path) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()

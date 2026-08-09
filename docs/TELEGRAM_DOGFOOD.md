@@ -40,17 +40,40 @@ Run these cases in order after a staging/dogfood deployment. Stop at the first f
 | T11 | Press `Обсудить`, then send a question. | Telegram tells the user to send the next message; that message is interpreted as discussion and does not replay an earlier plan. |
 | T12 | Restart Telegram ingress/delivery between a button press and projection delivery. | The callback is not applied twice; delivery resumes from PostgreSQL and leaves one current card. |
 
+## Operator commands
+
+The tooling is disabled by default. Enable it only for the disposable project:
+
+```dotenv
+VUZOL_TELEGRAM_DOGFOOD__ENABLED=true
+VUZOL_TELEGRAM_DOGFOOD__FAULT_INJECTION_ENABLED=true
+VUZOL_TELEGRAM_DOGFOOD__ALLOWED_PROJECT_IDS='["vuzol-test"]'
+```
+
+Start a recorded session and retain the returned UUID:
+
+```console
+vuzol-telegram-dogfood start --project vuzol-test
+vuzol-telegram-dogfood arm-fault --session UUID --project vuzol-test --fault provider_timeout_before_effects
+vuzol-telegram-dogfood diagnose --package PACKAGE_UUID
+vuzol-telegram-dogfood report --session UUID
+```
+
+Every command validates the migration head and project binding. Output is JSON and diagnostics
+contain only canonical statuses and bounded failure summaries.
+
 ## Controlled faults
 
-Do not wait for a real provider outage. Add a test-only, default-off fault injector that is accepted
-only for the disposable test project and an allowlisted user. It should support one-shot failures
-at these boundaries:
+Do not wait for a real provider outage. The test-only, default-off fault injector is accepted only
+for an allowlisted disposable project. It supports one-shot failures at these boundaries:
 
 - provider timeout before effects;
 - provider quota exhaustion before effects;
 - Telegram delivery failure before acknowledgement;
-- process exit after callback persistence but before control consumption;
-- process exit after state transition but before projection delivery.
+
+The two restart boundaries in T12 are exercised by stopping the relevant service after observing
+the persisted callback or transition. They deliberately are not exposed as remotely armable
+process-kill faults.
 
 The injector must be configuration-gated, auditable, consume each fault once, reject production
 projects, and never accept arbitrary commands or exception text from Telegram.

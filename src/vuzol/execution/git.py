@@ -205,6 +205,12 @@ class LocalGit:
         await self._run(worktree, "add", "--all", "--", *paths)
 
     async def create_commit(self, worktree: Path, message: str) -> str:
+        return await self._commit(worktree, message, amend=False)
+
+    async def amend_commit(self, worktree: Path, message: str) -> str:
+        return await self._commit(worktree, message, amend=True)
+
+    async def _commit(self, worktree: Path, message: str, *, amend: bool) -> str:
         paragraphs = tuple(part.strip() for part in message.split("\n\n"))
         if (
             not message
@@ -219,6 +225,7 @@ class LocalGit:
         await self._run(
             worktree,
             "commit",
+            *(('--amend',) if amend else ()),
             "--no-verify",
             "--no-gpg-sign",
             *message_args,

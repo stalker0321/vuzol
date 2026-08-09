@@ -132,6 +132,19 @@ class PythonTelegramClient:
             # Naming cards are ephemeral. Missing/expired cards must not block regeneration.
             return
 
+    async def pin_message(self, *, chat_id: int, message_id: int) -> bool:
+        """Best-effort pin for the reconstructable package status message."""
+
+        try:
+            await self._bot.pin_chat_message(
+                chat_id=chat_id,
+                message_id=message_id,
+                disable_notification=True,
+            )
+        except TelegramError:
+            return False
+        return True
+
     async def download(self, file_id: str) -> bytes:
         telegram_file = await self._bot.get_file(file_id)
         content = await telegram_file.download_as_bytearray()

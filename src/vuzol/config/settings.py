@@ -102,6 +102,37 @@ class SecretIngressSettings(BaseModel):
         return self
 
 
+class TelegramDogfoodSettings(BaseModel):
+    """Default-off operator tooling for one allowlisted disposable project."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    fault_injection_enabled: bool = False
+    allowed_project_ids: tuple[str, ...] = ()
+
+    @field_validator("allowed_project_ids")
+    @classmethod
+    def validate_project_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        import re
+
+        if len(set(value)) != len(value) or any(
+            re.fullmatch(r"[a-z][a-z0-9_-]{0,99}", project_id) is None for project_id in value
+        ):
+            raise ValueError("dogfood project IDs must be unique safe identifiers")
+        return value
+
+    @model_validator(mode="after")
+    def require_explicit_allowlist(self) -> "TelegramDogfoodSettings":
+        if (self.enabled or self.fault_injection_enabled) and not self.allowed_project_ids:
+            raise ValueError(
+                "enabled Telegram dogfood tooling requires an explicit project allowlist"
+            )
+        if self.fault_injection_enabled and not self.enabled:
+            raise ValueError("dogfood fault injection requires dogfood tooling")
+        return self
+
+
 class RetentionDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -396,6 +427,7 @@ class Settings(BaseSettings):
         default_factory=SubscriptionLimitSettings
     )
     secret_ingress: SecretIngressSettings = Field(default_factory=SecretIngressSettings)
+    telegram_dogfood: TelegramDogfoodSettings = Field(default_factory=TelegramDogfoodSettings)
 
     @field_validator(
         "repository_root",

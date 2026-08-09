@@ -152,9 +152,7 @@ class ProductionDeployer:
             if not required.exists():
                 raise DeploymentError(f"required deployment input is missing: {required}")
 
-    def _install_release(
-        self, target: str, *, fetch: bool = True, migrate: bool = True
-    ) -> None:
+    def _install_release(self, target: str, *, fetch: bool = True, migrate: bool = True) -> None:
         if fetch:
             self._run(
                 (
@@ -201,7 +199,7 @@ class ProductionDeployer:
                 "inspect",
                 INTERPRETER_CONTAINER,
                 "--format",
-                f"{{{{index .Config.Labels \"{IMAGE_SHA_LABEL}\"}}}}",
+                f'{{{{index .Config.Labels "{IMAGE_SHA_LABEL}"}}}}',
             ),
             None,
             None,

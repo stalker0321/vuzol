@@ -61,9 +61,7 @@ def test_dogfood_cli_rejects_unknown_fault() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "command", ["start", "arm-fault", "checkpoint", "diagnose", "report"]
-)
+@pytest.mark.parametrize("command", ["start", "arm-fault", "checkpoint", "diagnose", "report"])
 async def test_dogfood_cli_executes_each_operator_command(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str
 ) -> None:

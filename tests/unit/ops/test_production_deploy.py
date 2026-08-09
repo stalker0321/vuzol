@@ -118,9 +118,7 @@ def test_rejects_short_sha_and_dirty_checkout(tmp_path: Path) -> None:
     deployment = config(tmp_path)
     runner = FakeRunner(deployment.source, deployment.deployed)
 
-    def dirty(
-        argv: Sequence[str], cwd: Path | None, env: Mapping[str, str] | None
-    ) -> str:
+    def dirty(argv: Sequence[str], cwd: Path | None, env: Mapping[str, str] | None) -> str:
         if tuple(argv)[-2:] == ("status", "--porcelain"):
             return " M file"
         return runner(argv, cwd, env)

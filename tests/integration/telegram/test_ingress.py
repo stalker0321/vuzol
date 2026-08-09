@@ -265,15 +265,13 @@ def test_enabled_project_discussion_forks_before_task_creation(
             )
         assert await delivery.deliver_one()
         assert client.edited == []
-        follow_up = await service.accept_message(
-            message(502, 602, text="ещё одна деталь идеи")
-        )
+        follow_up = await service.accept_message(message(502, 602, text="ещё одна деталь идеи"))
         assert follow_up.status is IngressStatus.HANDLED
         async with factory() as session:
             bootstraps = await session.scalar(
-                select(func.count()).select_from(TransactionalOutbox).where(
-                    TransactionalOutbox.operation_type == "render_topic_status"
-                )
+                select(func.count())
+                .select_from(TransactionalOutbox)
+                .where(TransactionalOutbox.operation_type == "render_topic_status")
             )
             assert bootstraps == 2
         await engine.dispose()

@@ -368,7 +368,7 @@ class WorkPackageSequencer:
     async def _projection(self, package_id: uuid.UUID, generation: int, reason: str) -> None:
         await self._uow.outbox.enqueue(
             destination="work_package_projection",
-            operation_type="render_plan",
+            operation_type="render_status",
             entity_type="work_package",
             entity_id=package_id,
             idempotency_key=f"wp:projection:sequence:{package_id}:{generation}:{reason}",

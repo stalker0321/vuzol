@@ -76,9 +76,11 @@ from vuzol.telegram.work_package_projections import (
     WORK_PACKAGE_DETAIL_ROLE,
     WORK_PACKAGE_PLAN_ROLE,
     WORK_PACKAGE_PROJECTION_DESTINATION,
+    WORK_PACKAGE_STATUS_ROLE,
     WorkPackageProjectionError,
     build_work_package_detail_card,
     build_work_package_plan_card,
+    build_work_package_status_card,
 )
 
 TELEGRAM_DESTINATIONS = frozenset({"telegram", WORK_PACKAGE_PROJECTION_DESTINATION})
@@ -426,10 +428,13 @@ async def _prepare_work_package_projection(
     if item.linked_entity_type != "work_package":
         raise PermanentDeliveryError("invalid_work_package_projection_entity")
     package_id = item.linked_entity_id
-    role = (
-        WORK_PACKAGE_PLAN_ROLE if item.operation_type == "render_plan" else WORK_PACKAGE_DETAIL_ROLE
-    )
-    if item.operation_type not in {"render_plan", "render_detail", "clear_detail"}:
+    role = {
+        "render_plan": WORK_PACKAGE_PLAN_ROLE,
+        "render_status": WORK_PACKAGE_STATUS_ROLE,
+        "render_detail": WORK_PACKAGE_DETAIL_ROLE,
+        "clear_detail": WORK_PACKAGE_DETAIL_ROLE,
+    }.get(item.operation_type)
+    if role is None:
         raise PermanentDeliveryError("invalid_work_package_projection_operation")
     link = await session.scalar(
         select(TelegramMessageLink).where(
@@ -454,6 +459,8 @@ async def _prepare_work_package_projection(
             if not isinstance(raw_page, int):
                 raise WorkPackageProjectionError("invalid_page")
             card = await build_work_package_plan_card(session, package_id, page=raw_page)
+        elif item.operation_type == "render_status":
+            card = await build_work_package_status_card(session, package_id)
         else:
             detail_card = await build_work_package_detail_card(session, package_id)
             if detail_card is None:
@@ -484,7 +491,7 @@ async def _prepare_work_package_projection(
         work_package_id=card.package_id,
         plan_revision_id=card.revision_id,
         control_status_generation=card.status_generation,
-        pin_after_send=role == WORK_PACKAGE_PLAN_ROLE and link is None,
+        pin_after_send=role == WORK_PACKAGE_STATUS_ROLE and link is None,
     )
 
 

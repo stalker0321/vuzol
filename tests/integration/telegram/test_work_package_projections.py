@@ -75,6 +75,8 @@ async def test_plan_projection_is_pg_reconstructable_and_fenced(postgres_dsn: st
     async with factory() as session:
         first = await build_work_package_plan_card(session, package_id, page=1)
         second = await build_work_package_plan_card(session, package_id, page=2)
+        with pytest.raises(WorkPackageProjectionError, match="invalid_page"):
+            await build_work_package_plan_card(session, package_id, page=0)
 
     assert "Plan &lt;unsafe&gt;" in first.html and "Step &lt;1&gt;" in first.html
     assert "Step &lt;9&gt;" in second.html and first.status_generation == 1

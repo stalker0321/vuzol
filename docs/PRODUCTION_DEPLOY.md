@@ -14,12 +14,14 @@ sudo /opt/vuzol/.venv/bin/vuzol-production-deploy \
 The deployer:
 
 1. takes a non-blocking host lock and rejects concurrent deploys;
-2. rejects dirty operator and production checkouts or an unavailable commit;
+2. rejects dirty operator and production checkouts, an unavailable commit, or less than 2 GiB of
+   filesystem headroom before dependency and image builds;
 3. checks out the exact SHA and performs a frozen runtime dependency sync;
 4. applies forward-compatible migrations;
 5. labels and rebuilds the interpreter image with the same Git SHA;
 6. recreates the interpreter and restarts all long-running systemd services;
-7. verifies the production checkout, container label, container state, and every service.
+7. verifies the production checkout, container label, container state, every service, and that the
+   database revision exactly matches the release's Alembic head.
 
 If installation or attestation fails after checkout, the deployer restores the previous code and
 interpreter image, restarts the services, and attests the restored SHA before returning failure.

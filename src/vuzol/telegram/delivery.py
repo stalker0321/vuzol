@@ -84,6 +84,7 @@ from vuzol.telegram.work_package_projections import (
     build_work_package_detail_card,
     build_work_package_plan_card,
     build_work_package_status_card,
+    enqueue_project_topic_idle,
 )
 
 TELEGRAM_DESTINATIONS = frozenset({"telegram", WORK_PACKAGE_PROJECTION_DESTINATION})
@@ -432,6 +433,8 @@ async def _prepare_work_package_projection(
 ) -> PreparedDelivery:
     if item.operation_type == "render_topic_status":
         return await _prepare_project_topic_status(session, item)
+    if item.operation_type == "render_topic_idle":
+        return await _prepare_project_topic_status(session, item, idle=True)
     if item.linked_entity_type != "work_package":
         raise PermanentDeliveryError("invalid_work_package_projection_entity")
     package_id = item.linked_entity_id
@@ -513,7 +516,7 @@ async def _prepare_work_package_projection(
 
 
 async def _prepare_project_topic_status(
-    session: AsyncSession, item: TransactionalOutbox
+    session: AsyncSession, item: TransactionalOutbox, *, idle: bool = False
 ) -> PreparedDelivery:
     if item.linked_entity_type != "topic_mapping":
         raise PermanentDeliveryError("invalid_topic_status_entity")
@@ -542,13 +545,12 @@ async def _prepare_project_topic_status(
     )
     if link is not None and link.projection_revision >= revision:
         return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
+    state = "Готов к следующему сообщению" if idle else "Обрабатываю сообщение…"
     return PreparedDelivery(
         DeliveryAction.SEND_STATUS if link is None else DeliveryAction.EDIT_STATUS,
         chat_id=chat_id,
         thread_id=thread_id,
-        html=(
-            f"<b>{telegram_html(project_id)}</b>\nСтатус: <b>Обрабатываю сообщение…</b>"  # noqa: RUF001
-        ),
+        html=f"<b>{telegram_html(project_id)}</b>\nСтатус: <b>{state}</b>",  # noqa: RUF001
         revision=revision,
         link_id=None if link is None else link.id,
         message_id=None if link is None else link.message_id,
@@ -622,6 +624,7 @@ async def _prepare_discussion_reply(
             link_id=thinking_link.id,
             message_id=thinking_link.message_id,
             message_role=DISCUSSION_REPLY_DESTINATION,
+            project_id=discussion.project_id,
         )
     return PreparedDelivery(
         DeliveryAction.SEND_DISCUSSION_REPLY,
@@ -630,6 +633,7 @@ async def _prepare_discussion_reply(
         html=telegram_markdown_html(turn.content),
         fallback_html=telegram_html(turn.content),
         message_role=DISCUSSION_REPLY_DESTINATION,
+        project_id=discussion.project_id,
     )
 
 
@@ -1239,6 +1243,18 @@ class TelegramDeliveryService:
                     link = await session.get(TelegramMessageLink, prepared.link_id)
                     if link is not None:
                         await session.delete(link)
+            if (
+                prepared.message_role == DISCUSSION_REPLY_DESTINATION
+                and prepared.project_id is not None
+                and prepared.thread_id is not None
+            ):
+                await enqueue_project_topic_idle(
+                    session,
+                    chat_id=prepared.chat_id,
+                    thread_id=prepared.thread_id,
+                    project_id=prepared.project_id,
+                    source_outbox_id=token.item_id,
+                )
             await complete_outbox_item(session, token)
 
     async def _mark_ambiguous(self, token: OutboxLeaseToken) -> None:

@@ -37,14 +37,7 @@ from vuzol.providers.policy import (
     select_profile,
 )
 from vuzol.storage.leasing import STEP_CLAIM_LOCK_KEY
-from vuzol.storage.models import (
-    MaterializationLink,
-    RoutingDecision,
-    Run,
-    Step,
-    Task,
-    TransactionalOutbox,
-)
+from vuzol.storage.models import RoutingDecision, Run, Step, Task
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.repositories.core import step_record
 from vuzol.storage.types import QueueClass, RunStatus, StepStatus, TaskStatus
@@ -574,26 +567,7 @@ async def _block_route(
             actor_type="routing_policy",
             payload={"category": category},
         )
-    if quota:
-        link = await session.scalar(
-            select(MaterializationLink).where(MaterializationLink.task_id == task.id)
-        )
-        if link is not None:
-            session.add(
-                TransactionalOutbox(
-                    destination="work_package_sequence",
-                    operation_type="observe_task_terminal",
-                    linked_entity_type="task",
-                    linked_entity_id=task.id,
-                    idempotency_key=f"work-package:quota:{task.id}:{task.version}",
-                    payload={
-                        "work_package_id": str(link.work_package_id),
-                        "ordinal": link.ordinal,
-                        "task_status": TaskStatus.QUOTA_EXHAUSTED.value,
-                    },
-                )
-            )
-    if not quota and task.task_type != "discussion_agent_internal":
+    if task.task_type != "discussion_agent_internal":
         await enqueue_terminal_task_projections(session, task, run)
 
 

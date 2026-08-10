@@ -30,6 +30,12 @@ class DeploymentError(RuntimeError):
 
 
 Runner = Callable[[Sequence[str], Path | None, Mapping[str, str] | None], str]
+FreeSpaceProbe = Callable[[Path], int]
+
+
+def available_bytes(path: Path) -> int:
+    status = os.statvfs(path)
+    return int(status.f_bavail) * int(status.f_frsize)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +46,7 @@ class DeploymentConfig:
     service_env: Path = Path("/etc/vuzol/executor.env")
     uv: Path = Path("/home/vodkolyan/.local/bin/uv")
     lock_file: Path = Path("/run/lock/vuzol-deploy.lock")
+    minimum_free_bytes: int = 2 * 1024**3
     services: tuple[str, ...] = DEFAULT_SERVICES
 
 
@@ -96,9 +103,15 @@ def require_full_sha(value: str) -> str:
 
 
 class ProductionDeployer:
-    def __init__(self, config: DeploymentConfig, runner: Runner = run_command) -> None:
+    def __init__(
+        self,
+        config: DeploymentConfig,
+        runner: Runner = run_command,
+        free_space: FreeSpaceProbe = available_bytes,
+    ) -> None:
         self._config = config
         self._run = runner
+        self._free_space = free_space
 
     def deploy(self, target_sha: str) -> DeploymentResult:
         target = require_full_sha(target_sha)
@@ -151,6 +164,15 @@ class ProductionDeployer:
         for required in (self._config.runtime_env, self._config.service_env, self._config.uv):
             if not required.exists():
                 raise DeploymentError(f"required deployment input is missing: {required}")
+        try:
+            free_bytes = self._free_space(self._config.deployed)
+        except OSError as error:
+            raise DeploymentError("cannot measure production filesystem free space") from error
+        if free_bytes < self._config.minimum_free_bytes:
+            raise DeploymentError(
+                "insufficient free disk for production deployment "
+                f"({free_bytes} available, {self._config.minimum_free_bytes} required)"
+            )
 
     def _install_release(self, target: str, *, fetch: bool = True, migrate: bool = True) -> None:
         if fetch:

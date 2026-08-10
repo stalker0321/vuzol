@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,7 @@ def config(tmp_path: Path) -> DeploymentConfig:
         service_env=service_env,
         uv=uv,
         lock_file=tmp_path / "deploy.lock",
+        minimum_free_bytes=0,
         services=("vuzol-a.service", "vuzol-b.service"),
     )
 
@@ -127,6 +129,21 @@ def test_rejects_short_sha_and_dirty_checkout(tmp_path: Path) -> None:
 
     with pytest.raises(DeploymentError, match="operator checkout is dirty"):
         ProductionDeployer(deployment, dirty).deploy(NEW)
+
+
+def test_preflight_rejects_low_or_unknown_free_space(tmp_path: Path) -> None:
+    deployment = config(tmp_path)
+    deployment = replace(deployment, minimum_free_bytes=100)
+    runner = FakeRunner(deployment.source, deployment.deployed)
+
+    with pytest.raises(DeploymentError, match="insufficient free disk"):
+        ProductionDeployer(deployment, runner, free_space=lambda _path: 99).deploy(NEW)
+
+    def unavailable(_path: Path) -> int:
+        raise OSError("injected probe error")
+
+    with pytest.raises(DeploymentError, match="cannot measure"):
+        ProductionDeployer(deployment, runner, free_space=unavailable).deploy(NEW)
 
 
 def test_environment_parser_preserves_secrets_without_expansion(tmp_path: Path) -> None:

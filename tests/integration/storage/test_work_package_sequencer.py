@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -23,6 +24,7 @@ from vuzol.storage.models import (
     WorkPackage,
 )
 from vuzol.storage.types import (
+    DeliveryStatus,
     IdempotencyClass,
     PlanRevisionCreatedBy,
     RunStatus,
@@ -406,6 +408,36 @@ async def test_sequence_consumer_is_default_off_and_recovers_from_outbox(
         package = await session.get(WorkPackage, created.package_id)
         assert package is not None and package.cursor_ordinal == 2
         assert await session.scalar(select(func.count()).select_from(Task)) == 2
+    await engine.dispose()
+
+
+async def test_sequence_consumer_dead_letters_permanent_poison_without_crashing_worker(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    async with factory.begin() as session:
+        task_id = uuid.uuid4()
+        poison = TransactionalOutbox(
+            destination="work_package_sequence",
+            operation_type="wrong_operation",
+            linked_entity_type="task",
+            linked_entity_id=task_id,
+            idempotency_key=f"test:poison:{task_id}",
+            payload={},
+        )
+        session.add(poison)
+        await session.flush()
+        poison_id = poison.id
+
+    consumer = WorkPackageSequenceConsumer(
+        Settings(environment="test"), factory, owner="sequence-poison", enabled=True
+    )
+    assert await consumer.process_one()
+    async with factory() as session:
+        item = await session.get(TransactionalOutbox, poison_id)
+        assert item is not None and item.status is DeliveryStatus.DEAD_LETTER
+        assert item.last_error_category == "work_package_sequence_invalid_sequence_item"
+    assert not await consumer.process_one()
     await engine.dispose()
 
 

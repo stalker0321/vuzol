@@ -25,7 +25,11 @@ from vuzol.interpretation.domain import (
     TaskOperation,
     TaskType,
 )
-from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item
+from vuzol.storage.leasing import (
+    claim_outbox_item,
+    complete_outbox_item,
+    dead_letter_outbox_item,
+)
 from vuzol.storage.models import (
     Interpretation,
     MaterializationLink,
@@ -441,15 +445,30 @@ class WorkPackageSequenceConsumer:
             )
         if token is None:
             return False
-        async with UnitOfWork(self._factory) as uow:
-            assert uow.session is not None
-            item = await uow.session.get(TransactionalOutbox, token.item_id)
-            if (
-                item is None
-                or item.operation_type != "observe_task_terminal"
-                or item.linked_entity_type != "task"
-            ):
-                raise ValueError("work-package sequence item is invalid")
-            await WorkPackageSequencer(uow).observe_terminal(task_id=item.linked_entity_id)
-            await complete_outbox_item(uow.session, token)
+        try:
+            async with UnitOfWork(self._factory) as uow:
+                assert uow.session is not None
+                item = await uow.session.get(TransactionalOutbox, token.item_id)
+                if (
+                    item is None
+                    or item.operation_type != "observe_task_terminal"
+                    or item.linked_entity_type != "task"
+                ):
+                    raise ValueError("invalid_sequence_item")
+                await WorkPackageSequencer(uow).observe_terminal(task_id=item.linked_entity_id)
+                await complete_outbox_item(uow.session, token)
+        except (DomainError, ValueError) as error:
+            category = str(error)
+            if category not in {
+                "invalid_sequence_item",
+                "materialized_task_missing",
+                "task_not_terminal",
+            }:
+                raise
+            async with self._factory.begin() as session:
+                await dead_letter_outbox_item(
+                    session,
+                    token,
+                    error_category=f"work_package_sequence_{category}",
+                )
         return True

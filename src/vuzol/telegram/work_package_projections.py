@@ -91,6 +91,50 @@ async def enqueue_project_topic_status(
     )
 
 
+async def enqueue_project_topic_idle(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    thread_id: int,
+    project_id: str,
+    source_outbox_id: uuid.UUID,
+) -> None:
+    """Return an existing topic card to idle after a confirmed discussion reply."""
+
+    mapping = await session.scalar(
+        select(TopicMapping).where(
+            TopicMapping.chat_id == chat_id,
+            TopicMapping.message_thread_id == thread_id,
+            TopicMapping.project_id == project_id,
+            TopicMapping.enabled.is_(True),
+        )
+    )
+    link = await session.scalar(
+        select(TelegramMessageLink).where(
+            TelegramMessageLink.chat_id == chat_id,
+            TelegramMessageLink.message_thread_id == thread_id,
+            TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
+        )
+    )
+    if mapping is None or link is None:
+        return
+    session.add(
+        TransactionalOutbox(
+            destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+            operation_type="render_topic_idle",
+            linked_entity_type="topic_mapping",
+            linked_entity_id=mapping.id,
+            idempotency_key=f"topic-idle:{source_outbox_id}",
+            payload={
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "project_id": project_id,
+                "revision": link.projection_revision + 1,
+            },
+        )
+    )
+
+
 class WorkPackageProjectionError(RuntimeError):
     """A reconstructable projection cannot be built from canonical state."""
 

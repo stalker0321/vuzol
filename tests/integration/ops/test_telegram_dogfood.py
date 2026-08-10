@@ -184,11 +184,24 @@ async def test_package_diagnostic_is_redacted_canonical_state(postgres_dsn: str)
             created_by=PlanRevisionCreatedBy.USER,
             actor_type="user",
         )
+    async with factory.begin() as session:
+        session.add(
+            TransactionalOutbox(
+                destination="work_package_projection",
+                operation_type="render_status",
+                linked_entity_type="work_package",
+                linked_entity_id=created.package_id,
+                idempotency_key=f"test:diagnostic:{created.package_id}",
+                payload={},
+            )
+        )
     async with factory() as session:
         diagnostic = await diagnose_package(session, _settings(), created.package_id)
     assert diagnostic.status == "draft"
     assert diagnostic.revision_number == 1
     assert diagnostic.task_id is None and not diagnostic.safe_retry
+    assert diagnostic.outbox_counts == {"work_package_projection:pending": 1}
+    assert diagnostic.outbox_errors == {}
     assert set(diagnostic.to_dict()) == {
         "package_id",
         "project_id",
@@ -206,6 +219,8 @@ async def test_package_diagnostic_is_redacted_canonical_state(postgres_dsn: str)
         "failure_category",
         "failure_summary",
         "safe_retry",
+        "outbox_counts",
+        "outbox_errors",
     }
     await engine.dispose()
 

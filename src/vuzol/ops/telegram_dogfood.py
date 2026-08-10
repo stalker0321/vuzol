@@ -19,8 +19,10 @@ from vuzol.storage.models import (
     Run,
     Step,
     Task,
+    TransactionalOutbox,
     WorkPackage,
 )
+from vuzol.storage.types import DeliveryStatus
 
 
 class DogfoodError(ValueError):
@@ -91,6 +93,8 @@ class PackageDiagnostic:
     failure_category: str | None
     failure_summary: str | None
     safe_retry: bool
+    outbox_counts: dict[str, int]
+    outbox_errors: dict[str, int]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -356,6 +360,37 @@ async def diagnose_package(
         )
     from vuzol.workflows.retry_policy import blocked_step_is_retryable
 
+    linked_ids = [package.id]
+    if task is not None:
+        linked_ids.append(task.id)
+    outbox_rows = await session.execute(
+        select(
+            TransactionalOutbox.destination,
+            TransactionalOutbox.status,
+            TransactionalOutbox.last_error_category,
+            func.count(),
+        )
+        .where(
+            TransactionalOutbox.linked_entity_id.in_(linked_ids),
+            TransactionalOutbox.status != DeliveryStatus.DELIVERED,
+        )
+        .group_by(
+            TransactionalOutbox.destination,
+            TransactionalOutbox.status,
+            TransactionalOutbox.last_error_category,
+        )
+        .order_by(TransactionalOutbox.destination, TransactionalOutbox.status)
+    )
+    outbox_counts: dict[str, int] = {}
+    outbox_errors: dict[str, int] = {}
+    for destination, status, category, count in outbox_rows:
+        count = int(count)
+        status_key = f"{destination}:{status.value}"
+        outbox_counts[status_key] = outbox_counts.get(status_key, 0) + count
+        if category is not None:
+            error_key = f"{destination}:{category}"
+            outbox_errors[error_key] = outbox_errors.get(error_key, 0) + count
+
     return PackageDiagnostic(
         package_id=package.id,
         project_id=package.project_id,
@@ -373,6 +408,8 @@ async def diagnose_package(
         failure_category=None if step is None else step.failure_category,
         failure_summary=None if step is None else step.failure_summary,
         safe_retry=step is not None and blocked_step_is_retryable(step),
+        outbox_counts=outbox_counts,
+        outbox_errors=outbox_errors,
     )
 
 

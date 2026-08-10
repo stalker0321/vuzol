@@ -126,7 +126,7 @@ class ProductionDeployer:
                 raise
             try:
                 self._install_release(previous, fetch=False, migrate=False)
-                self._attest(previous)
+                self._attest(previous, verify_migrations=False)
             except Exception as rollback_error:
                 raise DeploymentError(
                     f"deployment failed and rollback failed: {deploy_error}; {rollback_error}"
@@ -190,7 +190,7 @@ class ProductionDeployer:
         self._run(self._compose("up", "-d", "--no-deps", "interpreter"), None, compose)
         self._run(("systemctl", "restart", *self._config.services), None, None)
 
-    def _attest(self, expected: str) -> None:
+    def _attest(self, expected: str, *, verify_migrations: bool = True) -> None:
         if self._git(self._config.deployed, "rev-parse", "HEAD") != expected:
             raise DeploymentError("production checkout SHA mismatch")
         image_sha = self._run(
@@ -216,6 +216,13 @@ class ProductionDeployer:
         )
         if container_state != "running":
             raise DeploymentError("interpreter container is not running")
+        if verify_migrations:
+            migration_environment = load_environment(self._config.service_env)
+            alembic = str(self._config.deployed / ".venv/bin/alembic")
+            heads = self._run((alembic, "heads"), self._config.deployed, migration_environment)
+            current = self._run((alembic, "current"), self._config.deployed, migration_environment)
+            if _alembic_revisions(current) != _alembic_revisions(heads):
+                raise DeploymentError("database migration revision is not at head")
 
     def _compose(self, *args: str) -> tuple[str, ...]:
         return (
@@ -235,3 +242,11 @@ class ProductionDeployer:
 
     def _git(self, repository: Path, *args: str) -> str:
         return self._run(("git", "-C", str(repository), *args), None, None)
+
+
+def _alembic_revisions(output: str) -> frozenset[str]:
+    return frozenset(
+        line.split()[0]
+        for line in output.splitlines()
+        if line and not line.startswith(("INFO", "WARNING"))
+    )

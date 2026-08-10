@@ -65,6 +65,8 @@ class FakeRunner:
             return "\n".join("active" for _ in command[2:])
         if command[:2] == ("docker", "inspect"):
             return self.image if "Labels" in command[-1] else "running"
+        if command[-1:] in {("heads",), ("current",)}:
+            return "head123 (head)"
         return ""
 
 
@@ -195,3 +197,16 @@ def test_attestation_rejects_image_service_and_container_mismatch(tmp_path: Path
 
     with pytest.raises(DeploymentError, match="container is not running"):
         ProductionDeployer(deployment, stopped)._attest(OLD)
+
+
+def test_attestation_requires_database_at_migration_head(tmp_path: Path) -> None:
+    deployment = config(tmp_path)
+    runner = FakeRunner(deployment.source, deployment.deployed)
+
+    def stale_database(argv: Sequence[str], cwd: Path | None, env: Mapping[str, str] | None) -> str:
+        if tuple(argv)[-1:] == ("current",):
+            return "previous123"
+        return runner(argv, cwd, env)
+
+    with pytest.raises(DeploymentError, match="migration revision is not at head"):
+        ProductionDeployer(deployment, stale_database)._attest(OLD)

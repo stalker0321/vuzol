@@ -31,11 +31,11 @@ from vuzol.storage.types import (
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
+from vuzol.telegram.projections import enqueue_terminal_task_projections
 from vuzol.telegram.work_package_projections import (
     build_work_package_plan_card,
     build_work_package_status_card,
 )
-from vuzol.workflows.service import _enqueue_work_package_terminal
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
@@ -89,7 +89,7 @@ async def _complete_with_terminal_outbox(
         assert task is not None
         task.status = TaskStatus.COMPLETED
         task.version += 1
-        await _enqueue_work_package_terminal(session, task)
+        await enqueue_terminal_task_projections(session, task)
 
 
 async def test_default_off_composed_discussion_to_sequential_completion(

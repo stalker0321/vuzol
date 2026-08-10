@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import func, select
 
@@ -21,6 +23,7 @@ from vuzol.storage.models import (
     WorkPackage,
 )
 from vuzol.storage.types import (
+    IdempotencyClass,
     PlanRevisionCreatedBy,
     RunStatus,
     StepStatus,
@@ -34,6 +37,7 @@ from vuzol.telegram.work_package_projections import (
     build_work_package_status_card,
 )
 from vuzol.workflows.compiler import compile_workflow
+from vuzol.workflows.recovery import recover_expired_steps
 from vuzol.workflows.service import materialize_run
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
@@ -402,6 +406,75 @@ async def test_sequence_consumer_is_default_off_and_recovers_from_outbox(
         package = await session.get(WorkPackage, created.package_id)
         assert package is not None and package.cursor_ordinal == 2
         assert await session.scalar(select(func.count()).select_from(Task)) == 2
+    await engine.dispose()
+
+
+async def test_expired_unsafe_step_pauses_owning_package_via_durable_sequence(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    created = await _approved(factory)
+    async with UnitOfWork(factory) as uow:
+        first = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=2,
+            user_id=42,
+        )
+    assert first.task_id is not None
+
+    async with factory.begin() as session:
+        task = await session.get(Task, first.task_id)
+        interpretation = await session.scalar(
+            select(Interpretation).where(Interpretation.task_id == first.task_id)
+        )
+        assert task is not None and interpretation is not None
+        run = await materialize_run(
+            session,
+            task_id=task.id,
+            workflow=compile_workflow(
+                TaskDraft.model_validate(task.task_draft), interpretation_id=interpretation.id
+            ),
+            configuration_revision="a" * 64,
+            policy_revision="b" * 64,
+            prompt_revision=None,
+            automatic_start=True,
+        )
+        step = await session.scalar(
+            select(Step).where(Step.run_id == run.id, Step.status == StepStatus.QUEUED)
+        )
+        assert step is not None
+        step.status = StepStatus.RUNNING
+        step.idempotency_class = IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
+        step.lease_owner = "crashed-worker"
+        step.lease_generation = 1
+        step.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    async with factory.begin() as session:
+        assert await recover_expired_steps(session, batch_size=1) == 1
+    async with factory() as session:
+        task = await session.get(Task, first.task_id)
+        sequence_count = await session.scalar(
+            select(func.count())
+            .select_from(TransactionalOutbox)
+            .where(
+                TransactionalOutbox.destination == "work_package_sequence",
+                TransactionalOutbox.linked_entity_id == first.task_id,
+            )
+        )
+        assert task is not None and task.status is TaskStatus.BLOCKED
+        assert sequence_count == 1
+
+    consumer = WorkPackageSequenceConsumer(
+        Settings(environment="test"), factory, owner="recovery-sequence", enabled=True
+    )
+    assert await consumer.process_one()
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        assert package is not None and package.status is WorkPackageStatus.PAUSED
+        assert package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED
+        assert package.last_failure_task_id == first.task_id
     await engine.dispose()
 
 

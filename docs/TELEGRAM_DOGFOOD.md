@@ -61,7 +61,9 @@ vuzol-telegram-dogfood report --session UUID
 ```
 
 Every command validates the migration head and project binding. Output is JSON and diagnostics
-contain only canonical statuses and bounded failure summaries.
+contain only canonical statuses, bounded failure summaries, and non-delivered outbox counts/error
+categories linked to the current package item. This makes a stuck sequence or projection visible
+without exposing message bodies or provider payloads.
 
 `checkpoint` accepts only the fixed T01–T12 identifier, `pass`/`fail`/`skip`, and an optional
 same-project package UUID. It deliberately accepts no free-form note that could leak prompt or

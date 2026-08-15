@@ -86,13 +86,16 @@ async def test_static_build_skips_unconfigured_project(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_static_build_requires_trusted_command(tmp_path: Path) -> None:
-    handler, request, _gates, _lease = _handler(tmp_path, StaticDeploymentConfig(url_path="demo"))
+async def test_static_build_uses_validated_zero_build_without_command(tmp_path: Path) -> None:
+    handler, request, gates, lease = _handler(tmp_path, StaticDeploymentConfig(url_path="demo"))
 
     outcome = await handler.execute(request, CancellationContext())
 
-    assert outcome.kind is OutcomeKind.BLOCKED
-    assert outcome.category == "static_build_not_configured"
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    assert outcome.result["status"] == "built"
+    assert outcome.result["gate"]["mode"] == "validated-source-tree"
+    gates.run.assert_not_awaited()
+    lease.revoke.assert_not_awaited()
 
 
 @pytest.mark.anyio

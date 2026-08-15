@@ -42,6 +42,7 @@ from vuzol.workflows.retry_policy import blocked_step_is_retryable
 
 WORK_PACKAGE_PLAN_ROLE = "work_package_plan"
 WORK_PACKAGE_STATUS_ROLE = "work_package_status"
+WORK_PACKAGE_ACTION_ROLE = "work_package_action"
 WORK_PACKAGE_DETAIL_ROLE = "work_package_detail"
 WORK_PACKAGE_PROJECTION_DESTINATION = "work_package_projection"
 PLAN_PAGE_SIZE = 8
@@ -203,6 +204,7 @@ async def build_work_package_plan_card(
     *,
     page: int = 1,
     _status_card: bool = False,
+    _action_card: bool = False,
 ) -> WorkPackageCard:
     if page < 1 or page > 999:
         raise WorkPackageProjectionError("invalid_page")
@@ -277,7 +279,7 @@ async def build_work_package_plan_card(
         progress = f"{ordinal}/{len(items)}"
         if current_task_status is TaskStatus.WAITING_APPROVAL:
             status = "Result approval"
-    if _status_card:
+    if _status_card or _action_card:
         preference = await load_preference(session, discussion.project_id)
         if package.status is WorkPackageStatus.PAUSED and preference.worker_key is not None:
             worker = preference.worker_key.value.title()
@@ -304,7 +306,7 @@ async def build_work_package_plan_card(
             f"Статус: <b>{status}</b> · версия плана {revision.revision_number}",
             "",
         ]
-    if _status_card and package.status is WorkPackageStatus.PAUSED:
+    if _action_card and package.status is WorkPackageStatus.PAUSED:
         reason_key = "unknown" if package.pause_reason is None else package.pause_reason.value
         reason = {
             "item_failed": "пункт завершился ошибкой",
@@ -323,15 +325,6 @@ async def build_work_package_plan_card(
         )
     if not _status_card:
         lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
-    tokens = await _work_package_token_totals(session, package.id)
-    if _status_card and any(tokens):
-        lines.extend(
-            (
-                "",
-                f"Токены: {_format_count(tokens[0])} вх / {_format_count(tokens[1])} вых / "
-                f"{_format_count(tokens[2])} кэш",
-            )
-        )
     if not _status_card and page_count > 1:
         lines.extend(("", f"Страница {page}/{page_count}"))
     html = "\n".join(lines)
@@ -368,7 +361,7 @@ async def build_work_package_plan_card(
             ("Принять план", _callback(WorkPackageCallbackKind.APPROVE, package, revision))
         )
         controls.append(("Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision)))
-    elif _status_card and package.status is WorkPackageStatus.RUNNING:
+    elif _action_card and package.status is WorkPackageStatus.RUNNING:
         controls.append(
             (
                 "Завершить цепочку",
@@ -381,7 +374,7 @@ async def build_work_package_plan_card(
                 _callback(WorkPackageCallbackKind.REQUEST_REPLAN, package, revision),
             )
         )
-    elif _status_card and package.status is WorkPackageStatus.PAUSED:
+    elif _action_card and package.status is WorkPackageStatus.PAUSED:
         if await _package_retry_available(session, package):
             controls.append(
                 ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
@@ -399,7 +392,7 @@ async def build_work_package_plan_card(
                 ),
             )
         )
-    elif _status_card and (
+    elif _action_card and (
         package.status is WorkPackageStatus.STOPPED and package.approved_revision_id == revision.id
     ):
         controls.append(
@@ -410,9 +403,15 @@ async def build_work_package_plan_card(
         )
     if controls:
         buttons.append(tuple(controls))
-    buttons.append(
-        (("Обсудить", _callback(WorkPackageCallbackKind.CONTINUE_DISCUSSION, package, revision)),)
-    )
+    if not _status_card:
+        buttons.append(
+            (
+                (
+                    "Обсудить",
+                    _callback(WorkPackageCallbackKind.CONTINUE_DISCUSSION, package, revision),
+                ),
+            )
+        )
     return WorkPackageCard(
         package_id=package.id,
         revision_id=revision.id,
@@ -420,7 +419,13 @@ async def build_work_package_plan_card(
         status_generation=package.version,
         chat_id=discussion.chat_id,
         thread_id=discussion.message_thread_id,
-        role=WORK_PACKAGE_STATUS_ROLE if _status_card else WORK_PACKAGE_PLAN_ROLE,
+        role=(
+            WORK_PACKAGE_STATUS_ROLE
+            if _status_card
+            else WORK_PACKAGE_ACTION_ROLE
+            if _action_card
+            else WORK_PACKAGE_PLAN_ROLE
+        ),
         html=html,
         callback_buttons=tuple(buttons),
         page=page,
@@ -431,6 +436,12 @@ async def build_work_package_status_card(
     session: AsyncSession, package_id: uuid.UUID
 ) -> WorkPackageCard:
     return await build_work_package_plan_card(session, package_id, _status_card=True)
+
+
+async def build_work_package_action_card(
+    session: AsyncSession, package_id: uuid.UUID
+) -> WorkPackageCard:
+    return await build_work_package_plan_card(session, package_id, _action_card=True)
 
 
 def _route_provider_label(route: object) -> str | None:

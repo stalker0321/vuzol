@@ -77,11 +77,13 @@ from vuzol.telegram.tracing import (
     should_deliver_orchestration_trace,
 )
 from vuzol.telegram.work_package_projections import (
+    WORK_PACKAGE_ACTION_ROLE,
     WORK_PACKAGE_DETAIL_ROLE,
     WORK_PACKAGE_PLAN_ROLE,
     WORK_PACKAGE_PROJECTION_DESTINATION,
     WORK_PACKAGE_STATUS_ROLE,
     WorkPackageProjectionError,
+    build_work_package_action_card,
     build_work_package_detail_card,
     build_work_package_plan_card,
     build_work_package_status_card,
@@ -442,6 +444,7 @@ async def _prepare_work_package_projection(
     role = {
         "render_plan": WORK_PACKAGE_PLAN_ROLE,
         "render_status": WORK_PACKAGE_STATUS_ROLE,
+        "render_action": WORK_PACKAGE_ACTION_ROLE,
         "render_detail": WORK_PACKAGE_DETAIL_ROLE,
         "clear_detail": WORK_PACKAGE_DETAIL_ROLE,
     }.get(item.operation_type)
@@ -474,6 +477,8 @@ async def _prepare_work_package_projection(
             card = await build_work_package_plan_card(session, package_id, page=raw_page)
         elif item.operation_type == "render_status":
             card = await build_work_package_status_card(session, package_id)
+        elif item.operation_type == "render_action":
+            card = await build_work_package_action_card(session, package_id)
         else:
             detail_card = await build_work_package_detail_card(session, package_id)
             if detail_card is None:
@@ -1058,9 +1063,7 @@ class TelegramDeliveryService:
                     DeliveryAction.SEND_HELP,
                     DeliveryAction.SEND_DISCUSSION_REPLY,
                 }:
-                    raise LostTelegramResponse(
-                        "Telegram send outcome is unknown"
-                    ) from error
+                    raise LostTelegramResponse("Telegram send outcome is unknown") from error
                 raise
             await self._complete(token, prepared, confirmed_message_id)
             self._logger.info(

@@ -378,6 +378,15 @@ class WorkPackageSequencer:
             idempotency_key=f"wp:projection:sequence:{package_id}:{generation}:{reason}",
             payload={"package_id": str(package_id)},
         )
+        if reason == "terminal_pause":
+            await self._uow.outbox.enqueue(
+                destination="work_package_projection",
+                operation_type="render_action",
+                entity_type="work_package",
+                entity_id=package_id,
+                idempotency_key=f"wp:action:sequence:{package_id}:{generation}:{reason}",
+                payload={"package_id": str(package_id)},
+            )
 
 
 def _task_draft(project_id: str, item: PlanRevisionItem) -> TaskDraft:

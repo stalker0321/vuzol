@@ -27,7 +27,10 @@ from vuzol.storage.types import (
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram.work_package_projections import build_work_package_status_card
+from vuzol.telegram.work_package_projections import (
+    build_work_package_action_card,
+    build_work_package_status_card,
+)
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
@@ -123,9 +126,12 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
     assert duplicate_failure.value.code == "stale_generation"
 
     async with factory() as session:
-        card = await build_work_package_status_card(session, created.package_id)
-    assert "Автоматического перехода дальше не будет" in card.html
-    labels = {label for row in card.callback_buttons for label, _ in row}
+        status_card = await build_work_package_status_card(session, created.package_id)
+        action_card = await build_work_package_action_card(session, created.package_id)
+    assert "Автоматического перехода дальше не будет" not in status_card.html
+    assert status_card.callback_buttons == ()
+    assert "Автоматического перехода дальше не будет" in action_card.html
+    labels = {label for row in action_card.callback_buttons for label, _ in row}
     assert "Повторить" not in labels
     assert labels >= {
         "Пропустить",

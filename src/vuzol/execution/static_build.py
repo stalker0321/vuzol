@@ -51,46 +51,51 @@ class StaticBuildHandler:
             deployment = project.static_deployment
             if deployment is None or not deployment.enabled:
                 return StepOutcome.succeeded({"status": "skipped", "reason": "not_configured"})
+            gate_result: dict[str, object]
             if deployment.build_command is None:
-                return StepOutcome(
-                    kind=OutcomeKind.BLOCKED,
-                    result={},
-                    category="static_build_not_configured",
-                    summary="static delivery requires a trusted build command",
+                gate_result = {
+                    "name": "static-zero-build",
+                    "exit_code": 0,
+                    "command_id": None,
+                    "mode": "validated-source-tree",
+                }
+            else:
+                sandbox = self._registries.sandboxes.get(project.sandbox_profile)
+                lease = await self._access.grant(
+                    path, sandbox_uid=sandbox.uid, sandbox_gid=sandbox.gid
                 )
-            sandbox = self._registries.sandboxes.get(project.sandbox_profile)
-            lease = await self._access.grant(path, sandbox_uid=sandbox.uid, sandbox_gid=sandbox.gid)
-            before = await self._git.inspect(path, worktree.base_commit)
-            runs = await self._gates.run(
-                path,
-                (RequiredGate(name="static-build", command_id=deployment.build_command),),
-                timeout_seconds=step.timeout_seconds,
-                context=GateExecutionContext(
-                    task_id=request.task_id,
-                    run_id=request.run_id,
-                    step_id=request.step_id,
-                    worktree_id=worktree.id,
-                    profile_id="static-build",
-                    provider_attempt=1,
-                    lease_generation=request.lease.generation,
-                ),
-                cancellation=cancellation,
-            )
-            gate = runs[0].evidence
-            if gate.exit_code != 0:
-                return StepOutcome(
-                    kind=OutcomeKind.BLOCKED,
-                    result={"gate": gate.model_dump(mode="json")},
-                    category="static_build_failed",
-                    summary="trusted static build command failed",
+                before = await self._git.inspect(path, worktree.base_commit)
+                runs = await self._gates.run(
+                    path,
+                    (RequiredGate(name="static-build", command_id=deployment.build_command),),
+                    timeout_seconds=step.timeout_seconds,
+                    context=GateExecutionContext(
+                        task_id=request.task_id,
+                        run_id=request.run_id,
+                        step_id=request.step_id,
+                        worktree_id=worktree.id,
+                        profile_id="static-build",
+                        provider_attempt=1,
+                        lease_generation=request.lease.generation,
+                    ),
+                    cancellation=cancellation,
                 )
-            after = await self._git.inspect(path, worktree.base_commit)
-            if (before.head, before.diff_hash, before.changed_files) != (
-                after.head,
-                after.diff_hash,
-                after.changed_files,
-            ):
-                raise ValueError("static build changed tracked Git facts")
+                gate = runs[0].evidence
+                gate_result = gate.model_dump(mode="json")
+                if gate.exit_code != 0:
+                    return StepOutcome(
+                        kind=OutcomeKind.BLOCKED,
+                        result={"gate": gate_result},
+                        category="static_build_failed",
+                        summary="trusted static build command failed",
+                    )
+                after = await self._git.inspect(path, worktree.base_commit)
+                if (before.head, before.diff_hash, before.changed_files) != (
+                    after.head,
+                    after.diff_hash,
+                    after.changed_files,
+                ):
+                    raise ValueError("static build changed tracked Git facts")
             source = contained(path, path / deployment.source_directory)
             evidence = measure_static_tree(source, entrypoint=deployment.entrypoint)
             return StepOutcome.succeeded(
@@ -102,7 +107,7 @@ class StaticBuildHandler:
                     "artifact_hash": evidence.digest,
                     "files": evidence.files,
                     "bytes": evidence.bytes,
-                    "gate": gate.model_dump(mode="json"),
+                    "gate": gate_result,
                 }
             )
         except (LookupError, ValueError, StaticPublishError) as error:

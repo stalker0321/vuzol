@@ -3,7 +3,14 @@
 from vuzol.storage.models import Step
 
 EXPLICITLY_RETRYABLE_FAILURES = frozenset(
-    {"cancelled", "quota_exhausted", "rate_limited", "timeout", "provider_unavailable"}
+    {
+        "authentication",
+        "cancelled",
+        "quota_exhausted",
+        "rate_limited",
+        "timeout",
+        "provider_unavailable",
+    }
 )
 
 

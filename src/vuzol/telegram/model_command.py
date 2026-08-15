@@ -148,7 +148,8 @@ async def enqueue_worker_picker(
             linked_entity_type="telegram_inbox",
             linked_entity_id=inbox_id,
             idempotency_key=(
-                f"telegram:model_picker:{chat_id}:{message_thread_id}:{preference.revision}:worker"
+                f"telegram:model_picker:{chat_id}:{message_thread_id}:{preference.revision}:"
+                f"{inbox_id}:worker"
             ),
             payload={
                 "role": PROJECT_MODEL_PICKER_ROLE,
@@ -371,6 +372,73 @@ class ProjectModelController:
         # Preference mutations must refresh «Статус проектов» so project-default labels
         # are not stale until an unrelated task event.
         await enqueue_project_status_dashboard(session, update.chat_id)
+        await _enqueue_project_topic_refresh(
+            session,
+            project_id=project_id,
+            chat_id=update.chat_id,
+            thread_id=update.message_thread_id,
+            action_id=action_id,
+        )
+
+
+async def _enqueue_project_topic_refresh(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    chat_id: int,
+    thread_id: int,
+    action_id: uuid.UUID,
+) -> None:
+    from sqlalchemy import select
+
+    from vuzol.storage.models import ProjectDiscussionSession, TopicMapping
+
+    discussion = await session.scalar(
+        select(ProjectDiscussionSession)
+        .where(
+            ProjectDiscussionSession.project_id == project_id,
+            ProjectDiscussionSession.chat_id == chat_id,
+            ProjectDiscussionSession.message_thread_id == thread_id,
+        )
+        .order_by(ProjectDiscussionSession.updated_at.desc())
+        .limit(1)
+    )
+    if discussion is not None and discussion.active_work_package_id is not None:
+        session.add(
+            TransactionalOutbox(
+                destination="work_package_projection",
+                operation_type="render_status",
+                linked_entity_type="work_package",
+                linked_entity_id=discussion.active_work_package_id,
+                idempotency_key=f"wp:projection:model-change:{action_id}",
+                payload={"package_id": str(discussion.active_work_package_id)},
+            )
+        )
+        return
+    mapping = await session.scalar(
+        select(TopicMapping).where(
+            TopicMapping.chat_id == chat_id,
+            TopicMapping.message_thread_id == thread_id,
+            TopicMapping.project_id == project_id,
+            TopicMapping.enabled.is_(True),
+        )
+    )
+    if mapping is not None:
+        session.add(
+            TransactionalOutbox(
+                destination="work_package_projection",
+                operation_type="render_topic_idle",
+                linked_entity_type="topic_mapping",
+                linked_entity_id=mapping.id,
+                idempotency_key=f"topic-idle:model-change:{action_id}",
+                payload={
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
+                    "project_id": project_id,
+                    "revision": 1,
+                },
+            )
+        )
 
 
 def _selected_profile(

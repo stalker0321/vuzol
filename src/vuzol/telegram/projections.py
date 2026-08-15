@@ -1279,6 +1279,20 @@ async def enqueue_task_status_projection(
             payload=payload,
         )
     )
+    materialization = await session.scalar(
+        select(MaterializationLink).where(MaterializationLink.task_id == task.id)
+    )
+    if materialization is not None:
+        session.add(
+            TransactionalOutbox(
+                destination="work_package_projection",
+                operation_type="render_status",
+                linked_entity_type="work_package",
+                linked_entity_id=materialization.work_package_id,
+                idempotency_key=(f"wp:projection:task-status:{task.id}:{task.version}:{role}"),
+                payload={"package_id": str(materialization.work_package_id)},
+            )
+        )
     await enqueue_project_status_dashboard(session, chat_id)
 
 

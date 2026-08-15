@@ -274,13 +274,22 @@ async def _schedule_bounded_repair(
     failed_step: Step,
     outcome: StepOutcome,
 ) -> bool:
-    """Schedule one worker repair without turning the static workflow into an unsafe cycle."""
+    """Schedule up to three worker repairs in the current human-approved epoch."""
+
+    task = await session.get(Task, run.task_id)
+    if task is None:
+        return False
+    repair_epoch = task.budget_epoch
+    previous_epoch = failed_step.payload.get("repair_epoch")
+    repair_count = (
+        int(failed_step.payload.get("repair_count", 0)) if previous_epoch == repair_epoch else 0
+    )
 
     if (
         outcome.unknown_effects
         or failed_step.step_type not in {"validate", "review"}
         or not (outcome.category or "").startswith(("validation_", "review_"))
-        or int(failed_step.payload.get("repair_count", 0)) >= 1
+        or repair_count >= 3
     ):
         return False
     worker = await session.scalar(
@@ -318,7 +327,8 @@ async def _schedule_bounded_repair(
         required_capabilities=list(worker.required_capabilities),
         payload={
             "repair_for_step_id": str(failed_step.id),
-            "repair_attempt": 1,
+            "repair_attempt": repair_count + 1,
+            "repair_epoch": repair_epoch,
             "repair_context": {
                 "source": failed_step.step_type,
                 "category": outcome.category,
@@ -340,7 +350,8 @@ async def _schedule_bounded_repair(
     failed_step.unknown_effects = False
     failed_step.payload = {
         **failed_step.payload,
-        "repair_count": 1,
+        "repair_count": repair_count + 1,
+        "repair_epoch": repair_epoch,
         "repair_scheduled_step_id": str(repair.id),
     }
     session.add(
@@ -353,7 +364,8 @@ async def _schedule_bounded_repair(
                 "failed_step_id": str(failed_step.id),
                 "repair_step_id": str(repair.id),
                 "category": outcome.category,
-                "repair_count": 1,
+                "repair_count": repair_count + 1,
+                "repair_epoch": repair_epoch,
             },
         )
     )

@@ -11,7 +11,7 @@ from vuzol.config.models import ProviderProfileConfig
 from vuzol.config.settings import HardLimits
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import ProviderBudgetReservation, Step, UsageRecord
+from vuzol.storage.models import ProviderBudgetReservation, Step, Task, UsageRecord
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import BudgetReservationStatus, StepStatus
 
@@ -97,11 +97,15 @@ async def reserve_budget(
     if existing is not None:
         return existing
 
-    task_usage = await _usage_totals(session, task_id=task_id)
-    step_usage = await _usage_totals(session, step_id=step_id)
+    task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
+    if task is None:
+        raise LookupError(f"unknown budget task: {task_id}")
+    budget_epoch = task.budget_epoch
+    task_usage = await _usage_totals(session, task_id=task_id, budget_epoch=budget_epoch)
+    step_usage = await _usage_totals(session, step_id=step_id, budget_epoch=budget_epoch)
     daily_usage = await _daily_usage_totals(session)
-    task_reserved = await _reserved_totals(session, task_id=task_id)
-    step_reserved = await _reserved_totals(session, step_id=step_id)
+    task_reserved = await _reserved_totals(session, task_id=task_id, budget_epoch=budget_epoch)
+    step_reserved = await _reserved_totals(session, step_id=step_id, budget_epoch=budget_epoch)
     daily_reserved = await _reserved_totals(session)
 
     if estimate.input_tokens > limits.provider_call_input_tokens:
@@ -138,6 +142,7 @@ async def reserve_budget(
         run_id=run_id,
         step_id=step_id,
         profile_id=profile_id,
+        budget_epoch=budget_epoch,
         provider_attempt=provider_attempt,
         reserved_input_tokens=estimate.input_tokens,
         reserved_output_tokens=estimate.output_tokens,
@@ -270,17 +275,23 @@ async def _usage_totals(
     *,
     task_id: uuid.UUID | None = None,
     step_id: uuid.UUID | None = None,
+    budget_epoch: int | None = None,
 ) -> tuple[int, int, Decimal, Decimal]:
     statement = select(
         func.coalesce(func.sum(UsageRecord.input_tokens), 0),
         func.coalesce(func.sum(UsageRecord.output_tokens), 0),
         func.coalesce(func.sum(UsageRecord.cost_units), 0),
         func.coalesce(func.sum(UsageRecord.quota_units), 0),
+    ).join(
+        ProviderBudgetReservation,
+        ProviderBudgetReservation.id == UsageRecord.reservation_id,
     )
     if task_id is not None:
         statement = statement.where(UsageRecord.task_id == task_id)
     if step_id is not None:
         statement = statement.where(UsageRecord.step_id == step_id)
+    if budget_epoch is not None:
+        statement = statement.where(ProviderBudgetReservation.budget_epoch == budget_epoch)
     row = (await session.execute(statement)).one()
     return int(row[0]), int(row[1]), Decimal(row[2]), Decimal(row[3])
 
@@ -301,6 +312,7 @@ async def _reserved_totals(
     *,
     task_id: uuid.UUID | None = None,
     step_id: uuid.UUID | None = None,
+    budget_epoch: int | None = None,
 ) -> tuple[int, int, Decimal, Decimal]:
     statement = select(
         func.coalesce(func.sum(ProviderBudgetReservation.reserved_input_tokens), 0),
@@ -312,5 +324,7 @@ async def _reserved_totals(
         statement = statement.where(ProviderBudgetReservation.task_id == task_id)
     if step_id is not None:
         statement = statement.where(ProviderBudgetReservation.step_id == step_id)
+    if budget_epoch is not None:
+        statement = statement.where(ProviderBudgetReservation.budget_epoch == budget_epoch)
     row = (await session.execute(statement)).one()
     return int(row[0]), int(row[1]), Decimal(row[2]), Decimal(row[3])

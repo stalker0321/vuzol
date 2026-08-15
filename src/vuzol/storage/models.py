@@ -86,6 +86,7 @@ class Task(IdentityMixin, TimestampMixin, Base):
             "topic_task_number IS NULL OR topic_task_number BETWEEN 1 AND 9999",
             name="topic_task_number_range",
         ),
+        CheckConstraint("budget_epoch >= 0", name="tasks_budget_epoch_nonnegative"),
         UniqueConstraint(
             "source_chat_id",
             "source_thread_id",
@@ -121,6 +122,7 @@ class Task(IdentityMixin, TimestampMixin, Base):
         ForeignKey("tasks.id", ondelete="RESTRICT")
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    budget_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
@@ -1269,6 +1271,8 @@ class ProviderBudgetReservation(IdentityMixin, Base):
     __tablename__ = "provider_budget_reservations"
     __table_args__ = (
         UniqueConstraint("step_id", "provider_attempt", name="uq_budget_step_attempt"),
+        CheckConstraint("budget_epoch >= 0", name="provider_budget_reservations_epoch_nonnegative"),
+        Index("ix_provider_budget_reservations_task_epoch", "task_id", "budget_epoch"),
     )
 
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -1281,6 +1285,7 @@ class ProviderBudgetReservation(IdentityMixin, Base):
         ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    budget_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     provider_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     reserved_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
     reserved_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)

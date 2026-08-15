@@ -285,6 +285,17 @@ async def retry_blocked_step(
     assert run is not None
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
     assert task is not None
+    task.budget_epoch += 1
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type="task.budget_epoch_started",
+            actor_type="user",
+            actor_id=actor_id,
+            payload={"budget_epoch": task.budget_epoch, "reason": "explicit_retry"},
+        )
+    )
     await transition_step(session, step, StepStatus.QUEUED, actor_type="user", actor_id=actor_id)
     step.failure_category = None
     step.failure_summary = None

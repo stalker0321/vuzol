@@ -25,6 +25,7 @@ from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
     dead_letter_outbox_item,
+    defer_outbox_item,
     mark_outbox_ambiguous,
     retry_outbox_item,
 )
@@ -1072,7 +1073,9 @@ class TelegramDeliveryService:
             )
         except LostTelegramResponse:
             await self._mark_ambiguous(token)
-        except (TimedOut, RetryAfter, NetworkError) as error:
+        except RetryAfter as error:
+            await self._defer_rate_limit(token, error)
+        except (TimedOut, NetworkError) as error:
             await self._handle_transient(token, attempt_count, type(error).__name__.lower())
         except (BadRequest, Forbidden) as error:
             await self._dead_letter(token, f"telegram_{type(error).__name__.lower()}")
@@ -1291,6 +1294,22 @@ class TelegramDeliveryService:
         delay = min(self._retry_max, self._retry_min * (2 ** (attempt_count - 1)))
         async with self._factory.begin() as session:
             await retry_outbox_item(session, token, delay_seconds=delay, error_category=category)
+
+    async def _defer_rate_limit(self, token: OutboxLeaseToken, error: RetryAfter) -> None:
+        """Honor Telegram backpressure without consuming the retry budget."""
+
+        retry_after = error.retry_after
+        delay = (
+            retry_after.total_seconds() if hasattr(retry_after, "total_seconds") else retry_after
+        )
+        delay_seconds = max(self._retry_min, min(self._retry_max, float(delay)))
+        async with self._factory.begin() as session:
+            await defer_outbox_item(
+                session,
+                token,
+                delay_seconds=delay_seconds,
+                reason="retryafter",
+            )
 
     async def _dead_letter(self, token: OutboxLeaseToken, category: str) -> None:
         async with self._factory.begin() as session:

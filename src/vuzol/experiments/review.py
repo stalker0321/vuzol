@@ -40,7 +40,9 @@ class VerificationResult(FrozenModel):
 
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("forced_success", re.compile(r"\bor\s+True\b|\bexit\s+0\b")),
+    # A standalone ``exit 0`` is the normal end of many strict shell test runners.
+    # Flag explicit failure suppression instead of successful process termination.
+    ("forced_success", re.compile(r"\bor\s+True\b|\|\|\s*(?:true\b|exit\s+0\b)")),
     (
         "exception_swallowing",
         re.compile(r"except\s+(?:Exception|BaseException)[^:]*:\s*(?:#.*\n\s*)?pass\b"),

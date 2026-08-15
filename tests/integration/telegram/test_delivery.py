@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import func, select, update
-from telegram.error import NetworkError
+from telegram.error import NetworkError, RetryAfter
 
 from tests.integration.storage.helpers import storage
 from vuzol.storage.models import (
@@ -467,6 +467,40 @@ def test_transient_retry_then_max_attempts_dead_letters(postgres_dsn: str) -> No
             item = await session.get(TransactionalOutbox, outbox_id)
             assert item is not None and item.status == DeliveryStatus.DEAD_LETTER
             assert item.attempt_count == 2 and item.last_error_category == "networkerror"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_retry_after_defers_without_consuming_attempt(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, outbox_id = await seed_delivery(factory, message_id=31)
+        assert task_id is not None
+        async with factory.begin() as session:
+            session.add(
+                TelegramMessageLink(
+                    chat_id=-100,
+                    message_thread_id=10,
+                    message_id=778,
+                    task_id=task_id,
+                    message_role="task_status",
+                    projection_revision=0,
+                )
+            )
+        delivery = service(
+            factory,
+            FakeTelegramClient(fail=RetryAfter(3)),
+            max_attempts=1,
+        )
+        assert await delivery.deliver_one()
+        async with factory() as session:
+            item = await session.get(TransactionalOutbox, outbox_id)
+            now = await session.scalar(func.now())
+            assert item is not None and item.status == DeliveryStatus.PENDING
+            assert item.attempt_count == 0
+            assert item.last_error_category == "retryafter"
+            assert now is not None and item.available_at > now
         await engine.dispose()
 
     asyncio.run(scenario())

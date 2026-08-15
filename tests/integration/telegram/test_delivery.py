@@ -33,7 +33,6 @@ from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.projections import (
     FakeTelegramClient,
-    LostTelegramResponse,
     enqueue_task_status_projection,
 )
 from vuzol.telegram.tracing import ORCHESTRATION_TRACE_ROLE
@@ -436,7 +435,19 @@ def test_existing_status_is_edited_and_stale_revision_is_ignored(postgres_dsn: s
 def test_transient_retry_then_max_attempts_dead_letters(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
-        _, outbox_id = await seed_delivery(factory, message_id=30)
+        task_id, outbox_id = await seed_delivery(factory, message_id=30)
+        assert task_id is not None
+        async with factory.begin() as session:
+            session.add(
+                TelegramMessageLink(
+                    chat_id=-100,
+                    message_thread_id=10,
+                    message_id=777,
+                    task_id=task_id,
+                    message_role="task_status",
+                    projection_revision=0,
+                )
+            )
         delivery = service(factory, FakeTelegramClient(fail=NetworkError("offline")))
         assert await delivery.deliver_one()
         async with factory() as session:
@@ -467,7 +478,7 @@ def test_unknown_send_is_ambiguous_and_clarification_has_no_task_link(
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         _, unknown_id = await seed_delivery(factory, message_id=40)
-        unknown = service(factory, FakeTelegramClient(fail=LostTelegramResponse("lost")))
+        unknown = service(factory, FakeTelegramClient(fail=NetworkError("response lost")))
         assert await unknown.deliver_one()
         assert not await unknown.deliver_one()
         async with factory() as session:

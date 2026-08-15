@@ -98,7 +98,7 @@ async def test_sequencer_is_one_ahead_idempotent_and_completes(postgres_dsn: str
     assert first.ordinal == 1 and first.task_id is not None
     async with factory() as session:
         status_card = await build_work_package_status_card(session, created.package_id)
-    assert status_card.html.startswith("<b>1/2 выполняется</b>\nImplement step 1")
+    assert status_card.html.startswith("<b>Working | Auto</b>\n1/2 · Implement step 1")
 
     async with factory.begin() as session:
         task = await session.get(Task, first.task_id, with_for_update=True)

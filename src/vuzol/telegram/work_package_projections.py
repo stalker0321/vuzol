@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.projects.executor_preference import load_preference
 from vuzol.storage.models import (
     MaterializationLink,
     PlanRevision,
@@ -224,13 +225,13 @@ async def build_work_package_plan_card(
         raise WorkPackageProjectionError("page_out_of_range")
     visible = items[(page - 1) * PLAN_PAGE_SIZE : page * PLAN_PAGE_SIZE]
     status = {
-        WorkPackageStatus.DRAFT: "Черновик",
-        WorkPackageStatus.APPROVED: "План принят",
-        WorkPackageStatus.RUNNING: "Выполняется",
-        WorkPackageStatus.PAUSED: "Приостановлен",
-        WorkPackageStatus.COMPLETED: "Завершён",
-        WorkPackageStatus.STOPPED: "Остановлен",
-        WorkPackageStatus.DISCARDED: "Отменён",
+        WorkPackageStatus.DRAFT: "Planning",
+        WorkPackageStatus.APPROVED: "Queued",
+        WorkPackageStatus.RUNNING: "Working",
+        WorkPackageStatus.PAUSED: "Paused",
+        WorkPackageStatus.COMPLETED: "Done",
+        WorkPackageStatus.STOPPED: "Stopped",
+        WorkPackageStatus.DISCARDED: "Cancelled",
     }[package.status]
     progress = None
     if package.status in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}:
@@ -246,23 +247,22 @@ async def build_work_package_plan_card(
             .limit(1)
         )
         worker = _route_provider_label(route)
-        action = "выполняется" if package.status is WorkPackageStatus.RUNNING else "пауза"
-        progress = f"{ordinal}/{len(items)} {action}"
-        if worker is not None:
-            progress += f" | {worker}"
-    if _status_card and progress is not None:
+        progress = f"{ordinal}/{len(items)}"
+    if _status_card:
+        preference = await load_preference(session, discussion.project_id)
+        if worker is None:
+            worker = (
+                "Auto" if preference.worker_key is None else preference.worker_key.value.title()
+            )
         current_item = next(
             (item for item in items if item.ordinal == (package.cursor_ordinal or 1)), None
         )
+        title = current_item.summary if current_item is not None else package.title
+        if progress is not None:
+            title = f"{progress} · {title}"
         lines = [
-            f"<b>{telegram_html(progress)}</b>",
-            (
-                telegram_html(current_item.summary)
-                if current_item is not None
-                else telegram_html(package.title)
-            ),
-            "",
-            f"<b>{telegram_html(package.title)}</b>",
+            f"<b>{status} | {telegram_html(worker)}</b>",
+            telegram_html(title),
             "",
         ]
     else:
@@ -403,10 +403,23 @@ async def build_work_package_status_card(
 def _route_provider_label(route: object) -> str | None:
     if not isinstance(route, dict):
         return None
-    value = route.get("trusted_profile_id") or route.get("profile_id") or route.get("executor")
-    if not isinstance(value, str):
+    values = (
+        route.get("executor_worker_key"),
+        route.get("model_override"),
+        route.get("trusted_profile_id"),
+        route.get("profile_id"),
+        route.get("executor"),
+    )
+    value = next((candidate for candidate in values if isinstance(candidate, str)), None)
+    if value is None:
         return None
     lowered = value.lower()
+    if "terra" in lowered:
+        return "Terra"
+    if "luna" in lowered:
+        return "Luna"
+    if "sol" in lowered:
+        return "Sol"
     if "grok" in lowered:
         return "Grok"
     if "kimi" in lowered:

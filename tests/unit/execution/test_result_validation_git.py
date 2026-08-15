@@ -33,17 +33,26 @@ def test_normalize_blank_lines_at_eof_is_bounded_to_changed_text(tmp_path: Path)
     binary.write_bytes(b"\x00\n\n")
     unchanged = source / "single.txt"
     unchanged.write_bytes(b"single\n")
+    trailing = source / "README.md"
+    trailing.write_bytes(b"one  \n two\t\r\nlast  ")
 
     changed = _normalize_blank_lines_at_eof(
         tmp_path,
-        ("src/styles.css", "src/windows.txt", "src/image.bin", "src/single.txt"),
+        (
+            "src/styles.css",
+            "src/windows.txt",
+            "src/image.bin",
+            "src/single.txt",
+            "src/README.md",
+        ),
     )
 
-    assert changed == ("src/styles.css", "src/windows.txt")
+    assert changed == ("src/styles.css", "src/windows.txt", "src/README.md")
     assert redundant.read_bytes() == b"body {}\n"
     assert crlf.read_bytes() == b"value\r\n"
     assert binary.read_bytes() == b"\x00\n\n"
     assert unchanged.read_bytes() == b"single\n"
+    assert trailing.read_bytes() == b"one\n two\r\nlast"
 
 
 @pytest.mark.anyio

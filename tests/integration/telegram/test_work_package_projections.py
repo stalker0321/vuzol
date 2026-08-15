@@ -82,7 +82,7 @@ async def test_plan_projection_is_pg_reconstructable_and_fenced(postgres_dsn: st
 
     assert "Plan &lt;unsafe&gt;" in first.html and "Step &lt;1&gt;" in first.html
     assert "Step &lt;9&gt;" in second.html and first.status_generation == 1
-    assert status.html.startswith("<b>Approval | Auto</b>\nPlan &lt;unsafe&gt;")
+    assert status.html.startswith("<b>Plan approval | Auto</b>\nPlan &lt;unsafe&gt;")
     callbacks = [
         parse_work_package_callback(data) for row in first.callback_buttons for _, data in row
     ]

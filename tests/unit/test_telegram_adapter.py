@@ -58,6 +58,8 @@ def test_long_polling_application_registers_boundary_handlers() -> None:
         on_control=control_handler,
     )
     assert len(application.handlers[0]) == 2
+    callback_handler = application.handlers[0][0]
+    assert callback_handler.pattern.pattern == r"^v[12]:"  # type: ignore[union-attr]
 
 
 def test_callback_answer_explains_discussion_mode_and_rejections() -> None:

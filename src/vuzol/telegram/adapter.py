@@ -236,6 +236,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
         return None
     parts = query.data.split(":")
     message_thread_id = getattr(query.message, "message_thread_id", None)
+    message_id = getattr(query.message, "message_id", None)
     if query.data.startswith("v1:wp:"):
         return WorkPackageControlUpdate(
             bot_id=bot_id,
@@ -298,6 +299,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
                 chat_id=query.message.chat.id,
                 user_id=user.id,
                 message_thread_id=message_thread_id,
+                message_id=message_id,
                 action_kind="project_model_select_auto",
                 preference_revision=revision,
             )
@@ -309,6 +311,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
                 chat_id=query.message.chat.id,
                 user_id=user.id,
                 message_thread_id=message_thread_id,
+                message_id=message_id,
                 action_kind="project_model_select_worker",
                 preference_revision=revision,
                 preference_worker=parts[4],
@@ -321,6 +324,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
                 chat_id=query.message.chat.id,
                 user_id=user.id,
                 message_thread_id=message_thread_id,
+                message_id=message_id,
                 action_kind="project_model_select_effort",
                 preference_revision=revision,
                 preference_worker=parts[4],
@@ -341,6 +345,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
                 chat_id=query.message.chat.id,
                 user_id=user.id,
                 message_thread_id=message_thread_id,
+                message_id=message_id,
                 action_kind="project_model_select_connection",
                 preference_revision=revision,
                 preference_profile_id=parts[4],
@@ -353,6 +358,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
                 chat_id=query.message.chat.id,
                 user_id=user.id,
                 message_thread_id=message_thread_id,
+                message_id=message_id,
                 action_kind="project_model_select_worker",
                 preference_revision=revision,
                 preference_profile_id=parts[4],
@@ -366,6 +372,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
                 chat_id=query.message.chat.id,
                 user_id=user.id,
                 message_thread_id=message_thread_id,
+                message_id=message_id,
                 action_kind="project_model_select_effort",
                 preference_revision=revision,
                 preference_profile_id=parts[4],
@@ -474,6 +481,6 @@ def build_long_polling_application(
                 text, show_alert = _callback_answer(result)
                 await query.answer(text=text, show_alert=show_alert)
 
-    application.add_handler(CallbackQueryHandler(handle_control, pattern=r"^v1:"))
+    application.add_handler(CallbackQueryHandler(handle_control, pattern=r"^v[12]:"))
     application.add_handler(MessageHandler(filters.ALL, handle_message))
     return application

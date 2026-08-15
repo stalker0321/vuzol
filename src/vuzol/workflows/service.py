@@ -214,6 +214,11 @@ async def commit_step_outcome(
         if step.step_type == "plan" and outcome.result:
             # Retry diagnostics only for plan outcomes (handoff rejection payload).
             step.result = outcome.result
+    elif outcome.kind is OutcomeKind.TRANSIENT_FAILURE:
+        # Automatic retries are exhausted, but the operation is known to be safe to
+        # retry explicitly after the user changes a provider, credential, or quota.
+        await transition_step(session, step, StepStatus.BLOCKED, actor_type="worker")
+        await transition_run(session, run, RunStatus.BLOCKED, actor_type="worker")
     elif outcome.kind is OutcomeKind.NEEDS_USER_INPUT:
         await transition_step(session, step, StepStatus.AWAITING_USER, actor_type="worker")
         await transition_run(session, run, RunStatus.AWAITING_USER, actor_type="worker")

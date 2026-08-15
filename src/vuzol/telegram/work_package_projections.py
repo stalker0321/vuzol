@@ -17,6 +17,7 @@ from vuzol.storage.models import (
     ProjectDiscussionSession,
     Run,
     Step,
+    Task,
     TelegramMessageLink,
     TopicMapping,
     TransactionalOutbox,
@@ -27,6 +28,7 @@ from vuzol.storage.models import (
 from vuzol.storage.types import (
     DeliveryStatus,
     StepStatus,
+    TaskStatus,
     WorkPackagePauseReason,
     WorkPackageStatus,
 )
@@ -225,7 +227,7 @@ async def build_work_package_plan_card(
         raise WorkPackageProjectionError("page_out_of_range")
     visible = items[(page - 1) * PLAN_PAGE_SIZE : page * PLAN_PAGE_SIZE]
     status = {
-        WorkPackageStatus.DRAFT: "Approval",
+        WorkPackageStatus.DRAFT: "Plan approval",
         WorkPackageStatus.APPROVED: "Queued",
         WorkPackageStatus.RUNNING: "Working",
         WorkPackageStatus.PAUSED: "Paused",
@@ -235,8 +237,18 @@ async def build_work_package_plan_card(
     }[package.status]
     progress = None
     worker = None
+    current_task_status = None
     if package.status in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}:
         ordinal = package.cursor_ordinal or 1
+        current_task_status = await session.scalar(
+            select(Task.status)
+            .join(MaterializationLink, MaterializationLink.task_id == Task.id)
+            .where(
+                MaterializationLink.plan_revision_id == revision.id,
+                MaterializationLink.ordinal == ordinal,
+            )
+            .limit(1)
+        )
         executor_profile_id = await session.scalar(
             select(Step.executor_profile_id)
             .join(Run, Run.id == Step.run_id)
@@ -263,8 +275,12 @@ async def build_work_package_plan_card(
             {"profile_id": executor_profile_id} if executor_profile_id is not None else route
         )
         progress = f"{ordinal}/{len(items)}"
+        if current_task_status is TaskStatus.WAITING_APPROVAL:
+            status = "Result approval"
     if _status_card:
         preference = await load_preference(session, discussion.project_id)
+        if package.status is WorkPackageStatus.PAUSED and preference.worker_key is not None:
+            worker = preference.worker_key.value.title()
         if worker is None:
             worker = (
                 "Auto" if preference.worker_key is None else preference.worker_key.value.title()

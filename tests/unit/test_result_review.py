@@ -69,6 +69,16 @@ def test_mechanical_findings_classifies_blocking_patterns() -> None:
     assert any(item.severity.value == "blocker" for item in findings)
 
 
+def test_standalone_success_exit_is_not_forced_success() -> None:
+    findings = mechanical_findings(b'if test "$FAIL" -gt 0; then exit 1; fi\nexit 0\n')
+    assert not any(item.classification == "forced_success" for item in findings)
+
+
+def test_shell_failure_suppression_is_forced_success() -> None:
+    findings = mechanical_findings(b"run-tests || exit 0\n")
+    assert any(item.classification == "forced_success" for item in findings)
+
+
 def test_docs_request_warns_about_unmentioned_new_verify_script() -> None:
     task = SimpleNamespace(
         original_text="Обнови README",

@@ -23,7 +23,12 @@ from vuzol.storage.models import (
     WorkPackage,
     WorkPackageOpenDetail,
 )
-from vuzol.storage.types import StepStatus, WorkPackagePauseReason, WorkPackageStatus
+from vuzol.storage.types import (
+    DeliveryStatus,
+    StepStatus,
+    WorkPackagePauseReason,
+    WorkPackageStatus,
+)
 from vuzol.telegram.projections import TELEGRAM_TEXT_LIMIT, telegram_html
 from vuzol.telegram.work_packages import (
     WorkPackageCallback,
@@ -65,15 +70,16 @@ async def enqueue_project_topic_status(
             TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
         )
     )
-    pending_bootstrap = await session.scalar(
+    blocking_bootstrap = await session.scalar(
         select(TransactionalOutbox.id).where(
             TransactionalOutbox.destination == WORK_PACKAGE_PROJECTION_DESTINATION,
             TransactionalOutbox.operation_type.in_(("render_topic_status", "render_topic_idle")),
+            TransactionalOutbox.status != DeliveryStatus.DEAD_LETTER,
             TransactionalOutbox.payload["chat_id"].astext == str(chat_id),
             TransactionalOutbox.payload["thread_id"].astext == str(thread_id),
         )
     )
-    if existing_link is not None or pending_bootstrap is not None:
+    if existing_link is not None or blocking_bootstrap is not None:
         return
     session.add(
         TransactionalOutbox(

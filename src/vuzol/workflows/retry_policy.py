@@ -17,6 +17,11 @@ EXPLICITLY_RETRYABLE_FAILURES = frozenset(
 def blocked_step_is_retryable(step: Step) -> bool:
     if step.unknown_effects:
         return False
-    return step.attempt_count < step.max_attempts or (
-        step.failure_category in EXPLICITLY_RETRYABLE_FAILURES
+    category = step.failure_category or ""
+    return (
+        step.attempt_count < step.max_attempts
+        or category in EXPLICITLY_RETRYABLE_FAILURES
+        # Validation is deterministic and has no external side effects. An explicit
+        # retry is safe after code, configuration, or a guardrail changes.
+        or category.startswith("validation_")
     )

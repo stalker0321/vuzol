@@ -367,7 +367,7 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
         assert len(telegram.sent) == 2
         assert all(message[:2] == (-100, 41) for message in telegram.sent)
         assert any("Notes" in message[2] for message in telegram.sent)
-        assert any("Готов к следующему сообщению" in message[2] for message in telegram.sent)
+        assert any(message[2] == "<b>Waiting | Auto</b>" for message in telegram.sent)
         async with factory() as session:
             link = await session.scalar(
                 select(TelegramMessageLink).where(

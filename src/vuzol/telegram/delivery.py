@@ -19,6 +19,7 @@ from vuzol.interpretation.discussion import (
 )
 from vuzol.observability import get_logger
 from vuzol.ops.telegram_dogfood import DogfoodFault, consume_fault
+from vuzol.projects.executor_preference import load_preference
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
     claim_outbox_item,
@@ -545,12 +546,14 @@ async def _prepare_project_topic_status(
     )
     if link is not None and link.projection_revision >= revision:
         return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
-    state = "Готов к следующему сообщению" if idle else "Обрабатываю сообщение…"
+    preference = await load_preference(session, project_id)
+    worker = "Auto" if preference.worker_key is None else preference.worker_key.value.title()
+    state = "Waiting" if idle else "Thinking"
     return PreparedDelivery(
         DeliveryAction.SEND_STATUS if link is None else DeliveryAction.EDIT_STATUS,
         chat_id=chat_id,
         thread_id=thread_id,
-        html=f"<b>{telegram_html(project_id)}</b>\nСтатус: <b>{state}</b>",  # noqa: RUF001
+        html=f"<b>{state} | {telegram_html(worker)}</b>",
         revision=revision,
         link_id=None if link is None else link.id,
         message_id=None if link is None else link.message_id,
@@ -1043,7 +1046,22 @@ class TelegramDeliveryService:
                 return True
             if await self._consume_transient_dogfood_fault(prepared):
                 raise TimedOut("controlled dogfood Telegram failure before request")
-            confirmed_message_id = await self._call_telegram(prepared)
+            try:
+                confirmed_message_id = await self._call_telegram(prepared)
+            except (TimedOut, NetworkError) as error:
+                if prepared.action in {
+                    DeliveryAction.SEND_STATUS,
+                    DeliveryAction.SEND_CLARIFICATION,
+                    DeliveryAction.SEND_PROJECT_WELCOME,
+                    DeliveryAction.SEND_PROJECT_NAMES,
+                    DeliveryAction.SEND_MODEL_PICKER,
+                    DeliveryAction.SEND_HELP,
+                    DeliveryAction.SEND_DISCUSSION_REPLY,
+                }:
+                    raise LostTelegramResponse(
+                        "Telegram send outcome is unknown"
+                    ) from error
+                raise
             await self._complete(token, prepared, confirmed_message_id)
             self._logger.info(
                 "Telegram outbox item delivered",

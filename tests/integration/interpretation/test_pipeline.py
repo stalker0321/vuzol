@@ -324,7 +324,7 @@ def test_discussion_runtime_hands_user_turn_to_hidden_project_agent(
         assert "Предлагаю выбирать нужное количество" in client.edited[-1][2]
         assert await delivery.deliver_one()
         assert client.edited[-1][1] == 900
-        assert "Готов к следующему сообщению" in client.edited[-1][2]
+        assert client.edited[-1][2] == "<b>Waiting | Auto</b>"
         cancelled = CancellationContext()
         cancelled.request()
         cancelled_outcome = await DeliverDiscussionReplyHandler(factory).execute(

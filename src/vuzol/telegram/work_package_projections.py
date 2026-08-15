@@ -225,7 +225,7 @@ async def build_work_package_plan_card(
         raise WorkPackageProjectionError("page_out_of_range")
     visible = items[(page - 1) * PLAN_PAGE_SIZE : page * PLAN_PAGE_SIZE]
     status = {
-        WorkPackageStatus.DRAFT: "Planning",
+        WorkPackageStatus.DRAFT: "Approval",
         WorkPackageStatus.APPROVED: "Queued",
         WorkPackageStatus.RUNNING: "Working",
         WorkPackageStatus.PAUSED: "Paused",
@@ -234,8 +234,21 @@ async def build_work_package_plan_card(
         WorkPackageStatus.DISCARDED: "Cancelled",
     }[package.status]
     progress = None
+    worker = None
     if package.status in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}:
         ordinal = package.cursor_ordinal or 1
+        executor_profile_id = await session.scalar(
+            select(Step.executor_profile_id)
+            .join(Run, Run.id == Step.run_id)
+            .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+            .where(
+                MaterializationLink.plan_revision_id == revision.id,
+                MaterializationLink.ordinal == ordinal,
+                Step.executor_profile_id.is_not(None),
+            )
+            .order_by(Run.created_at.desc(), Step.ordinal.desc())
+            .limit(1)
+        )
         route = await session.scalar(
             select(Run.selected_route)
             .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
@@ -246,7 +259,9 @@ async def build_work_package_plan_card(
             .order_by(Run.created_at.desc())
             .limit(1)
         )
-        worker = _route_provider_label(route)
+        worker = _route_provider_label(
+            {"profile_id": executor_profile_id} if executor_profile_id is not None else route
+        )
         progress = f"{ordinal}/{len(items)}"
     if _status_card:
         preference = await load_preference(session, discussion.project_id)
@@ -254,8 +269,10 @@ async def build_work_package_plan_card(
             worker = (
                 "Auto" if preference.worker_key is None else preference.worker_key.value.title()
             )
-        current_item = next(
-            (item for item in items if item.ordinal == (package.cursor_ordinal or 1)), None
+        current_item = (
+            next((item for item in items if item.ordinal == (package.cursor_ordinal or 1)), None)
+            if package.status in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}
+            else None
         )
         title = current_item.summary if current_item is not None else package.title
         if progress is not None:

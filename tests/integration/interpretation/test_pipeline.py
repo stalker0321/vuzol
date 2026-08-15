@@ -466,11 +466,17 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
         assert await pipeline.process_one()
         async with factory() as session:
             package = await session.scalar(select(WorkPackage))
-            projection = await session.scalar(
-                select(TransactionalOutbox).where(
-                    TransactionalOutbox.destination == "work_package_projection",
-                    TransactionalOutbox.operation_type == "render_plan",
-                )
+            projections = tuple(
+                (
+                    await session.scalars(
+                        select(TransactionalOutbox).where(
+                            TransactionalOutbox.destination == "work_package_projection",
+                            TransactionalOutbox.operation_type.in_(
+                                ("render_plan", "render_status")
+                            ),
+                        )
+                    )
+                ).all()
             )
             leaked_summary = await session.scalar(
                 select(ConversationTurn).where(
@@ -478,8 +484,11 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
                 )
             )
             assert package is not None and package.title == "Bill Buddy MVP"
-            assert projection is not None
-            assert projection.linked_entity_id == package.id
+            assert {projection.operation_type for projection in projections} == {
+                "render_plan",
+                "render_status",
+            }
+            assert all(projection.linked_entity_id == package.id for projection in projections)
             assert leaked_summary is None
         await engine.dispose()
 

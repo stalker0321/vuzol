@@ -64,8 +64,11 @@ user-visible answer. `original_input` is the current request and is always the s
 classification and any newly generated plan. `memory_pack` is supporting context only: never use
 an older turn, task, or plan as the requested work unless `original_input` explicitly refers to it.
 Never repeat a previous plan merely because it is present in memory. Keep the summary factual and
-short. Every plan item summary must be a complete, standalone title of at most 80 characters;
-never shorten one by cutting a word."""
+short. Choose the smallest coherent number of plan items justified by the work, from 1 to 20.
+There is no preferred or default item count. Do not pad a plan to four items or split work merely
+to reach a count; split only at independently executable and verifiable boundaries. Respect an
+explicit item count requested by the user. Every plan item summary must be a complete, standalone
+title of at most 80 characters; never shorten one by cutting a word."""
 
 
 class OpenAICompatibleInterpreter:

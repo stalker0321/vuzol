@@ -18,6 +18,7 @@ from vuzol.telegram.work_package_projections import (
     _route_provider_label,
     build_work_package_detail_card,
     build_work_package_plan_card,
+    build_work_package_status_card,
 )
 from vuzol.telegram.work_packages import parse_work_package_callback
 
@@ -75,11 +76,13 @@ async def test_plan_projection_is_pg_reconstructable_and_fenced(postgres_dsn: st
     async with factory() as session:
         first = await build_work_package_plan_card(session, package_id, page=1)
         second = await build_work_package_plan_card(session, package_id, page=2)
+        status = await build_work_package_status_card(session, package_id)
         with pytest.raises(WorkPackageProjectionError, match="invalid_page"):
             await build_work_package_plan_card(session, package_id, page=0)
 
     assert "Plan &lt;unsafe&gt;" in first.html and "Step &lt;1&gt;" in first.html
     assert "Step &lt;9&gt;" in second.html and first.status_generation == 1
+    assert status.html.startswith("<b>Approval | Auto</b>\nPlan &lt;unsafe&gt;")
     callbacks = [
         parse_work_package_callback(data) for row in first.callback_buttons for _, data in row
     ]

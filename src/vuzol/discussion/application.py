@@ -231,6 +231,14 @@ async def enqueue_plan_projection(uow: UnitOfWork, result: RevisionResult) -> No
         idempotency_key=f"wp:projection:revision:{result.revision_id}",
         payload={"package_id": str(result.package_id)},
     )
+    await uow.outbox.enqueue(
+        destination="work_package_projection",
+        operation_type="render_status",
+        entity_type="work_package",
+        entity_id=result.package_id,
+        idempotency_key=f"wp:projection:revision-status:{result.revision_id}",
+        payload={"package_id": str(result.package_id)},
+    )
 
 
 class PackageControlIngress:

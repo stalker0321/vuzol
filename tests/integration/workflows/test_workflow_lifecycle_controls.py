@@ -502,6 +502,15 @@ def test_explicit_retry_requeues_only_safe_blocked_step(
             assert loaded_run is not None and loaded_run.status is RunStatus.RUNNING
             assert loaded_run.failure_category is None and loaded_run.failure_summary is None
             assert task is not None and task.status is TaskStatus.RETRYING
+            assert task.budget_epoch == 1
+            epoch_event = await session.scalar(
+                select(Event).where(
+                    Event.entity_id == task_id,
+                    Event.event_type == "task.budget_epoch_started",
+                )
+            )
+            assert epoch_event is not None
+            assert epoch_event.payload == {"budget_epoch": 1, "reason": "explicit_retry"}
         await engine.dispose()
 
     asyncio.run(scenario())

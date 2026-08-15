@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from vuzol.storage.models import Task
+
 from ._test_routing_helpers import (
     BudgetExceeded,
     Capability,
@@ -126,6 +128,81 @@ def test_concurrent_reservations_cannot_exceed_shared_task_budget(
             reservations = tuple((await session.scalars(select(ProviderBudgetReservation))).all())
             assert len(reservations) == 1
             assert reservations[0].reserved_cost_units == Decimal("0.010000")
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_new_budget_epoch_resets_task_and_step_token_caps(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        configured = profile("api")
+        settings, _registries = bundle(tmp_path, configured)
+        settings = settings.model_copy(
+            update={
+                "limits": settings.limits.model_copy(
+                    update={
+                        "task_input_tokens": 1,
+                        "step_input_tokens": 1,
+                        "provider_call_input_tokens": 1,
+                    }
+                )
+            }
+        )
+        task_id, run_id, first_step = await seed_provider_step(factory)
+        async with UnitOfWork(factory) as uow:
+            second = await uow.steps.create(
+                run_id=run_id,
+                ordinal=2,
+                step_type="execute_model",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                status=StepStatus.QUEUED,
+                max_attempts=3,
+            )
+        estimate = estimate_reservation(configured, input_tokens=1, output_tokens=1)
+        async with factory.begin() as session:
+            first = await reserve_budget(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=first_step,
+                profile_id="api",
+                provider_attempt=1,
+                estimate=estimate,
+                limits=settings.limits,
+            )
+        with pytest.raises(BudgetExceeded):
+            async with factory.begin() as session:
+                await reserve_budget(
+                    session,
+                    task_id=task_id,
+                    run_id=run_id,
+                    step_id=second.id,
+                    profile_id="api",
+                    provider_attempt=1,
+                    estimate=estimate,
+                    limits=settings.limits,
+                )
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            task.budget_epoch = 1
+        async with factory.begin() as session:
+            second_reservation = await reserve_budget(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=second.id,
+                profile_id="api",
+                provider_attempt=1,
+                estimate=estimate,
+                limits=settings.limits,
+            )
+        assert first.budget_epoch == 0
+        assert second_reservation.budget_epoch == 1
         await engine.dispose()
 
     asyncio.run(scenario())

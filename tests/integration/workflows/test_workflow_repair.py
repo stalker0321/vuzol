@@ -150,7 +150,7 @@ async def test_validation_failure_gets_one_worker_repair_then_revalidates(
     await engine.dispose()
 
 
-async def test_second_validation_failure_stops_instead_of_looping(postgres_dsn: str) -> None:
+async def test_fourth_validation_failure_stops_instead_of_looping(postgres_dsn: str) -> None:
     # The end-to-end case above proves the loop. This focused state check protects its hard bound.
     engine, factory = storage(postgres_dsn)
     async with UnitOfWork(factory) as uow:
@@ -178,7 +178,7 @@ async def test_second_validation_failure_stops_instead_of_looping(postgres_dsn: 
             queue_class=QueueClass.HEAVY,
             status=StepStatus.QUEUED,
             max_attempts=1,
-            payload={"repair_count": 1},
+            payload={"repair_count": 3, "repair_epoch": 0},
         )
     async with factory.begin() as session:
         token = await claim_step(

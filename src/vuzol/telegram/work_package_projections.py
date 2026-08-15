@@ -81,6 +81,19 @@ async def enqueue_project_topic_status(
     )
     if existing_link is not None or blocking_bootstrap is not None:
         return
+    dead_bootstrap = await session.scalar(
+        select(TransactionalOutbox.id)
+        .where(
+            TransactionalOutbox.destination == WORK_PACKAGE_PROJECTION_DESTINATION,
+            TransactionalOutbox.operation_type.in_(("render_topic_status", "render_topic_idle")),
+            TransactionalOutbox.status == DeliveryStatus.DEAD_LETTER,
+            TransactionalOutbox.payload["chat_id"].astext == str(chat_id),
+            TransactionalOutbox.payload["thread_id"].astext == str(thread_id),
+        )
+        .order_by(TransactionalOutbox.created_at.desc(), TransactionalOutbox.id.desc())
+        .limit(1)
+    )
+    retry_suffix = "" if dead_bootstrap is None else f":retry:{dead_bootstrap}"
     session.add(
         TransactionalOutbox(
             destination=WORK_PACKAGE_PROJECTION_DESTINATION,
@@ -88,7 +101,7 @@ async def enqueue_project_topic_status(
             linked_entity_type="topic_mapping",
             linked_entity_id=mapping.id,
             idempotency_key=(
-                f"topic-idle-bootstrap:{chat_id}:{thread_id}:{revision}"
+                f"topic-idle-bootstrap:{chat_id}:{thread_id}:{revision}{retry_suffix}"
                 if idle
                 else f"topic-status:{chat_id}:{thread_id}:{revision}"
             ),

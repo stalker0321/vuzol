@@ -440,6 +440,9 @@ def test_dead_letter_does_not_permanently_block_status_bootstrap(postgres_dsn: s
             )
         assert [item.status for item in items].count(DeliveryStatus.DEAD_LETTER) == 1
         assert [item.status for item in items].count(DeliveryStatus.PENDING) == 1
+        retry = next(item for item in items if item.status is DeliveryStatus.PENDING)
+        dead = next(item for item in items if item.status is DeliveryStatus.DEAD_LETTER)
+        assert retry.idempotency_key.endswith(f":retry:{dead.id}")
         await engine.dispose()
 
     asyncio.run(scenario())

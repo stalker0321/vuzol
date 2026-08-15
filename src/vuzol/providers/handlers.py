@@ -223,17 +223,25 @@ class ProviderStepHandler:
                     summary=failure.safe_summary,
                 )
             async with self._factory.begin() as session:
-                await reconcile_usage(
-                    session,
-                    reservation_id=reservation_id,
-                    token=request.lease,
-                    provider=profile.provider,
-                    model=profile.model,
-                    usage=None,
-                    provider_request_id=None,
-                    outcome=failure.category.value,
-                    conservative=True,
-                )
+                if failure.category is ProviderErrorCategory.AUTHENTICATION:
+                    # Authentication rejection happens before generation. Charging the
+                    # full reservation fabricates usage and can prevent a retry on a
+                    # newly selected provider.
+                    await release_reservation(
+                        session, reservation_id=reservation_id, token=request.lease
+                    )
+                else:
+                    await reconcile_usage(
+                        session,
+                        reservation_id=reservation_id,
+                        token=request.lease,
+                        provider=profile.provider,
+                        model=profile.model,
+                        usage=None,
+                        provider_request_id=None,
+                        outcome=failure.category.value,
+                        conservative=True,
+                    )
                 await record_failure_observation(
                     session,
                     profile,

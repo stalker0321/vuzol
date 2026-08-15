@@ -748,6 +748,15 @@ class WorkPackageService:
             idempotency_key=f"wp:projection:{reason}:{package_id}:{generation}",
             payload={"package_id": str(package_id)},
         )
+        if reason == "pause":
+            await self._uow.outbox.enqueue(
+                destination="work_package_projection",
+                operation_type="render_action",
+                entity_type="work_package",
+                entity_id=package_id,
+                idempotency_key=f"wp:action:{reason}:{package_id}:{generation}",
+                payload={"package_id": str(package_id)},
+            )
 
     async def _create_revision(
         self,

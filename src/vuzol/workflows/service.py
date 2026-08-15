@@ -259,9 +259,9 @@ async def commit_step_outcome(
         if task.task_type == "discussion_agent_internal":
             pass
         elif target is TaskStatus.WAITING_APPROVAL:
-            # Project card in the project topic + decision card in Апрувы.
+            # The project-topic card is the canonical decision surface. The global
+            # project dashboard remains the cross-project attention inbox.
             await _enqueue_telegram_projection(session, task, run, role="intake_ack")
-            await _enqueue_telegram_projection(session, task, run, role="approval_card")
         elif target in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED}:
             await enqueue_terminal_task_projections(session, task, run)
         else:

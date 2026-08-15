@@ -290,8 +290,8 @@ class ResultValidationHandler:
                 inspection = await self._git.inspect(path, worktree.base_commit)
                 system_checks.append(
                     SystemCheck(
-                        name="canonicalize-eof",
-                        command_id=f"{SYSTEM_GATE_PREFIX}canonicalize-eof",
+                        name="canonicalize-whitespace",
+                        command_id=f"{SYSTEM_GATE_PREFIX}canonicalize-whitespace",
                         exit_code=0,
                         duration_ms=_elapsed_ms(started),
                         detail=f"files={len(normalized)}",
@@ -578,7 +578,12 @@ def resolve_trusted_gates(project: ProjectConfig) -> tuple[RequiredGate, ...]:
 
 
 def _normalize_blank_lines_at_eof(root: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
-    """Remove only redundant terminal blank lines from changed UTF-8 text files."""
+    """Canonicalize harmless whitespace in bounded changed text files.
+
+    Git's diff check treats trailing spaces as an error, although agents commonly
+    produce them in prose and generated test output. Strip horizontal whitespace at
+    line ends and redundant terminal blank lines before the trusted check runs.
+    """
 
     trusted = root.resolve()
     changed: list[str] = []
@@ -595,15 +600,26 @@ def _normalize_blank_lines_at_eof(root: Path, paths: tuple[str, ...]) -> tuple[s
         except ValueError:
             continue
         content = candidate.read_bytes()
-        if b"\x00" in content or not content.endswith(b"\n"):
+        if b"\x00" in content:
             continue
-        line_ending = b"\r\n" if content.endswith(b"\r\n") else b"\n"
-        body = content
-        while body.endswith(b"\n"):
-            body = body[:-1]
-            if body.endswith(b"\r"):
+        lines = content.splitlines(keepends=True)
+        normalized_lines: list[bytes] = []
+        for line in lines:
+            if line.endswith(b"\r\n"):
+                normalized_lines.append(line[:-2].rstrip(b" \t") + b"\r\n")
+            elif line.endswith(b"\n"):
+                normalized_lines.append(line[:-1].rstrip(b" \t") + b"\n")
+            else:
+                normalized_lines.append(line.rstrip(b" \t"))
+        normalized = b"".join(normalized_lines)
+        if normalized.endswith(b"\n"):
+            line_ending = b"\r\n" if normalized.endswith(b"\r\n") else b"\n"
+            body = normalized
+            while body.endswith(b"\n"):
                 body = body[:-1]
-        normalized = body + line_ending
+                if body.endswith(b"\r"):
+                    body = body[:-1]
+            normalized = body + line_ending
         if normalized != content:
             candidate.write_bytes(normalized)
             changed.append(raw)

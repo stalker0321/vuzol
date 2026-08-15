@@ -323,6 +323,18 @@ async def build_work_package_plan_card(
                 "",
             )
         )
+    if _action_card:
+        input_tokens, output_tokens, cached_tokens = await _work_package_token_totals(
+            session, package.id
+        )
+        if input_tokens or output_tokens or cached_tokens:
+            lines.append(
+                "Токены: "
+                f"{_format_count(input_tokens)} вх / "
+                f"{_format_count(output_tokens)} вых / "
+                f"{_format_count(cached_tokens)} кэш"
+            )
+            lines.append("")
     if not _status_card:
         lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
     if not _status_card and page_count > 1:

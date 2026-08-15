@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from sqlalchemy import func, select
 from sqlalchemy import inspect as sqlalchemy_inspect
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import ProviderProfileConfig
@@ -1388,16 +1388,21 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
         if worktree is not None and worktree.result_commit and approval is None:
             lines.append(f"Доставка: {delivery_state_label(worktree.delivery_state)}")
-        usage = await session.scalar(
-            select(UsageRecord)
-            .where(UsageRecord.run_id == run.id)
-            .order_by(UsageRecord.created_at.desc())
-            .limit(1)
-        )
-        if usage is not None and usage.input_tokens is not None:
+        usage = (
+            await session.execute(
+                select(
+                    func.coalesce(func.sum(UsageRecord.input_tokens), 0),
+                    func.coalesce(func.sum(UsageRecord.output_tokens), 0),
+                    func.coalesce(func.sum(UsageRecord.cached_tokens), 0),
+                ).where(UsageRecord.task_id == task.id)
+            )
+        ).one()
+        input_tokens, output_tokens, cached_tokens = map(int, usage)
+        if input_tokens or output_tokens or cached_tokens:
             lines.append(
-                f"Токены: {telegram_html(usage.input_tokens)} вх / "
-                f"{telegram_html(usage.output_tokens or 0)} вых"
+                f"Токены: {telegram_html(input_tokens)} вх / "
+                f"{telegram_html(output_tokens)} вых / "
+                f"{telegram_html(cached_tokens)} кэш"
             )
     if task.status is TaskStatus.COMPLETED:
         report, agent_checks, gates = await _completion_report(session, task)

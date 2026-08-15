@@ -131,6 +131,7 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
     assert "Автоматического перехода дальше не будет" not in status_card.html
     assert status_card.callback_buttons == ()
     assert "Автоматического перехода дальше не будет" in action_card.html
+    assert "Токены:" not in action_card.html
     labels = {label for row in action_card.callback_buttons for label, _ in row}
     assert "Повторить" not in labels
     assert labels >= {

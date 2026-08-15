@@ -36,6 +36,7 @@ from vuzol.storage.types import (
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.work_package_projections import (
     _work_package_token_totals,
+    build_work_package_action_card,
     build_work_package_status_card,
 )
 from vuzol.workflows.compiler import compile_workflow
@@ -250,6 +251,11 @@ async def test_replanned_sequence_keeps_unchanged_completed_prefix(
     assert len(links) == 3
     assert sum(link.ordinal == 1 for link in links) == 1
     assert token_totals == (300, 60, 15)
+    async with factory() as session:
+        status_card = await build_work_package_status_card(session, created.package_id)
+        action_card = await build_work_package_action_card(session, created.package_id)
+    assert "Токены:" not in status_card.html
+    assert "Токены: 300 вх / 60 вых / 15 кэш" in action_card.html
     await engine.dispose()
 
 

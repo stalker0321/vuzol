@@ -30,6 +30,7 @@ from vuzol.storage.models import (
     ProjectProvisioning,
     Task,
     TelegramMessageLink,
+    TopicMapping,
     TransactionalOutbox,
 )
 from vuzol.storage.types import (
@@ -41,6 +42,7 @@ from vuzol.storage.types import (
 )
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.projections import FakeTelegramClient
+from vuzol.telegram.work_package_projections import enqueue_project_topic_status
 from vuzol.telegram.workspace import TopicCreationOutcomeUnknown
 from vuzol.workflows.dispatch import WorkflowDispatcher
 
@@ -381,6 +383,63 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
             assert status_link is not None
             assert status_link.message_id in {80, 81} - {link.message_id}
             assert telegram.pinned == [(-100, status_link.message_id)]
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_dead_letter_does_not_permanently_block_status_bootstrap(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with factory.begin() as session:
+            mapping = TopicMapping(
+                chat_id=-100,
+                message_thread_id=88,
+                topic_kind="project",
+                project_id="dogfood-retry",
+                accepts_new_tasks=True,
+                default_workflow="adaptive_task",
+                enabled=True,
+            )
+            session.add(mapping)
+            await session.flush()
+            session.add(
+                TransactionalOutbox(
+                    destination="work_package_projection",
+                    operation_type="render_topic_idle",
+                    linked_entity_type="topic_mapping",
+                    linked_entity_id=mapping.id,
+                    idempotency_key="topic-idle-bootstrap:dead-letter",
+                    status=DeliveryStatus.DEAD_LETTER,
+                    payload={
+                        "chat_id": -100,
+                        "thread_id": 88,
+                        "project_id": "dogfood-retry",
+                        "revision": 1,
+                    },
+                )
+            )
+        async with factory.begin() as session:
+            await enqueue_project_topic_status(
+                session,
+                chat_id=-100,
+                thread_id=88,
+                project_id="dogfood-retry",
+                revision=1,
+                idle=True,
+            )
+        async with factory() as session:
+            items = tuple(
+                (
+                    await session.scalars(
+                        select(TransactionalOutbox).where(
+                            TransactionalOutbox.linked_entity_type == "topic_mapping"
+                        )
+                    )
+                ).all()
+            )
+        assert [item.status for item in items].count(DeliveryStatus.DEAD_LETTER) == 1
+        assert [item.status for item in items].count(DeliveryStatus.PENDING) == 1
         await engine.dispose()
 
     asyncio.run(scenario())

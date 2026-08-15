@@ -97,7 +97,11 @@ class StaticBuildHandler:
                 ):
                     raise ValueError("static build changed tracked Git facts")
             source = contained(path, path / deployment.source_directory)
-            evidence = measure_static_tree(source, entrypoint=deployment.entrypoint)
+            evidence = measure_static_tree(
+                source,
+                entrypoint=deployment.entrypoint,
+                include=deployment.include,
+            )
             return StepOutcome.succeeded(
                 {
                     "status": "built",

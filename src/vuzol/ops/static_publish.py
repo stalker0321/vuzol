@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import stat
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
@@ -98,13 +99,24 @@ def publish(
 
 
 def measure_static_tree(
-    source: Path, *, entrypoint: Path = Path("index.html")
+    source: Path,
+    *,
+    entrypoint: Path = Path("index.html"),
+    include: tuple[Path, ...] | None = None,
 ) -> StaticTreeEvidence:
     """Measure a closed, regular-file-only static tree without publishing it."""
 
     root = source.resolve(strict=True)
     if source.is_symlink() or not root.is_dir():
         raise StaticPublishError("static build source must be a real directory")
+    if include is not None:
+        with tempfile.TemporaryDirectory(prefix="vuzol-static-measure-") as raw_staging:
+            staging = Path(raw_staging)
+            files, total_bytes = _copy_allowlist(root, staging, include)
+            if not _regular_file(staging / entrypoint):
+                raise StaticPublishError(f"required entrypoint is missing: {entrypoint}")
+            _require_closed_html_entrypoint(staging, entrypoint)
+            return StaticTreeEvidence(_tree_digest(staging), files, total_bytes)
     files = 0
     total_bytes = 0
     for item in sorted(root.rglob("*")):

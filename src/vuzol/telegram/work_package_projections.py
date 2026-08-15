@@ -46,6 +46,7 @@ async def enqueue_project_topic_status(
     thread_id: int,
     project_id: str,
     revision: int,
+    idle: bool = False,
 ) -> None:
     mapping = await session.scalar(
         select(TopicMapping).where(
@@ -67,7 +68,7 @@ async def enqueue_project_topic_status(
     pending_bootstrap = await session.scalar(
         select(TransactionalOutbox.id).where(
             TransactionalOutbox.destination == WORK_PACKAGE_PROJECTION_DESTINATION,
-            TransactionalOutbox.operation_type == "render_topic_status",
+            TransactionalOutbox.operation_type.in_(("render_topic_status", "render_topic_idle")),
             TransactionalOutbox.payload["chat_id"].astext == str(chat_id),
             TransactionalOutbox.payload["thread_id"].astext == str(thread_id),
         )
@@ -77,10 +78,14 @@ async def enqueue_project_topic_status(
     session.add(
         TransactionalOutbox(
             destination=WORK_PACKAGE_PROJECTION_DESTINATION,
-            operation_type="render_topic_status",
+            operation_type="render_topic_idle" if idle else "render_topic_status",
             linked_entity_type="topic_mapping",
             linked_entity_id=mapping.id,
-            idempotency_key=f"topic-status:{chat_id}:{thread_id}:{revision}",
+            idempotency_key=(
+                f"topic-idle-bootstrap:{chat_id}:{thread_id}:{revision}"
+                if idle
+                else f"topic-status:{chat_id}:{thread_id}:{revision}"
+            ),
             payload={
                 "chat_id": chat_id,
                 "thread_id": thread_id,

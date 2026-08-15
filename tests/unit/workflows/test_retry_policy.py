@@ -26,6 +26,12 @@ def test_retry_policy_allows_explicit_retry_after_transient_exhaustion() -> None
     )
 
 
-def test_retry_policy_rejects_unknown_effects_and_non_transient_exhaustion() -> None:
+def test_retry_policy_rejects_unknown_effects_and_non_retryable_exhaustion() -> None:
     assert not blocked_step_is_retryable(_step(unknown_effects=True))
-    assert not blocked_step_is_retryable(_step(attempt_count=2, max_attempts=2))
+    assert not blocked_step_is_retryable(
+        _step(attempt_count=2, max_attempts=2, failure_category="policy_denied")
+    )
+
+
+def test_retry_policy_allows_explicit_validation_retry_after_exhaustion() -> None:
+    assert blocked_step_is_retryable(_step(attempt_count=2, max_attempts=2))

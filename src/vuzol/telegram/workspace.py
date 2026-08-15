@@ -5,11 +5,12 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config import TopicRegistry
+from vuzol.config import TopicKind, TopicRegistry
 from vuzol.observability import get_logger
 from vuzol.storage.models import TopicMapping
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.layout import effective_display_name, topic_wants_pin
+from vuzol.telegram.work_package_projections import enqueue_project_topic_status
 
 
 class TelegramWorkspaceClient(Protocol):
@@ -67,6 +68,16 @@ class TelegramWorkspaceService:
                         enabled=topic.enabled,
                     )
                 )
+                if topic.enabled and topic.kind is TopicKind.PROJECT and topic.project_id:
+                    assert uow.session is not None
+                    await enqueue_project_topic_status(
+                        uow.session,
+                        chat_id=topic.chat_id,
+                        thread_id=topic.message_thread_id,
+                        project_id=topic.project_id,
+                        revision=1,
+                        idle=True,
+                    )
 
         named_topics = 0
         pinned_topics = 0

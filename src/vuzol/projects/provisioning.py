@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import (
@@ -36,12 +37,14 @@ from vuzol.storage.models import (
     ProjectProvisioning,
     Task,
     TelegramIntakeMessage,
+    TopicMapping,
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import ProjectProvisioningStatus, TaskStatus
 from vuzol.telegram.layout import project_topic_should_pin_on_create
 from vuzol.telegram.projections import enqueue_terminal_task_projections
+from vuzol.telegram.work_package_projections import enqueue_project_topic_status
 from vuzol.telegram.workspace import (
     TelegramWorkspaceClient,
     TopicCreationOutcomeUnknown,
@@ -289,6 +292,36 @@ class ProjectProvisioningService:
                 TaskStatus.COMPLETED,
                 actor_type="project_provisioning",
                 payload={"project_id": row.project_id, "topic_thread_id": row.topic_thread_id},
+            )
+            await session.execute(
+                postgres_insert(TopicMapping)
+                .values(
+                    chat_id=row.chat_id,
+                    message_thread_id=row.topic_thread_id,
+                    topic_kind=TopicKind.PROJECT.value,
+                    project_id=row.project_id,
+                    accepts_new_tasks=True,
+                    default_workflow="adaptive_task",
+                    enabled=True,
+                )
+                .on_conflict_do_update(
+                    index_elements=["chat_id", "message_thread_id"],
+                    set_={
+                        "topic_kind": TopicKind.PROJECT.value,
+                        "project_id": row.project_id,
+                        "accepts_new_tasks": True,
+                        "default_workflow": "adaptive_task",
+                        "enabled": True,
+                    },
+                )
+            )
+            await enqueue_project_topic_status(
+                session,
+                chat_id=row.chat_id,
+                thread_id=row.topic_thread_id,
+                project_id=row.project_id,
+                revision=1,
+                idle=True,
             )
             session.add(
                 TransactionalOutbox(

@@ -64,6 +64,7 @@ async def test_workspace_sync_persists_all_topics_and_renames_best_effort(
     class UnitOfWork:
         def __init__(self, _factory: object) -> None:
             self.topics = SimpleNamespace(upsert=AsyncMock(side_effect=persisted.append))
+            self.session = cast(AsyncSession, object())
 
         async def __aenter__(self) -> "UnitOfWork":
             return self
@@ -77,6 +78,8 @@ async def test_workspace_sync_persists_all_topics_and_renames_best_effort(
     )
     client.rename_topic.side_effect = (None, TopicSynchronizationError("forbidden"))
     monkeypatch.setattr(workspace, "UnitOfWork", UnitOfWork)
+    enqueue_status = AsyncMock()
+    monkeypatch.setattr(workspace, "enqueue_project_topic_status", enqueue_status)
 
     factory = cast(async_sessionmaker[AsyncSession], object())
     result = await TelegramWorkspaceService(factory, topics).synchronize(client)
@@ -93,6 +96,7 @@ async def test_workspace_sync_persists_all_topics_and_renames_best_effort(
     assert client.set_topic_pinned.await_count == 2
     # Product layout forces the canonical approvals name.
     assert client.rename_topic.await_args_list[1].kwargs["name"] == "Апрувы"
+    enqueue_status.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -148,6 +152,7 @@ async def test_workspace_sync_applies_pin_state_when_supported(monkeypatch: Monk
     class UnitOfWork:
         def __init__(self, _factory: object) -> None:
             self.topics = SimpleNamespace(upsert=AsyncMock())
+            self.session = cast(AsyncSession, object())
 
         async def __aenter__(self) -> "UnitOfWork":
             return self
@@ -160,6 +165,8 @@ async def test_workspace_sync_applies_pin_state_when_supported(monkeypatch: Monk
         set_topic_pinned=AsyncMock(),
     )
     monkeypatch.setattr(workspace, "UnitOfWork", UnitOfWork)
+    enqueue_status = AsyncMock()
+    monkeypatch.setattr(workspace, "enqueue_project_topic_status", enqueue_status)
     factory = cast(async_sessionmaker[AsyncSession], object())
     result = await TelegramWorkspaceService(factory, topics).synchronize(client)
     assert result.pinned_topics == 3
@@ -172,3 +179,11 @@ async def test_workspace_sync_applies_pin_state_when_supported(monkeypatch: Monk
     assert "История" in rename_names
     assert "Notes" in rename_names
     assert "Система" in rename_names
+    enqueue_status.assert_awaited_once()
+    assert enqueue_status.await_args.kwargs == {
+        "chat_id": -100,
+        "thread_id": 2,
+        "project_id": "notes",
+        "revision": 1,
+        "idle": True,
+    }

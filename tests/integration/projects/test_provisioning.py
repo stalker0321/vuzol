@@ -360,16 +360,27 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
             retry_max_seconds=10,
         )
         assert await delivery.deliver_one()
-        assert len(telegram.sent) == 1
-        assert telegram.sent[0][:2] == (-100, 41)
-        assert "Notes" in telegram.sent[0][2]
+        assert await delivery.deliver_one()
+        assert not await delivery.deliver_one()
+        assert len(telegram.sent) == 2
+        assert all(message[:2] == (-100, 41) for message in telegram.sent)
+        assert any("Notes" in message[2] for message in telegram.sent)
+        assert any("Готов к следующему сообщению" in message[2] for message in telegram.sent)
         async with factory() as session:
             link = await session.scalar(
                 select(TelegramMessageLink).where(
                     TelegramMessageLink.message_role == "project_welcome"
                 )
             )
-            assert link is not None and link.message_id == 80
+            assert link is not None and link.message_id in {80, 81}
+            status_link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.message_role == "work_package_status"
+                )
+            )
+            assert status_link is not None
+            assert status_link.message_id in {80, 81} - {link.message_id}
+            assert telegram.pinned == [(-100, status_link.message_id)]
         await engine.dispose()
 
     asyncio.run(scenario())

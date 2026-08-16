@@ -428,10 +428,11 @@ def test_continuation_resumes_awaiting_step(postgres_dsn: str) -> None:
 
 @pytest.mark.postgresql
 @pytest.mark.parametrize(
-    ("failure_category", "task_status", "exhausted"),
+    ("failure_category", "task_status", "exhausted", "expect_fallback"),
     (
-        ("provider_unavailable", TaskStatus.BLOCKED, False),
-        ("quota_exhausted", TaskStatus.QUOTA_EXHAUSTED, True),
+        ("provider_unavailable", TaskStatus.BLOCKED, False, True),
+        ("quota_exhausted", TaskStatus.QUOTA_EXHAUSTED, True, True),
+        ("review_changes_required", TaskStatus.BLOCKED, False, False),
     ),
 )
 def test_explicit_retry_requeues_only_safe_blocked_step(
@@ -439,6 +440,7 @@ def test_explicit_retry_requeues_only_safe_blocked_step(
     failure_category: str,
     task_status: TaskStatus,
     exhausted: bool,
+    expect_fallback: bool,
 ) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
@@ -497,7 +499,9 @@ def test_explicit_retry_requeues_only_safe_blocked_step(
             task = await session.get(Task, task_id)
             assert step is not None and step.status is StepStatus.QUEUED
             assert step.failure_category is None and step.failure_summary is None
-            assert step.payload["retry_failed_profile_id"] == "grok-subscription-a"
+            assert (step.payload.get("retry_failed_profile_id") == "grok-subscription-a") is (
+                expect_fallback
+            )
             assert step.max_attempts == (4 if exhausted else 3)
             assert loaded_run is not None and loaded_run.status is RunStatus.RUNNING
             assert loaded_run.failure_category is None and loaded_run.failure_summary is None

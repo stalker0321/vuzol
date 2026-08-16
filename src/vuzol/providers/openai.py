@@ -204,7 +204,19 @@ def _payload(request: ProviderRequest, profile: ProviderProfileConfig) -> dict[s
         payload["temperature"] = 0
         payload["max_tokens"] = request.max_output_tokens
     if request.output_json_schema is not None:
-        payload["response_format"] = {"type": "json_object"}
+        if _uses_openai_strict_schema(profile):
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": request.output_schema_name or "structured_output",
+                    "strict": True,
+                    "schema": request.output_json_schema,
+                },
+            }
+        else:
+            # Generic OpenAI-compatible endpoints commonly implement JSON mode
+            # without implementing OpenAI's strict json_schema extension.
+            payload["response_format"] = {"type": "json_object"}
     return payload
 
 
@@ -212,6 +224,12 @@ def _uses_reasoning_chat_parameters(model: str) -> bool:
     """Use the Chat Completions parameter set required by GPT-5 models."""
 
     return model.lower().startswith("gpt-5")
+
+
+def _uses_openai_strict_schema(profile: ProviderProfileConfig) -> bool:
+    if not _uses_reasoning_chat_parameters(profile.model):
+        return False
+    return "api.openai.com" in str(profile.api_base_url or "").lower()
 
 
 def _http_failure(response: httpx.Response) -> ProviderFailure:

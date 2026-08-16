@@ -41,6 +41,8 @@ StartupHandlerFn = Callable[[Bot], Awaitable[None]]
 
 def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
     if result is not None and result.status is IngressStatus.REJECTED:
+        if result.reason == "item_not_safely_retryable":
+            return "Повтор недоступен для текущего состояния задачи.", True
         return "Действие уже недоступно. Обновите карточку.", True
     if result is not None and result.reason == "continue_discussion":
         return "Напишите следующим сообщением, что хотите обсудить.", False

@@ -452,6 +452,7 @@ async def _prepare_work_package_projection(
     package_id = item.linked_entity_id
     role = {
         "render_plan": WORK_PACKAGE_PLAN_ROLE,
+        "clear_plan": WORK_PACKAGE_PLAN_ROLE,
         "render_status": WORK_PACKAGE_STATUS_ROLE,
         "render_action": WORK_PACKAGE_ACTION_ROLE,
         "clear_action": WORK_PACKAGE_ACTION_ROLE,
@@ -468,7 +469,7 @@ async def _prepare_work_package_projection(
                 TelegramMessageLink.message_role == role,
             )
         )
-    if item.operation_type in {"clear_detail", "clear_action"}:
+    if item.operation_type in {"clear_detail", "clear_action", "clear_plan"}:
         if link is None:
             return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
         return PreparedDelivery(

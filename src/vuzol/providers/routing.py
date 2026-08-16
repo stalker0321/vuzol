@@ -276,6 +276,11 @@ async def claim_routed_step(
                         for profile_id in allowed_fallbacks
                         if profile_id in pin_family_ids
                     )
+                    if not allowed_fallbacks:
+                        # Configured fallbacks may all be outside an exact project pin.
+                        # In that case the bounded retry must stay on the pinned profile
+                        # instead of excluding every permitted route.
+                        failed_profile_id = None
                 else:
                     # Initial claim: prefer trusted, allow same-family only if explicit edges exist.
                     allowed_fallbacks = same_family

@@ -416,8 +416,7 @@ class PackageControlIngress:
                     destination="work_package_projection",
                     operation_type=(
                         "render_plan"
-                        if command.action
-                        in {PackageControlAction.APPROVE, PackageControlAction.DISCARD}
+                        if command.action is PackageControlAction.APPROVE
                         else "render_status"
                     ),
                     entity_type="work_package",

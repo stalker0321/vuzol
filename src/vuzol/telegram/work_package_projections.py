@@ -237,6 +237,13 @@ async def build_work_package_plan_card(
         WorkPackageStatus.STOPPED: "Stopped",
         WorkPackageStatus.DISCARDED: "Cancelled",
     }[package.status]
+    released = (
+        package.status
+        in {WorkPackageStatus.COMPLETED, WorkPackageStatus.DISCARDED}
+        and discussion.active_work_package_id != package.id
+    )
+    if released:
+        status = "Ready"
     progress = None
     worker = None
     current_task_status = None
@@ -292,7 +299,11 @@ async def build_work_package_plan_card(
             if package.status in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}
             else None
         )
-        title = current_item.summary if current_item is not None else package.title
+        title = (
+            "Send a new task"
+            if released
+            else current_item.summary if current_item is not None else package.title
+        )
         if progress is not None:
             title = f"{progress} · {title}"
         lines = [

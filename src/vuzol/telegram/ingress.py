@@ -574,6 +574,14 @@ class TelegramIngressService:
                 raise TelegramPolicyError("this project topic has no current plan")
             await uow.outbox.enqueue(
                 destination="work_package_projection",
+                operation_type="clear_plan",
+                entity_type="work_package",
+                entity_id=discussion.active_work_package_id,
+                idempotency_key=f"wp:plan:clear-command:{inbox_id}",
+                payload={"package_id": str(discussion.active_work_package_id)},
+            )
+            await uow.outbox.enqueue(
+                destination="work_package_projection",
                 operation_type="render_plan",
                 entity_type="work_package",
                 entity_id=discussion.active_work_package_id,

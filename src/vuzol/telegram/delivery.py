@@ -1218,11 +1218,11 @@ class TelegramDeliveryService:
                 if link is None:
                     raise LeaseLost(f"Telegram projection disappeared: {prepared.link_id}")
                 link.projection_revision = prepared.revision
-                if prepared.message_role == WORK_PACKAGE_STATUS_ROLE:
+                if (
+                    prepared.message_role == WORK_PACKAGE_STATUS_ROLE
+                    or prepared.work_package_id is not None
+                ):
                     link.work_package_id = prepared.work_package_id
-                    link.plan_revision_id = prepared.plan_revision_id
-                    link.control_status_generation = prepared.control_status_generation
-                elif prepared.work_package_id is not None:
                     link.plan_revision_id = prepared.plan_revision_id
                     link.control_status_generation = prepared.control_status_generation
             elif prepared.action == DeliveryAction.SEND_CLARIFICATION:

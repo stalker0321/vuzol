@@ -35,3 +35,13 @@ def test_retry_policy_rejects_unknown_effects_and_non_retryable_exhaustion() -> 
 
 def test_retry_policy_allows_explicit_validation_retry_after_exhaustion() -> None:
     assert blocked_step_is_retryable(_step(attempt_count=2, max_attempts=2))
+
+
+def test_retry_policy_allows_explicit_independent_review_retry_after_exhaustion() -> None:
+    assert blocked_step_is_retryable(
+        _step(
+            attempt_count=3,
+            max_attempts=3,
+            failure_category="independent_review_required",
+        )
+    )

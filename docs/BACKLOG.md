@@ -34,3 +34,24 @@ boundary completes review automatically, findings from separate chunks are not
 lost, a blocking finding blocks the aggregate verdict, generated/noisy files do
 not consume the whole model context, and the batch cap terminates deterministically.
 
+### Make repair loops progress-aware
+
+Replace token pressure as the normal repair-loop control with explicit progress
+semantics:
+
+- fingerprint normalized validation failures and reviewer findings;
+- do not send the worker through an unchanged failure a second time unless new
+  evidence, code, configuration, or instructions can change the outcome;
+- keep a high aggregate token ceiling (order of magnitude: one million tokens)
+  only as an emergency spend guard, not a target that ordinary tasks routinely
+  approach;
+- bound automatic repair cycles explicitly and let a user-requested Retry open
+  one new bounded round;
+- show a compact attempt history on a blocked task card (attempt, stage, model,
+  normalized outcome), collapsing consecutive identical outcomes instead of
+  dumping raw logs or prompts.
+
+The exact aggregate ceiling and automatic-cycle count must be chosen from
+dogfood telemetry. Acceptance requires deterministic same-failure detection,
+proof that a changed failure remains eligible for repair, and bounded Telegram
+rendering for long histories.

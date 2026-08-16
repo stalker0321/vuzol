@@ -71,6 +71,12 @@ def test_callback_answer_explains_discussion_mode_and_rejections() -> None:
         True,
     )
     assert _callback_answer(
+        IngressResult(
+            status=IngressStatus.REJECTED,
+            reason="item_not_safely_retryable",
+        )
+    ) == ("Повтор недоступен для текущего состояния задачи.", True)
+    assert _callback_answer(
         IngressResult(status=IngressStatus.HANDLED, reason="secret_cancelled")
     ) == ("Ссылка отменена.", False)
     assert _callback_answer(

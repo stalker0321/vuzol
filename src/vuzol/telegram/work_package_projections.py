@@ -401,13 +401,8 @@ async def build_work_package_plan_card(
             )
         )
     elif not _status_card and package.status is WorkPackageStatus.PAUSED:
-        if await _package_retry_available(session, package):
-            controls.append(
-                ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
-            )
         controls.extend(
             (
-                ("Пропустить", _callback(WorkPackageCallbackKind.SKIP_ITEM, package, revision)),
                 (
                     "Перепланировать",
                     _callback(WorkPackageCallbackKind.REQUEST_REPLAN, package, revision),

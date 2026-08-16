@@ -219,8 +219,9 @@ class TelegramControlService:
                 )
                 if binding is None:
                     raise DomainError("control_binding_missing")
-                package_id, revision_id, generation = binding
+                package_id, revision_id, generation, message_role = binding
                 revision = await uow.work_packages.get_revision(revision_id)
+                package = await uow.work_packages.get_package(package_id)
                 if (
                     callback.package_id != package_id
                     or revision.work_package_id != package_id
@@ -228,6 +229,10 @@ class TelegramControlService:
                     or callback.h8 != revision.content_hash[:8]
                 ):
                     raise DomainError("stale_revision")
+                if message_role == "work_package_plan":
+                    if package.head_revision_id != revision.id:
+                        raise DomainError("stale_revision")
+                    generation = package.version
             action = _MUTATING_PACKAGE_KINDS.get(callback.kind)
             if action is not None:
                 result = await PackageControlIngress(
@@ -275,7 +280,7 @@ class TelegramControlService:
             )
             if binding is None:
                 raise DomainError("control_binding_missing")
-            package_id, revision_id, generation = binding
+            package_id, revision_id, generation, message_role = binding
             package = await uow.work_packages.get_package(package_id, for_update=True)
             revision = await uow.work_packages.get_revision(revision_id)
             if (
@@ -284,9 +289,13 @@ class TelegramControlService:
                 or callback.revision_number != revision.revision_number
                 or callback.h8 != revision.content_hash[:8]
                 or package.head_revision_id != revision.id
-                or package.version != generation
+                or (
+                    message_role != "work_package_plan" and package.version != generation
+                )
             ):
                 raise DomainError("stale_projection")
+            if message_role == "work_package_plan":
+                generation = package.version
             service = WorkPackageService(uow)
             operation: str | None = None
             enqueue_projection = False

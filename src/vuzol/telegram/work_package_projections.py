@@ -376,9 +376,12 @@ async def build_work_package_plan_card(
     elif not _status_card and package.status is WorkPackageStatus.RUNNING:
         controls.append(
             (
-                "Завершить цепочку",
+                "Остановить",
                 _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision),
             )
+        )
+        controls.append(
+            ("Завершить", _callback(WorkPackageCallbackKind.FINISH_PACKAGE, package, revision))
         )
         controls.append(
             (
@@ -399,8 +402,8 @@ async def build_work_package_plan_card(
                     _callback(WorkPackageCallbackKind.REQUEST_REPLAN, package, revision),
                 ),
                 (
-                    "Завершить цепочку",
-                    _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision),
+                    "Завершить",
+                    _callback(WorkPackageCallbackKind.FINISH_PACKAGE, package, revision),
                 ),
             )
         )
@@ -412,6 +415,9 @@ async def build_work_package_plan_card(
                 "Возобновить",
                 _callback(WorkPackageCallbackKind.RESTART_PACKAGE, package, revision),
             )
+        )
+        controls.append(
+            ("Завершить", _callback(WorkPackageCallbackKind.FINISH_PACKAGE, package, revision))
         )
     if controls:
         buttons.append(tuple(controls))

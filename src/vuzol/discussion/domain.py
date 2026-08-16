@@ -46,6 +46,7 @@ class PackageControlAction(StrEnum):
     RETRY_ITEM = "retry_item"
     SKIP_ITEM = "skip_item"
     STOP_PACKAGE = "stop_package"
+    FINISH_PACKAGE = "finish_package"
     RESTART_PACKAGE = "restart_package"
     REQUEST_REPLAN = "request_replan"
 
@@ -266,6 +267,17 @@ def control_transition_target(
                 }
             ),
             WorkPackageStatus.STOPPED,
+        ),
+        PackageControlAction.FINISH_PACKAGE: (
+            frozenset(
+                {
+                    WorkPackageStatus.APPROVED,
+                    WorkPackageStatus.RUNNING,
+                    WorkPackageStatus.PAUSED,
+                    WorkPackageStatus.STOPPED,
+                }
+            ),
+            WorkPackageStatus.DISCARDED,
         ),
         PackageControlAction.RESTART_PACKAGE: (
             frozenset({WorkPackageStatus.STOPPED}),

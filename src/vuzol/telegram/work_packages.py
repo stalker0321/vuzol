@@ -68,6 +68,7 @@ class WorkPackageCallbackKind(StrEnum):
     RETRY_ITEM = "R"
     SKIP_ITEM = "N"
     STOP_PACKAGE = "X"
+    FINISH_PACKAGE = "Z"
     RESTART_PACKAGE = "Y"
     REQUEST_REPLAN = "L"
     CLOSE_DETAIL = "C"

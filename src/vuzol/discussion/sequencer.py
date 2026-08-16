@@ -277,6 +277,11 @@ class WorkPackageSequencer:
             package.pause_reason = None
             package.last_failure_task_id = None
             package.version += 1
+            discussion = await self._uow.session.get(
+                ProjectDiscussionSession, package.session_id, with_for_update=True
+            )
+            if discussion is not None and discussion.active_work_package_id == package.id:
+                discussion.active_work_package_id = None
             await self._uow.events.append(
                 entity_type="work_package",
                 entity_id=package.id,

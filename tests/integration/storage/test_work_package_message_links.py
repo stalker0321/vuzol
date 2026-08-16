@@ -66,7 +66,7 @@ async def test_message_link_persists_button_epoch_without_creating_task(
         assert session is not None
         task_count = await session.scalar(select(func.count()).select_from(Task))
 
-    assert control == (package_id, revision_id, 1)
+    assert control == (package_id, revision_id, 1, "work_package_plan_card")
     assert legacy is None
     assert task_count == 0
     await engine.dispose()

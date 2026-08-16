@@ -196,8 +196,8 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
         )
     )
     assert first.status is IngressStatus.HANDLED and first.reason == "applied"
-    assert stale.status is IngressStatus.REJECTED and stale.reason == "stale_generation"
-    assert stale_open.status is IngressStatus.REJECTED and stale_open.reason == "stale_projection"
+    assert stale.status is IngressStatus.REJECTED and stale.reason == "invalid_transition"
+    assert stale_open.status is IngressStatus.HANDLED and stale_open.reason == "render_detail"
     async with factory() as session:
         package = await session.get(WorkPackage, result.package_id)
         task_count = await session.scalar(select(func.count()).select_from(Task))

@@ -165,13 +165,14 @@ class TelegramMessageLinkRepository:
 
     async def resolve_work_package_control(
         self, chat_id: int, message_id: int
-    ) -> tuple[uuid.UUID, uuid.UUID, int] | None:
+    ) -> tuple[uuid.UUID, uuid.UUID, int, str] | None:
         row = (
             await self._session.execute(
                 select(
                     TelegramMessageLink.work_package_id,
                     TelegramMessageLink.plan_revision_id,
                     TelegramMessageLink.control_status_generation,
+                    TelegramMessageLink.message_role,
                 ).where(
                     TelegramMessageLink.chat_id == chat_id,
                     TelegramMessageLink.message_id == message_id,
@@ -186,7 +187,12 @@ class TelegramMessageLinkRepository:
         assert row.work_package_id is not None
         assert row.plan_revision_id is not None
         assert row.control_status_generation is not None
-        return row.work_package_id, row.plan_revision_id, row.control_status_generation
+        return (
+            row.work_package_id,
+            row.plan_revision_id,
+            row.control_status_generation,
+            row.message_role,
+        )
 
 
 class TelegramIntakeRepository:

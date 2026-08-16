@@ -94,6 +94,25 @@ async def test_plan_projection_is_pg_reconstructable_and_fenced(postgres_dsn: st
     await engine.dispose()
 
 
+async def test_discarded_plan_releases_topic_and_status_becomes_ready(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    package_id, result = await _create(factory)
+    async with UnitOfWork(factory) as uow:
+        await WorkPackageService(uow).discard(
+            package_id=package_id,
+            revision_number=result.revision_number,
+            h8=result.content_hash[:8],
+            expected_status_generation=1,
+            user_id=42,
+        )
+    async with factory() as session:
+        status = await build_work_package_status_card(session, package_id)
+    assert status.html.startswith("<b>Ready | Auto</b>\nSend a new task")
+    await engine.dispose()
+
+
 async def test_detail_projection_uses_stable_fenced_pointer(postgres_dsn: str) -> None:
     engine, factory = storage(postgres_dsn)
     package_id, result = await _create(factory)

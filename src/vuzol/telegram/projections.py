@@ -26,6 +26,8 @@ from vuzol.storage.models import (
     Approval,
     Event,
     MaterializationLink,
+    PlanRevision,
+    PlanRevisionItem,
     Run,
     Step,
     Task,
@@ -34,6 +36,7 @@ from vuzol.storage.models import (
     TopicMapping,
     TransactionalOutbox,
     UsageRecord,
+    WorkPackage,
     Worktree,
 )
 from vuzol.storage.types import (
@@ -92,6 +95,10 @@ class StatusCard:
     html: str
     buttons: tuple[str, ...] = ()
     approval_id: uuid.UUID | None = None
+    callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = ()
+    work_package_id: uuid.UUID | None = None
+    plan_revision_id: uuid.UUID | None = None
+    control_status_generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1249,18 +1256,9 @@ async def enqueue_task_status_projection(
         .limit(1)
     )
     if role is None:
-        pending_approval = None
-        if run is not None:
-            pending_approval = await session.scalar(
-                select(Approval.id)
-                .join(Step, Approval.step_id == Step.id)
-                .where(
-                    Step.run_id == run.id,
-                    Approval.status == ApprovalStatus.PENDING,
-                )
-                .limit(1)
-            )
-        role = "approval_card" if pending_approval is not None else "intake_ack"
+        # Approval is a stage of the same project-topic task/result card, not a
+        # second message in a remote approvals topic.
+        role = "intake_ack"
     payload: dict[str, object] = {
         "chat_id": task.source_chat_id,
         "message_thread_id": task.source_thread_id,
@@ -1347,9 +1345,25 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         )
         .limit(1)
     )
+    materialization = await session.scalar(
+        select(MaterializationLink).where(MaterializationLink.task_id == task.id)
+    )
+    package = None
+    revision = None
+    plan_size = None
+    if materialization is not None:
+        package = await session.get(WorkPackage, materialization.work_package_id)
+        revision = await session.get(PlanRevision, materialization.plan_revision_id)
+        plan_size = await session.scalar(
+            select(func.count(PlanRevisionItem.id)).where(
+                PlanRevisionItem.plan_revision_id == materialization.plan_revision_id
+            )
+        )
     title = task_title(task)
     scope = task.project_id or "личный"
     lines = [f"<b>{telegram_html(title)}</b>"]
+    if materialization is not None and plan_size:
+        lines.append(f"Пункт плана: <b>{materialization.ordinal}/{int(plan_size)}</b>")
     draft = task.task_draft if isinstance(task.task_draft, dict) else {}
     if any(draft.get(key) for key in ("task_summary", "normalized_title", "goal", "title")):
         lines.append(f"Задача: {telegram_html(task_sense_sentence(task))}")
@@ -1443,12 +1457,42 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             if run is not None and run.status.value == "created"
             else tuple(status_buttons(task.status.value))
         )
+    callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = ()
+    if package is not None and revision is not None and approval is None:
+        from vuzol.telegram.work_packages import (
+            WorkPackageCallback,
+            WorkPackageCallbackKind,
+            encode_work_package_callback,
+        )
+
+        def package_callback(kind: WorkPackageCallbackKind) -> str:
+            return encode_work_package_callback(
+                WorkPackageCallback(
+                    kind=kind,
+                    package_id=package.id,
+                    revision_number=revision.revision_number,
+                    h8=revision.content_hash[:8],
+                )
+            )
+
+        package_actions: list[tuple[str, str]] = [
+            ("Изменить", package_callback(WorkPackageCallbackKind.CONTINUE_DISCUSSION))
+        ]
+        if task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.QUOTA_EXHAUSTED}:
+            package_actions.insert(
+                0, ("Повторить", package_callback(WorkPackageCallbackKind.RETRY_ITEM))
+            )
+        callback_buttons = (tuple(package_actions),)
     return StatusCard(
         task_id=task.id,
         revision=task.version,
         html="\n".join(lines),
         buttons=buttons,
         approval_id=approval.id if approval is not None else None,
+        callback_buttons=callback_buttons,
+        work_package_id=None if package is None else package.id,
+        plan_revision_id=None if revision is None else revision.id,
+        control_status_generation=None if package is None else package.version,
     )
 
 

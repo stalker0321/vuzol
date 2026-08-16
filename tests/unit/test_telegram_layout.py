@@ -7,6 +7,7 @@ from vuzol.telegram.layout import (
     SYSTEM_PINNED_TOPIC_ORDER,
     SYSTEM_TOPIC_DISPLAY_NAMES,
     effective_display_name,
+    is_plan_command,
     is_status_dashboard_topic,
     is_system_workspace_kind,
     ordered_pinned_topics,
@@ -16,6 +17,13 @@ from vuzol.telegram.layout import (
     system_pin_rank,
     topic_wants_pin,
 )
+
+
+def test_plan_command_accepts_only_bare_command() -> None:
+    assert is_plan_command("/plan") is True
+    assert is_plan_command("/plan@vuzol_bot") is True
+    assert is_plan_command("/plan now") is False
+    assert is_plan_command(None) is False
 
 
 def test_dashboard_title_is_canonical_russian_label() -> None:

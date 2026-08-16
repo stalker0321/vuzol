@@ -82,6 +82,15 @@ def is_model_command(text: str | None) -> bool:
     return command == "/model"
 
 
+def is_plan_command(text: str | None) -> bool:
+    """True for bare ``/plan`` (optional @bot suffix) with no arguments."""
+
+    if text is None:
+        return False
+    parts = text.strip().split()
+    return len(parts) == 1 and parts[0].split("@", 1)[0] == "/plan"
+
+
 def build_help_card(kind: TopicKind) -> str:
     """Return concise, context-aware help for one forum topic."""
 
@@ -95,6 +104,7 @@ def build_help_card(kind: TopicKind) -> str:
                 "Опишите задачу текстом, голосом или приложите документ.",
                 "Ответьте на сообщение задачи, чтобы продолжить её.",
                 "<code>/model</code> — выбрать исполнителя проекта.",
+                "<code>/plan</code> — показать текущий план.",
             )
         )
     elif kind is TopicKind.INBOX:

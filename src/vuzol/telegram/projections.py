@@ -1483,9 +1483,14 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
                 0, ("Повторить", package_callback(WorkPackageCallbackKind.RETRY_ITEM))
             )
         callback_buttons = (tuple(package_actions),)
+    projection_revision = (
+        task.version
+        if package is None
+        else task.version * 10_000 + package.version
+    )
     return StatusCard(
         task_id=task.id,
-        revision=task.version,
+        revision=projection_revision,
         html="\n".join(lines),
         buttons=buttons,
         approval_id=approval.id if approval is not None else None,

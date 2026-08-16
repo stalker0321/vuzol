@@ -228,6 +228,7 @@ class WorkPackageSequencer:
                 },
             )
             await self._projection(package.id, package.version, "terminal_pause")
+            await self._task_projection(task, package.version, "terminal_pause")
             return SequenceResult(package.id, package.version, task.id, link.ordinal)
 
         package.cursor_ordinal = link.ordinal + 1
@@ -390,6 +391,23 @@ class WorkPackageSequencer:
             entity_id=package_id,
             idempotency_key=f"wp:action:clear:{package_id}:{generation}:{reason}",
             payload={"package_id": str(package_id)},
+        )
+
+    async def _task_projection(self, task: Task, generation: int, reason: str) -> None:
+        if task.source_chat_id is None or task.source_thread_id is None:
+            return
+        await self._uow.outbox.enqueue(
+            destination="telegram",
+            operation_type="send_message",
+            entity_type="task",
+            entity_id=task.id,
+            idempotency_key=f"telegram:task-status:package:{task.id}:{generation}:{reason}",
+            payload={
+                "chat_id": task.source_chat_id,
+                "message_thread_id": task.source_thread_id,
+                "role": "intake_ack",
+                "task_id": str(task.id),
+            },
         )
 
 

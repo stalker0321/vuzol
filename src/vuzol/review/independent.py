@@ -50,7 +50,11 @@ from vuzol.workflows.ports import CancellationContext
 
 INDEPENDENT_REVIEW_SCHEMA = "independent-review.v1"
 _PROMPT_REVISION = "independent-review-v1"
-_MAX_DIFF_CHARS = 60_000
+# Keep the complete diff in the independent-review bundle whenever it still fits
+# the reviewer's 32k-token input allowance.  The old 60k-character boundary was
+# substantially below that allowance and made ordinary front-end changes fail
+# before a reviewer was even called.
+_MAX_DIFF_CHARS = 120_000
 _MAX_FILES = 80
 _MAX_CONTEXT_ITEM_CHARS = 20_000
 
@@ -163,7 +167,9 @@ class DatabaseReviewAccounting:
                     limits=self._limits,
                 )
             except BudgetExceeded as error:
-                raise IndependentReviewError("independent review budget is exhausted") from error
+                raise IndependentReviewError(
+                    f"independent review budget is exhausted: {error}"
+                ) from error
         return ReviewBudgetReservation(
             id=row.id,
             cost_units=estimate.cost_units,

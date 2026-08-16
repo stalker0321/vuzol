@@ -285,7 +285,10 @@ async def test_database_review_accounting_reserves_reconciles_and_releases(
     assert reconcile.await_count == 2
     release.assert_awaited_once()
     reserve.side_effect = BudgetExceeded("limit")
-    with pytest.raises(IndependentReviewError, match="budget is exhausted"):
+    with pytest.raises(
+        IndependentReviewError,
+        match="budget is exhausted: limit",
+    ):
         await accounting.reserve(request=request, profile=profile)
 
 
@@ -578,7 +581,7 @@ async def test_independent_reviewer_rejects_oversized_bundle() -> None:
             lease=_lease(),
         )
     adapter.execute.assert_not_awaited()
-    with pytest.raises(IndependentReviewError, match="maximum is 60000"):
+    with pytest.raises(IndependentReviewError, match="maximum is 120000"):
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
             risk=RiskLevel.HIGH,
@@ -586,7 +589,7 @@ async def test_independent_reviewer_rejects_oversized_bundle() -> None:
                 head="b" * 40,
                 branch="task",
                 changed_files=("large.py",),
-                diff=b"+" + b"x" * 60_001,
+                diff=b"+" + b"x" * 120_001,
             ),
             base_commit="a" * 40,
             result_commit="b" * 40,

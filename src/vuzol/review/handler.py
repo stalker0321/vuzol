@@ -290,6 +290,20 @@ class ResultReviewHandler:
         )
 
     async def _require_validate_predecessor(self, session: AsyncSession, step: Step) -> Step:
+        repaired_validation_id = step.payload.get("repair_validation_step_id")
+        if isinstance(repaired_validation_id, str):
+            try:
+                validation_id = uuid.UUID(repaired_validation_id)
+            except ValueError as error:
+                raise ValueError("review repair validation binding is invalid") from error
+            predecessor = await session.scalar(
+                select(Step).where(Step.id == validation_id, Step.run_id == step.run_id)
+            )
+            if predecessor is None or predecessor.step_type != "validate":
+                raise ValueError("review repair validation binding is missing")
+            if predecessor.status is not StepStatus.COMPLETED:
+                raise ValueError("review repair validation is not completed")
+            return predecessor
         predecessors = step.dependency_metadata.get("predecessor_ordinals", [])
         if not isinstance(predecessors, list) or len(predecessors) != 1:
             raise ValueError("review requires exactly one validate predecessor")
@@ -303,6 +317,7 @@ class ResultReviewHandler:
             raise ValueError("review predecessor must be a validate step")
         if predecessor.status is not StepStatus.COMPLETED:
             raise ValueError("validate predecessor is not completed")
+        assert isinstance(predecessor, Step)
         return predecessor
 
 

@@ -415,6 +415,10 @@ async def prepare_delivery(
             revision=card.revision,
             buttons=card.buttons,
             approval_id=card.approval_id,
+            callback_buttons=card.callback_buttons,
+            work_package_id=card.work_package_id,
+            plan_revision_id=card.plan_revision_id,
+            control_status_generation=card.control_status_generation,
             message_role=message_role,
         )
     return PreparedDelivery(
@@ -428,6 +432,10 @@ async def prepare_delivery(
         message_id=link.message_id,
         buttons=card.buttons,
         approval_id=card.approval_id,
+        callback_buttons=card.callback_buttons,
+        work_package_id=card.work_package_id,
+        plan_revision_id=card.plan_revision_id,
+        control_status_generation=card.control_status_generation,
         message_role=message_role,
     )
 
@@ -446,6 +454,7 @@ async def _prepare_work_package_projection(
         "render_plan": WORK_PACKAGE_PLAN_ROLE,
         "render_status": WORK_PACKAGE_STATUS_ROLE,
         "render_action": WORK_PACKAGE_ACTION_ROLE,
+        "clear_action": WORK_PACKAGE_ACTION_ROLE,
         "render_detail": WORK_PACKAGE_DETAIL_ROLE,
         "clear_detail": WORK_PACKAGE_DETAIL_ROLE,
     }.get(item.operation_type)
@@ -459,7 +468,7 @@ async def _prepare_work_package_projection(
                 TelegramMessageLink.message_role == role,
             )
         )
-    if item.operation_type == "clear_detail":
+    if item.operation_type in {"clear_detail", "clear_action"}:
         if link is None:
             return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
         return PreparedDelivery(

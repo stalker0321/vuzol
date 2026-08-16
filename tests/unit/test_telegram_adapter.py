@@ -446,3 +446,15 @@ def test_control_labels_are_russian_and_wire_actions_stay_stable(
     assert tuple(row[0].callback_data for row in markup.inline_keyboard) == tuple(
         f"v1:{action}:{task_id}" for action in actions
     )
+
+
+def test_task_controls_and_package_controls_share_one_card() -> None:
+    task_id = uuid.uuid4()
+    markup = _control_markup(
+        ("pause",),
+        task_id=task_id,
+        approval_id=None,
+        callback_buttons=((('Изменить', 'v1:wp:U:payload'),),),
+    )
+    assert markup is not None
+    assert tuple(row[0].text for row in markup.inline_keyboard) == ("Пауза", "Изменить")

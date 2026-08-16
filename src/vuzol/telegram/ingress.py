@@ -12,7 +12,12 @@ from vuzol.config.models import TopicConfig, TopicKind
 from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
 from vuzol.providers.subscription_limits import SUBSCRIPTION_LIMITS_DESTINATION
 from vuzol.security.secret_ingress import create_request, parse_secret_command
-from vuzol.storage.models import TelegramIntakeMessage, TelegramMessageLink, TopicMapping
+from vuzol.storage.models import (
+    ProjectDiscussionSession,
+    TelegramIntakeMessage,
+    TelegramMessageLink,
+    TopicMapping,
+)
 from vuzol.storage.types import IntakeStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
@@ -20,6 +25,7 @@ from vuzol.telegram.layout import (
     HELP_CARD_ROLE,
     is_help_command,
     is_model_command,
+    is_plan_command,
     is_status_dashboard_topic,
     is_update_command,
 )
@@ -90,6 +96,12 @@ class TelegramIngressService:
                 if not topic.enabled:
                     raise TelegramPolicyError("project topic is disabled")
                 return await self._handle_model_command(update, topic)
+            if is_plan_command(update.text):
+                if topic.kind is not TopicKind.PROJECT or topic.project_id is None:
+                    raise TelegramPolicyError("/plan is only available in a project topic")
+                if not topic.enabled:
+                    raise TelegramPolicyError("project topic is disabled")
+                return await self._handle_plan_command(update, topic)
             if not topic.enabled or not topic.accepts_new_tasks:
                 raise TelegramPolicyError("topic does not accept new tasks")
         except (TelegramPolicyError, RegistryError) as error:
@@ -525,6 +537,55 @@ class TelegramIngressService:
                 entity_type="telegram_inbox",
                 entity_id=inbox_id,
                 idempotency_key=(f"telegram:delete_command:{update.chat_id}:{update.message_id}"),
+                payload={
+                    "role": "user_command_delete",
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "message_id": update.message_id,
+                },
+            )
+            await uow.inbox.mark_processed(
+                inbox_id, entity_type="telegram_command", entity_id=inbox_id
+            )
+        return IngressResult(status=IngressStatus.HANDLED)
+
+    async def _handle_plan_command(
+        self, update: MessageUpdate, topic: TopicConfig
+    ) -> IngressResult:
+        """Render the current plan card without mixing it with runtime progress."""
+
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            assert uow.session is not None
+            discussion = await uow.session.scalar(
+                select(ProjectDiscussionSession).where(
+                    ProjectDiscussionSession.chat_id == update.chat_id,
+                    ProjectDiscussionSession.message_thread_id == update.message_thread_id,
+                )
+            )
+            if discussion is None or discussion.active_work_package_id is None:
+                raise TelegramPolicyError("this project topic has no current plan")
+            await uow.outbox.enqueue(
+                destination="work_package_projection",
+                operation_type="render_plan",
+                entity_type="work_package",
+                entity_id=discussion.active_work_package_id,
+                idempotency_key=f"wp:plan:command:{inbox_id}",
+                payload={"package_id": str(discussion.active_work_package_id)},
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="delete_message",
+                entity_type="telegram_inbox",
+                entity_id=inbox_id,
+                idempotency_key=f"telegram:delete_command:{update.chat_id}:{update.message_id}",
                 payload={
                     "role": "user_command_delete",
                     "chat_id": update.chat_id,

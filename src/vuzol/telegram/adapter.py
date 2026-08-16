@@ -418,14 +418,7 @@ def _control_markup(
     approval_id: uuid.UUID | None,
     callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
 ) -> InlineKeyboardMarkup | None:
-    if callback_buttons:
-        return InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton(label, callback_data=data) for label, data in row]
-                for row in callback_buttons
-            ]
-        )
-    if not actions:
+    if not actions and not callback_buttons:
         return None
     labels = {
         "start": "Старт",
@@ -435,17 +428,21 @@ def _control_markup(
         "approve": "Принять",
         "redo": "Переделать",
         "reject": "Отклонить",
+        "retry": "Повторить",
     }
     approval_actions = {"approve", "redo", "reject"}
     targets = {action: approval_id if action in approval_actions else task_id for action in actions}
     if any(target is None for target in targets.values()):
         return None
-    return InlineKeyboardMarkup(
-        [
+    rows = [
             [InlineKeyboardButton(labels[action], callback_data=f"v1:{action}:{targets[action]}")]
             for action in actions
         ]
+    rows.extend(
+        [InlineKeyboardButton(label, callback_data=data) for label, data in row]
+        for row in callback_buttons
     )
+    return InlineKeyboardMarkup(rows)
 
 
 def build_long_polling_application(

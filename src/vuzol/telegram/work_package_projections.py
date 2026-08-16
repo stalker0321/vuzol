@@ -373,7 +373,7 @@ async def build_work_package_plan_card(
             ("Принять план", _callback(WorkPackageCallbackKind.APPROVE, package, revision))
         )
         controls.append(("Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision)))
-    elif _action_card and package.status is WorkPackageStatus.RUNNING:
+    elif not _status_card and package.status is WorkPackageStatus.RUNNING:
         controls.append(
             (
                 "Завершить цепочку",
@@ -386,7 +386,7 @@ async def build_work_package_plan_card(
                 _callback(WorkPackageCallbackKind.REQUEST_REPLAN, package, revision),
             )
         )
-    elif _action_card and package.status is WorkPackageStatus.PAUSED:
+    elif not _status_card and package.status is WorkPackageStatus.PAUSED:
         if await _package_retry_available(session, package):
             controls.append(
                 ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
@@ -404,7 +404,7 @@ async def build_work_package_plan_card(
                 ),
             )
         )
-    elif _action_card and (
+    elif not _status_card and (
         package.status is WorkPackageStatus.STOPPED and package.approved_revision_id == revision.id
     ):
         controls.append(

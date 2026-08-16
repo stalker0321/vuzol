@@ -197,6 +197,11 @@ async def claim_routed_step(
         allowed_fallbacks: tuple[str, ...] = ()
         if failed_profile_id is not None:
             allowed_fallbacks = registries.profiles.get(failed_profile_id).fallback_profile_ids
+            # A pin without configured fallbacks must still be able to consume its
+            # bounded retry attempts. Excluding its only profile turns retries into
+            # immediate no_compatible_profile failures without calling the provider.
+            if not allowed_fallbacks:
+                failed_profile_id = None
         project_pin = None
         pin_family_ids: frozenset[str] | None = None
         pin_preference_revision: int | None = None

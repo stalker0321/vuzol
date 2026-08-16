@@ -165,6 +165,10 @@ class DatabaseReviewAccounting:
                     provider_attempt=request.provider_attempt,
                     estimate=estimate,
                     limits=self._limits,
+                    # Worker/repair calls must not consume the allowance needed
+                    # by the mandatory safety verdict. Review remains bounded by
+                    # its own call/step limits and by task/daily cost limits.
+                    enforce_task_token_limits=False,
                 )
             except BudgetExceeded as error:
                 raise IndependentReviewError(

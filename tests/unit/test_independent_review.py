@@ -282,6 +282,7 @@ async def test_database_review_accounting_reserves_reconciles_and_releases(
 
     assert reservation.id == reservation_id
     reserve.assert_awaited_once()
+    assert reserve.await_args.kwargs["enforce_task_token_limits"] is False
     assert reconcile.await_count == 2
     release.assert_awaited_once()
     reserve.side_effect = BudgetExceeded("limit")

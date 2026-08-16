@@ -186,6 +186,28 @@ def test_new_budget_epoch_resets_task_and_step_token_caps(
                     estimate=estimate,
                     limits=settings.limits,
                 )
+        async with UnitOfWork(factory) as uow:
+            reviewer = await uow.steps.create(
+                run_id=run_id,
+                ordinal=3,
+                step_type="review",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                status=StepStatus.QUEUED,
+                max_attempts=3,
+            )
+        async with factory.begin() as session:
+            review_reservation = await reserve_budget(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=reviewer.id,
+                profile_id="api",
+                provider_attempt=1,
+                estimate=estimate,
+                limits=settings.limits,
+                enforce_task_token_limits=False,
+            )
+        assert review_reservation.budget_epoch == 0
         async with factory.begin() as session:
             task = await session.get(Task, task_id)
             assert task is not None

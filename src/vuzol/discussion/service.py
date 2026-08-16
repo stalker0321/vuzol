@@ -29,6 +29,7 @@ from vuzol.storage.models import (
     MaterializationLink,
     PlanRevision,
     PlanRevisionItem,
+    ProjectDiscussionSession,
     Run,
     Step,
     Task,
@@ -276,6 +277,7 @@ class WorkPackageService:
         package.status = WorkPackageStatus.DISCARDED
         package.approved_revision_id = None
         package.version += 1
+        await self._release_discussion(package)
         await self._close_open_edits(package_id, actor_type="system")
         await self._uow.work_packages.clear_open_detail(package_id=package_id)
         await self._detail_event(package_id, None, None, None, None, True)
@@ -288,6 +290,61 @@ class WorkPackageService:
             payload={"revision_id": str(revision.id), "discarded_by_user_id": user_id},
         )
         return package.version
+
+    async def finish_package(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        user_id: int,
+    ) -> int:
+        """Abandon a live/stopped chain and release its project topic for new work."""
+
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_generation(package.version, expected_status_generation)
+        control_transition_target(package.status, PackageControlAction.FINISH_PACKAGE)
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if package.head_revision_id != revision.id:
+            raise DomainError("stale_revision")
+        previous = package.status
+        cancelled_task_id = await self._cancel_current_task(package, actor_id=str(user_id))
+        package.status = WorkPackageStatus.DISCARDED
+        package.pause_reason = None
+        package.approved_revision_id = None
+        revision.state = PlanRevisionState.DISCARDED
+        package.version += 1
+        await self._release_discussion(package)
+        await self._close_open_edits(package_id, actor_type="system")
+        await self._uow.work_packages.clear_open_detail(package_id=package_id)
+        await self._detail_event(package_id, None, None, None, None, True)
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_DISCARDED,
+            "user",
+            previous_state=previous.value,
+            new_state=WorkPackageStatus.DISCARDED.value,
+            payload={
+                "revision_id": str(revision.id),
+                "finished_by_user_id": user_id,
+                "cancelled_task_id": (
+                    None if cancelled_task_id is None else str(cancelled_task_id)
+                ),
+                "status_generation": package.version,
+            },
+        )
+        return package.version
+
+    async def _release_discussion(self, package: WorkPackage) -> None:
+        session = self._uow.session
+        if session is None:
+            raise RuntimeError("unit of work is not active")
+        discussion = await session.get(
+            ProjectDiscussionSession, package.session_id, with_for_update=True
+        )
+        if discussion is not None and discussion.active_work_package_id == package.id:
+            discussion.active_work_package_id = None
 
     async def open_edit_session(
         self,

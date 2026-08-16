@@ -350,6 +350,16 @@ class PackageControlIngress:
                 )
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
+            elif command.action is PackageControlAction.FINISH_PACKAGE:
+                generation = await service.finish_package(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    user_id=command.user_id,
+                )
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
             elif command.action is PackageControlAction.RESTART_PACKAGE:
                 restart = await service.restart_plan(
                     package_id=command.package_id,

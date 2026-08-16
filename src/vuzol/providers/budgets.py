@@ -86,6 +86,7 @@ async def reserve_budget(
     provider_attempt: int,
     estimate: ReservationEstimate,
     limits: HardLimits,
+    enforce_task_token_limits: bool = True,
 ) -> ProviderBudgetReservation:
     await session.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK_KEY)))
     existing = await session.scalar(
@@ -116,9 +117,15 @@ async def reserve_budget(
         raise BudgetExceeded("step input-token limit exceeded")
     if step_usage[1] + step_reserved[1] + estimate.output_tokens > limits.step_output_tokens:
         raise BudgetExceeded("step output-token limit exceeded")
-    if task_usage[0] + task_reserved[0] + estimate.input_tokens > limits.task_input_tokens:
+    if (
+        enforce_task_token_limits
+        and task_usage[0] + task_reserved[0] + estimate.input_tokens > limits.task_input_tokens
+    ):
         raise BudgetExceeded("task input-token limit exceeded")
-    if task_usage[1] + task_reserved[1] + estimate.output_tokens > limits.task_output_tokens:
+    if (
+        enforce_task_token_limits
+        and task_usage[1] + task_reserved[1] + estimate.output_tokens > limits.task_output_tokens
+    ):
         raise BudgetExceeded("task output-token limit exceeded")
     if step_usage[2] + step_reserved[2] + estimate.cost_units > Decimal(
         str(limits.step_cost_units)

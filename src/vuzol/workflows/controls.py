@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Settings
+from vuzol.providers.fallback_policy import should_fallback_provider
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item
 from vuzol.storage.models import (
     Approval,
@@ -276,10 +277,16 @@ async def retry_blocked_step(
     if explicit_retry and step.attempt_count >= step.max_attempts:
         # Each explicit user retry grants exactly one additional bounded attempt.
         step.max_attempts += 1
-    if step.executor_profile_id is not None and step.failure_category != "cancelled":
+    if step.executor_profile_id is not None and should_fallback_provider(step.failure_category):
         step.payload = {
             **step.payload,
             "retry_failed_profile_id": step.executor_profile_id,
+        }
+    else:
+        step.payload = {
+            key: value
+            for key, value in step.payload.items()
+            if key != "retry_failed_profile_id"
         }
     run = await session.scalar(select(Run).where(Run.id == step.run_id).with_for_update())
     assert run is not None

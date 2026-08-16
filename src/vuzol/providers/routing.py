@@ -29,6 +29,7 @@ from vuzol.projects.executor_preference import (
 )
 from vuzol.providers.budgets import BudgetExceeded, estimate_reservation, reserve_budget
 from vuzol.providers.domain import EffectiveProfileState
+from vuzol.providers.fallback_policy import should_fallback_provider
 from vuzol.providers.health import effective_health
 from vuzol.providers.policy import (
     ExclusionReason,
@@ -56,16 +57,6 @@ PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
     "execute_code": ProviderRole.EXECUTOR,
     "execute_agent": ProviderRole.EXECUTOR,
 }
-
-# Content-quality plan failures are not profile outages; the same planner may retry.
-PLANNER_CONTENT_FAILURE_CATEGORIES = frozenset(
-    {
-        "planner_empty_output",
-        "planner_truncated",
-        "planner_invalid_output",
-    }
-)
-
 
 async def claim_routed_step(
     session: AsyncSession,
@@ -186,10 +177,7 @@ async def claim_routed_step(
                 attempt > 1
                 and (
                     isinstance(retry_failed_profile_id, str)
-                    or (
-                        step.failure_category is not None
-                        and step.failure_category not in PLANNER_CONTENT_FAILURE_CATEGORIES
-                    )
+                    or should_fallback_provider(step.failure_category)
                 )
             )
             else None

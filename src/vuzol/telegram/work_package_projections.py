@@ -416,6 +416,25 @@ async def build_work_package_plan_card(
         )
         if token_line is not None:
             lines.extend((token_line, ""))
+        production_url = await session.scalar(
+            select(Step.result["public_url"].astext)
+            .join(Run, Run.id == Step.run_id)
+            .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+            .where(
+                MaterializationLink.work_package_id == package.id,
+                MaterializationLink.plan_revision_id == revision.id,
+                Step.step_type == "publish_static",
+                Step.status == StepStatus.COMPLETED,
+                Step.result["status"].astext == "published",
+            )
+            .order_by(MaterializationLink.ordinal.desc(), Step.updated_at.desc())
+            .limit(1)
+        )
+        if isinstance(production_url, str) and production_url:
+            production = telegram_html(production_url)
+            lines.extend(
+                (f'<b>Production:</b> <a href="{production}">{production}</a>', "")
+            )
     if package_delivery_failure is not None:
         lines = ["<b>Plan completed · delivery failed</b>"]
         lines.extend(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items)
@@ -475,7 +494,18 @@ async def build_work_package_plan_card(
             )
         buttons.append(tuple(navigation))
     controls: list[tuple[str, str]] = []
-    if package_approval is not None:
+    if package_delivery_failure is not None:
+        if await _package_retry_available(session, package):
+            controls.append(
+                ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
+            )
+        controls.append(
+            (
+                "Внести правки",
+                _callback(WorkPackageCallbackKind.CONTINUE_DISCUSSION, package, revision),
+            )
+        )
+    elif package_approval is not None:
         controls.extend(
             (
                 ("Принять", f"v1:approve:{package_approval.id}"),
@@ -535,7 +565,11 @@ async def build_work_package_plan_card(
         )
     if controls:
         buttons.append(tuple(controls))
-    if not _status_card and not package_result_complete:
+    if (
+        not _status_card
+        and not package_result_complete
+        and package_delivery_failure is None
+    ):
         buttons.append(
             (
                 (

@@ -5,6 +5,23 @@ deferred. Completed work belongs in `CHANGELOG.md`.
 
 ## Next after Telegram dogfood testing
 
+### Build an interpreter/planner evaluation corpus
+
+Create an agreed corpus of roughly 20 realistic requests spanning trivial,
+ambiguous, multi-step, risky, and cross-domain work. Before running models,
+review with the user a human reference decomposition into the smallest useful
+work items. Then execute the real interpreter and planner contracts for every
+request/work item and retain model/profile, prompt revision, structured output,
+tokens, latency, repairs, and validation failures.
+
+Evaluation must keep interpreter and planner scores separate and compare model
+outputs against explicit observable criteria (intent and constraints retained,
+clarification quality, task boundaries, dependencies, completion criteria,
+scope/risk, schema validity, unnecessary steps, and token/latency cost). The
+reference is a rubric, not a requirement for identical wording or an identical
+plan. Runs must be reproducible so small/free models can be compared against the
+current production baseline instead of being judged as a black box.
+
 ### Replace fixed diff-size failure with chunked independent review
 
 **Priority:** first engineering task after the current end-to-end Telegram

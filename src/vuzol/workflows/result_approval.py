@@ -205,6 +205,23 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
             source = step
             break
     if source is None:
+        # Compatibility for workflows whose trusted validation manifest is
+        # retained on another completed predecessor.
+        for step in reversed(ordered):
+            if step.status is not StepStatus.COMPLETED:
+                continue
+            result = step.result if isinstance(step.result, dict) else {}
+            structured = result.get("structured_output")
+            if (
+                isinstance(structured, dict)
+                and structured.get("result_commit") == worktree.result_commit
+                and structured.get("base_commit") == worktree.base_commit
+                and isinstance(structured.get("gates"), list)
+                and structured.get("gates")
+            ):
+                source = step
+                break
+    if source is None:
         raise ValueError("result approval requires a completed validate step")
 
     result = source.result if isinstance(source.result, dict) else {}

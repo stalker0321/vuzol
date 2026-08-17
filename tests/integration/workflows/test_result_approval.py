@@ -194,6 +194,20 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
                 max_attempts=1,
                 timeout_seconds=60,
             )
+            pending_finalize = Step(
+                run_id=run_id,
+                ordinal=5,
+                dependency_metadata={"predecessor_ordinals": [4]},
+                step_type="finalize",
+                queue_class=QueueClass.CONTROL,
+                status=StepStatus.PENDING,
+                required_capabilities=[],
+                payload={},
+                retry_class=RetryClass.NEVER,
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                max_attempts=1,
+                timeout_seconds=60,
+            )
             worktree = Worktree(
                 task_id=task_id,
                 run_id=run_id,
@@ -214,7 +228,9 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             await session.flush()
             session.add(run)
             await session.flush()
-            session.add_all((source_step, review_step, approval_step, worktree))
+            session.add_all(
+                (source_step, review_step, approval_step, pending_finalize, worktree)
+            )
             await session.flush()
             approval = await ensure_result_approval(
                 session,

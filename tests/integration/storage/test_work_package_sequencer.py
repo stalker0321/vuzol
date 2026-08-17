@@ -209,7 +209,8 @@ async def test_final_item_approval_is_rendered_as_package_result(
 
     async with factory() as session:
         card = await build_work_package_action_card(session, created.package_id)
-    assert "<b>Plan completed</b>" in card.html
+    assert card.html.startswith("<b>Plan completed · approval required</b>")
+    assert "Ready |" not in card.html
     assert "✅ 1. Implement step 1" in card.html
     assert "✅ 2. Implement step 2" in card.html
     callbacks = {label: callback for row in card.callback_buttons for label, callback in row}

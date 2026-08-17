@@ -249,6 +249,47 @@ async def test_typed_git_creates_private_package_ref_with_cas(tmp_path: Path) ->
 
 
 @pytest.mark.anyio
+async def test_typed_git_promotes_chain_from_successive_shallow_worktrees(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "test@example.com")
+    _git(repository, "config", "user.name", "Test")
+    (repository / "base.txt").write_text("base\n")
+    _git(repository, "add", "base.txt")
+    _git(repository, "commit", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD").strip()
+    git = LocalGit()
+
+    first = tmp_path / "first"
+    await git.add_worktree(repository, first, "first-task", base)
+    (first / "first.txt").write_text("first\n")
+    await git.stage_paths(first, ("first.txt",))
+    first_head = await git.create_commit(first, "first task")
+    assert await git.apply_result(
+        repository,
+        first,
+        target_branch="vuzol/package/test/revision",
+        expected_head=base,
+        result_commit=first_head,
+    )
+
+    second = tmp_path / "second"
+    await git.add_worktree(repository, second, "second-task", first_head)
+    (second / "second.txt").write_text("second\n")
+    await git.stage_paths(second, ("second.txt",))
+    final_head = await git.create_commit(second, "second task")
+    assert await git.apply_result(
+        repository,
+        second,
+        target_branch="main",
+        expected_head=base,
+        result_commit=final_head,
+    )
+    assert _git(repository, "rev-parse", "main").strip() == final_head
+
+
+@pytest.mark.anyio
 async def test_typed_git_applies_when_target_branch_is_checked_out(tmp_path: Path) -> None:
     """Freshly provisioned repos keep main checked out; apply must still CAS-advance."""
 

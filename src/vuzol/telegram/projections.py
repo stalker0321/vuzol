@@ -1396,6 +1396,14 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         and materialization.ordinal == int(plan_size)
         and task.status is TaskStatus.WAITING_APPROVAL
     )
+    final_package_delivery_failure = bool(
+        materialization is not None
+        and plan_size is not None
+        and materialization.ordinal == int(plan_size)
+        and step is not None
+        and step.step_type == "approval"
+        and task.status in {TaskStatus.BLOCKED, TaskStatus.FAILED}
+    )
     lines = [f"<b>{telegram_html(title)}</b>"]
     if materialization is not None and plan_size:
         lines.append(f"Пункт плана: <b>{materialization.ordinal}/{int(plan_size)}</b>")
@@ -1404,7 +1412,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         lines.append(f"Задача: {telegram_html(task_sense_sentence(task))}")
     status_label = (
         "Работа завершена"
-        if final_package_result
+        if final_package_result or final_package_delivery_failure
         else
         _task_outcome_label(task.status)
         if task.status in USER_REPORTABLE_TASK_STATUSES
@@ -1416,7 +1424,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             f"Статус: <b>{status_label}</b>",
         )
     )
-    if step is not None and not final_package_result:
+    if step is not None and not final_package_result and not final_package_delivery_failure:
         lines.append(f"Этап: {step_type_label(step.step_type)} ({step_status_label(step.status)})")
     worker = await _task_worker_label(session, task.id) if run is not None else None
     if worker is not None:
@@ -1480,7 +1488,10 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         if gates:
             lines.extend(("", "<b>Проверки Vuzol (доверенные)</b>"))
             lines.extend(f"✅ {telegram_html(gate)}" for gate in gates)
-    elif task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+    elif (
+        task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}
+        and not final_package_delivery_failure
+    ):
         failed_stage, reason = await _failure_details(session, task)
         lines.extend(("", "<b>Отчёт о завершении</b>"))
         if failed_stage:
@@ -1496,10 +1507,13 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             "Чтобы переделать результат, отправьте новую задачу отдельным сообщением "
             "и укажите, что именно нужно исправить."
         )
-    if approval is not None and step is not None:
+    buttons: tuple[str, ...]
+    if final_package_delivery_failure:
+        buttons = ()
+    elif approval is not None and step is not None:
         envelope = verified_envelope(step, approval)
         lines.extend(("", *_approval_fact_lines(envelope, approval.human_summary)))
-        buttons: tuple[str, ...] = ("approve", "redo", "reject")
+        buttons = ("approve", "redo", "reject")
     else:
         buttons = (
             ("start",)
@@ -1507,7 +1521,12 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             else tuple(status_buttons(task.status.value))
         )
     callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = ()
-    if package is not None and revision is not None and approval is None:
+    if (
+        package is not None
+        and revision is not None
+        and approval is None
+        and not final_package_delivery_failure
+    ):
         from vuzol.telegram.work_packages import (
             WorkPackageCallback,
             WorkPackageCallbackKind,

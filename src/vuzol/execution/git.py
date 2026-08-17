@@ -280,7 +280,12 @@ class LocalGit:
 
         await self.require_clean_worktree(worktree)
         await self.require_no_remotes(worktree)
-        if not await self.is_ancestor(worktree, expected_head, result_commit):
+        result_parent = await self.commit_parent(worktree, result_commit)
+        if (
+            result_parent != expected_head
+            and not await self.is_ancestor(worktree, expected_head, result_commit)
+            and not await self.is_ancestor(repository, expected_head, result_parent)
+        ):
             raise GitError("result commit is not a descendant of the approved base")
         target_ref = f"refs/heads/{target_branch}"
         checked_out = await self._optional(repository, "symbolic-ref", "--quiet", "HEAD")

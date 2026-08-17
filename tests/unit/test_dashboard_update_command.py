@@ -374,3 +374,57 @@ async def test_complete_user_command_delete_without_link(
     )
     await service._complete(token, prepared, None)
     complete.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_complete_status_edit_rebinds_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vuzol.storage.records import OutboxLeaseToken
+    from vuzol.storage.types import DeliveryStatus
+    from vuzol.telegram.delivery import DeliveryAction, PreparedDelivery, TelegramDeliveryService
+
+    link_id = uuid4()
+    approval_id = uuid4()
+    link = MagicMock(projection_revision=8, approval_id=None)
+    session = MagicMock()
+    session.get = AsyncMock(return_value=link)
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock()
+    factory.begin.return_value = session_cm
+    complete = AsyncMock(return_value=None)
+    monkeypatch.setattr("vuzol.telegram.delivery.complete_outbox_item", complete)
+    service = TelegramDeliveryService(
+        factory,
+        MagicMock(),
+        owner="delivery",
+        lease_seconds=30,
+        max_attempts=5,
+        retry_min_seconds=0.1,
+        retry_max_seconds=1.0,
+    )
+    prepared = PreparedDelivery(
+        DeliveryAction.EDIT_STATUS,
+        chat_id=-100,
+        thread_id=5,
+        link_id=link_id,
+        message_id=77,
+        revision=9,
+        approval_id=approval_id,
+        message_role="task_status",
+    )
+    token = OutboxLeaseToken(
+        item_id=uuid4(),
+        status=DeliveryStatus.LEASED,
+        owner="delivery",
+        generation=1,
+        lease_expires_at=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+
+    await service._complete(token, prepared, None)
+
+    assert link.projection_revision == 9
+    assert link.approval_id == approval_id
+    complete.assert_awaited_once()

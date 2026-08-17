@@ -746,6 +746,13 @@ class WorkPackage(IdentityMixin, TimestampMixin, Base):
             "cursor_ordinal IS NULL OR cursor_ordinal >= 1",
             name="work_package_cursor_ordinal_positive",
         ),
+        CheckConstraint(
+            "(integration_branch IS NULL AND integration_base_commit IS NULL "
+            "AND integration_head_commit IS NULL AND integration_target_branch IS NULL) OR "
+            "(integration_branch IS NOT NULL AND integration_base_commit IS NOT NULL "
+            "AND integration_head_commit IS NOT NULL AND integration_target_branch IS NOT NULL)",
+            name="integration_state_complete",
+        ),
         UniqueConstraint("id", "session_id", name="uq_work_package_session_identity"),
         ForeignKeyConstraint(
             ["head_revision_id", "id"],
@@ -791,6 +798,11 @@ class WorkPackage(IdentityMixin, TimestampMixin, Base):
     head_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     approved_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     running_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    integration_branch: Mapped[str | None] = mapped_column(String(255))
+    integration_target_branch: Mapped[str | None] = mapped_column(String(255))
+    integration_base_commit: Mapped[str | None] = mapped_column(String(64))
+    integration_head_commit: Mapped[str | None] = mapped_column(String(64))
+    preview_url: Mapped[str | None] = mapped_column(String(500))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     start_generation: Mapped[int | None] = mapped_column(Integer)
     cursor_ordinal: Mapped[int | None] = mapped_column(Integer)

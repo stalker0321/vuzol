@@ -27,6 +27,16 @@ class LocalGit:
     def __init__(self, *, timeout_seconds: float = 30) -> None:
         self._timeout = timeout_seconds
 
+    async def ensure_branch(self, repository: Path, branch: str, base_commit: str) -> str:
+        """Create a private integration ref once and return its current head."""
+
+        target_ref = f"refs/heads/{branch}"
+        existing = await self._optional(repository, "rev-parse", "--verify", target_ref)
+        if existing is None:
+            await self._run(repository, "update-ref", target_ref, base_commit, "0" * 40)
+            return base_commit
+        return existing.decode().strip()
+
     async def repository_identity(self, repository: Path) -> tuple[str, str | None]:
         common = await self._run(
             repository, "rev-parse", "--path-format=absolute", "--git-common-dir"
@@ -241,6 +251,12 @@ class LocalGit:
     async def commit_parent(self, worktree: Path, commit: str) -> str:
         return await self.resolve_commit(worktree, f"{commit}^")
 
+    async def is_ancestor(self, repository: Path, ancestor: str, descendant: str) -> bool:
+        result = await self._optional(
+            repository, "merge-base", "--is-ancestor", ancestor, descendant
+        )
+        return result is not None
+
     async def require_no_remotes(self, worktree: Path) -> None:
         if await self._run(worktree, "remote"):
             raise GitError("isolated worktree unexpectedly has a remote")
@@ -274,8 +290,8 @@ class LocalGit:
 
         await self.require_clean_worktree(worktree)
         await self.require_no_remotes(worktree)
-        if await self.commit_parent(worktree, result_commit) != expected_head:
-            raise GitError("result commit is not a direct child of the approved base")
+        if not await self.is_ancestor(worktree, expected_head, result_commit):
+            raise GitError("result commit is not a descendant of the approved base")
         target_ref = f"refs/heads/{target_branch}"
         checked_out = await self._optional(repository, "symbolic-ref", "--quiet", "HEAD")
         target_is_checked_out = (

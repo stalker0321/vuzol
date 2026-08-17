@@ -16,7 +16,7 @@ from vuzol.workflows.static_publish import StaticPublishHandler, _probe_public_s
 
 
 def _handler(
-    tmp_path: Path, *, with_entrypoint: bool = True
+    tmp_path: Path, *, with_entrypoint: bool = True, preview: bool = False
 ) -> tuple[StaticPublishHandler, object]:
     repositories = tmp_path / "repositories"
     sites = tmp_path / "sites"
@@ -36,6 +36,8 @@ def _handler(
             worktree_root=repositories,
             static_site_root=sites,
             static_site_base_url="https://hryshyn.dev/",
+            preview_site_root=tmp_path / "preview-sites",
+            preview_site_base_url="https://test.hryshyn.dev/",
         ),
         registries=SimpleNamespace(projects=SimpleNamespace(get=lambda _project_id: project)),
     )
@@ -63,7 +65,13 @@ def _handler(
             "final_url": "https://hryshyn.dev/demo/",
         }
     )
-    return StaticPublishHandler(factory, cast(RuntimeConfiguration, runtime), probe=probe), request
+    (tmp_path / "preview-sites").mkdir()
+    return (
+        StaticPublishHandler(
+            factory, cast(RuntimeConfiguration, runtime), probe=probe, preview=preview
+        ),
+        request,
+    )
 
 
 @pytest.mark.anyio
@@ -75,6 +83,18 @@ async def test_handler_publishes_and_returns_public_url(tmp_path: Path) -> None:
     assert outcome.result["public_url"] == "https://hryshyn.dev/demo/"
     assert outcome.result["probe"]["status_code"] == 200
     assert (tmp_path / "sites/demo/current/index.html").read_text() == "<h1>Demo</h1>"
+
+
+@pytest.mark.anyio
+async def test_preview_handler_publishes_to_isolated_preview_host(tmp_path: Path) -> None:
+    handler, request = _handler(tmp_path, preview=True)
+
+    outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
+
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    assert outcome.result["public_url"] == "https://test.hryshyn.dev/demo/"
+    assert (tmp_path / "preview-sites/demo/current/index.html").read_text() == "<h1>Demo</h1>"
+    assert not (tmp_path / "sites/demo/current/index.html").exists()
 
 
 @pytest.mark.anyio

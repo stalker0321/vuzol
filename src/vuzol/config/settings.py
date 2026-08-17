@@ -411,6 +411,8 @@ class Settings(BaseSettings):
     artifact_root: Path = Path("/srv/vuzol/artifacts")
     static_site_root: Path = Path("/srv/vuzol/sites/hryshyn.dev")
     static_site_base_url: HttpUrl = HttpUrl("https://hryshyn.dev")
+    preview_site_root: Path = Path("/srv/vuzol/sites/test.hryshyn.dev")
+    preview_site_base_url: HttpUrl = HttpUrl("https://test.hryshyn.dev")
     secret_file_root: Path = Path("/run/secrets")
     concurrency: ConcurrencyLimits = ConcurrencyLimits()
     database: DatabaseSettings = DatabaseSettings()
@@ -434,6 +436,7 @@ class Settings(BaseSettings):
         "worktree_root",
         "artifact_root",
         "static_site_root",
+        "preview_site_root",
         "secret_file_root",
         "registry_overlay_file",
     )

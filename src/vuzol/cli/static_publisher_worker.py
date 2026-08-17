@@ -34,7 +34,10 @@ async def run() -> None:
             settings,
             factory,
             owner=owner,
-            handlers={"publish_static": StaticPublishHandler(factory, runtime)},
+            handlers={
+                "publish_static": StaticPublishHandler(factory, runtime),
+                "publish_preview": StaticPublishHandler(factory, runtime, preview=True),
+            },
             capabilities=frozenset({Capability.FILESYSTEM_WRITE}),
             queue_classes=frozenset({QueueClass.LIGHT}),
         )

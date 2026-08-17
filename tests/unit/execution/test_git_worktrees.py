@@ -186,6 +186,39 @@ async def test_typed_git_applies_one_approved_result_with_target_cas(tmp_path: P
 
 
 @pytest.mark.anyio
+async def test_typed_git_fast_forwards_whole_approved_package_chain(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "test@example.com")
+    _git(repository, "config", "user.name", "Test")
+    (repository / "value.txt").write_text("base\n")
+    _git(repository, "add", "value.txt")
+    _git(repository, "commit", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD").strip()
+    _git(repository, "switch", "--detach")
+
+    worktree = tmp_path / "package-worktree"
+    git = LocalGit()
+    await git.add_worktree(repository, worktree, "package-result", base)
+    (worktree / "first.txt").write_text("first\n")
+    await git.stage_paths(worktree, ("first.txt",))
+    await git.create_commit(worktree, "first task")
+    (worktree / "second.txt").write_text("second\n")
+    await git.stage_paths(worktree, ("second.txt",))
+    package_head = await git.create_commit(worktree, "second task")
+
+    assert await git.apply_result(
+        repository,
+        worktree,
+        target_branch="main",
+        expected_head=base,
+        result_commit=package_head,
+    )
+    assert _git(repository, "rev-parse", "main").strip() == package_head
+
+
+@pytest.mark.anyio
 async def test_typed_git_applies_when_target_branch_is_checked_out(tmp_path: Path) -> None:
     """Freshly provisioned repos keep main checked out; apply must still CAS-advance."""
 

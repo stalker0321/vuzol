@@ -13,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
 from vuzol.ops.static_publish import StaticPublishError, StaticSite, publish, rollback
-from vuzol.storage.models import MaterializationLink, PlanRevisionItem, Step, Task, Worktree
+from vuzol.storage.models import (
+    MaterializationLink,
+    PlanRevisionItem,
+    Step,
+    Task,
+    WorkPackage,
+    Worktree,
+)
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -25,10 +32,12 @@ class StaticPublishHandler:
         session_factory: async_sessionmaker[AsyncSession],
         runtime: RuntimeConfiguration,
         probe: Callable[[str], Awaitable[dict[str, object]]] | None = None,
+        preview: bool = False,
     ) -> None:
         self._factory = session_factory
         self._runtime = runtime
         self._probe = probe or _probe_public_site
+        self._preview = preview
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -67,7 +76,8 @@ class StaticPublishHandler:
         if deployment is None or not deployment.enabled:
             return StepOutcome.succeeded({"status": "skipped", "reason": "not_configured"})
         if (
-            materialization is not None
+            not self._preview
+            and materialization is not None
             and plan_size is not None
             and materialization.ordinal < int(plan_size)
         ):
@@ -99,9 +109,17 @@ class StaticPublishHandler:
             )
         source = Path(worktree.path) / deployment.source_directory
         entrypoint = source / deployment.entrypoint
-        public_url = (
-            f"{str(self._runtime.settings.static_site_base_url).rstrip('/')}/{deployment.url_path}/"
+        site_root = (
+            self._runtime.settings.preview_site_root
+            if self._preview
+            else self._runtime.settings.static_site_root
         )
+        site_base_url = (
+            self._runtime.settings.preview_site_base_url
+            if self._preview
+            else self._runtime.settings.static_site_base_url
+        )
+        public_url = f"{str(site_base_url).rstrip('/')}/{deployment.url_path}/"
         if not entrypoint.is_file() or entrypoint.is_symlink():
             return StepOutcome.succeeded(
                 {
@@ -113,7 +131,7 @@ class StaticPublishHandler:
         site = StaticSite(
             id=project.id,
             source=source,
-            destination=self._runtime.settings.static_site_root / deployment.url_path,
+            destination=site_root / deployment.url_path,
             include=deployment.include,
             entrypoint=deployment.entrypoint,
             keep_releases=deployment.keep_releases,
@@ -123,7 +141,7 @@ class StaticPublishHandler:
                 publish,
                 site,
                 source_root=self._runtime.settings.worktree_root,
-                site_root=self._runtime.settings.static_site_root,
+                site_root=site_root,
             )
         except StaticPublishError as error:
             return StepOutcome(
@@ -133,7 +151,7 @@ class StaticPublishHandler:
                 summary=str(error)[:500],
             )
         if result.release != str(build["artifact_hash"])[:20]:
-            await self._rollback_changed(site, result.changed)
+            await self._rollback_changed(site, result.changed, site_root=site_root)
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
                 result={"public_url": public_url, "release": result.release},
@@ -143,13 +161,18 @@ class StaticPublishHandler:
         try:
             probe = await self._probe(public_url)
         except (httpx.HTTPError, ValueError) as error:
-            await self._rollback_changed(site, result.changed)
+            await self._rollback_changed(site, result.changed, site_root=site_root)
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
                 result={"public_url": public_url, "release": result.release},
                 category="static_publish_probe_failed",
                 summary=str(error)[:500],
             )
+        if self._preview and materialization is not None:
+            async with self._factory.begin() as session:
+                package = await session.get(WorkPackage, materialization.work_package_id)
+                if package is not None:
+                    package.preview_url = public_url
         return StepOutcome.succeeded(
             {
                 "status": "published",
@@ -164,13 +187,13 @@ class StaticPublishHandler:
             }
         )
 
-    async def _rollback_changed(self, site: StaticSite, changed: bool) -> None:
+    async def _rollback_changed(self, site: StaticSite, changed: bool, *, site_root: Path) -> None:
         if changed:
             with suppress(StaticPublishError):
                 await asyncio.to_thread(
                     rollback,
                     site,
-                    site_root=self._runtime.settings.static_site_root,
+                    site_root=site_root,
                 )
 
 

@@ -238,6 +238,14 @@ class WorkPackageService:
         revision.approved_at = datetime.now(UTC)
         revision.approved_by_user_id = user_id
         package.approved_revision_id = revision.id
+        # Every accepted revision starts from the then-current project target.
+        # Old integration refs remain immutable evidence but cannot leak changes
+        # into a replanned package execution.
+        package.integration_branch = None
+        package.integration_target_branch = None
+        package.integration_base_commit = None
+        package.integration_head_commit = None
+        package.preview_url = None
         package.status = WorkPackageStatus.APPROVED
         package.version += 1
         await self._event(

@@ -16,6 +16,7 @@ from vuzol.storage.models import (
     PlanRevisionItem,
     Run,
     Step,
+    WorkPackage,
     Worktree,
 )
 from vuzol.storage.types import ApprovalStatus, StepStatus
@@ -53,6 +54,25 @@ async def ensure_result_approval(
     gates = evidence["gates"]
     agent_checks = evidence["agent_checks"]
     summary = evidence["summary"]
+    target_branch = worktree.default_branch
+    expected_target_head = worktree.expected_target_head
+    link = await session.scalar(
+        select(MaterializationLink).where(MaterializationLink.task_id == run.task_id)
+    )
+    if link is not None:
+        package = await session.get(WorkPackage, link.work_package_id)
+        item_count = await session.scalar(
+            select(func.count())
+            .select_from(PlanRevisionItem)
+            .where(PlanRevisionItem.plan_revision_id == link.plan_revision_id)
+        )
+        if package is None or package.integration_base_commit is None:
+            raise ValueError("package integration state is missing")
+        if link.ordinal == int(item_count or 0):
+            if package.integration_target_branch is None:
+                raise ValueError("package target branch is missing")
+            target_branch = package.integration_target_branch
+            expected_target_head = package.integration_base_commit
     envelope: dict[str, Any] = {
         "schema_version": RESULT_APPROVAL_SCHEMA,
         "requested_action": "apply_result",
@@ -61,8 +81,8 @@ async def ensure_result_approval(
         "step_id": str(approval_step.id),
         "project_id": worktree.project_id,
         "repository_identity_hash": worktree.repository_identity_hash,
-        "target_branch": worktree.default_branch,
-        "expected_target_head": worktree.expected_target_head,
+        "target_branch": target_branch,
+        "expected_target_head": expected_target_head,
         "base_commit": worktree.base_commit,
         "result_commit": worktree.result_commit,
         "diff_hash": worktree.diff_hash,
@@ -84,7 +104,7 @@ async def ensure_result_approval(
         step_id=approval_step.id,
         action_envelope_hash=digest,
         requested_action="apply_result",
-        normalized_target=f"{worktree.project_id}:{worktree.default_branch}",
+        normalized_target=f"{worktree.project_id}:{target_branch}",
         human_summary=summary,
         token_hash=token_hash,
         status=ApprovalStatus.PENDING,

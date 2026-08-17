@@ -29,6 +29,7 @@ from vuzol.storage.types import (
     ControlActionStatus,
     InteractionMode,
     PlanRevisionCreatedBy,
+    WorkPackagePauseReason,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 
@@ -320,13 +321,24 @@ class PackageControlIngress:
                 generation = sequence.status_generation
                 code = PackageControlResultCode.APPLIED
             elif command.action is PackageControlAction.RETRY_ITEM:
-                generation = await service.retry_item(
-                    package_id=command.package_id,
-                    revision_number=command.plan_revision_number,
-                    h8=command.h8,
-                    expected_status_generation=command.expected_status_generation,
-                    user_id=command.user_id,
-                )
+                package = await uow.work_packages.get_package(command.package_id)
+                if package.pause_reason is WorkPackagePauseReason.ITEM_FAILED:
+                    sequence = await WorkPackageSequencer(uow).retry_failed_item(
+                        package_id=command.package_id,
+                        revision_number=command.plan_revision_number,
+                        h8=command.h8,
+                        expected_status_generation=command.expected_status_generation,
+                        user_id=command.user_id,
+                    )
+                    generation = sequence.status_generation
+                else:
+                    generation = await service.retry_item(
+                        package_id=command.package_id,
+                        revision_number=command.plan_revision_number,
+                        h8=command.h8,
+                        expected_status_generation=command.expected_status_generation,
+                        user_id=command.user_id,
+                    )
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.SKIP_ITEM:

@@ -22,7 +22,7 @@ from vuzol.execution.paths import (
     worktree_path,
 )
 from vuzol.execution.ports import GitPort
-from vuzol.storage.models import SupervisedProcess, Worktree
+from vuzol.storage.models import MaterializationLink, SupervisedProcess, WorkPackage, Worktree
 from vuzol.storage.types import ProcessStatus, WorktreeDeliveryState
 
 WORKTREE_LOCK_KEY = 8_946_527_102
@@ -52,6 +52,32 @@ class WorktreeService:
         repository = project.repository_path.resolve(strict=True)
         identity, remote = await self._git.repository_identity(repository)
         base = await self._git.resolve_commit(repository, project.default_branch)
+        target_branch = project.default_branch
+        materialization = await session.scalar(
+            select(MaterializationLink).where(MaterializationLink.task_id == task_id)
+        )
+        if materialization is not None:
+            package = await session.scalar(
+                select(WorkPackage)
+                .where(WorkPackage.id == materialization.work_package_id)
+                .with_for_update()
+            )
+            if package is None:
+                raise WorktreeError("materialized task has no work package")
+            target_branch = package.integration_branch or (
+                f"vuzol/package/{package.id.hex}/{materialization.plan_revision_id.hex[:12]}"
+            )
+            if package.integration_branch is None:
+                package.integration_branch = target_branch
+                package.integration_target_branch = project.default_branch
+                package.integration_base_commit = base
+                package.integration_head_commit = base
+            assert package.integration_head_commit is not None
+            base = await self._git.ensure_branch(
+                repository, target_branch, package.integration_head_commit
+            )
+            if base != package.integration_head_commit:
+                raise WorktreeError("package integration ref diverged from canonical head")
         path = worktree_path(self._root, project.id, run_id)
         branch = worktree_branch(task_id, run_id)
         if existing is not None:
@@ -88,7 +114,7 @@ class WorktreeService:
                 ),
                 repository_identity_hash=identity,
                 base_commit=base,
-                default_branch=project.default_branch,
+                default_branch=target_branch,
                 expected_target_head=base,
                 branch=branch,
                 path=str(path),

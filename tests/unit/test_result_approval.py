@@ -122,7 +122,7 @@ async def test_result_approval_requires_validation_evidence(failure: str) -> Non
         expected_target_head=base,
     )
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=(None, worktree))
+    session.scalar = AsyncMock(side_effect=(None, worktree, None))
     steps = {}
     if failure != "missing_validate":
         steps[5] = _step(
@@ -215,7 +215,7 @@ async def test_result_approval_rejects_raw_executor_transcript_and_keeps_validat
         expected_target_head=base,
     )
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=(None, worktree))
+    session.scalar = AsyncMock(side_effect=(None, worktree, None))
     session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
     session.flush = AsyncMock()
     run = MagicMock(
@@ -409,7 +409,7 @@ async def test_result_approval_uses_a_safe_summary_fallback() -> None:
         expected_target_head=base,
     )
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=(None, worktree))
+    session.scalar = AsyncMock(side_effect=(None, worktree, None))
     session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
     session.flush = AsyncMock()
     run = MagicMock(

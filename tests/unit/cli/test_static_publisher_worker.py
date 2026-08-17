@@ -36,7 +36,7 @@ async def test_static_publisher_worker_processes_then_stops(
     monkeypatch.setattr(cli, "require_migration_head", AsyncMock())
     monkeypatch.setattr(cli, "create_session_factory", lambda _engine: factory)
     handler = object()
-    monkeypatch.setattr(cli, "StaticPublishHandler", lambda *_args: handler)
+    monkeypatch.setattr(cli, "StaticPublishHandler", lambda *_args, **_kwargs: handler)
     worker_factory = MagicMock(return_value=worker)
     monkeypatch.setattr(cli, "WorkflowWorker", worker_factory)
     monkeypatch.setattr(asyncio, "Event", lambda: stop)
@@ -53,7 +53,10 @@ async def test_static_publisher_worker_processes_then_stops(
     await cli.run()
 
     kwargs = worker_factory.call_args.kwargs
-    assert kwargs["handlers"] == {"publish_static": handler}
+    assert kwargs["handlers"] == {
+        "publish_static": handler,
+        "publish_preview": handler,
+    }
     assert kwargs["capabilities"] == frozenset({Capability.FILESYSTEM_WRITE})
     assert kwargs["queue_classes"] == frozenset({QueueClass.LIGHT})
     assert worker.process_one.await_count == 2

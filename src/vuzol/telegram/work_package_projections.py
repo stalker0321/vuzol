@@ -380,6 +380,9 @@ async def build_work_package_plan_card(
             )
             if token_line is not None:
                 lines.extend((token_line, ""))
+            if package.preview_url is not None:
+                preview = telegram_html(package.preview_url)
+                lines.extend((f'<b>Preview:</b> <a href="{preview}">{preview}</a>', ""))
             lines.extend(("Применить итоговый результат плана?", ""))
     if package_result_complete:
         lines = []

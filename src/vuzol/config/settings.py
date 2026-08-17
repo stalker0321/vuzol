@@ -411,6 +411,8 @@ class Settings(BaseSettings):
     artifact_root: Path = Path("/srv/vuzol/artifacts")
     static_site_root: Path = Path("/srv/vuzol/sites/example.com")
     static_site_base_url: HttpUrl = HttpUrl("https://example.com")
+    preview_site_root: Path = Path("/srv/vuzol/sites/test.example.com")
+    preview_site_base_url: HttpUrl = HttpUrl("https://test.example.com")
     secret_file_root: Path = Path("/run/secrets")
     concurrency: ConcurrencyLimits = ConcurrencyLimits()
     database: DatabaseSettings = DatabaseSettings()
@@ -434,6 +436,7 @@ class Settings(BaseSettings):
         "worktree_root",
         "artifact_root",
         "static_site_root",
+        "preview_site_root",
         "secret_file_root",
         "registry_overlay_file",
     )

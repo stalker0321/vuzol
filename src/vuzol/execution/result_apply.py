@@ -12,7 +12,7 @@ from vuzol.config import DeliveryMode
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import Approval, Step, Worktree
+from vuzol.storage.models import Approval, MaterializationLink, Step, WorkPackage, Worktree
 from vuzol.storage.types import ApprovalStatus, StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -48,7 +48,11 @@ class ResultApplyHandler:
                 raise ValueError("project policy does not allow local apply")
             if DeliveryMode.APPLY not in project.git_delivery.approval_required:
                 raise ValueError("project policy does not require approval for local apply")
-            if project.default_branch != envelope["target_branch"]:
+            if project.default_branch != envelope[
+                "target_branch"
+            ] and not await self._is_package_integration_target(
+                request.task_id, envelope["target_branch"]
+            ):
                 raise ValueError("project default branch changed after approval was requested")
             # Full bundle revision includes display-only profile fields (model labels,
             # planner entries). Those must not strand an already-approved local apply;
@@ -95,6 +99,19 @@ class ResultApplyHandler:
                 unknown_effects=False,
             )
         return StepOutcome.succeeded({"approval_id": str(approval_id), "delivery_state": "applied"})
+
+    async def _is_package_integration_target(
+        self, task_id: uuid.UUID, target_branch: object
+    ) -> bool:
+        if not isinstance(target_branch, str):
+            return False
+        async with self._factory() as session:
+            package = await session.scalar(
+                select(WorkPackage)
+                .join(MaterializationLink, MaterializationLink.work_package_id == WorkPackage.id)
+                .where(MaterializationLink.task_id == task_id)
+            )
+            return package is not None and package.integration_branch == target_branch
 
     async def _load(
         self, request: StepExecutionRequest
@@ -182,6 +199,19 @@ class ResultApplyHandler:
             worktree.delivery_state = WorktreeDeliveryState.APPLIED
             worktree.delivery_operation_hash = operation_hash
             worktree.delivered_ref = f"refs/heads/{target_branch}"
+            materialization = await session.scalar(
+                select(MaterializationLink).where(MaterializationLink.task_id == request.task_id)
+            )
+            if materialization is not None:
+                package = await session.scalar(
+                    select(WorkPackage)
+                    .where(WorkPackage.id == materialization.work_package_id)
+                    .with_for_update()
+                )
+                if package is None:
+                    raise LookupError("applied package disappeared")
+                if target_branch == package.integration_branch:
+                    package.integration_head_commit = worktree.result_commit
             await session.flush()
 
     async def _assert_current_lease(self, request: StepExecutionRequest) -> None:

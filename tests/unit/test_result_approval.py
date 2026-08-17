@@ -9,6 +9,7 @@ from vuzol.storage.models import Step
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.result_approval import (
     _plan_approval_covers_intermediate_result,
+    _validation_evidence,
     ensure_result_approval,
     envelope_hash,
     verified_envelope,
@@ -28,6 +29,43 @@ def _step(
     step.result = result
     step.ordinal = ordinal
     return cast(Step, step)
+
+
+def test_validation_evidence_uses_latest_repair_result() -> None:
+    base = "a" * 40
+    original_commit = "b" * 40
+    repaired_commit = "c" * 40
+
+    def validation(ordinal: int, commit: str, gate: str) -> Step:
+        return _step(
+            step_type="validate",
+            ordinal=ordinal,
+            result={
+                "structured_output": {
+                    "base_commit": base,
+                    "result_commit": commit,
+                    "gates": [{"name": gate, "exit_code": 0}],
+                    "changed_files": ["app.js"],
+                }
+            },
+        )
+
+    evidence = _validation_evidence(
+        {
+            4: validation(4, original_commit, "original"),
+            11: validation(11, repaired_commit, "repaired"),
+        },
+        cast(
+            Any,
+            SimpleNamespace(
+                base_commit=base,
+                result_commit=repaired_commit,
+                diff_hash="d" * 64,
+            ),
+        ),
+    )
+
+    assert evidence["gates"] == [{"name": "repaired", "exit_code": 0}]
 
 
 @pytest.mark.anyio

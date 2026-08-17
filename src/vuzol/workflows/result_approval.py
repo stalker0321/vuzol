@@ -159,14 +159,11 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     """Collect gate evidence and summary from validate/review/execute predecessors."""
 
     ordered = [steps_by_ordinal[key] for key in sorted(steps_by_ordinal)]
-    validate = next(
-        (
-            step
-            for step in ordered
-            if step.step_type == "validate" and step.status is StepStatus.COMPLETED
-        ),
-        None,
-    )
+    completed_validations = [
+        step
+        for step in ordered
+        if step.step_type == "validate" and step.status is StepStatus.COMPLETED
+    ]
     review_steps = [step for step in ordered if step.step_type == "review"]
     review = next(
         (
@@ -191,22 +188,22 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
         None,
     )
 
-    source = validate
-    if source is None:
-        # Fall back to any completed predecessor with structured validation output.
-        for step in reversed(ordered):
-            if step.status is not StepStatus.COMPLETED:
-                continue
-            result = step.result if isinstance(step.result, dict) else {}
-            structured = result.get("structured_output")
-            if (
-                isinstance(structured, dict)
-                and structured.get("result_commit") == worktree.result_commit
-                and isinstance(structured.get("gates"), list)
-                and structured.get("gates")
-            ):
-                source = step
-                break
+    source = None
+    # Repair cycles append new validate steps. Approval must bind to the newest
+    # completed validation for the retained result, never the original result
+    # that caused the repair.
+    for step in reversed(completed_validations):
+        result = step.result if isinstance(step.result, dict) else {}
+        structured = result.get("structured_output")
+        if (
+            isinstance(structured, dict)
+            and structured.get("result_commit") == worktree.result_commit
+            and structured.get("base_commit") == worktree.base_commit
+            and isinstance(structured.get("gates"), list)
+            and structured.get("gates")
+        ):
+            source = step
+            break
     if source is None:
         raise ValueError("result approval requires a completed validate step")
 

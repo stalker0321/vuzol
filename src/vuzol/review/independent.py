@@ -74,7 +74,10 @@ _OUTPUT_JSON_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["severity", "classification", "summary"],
+                # OpenAI strict Structured Outputs requires every declared
+                # property to be present. Optional location data is expressed
+                # as an explicit null rather than an omitted key.
+                "required": ["severity", "classification", "summary", "path", "line"],
                 "properties": {
                     "severity": {
                         "type": "string",

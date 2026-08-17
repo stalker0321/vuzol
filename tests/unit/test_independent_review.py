@@ -359,6 +359,8 @@ async def test_independent_reviewer_builds_pass_verdict() -> None:
     assert request.role is ProviderRole.REVIEWER
     assert request.sandbox_reference is None
     assert request.output_json_schema is not None
+    finding_schema = request.output_json_schema["properties"]["findings"]["items"]
+    assert set(finding_schema["required"]) == set(finding_schema["properties"])
     assert all(
         item.content_hash == hashlib.sha256(item.content.encode()).hexdigest()
         for item in request.context

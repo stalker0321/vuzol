@@ -269,6 +269,10 @@ async def test_failed_internal_step_retry_materializes_a_fresh_task(postgres_dsn
     async with UnitOfWork(factory) as uow:
         paused = await WorkPackageSequencer(uow).observe_terminal(task_id=first.task_id)
     assert paused is not None
+    async with factory() as session:
+        card = await build_work_package_action_card(session, created.package_id)
+    labels = {label for row in card.callback_buttons for label, _callback_data in row}
+    assert "Повторить" in labels
     async with UnitOfWork(factory) as uow:
         retried = await WorkPackageSequencer(uow).retry_failed_item(
             package_id=created.package_id,

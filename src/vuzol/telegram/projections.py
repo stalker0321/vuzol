@@ -1334,8 +1334,23 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     step = None
     if run is not None:
         step = await session.scalar(
-            select(Step).where(Step.run_id == run.id).order_by(Step.ordinal.desc()).limit(1)
+            select(Step)
+            .where(
+                Step.run_id == run.id,
+                Step.status.notin_(
+                    (StepStatus.PENDING, StepStatus.COMPLETED, StepStatus.CANCELLED)
+                ),
+            )
+            .order_by(Step.ordinal.desc())
+            .limit(1)
         )
+        if step is None:
+            step = await session.scalar(
+                select(Step)
+                .where(Step.run_id == run.id)
+                .order_by(Step.ordinal.desc())
+                .limit(1)
+            )
     redo_requested = await session.scalar(
         select(Event.id)
         .where(

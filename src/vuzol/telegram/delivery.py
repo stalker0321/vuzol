@@ -1218,6 +1218,10 @@ class TelegramDeliveryService:
                 if link is None:
                     raise LeaseLost(f"Telegram projection disappeared: {prepared.link_id}")
                 link.projection_revision = prepared.revision
+                # A task card changes roles in place (work -> approval ->
+                # result). Keep the callback target synchronized with the
+                # buttons rendered by this exact edit.
+                link.approval_id = prepared.approval_id
                 if (
                     prepared.message_role == WORK_PACKAGE_STATUS_ROLE
                     or prepared.work_package_id is not None

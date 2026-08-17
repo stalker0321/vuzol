@@ -27,16 +27,6 @@ class LocalGit:
     def __init__(self, *, timeout_seconds: float = 30) -> None:
         self._timeout = timeout_seconds
 
-    async def ensure_branch(self, repository: Path, branch: str, base_commit: str) -> str:
-        """Create a private integration ref once and return its current head."""
-
-        target_ref = f"refs/heads/{branch}"
-        existing = await self._optional(repository, "rev-parse", "--verify", target_ref)
-        if existing is None:
-            await self._run(repository, "update-ref", target_ref, base_commit, "0" * 40)
-            return base_commit
-        return existing.decode().strip()
-
     async def repository_identity(self, repository: Path) -> tuple[str, str | None]:
         common = await self._run(
             repository, "rev-parse", "--path-format=absolute", "--git-common-dir"
@@ -297,7 +287,9 @@ class LocalGit:
         target_is_checked_out = (
             checked_out is not None and checked_out.decode().strip() == target_ref
         )
-        current = await self.resolve_commit(repository, target_ref)
+        raw_current = await self._optional(repository, "rev-parse", "--verify", target_ref)
+        target_exists = raw_current is not None
+        current = raw_current.decode().strip() if raw_current is not None else expected_head
         if current == result_commit:
             if target_is_checked_out:
                 if await self._tree_matches_commit(repository, result_commit):
@@ -315,7 +307,13 @@ class LocalGit:
         await self._run(repository, "fetch", "--no-tags", str(worktree), result_commit)
         if await self.resolve_commit(repository, "FETCH_HEAD") != result_commit:
             raise GitError("fetched result identity does not match the approval")
-        await self._run(repository, "update-ref", target_ref, result_commit, expected_head)
+        await self._run(
+            repository,
+            "update-ref",
+            target_ref,
+            result_commit,
+            expected_head if target_exists else "0" * 40,
+        )
         if await self.resolve_commit(repository, target_ref) != result_commit:
             raise GitError("target branch did not advance to the approved result")
         if target_is_checked_out:

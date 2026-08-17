@@ -73,11 +73,7 @@ class WorktreeService:
                 package.integration_base_commit = base
                 package.integration_head_commit = base
             assert package.integration_head_commit is not None
-            base = await self._git.ensure_branch(
-                repository, target_branch, package.integration_head_commit
-            )
-            if base != package.integration_head_commit:
-                raise WorktreeError("package integration ref diverged from canonical head")
+            base = await self._git.resolve_commit(repository, package.integration_head_commit)
         path = worktree_path(self._root, project.id, run_id)
         branch = worktree_branch(task_id, run_id)
         if existing is not None:

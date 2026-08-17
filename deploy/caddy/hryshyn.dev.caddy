@@ -17,3 +17,19 @@ hryshyn.dev, www.hryshyn.dev {
 		file_server
 	}
 }
+
+test.hryshyn.dev {
+	@projectExact path_regexp projectExact ^/([a-z][a-z0-9-]{0,62})$
+	redir @projectExact {http.request.uri.path}/ 308
+
+	@project path_regexp project ^/([a-z][a-z0-9-]{0,62})/(.*)$
+	handle @project {
+		uri strip_prefix /{re.project.1}
+		root * /srv/vuzol/sites/test.hryshyn.dev/{re.project.1}/current
+		encode gzip zstd
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+
+	respond "Vuzol preview environment" 200
+}

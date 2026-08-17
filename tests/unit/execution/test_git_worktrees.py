@@ -219,6 +219,36 @@ async def test_typed_git_fast_forwards_whole_approved_package_chain(tmp_path: Pa
 
 
 @pytest.mark.anyio
+async def test_typed_git_creates_private_package_ref_with_cas(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "test@example.com")
+    _git(repository, "config", "user.name", "Test")
+    (repository / "value.txt").write_text("base\n")
+    _git(repository, "add", "value.txt")
+    _git(repository, "commit", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD").strip()
+
+    worktree = tmp_path / "package-step"
+    git = LocalGit()
+    await git.add_worktree(repository, worktree, "isolated-result", base)
+    (worktree / "value.txt").write_text("preview\n")
+    await git.stage_paths(worktree, ("value.txt",))
+    result = await git.create_commit(worktree, "package step")
+
+    assert await git.apply_result(
+        repository,
+        worktree,
+        target_branch="vuzol/package/test/revision",
+        expected_head=base,
+        result_commit=result,
+    )
+    assert _git(repository, "rev-parse", "vuzol/package/test/revision").strip() == result
+    assert _git(repository, "rev-parse", "main").strip() == base
+
+
+@pytest.mark.anyio
 async def test_typed_git_applies_when_target_branch_is_checked_out(tmp_path: Path) -> None:
     """Freshly provisioned repos keep main checked out; apply must still CAS-advance."""
 

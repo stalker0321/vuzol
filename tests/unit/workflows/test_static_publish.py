@@ -50,7 +50,7 @@ def _handler(
     }
     build_step = SimpleNamespace(result=build_result)
     session.get.return_value = SimpleNamespace(project_id="demo")
-    session.scalar.side_effect = [worktree, build_step]
+    session.scalar.side_effect = [worktree, build_step, None]
     context = AsyncMock()
     context.__aenter__.return_value = session
     factory = MagicMock(return_value=context)
@@ -103,7 +103,7 @@ async def test_handler_requires_build_evidence(tmp_path: Path) -> None:
     handler, request = _handler(tmp_path)
     factory = cast(MagicMock, handler._factory)
     session = factory.return_value.__aenter__.return_value
-    session.scalar.side_effect = [None, None]
+    session.scalar.side_effect = [None, None, None]
 
     outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
 
@@ -116,9 +116,9 @@ async def test_handler_rolls_back_hash_mismatch(tmp_path: Path) -> None:
     handler, request = _handler(tmp_path)
     factory = cast(MagicMock, handler._factory)
     session = factory.return_value.__aenter__.return_value
-    worktree, build_step = session.scalar.side_effect
+    worktree, build_step, materialization = session.scalar.side_effect
     build_step.result["artifact_hash"] = "f" * 64
-    session.scalar.side_effect = [worktree, build_step]
+    session.scalar.side_effect = [worktree, build_step, materialization]
     rollback = AsyncMock()
     handler_mock = cast(object, handler)
     cast(Any, handler_mock)._rollback_changed = rollback
@@ -150,6 +150,31 @@ async def test_handler_skips_missing_project(tmp_path: Path) -> None:
     outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
 
     assert outcome.result == {"status": "skipped", "reason": "project_missing"}
+
+
+@pytest.mark.anyio
+async def test_handler_does_not_publish_intermediate_package_item(tmp_path: Path) -> None:
+    handler, request = _handler(tmp_path)
+    factory = cast(MagicMock, handler._factory)
+    session = factory.return_value.__aenter__.return_value
+    worktree, build_step, _materialization = session.scalar.side_effect
+    session.scalar.side_effect = [
+        worktree,
+        build_step,
+        SimpleNamespace(ordinal=2, plan_revision_id=uuid4()),
+        4,
+    ]
+
+    outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
+
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    assert outcome.result == {
+        "status": "skipped",
+        "reason": "package_intermediate_item",
+        "ordinal": 2,
+        "plan_size": 4,
+    }
+    handler._probe.assert_not_awaited()  # type: ignore[union-attr]
 
 
 @pytest.mark.anyio

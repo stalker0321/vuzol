@@ -386,10 +386,10 @@ class WorkPackageSequencer:
         )
         await self._uow.outbox.enqueue(
             destination="work_package_projection",
-            operation_type="clear_action",
+            operation_type="render_action" if reason == "completed" else "clear_action",
             entity_type="work_package",
             entity_id=package_id,
-            idempotency_key=f"wp:action:clear:{package_id}:{generation}:{reason}",
+            idempotency_key=f"wp:action:{package_id}:{generation}:{reason}",
             payload={"package_id": str(package_id)},
         )
 

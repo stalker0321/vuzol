@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.projects.executor_preference import load_preference
 from vuzol.storage.models import (
+    Approval,
     MaterializationLink,
     PlanRevision,
     PlanRevisionItem,
@@ -26,6 +27,7 @@ from vuzol.storage.models import (
     WorkPackageOpenDetail,
 )
 from vuzol.storage.types import (
+    ApprovalStatus,
     DeliveryStatus,
     StepStatus,
     TaskStatus,
@@ -346,7 +348,48 @@ async def build_work_package_plan_card(
                 f"{_format_count(cached_tokens)} кэш"
             )
             lines.append("")
-    if not _status_card:
+    package_approval = None
+    package_result_complete = _action_card and package.status is WorkPackageStatus.COMPLETED
+    if _action_card and current_task_status is TaskStatus.WAITING_APPROVAL:
+        package_approval = await session.scalar(
+            select(Approval)
+            .join(Step, Step.id == Approval.step_id)
+            .join(Run, Run.id == Step.run_id)
+            .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+            .where(
+                MaterializationLink.work_package_id == package.id,
+                MaterializationLink.plan_revision_id == revision.id,
+                MaterializationLink.ordinal == len(items),
+                Approval.status == ApprovalStatus.PENDING,
+            )
+            .order_by(Approval.created_at.desc())
+            .limit(1)
+        )
+        if package_approval is not None:
+            lines.extend(
+                (
+                    "<b>Plan completed</b>",
+                    *(
+                        f"✅ {item.ordinal}. {telegram_html(item.summary)}"
+                        for item in items
+                    ),
+                    "",
+                    "Все пункты и настроенные проверки завершены.",  # noqa: RUF001
+                    "Применить итоговый результат плана?",
+                    "",
+                )
+            )
+    if package_result_complete:
+        lines.extend(
+            (
+                "<b>Plan approved · completed</b>",
+                *(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items),
+                "",
+                "Итоговый результат принят и применён.",
+                "",
+            )
+        )
+    if not _status_card and package_approval is None and not package_result_complete:
         lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
     if not _status_card and page_count > 1:
         lines.extend(("", f"Страница {page}/{page_count}"))
@@ -379,7 +422,15 @@ async def build_work_package_plan_card(
             )
         buttons.append(tuple(navigation))
     controls: list[tuple[str, str]] = []
-    if not _status_card and package.status is WorkPackageStatus.DRAFT:
+    if package_approval is not None:
+        controls.extend(
+            (
+                ("Принять", f"v1:approve:{package_approval.id}"),
+                ("Изменить", f"v1:redo:{package_approval.id}"),
+                ("Отклонить", f"v1:reject:{package_approval.id}"),
+            )
+        )
+    elif not _status_card and package.status is WorkPackageStatus.DRAFT:
         controls.append(
             ("Принять план", _callback(WorkPackageCallbackKind.APPROVE, package, revision))
         )
@@ -427,7 +478,7 @@ async def build_work_package_plan_card(
         )
     if controls:
         buttons.append(tuple(controls))
-    if not _status_card:
+    if not _status_card and not package_result_complete:
         buttons.append(
             (
                 (

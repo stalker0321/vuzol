@@ -13,6 +13,7 @@ from vuzol.discussion.sequencer import WorkPackageSequenceConsumer, WorkPackageS
 from vuzol.discussion.service import RevisionResult
 from vuzol.interpretation.domain import TaskDraft
 from vuzol.storage.models import (
+    Approval,
     Event,
     Interpretation,
     MaterializationLink,
@@ -24,9 +25,11 @@ from vuzol.storage.models import (
     WorkPackage,
 )
 from vuzol.storage.types import (
+    ApprovalStatus,
     DeliveryStatus,
     IdempotencyClass,
     PlanRevisionCreatedBy,
+    RetryClass,
     RunStatus,
     StepStatus,
     TaskStatus,
@@ -134,6 +137,85 @@ async def test_sequencer_is_one_ahead_idempotent_and_completes(postgres_dsn: str
             )
         )
     assert {"work_package.started", "work_package.completed"} <= event_types
+    await engine.dispose()
+
+
+async def test_final_item_approval_is_rendered_as_package_result(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    created = await _approved(factory)
+    async with UnitOfWork(factory) as uow:
+        first = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=2,
+            user_id=42,
+        )
+    assert first.task_id is not None
+    async with factory.begin() as session:
+        task = await session.get(Task, first.task_id, with_for_update=True)
+        assert task is not None
+        task.status = TaskStatus.COMPLETED
+    async with UnitOfWork(factory) as uow:
+        second = await WorkPackageSequencer(uow).observe_terminal(task_id=first.task_id)
+    assert second is not None and second.task_id is not None
+
+    async with factory.begin() as session:
+        task = await session.get(Task, second.task_id, with_for_update=True)
+        assert task is not None
+        task.status = TaskStatus.WAITING_APPROVAL
+        run = Run(
+            task_id=task.id,
+            workflow_type="coding",
+            workflow_version="1",
+            status=RunStatus.RUNNING,
+            selected_route={},
+            budget_mode="balanced",
+            configuration_revision="a" * 64,
+            policy_revision="b" * 64,
+        )
+        session.add(run)
+        await session.flush()
+        step = Step(
+            run_id=run.id,
+            ordinal=7,
+            dependency_metadata={},
+            step_type="approval",
+            status=StepStatus.WAITING_APPROVAL,
+            required_capabilities=[],
+            payload={},
+            retry_class=RetryClass.NEVER,
+            idempotency_class=IdempotencyClass.IDEMPOTENT,
+            max_attempts=1,
+            timeout_seconds=60,
+        )
+        session.add(step)
+        await session.flush()
+        approval = Approval(
+            step_id=step.id,
+            action_envelope_hash="c" * 64,
+            requested_action="apply_result",
+            normalized_target="vuzol:main",
+            human_summary="Package result",
+            token_hash="d" * 64,
+            status=ApprovalStatus.PENDING,
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+        )
+        session.add(approval)
+        await session.flush()
+        approval_id = approval.id
+
+    async with factory() as session:
+        card = await build_work_package_action_card(session, created.package_id)
+    assert "<b>Plan completed</b>" in card.html
+    assert "✅ 1. Implement step 1" in card.html
+    assert "✅ 2. Implement step 2" in card.html
+    callbacks = {label: callback for row in card.callback_buttons for label, callback in row}
+    assert callbacks["Принять"] == f"v1:approve:{approval_id}"
+    assert callbacks["Изменить"] == f"v1:redo:{approval_id}"
+    assert callbacks["Отклонить"] == f"v1:reject:{approval_id}"
     await engine.dispose()
 
 

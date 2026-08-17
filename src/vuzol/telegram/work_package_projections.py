@@ -353,6 +353,22 @@ async def build_work_package_plan_card(
             )
     package_approval = None
     package_result_complete = _action_card and package.status is WorkPackageStatus.COMPLETED
+    package_delivery_failure = None
+    if _action_card and package.status is WorkPackageStatus.PAUSED:
+        package_delivery_failure = await session.scalar(
+            select(Step)
+            .join(Run, Run.id == Step.run_id)
+            .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+            .where(
+                MaterializationLink.work_package_id == package.id,
+                MaterializationLink.plan_revision_id == revision.id,
+                MaterializationLink.ordinal == len(items),
+                Step.step_type == "approval",
+                Step.status == StepStatus.BLOCKED,
+            )
+            .order_by(Step.updated_at.desc())
+            .limit(1)
+        )
     if _action_card and current_task_status is TaskStatus.WAITING_APPROVAL:
         package_approval = await session.scalar(
             select(Approval)
@@ -400,6 +416,20 @@ async def build_work_package_plan_card(
         )
         if token_line is not None:
             lines.extend((token_line, ""))
+    if package_delivery_failure is not None:
+        lines = ["<b>Plan completed · delivery failed</b>"]
+        lines.extend(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items)
+        lines.append("")
+        if package.preview_url is not None:
+            preview = telegram_html(package.preview_url)
+            lines.extend((f'<b>Preview:</b> <a href="{preview}">{preview}</a>', ""))
+        lines.extend(
+            (
+                "<b>Production apply failed</b>",
+                telegram_html(package_delivery_failure.failure_summary or "unknown failure"),
+                "",
+            )
+        )
     if (
         _action_card
         and package_approval is None
@@ -407,7 +437,12 @@ async def build_work_package_plan_card(
         and token_line is not None
     ):
         lines.extend((token_line, ""))
-    if not _status_card and package_approval is None and not package_result_complete:
+    if (
+        not _status_card
+        and package_approval is None
+        and not package_result_complete
+        and package_delivery_failure is None
+    ):
         lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
     if not _status_card and page_count > 1:
         lines.extend(("", f"Страница {page}/{page_count}"))

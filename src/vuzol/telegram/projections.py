@@ -1291,6 +1291,19 @@ async def enqueue_task_status_projection(
                 payload={"package_id": str(materialization.work_package_id)},
             )
         )
+        if task.status is TaskStatus.WAITING_APPROVAL:
+            session.add(
+                TransactionalOutbox(
+                    destination="work_package_projection",
+                    operation_type="render_action",
+                    linked_entity_type="work_package",
+                    linked_entity_id=materialization.work_package_id,
+                    idempotency_key=(
+                        f"wp:projection:package-result:{task.id}:{task.version}"
+                    ),
+                    payload={"package_id": str(materialization.work_package_id)},
+                )
+            )
     await enqueue_project_status_dashboard(session, chat_id)
 
 
@@ -1376,6 +1389,12 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         )
     title = task_title(task)
     scope = task.project_id or "личный"
+    final_package_result = bool(
+        materialization is not None
+        and plan_size is not None
+        and materialization.ordinal == int(plan_size)
+        and task.status is TaskStatus.WAITING_APPROVAL
+    )
     lines = [f"<b>{telegram_html(title)}</b>"]
     if materialization is not None and plan_size:
         lines.append(f"Пункт плана: <b>{materialization.ordinal}/{int(plan_size)}</b>")
@@ -1383,6 +1402,9 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     if any(draft.get(key) for key in ("task_summary", "normalized_title", "goal", "title")):
         lines.append(f"Задача: {telegram_html(task_sense_sentence(task))}")
     status_label = (
+        "Работа завершена"
+        if final_package_result
+        else
         _task_outcome_label(task.status)
         if task.status in USER_REPORTABLE_TASK_STATUSES
         else user_status_label(task.status)
@@ -1393,7 +1415,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             f"Статус: <b>{status_label}</b>",
         )
     )
-    if step is not None:
+    if step is not None and not final_package_result:
         lines.append(f"Этап: {step_type_label(step.step_type)} ({step_status_label(step.status)})")
     worker = await _task_worker_label(session, task.id) if run is not None else None
     if worker is not None:
@@ -1406,6 +1428,17 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
                 Approval.status == ApprovalStatus.PENDING,
             )
         )
+    if (
+        approval is not None
+        and materialization is not None
+        and plan_size is not None
+        and materialization.ordinal == int(plan_size)
+    ):
+        # The final item has finished its own work. Its approval belongs to the
+        # whole accepted package and is rendered on a separate package-result
+        # card, not on the item card.
+        approval = None
+        lines.append("Результат пункта готов; итог плана ожидает вашего решения.")
     if run is not None and run.selected_route:
         executor = (
             run.selected_route.get("trusted_profile_id")

@@ -8,12 +8,12 @@ from contextlib import suppress
 from pathlib import Path
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
 from vuzol.ops.static_publish import StaticPublishError, StaticSite, publish, rollback
-from vuzol.storage.models import Step, Task, Worktree
+from vuzol.storage.models import MaterializationLink, PlanRevisionItem, Step, Task, Worktree
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -50,12 +50,35 @@ class StaticPublishHandler:
                     Step.status == StepStatus.COMPLETED,
                 )
             )
+            materialization = await session.scalar(
+                select(MaterializationLink).where(MaterializationLink.task_id == request.task_id)
+            )
+            plan_size = None
+            if materialization is not None:
+                plan_size = await session.scalar(
+                    select(func.count(PlanRevisionItem.id)).where(
+                        PlanRevisionItem.plan_revision_id == materialization.plan_revision_id
+                    )
+                )
         if task is None or task.project_id is None:
             return StepOutcome.succeeded({"status": "skipped", "reason": "project_missing"})
         project = self._runtime.registries.projects.get(task.project_id)
         deployment = project.static_deployment
         if deployment is None or not deployment.enabled:
             return StepOutcome.succeeded({"status": "skipped", "reason": "not_configured"})
+        if (
+            materialization is not None
+            and plan_size is not None
+            and materialization.ordinal < int(plan_size)
+        ):
+            return StepOutcome.succeeded(
+                {
+                    "status": "skipped",
+                    "reason": "package_intermediate_item",
+                    "ordinal": materialization.ordinal,
+                    "plan_size": int(plan_size),
+                }
+            )
         build = (
             build_step.result
             if build_step is not None and isinstance(build_step.result, dict)

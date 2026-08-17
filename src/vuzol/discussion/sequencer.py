@@ -6,7 +6,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, Settings
@@ -36,12 +36,15 @@ from vuzol.storage.models import (
     PlanRevision,
     PlanRevisionItem,
     ProjectDiscussionSession,
+    Run,
+    Step,
     Task,
     TransactionalOutbox,
 )
 from vuzol.storage.types import (
     EstimatedComplexity,
     PlanRevisionState,
+    StepStatus,
     TaskStatus,
     WorkPackageStatus,
 )
@@ -247,6 +250,132 @@ class WorkPackageSequencer:
         if revision.id != package.head_revision_id:
             raise DomainError("stale_revision")
         return await self._materialize_current(package, revision)
+
+    async def retry_failed_item(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        user_id: int,
+    ) -> SequenceResult:
+        """Materialize a fresh Task while retaining the failed attempt as evidence."""
+
+        from vuzol.storage.types import WorkPackagePauseReason
+        from vuzol.workflows.retry_policy import failed_item_is_rematerializable
+
+        assert self._uow.session is not None
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_generation(package.version, expected_status_generation)
+        revision = await self._fenced_approved_revision(
+            package_id, revision_number=revision_number, h8=h8
+        )
+        if (
+            package.status is not WorkPackageStatus.PAUSED
+            or package.pause_reason is not WorkPackagePauseReason.ITEM_FAILED
+            or package.cursor_ordinal is None
+            or package.last_failure_task_id is None
+            or package.running_revision_id != revision.id
+        ):
+            raise DomainError("item_not_safely_retryable")
+        failed_step = await self._uow.session.scalar(
+            select(Step)
+            .join(Run, Run.id == Step.run_id)
+            .where(
+                Run.task_id == package.last_failure_task_id,
+                Step.status == StepStatus.FAILED,
+            )
+            .order_by(Step.ordinal.desc())
+            .limit(1)
+        )
+        if failed_step is None or not failed_item_is_rematerializable(failed_step):
+            raise DomainError("item_not_safely_retryable")
+        link = await self._uow.session.scalar(
+            select(MaterializationLink)
+            .where(
+                MaterializationLink.work_package_id == package.id,
+                MaterializationLink.plan_revision_id == revision.id,
+                MaterializationLink.ordinal == package.cursor_ordinal,
+                MaterializationLink.task_id == package.last_failure_task_id,
+            )
+            .with_for_update()
+        )
+        if link is None:
+            raise DomainError("failure_context_missing")
+        item = await self._uow.session.scalar(
+            select(PlanRevisionItem).where(
+                PlanRevisionItem.id == link.plan_revision_item_id
+            )
+        )
+        discussion = await self._uow.session.get(ProjectDiscussionSession, package.session_id)
+        if item is None or discussion is None:
+            raise DomainError("failure_context_missing")
+        draft = _task_draft(package.project_id, item)
+        original = _original_text(item)
+        task_record = await self._uow.tasks.create(
+            user_id=user_id,
+            chat_id=discussion.chat_id,
+            thread_id=discussion.message_thread_id,
+            project_id=package.project_id,
+            original_text=original,
+            task_type=draft.task_type.value,
+            task_draft=draft.model_dump(mode="json"),
+        )
+        task = await self._uow.session.get(Task, task_record.id, with_for_update=True)
+        assert task is not None
+        task.status = TaskStatus.INTERPRETED
+        task.interpreter_profile = MATERIALIZER_PROFILE
+        task.prompt_version = MATERIALIZER_PROMPT_VERSION
+        task.draft_schema_version = TASK_DRAFT_SCHEMA_VERSION
+        task.version += 1
+        interpretation = Interpretation(
+            task_id=task.id,
+            original_input_hash=hashlib.sha256(original.encode()).hexdigest(),
+            transcript=None,
+            task_draft=draft.model_dump(mode="json"),
+            profile_id=MATERIALIZER_PROFILE,
+            model=MATERIALIZER_MODEL,
+            prompt_version=MATERIALIZER_PROMPT_VERSION,
+            schema_version=TASK_DRAFT_SCHEMA_VERSION,
+        )
+        self._uow.session.add(interpretation)
+        await self._uow.session.flush()
+        previous_task_id = link.task_id
+        link.task_id = task.id
+        link.materialized_at = func.now()
+        package.status = WorkPackageStatus.RUNNING
+        package.pause_reason = None
+        package.last_failure_task_id = None
+        package.version += 1
+        await self._uow.outbox.enqueue(
+            destination="workflow_dispatch",
+            operation_type="dispatch_interpretation",
+            entity_type="interpretation",
+            entity_id=interpretation.id,
+            idempotency_key=f"workflow:dispatch:{interpretation.id}",
+            payload={
+                "task_id": str(task.id),
+                "work_package_id": str(package.id),
+                "ordinal": link.ordinal,
+            },
+        )
+        await self._uow.events.append(
+            entity_type="work_package",
+            entity_id=package.id,
+            event_type=WorkPackageEvent.PACKAGE_RETRIED.value,
+            actor_type="user",
+            previous_state=WorkPackageStatus.PAUSED.value,
+            new_state=WorkPackageStatus.RUNNING.value,
+            payload={
+                "ordinal": link.ordinal,
+                "previous_task_id": str(previous_task_id),
+                "task_id": str(task.id),
+                "requested_by_user_id": user_id,
+            },
+        )
+        await self._projection(package.id, package.version, "failed_item_retry")
+        return SequenceResult(package.id, package.version, task.id, link.ordinal)
 
     async def _materialize_current(self, package: object, revision: PlanRevision) -> SequenceResult:
         from vuzol.storage.models import WorkPackage

@@ -220,6 +220,79 @@ async def test_final_item_approval_is_rendered_as_package_result(
     await engine.dispose()
 
 
+async def test_failed_internal_step_retry_materializes_a_fresh_task(postgres_dsn: str) -> None:
+    engine, factory = storage(postgres_dsn)
+    created = await _approved(factory)
+    async with UnitOfWork(factory) as uow:
+        first = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=2,
+            user_id=42,
+        )
+    assert first.task_id is not None
+    async with factory.begin() as session:
+        task = await session.get(Task, first.task_id, with_for_update=True)
+        assert task is not None
+        task.status = TaskStatus.FAILED
+        run = Run(
+            task_id=task.id,
+            workflow_type="coding",
+            workflow_version="1",
+            status=RunStatus.FAILED,
+            selected_route={},
+            budget_mode="balanced",
+            configuration_revision="a" * 64,
+            policy_revision="b" * 64,
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            Step(
+                run_id=run.id,
+                ordinal=2,
+                dependency_metadata={},
+                step_type="prepare_worktree",
+                status=StepStatus.FAILED,
+                required_capabilities=[],
+                payload={},
+                retry_class=RetryClass.NEVER,
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                max_attempts=1,
+                attempt_count=1,
+                timeout_seconds=60,
+                failure_category="handler_exception",
+                unknown_effects=False,
+            )
+        )
+    async with UnitOfWork(factory) as uow:
+        paused = await WorkPackageSequencer(uow).observe_terminal(task_id=first.task_id)
+    assert paused is not None
+    async with UnitOfWork(factory) as uow:
+        retried = await WorkPackageSequencer(uow).retry_failed_item(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=paused.status_generation,
+            user_id=42,
+        )
+    assert retried.task_id is not None and retried.task_id != first.task_id
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        link = await session.scalar(
+            select(MaterializationLink).where(
+                MaterializationLink.work_package_id == created.package_id,
+                MaterializationLink.ordinal == 1,
+            )
+        )
+        old_task = await session.get(Task, first.task_id)
+        assert package is not None and package.status is WorkPackageStatus.RUNNING
+        assert link is not None and link.task_id == retried.task_id
+        assert old_task is not None and old_task.status is TaskStatus.FAILED
+    await engine.dispose()
+
+
 async def test_replanned_sequence_keeps_unchanged_completed_prefix(
     postgres_dsn: str,
 ) -> None:

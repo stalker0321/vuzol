@@ -40,7 +40,10 @@ from vuzol.telegram.work_packages import (
     WorkPackageCallbackKind,
     encode_work_package_callback,
 )
-from vuzol.workflows.retry_policy import blocked_step_is_retryable
+from vuzol.workflows.retry_policy import (
+    blocked_step_is_retryable,
+    failed_item_is_rematerializable,
+)
 
 WORK_PACKAGE_PLAN_ROLE = "work_package_plan"
 WORK_PACKAGE_STATUS_ROLE = "work_package_status"
@@ -582,22 +585,32 @@ async def _work_package_token_totals(
 
 
 async def _package_retry_available(session: AsyncSession, package: WorkPackage) -> bool:
-    if (
-        package.pause_reason is not WorkPackagePauseReason.ITEM_BLOCKED
-        or package.last_failure_task_id is None
-    ):
+    if package.last_failure_task_id is None:
+        return False
+    expected_status = (
+        StepStatus.BLOCKED
+        if package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED
+        else StepStatus.FAILED
+        if package.pause_reason is WorkPackagePauseReason.ITEM_FAILED
+        else None
+    )
+    if expected_status is None:
         return False
     step = await session.scalar(
         select(Step)
         .join(Run, Run.id == Step.run_id)
         .where(
             Run.task_id == package.last_failure_task_id,
-            Step.status == StepStatus.BLOCKED,
+            Step.status == expected_status,
         )
         .order_by(Step.ordinal.desc())
         .limit(1)
     )
-    return step is not None and blocked_step_is_retryable(step)
+    return step is not None and (
+        blocked_step_is_retryable(step)
+        if expected_status is StepStatus.BLOCKED
+        else failed_item_is_rematerializable(step)
+    )
 
 
 def _format_count(value: int) -> str:

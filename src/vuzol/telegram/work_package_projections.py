@@ -336,18 +336,18 @@ async def build_work_package_plan_card(
                 "",
             )
         )
+    token_line = None
     if _action_card:
         input_tokens, output_tokens, cached_tokens = await _work_package_token_totals(
             session, package.id
         )
         if input_tokens or output_tokens or cached_tokens:
-            lines.append(
+            token_line = (
                 "Токены: "
                 f"{_format_count(input_tokens)} вх / "
                 f"{_format_count(output_tokens)} вых / "
                 f"{_format_count(cached_tokens)} кэш"
             )
-            lines.append("")
     package_approval = None
     package_result_complete = _action_card and package.status is WorkPackageStatus.COMPLETED
     if _action_card and current_task_status is TaskStatus.WAITING_APPROVAL:
@@ -366,29 +366,41 @@ async def build_work_package_plan_card(
             .limit(1)
         )
         if package_approval is not None:
+            lines = []
             lines.extend(
                 (
-                    "<b>Plan completed</b>",
+                    "<b>Plan completed · approval required</b>",
                     *(
                         f"✅ {item.ordinal}. {telegram_html(item.summary)}"
                         for item in items
                     ),
                     "",
                     "Все пункты и настроенные проверки завершены.",  # noqa: RUF001
-                    "Применить итоговый результат плана?",
-                    "",
                 )
             )
+            if token_line is not None:
+                lines.extend((token_line, ""))
+            lines.extend(("Применить итоговый результат плана?", ""))
     if package_result_complete:
+        lines = []
         lines.extend(
             (
-                "<b>Plan approved · completed</b>",
+                "<b>Plan approved · deployed</b>",
                 *(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items),
                 "",
                 "Итоговый результат принят и применён.",
                 "",
             )
         )
+        if token_line is not None:
+            lines.extend((token_line, ""))
+    if (
+        _action_card
+        and package_approval is None
+        and not package_result_complete
+        and token_line is not None
+    ):
+        lines.extend((token_line, ""))
     if not _status_card and package_approval is None and not package_result_complete:
         lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
     if not _status_card and page_count > 1:

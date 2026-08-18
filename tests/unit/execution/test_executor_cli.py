@@ -261,6 +261,24 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     assert gate_envelope.sandbox.mounts[0].target == Path("/workspace")
     assert gate_envelope.sandbox.mounts[1].source == wt_dir / ".git"
     assert gate_envelope.sandbox.mounts[1].mode is MountMode.READ_ONLY
+    artifact_request = MagicMock(
+        task_id=task_id,
+        run_id=run_id,
+        step_id=step_id,
+        lease=MagicMock(generation=1),
+    )
+    artifact_envelope = await envf.build_artifact(
+        artifact_request,
+        worktree_id=mock_wt.id,
+        argv=("python", "-m", "build"),
+        timeout_seconds=30,
+    )
+    assert artifact_envelope.argv == (
+        "/opt/vuzol-validation/bin/python",
+        "-m",
+        "build",
+    )
+    assert artifact_envelope.sandbox.network_disabled is True
     with pytest.raises(ValueError, match="trusted registry"):
         await envf.build_gate(
             gate_context,
@@ -429,6 +447,18 @@ def test_coding_workflow_review_is_retryable() -> None:
     assert review is not None
     assert review.max_attempts == 3
     assert review.retry_class is RetryClass.TRANSIENT
+
+
+def test_current_coding_workflow_produces_artifacts_before_static_delivery() -> None:
+    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
+
+    coding = WORKFLOW_REGISTRY["coding.v2"]
+    producer = next(step for step in coding.steps if step.key == "produce_artifacts")
+    static_build = next(step for step in coding.steps if step.key == "build_static")
+
+    assert producer.predecessors == ("review",)
+    assert producer.idempotency_class is IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
+    assert static_build.predecessors == ("produce_artifacts",)
 
 
 def test_grok_execution_boundary_accepts_only_canonical_runtime() -> None:

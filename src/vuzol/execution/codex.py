@@ -43,7 +43,20 @@ from vuzol.providers.kimi import canonical_kimi_argv
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
-from vuzol.workflows.ports import CancellationContext
+from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
+
+_ARTIFACT_EXECUTABLES = {
+    "python": "/opt/vuzol-validation/bin/python",
+    "python3": "/opt/vuzol-validation/bin/python",
+    "pytest": "/opt/vuzol-validation/bin/pytest",
+    "alembic": "/opt/vuzol-validation/bin/alembic",
+    "uv": "/usr/local/bin/uv",
+    "make": "/usr/bin/make",
+    "node": "/usr/bin/node",
+    "npm": "/usr/bin/npm",
+    "gradle": "/usr/bin/gradle",
+    "./gradlew": "/workspace/gradlew",
+}
 
 
 class ExecutionEnvelopeFactory:
@@ -259,6 +272,28 @@ class ExecutionEnvelopeFactory:
         if argv not in TRUSTED_GATE_COMMANDS.values():
             raise ValueError("gate command is absent from the trusted registry")
         return await self._build_validation_envelope(context, argv, timeout_seconds)
+
+    async def build_artifact(
+        self,
+        request: StepExecutionRequest,
+        *,
+        worktree_id: uuid.UUID,
+        argv: tuple[str, ...],
+        timeout_seconds: int,
+    ) -> ProcessEnvelope:
+        """Build a no-network validation envelope for an approved component command."""
+
+        normalized = _artifact_argv(argv)
+        context = GateExecutionContext(
+            task_id=request.task_id,
+            run_id=request.run_id,
+            step_id=request.step_id,
+            worktree_id=worktree_id,
+            profile_id="artifact-producer",
+            provider_attempt=1,
+            lease_generation=request.lease.generation,
+        )
+        return await self._build_validation_envelope(context, normalized, timeout_seconds)
 
     async def build_canonicalizer(
         self,
@@ -720,6 +755,17 @@ def _remove_staged_diagnostics(paths: tuple[Path, Path]) -> None:
     for directory in (paths[0].parent, paths[0].parent.parent):
         with contextlib.suppress(OSError):
             directory.rmdir()
+
+
+def _artifact_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
+    if not argv or len(argv) > 32:
+        raise ValueError("artifact command must contain 1..32 arguments")
+    executable = _ARTIFACT_EXECUTABLES.get(argv[0])
+    if executable is None:
+        raise ValueError(f"artifact executable is not allowed: {argv[0]}")
+    if any(not value or len(value) > 500 or "\x00" in value for value in argv):
+        raise ValueError("artifact command contains an unsafe argument")
+    return (executable, *argv[1:])
 
 
 def _cancellation_initiator(classification: object) -> str:

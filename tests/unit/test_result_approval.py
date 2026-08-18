@@ -68,6 +68,101 @@ def test_validation_evidence_uses_latest_repair_result() -> None:
     assert evidence["gates"] == [{"name": "repaired", "exit_code": 0}]
 
 
+def test_validation_evidence_binds_trusted_artifacts_to_retained_commit() -> None:
+    base = "a" * 40
+    result_commit = "b" * 40
+    artifact_result = {
+        "status": "produced",
+        "source_commit": result_commit,
+        "artifacts": [
+            {
+                "artifact_id": str(uuid.uuid4()),
+                "artifact_type": "cli_transcript",
+                "content_hash": "c" * 64,
+                "size_bytes": 42,
+            }
+        ],
+    }
+    evidence = _validation_evidence(
+        {
+            5: _step(
+                step_type="validate",
+                result={
+                    "structured_output": {
+                        "base_commit": base,
+                        "result_commit": result_commit,
+                        "gates": [{"name": "tests", "exit_code": 0}],
+                    }
+                },
+            ),
+            7: _step(step_type="produce_artifacts", result=artifact_result),
+        },
+        cast(
+            Any,
+            SimpleNamespace(
+                base_commit=base,
+                result_commit=result_commit,
+                diff_hash="d" * 64,
+            ),
+        ),
+    )
+
+    assert evidence["artifact_evidence"]["artifacts"] == artifact_result["artifacts"]
+    assert evidence["artifact_evidence"]["evidence_hash"] == envelope_hash(artifact_result)
+
+
+@pytest.mark.parametrize(
+    "artifact_result",
+    (
+        {"status": "failed"},
+        {"status": "produced", "source_commit": "wrong", "artifacts": []},
+        {
+            "status": "produced",
+            "source_commit": "b" * 40,
+            "artifacts": [
+                {
+                    "artifact_id": "not-a-uuid",
+                    "artifact_type": "cli_transcript",
+                    "content_hash": "c" * 64,
+                    "size_bytes": 1,
+                }
+            ],
+        },
+    ),
+)
+def test_validation_evidence_rejects_invalid_artifact_results(
+    artifact_result: dict[str, Any],
+) -> None:
+    base = "a" * 40
+    result_commit = "b" * 40
+    steps = {
+        5: _step(
+            step_type="validate",
+            result={
+                "structured_output": {
+                    "base_commit": base,
+                    "result_commit": result_commit,
+                    "gates": [{"exit_code": 0}],
+                }
+            },
+        ),
+        7: _step(step_type="produce_artifacts", result=artifact_result),
+    }
+
+    with pytest.raises(ValueError, match="artifact"):
+        _validation_evidence(
+            steps,
+            cast(
+                Any,
+                SimpleNamespace(
+                    base_commit=base,
+                    result_commit=result_commit,
+                    diff_hash="d" * 64,
+                ),
+            ),
+        )
+
+
 @pytest.mark.anyio
 async def test_non_apply_approval_is_not_materialized_as_a_result_decision() -> None:
     step = MagicMock(payload={}, dependency_metadata={})

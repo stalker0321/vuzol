@@ -93,6 +93,7 @@ async def ensure_result_approval(
         "review_evidence": evidence["review_evidence"],
         "review_evidence_hash": evidence["review_evidence_hash"],
         "static_build_evidence": evidence["static_build_evidence"],
+        "artifact_evidence": evidence["artifact_evidence"],
         "configuration_revision": run.configuration_revision,
         "policy_revision": run.policy_revision,
     }
@@ -205,6 +206,11 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     build_steps = [step for step in ordered if step.step_type == "build_static"]
     build = next(
         (step for step in build_steps if step.status is StepStatus.COMPLETED),
+        None,
+    )
+    artifact_steps = [step for step in ordered if step.step_type == "produce_artifacts"]
+    artifact_step = next(
+        (step for step in artifact_steps if step.status is StepStatus.COMPLETED),
         None,
     )
 
@@ -326,6 +332,28 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
             }
         elif build_result.get("status") != "skipped":
             raise ValueError("static build did not produce a publishable result")
+    artifact_evidence: dict[str, Any] | None = None
+    if artifact_steps:
+        if artifact_step is None or not isinstance(artifact_step.result, dict):
+            raise ValueError("result approval requires artifact production to complete")
+        artifact_result = artifact_step.result
+        status = artifact_result.get("status")
+        if status == "produced":
+            artifacts = artifact_result.get("artifacts")
+            if (
+                artifact_result.get("source_commit") != worktree.result_commit
+                or not isinstance(artifacts, list)
+                or not artifacts
+                or not _trusted_artifact_records(artifacts)
+            ):
+                raise ValueError("artifact evidence does not match the retained result")
+            artifact_evidence = {
+                "source_commit": worktree.result_commit,
+                "artifacts": artifacts,
+                "evidence_hash": envelope_hash(artifact_result),
+            }
+        elif status != "skipped":
+            raise ValueError("artifact production did not produce trusted evidence")
     agent_checks = _agent_checks(execute_result)
     summary = None
     for candidate in (execute_result.get("implementation_summary"),):
@@ -347,7 +375,37 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
         "review_evidence": review_evidence,
         "review_evidence_hash": review_evidence_hash,
         "static_build_evidence": static_build_evidence,
+        "artifact_evidence": artifact_evidence,
     }
+
+
+def _trusted_artifact_records(artifacts: list[object]) -> bool:
+    if len(artifacts) > 40:
+        return False
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            return False
+        artifact_id = artifact.get("artifact_id")
+        artifact_type = artifact.get("artifact_type")
+        content_hash = artifact.get("content_hash")
+        size_bytes = artifact.get("size_bytes")
+        try:
+            uuid.UUID(artifact_id if isinstance(artifact_id, str) else "")
+        except ValueError:
+            return False
+        if (
+            not isinstance(artifact_type, str)
+            or not artifact_type
+            or len(artifact_type) > 100
+            or not isinstance(content_hash, str)
+            or len(content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_hash)
+            or not isinstance(size_bytes, int)
+            or isinstance(size_bytes, bool)
+            or size_bytes < 0
+        ):
+            return False
+    return True
 
 
 def _agent_checks(execute_result: dict[str, Any]) -> list[dict[str, str | None]]:

@@ -8,6 +8,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from vuzol.storage.types import EstimatedComplexity, RiskLevel, WorkPackageStatus
@@ -105,6 +106,22 @@ class EnvironmentComponentDraft:
             raise DomainError("invalid_environment", "web service requires a run command")
         if self.kind is ComponentKind.WEB_SERVICE and self.port is None:
             raise DomainError("invalid_environment", "web service requires a port")
+        if len(self.run_command) > 32 or any(
+            not value or len(value) > 500 or "\x00" in value for value in self.run_command
+        ):
+            raise DomainError("invalid_environment", "component run command is unsafe")
+        if len(self.artifact_patterns) > 20:
+            raise DomainError("invalid_environment", "component has too many artifact patterns")
+        for pattern in self.artifact_patterns:
+            path = Path(pattern)
+            if (
+                not pattern
+                or len(pattern) > 240
+                or path.is_absolute()
+                or ".." in path.parts
+                or "\x00" in pattern
+            ):
+                raise DomainError("invalid_environment", "component artifact pattern is unsafe")
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,6 +17,10 @@ from vuzol.config.models import SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import SubscriptionLimitSettings
 from vuzol.execution.access import RootlessIdentityResolver, WorktreeAccessManager
+from vuzol.execution.artifact_production import (
+    ArtifactProductionHandler,
+    SandboxedArtifactCommandRunner,
+)
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
 from vuzol.execution.domain import ProcessEnvelope, SandboxSpec
@@ -228,6 +232,15 @@ async def run() -> None:
             worktree_access,
             worktree_root=settings.worktree_root,
         )
+        artifact_handler = ArtifactProductionHandler(
+            factory,
+            runtime.registries,
+            local_git,
+            worktree_access,
+            SandboxedArtifactCommandRunner(envelope_factory, sandbox_runtime),
+            artifact_store,
+            worktree_root=settings.worktree_root,
+        )
         worktree_worker = WorkflowWorker(
             settings,
             factory,
@@ -235,6 +248,7 @@ async def run() -> None:
             handlers={
                 "prepare_worktree": worktree_handler,
                 "validate": validation_handler,
+                "produce_artifacts": artifact_handler,
                 "build_static": static_build_handler,
             },
             queue_classes=frozenset({QueueClass.HEAVY}),

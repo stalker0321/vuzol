@@ -108,13 +108,26 @@ class RegistryOverlayWriter:
         if topic_key in existing_topics:
             raise ValueError("project topic is already assigned in the dynamic registry")
         template = self._runtime.registries.projects.get(self._runtime.settings.project_template_id)
+        imported = provisioning.source_repository_url is not None
+        repository = self._runtime.settings.repository_root / provisioning.repository_path
+        validation_commands = (
+            self._import_validation_commands(repository)
+            if imported
+            else (CommandDefinition(name="tests", argv=("make", "test")),)
+        )
+        static_deployment = (
+            self._import_static_deployment(repository, provisioning.project_id)
+            if imported
+            else StaticDeploymentConfig(url_path=provisioning.project_id)
+        )
         project = template.model_copy(
             update={
                 "id": provisioning.project_id,
                 "display_name": provisioning.display_name,
                 "repository_path": Path(provisioning.repository_path),
+                "default_branch": provisioning.default_branch,
                 "summary_path": None,
-                "validation_commands": (CommandDefinition(name="tests", argv=("make", "test")),),
+                "validation_commands": validation_commands,
                 "allowed_capabilities": frozenset(
                     {
                         Capability.REPOSITORY_READ,
@@ -131,7 +144,7 @@ class RegistryOverlayWriter:
                         "approval_required": frozenset({DeliveryMode.APPLY}),
                     }
                 ),
-                "static_deployment": StaticDeploymentConfig(url_path=provisioning.project_id),
+                "static_deployment": static_deployment,
             }
         )
         topic = TopicConfig(
@@ -171,6 +184,50 @@ class RegistryOverlayWriter:
         temporary.write_text(serialized)
         os.replace(temporary, self._path)
         return bundle.revision
+
+    @staticmethod
+    def _import_validation_commands(repository: Path) -> tuple[CommandDefinition, ...]:
+        """Infer only high-confidence, non-installing validation commands."""
+
+        if (repository / "Makefile").is_file():
+            return (CommandDefinition(name="tests", argv=("make", "test")),)
+        package_json = repository / "package.json"
+        if package_json.is_file():
+            try:
+                package = json.loads(package_json.read_text())
+            except (OSError, ValueError):
+                package = {}
+            if (
+                isinstance(package, dict)
+                and isinstance(package.get("scripts"), dict)
+                and "test" in package["scripts"]
+            ):
+                return (CommandDefinition(name="tests", argv=("npm", "test")),)
+        if (repository / "pyproject.toml").is_file() or (repository / "pytest.ini").is_file():
+            return (CommandDefinition(name="tests", argv=("pytest",)),)
+        if any(repository.glob("*.js")):
+            return (CommandDefinition(name="tests", argv=("node", "--test")),)
+        return ()
+
+    @staticmethod
+    def _import_static_deployment(
+        repository: Path, project_id: str
+    ) -> StaticDeploymentConfig | None:
+        """Enable static delivery only when no obvious server runtime is present."""
+
+        server_markers = (
+            "server.js",
+            "app.py",
+            "manage.py",
+            "Dockerfile",
+            "compose.yaml",
+            "docker-compose.yml",
+        )
+        if any((repository / marker).exists() for marker in server_markers):
+            return None
+        if (repository / "index.html").is_file():
+            return StaticDeploymentConfig(url_path=project_id)
+        return None
 
 
 class ProjectProvisioningService:
@@ -233,14 +290,21 @@ class ProjectProvisioningService:
             topic_thread_id = provisioning.topic_thread_id
         repository = (self._runtime.settings.repository_root / project_id).resolve()
         repository.relative_to(self._runtime.settings.repository_root.resolve())
-        readme = f"# {display_name}\n\n{description.strip()}\n"
-        await self._git.initialize_repository(repository, readme=readme)
+        if provisioning.source_repository_url is None:
+            readme = f"# {display_name}\n\n{description.strip()}\n"
+            await self._git.initialize_repository(repository, readme=readme)
+            default_branch = "main"
+        else:
+            _commit, default_branch = await self._git.clone_repository(
+                repository, url=provisioning.source_repository_url
+            )
         _match_repository_root_ownership(repository, self._runtime.settings.repository_root)
         async with self._factory.begin() as session:
             row = await session.get(ProjectProvisioning, provisioning_id, with_for_update=True)
             assert row is not None
             if row.status is ProjectProvisioningStatus.PENDING:
                 row.status = ProjectProvisioningStatus.REPOSITORY_CREATED
+                row.default_branch = default_branch
         if topic_thread_id is None:
             async with self._factory.begin() as session:
                 row = await session.get(ProjectProvisioning, provisioning_id, with_for_update=True)

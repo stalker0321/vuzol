@@ -51,6 +51,29 @@ def test_local_git_initializes_project_repository_idempotently(tmp_path: Path) -
     asyncio.run(scenario())
 
 
+def test_local_git_clones_existing_repository_idempotently(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source = tmp_path / "source"
+        source.mkdir()
+        _git(source, "init", "-b", "trunk")
+        _git(source, "config", "user.email", "test@example.com")
+        _git(source, "config", "user.name", "Test")
+        (source / "README.md").write_text("existing project\n")
+        _git(source, "add", "README.md")
+        _git(source, "commit", "-m", "initial")
+
+        destination = tmp_path / "imported"
+        git = LocalGit()
+        first = await git.clone_repository(destination, url=str(source))
+        second = await git.clone_repository(destination, url=str(source))
+
+        assert first == second
+        assert first[1] == "trunk"
+        assert (destination / "README.md").read_text() == "existing project\n"
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.anyio
 async def test_diff_check_reports_bounded_git_stderr(tmp_path: Path) -> None:
     repository = tmp_path / "repository"

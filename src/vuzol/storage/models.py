@@ -362,6 +362,8 @@ class ProjectProvisioning(IdentityMixin, TimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     repository_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_repository_url: Mapped[str | None] = mapped_column(String(1000))
+    default_branch: Mapped[str] = mapped_column(String(255), nullable=False, default="main")
     topic_thread_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
     status: Mapped[ProjectProvisioningStatus] = mapped_column(
         enum_type(ProjectProvisioningStatus, "project_provisioning_status"),

@@ -35,3 +35,12 @@ the request becomes blocked for manual reconciliation rather than risking a dupl
 - repository and registry paths are deterministic children of configured roots;
 - a project becomes usable only after repository, topic, overlay, and process reload all succeed;
 - provisioning can be reconstructed from PostgreSQL plus the registry overlay.
+
+## Existing repositories
+
+`/import` is a second explicit intake within the same authority boundary. Its first version accepts
+only public GitHub HTTPS repository URLs and derives the project identity from the repository name.
+The trusted provisioner performs the clone and records its default branch; the executor never
+receives repository credentials. Local paths, embedded URL credentials, alternate protocols, and
+untrusted hosts remain outside the Telegram contract. Supporting private repositories or other
+hosts requires a separately configured trusted connection rather than broadening worker access.

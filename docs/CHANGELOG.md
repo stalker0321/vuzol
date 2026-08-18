@@ -4,6 +4,9 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added `/import` intake for existing public GitHub repositories. Imported projects are cloned by
+  the privileged provisioner, retain their remote default branch, receive conservative validation
+  and deployment defaults, and never expose Git credentials or arbitrary host paths to workers;
 - completed the default-off Project Discussions and Work Packages candidate: fenced discussion
   plans can be edited and separately approved, then a deterministic materializer creates canonical
   Tasks sequentially through the existing workflow dispatcher; terminal evidence advances exactly

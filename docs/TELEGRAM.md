@@ -181,6 +181,14 @@ project description into the new topic. It never creates a remote, pushes, deplo
 dependencies, or executes user-supplied commands. An unknown Telegram topic-creation outcome blocks
 for reconciliation instead of retrying.
 
+`/import` in `Новый проект` starts a separate existing-repository intake. Vuzol asks for one public
+`https://github.com/owner/repository` URL, derives the project identity from the repository name,
+and persists the source URL before the privileged provisioner clones it. Git credentials, local
+paths, URL credentials, non-HTTPS protocols, and non-GitHub hosts are rejected in this first bounded
+version. The provisioner retains the remote default branch, infers a conservative existing test
+command without installing dependencies, and enables static deployment only for an obvious static
+repository. It then creates the project topic through the same durable provisioning path.
+
 An exact-result approval has its own message link in the global approvals topic. It does not replace
 the task status message in the project topic. After a decision, Vuzol edits the approval card to
 remove its buttons and show the persisted outcome, then separately refreshes the project card.

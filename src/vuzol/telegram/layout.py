@@ -91,6 +91,15 @@ def is_plan_command(text: str | None) -> bool:
     return len(parts) == 1 and parts[0].split("@", 1)[0] == "/plan"
 
 
+def is_import_command(text: str | None) -> bool:
+    """True for bare ``/import`` (optional @bot suffix)."""
+
+    if text is None:
+        return False
+    parts = text.strip().split()
+    return len(parts) == 1 and parts[0].split("@", 1)[0] == "/import"
+
+
 def build_help_card(kind: TopicKind) -> str:
     """Return concise, context-aware help for one forum topic."""
 
@@ -108,7 +117,12 @@ def build_help_card(kind: TopicKind) -> str:
             )
         )
     elif kind is TopicKind.INBOX:
-        lines.append("Опишите идею и цель — Vuzol предложит названия и создаст проект.")
+        lines.extend(
+            (
+                "Опишите идею и цель — Vuzol предложит названия и создаст проект.",
+                "<code>/import</code> — подключить существующий GitHub-репозиторий.",
+            )
+        )
     elif kind is TopicKind.TASK_DASHBOARD:
         lines.append("<code>/update</code> — обновить статусы проектов и лимиты.")
     elif kind is TopicKind.APPROVALS:

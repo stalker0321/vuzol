@@ -10,10 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.config.models import TopicConfig, TopicKind
 from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
+from vuzol.projects.importing import ProjectImportError, parse_github_repository_url
 from vuzol.providers.subscription_limits import SUBSCRIPTION_LIMITS_DESTINATION
 from vuzol.security.secret_ingress import create_request, parse_secret_command
 from vuzol.storage.models import (
     ProjectDiscussionSession,
+    ProjectProvisioning,
+    Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
     TopicMapping,
@@ -24,6 +27,7 @@ from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
 from vuzol.telegram.layout import (
     HELP_CARD_ROLE,
     is_help_command,
+    is_import_command,
     is_model_command,
     is_plan_command,
     is_status_dashboard_topic,
@@ -34,6 +38,7 @@ from vuzol.telegram.policy import TelegramPolicyError, authorize, validate_messa
 from vuzol.telegram.projections import enqueue_project_status_dashboard
 from vuzol.telegram.work_package_projections import enqueue_project_topic_status
 from vuzol.telegram.work_packages import ContinueDiscussionOverrides
+from vuzol.workflows.transitions import transition_task
 
 
 def update_hash(update: MessageUpdate) -> str:
@@ -86,6 +91,16 @@ class TelegramIngressService:
                 if not topic.enabled:
                     raise TelegramPolicyError("topic is disabled")
                 return await self._handle_help_command(update, topic)
+            if is_import_command(update.text):
+                if topic.kind is not TopicKind.INBOX:
+                    raise TelegramPolicyError("/import is only available in the New Project topic")
+                if not topic.enabled:
+                    raise TelegramPolicyError("new project topic is disabled")
+                return await self._handle_import_command(update)
+            if topic.kind is TopicKind.INBOX and update.text is not None:
+                pending_import = await self._pending_import_task(update)
+                if pending_import is not None:
+                    return await self._handle_import_url(update, pending_import)
             if is_status_dashboard_topic(topic.kind) and is_update_command(update.text):
                 if not topic.enabled:
                     raise TelegramPolicyError("status dashboard topic is disabled")
@@ -255,6 +270,155 @@ class TelegramIngressService:
             task_id=task_id,
             intake_id=intake_id,
         )
+
+    async def _pending_import_task(self, update: MessageUpdate) -> uuid.UUID | None:
+        async with self._session_factory() as session:
+            task_id = await session.scalar(
+                select(Task.id)
+                .where(
+                    Task.source_chat_id == update.chat_id,
+                    Task.source_thread_id == update.message_thread_id,
+                    Task.user_id == update.user_id,
+                    Task.task_type == "project_import",
+                    Task.status == TaskStatus.AWAITING_USER,
+                )
+                .order_by(Task.created_at.desc())
+                .limit(1)
+            )
+            return task_id if isinstance(task_id, uuid.UUID) else None
+
+    async def _handle_import_command(self, update: MessageUpdate) -> IngressResult:
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            assert uow.session is not None
+            existing = await uow.session.scalar(
+                select(Task.id)
+                .where(
+                    Task.source_chat_id == update.chat_id,
+                    Task.source_thread_id == update.message_thread_id,
+                    Task.user_id == update.user_id,
+                    Task.task_type == "project_import",
+                    Task.status == TaskStatus.AWAITING_USER,
+                )
+                .order_by(Task.created_at.desc())
+                .limit(1)
+            )
+            if existing is not None:
+                await uow.inbox.mark_processed(inbox_id, entity_type="task", entity_id=existing)
+                return IngressResult(status=IngressStatus.HANDLED, task_id=existing)
+            record = await uow.tasks.create(
+                user_id=update.user_id,
+                chat_id=update.chat_id,
+                thread_id=update.message_thread_id,
+                original_text="/import",
+                task_type="project_import",
+            )
+            task = await uow.tasks.get(record.id, for_update=True)
+            await transition_task(
+                uow.session,
+                task,
+                TaskStatus.AWAITING_USER,
+                actor_type="telegram_import",
+                actor_id=str(update.user_id),
+                payload={"waiting_for": "repository_url"},
+            )
+            await uow.inbox.mark_processed(inbox_id, entity_type="task", entity_id=task.id)
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="task",
+                entity_id=task.id,
+                idempotency_key=f"telegram:project-import:{task.id}:prompt",
+                payload={
+                    "role": "project_import_prompt",
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "html": (
+                        "<b>Подключить существующий проект</b>\n"
+                        "Пришлите ссылку вида <code>https://github.com/owner/repository</code>."
+                    ),
+                },
+            )
+        return IngressResult(status=IngressStatus.HANDLED, task_id=task.id)
+
+    async def _handle_import_url(self, update: MessageUpdate, task_id: uuid.UUID) -> IngressResult:
+        try:
+            imported = parse_github_repository_url(update.text or "")
+        except ProjectImportError as error:
+            return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            assert uow.session is not None
+            lock_key = int.from_bytes(
+                hashlib.sha256(f"project:{imported.project_id}".encode()).digest()[:8],
+                signed=True,
+            )
+            await uow.session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            task = await uow.tasks.get(task_id, for_update=True)
+            if task.status is not TaskStatus.AWAITING_USER:
+                return IngressResult(
+                    status=IngressStatus.REJECTED, reason="import is no longer active"
+                )
+            known_ids = {project.id for project in self._runtime.registries.projects.items()}
+            conflict = await uow.session.scalar(
+                select(ProjectProvisioning.id).where(
+                    ProjectProvisioning.project_id == imported.project_id
+                )
+            )
+            if imported.project_id in known_ids or conflict is not None:
+                await uow.inbox.mark_processed(inbox_id, entity_type="task", entity_id=task.id)
+                return IngressResult(
+                    status=IngressStatus.REJECTED,
+                    reason="a project with this repository name already exists",
+                )
+            provisioning = ProjectProvisioning(
+                task_id=task.id,
+                requested_by_user_id=update.user_id,
+                chat_id=update.chat_id,
+                source_thread_id=update.message_thread_id,
+                project_id=imported.project_id,
+                display_name=imported.display_name,
+                description=f"Imported from {imported.url}",
+                repository_path=imported.project_id,
+                source_repository_url=imported.url,
+            )
+            uow.session.add(provisioning)
+            await uow.session.flush()
+            task.project_id = imported.project_id
+            await transition_task(
+                uow.session,
+                task,
+                TaskStatus.EXECUTING,
+                actor_type="telegram_import",
+                actor_id=str(update.user_id),
+                payload={"project_id": imported.project_id},
+            )
+            await uow.inbox.mark_processed(
+                inbox_id, entity_type="project_provisioning", entity_id=provisioning.id
+            )
+            await uow.outbox.enqueue(
+                destination="project_provisioning",
+                operation_type="import_project",
+                entity_type="project_provisioning",
+                entity_id=provisioning.id,
+                idempotency_key=f"project:provision:{provisioning.id}",
+                payload={"project_id": provisioning.project_id},
+            )
+        return IngressResult(status=IngressStatus.HANDLED, task_id=task.id)
 
     async def _handle_secret_command(
         self, update: MessageUpdate, secret_name: str

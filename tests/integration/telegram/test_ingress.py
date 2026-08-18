@@ -23,6 +23,7 @@ from vuzol.config.settings import SecretIngressSettings
 from vuzol.storage.models import (
     ExternalInbox,
     ProjectDiscussionSession,
+    ProjectProvisioning,
     Run,
     SecretIngressRequest,
     Task,
@@ -31,6 +32,7 @@ from vuzol.storage.models import (
     TopicMapping,
     TransactionalOutbox,
 )
+from vuzol.storage.types import TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram import TelegramIngressService
 from vuzol.telegram.delivery import (
@@ -66,6 +68,86 @@ def initialize_repository(repository: Path) -> None:
         check=True,
         capture_output=True,
     )
+
+
+def inbox_runtime(tmp_path: Path) -> RuntimeConfiguration:
+    configured = telegram_runtime(tmp_path)
+    document = RegistryDocument(
+        projects=configured.registries.projects.items(),
+        topics=(
+            TopicConfig(
+                chat_id=-100,
+                message_thread_id=10,
+                kind=TopicKind.INBOX,
+                accepts_new_tasks=True,
+                default_workflow="simple_model_task",
+            ),
+        ),
+        sandboxes=configured.registries.sandboxes.items(),
+    )
+    return RuntimeConfiguration(
+        settings=configured.settings,
+        registries=build_bundle(document, configured.settings),
+    )
+
+
+@pytest.mark.postgresql
+def test_import_command_collects_url_and_queues_existing_repository(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        service = TelegramIngressService(inbox_runtime(tmp_path), factory)
+
+        prompted = await service.accept_message(message(701, 801, text="/import"))
+        imported = await service.accept_message(
+            message(702, 802, text="https://github.com/example/three-body-problems")
+        )
+
+        assert prompted.status is IngressStatus.HANDLED
+        assert imported.status is IngressStatus.HANDLED
+        assert imported.task_id == prompted.task_id
+        async with factory() as session:
+            task = await session.get(Task, prompted.task_id)
+            provisioning = await session.scalar(select(ProjectProvisioning))
+            assert task is not None and task.status is TaskStatus.EXECUTING
+            assert task.project_id == "three-body-problems"
+            assert provisioning is not None
+            assert provisioning.project_id == "three-body-problems"
+            assert provisioning.source_repository_url == (
+                "https://github.com/example/three-body-problems.git"
+            )
+            queued = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "project_provisioning"
+                )
+            )
+            assert queued is not None and queued.operation_type == "import_project"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_import_rejects_non_github_source_without_consuming_request(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        service = TelegramIngressService(inbox_runtime(tmp_path), factory)
+        prompted = await service.accept_message(message(711, 811, text="/import"))
+        rejected = await service.accept_message(
+            message(712, 812, text="file:///opt/three-body-problem")
+        )
+        assert prompted.status is IngressStatus.HANDLED
+        assert rejected.status is IngressStatus.REJECTED
+        async with factory() as session:
+            task = await session.get(Task, prompted.task_id)
+            assert task is not None and task.status is TaskStatus.AWAITING_USER
+            assert await session.scalar(select(ProjectProvisioning.id)) is None
+        await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def message(update_id: int, message_id: int, **changes: object) -> MessageUpdate:

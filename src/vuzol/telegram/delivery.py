@@ -188,6 +188,20 @@ async def prepare_delivery(
             html=build_help_card(topic_kind),
             message_role=HELP_CARD_ROLE,
         )
+    if item.payload.get("role") == "project_import_prompt":
+        try:
+            chat_id = int(item.payload["chat_id"])
+            thread_id = int(item.payload["message_thread_id"])
+            html_body = str(item.payload["html"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise PermanentDeliveryError("invalid_project_import_prompt") from error
+        return PreparedDelivery(
+            DeliveryAction.SEND_STATUS,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            html=html_body,
+            message_role="project_import_prompt",
+        )
     if item.payload.get("role") in {PROJECT_MODEL_PICKER_ROLE, PROJECT_MODEL_CONFIRM_ROLE}:
         return _prepare_project_model_message(item)
     if item.payload.get("role") == "secret_ingress":

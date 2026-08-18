@@ -64,6 +64,63 @@ class LocalGit:
         await self._run(repository, "switch", "--detach", "HEAD")
         return commit
 
+    async def clone_repository(self, repository: Path, *, url: str) -> tuple[str, str]:
+        """Clone one already-validated remote without interactive credentials.
+
+        The destination must not exist. The checked-out remote default branch is
+        retained as a local branch so normal project delivery can advance it.
+        """
+
+        if repository.exists():  # noqa: ASYNC240
+            if not (repository / ".git").is_dir():
+                raise GitError("project repository path already exists and is not a Git repository")
+            remote = await self._optional(repository, "remote", "get-url", "origin")
+            if remote is None or remote.decode().strip() != url:
+                raise GitError("existing project repository has a different origin")
+            await self.require_clean_source(repository)
+            branch = (await self._run(repository, "branch", "--show-current")).decode().strip()
+            return await self.resolve_commit(repository, "HEAD"), branch
+        repository.parent.mkdir(parents=True, exist_ok=True)
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": "/nonexistent",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "/bin/false",
+            "SSH_ASKPASS": "/bin/false",
+            "GIT_PAGER": "cat",
+        }
+        configuration = tuple(value for item in SYSTEM_GIT_CONFIG for value in ("-c", item))
+        process = await asyncio.create_subprocess_exec(
+            "/usr/bin/git",
+            *configuration,
+            "clone",
+            "--no-tags",
+            "--",
+            url,
+            str(repository),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+        )
+        try:
+            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self._timeout)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            shutil.rmtree(repository, ignore_errors=True)
+            raise GitError("repository clone timed out") from None
+        if process.returncode != 0:
+            shutil.rmtree(repository, ignore_errors=True)
+            raise GitError(f"repository clone failed: {stderr.decode(errors='replace')[:200]}")
+        await self.require_clean_source(repository)
+        branch = (await self._run(repository, "branch", "--show-current")).decode().strip()
+        if not branch or len(branch) > 255:
+            shutil.rmtree(repository, ignore_errors=True)
+            raise GitError("remote default branch is missing or invalid")
+        commit = await self.resolve_commit(repository, "HEAD")
+        return commit, branch
+
     async def resolve_commit(self, repository: Path, ref: str) -> str:
         value = await self._run(repository, "rev-parse", "--verify", f"{ref}^{{commit}}")
         commit = value.decode().strip()

@@ -58,6 +58,7 @@ PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
     "execute_agent": ProviderRole.EXECUTOR,
 }
 
+
 async def claim_routed_step(
     session: AsyncSession,
     *,

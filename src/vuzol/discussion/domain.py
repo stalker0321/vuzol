@@ -59,6 +59,95 @@ class DomainError(RuntimeError):
         super().__init__(message or code)
 
 
+class ComponentKind(StrEnum):
+    STATIC_SITE = "static_site"
+    WEB_SERVICE = "web_service"
+    ANDROID_APP = "android_app"
+    CLI = "cli"
+    LIBRARY = "library"
+    BOT = "bot"
+    MCP_SERVER = "mcp_server"
+    WORKER = "worker"
+    DATABASE = "database"
+    OTHER = "other"
+
+
+class CapabilityProvisioning(StrEnum):
+    AUTOMATIC = "automatic"
+    APPROVAL_REQUIRED = "approval_required"
+    EXTERNAL_SETUP = "external_setup"
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentComponentDraft:
+    key: str
+    label: str
+    kind: ComponentKind
+    technology: str
+    version: str | None = None
+    run_command: tuple[str, ...] = ()
+    port: int | None = None
+    healthcheck_path: str | None = None
+    artifact_patterns: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if _SLUG.fullmatch(self.key) is None or len(self.key) > 64:
+            raise DomainError("invalid_environment", "component key must be a bounded slug")
+        if not self.label.strip() or len(self.label) > 100:
+            raise DomainError("invalid_environment", "component label must contain 1..100 chars")
+        if not self.technology.strip() or len(self.technology) > 100:
+            raise DomainError("invalid_environment", "component technology is required")
+        if self.port is not None and not 1 <= self.port <= 65535:
+            raise DomainError("invalid_environment", "component port is invalid")
+        if self.healthcheck_path is not None and not self.healthcheck_path.startswith("/"):
+            raise DomainError("invalid_environment", "healthcheck path must be absolute")
+        if self.kind is ComponentKind.WEB_SERVICE and not self.run_command:
+            raise DomainError("invalid_environment", "web service requires a run command")
+        if self.kind is ComponentKind.WEB_SERVICE and self.port is None:
+            raise DomainError("invalid_environment", "web service requires a port")
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityRequirementDraft:
+    key: str
+    label: str
+    provisioning: CapabilityProvisioning = CapabilityProvisioning.AUTOMATIC
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if _SLUG.fullmatch(self.key) is None or len(self.key) > 64:
+            raise DomainError("invalid_environment", "capability key must be a bounded slug")
+        if not self.label.strip() or len(self.label) > 100:
+            raise DomainError("invalid_environment", "capability label must contain 1..100 chars")
+        if len(self.reason) > 500:
+            raise DomainError("invalid_environment", "capability reason is too long")
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentDeltaDraft:
+    upsert_components: tuple[EnvironmentComponentDraft, ...] = ()
+    remove_components: tuple[str, ...] = ()
+    required_capabilities: tuple[CapabilityRequirementDraft, ...] = ()
+
+    def __post_init__(self) -> None:
+        keys = [component.key for component in self.upsert_components]
+        if len(keys) != len(set(keys)):
+            raise DomainError("invalid_environment", "component keys must be unique")
+        if len(self.remove_components) != len(set(self.remove_components)) or any(
+            _SLUG.fullmatch(key) is None for key in self.remove_components
+        ):
+            raise DomainError("invalid_environment", "removed component keys must be unique slugs")
+        if set(keys) & set(self.remove_components):
+            raise DomainError("invalid_environment", "a component cannot be added and removed")
+        capabilities = [capability.key for capability in self.required_capabilities]
+        if len(capabilities) != len(set(capabilities)):
+            raise DomainError("invalid_environment", "capability keys must be unique")
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.upsert_components or self.remove_components or self.required_capabilities)
+
+
 @dataclass(frozen=True, slots=True)
 class PlanItemDraft:
     summary: str
@@ -99,6 +188,7 @@ class PlanItemDraft:
 class PlanDraft:
     title: str
     items: tuple[PlanItemDraft, ...]
+    environment_delta: EnvironmentDeltaDraft = EnvironmentDeltaDraft()
 
     def __post_init__(self) -> None:
         if not self.title.strip() or len(self.title) > 240:
@@ -116,7 +206,7 @@ class PlanDraft:
 def canonical_plan_body(plan: PlanDraft, item_ids: tuple[uuid.UUID, ...]) -> dict[str, Any]:
     if len(plan.items) != len(item_ids):
         raise DomainError("invalid_plan", "resolved item identities do not match plan items")
-    return {
+    body: dict[str, Any] = {
         "title": plan.title.strip(),
         "items": [
             {
@@ -138,6 +228,38 @@ def canonical_plan_body(plan: PlanDraft, item_ids: tuple[uuid.UUID, ...]) -> dic
             for ordinal, (item, item_id) in enumerate(zip(plan.items, item_ids, strict=True), 1)
         ],
     }
+    if not plan.environment_delta.is_empty:
+        body["environment_delta"] = canonical_environment_delta(plan.environment_delta)
+    return body
+
+
+def canonical_environment_delta(delta: EnvironmentDeltaDraft) -> dict[str, Any]:
+    return {
+        "upsert_components": [
+            {
+                "key": component.key,
+                "label": component.label.strip(),
+                "kind": component.kind.value,
+                "technology": component.technology.strip(),
+                "version": component.version,
+                "run_command": list(component.run_command),
+                "port": component.port,
+                "healthcheck_path": component.healthcheck_path,
+                "artifact_patterns": list(component.artifact_patterns),
+            }
+            for component in delta.upsert_components
+        ],
+        "remove_components": list(delta.remove_components),
+        "required_capabilities": [
+            {
+                "key": capability.key,
+                "label": capability.label.strip(),
+                "provisioning": capability.provisioning.value,
+                "reason": capability.reason.strip(),
+            }
+            for capability in delta.required_capabilities
+        ],
+    }
 
 
 def canonical_plan_hash(body: dict[str, Any]) -> str:
@@ -148,7 +270,7 @@ def canonical_plan_hash(body: dict[str, Any]) -> str:
 def semantic_plan_hash(plan: PlanDraft) -> str:
     """Fingerprint user-visible plan meaning without package-local identities."""
 
-    body = {
+    body: dict[str, Any] = {
         "title": plan.title.strip(),
         "items": [
             {
@@ -168,6 +290,8 @@ def semantic_plan_hash(plan: PlanDraft) -> str:
             for item in plan.items
         ],
     }
+    if not plan.environment_delta.is_empty:
+        body["environment_delta"] = canonical_environment_delta(plan.environment_delta)
     return canonical_plan_hash(body)
 
 
@@ -185,18 +309,21 @@ def semantic_revision_hash(body: dict[str, Any]) -> str:
             if isinstance(item, dict)
         ],
     }
+    if isinstance(body.get("environment_delta"), dict):
+        projected["environment_delta"] = body["environment_delta"]
     return canonical_plan_hash(projected)
 
 
 def plan_outline_hash(plan: PlanDraft) -> str:
     """Fingerprint the stable user-visible outline, ignoring model paraphrases."""
 
-    return canonical_plan_hash(
-        {
-            "title": _normalized_outline_text(plan.title),
-            "items": [_normalized_outline_text(item.summary) for item in plan.items],
-        }
-    )
+    body: dict[str, Any] = {
+        "title": _normalized_outline_text(plan.title),
+        "items": [_normalized_outline_text(item.summary) for item in plan.items],
+    }
+    if not plan.environment_delta.is_empty:
+        body["environment_delta"] = canonical_environment_delta(plan.environment_delta)
+    return canonical_plan_hash(body)
 
 
 def revision_outline_hash(body: dict[str, Any]) -> str:
@@ -210,12 +337,13 @@ def revision_outline_hash(body: dict[str, Any]) -> str:
         for item in raw_items
         if isinstance(item, dict)
     ]
-    return canonical_plan_hash(
-        {
-            "title": _normalized_outline_text(str(body.get("title", ""))),
-            "items": summaries,
-        }
-    )
+    projected: dict[str, Any] = {
+        "title": _normalized_outline_text(str(body.get("title", ""))),
+        "items": summaries,
+    }
+    if isinstance(body.get("environment_delta"), dict):
+        projected["environment_delta"] = body["environment_delta"]
+    return canonical_plan_hash(projected)
 
 
 def _normalized_outline_text(value: str) -> str:

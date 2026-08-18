@@ -180,6 +180,7 @@ async def test_workspace_sync_applies_pin_state_when_supported(monkeypatch: Monk
     assert "Notes" in rename_names
     assert "Система" in rename_names
     enqueue_status.assert_awaited_once()
+    assert enqueue_status.await_args is not None
     assert enqueue_status.await_args.kwargs == {
         "chat_id": -100,
         "thread_id": 2,

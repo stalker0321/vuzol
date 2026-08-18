@@ -89,6 +89,9 @@ async def test_project_provisioner_composes_and_disposes(monkeypatch: MonkeyPatc
     monkeypatch.setattr(provisioner_cli, "create_engine", lambda *_args: Engine())
     monkeypatch.setattr(provisioner_cli, "require_migration_head", pass_head)
     monkeypatch.setattr(provisioner_cli, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr(
+        provisioner_cli, "reconcile_imported_environments", AsyncMock(return_value=0)
+    )
     monkeypatch.setattr(provisioner_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
     monkeypatch.setattr(provisioner_cli, "Bot", bot_factory)
     monkeypatch.setattr(provisioner_cli, "PythonTelegramClient", lambda bot: ("client", bot))

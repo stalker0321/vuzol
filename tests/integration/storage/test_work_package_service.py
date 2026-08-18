@@ -6,10 +6,18 @@ import pytest
 from sqlalchemy import func, select
 
 from vuzol.discussion import DomainError, PlanDraft, PlanItemDraft, WorkPackageService
+from vuzol.discussion.domain import (
+    CapabilityProvisioning,
+    CapabilityRequirementDraft,
+    ComponentKind,
+    EnvironmentComponentDraft,
+    EnvironmentDeltaDraft,
+)
 from vuzol.storage.models import (
     Event,
     MaterializationLink,
     PlanRevision,
+    ProjectEnvironmentRevision,
     Task,
     WorkPackage,
     WorkPackageOpenDetail,
@@ -114,6 +122,65 @@ async def test_create_approve_revise_invalidates_approval_without_tasks(postgres
         PlanRevisionState.DRAFT,
     ]
     assert task_count == 0 and link_count == 0
+    await engine.dispose()
+
+
+async def test_plan_approval_versions_environment_delta_atomically(postgres_dsn: str) -> None:
+    engine, factory = storage(postgres_dsn)
+    async with UnitOfWork(factory) as uow:
+        session_id = await uow.discussions.create_session(
+            project_id="vuzol", chat_id=-1001, message_thread_id=92
+        )
+        drafted = await WorkPackageService(uow).create_draft(
+            session_id=session_id,
+            project_id="vuzol",
+            plan=PlanDraft(
+                title="Add runtime",
+                items=plan().items,
+                environment_delta=EnvironmentDeltaDraft(
+                    upsert_components=(
+                        EnvironmentComponentDraft(
+                            key="api",
+                            label="API",
+                            kind=ComponentKind.WEB_SERVICE,
+                            technology="Flask",
+                            version="3",
+                            run_command=("python", "-m", "app"),
+                            port=8000,
+                            healthcheck_path="/health",
+                        ),
+                    ),
+                    required_capabilities=(
+                        CapabilityRequirementDraft(
+                            key="python-runtime",
+                            label="Python runtime",
+                            provisioning=CapabilityProvisioning.AUTOMATIC,
+                        ),
+                    ),
+                ),
+            ),
+            created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+            actor_type="planner_model",
+        )
+    async with UnitOfWork(factory) as uow:
+        await WorkPackageService(uow).approve(
+            package_id=drafted.package_id,
+            revision_number=1,
+            h8=drafted.content_hash[:8],
+            expected_status_generation=1,
+            user_id=42,
+        )
+    async with factory() as session:
+        environment = await session.scalar(select(ProjectEnvironmentRevision))
+        revision = await session.get(PlanRevision, drafted.revision_id)
+        assert environment is not None and revision is not None
+        assert environment.source_plan_revision_id == revision.id
+        assert environment.approved_by_user_id == 42
+        assert environment.contract["components"]["api"]["technology"] == "Flask"
+        assert "python-runtime" in environment.contract["capabilities"]
+        assert revision.immutable_body["environment_delta"]["upsert_components"][0][
+            "run_command"
+        ] == ["python", "-m", "app"]
     await engine.dispose()
 
 

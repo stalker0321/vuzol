@@ -12,6 +12,7 @@ from vuzol.observability import configure_logging
 from vuzol.projects.provisioning import (
     FixedSystemdReloader,
     ProjectProvisioningService,
+    reconcile_imported_environments,
     run_provisioning_loop,
 )
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
@@ -29,6 +30,8 @@ async def run() -> None:
     try:
         # S-2.2c: fail closed before factory, Bot, provision loop, or schema work.
         await require_migration_head(engine)
+        factory = create_session_factory(engine)
+        await reconcile_imported_environments(runtime, factory)
         stop_event = asyncio.Event()
 
         def request_stop(_signum: int, _frame: object) -> None:
@@ -40,7 +43,7 @@ async def run() -> None:
         async with Bot(resolve_bot_token(settings).get_secret_value()) as bot:
             service = ProjectProvisioningService(
                 runtime,
-                create_session_factory(engine),
+                factory,
                 PythonTelegramClient(bot),
                 owner=owner,
                 reloader=FixedSystemdReloader(),

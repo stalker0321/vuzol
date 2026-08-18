@@ -9,7 +9,12 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from vuzol.discussion.domain import (
+    CapabilityProvisioning,
+    CapabilityRequirementDraft,
+    ComponentKind,
     DomainError,
+    EnvironmentComponentDraft,
+    EnvironmentDeltaDraft,
     PackageControlAction,
     PlanDraft,
     PlanItemDraft,
@@ -24,6 +29,7 @@ from vuzol.discussion.domain import (
     semantic_plan_hash,
     semantic_revision_hash,
 )
+from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
     EditSession,
     MaterializationLink,
@@ -237,6 +243,13 @@ class WorkPackageService:
         revision.state = PlanRevisionState.APPROVED
         revision.approved_at = datetime.now(UTC)
         revision.approved_by_user_id = user_id
+        assert self._uow.session is not None
+        await apply_approved_environment_delta(
+            self._uow.session,
+            project_id=package.project_id,
+            plan_revision=revision,
+            approved_by_user_id=user_id,
+        )
         package.approved_revision_id = revision.id
         # Every accepted revision starts from the then-current project target.
         # Old integration refs remain immutable evidence but cannot leak changes
@@ -996,4 +1009,62 @@ def _plan_from_revision_body(body: dict[str, object]) -> PlanDraft:
             )
     except (KeyError, TypeError, ValueError) as error:
         raise DomainError("invalid_plan") from error
-    return PlanDraft(title=title, items=tuple(drafts))
+    return PlanDraft(
+        title=title,
+        items=tuple(drafts),
+        environment_delta=_environment_delta_from_revision_body(body),
+    )
+
+
+def _environment_delta_from_revision_body(body: dict[str, object]) -> EnvironmentDeltaDraft:
+    raw_delta = body.get("environment_delta")
+    if raw_delta is None:
+        return EnvironmentDeltaDraft()
+    if not isinstance(raw_delta, dict):
+        raise DomainError("invalid_environment")
+    try:
+        raw_components = raw_delta.get("upsert_components", [])
+        raw_removed = raw_delta.get("remove_components", [])
+        raw_capabilities = raw_delta.get("required_capabilities", [])
+        if not all(
+            isinstance(value, list) for value in (raw_components, raw_removed, raw_capabilities)
+        ):
+            raise DomainError("invalid_environment")
+        components = tuple(
+            EnvironmentComponentDraft(
+                key=str(component["key"]),
+                label=str(component["label"]),
+                kind=ComponentKind(str(component["kind"])),
+                technology=str(component["technology"]),
+                version=(None if component.get("version") is None else str(component["version"])),
+                run_command=tuple(str(value) for value in component.get("run_command", [])),
+                port=None if component.get("port") is None else int(component["port"]),
+                healthcheck_path=(
+                    None
+                    if component.get("healthcheck_path") is None
+                    else str(component["healthcheck_path"])
+                ),
+                artifact_patterns=tuple(
+                    str(value) for value in component.get("artifact_patterns", [])
+                ),
+            )
+            for component in raw_components
+            if isinstance(component, dict)
+        )
+        capabilities = tuple(
+            CapabilityRequirementDraft(
+                key=str(capability["key"]),
+                label=str(capability["label"]),
+                provisioning=CapabilityProvisioning(str(capability["provisioning"])),
+                reason=str(capability.get("reason", "")),
+            )
+            for capability in raw_capabilities
+            if isinstance(capability, dict)
+        )
+        return EnvironmentDeltaDraft(
+            upsert_components=components,
+            remove_components=tuple(str(value) for value in raw_removed),
+            required_capabilities=capabilities,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise DomainError("invalid_environment") from error

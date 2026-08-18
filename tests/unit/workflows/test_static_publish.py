@@ -194,7 +194,7 @@ async def test_handler_does_not_publish_intermediate_package_item(tmp_path: Path
         "ordinal": 2,
         "plan_size": 4,
     }
-    handler._probe.assert_not_awaited()  # type: ignore[union-attr]
+    cast(AsyncMock, handler._probe).assert_not_awaited()
 
 
 @pytest.mark.anyio

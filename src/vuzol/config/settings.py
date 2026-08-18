@@ -413,6 +413,8 @@ class Settings(BaseSettings):
     static_site_base_url: HttpUrl = HttpUrl("https://hryshyn.dev")
     preview_site_root: Path = Path("/srv/vuzol/sites/test.hryshyn.dev")
     preview_site_base_url: HttpUrl = HttpUrl("https://test.hryshyn.dev")
+    preview_gateway_host: str = "127.0.0.1"
+    preview_gateway_port: int = Field(default=8091, ge=1024, le=65535)
     secret_file_root: Path = Path("/run/secrets")
     concurrency: ConcurrencyLimits = ConcurrencyLimits()
     database: DatabaseSettings = DatabaseSettings()

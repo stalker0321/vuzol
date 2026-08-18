@@ -200,6 +200,7 @@ async def test_review_passes_after_clean_validate(tmp_path: Path) -> None:
         lease_owner=lease.owner,
         lease_generation=lease.generation,
         run_id=run_id,
+        payload={},
         dependency_metadata={"predecessor_ordinals": [5]},
     )
     run = SimpleNamespace(task_id=task_id)
@@ -259,6 +260,7 @@ async def test_review_blocks_high_risk_without_independent_reviewer(tmp_path: Pa
         lease_owner=lease.owner,
         lease_generation=lease.generation,
         run_id=run_id,
+        payload={},
         dependency_metadata={"predecessor_ordinals": [5]},
     )
     session = MagicMock()
@@ -327,6 +329,7 @@ async def test_review_escalates_sensitive_diff_to_independent_reviewer(tmp_path:
         lease_owner=lease.owner,
         lease_generation=lease.generation,
         run_id=run_id,
+        payload={},
         dependency_metadata={"predecessor_ordinals": [5]},
     )
     task = SimpleNamespace(
@@ -410,6 +413,7 @@ async def test_review_blocks_suspicious_diff(tmp_path: Path) -> None:
         lease_owner=lease.owner,
         lease_generation=lease.generation,
         run_id=run_id,
+        payload={},
         dependency_metadata={"predecessor_ordinals": [5]},
     )
     session = MagicMock()
@@ -476,6 +480,7 @@ async def test_review_fails_closed_on_git_error(tmp_path: Path) -> None:
         lease_owner=lease.owner,
         lease_generation=lease.generation,
         run_id=run_id,
+        payload={},
         dependency_metadata={"predecessor_ordinals": [5]},
     )
     session = MagicMock()
@@ -565,6 +570,7 @@ async def test_review_fails_without_worktree(tmp_path: Path) -> None:
         lease_owner=lease.owner,
         lease_generation=lease.generation,
         run_id=run_id,
+        payload={},
         dependency_metadata={"predecessor_ordinals": [1]},
     )
     session = MagicMock()

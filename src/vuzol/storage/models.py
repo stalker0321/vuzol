@@ -374,6 +374,47 @@ class ProjectProvisioning(IdentityMixin, TimestampMixin, Base):
     last_error_category: Mapped[str | None] = mapped_column(String(100))
 
 
+class ProjectEnvironmentRevision(IdentityMixin, Base):
+    """Immutable declared environment accepted or detected for one project."""
+
+    __tablename__ = "project_environment_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "revision_number", name="uq_project_environment_revision_number"
+        ),
+        UniqueConstraint(
+            "source_plan_revision_id", name="uq_project_environment_source_plan_revision"
+        ),
+        CheckConstraint("revision_number >= 1", name="project_environment_revision_positive"),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-f]{64}$'", name="project_environment_content_hash_lower_hex"
+        ),
+        CheckConstraint(
+            "source IN ('detected', 'plan_approval', 'manual')",
+            name="project_environment_source_known",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(contract) = 'object'", name="project_environment_contract_object"
+        ),
+    )
+
+    project_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("project_environment_revisions.id", ondelete="RESTRICT")
+    )
+    source: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_plan_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("plan_revisions.id", ondelete="RESTRICT", use_alter=True)
+    )
+    contract: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_by_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class ProjectNamingRequest(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "project_naming_requests"
 

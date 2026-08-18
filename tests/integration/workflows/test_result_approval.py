@@ -228,9 +228,7 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             await session.flush()
             session.add(run)
             await session.flush()
-            session.add_all(
-                (source_step, review_step, approval_step, pending_finalize, worktree)
-            )
+            session.add_all((source_step, review_step, approval_step, pending_finalize, worktree))
             await session.flush()
             approval = await ensure_result_approval(
                 session,

@@ -203,6 +203,44 @@ def _callback(
     )
 
 
+def _environment_delta_lines(body: dict[str, object]) -> tuple[str, ...]:
+    delta = body.get("environment_delta")
+    if not isinstance(delta, dict):
+        return ()
+    lines: list[str] = []
+    components = delta.get("upsert_components", [])
+    if isinstance(components, list):
+        for component in components[:12]:
+            if not isinstance(component, dict):
+                continue
+            label = telegram_html(component.get("label", component.get("key", "Component")))
+            technology = telegram_html(component.get("technology", "unspecified"))
+            version = component.get("version")
+            suffix = f" {telegram_html(version)}" if isinstance(version, str) and version else ""
+            lines.append(f"+ {label} · {technology}{suffix}")
+    removed = delta.get("remove_components", [])
+    if isinstance(removed, list):
+        lines.extend(f"- {telegram_html(key)}" for key in removed[:8])
+    capabilities = delta.get("required_capabilities", [])
+    if isinstance(capabilities, list):
+        external: list[str] = []
+        privileged: list[str] = []
+        for capability in capabilities:
+            if not isinstance(capability, dict):
+                continue
+            label = str(capability.get("label", capability.get("key", "capability")))
+            provisioning = capability.get("provisioning")
+            if provisioning == "external_setup":
+                external.append(label)
+            elif provisioning == "approval_required":
+                privileged.append(label)
+        if privileged:
+            lines.append("Approval: " + telegram_html(", ".join(privileged[:6])))
+        if external:
+            lines.append("Setup: " + telegram_html(", ".join(external[:6])))
+    return tuple(lines)
+
+
 async def build_work_package_plan_card(
     session: AsyncSession,
     package_id: uuid.UUID,
@@ -243,8 +281,7 @@ async def build_work_package_plan_card(
         WorkPackageStatus.DISCARDED: "Cancelled",
     }[package.status]
     released = (
-        package.status
-        in {WorkPackageStatus.COMPLETED, WorkPackageStatus.DISCARDED}
+        package.status in {WorkPackageStatus.COMPLETED, WorkPackageStatus.DISCARDED}
         and discussion.active_work_package_id != package.id
     )
     if released:
@@ -307,7 +344,9 @@ async def build_work_package_plan_card(
         title = (
             "Send a new task"
             if released
-            else current_item.summary if current_item is not None else package.title
+            else current_item.summary
+            if current_item is not None
+            else package.title
         )
         if progress is not None:
             title = f"{progress} · {title}"
@@ -323,6 +362,20 @@ async def build_work_package_plan_card(
             "",
         ]
     if _action_card and package.status is WorkPackageStatus.PAUSED:
+        failed_step = (
+            None
+            if package.last_failure_task_id is None
+            else await session.scalar(
+                select(Step)
+                .join(Run, Run.id == Step.run_id)
+                .where(
+                    Run.task_id == package.last_failure_task_id,
+                    Step.status.in_((StepStatus.BLOCKED, StepStatus.FAILED)),
+                )
+                .order_by(Step.updated_at.desc())
+                .limit(1)
+            )
+        )
         reason_key = "unknown" if package.pause_reason is None else package.pause_reason.value
         reason = {
             "item_failed": "пункт завершился ошибкой",
@@ -332,13 +385,24 @@ async def build_work_package_plan_card(
             "user": "остановлено пользователем",
         }.get(reason_key, "причина неизвестна")
         current = "не определён" if package.cursor_ordinal is None else str(package.cursor_ordinal)
-        lines.extend(
-            (
-                f"Очередь остановлена: <b>{reason}</b>.",
-                f"Текущий пункт: {current}. Автоматического перехода дальше не будет.",
-                "",
+        if failed_step is not None and failed_step.failure_category == "environment_setup_required":
+            lines[0] = f"<b>Needs setup | {telegram_html(worker)}</b>"
+            lines.extend(
+                (
+                    "Для продолжения не хватает возможности окружения.",
+                    telegram_html(failed_step.failure_summary or "Environment setup is required"),
+                    f"Пункт {current} сохранён; после настройки его можно повторить.",  # noqa: RUF001
+                    "",
+                )
             )
-        )
+        else:
+            lines.extend(
+                (
+                    f"Очередь остановлена: <b>{reason}</b>.",
+                    f"Текущий пункт: {current}. Автоматического перехода дальше не будет.",
+                    "",
+                )
+            )
     token_line = None
     if _action_card:
         input_tokens, output_tokens, cached_tokens = await _work_package_token_totals(
@@ -389,10 +453,7 @@ async def build_work_package_plan_card(
             lines.extend(
                 (
                     "<b>Plan completed · approval required</b>",
-                    *(
-                        f"✅ {item.ordinal}. {telegram_html(item.summary)}"
-                        for item in items
-                    ),
+                    *(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items),
                     "",
                     "Все пункты и настроенные проверки завершены.",  # noqa: RUF001
                 )
@@ -432,9 +493,7 @@ async def build_work_package_plan_card(
         )
         if isinstance(production_url, str) and production_url:
             production = telegram_html(production_url)
-            lines.extend(
-                (f'<b>Production:</b> <a href="{production}">{production}</a>', "")
-            )
+            lines.extend((f'<b>Production:</b> <a href="{production}">{production}</a>', ""))
     if package_delivery_failure is not None:
         lines = ["<b>Plan completed · delivery failed</b>"]
         lines.extend(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items)
@@ -463,6 +522,10 @@ async def build_work_package_plan_card(
         and package_delivery_failure is None
     ):
         lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
+        if page == page_count:
+            environment_lines = _environment_delta_lines(revision.immutable_body)
+            if environment_lines:
+                lines.extend(("", "<b>Stack</b>", *environment_lines))
     if not _status_card and page_count > 1:
         lines.extend(("", f"Страница {page}/{page_count}"))
     html = "\n".join(lines)
@@ -565,11 +628,7 @@ async def build_work_package_plan_card(
         )
     if controls:
         buttons.append(tuple(controls))
-    if (
-        not _status_card
-        and not package_result_complete
-        and package_delivery_failure is None
-    ):
+    if not _status_card and not package_result_complete and package_delivery_failure is None:
         buttons.append(
             (
                 (

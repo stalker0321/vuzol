@@ -19,7 +19,14 @@ from vuzol.discussion.application import (
     PackageControlSource,
 )
 from vuzol.discussion.service import RevisionResult
-from vuzol.storage.models import Event, PlanRevision, PlanRevisionItem, Task, WorkPackage
+from vuzol.storage.models import (
+    Event,
+    PlanRevision,
+    PlanRevisionItem,
+    ProjectDiscussionSession,
+    Task,
+    WorkPackage,
+)
 from vuzol.storage.types import (
     PlanRevisionCreatedBy,
     PlanRevisionState,
@@ -83,6 +90,43 @@ async def _running_package(
     return created, session_id
 
 
+async def test_finish_live_package_releases_topic_and_records_cancelled_task(
+    postgres_dsn: str,
+) -> None:
+    _engine, factory = storage(postgres_dsn)
+    created, session_id = await _running_package(factory)
+
+    async with UnitOfWork(factory) as uow:
+        generation = await WorkPackageService(uow).finish_package(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=3,
+            user_id=42,
+        )
+
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        revision = await session.get(PlanRevision, created.revision_id)
+        discussion = await session.get(ProjectDiscussionSession, session_id)
+        event = await session.scalar(
+            select(Event)
+            .where(
+                Event.entity_id == created.package_id,
+                Event.event_type == "work_package.discarded",
+            )
+            .order_by(Event.created_at.desc())
+            .limit(1)
+        )
+
+    assert generation == 4
+    assert package is not None and package.status is WorkPackageStatus.DISCARDED
+    assert package.approved_revision_id is None
+    assert revision is not None and revision.state is PlanRevisionState.DISCARDED
+    assert discussion is not None and discussion.active_work_package_id is None
+    assert event is not None and event.payload["finished_by_user_id"] == 42
+
+
 def _command(
     action: PackageControlAction, created: RevisionResult, generation: int, key: str
 ) -> AuthoritativeControlCommand:
@@ -134,11 +178,8 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
     assert "Токены:" not in action_card.html
     labels = {label for row in action_card.callback_buttons for label, _ in row}
     assert "Повторить" not in labels
-    assert labels >= {
-        "Пропустить",
-        "Перепланировать",
-        "Завершить цепочку",
-    }
+    assert labels >= {"Перепланировать", "Завершить", "Обсудить"}
+    assert "Пропустить" not in labels
 
     ingress = PackageControlIngress(factory, enabled=True, authorized_user_ids=frozenset({42}))
     with pytest.raises(DomainError) as unsafe_retry:

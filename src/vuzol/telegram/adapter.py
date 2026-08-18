@@ -437,9 +437,9 @@ def _control_markup(
     if any(target is None for target in targets.values()):
         return None
     rows = [
-            [InlineKeyboardButton(labels[action], callback_data=f"v1:{action}:{targets[action]}")]
-            for action in actions
-        ]
+        [InlineKeyboardButton(labels[action], callback_data=f"v1:{action}:{targets[action]}")]
+        for action in actions
+    ]
     rows.extend(
         [InlineKeyboardButton(label, callback_data=data) for label, data in row]
         for row in callback_buttons

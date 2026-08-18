@@ -8,6 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import storage
 from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+from vuzol.discussion.domain import (
+    CapabilityProvisioning,
+    CapabilityRequirementDraft,
+    ComponentKind,
+    EnvironmentComponentDraft,
+    EnvironmentDeltaDraft,
+)
 from vuzol.discussion.service import RevisionResult
 from vuzol.storage.models import PlanRevision, Task, WorkPackageOpenDetail
 from vuzol.storage.types import PlanRevisionCreatedBy
@@ -52,6 +59,34 @@ def _plan() -> PlanDraft:
     )
 
 
+def _plan_with_environment() -> PlanDraft:
+    base = _plan()
+    return PlanDraft(
+        title=base.title,
+        items=base.items,
+        environment_delta=EnvironmentDeltaDraft(
+            upsert_components=(
+                EnvironmentComponentDraft(
+                    key="api",
+                    label="Public API",
+                    kind=ComponentKind.WEB_SERVICE,
+                    technology="Flask",
+                    run_command=("python", "-m", "app"),
+                    port=8000,
+                ),
+            ),
+            remove_components=("django",),
+            required_capabilities=(
+                CapabilityRequirementDraft(
+                    key="cloud-account",
+                    label="Cloud account",
+                    provisioning=CapabilityProvisioning.EXTERNAL_SETUP,
+                ),
+            ),
+        ),
+    )
+
+
 async def _create(
     factory: async_sessionmaker[AsyncSession],
 ) -> tuple[uuid.UUID, RevisionResult]:
@@ -91,6 +126,30 @@ async def test_plan_projection_is_pg_reconstructable_and_fenced(postgres_dsn: st
     assert all(callback.h8 == result.content_hash[:8] for callback in callbacks)
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(Task)) == 0
+    await engine.dispose()
+
+
+async def test_plan_projection_separates_stack_delta_from_work_items(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    async with UnitOfWork(factory) as uow:
+        session_id = await uow.discussions.create_session(
+            project_id="vuzol", chat_id=-1001, message_thread_id=93
+        )
+        result = await WorkPackageService(uow).create_draft(
+            session_id=session_id,
+            project_id="vuzol",
+            plan=_plan_with_environment(),
+            created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+            actor_type="planner_model",
+        )
+    async with factory() as session:
+        card = await build_work_package_plan_card(session, result.package_id, page=2)
+    assert "<b>Stack</b>" in card.html
+    assert "+ Public API · Flask" in card.html
+    assert "- django" in card.html
+    assert "Setup: Cloud account" in card.html
     await engine.dispose()
 
 

@@ -74,9 +74,7 @@ async def test_openai_adapter_uses_gpt5_chat_completion_parameters() -> None:
         return httpx.Response(
             200,
             json={
-                "choices": [
-                    {"message": {"content": '{"answer":"plan"}'}, "finish_reason": "stop"}
-                ]
+                "choices": [{"message": {"content": '{"answer":"plan"}'}, "finish_reason": "stop"}]
             },
         )
 
@@ -84,9 +82,7 @@ async def test_openai_adapter_uses_gpt5_chat_completion_parameters() -> None:
         transport=httpx.MockTransport(respond), base_url="https://api.openai.com/v1"
     ) as client:
         adapter = OpenAICompatibleAdapter(credential=SecretStr("test-key"), client=client)
-        request = provider_request(structured=True).model_copy(
-            update={"max_output_tokens": 1_000}
-        )
+        request = provider_request(structured=True).model_copy(update={"max_output_tokens": 1_000})
         selected = profile("profile").model_copy(
             update={
                 "model": "gpt-5-nano-2025-08-07",

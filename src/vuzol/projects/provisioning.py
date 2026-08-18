@@ -26,6 +26,7 @@ from vuzol.config import (
     merge_documents,
 )
 from vuzol.execution.git import GitError, LocalGit
+from vuzol.project_environment import record_detected_environment
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
@@ -34,6 +35,7 @@ from vuzol.storage.leasing import (
     retry_outbox_item,
 )
 from vuzol.storage.models import (
+    ProjectEnvironmentRevision,
     ProjectProvisioning,
     Task,
     TelegramIntakeMessage,
@@ -54,6 +56,44 @@ from vuzol.telegram.workspace import (
 from vuzol.workflows.transitions import transition_task
 
 PROJECT_PROVISIONING_DESTINATIONS = frozenset({"project_provisioning"})
+
+
+async def reconcile_imported_environments(
+    runtime: RuntimeConfiguration,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    """Backfill conservative contracts for imports created before environment versioning."""
+
+    async with session_factory.begin() as session:
+        rows = tuple(
+            (
+                await session.scalars(
+                    select(ProjectProvisioning)
+                    .outerjoin(
+                        ProjectEnvironmentRevision,
+                        ProjectEnvironmentRevision.project_id == ProjectProvisioning.project_id,
+                    )
+                    .where(
+                        ProjectProvisioning.status == ProjectProvisioningStatus.COMPLETED,
+                        ProjectProvisioning.source_repository_url.is_not(None),
+                        ProjectEnvironmentRevision.id.is_(None),
+                    )
+                    .order_by(ProjectProvisioning.created_at)
+                )
+            ).all()
+        )
+        reconciled = 0
+        for row in rows:
+            repository = (runtime.settings.repository_root / row.repository_path).resolve()
+            repository.relative_to(runtime.settings.repository_root.resolve())
+            if repository.is_dir():
+                await record_detected_environment(
+                    session,
+                    project_id=row.project_id,
+                    repository=repository,
+                )
+                reconciled += 1
+        return reconciled
 
 
 class ServiceReloader(Protocol):
@@ -125,7 +165,7 @@ class RegistryOverlayWriter:
                 "id": provisioning.project_id,
                 "display_name": provisioning.display_name,
                 "repository_path": Path(provisioning.repository_path),
-                "default_branch": provisioning.default_branch,
+                "default_branch": provisioning.default_branch or template.default_branch,
                 "summary_path": None,
                 "validation_commands": validation_commands,
                 "allowed_capabilities": frozenset(
@@ -305,6 +345,12 @@ class ProjectProvisioningService:
             if row.status is ProjectProvisioningStatus.PENDING:
                 row.status = ProjectProvisioningStatus.REPOSITORY_CREATED
                 row.default_branch = default_branch
+                if row.source_repository_url is not None:
+                    await record_detected_environment(
+                        session,
+                        project_id=row.project_id,
+                        repository=repository,
+                    )
         if topic_thread_id is None:
             async with self._factory.begin() as session:
                 row = await session.get(ProjectProvisioning, provisioning_id, with_for_update=True)

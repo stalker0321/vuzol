@@ -68,7 +68,14 @@ short. Choose the smallest coherent number of plan items justified by the work, 
 There is no preferred or default item count. Do not pad a plan to four items or split work merely
 to reach a count; split only at independently executable and verifiable boundaries. Respect an
 explicit item count requested by the user. Every plan item summary must be a complete, standalone
-title of at most 80 characters; never shorten one by cutting a word."""
+title of at most 80 characters; never shorten one by cutting a word. For a plan_request, keep the
+work breakdown in items and describe proposed technical changes separately in environment_delta.
+Do not infer a permanent stack merely from an early product idea. Add or replace components only
+when the current discussion has established that choice. Use remove_components when the user
+rejects an existing technology. A web_service component requires an argv-style run_command, port,
+and optional healthcheck_path. Non-web projects do not require a preview or web component. Mark
+local runtimes and tools automatic, secrets or privileged external resources approval_required,
+and unavailable user/account setup external_setup."""
 
 
 class OpenAICompatibleInterpreter:

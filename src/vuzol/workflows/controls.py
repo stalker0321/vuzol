@@ -284,9 +284,7 @@ async def retry_blocked_step(
         }
     else:
         step.payload = {
-            key: value
-            for key, value in step.payload.items()
-            if key != "retry_failed_profile_id"
+            key: value for key, value in step.payload.items() if key != "retry_failed_profile_id"
         }
     run = await session.scalar(select(Run).where(Run.id == step.run_id).with_for_update())
     assert run is not None

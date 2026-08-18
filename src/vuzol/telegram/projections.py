@@ -1299,9 +1299,7 @@ async def enqueue_task_status_projection(
                     operation_type="render_action",
                     linked_entity_type="work_package",
                     linked_entity_id=materialization.work_package_id,
-                    idempotency_key=(
-                        f"wp:projection:package-result:{task.id}:{task.version}"
-                    ),
+                    idempotency_key=(f"wp:projection:package-result:{task.id}:{task.version}"),
                     payload={"package_id": str(materialization.work_package_id)},
                 )
             )
@@ -1360,10 +1358,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         )
         if step is None:
             step = await session.scalar(
-                select(Step)
-                .where(Step.run_id == run.id)
-                .order_by(Step.ordinal.desc())
-                .limit(1)
+                select(Step).where(Step.run_id == run.id).order_by(Step.ordinal.desc()).limit(1)
             )
     redo_requested = await session.scalar(
         select(Event.id)
@@ -1413,8 +1408,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     status_label = (
         "Работа завершена"
         if final_package_result or final_package_delivery_failure
-        else
-        _task_outcome_label(task.status)
+        else _task_outcome_label(task.status)
         if task.status in USER_REPORTABLE_TASK_STATUSES
         else user_status_label(task.status)
     )
@@ -1552,9 +1546,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             )
         callback_buttons = (tuple(package_actions),)
     projection_revision = (
-        task.version
-        if package is None
-        else task.version * 10_000 + package.version
+        task.version if package is None else task.version * 10_000 + package.version
     )
     return StatusCard(
         task_id=task.id,

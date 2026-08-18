@@ -304,9 +304,7 @@ class WorkPackageSequencer:
         if link is None:
             raise DomainError("failure_context_missing")
         item = await self._uow.session.scalar(
-            select(PlanRevisionItem).where(
-                PlanRevisionItem.id == link.plan_revision_item_id
-            )
+            select(PlanRevisionItem).where(PlanRevisionItem.id == link.plan_revision_item_id)
         )
         discussion = await self._uow.session.get(ProjectDiscussionSession, package.session_id)
         if item is None or discussion is None:

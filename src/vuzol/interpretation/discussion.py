@@ -8,7 +8,15 @@ from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
 
-from vuzol.discussion.domain import PlanDraft, PlanItemDraft
+from vuzol.discussion.domain import (
+    CapabilityProvisioning,
+    CapabilityRequirementDraft,
+    ComponentKind,
+    EnvironmentComponentDraft,
+    EnvironmentDeltaDraft,
+    PlanDraft,
+    PlanItemDraft,
+)
 from vuzol.discussion.memory import MemoryPack
 from vuzol.interpretation.domain import FrozenModel, SuggestedComplexity
 from vuzol.storage.types import EstimatedComplexity, InteractionMode, RiskLevel
@@ -94,6 +102,41 @@ class DiscussionPlanItem(FrozenModel):
     estimated_complexity: SuggestedComplexity
 
 
+class EnvironmentComponentProposal(FrozenModel):
+    key: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
+    label: str = Field(min_length=1, max_length=100)
+    kind: ComponentKind
+    technology: str = Field(min_length=1, max_length=100)
+    version: str | None = Field(default=None, max_length=50)
+    run_command: tuple[str, ...] = Field(default=(), max_length=20)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    healthcheck_path: str | None = Field(default=None, pattern=r"^/", max_length=200)
+    artifact_patterns: tuple[str, ...] = Field(default=(), max_length=20)
+
+    @model_validator(mode="after")
+    def validate_runtime_shape(self) -> EnvironmentComponentProposal:
+        if any(not value or len(value) > 500 or "\x00" in value for value in self.run_command):
+            raise ValueError("run command arguments must be bounded non-empty strings")
+        if self.kind is ComponentKind.WEB_SERVICE and (not self.run_command or self.port is None):
+            raise ValueError("web service requires run_command and port")
+        return self
+
+
+class CapabilityRequirementProposal(FrozenModel):
+    key: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
+    label: str = Field(min_length=1, max_length=100)
+    provisioning: CapabilityProvisioning = CapabilityProvisioning.AUTOMATIC
+    reason: str = Field(default="", max_length=500)
+
+
+class EnvironmentDeltaProposal(FrozenModel):
+    upsert_components: tuple[EnvironmentComponentProposal, ...] = Field(default=(), max_length=20)
+    remove_components: tuple[str, ...] = Field(default=(), max_length=20)
+    required_capabilities: tuple[CapabilityRequirementProposal, ...] = Field(
+        default=(), max_length=30
+    )
+
+
 class PlanRequestPayload(FrozenModel):
     intent: PlanRequestIntent
     base_revision_id: uuid.UUID | None = None
@@ -101,6 +144,7 @@ class PlanRequestPayload(FrozenModel):
     item_local_id: str | None = Field(default=None, max_length=64)
     title: str = Field(min_length=1, max_length=200)
     items: tuple[DiscussionPlanItem, ...] = Field(min_length=1, max_length=20)
+    environment_delta: EnvironmentDeltaProposal = EnvironmentDeltaProposal()
     rationale: str | None = Field(default=None, max_length=2_000)
 
 
@@ -450,6 +494,32 @@ def plan_draft_from_interpretation(result: DiscussionInterpretation) -> PlanDraf
                 estimated_complexity=EstimatedComplexity(item.estimated_complexity.value),
             )
             for item in request.items
+        ),
+        environment_delta=EnvironmentDeltaDraft(
+            upsert_components=tuple(
+                EnvironmentComponentDraft(
+                    key=component.key,
+                    label=component.label,
+                    kind=component.kind,
+                    technology=component.technology,
+                    version=component.version,
+                    run_command=component.run_command,
+                    port=component.port,
+                    healthcheck_path=component.healthcheck_path,
+                    artifact_patterns=component.artifact_patterns,
+                )
+                for component in request.environment_delta.upsert_components
+            ),
+            remove_components=request.environment_delta.remove_components,
+            required_capabilities=tuple(
+                CapabilityRequirementDraft(
+                    key=capability.key,
+                    label=capability.label,
+                    provisioning=capability.provisioning,
+                    reason=capability.reason,
+                )
+                for capability in request.environment_delta.required_capabilities
+            ),
         ),
     )
 

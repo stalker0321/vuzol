@@ -24,9 +24,119 @@ from vuzol.projects.provisioning import (
     FixedSystemdReloader,
     ProjectProvisioningService,
     RegistryOverlayWriter,
+    reconcile_imported_environments,
     run_provisioning_loop,
 )
 from vuzol.storage.models import ProjectProvisioning
+
+
+class AsyncContext:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    async def __aenter__(self) -> object:
+        return self.value
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+@pytest.mark.anyio
+async def test_reconcile_imported_environments_records_only_existing_repositories(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    repository_root = tmp_path / "repositories"
+    (repository_root / "present").mkdir(parents=True)
+    settings = Settings(environment="test", repository_root=repository_root)
+    runtime = RuntimeConfiguration(
+        settings=settings,
+        registries=build_bundle(RegistryDocument(), settings),
+    )
+    rows = [
+        MagicMock(project_id="present", repository_path="present"),
+        MagicMock(project_id="missing", repository_path="missing"),
+    ]
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
+    factory = MagicMock()
+    factory.begin.return_value = AsyncContext(session)
+    record = AsyncMock()
+    monkeypatch.setattr(
+        "vuzol.projects.provisioning.record_detected_environment",
+        record,
+    )
+
+    count = await reconcile_imported_environments(runtime, factory)
+
+    assert count == 1
+    record.assert_awaited_once_with(
+        session,
+        project_id="present",
+        repository=repository_root / "present",
+    )
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        ({"Makefile": "test:\n\ttrue\n"}, ("make", "test")),
+        ({"package.json": '{"scripts":{"test":"node --test"}}'}, ("npm", "test")),
+        ({"pyproject.toml": "[project]\nname='demo'\n"}, ("pytest",)),
+        ({"pytest.ini": "[pytest]\n"}, ("pytest",)),
+        ({"server.js": "console.log('ok')\n"}, ("node", "--test")),
+        ({"README.md": "# Demo\n"}, None),
+    ],
+)
+def test_import_validation_detection_is_conservative(
+    tmp_path: Path,
+    files: dict[str, str],
+    expected: tuple[str, ...] | None,
+) -> None:
+    for name, content in files.items():
+        (tmp_path / name).write_text(content)
+
+    commands = RegistryOverlayWriter._import_validation_commands(tmp_path)
+
+    if expected is None:
+        assert commands == ()
+    else:
+        assert len(commands) == 1
+        assert commands[0].argv == expected
+
+
+@pytest.mark.parametrize("content", ["not json", "{}", '{"scripts":{}}'])
+def test_import_package_without_test_script_does_not_invent_command(
+    tmp_path: Path, content: str
+) -> None:
+    (tmp_path / "package.json").write_text(content)
+
+    assert RegistryOverlayWriter._import_validation_commands(tmp_path) == ()
+
+
+@pytest.mark.parametrize(
+    "server_marker",
+    ["server.js", "app.py", "manage.py", "Dockerfile", "compose.yaml", "docker-compose.yml"],
+)
+def test_import_server_marker_disables_static_delivery(tmp_path: Path, server_marker: str) -> None:
+    (tmp_path / "index.html").write_text("<main>Demo</main>")
+    (tmp_path / server_marker).write_text("")
+
+    assert RegistryOverlayWriter._import_static_deployment(tmp_path, "demo") is None
+
+
+def test_import_static_site_gets_project_scoped_delivery(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("<main>Demo</main>")
+
+    deployment = RegistryOverlayWriter._import_static_deployment(tmp_path, "demo")
+
+    assert deployment is not None
+    assert deployment.url_path == "demo"
+
+
+def test_import_non_web_project_has_no_delivery(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Library")
+
+    assert RegistryOverlayWriter._import_static_deployment(tmp_path, "library") is None
 
 
 def test_registry_overlay_adds_one_inherited_project_and_topic_idempotently(

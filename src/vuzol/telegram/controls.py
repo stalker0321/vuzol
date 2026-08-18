@@ -289,9 +289,7 @@ class TelegramControlService:
                 or callback.revision_number != revision.revision_number
                 or callback.h8 != revision.content_hash[:8]
                 or package.head_revision_id != revision.id
-                or (
-                    message_role != "work_package_plan" and package.version != generation
-                )
+                or (message_role != "work_package_plan" and package.version != generation)
             ):
                 raise DomainError("stale_projection")
             if message_role == "work_package_plan":

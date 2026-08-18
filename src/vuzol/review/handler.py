@@ -6,7 +6,7 @@ import re
 import uuid
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -317,8 +317,7 @@ class ResultReviewHandler:
             raise ValueError("review predecessor must be a validate step")
         if predecessor.status is not StepStatus.COMPLETED:
             raise ValueError("validate predecessor is not completed")
-        assert isinstance(predecessor, Step)
-        return predecessor
+        return cast(Step, predecessor)
 
 
 def mechanical_findings(diff: bytes) -> tuple[ReviewFinding, ...]:

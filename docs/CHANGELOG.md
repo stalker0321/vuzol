@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added versioned project environment contracts: plan approval now atomically versions explicit
+  Stack changes instead of inferring a permanent stack from the first project message; imported
+  projects receive conservative discovery, capability preflight fails closed with `Needs setup`,
+  non-web result evidence is typed, and Node.js services can use a managed test preview;
 - added `/import` intake for existing public GitHub repositories. Imported projects are cloned by
   the privileged provisioner, retain their remote default branch, receive conservative validation
   and deployment defaults, and never expose Git credentials or arbitrary host paths to workers;

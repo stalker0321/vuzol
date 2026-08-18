@@ -140,6 +140,7 @@ async def decide_result(
     approval.deciding_user_id = deciding_user_id
     approval.decided_at = func.now()
     actor_id = str(deciding_user_id)
+    capability_install = approval.requested_action == "install_capabilities"
     if decision == "approve":
         approval.status = ApprovalStatus.APPROVED
         await transition_step(
@@ -148,8 +149,10 @@ async def decide_result(
         await transition_task(
             session, task, TaskStatus.EXECUTING, actor_type="user", actor_id=actor_id
         )
-        event_type = "result.approved"
+        event_type = "capability_installation.approved" if capability_install else "result.approved"
     elif decision == "redo":
+        if capability_install:
+            raise ValueError("capability installation does not support redo")
         approval.status = ApprovalStatus.REJECTED
         await transition_step(
             session, step, StepStatus.CANCELLED, actor_type="user", actor_id=actor_id
@@ -172,7 +175,7 @@ async def decide_result(
         await transition_task(
             session, task, TaskStatus.CANCELLED, actor_type="user", actor_id=actor_id
         )
-        event_type = "result.rejected"
+        event_type = "capability_installation.rejected" if capability_install else "result.rejected"
     else:
         raise ValueError(f"unsupported result decision: {decision}")
     session.add(

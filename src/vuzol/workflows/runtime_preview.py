@@ -102,7 +102,12 @@ class RuntimePreviewHandler:
         contract = {} if environment is None else environment.contract
         blocked = tuple(
             check
-            for check in preflight_capabilities(contract)
+            for check in preflight_capabilities(
+                contract,
+                managed_toolchain_root=(
+                    self._runtime.settings.capability_provisioning.toolchain_root
+                ),
+            )
             if check.state is not CapabilityState.READY
         )
         if blocked:

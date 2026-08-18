@@ -8,7 +8,7 @@ from vuzol.workflows.definitions import WORKFLOW_REGISTRY
 from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow, WorkflowDefinitionError
 
 TASK_WORKFLOWS = {
-    TaskType.CODING: "coding.v2",
+    TaskType.CODING: "coding.v3",
     TaskType.ARCHITECTURE: "architecture.v1",
     TaskType.RESEARCH: "research.v1",
     TaskType.INFRASTRUCTURE: "infrastructure.v1",

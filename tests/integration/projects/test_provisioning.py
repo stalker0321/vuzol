@@ -26,6 +26,7 @@ from vuzol.interpretation.domain import (
 from vuzol.projects.provisioning import ProjectProvisioningService
 from vuzol.storage.models import (
     Interpretation,
+    ProjectEnvironmentRevision,
     ProjectNamingRequest,
     ProjectProvisioning,
     Task,
@@ -345,11 +346,17 @@ def test_provisioner_creates_repository_topic_overlay_and_welcome(
         async with factory() as session:
             row = await session.get(ProjectProvisioning, provisioning_id)
             item = await session.get(TransactionalOutbox, outbox_id)
+            environment = await session.scalar(
+                select(ProjectEnvironmentRevision).where(
+                    ProjectEnvironmentRevision.project_id == "notes"
+                )
+            )
             task = await session.get(Task, row.task_id) if row is not None else None
             assert row is not None and row.status is ProjectProvisioningStatus.COMPLETED
             assert row.topic_thread_id == 41 and row.configuration_revision
             assert task is not None and task.status is TaskStatus.COMPLETED
             assert item is not None and item.status is DeliveryStatus.DELIVERED
+            assert environment is not None and environment.contract["components"] == {}
 
         telegram = FakeTelegramClient(next_message_id=80)
         delivery = TelegramDeliveryService(

@@ -5,6 +5,7 @@ from pytest import MonkeyPatch, raises
 
 from vuzol.config import (
     BackupSettings,
+    CapabilityProvisioningSettings,
     ExecutionSettings,
     InterpretationSettings,
     Settings,
@@ -31,6 +32,21 @@ def test_settings_accept_valid_values() -> None:
 def test_settings_reject_invalid_port() -> None:
     with raises(ValidationError, match="less than or equal to 65535"):
         Settings(port=70000)
+
+
+def test_capability_provisioning_is_default_off_and_uses_separate_absolute_roots() -> None:
+    configured = CapabilityProvisioningSettings()
+    assert configured.enabled is False
+    assert configured.allowed_capabilities == ("android-sdk",)
+    with raises(ValidationError, match="absolute"):
+        CapabilityProvisioningSettings(bundle_root=Path("bundles"))
+    with raises(ValidationError, match="separate"):
+        CapabilityProvisioningSettings(
+            bundle_root=Path("/var/lib/vuzol"),
+            toolchain_root=Path("/var/lib/vuzol/toolchains"),
+        )
+    with raises(ValidationError, match="unsafe key"):
+        CapabilityProvisioningSettings(allowed_capabilities=("Bad SDK",))
 
 
 def test_telegram_dogfood_requires_explicit_safe_allowlist() -> None:

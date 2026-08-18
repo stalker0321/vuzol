@@ -29,14 +29,20 @@ Updated: 2026-08-18
   evidence, while `coding.v1` remains available for in-flight compatibility.
 - Added artifact types to the result approval card and bound artifact IDs, types, sizes and content
   hashes into the immutable approval envelope.
+- Added `coding.v3` with a separate capability-installation approval before project execution.
+  The first adapter installs only hash-pinned, operator-staged Android SDK/JDK/Gradle tar bundles
+  into managed storage, default-off, without shell/package-manager/network access. Approved
+  toolchains are mounted read-only only for artifact production; plan approval alone never grants
+  installation permission.
 
 The pre-existing untracked root-owned `package-lock.json` belongs to the user and must remain
 untracked and untouched.
 
 ## Still required after this revision
 
-1. Add host adapters beyond Node.js. Python/Android are detected by preflight but runtime/build
-   provisioning must remain `Needs setup` until an explicit adapter is implemented.
+1. Add additional offline adapters beyond Android and document the operator process that assembles,
+   audits and stages production toolchain bundles. Python and Node already use installed runtimes;
+   unknown runtimes remain `Needs setup`.
 2. Replace the free-port probe with a stronger reservation or supervised socket handoff if preview
    concurrency becomes high.
 3. Decide whether to add wildcard `*.test.hryshyn.dev`; it removes the absolute-path limitation but

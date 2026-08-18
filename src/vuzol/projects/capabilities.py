@@ -6,6 +6,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 
 class CapabilityState(StrEnum):
@@ -25,7 +26,6 @@ class CapabilityCheck:
 _EXECUTABLES = {
     "node-runtime": "node",
     "python-runtime": "python3",
-    "android-sdk": "adb",
     "git": "git",
 }
 
@@ -34,6 +34,7 @@ def preflight_capabilities(
     contract: dict[str, object],
     *,
     which: Callable[[str], str | None] = shutil.which,
+    managed_toolchain_root: Path | None = None,
 ) -> tuple[CapabilityCheck, ...]:
     """Classify every declared requirement without mutating the host."""
 
@@ -61,6 +62,19 @@ def preflight_capabilities(
                 )
             )
             continue
+        if key == "android-sdk":
+            state = (
+                CapabilityState.READY
+                if _managed_capability_ready(key, managed_toolchain_root)
+                else CapabilityState.NEEDS_SETUP
+            )
+            detail = (
+                "managed Android toolchain is available"
+                if state is CapabilityState.READY
+                else "managed Android toolchain is not installed"
+            )
+            checks.append(CapabilityCheck(key, label, state, detail))
+            continue
         executable = _EXECUTABLES.get(key)
         if executable is None:
             checks.append(
@@ -79,6 +93,21 @@ def preflight_capabilities(
                 CapabilityCheck(key, label, CapabilityState.READY, f"{executable} is available")
             )
     return tuple(checks)
+
+
+def _managed_capability_ready(key: str, root: Path | None) -> bool:
+    if key != "android-sdk" or root is None:
+        return False
+    target = root / "android-sdk"
+    required = (
+        target / "android-sdk/platform-tools/adb",
+        target / "jdk/bin/java",
+        target / "gradle/bin/gradle",
+    )
+    return all(
+        path.is_file() and not path.is_symlink() and path.stat().st_mode & 0o111
+        for path in required
+    )
 
 
 def blocking_capabilities(checks: tuple[CapabilityCheck, ...]) -> tuple[CapabilityCheck, ...]:

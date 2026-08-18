@@ -10,6 +10,10 @@ from vuzol.config import Capability, get_runtime_configuration
 from vuzol.execution.git import LocalGit
 from vuzol.execution.result_apply import ResultApplyHandler
 from vuzol.observability import configure_logging, get_logger
+from vuzol.projects.capability_provisioning import (
+    CapabilityProvisioningHandler,
+    OfflineCapabilityInstaller,
+)
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
@@ -42,12 +46,16 @@ async def run() -> None:
         owner = f"{socket.gethostname()}:{os.getpid()}:applier"
         controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
         handler = ResultApplyHandler(factory, runtime.registries, LocalGit())
+        capability_handler = CapabilityProvisioningHandler(
+            factory,
+            OfflineCapabilityInstaller(settings.capability_provisioning),
+        )
         worker = WorkflowWorker(
             settings,
             factory,
             owner=f"{owner}:apply",
-            handlers={"approval": handler},
-            capabilities=frozenset({Capability.GIT}),
+            handlers={"approval": handler, "ensure_capabilities": capability_handler},
+            capabilities=frozenset({Capability.GIT, Capability.HOST_ADMIN}),
             queue_classes=frozenset({QueueClass.PRIVILEGED}),
         )
         stop = asyncio.Event()

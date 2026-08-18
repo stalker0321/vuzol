@@ -36,7 +36,7 @@ from vuzol.workflows.transitions import transition_run, transition_step, transit
 POLICY_REVISION = hashlib.sha256(b"step-06-workflow-policy-v1").hexdigest()
 WORKFLOW_ALIASES = {
     "adaptive_task": None,
-    "coding_task": "coding.v2",
+    "coding_task": "coding.v3",
     "simple_model_task": "simple_model.v1",
     "research_task": "research.v1",
     "infrastructure_task": "infrastructure.v1",
@@ -45,7 +45,7 @@ WORKFLOW_ALIASES = {
 
 def configured_topic_workflow(default_workflow: str, task_type: TaskType) -> str | None:
     configured = WORKFLOW_ALIASES.get(default_workflow, default_workflow)
-    if configured in {"coding.v1", "coding.v2"} and task_type is not TaskType.CODING:
+    if configured in {"coding.v1", "coding.v2", "coding.v3"} and task_type is not TaskType.CODING:
         return None
     return configured
 

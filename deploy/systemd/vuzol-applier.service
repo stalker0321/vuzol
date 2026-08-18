@@ -8,6 +8,7 @@ Type=simple
 User=vuzol-executor
 Group=vuzol-executor
 EnvironmentFile=/etc/vuzol/executor.env
+StateDirectory=vuzol/toolchains
 ExecStart=/opt/vuzol/.venv/bin/vuzol-applier
 Restart=on-failure
 RestartSec=5
@@ -26,6 +27,7 @@ RestrictRealtime=true
 SystemCallArchitectures=native
 ReadWritePaths=/srv/vuzol/repositories
 ReadOnlyPaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /etc/vuzol
+ReadWritePaths=/var/lib/vuzol/toolchains
 
 [Install]
 WantedBy=multi-user.target

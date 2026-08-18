@@ -75,7 +75,10 @@ when the current discussion has established that choice. Use remove_components w
 rejects an existing technology. A web_service component requires an argv-style run_command, port,
 and optional healthcheck_path. Non-web projects do not require a preview or web component. Mark
 local runtimes and tools automatic, secrets or privileged external resources approval_required,
-and unavailable user/account setup external_setup."""
+and unavailable user/account setup external_setup. Every non-web component must declare a bounded
+argv-style acceptance run_command. Android components must also declare android-sdk and use a
+Gradle acceptance command plus an APK artifact pattern; never claim that approving the plan itself
+authorizes toolchain installation. Missing managed tools require a separate runtime approval."""
 
 
 class OpenAICompatibleInterpreter:

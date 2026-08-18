@@ -54,7 +54,7 @@ _ARTIFACT_EXECUTABLES = {
     "make": "/usr/bin/make",
     "node": "/usr/bin/node",
     "npm": "/usr/bin/npm",
-    "gradle": "/usr/bin/gradle",
+    "gradle": "/toolchains/android-sdk/gradle/bin/gradle",
     "./gradlew": "/workspace/gradlew",
 }
 
@@ -293,7 +293,9 @@ class ExecutionEnvelopeFactory:
             provider_attempt=1,
             lease_generation=request.lease.generation,
         )
-        return await self._build_validation_envelope(context, normalized, timeout_seconds)
+        return await self._build_validation_envelope(
+            context, normalized, timeout_seconds, include_toolchains=True
+        )
 
     async def build_canonicalizer(
         self,
@@ -323,6 +325,8 @@ class ExecutionEnvelopeFactory:
         context: GateExecutionContext,
         argv: tuple[str, ...],
         timeout_seconds: int,
+        *,
+        include_toolchains: bool = False,
     ) -> ProcessEnvelope:
         async with self._factory() as session:
             worktree = await session.get(Worktree, context.worktree_id)
@@ -352,6 +356,64 @@ class ExecutionEnvelopeFactory:
                 raise ValueError("sandbox seccomp profile is not configured")
             worktree_path = contained(self._worktree_root, Path(worktree.path))
             git_metadata_path = _worktree_git_metadata(worktree_path)
+            mounts = [
+                SandboxMount(
+                    source=worktree_path,
+                    target=Path("/workspace"),
+                    mode=MountMode.READ_WRITE,
+                    purpose="finalizer-worktree",
+                ),
+                SandboxMount(
+                    source=git_metadata_path,
+                    target=Path("/workspace/.git"),
+                    mode=MountMode.READ_ONLY,
+                    purpose="worktree-git-metadata",
+                ),
+            ]
+            environment = {
+                "HOME": "/tmp/home",  # noqa: S108 - container-scoped tmpfs
+                "CI": "1",
+                "PATH": "/opt/vuzol-validation/bin:/usr/local/bin:/usr/bin:/bin",
+                "VIRTUAL_ENV": "/opt/vuzol-validation",
+                "UV_PROJECT_ENVIRONMENT": "/opt/vuzol-validation",
+                "UV_NO_SYNC": "1",
+                "UV_OFFLINE": "1",
+                "UV_CACHE_DIR": "/tmp/uv-cache",  # noqa: S108
+                "PYTHONPATH": "/workspace/src",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "COVERAGE_FILE": "/tmp/.coverage",  # noqa: S108
+                "RUFF_CACHE_DIR": "/tmp/ruff-cache",  # noqa: S108
+                "MYPY_CACHE_DIR": "/tmp/mypy-cache",  # noqa: S108
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "/workspace",
+            }
+            toolchain_root = self._settings.capability_provisioning.toolchain_root
+            if include_toolchains and toolchain_root.is_dir():
+                mounts.append(
+                    SandboxMount(
+                        source=trusted_root(toolchain_root, create=False),
+                        target=Path("/toolchains"),
+                        mode=MountMode.READ_ONLY,
+                        purpose="approved-capability-toolchains",
+                    )
+                )
+                environment.update(
+                    {
+                        "ANDROID_HOME": "/toolchains/android-sdk/android-sdk",
+                        "ANDROID_SDK_ROOT": "/toolchains/android-sdk/android-sdk",
+                        "JAVA_HOME": "/toolchains/android-sdk/jdk",
+                        "GRADLE_HOME": "/toolchains/android-sdk/gradle",
+                        "PATH": (
+                            "/toolchains/android-sdk/gradle/bin:"
+                            "/toolchains/android-sdk/jdk/bin:"
+                            "/toolchains/android-sdk/android-sdk/platform-tools:"
+                            + environment["PATH"]
+                        ),
+                    }
+                )
             spec = SandboxSpec(
                 image=sandbox.image,
                 uid=sandbox.uid,
@@ -359,20 +421,7 @@ class ExecutionEnvelopeFactory:
                 seccomp_profile=seccomp_profile,
                 seccomp_profile_sha256=seccomp_digest,
                 working_directory=Path("/workspace"),
-                mounts=(
-                    SandboxMount(
-                        source=worktree_path,
-                        target=Path("/workspace"),
-                        mode=MountMode.READ_WRITE,
-                        purpose="finalizer-worktree",
-                    ),
-                    SandboxMount(
-                        source=git_metadata_path,
-                        target=Path("/workspace/.git"),
-                        mode=MountMode.READ_ONLY,
-                        purpose="worktree-git-metadata",
-                    ),
-                ),
+                mounts=tuple(mounts),
                 cpu_count=sandbox.cpu_count,
                 memory_bytes=sandbox.memory_bytes,
                 pids_limit=sandbox.pids_limit,
@@ -382,26 +431,7 @@ class ExecutionEnvelopeFactory:
                 timeout_seconds=min(sandbox.timeout_seconds, timeout_seconds),
                 stop_grace_seconds=sandbox.stop_grace_seconds,
                 network_disabled=True,
-                environment={
-                    "HOME": "/tmp/home",  # noqa: S108 - container-scoped tmpfs
-                    "CI": "1",
-                    "PATH": "/opt/vuzol-validation/bin:/usr/local/bin:/usr/bin:/bin",
-                    "VIRTUAL_ENV": "/opt/vuzol-validation",
-                    "UV_PROJECT_ENVIRONMENT": "/opt/vuzol-validation",
-                    "UV_NO_SYNC": "1",
-                    "UV_OFFLINE": "1",
-                    "UV_CACHE_DIR": "/tmp/uv-cache",  # noqa: S108
-                    "PYTHONPATH": "/workspace/src",
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    "COVERAGE_FILE": "/tmp/.coverage",  # noqa: S108
-                    "RUFF_CACHE_DIR": "/tmp/ruff-cache",  # noqa: S108
-                    "MYPY_CACHE_DIR": "/tmp/mypy-cache",  # noqa: S108
-                    "GIT_CONFIG_NOSYSTEM": "1",
-                    "GIT_TERMINAL_PROMPT": "0",
-                    "GIT_CONFIG_COUNT": "1",
-                    "GIT_CONFIG_KEY_0": "safe.directory",
-                    "GIT_CONFIG_VALUE_0": "/workspace",
-                },
+                environment=environment,
             )
             return ProcessEnvelope(
                 task_id=context.task_id,

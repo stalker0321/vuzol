@@ -98,6 +98,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     mock_settings = MagicMock()
     mock_settings.worktree_root = worktree_root
     mock_settings.artifact_root = artifact_root
+    mock_settings.capability_provisioning.toolchain_root = tmp_path / "toolchains"
     seccomp_profile, seccomp_digest = _seccomp_profile(tmp_path)
     mock_settings.execution.sandbox_seccomp_profile = seccomp_profile
     mock_settings.execution.sandbox_seccomp_profile_sha256 = seccomp_digest
@@ -267,6 +268,7 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
         step_id=step_id,
         lease=MagicMock(generation=1),
     )
+    mock_settings.capability_provisioning.toolchain_root.mkdir()
     artifact_envelope = await envf.build_artifact(
         artifact_request,
         worktree_id=mock_wt.id,
@@ -279,6 +281,11 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
         "build",
     )
     assert artifact_envelope.sandbox.network_disabled is True
+    assert artifact_envelope.sandbox.mounts[-1].target == Path("/toolchains")
+    assert artifact_envelope.sandbox.mounts[-1].mode is MountMode.READ_ONLY
+    assert artifact_envelope.sandbox.environment["ANDROID_HOME"] == (
+        "/toolchains/android-sdk/android-sdk"
+    )
     with pytest.raises(ValueError, match="trusted registry"):
         await envf.build_gate(
             gate_context,
@@ -449,7 +456,7 @@ def test_coding_workflow_review_is_retryable() -> None:
     assert review.retry_class is RetryClass.TRANSIENT
 
 
-def test_current_coding_workflow_produces_artifacts_before_static_delivery() -> None:
+def test_coding_v2_produces_artifacts_before_static_delivery() -> None:
     from vuzol.workflows.definitions import WORKFLOW_REGISTRY
 
     coding = WORKFLOW_REGISTRY["coding.v2"]
@@ -459,6 +466,18 @@ def test_current_coding_workflow_produces_artifacts_before_static_delivery() -> 
     assert producer.predecessors == ("review",)
     assert producer.idempotency_class is IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
     assert static_build.predecessors == ("produce_artifacts",)
+
+
+def test_current_coding_workflow_checks_capabilities_before_context() -> None:
+    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
+
+    coding = WORKFLOW_REGISTRY["coding.v3"]
+    capability = next(step for step in coding.steps if step.key == "ensure_capabilities")
+    context = next(step for step in coding.steps if step.key == "prepare_context")
+
+    assert capability.predecessors == ("plan",)
+    assert capability.idempotency_class is IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
+    assert context.predecessors == ("ensure_capabilities",)
 
 
 def test_grok_execution_boundary_accepts_only_canonical_runtime() -> None:

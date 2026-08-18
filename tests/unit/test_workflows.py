@@ -61,6 +61,7 @@ def test_definitions_are_valid_and_stable() -> None:
         "research.v1",
         "infrastructure.v1",
         "coding.v2",
+        "coding.v3",
     ]
     for definition in WORKFLOW_DEFINITIONS:
         validate_definition(definition)
@@ -76,6 +77,7 @@ def test_compiler_resolves_optional_predecessors() -> None:
     assert without_optional.steps[0].status is StepStatus.COMPLETED
     assert [step.key for step in without_optional.steps] == [
         "interpret",
+        "ensure_capabilities",
         "prepare_context",
         "prepare_worktree",
         "execute_code",
@@ -129,7 +131,7 @@ def test_architecture_workflow_uses_read_only_agent_without_delivery_gates() -> 
 def test_project_topics_select_architecture_and_current_coding_workflow() -> None:
     assert configured_topic_workflow("adaptive_task", TaskType.ARCHITECTURE) is None
     assert configured_topic_workflow("coding_task", TaskType.ARCHITECTURE) is None
-    assert configured_topic_workflow("coding_task", TaskType.CODING) == "coding.v2"
+    assert configured_topic_workflow("coding_task", TaskType.CODING) == "coding.v3"
 
 
 def test_legacy_coding_workflow_remains_available_without_artifact_production() -> None:
@@ -141,6 +143,16 @@ def test_legacy_coding_workflow_remains_available_without_artifact_production() 
 
     assert workflow.version == "1"
     assert "produce_artifacts" not in [step.key for step in workflow.steps]
+
+
+def test_previous_coding_v2_remains_available_without_capability_installation() -> None:
+    workflow = compile_workflow(
+        draft(), interpretation_id=uuid.uuid4(), configured_workflow="coding.v2"
+    )
+
+    assert workflow.version == "2"
+    assert "produce_artifacts" in [step.key for step in workflow.steps]
+    assert "ensure_capabilities" not in [step.key for step in workflow.steps]
 
 
 def test_definition_validation_rejects_duplicate_and_missing_edges() -> None:

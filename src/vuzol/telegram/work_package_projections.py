@@ -327,7 +327,24 @@ async def build_work_package_plan_card(
         )
         progress = f"{ordinal}/{len(items)}"
         if current_task_status is TaskStatus.WAITING_APPROVAL:
-            status = "Result approval"
+            requested_action = await session.scalar(
+                select(Approval.requested_action)
+                .join(Step, Step.id == Approval.step_id)
+                .join(Run, Run.id == Step.run_id)
+                .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+                .where(
+                    MaterializationLink.plan_revision_id == revision.id,
+                    MaterializationLink.ordinal == ordinal,
+                    Approval.status == ApprovalStatus.PENDING,
+                )
+                .order_by(Approval.created_at.desc())
+                .limit(1)
+            )
+            status = (
+                "Tool installation approval"
+                if requested_action == "install_capabilities"
+                else "Result approval"
+            )
     if _status_card or _action_card:
         preference = await load_preference(session, discussion.project_id)
         if package.status is WorkPackageStatus.PAUSED and preference.worker_key is not None:
@@ -444,6 +461,7 @@ async def build_work_package_plan_card(
                 MaterializationLink.plan_revision_id == revision.id,
                 MaterializationLink.ordinal == len(items),
                 Approval.status == ApprovalStatus.PENDING,
+                Approval.requested_action == "apply_result",
             )
             .order_by(Approval.created_at.desc())
             .limit(1)

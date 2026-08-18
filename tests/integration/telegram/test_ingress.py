@@ -107,6 +107,25 @@ def test_import_command_collects_url_and_queues_existing_repository(
         assert prompted.status is IngressStatus.HANDLED
         assert imported.status is IngressStatus.HANDLED
         assert imported.task_id == prompted.task_id
+        client = FakeTelegramClient(next_message_id=901)
+        delivery = TelegramDeliveryService(
+            factory,
+            client,
+            owner="import-prompt-delivery",
+            lease_seconds=30,
+            max_attempts=3,
+            retry_min_seconds=1,
+            retry_max_seconds=10,
+        )
+        assert await delivery.deliver_one()
+        assert client.sent == [
+            (
+                -100,
+                10,
+                "<b>Подключить существующий проект</b>\n"
+                "Пришлите ссылку вида <code>https://github.com/owner/repository</code>.",
+            )
+        ]
         async with factory() as session:
             task = await session.get(Task, prompted.task_id)
             provisioning = await session.scalar(select(ProjectProvisioning))
@@ -123,6 +142,12 @@ def test_import_command_collects_url_and_queues_existing_repository(
                 )
             )
             assert queued is not None and queued.operation_type == "import_project"
+            prompt = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("telegram:project-import:%")
+                )
+            )
+            assert prompt is not None and prompt.status.value == "delivered"
         await engine.dispose()
 
     asyncio.run(scenario())

@@ -196,7 +196,7 @@ async def prepare_delivery(
         except (KeyError, TypeError, ValueError) as error:
             raise PermanentDeliveryError("invalid_project_import_prompt") from error
         return PreparedDelivery(
-            DeliveryAction.SEND_STATUS,
+            DeliveryAction.SEND_HELP,
             chat_id=chat_id,
             thread_id=thread_id,
             html=html_body,

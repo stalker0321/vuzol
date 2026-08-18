@@ -50,9 +50,19 @@ Every component kind maps to an acceptance artifact contract:
 | worker | bounded job report |
 | database | migration/schema report |
 
-Only the web adapter is implemented end-to-end in this revision. The remaining rows are typed
-contracts, not fake success: an adapter must produce and verify the evidence before the result card
-can claim it.
+The current `coding.v2` workflow adds a trusted artifact-production step after review. For every
+non-web component it runs the approved argv-style acceptance command in the pinned, rootless,
+network-disabled validation sandbox. Executables are allowlisted, arguments and artifact patterns
+are bounded, Git metadata is read-only, and tracked source must still match the retained result after
+the command. Android and library artifacts are copied into private artifact storage from declared
+patterns; CLI, bot, MCP, worker, database, and custom components store bounded JSON reports with
+exit status, output hashes, image identity, and execution duration. Each result also has a separate
+evidence artifact.
+
+Missing commands, failed commands, missing declared files, unavailable capabilities, changed source,
+or malformed evidence block the workflow. The approval envelope binds stored artifact IDs and hashes
+to the retained commit, and the result card names the verified artifact types. Binary attachment or
+short-lived authenticated download delivery is still a separate concern.
 
 ## HTTP preview runtime
 
@@ -74,6 +84,7 @@ configuration and are deliberately not introduced implicitly.
 
 1. Add or reuse a component kind and artifact expectation.
 2. Register required capabilities and their provisioning class.
-3. Add a trusted, argv-based adapter; do not execute an arbitrary repository deploy script.
+3. Add an approved, argv-based acceptance command supported by the validation image; do not execute
+   an arbitrary repository deploy script.
 4. Add preflight, success, failure, cleanup, and Telegram projection tests.
 5. Only then allow the adapter to produce verified result evidence.

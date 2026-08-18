@@ -60,6 +60,7 @@ def test_definitions_are_valid_and_stable() -> None:
         "architecture.v1",
         "research.v1",
         "infrastructure.v1",
+        "coding.v2",
     ]
     for definition in WORKFLOW_DEFINITIONS:
         validate_definition(definition)
@@ -80,6 +81,7 @@ def test_compiler_resolves_optional_predecessors() -> None:
         "execute_code",
         "validate",
         "review",
+        "produce_artifacts",
         "build_static",
         "publish_preview",
         "approve_result",
@@ -124,10 +126,21 @@ def test_architecture_workflow_uses_read_only_agent_without_delivery_gates() -> 
     assert agent.idempotency_class is IdempotencyClass.READ_ONLY
 
 
-def test_project_topics_select_architecture_without_breaking_legacy_coding_defaults() -> None:
+def test_project_topics_select_architecture_and_current_coding_workflow() -> None:
     assert configured_topic_workflow("adaptive_task", TaskType.ARCHITECTURE) is None
     assert configured_topic_workflow("coding_task", TaskType.ARCHITECTURE) is None
-    assert configured_topic_workflow("coding_task", TaskType.CODING) == "coding.v1"
+    assert configured_topic_workflow("coding_task", TaskType.CODING) == "coding.v2"
+
+
+def test_legacy_coding_workflow_remains_available_without_artifact_production() -> None:
+    workflow = compile_workflow(
+        draft(),
+        interpretation_id=uuid.uuid4(),
+        configured_workflow="coding.v1",
+    )
+
+    assert workflow.version == "1"
+    assert "produce_artifacts" not in [step.key for step in workflow.steps]
 
 
 def test_definition_validation_rejects_duplicate_and_missing_edges() -> None:

@@ -22,26 +22,30 @@ Updated: 2026-08-18
   projection and work-package tests. The complete suite now reports `2055 passed, 7 skipped` and
   90.001336% branch coverage; Ruff, format-check and strict mypy are green. The new environment
   migration has also passed a direct downgrade/upgrade round trip.
+- Added `coding.v2` trusted artifact production for every non-web component contract. Approved,
+  bounded commands run without a shell in the rootless offline validation sandbox; APK/package files
+  and protocol/transcript/migration reports are stored privately with hash-bound evidence. The step
+  fails closed on missing setup, command/file failures, tracked Git mutation, or malformed approval
+  evidence, while `coding.v1` remains available for in-flight compatibility.
+- Added artifact types to the result approval card and bound artifact IDs, types, sizes and content
+  hashes into the immutable approval envelope.
 
 The pre-existing untracked root-owned `package-lock.json` belongs to the user and must remain
 untracked and untouched.
 
 ## Still required after this revision
 
-1. Implement trusted artifact producers for Android APK, CLI transcript, library package, bot/MCP
-   protocol reports, worker reports and database migration reports. The type mapping exists, but does
-   not pretend those artifacts were produced.
-2. Add host adapters beyond Node.js. Python/Android are detected by preflight but runtime/build
+1. Add host adapters beyond Node.js. Python/Android are detected by preflight but runtime/build
    provisioning must remain `Needs setup` until an explicit adapter is implemented.
-3. Replace the free-port probe with a stronger reservation or supervised socket handoff if preview
+2. Replace the free-port probe with a stronger reservation or supervised socket handoff if preview
    concurrency becomes high.
-4. Decide whether to add wildcard `*.test.hryshyn.dev`; it removes the absolute-path limitation but
+3. Decide whether to add wildcard `*.test.hryshyn.dev`; it removes the absolute-path limitation but
    requires a deliberate DNS/TLS change.
-5. Define production delivery for server applications. Do not automatically trust or execute an
+4. Define production delivery for server applications. Do not automatically trust or execute an
    imported `deploy.sh`; model it as a reviewed project-specific adapter.
-6. Add persistent preview-process metadata or reconciliation if previews must survive publisher
+5. Add persistent preview-process metadata or reconciliation if previews must survive publisher
    restarts. Current processes intentionally live only for the service lifetime.
-7. Extend result-card delivery so private stored binary artifacts can be attached or downloaded via
+6. Extend result-card delivery so private stored binary artifacts can be attached or downloaded via
    a short-lived authenticated link.
 
 ## Deployment and dogfood checks

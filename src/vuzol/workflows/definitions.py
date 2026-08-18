@@ -1,5 +1,7 @@
 """Closed versioned workflow registry for the MVP."""
 
+from dataclasses import replace
+
 from vuzol.config import Capability
 from vuzol.storage.types import IdempotencyClass, QueueClass, RetryClass
 from vuzol.workflows.domain import (
@@ -227,6 +229,36 @@ WORKFLOW_DEFINITIONS: tuple[WorkflowDefinition, ...] = (
         ),
     ),
 )
+
+
+def _coding_v2() -> WorkflowDefinition:
+    coding_v1 = next(
+        definition for definition in WORKFLOW_DEFINITIONS if definition.stable_id == "coding.v1"
+    )
+    steps: list[StepDefinition] = []
+    for step in coding_v1.steps:
+        if step.key == "build_static":
+            steps.append(
+                _step(
+                    "produce_artifacts",
+                    "review",
+                    queue=QueueClass.HEAVY,
+                    capabilities=frozenset({Capability.PROJECT_SHELL}),
+                    idempotency=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+                    timeout=600,
+                )
+            )
+            step = replace(step, predecessors=("produce_artifacts",))
+        steps.append(step)
+    return WorkflowDefinition(
+        workflow_type="coding",
+        version="2",
+        task_types=coding_v1.task_types,
+        steps=tuple(steps),
+    )
+
+
+WORKFLOW_DEFINITIONS = (*WORKFLOW_DEFINITIONS, _coding_v2())
 
 
 def validate_definition(definition: WorkflowDefinition) -> None:

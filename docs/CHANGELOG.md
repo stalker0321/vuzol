@@ -4,6 +4,11 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added `coding.v2` trusted non-web artifact production: approved bounded commands run without a
+  shell in the pinned offline validation sandbox, rootless worktree access is leased and revoked,
+  tracked source mutation fails closed, APK/package files and JSON acceptance reports are stored
+  privately, and immutable result approvals expose hash-bound artifact evidence; `coding.v1` remains
+  registered for in-flight compatibility;
 - added versioned project environment contracts: plan approval now atomically versions explicit
   Stack changes instead of inferring a permanent stack from the first project message; imported
   projects receive conservative discovery, capability preflight fails closed with `Needs setup`,

@@ -10,6 +10,7 @@ from vuzol.storage.types import ApprovalStatus, StepStatus, TaskStatus, Worktree
 from vuzol.telegram.projections import (
     EditRateLimiter,
     _approval_display_summary,
+    _approval_fact_lines,
     _approval_status_label,
     _format_duration_ru,
     delivery_state_label,
@@ -90,6 +91,23 @@ def test_approval_summary_hides_legacy_provider_transcript() -> None:
         "Изменения подготовлены и прошли настроенные проверки."
     )
     assert _approval_display_summary("## Готово") == "Готово"
+
+
+def test_approval_facts_show_trusted_artifact_types() -> None:
+    lines = _approval_fact_lines(
+        {
+            "gates": [],
+            "artifact_evidence": {
+                "artifacts": [
+                    {"artifact_type": "cli_transcript"},
+                    {"artifact_type": "cli_transcript_evidence"},
+                ]
+            },
+        },
+        "CLI готов",
+    )
+
+    assert "✅ Артефакты: <code>cli_transcript, cli_transcript_evidence</code>" in lines
 
 
 def test_task_status_button_matrix_is_exhaustive_and_has_no_retry_ui() -> None:

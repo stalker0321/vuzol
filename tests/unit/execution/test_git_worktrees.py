@@ -88,6 +88,28 @@ async def test_diff_check_reports_bounded_git_stderr(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_artifact_git_check_allows_untracked_output_but_rejects_tracked_changes(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "test@example.com")
+    _git(repository, "config", "user.name", "Test")
+    tracked = repository / "tracked.txt"
+    tracked.write_text("base\n")
+    _git(repository, "add", "tracked.txt")
+    _git(repository, "commit", "-m", "base")
+    git = LocalGit()
+
+    (repository / "artifact.bin").write_bytes(b"artifact")
+    await git.require_clean_tracked_worktree(repository)
+    tracked.write_text("mutated\n")
+    with pytest.raises(GitError, match="artifact command changed"):
+        await git.require_clean_tracked_worktree(repository)
+
+
+@pytest.mark.anyio
 async def test_typed_git_creates_isolated_worktree_and_collects_diff(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()

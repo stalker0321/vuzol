@@ -146,6 +146,18 @@ def test_environment_delta_is_canonical_and_part_of_every_plan_fingerprint() -> 
         lambda: EnvironmentComponentDraft(
             "web", "Web", ComponentKind.WEB_SERVICE, "Node", run_command=("node",)
         ),
+        lambda: EnvironmentComponentDraft(
+            "cli", "CLI", ComponentKind.CLI, "Python", run_command=("",)
+        ),
+        lambda: EnvironmentComponentDraft(
+            "cli", "CLI", ComponentKind.CLI, "Python", run_command=("python",) * 33
+        ),
+        lambda: EnvironmentComponentDraft(
+            "library", "Library", ComponentKind.LIBRARY, "Python", artifact_patterns=("../x",)
+        ),
+        lambda: EnvironmentComponentDraft(
+            "library", "Library", ComponentKind.LIBRARY, "Python", artifact_patterns=("/outside/x",)
+        ),
         lambda: CapabilityRequirementDraft("Bad", "Node"),
         lambda: CapabilityRequirementDraft("node", ""),
         lambda: CapabilityRequirementDraft("node", "Node", reason="x" * 501),

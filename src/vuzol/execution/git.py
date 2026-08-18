@@ -313,6 +313,16 @@ class LocalGit:
         if status:
             raise GitError("finalized worktree is dirty")
 
+    async def require_clean_tracked_worktree(self, worktree: Path) -> None:
+        """Reject tracked/index mutations while permitting generated untracked artifacts."""
+
+        unstaged = await self._optional(worktree, "diff", "--quiet", "--no-ext-diff", "HEAD", "--")
+        staged = await self._optional(
+            worktree, "diff", "--cached", "--quiet", "--no-ext-diff", "HEAD", "--"
+        )
+        if unstaged is None or staged is None:
+            raise GitError("artifact command changed tracked Git content")
+
     async def require_diff_check(self, worktree: Path) -> None:
         """Fail closed on conflict markers or whitespace errors in the staged index."""
 

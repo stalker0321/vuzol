@@ -172,6 +172,7 @@ _STEP_TYPE_LABELS = {
     "execute_code": "Выполнение кода",
     "validate": "Проверка",
     "review": "Ревью",
+    "produce_artifacts": "Подготовка артефактов",
     "build_static": "Сборка сайта",
     "approval": "Решение / апрув",
     "publish_static": "Публикация прототипа",
@@ -932,6 +933,20 @@ def _approval_fact_lines(
         lines.append(
             f"✅ {telegram_html(gate.get('name', 'проверка'))} — пройдено ({duration:.1f} с)"
         )
+    artifact_evidence = envelope.get("artifact_evidence")
+    raw_artifacts = (
+        artifact_evidence.get("artifacts") if isinstance(artifact_evidence, dict) else None
+    )
+    artifacts = raw_artifacts if isinstance(raw_artifacts, list) else []
+    artifact_types = sorted(
+        {
+            str(artifact.get("artifact_type"))
+            for artifact in artifacts
+            if isinstance(artifact, dict) and isinstance(artifact.get("artifact_type"), str)
+        }
+    )
+    if artifact_types:
+        lines.append(f"✅ Артефакты: <code>{telegram_html(', '.join(artifact_types))}</code>")
     lines.extend(("", "Применить этот результат локально?"))
     return lines
 

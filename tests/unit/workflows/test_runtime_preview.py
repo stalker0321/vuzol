@@ -46,6 +46,9 @@ def _handler(tmp_path: Path) -> tuple[RuntimePreviewHandler, MagicMock, MagicMoc
         settings=SimpleNamespace(
             preview_site_root=tmp_path / "previews",
             preview_site_base_url="https://test.example",
+            capability_provisioning=SimpleNamespace(
+                toolchain_root=tmp_path / "toolchains",
+            ),
         )
     )
     handler = RuntimePreviewHandler(

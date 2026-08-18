@@ -133,6 +133,45 @@ class TelegramDogfoodSettings(BaseModel):
         return self
 
 
+class CapabilityProvisioningSettings(BaseModel):
+    """Default-off installation of reviewed, offline capability bundles."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    bundle_root: Path = Path("/etc/vuzol/capability-bundles")
+    toolchain_root: Path = Path("/var/lib/vuzol/toolchains")
+    allowed_capabilities: tuple[str, ...] = ("android-sdk",)
+    maximum_bundle_bytes: int = Field(default=4_000_000_000, ge=1, le=20_000_000_000)
+    maximum_files: int = Field(default=200_000, ge=1, le=1_000_000)
+
+    @field_validator("bundle_root", "toolchain_root")
+    @classmethod
+    def require_absolute_roots(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("capability provisioning roots must be absolute")
+        return value
+
+    @field_validator("allowed_capabilities")
+    @classmethod
+    def validate_capability_allowlist(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        import re
+
+        if len(set(value)) != len(value) or any(
+            re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", item) is None for item in value
+        ):
+            raise ValueError("capability provisioning allowlist contains an unsafe key")
+        return value
+
+    @model_validator(mode="after")
+    def require_separate_roots(self) -> "CapabilityProvisioningSettings":
+        bundle = self.bundle_root.resolve()
+        toolchain = self.toolchain_root.resolve()
+        if bundle == toolchain or bundle in toolchain.parents or toolchain in bundle.parents:
+            raise ValueError("capability bundle and toolchain roots must be separate")
+        return self
+
+
 class RetentionDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -432,6 +471,9 @@ class Settings(BaseSettings):
     )
     secret_ingress: SecretIngressSettings = Field(default_factory=SecretIngressSettings)
     telegram_dogfood: TelegramDogfoodSettings = Field(default_factory=TelegramDogfoodSettings)
+    capability_provisioning: CapabilityProvisioningSettings = Field(
+        default_factory=CapabilityProvisioningSettings
+    )
 
     @field_validator(
         "repository_root",
@@ -452,12 +494,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def require_distinct_storage_roots(self) -> "Settings":
-        roots = (self.repository_root, self.worktree_root, self.artifact_root)
+        roots = (
+            self.repository_root,
+            self.worktree_root,
+            self.artifact_root,
+            self.capability_provisioning.toolchain_root,
+        )
         resolved = tuple(root.resolve() for root in roots)
         for index, root in enumerate(resolved):
             for other in resolved[index + 1 :]:
                 if root == other or root in other.parents or other in root.parents:
-                    raise ValueError("repository, worktree, and artifact roots must be distinct")
+                    raise ValueError(
+                        "repository, worktree, artifact, and toolchain roots must be distinct"
+                    )
         return self
 
 

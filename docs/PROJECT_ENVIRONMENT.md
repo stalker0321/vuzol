@@ -21,9 +21,9 @@ The v1 contract has:
 An environment delta can add/update components, remove components, and add requirements. Replanning
 can therefore replace Django with Flask or remove a preview component without rewriting history.
 
-Imported repositories receive a conservative detected baseline. Detection reads markers only; it
-does not install packages or execute repository code. The project provisioner reconciles older
-completed imports which predate environment revisions.
+Every provisioned project receives a conservative detected baseline (which may be an empty
+contract). Detection reads markers only; it does not install packages or execute repository code.
+The project provisioner reconciles older completed projects which predate environment revisions.
 
 ## Capability preflight
 
@@ -34,6 +34,44 @@ being reported as a model failure.
 
 Current trusted executable checks cover Node.js, Python, Android SDK and Git. This registry is
 intentionally small and should grow only together with a bounded adapter and tests.
+
+## Separate toolchain installation approval
+
+`coding.v3` checks the approved environment before repository work begins. Approving a plan records
+the chosen stack, but does not authorize a host/toolchain mutation. If a declared capability is
+already present, execution continues without another prompt. If it is absent and a trusted offline
+bundle is available, Vuzol creates a second immutable approval containing the capability key, exact
+bundle SHA-256, byte size, environment revision/hash, and managed installation root. Rejecting this
+approval cancels the task without installing anything.
+
+Capability provisioning is default-off. The initial trusted adapter is `android-sdk`; it accepts
+only an operator-staged uncompressed tar bundle and adjacent `android-sdk.json` manifest under the
+configured read-only bundle root. The archive must contain executable
+`android-sdk/platform-tools/adb`, `jdk/bin/java`, and `gradle/bin/gradle`. Absolute/traversing paths,
+links, special files, writable manifests, oversized archives, hash changes, environment changes, and
+partial target directories all fail closed. Vuzol never invokes `apt`, a shell, or an online SDK
+installer, and never accepts third-party licences on the user's behalf.
+
+After approval, the applier extracts into a same-filesystem temporary directory, verifies required
+executables, and atomically renames it under `/var/lib/vuzol/toolchains/android-sdk`. Artifact
+commands receive the managed toolchain as a read-only `/toolchains` mount with bounded Android/JDK/
+Gradle environment variables. Normal validation gates do not receive this mount.
+
+Example manifest:
+
+```json
+{
+  "schema_version": "capability-bundle.v1",
+  "capability_key": "android-sdk",
+  "archive": "android-sdk.tar",
+  "sha256": "<64 lowercase hex characters>"
+}
+```
+
+Enabling the adapter requires
+`VUZOL_CAPABILITY_PROVISIONING__ENABLED=true`. If provisioning is disabled, no supported adapter is
+registered, or the reviewed bundle is absent, the task remains `Needs setup`; plan approval is never
+silently promoted into installation permission.
 
 ## Typed result artifacts
 

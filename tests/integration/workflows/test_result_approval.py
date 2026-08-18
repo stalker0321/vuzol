@@ -447,3 +447,103 @@ def test_redo_and_reject_do_not_apply_the_retained_result(
         await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_capability_installation_uses_separate_approval_and_requeues_exact_step(
+    postgres_dsn: str,
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task = Task(
+            user_id=42,
+            source_chat_id=-100,
+            source_thread_id=10,
+            project_id="android-project",
+            original_text="build android app",
+            task_draft={},
+            status=TaskStatus.WAITING_APPROVAL,
+            risk=RiskLevel.LOW,
+            task_type="coding",
+        )
+        async with factory.begin() as session:
+            session.add(task)
+            await session.flush()
+            run = Run(
+                task_id=task.id,
+                workflow_type="coding",
+                workflow_version="3",
+                status=RunStatus.RUNNING,
+                selected_route={},
+                budget_mode="strong",
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+            )
+            session.add(run)
+            await session.flush()
+            step = Step(
+                run_id=run.id,
+                ordinal=1,
+                dependency_metadata={"predecessor_ordinals": [0]},
+                step_type="ensure_capabilities",
+                queue_class=QueueClass.PRIVILEGED,
+                status=StepStatus.WAITING_APPROVAL,
+                required_capabilities=["host_admin"],
+                payload={},
+                retry_class=RetryClass.NEVER,
+                idempotency_class=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+                max_attempts=1,
+                timeout_seconds=1800,
+            )
+            session.add(step)
+            await session.flush()
+            envelope = {
+                "schema_version": "capability-provisioning-approval.v1",
+                "requested_action": "install_capabilities",
+                "step_id": str(step.id),
+                "bundles": [
+                    {
+                        "capability_key": "android-sdk",
+                        "archive_sha256": "c" * 64,
+                        "archive_bytes": 1024,
+                    }
+                ],
+            }
+            step.payload = {"action_envelope": envelope}
+            approval = Approval(
+                step_id=step.id,
+                action_envelope_hash=envelope_hash(envelope),
+                requested_action="install_capabilities",
+                normalized_target="android-project:managed-toolchains",
+                human_summary="Установить Android SDK",
+                token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+                status=ApprovalStatus.PENDING,
+                expires_at=datetime.now(UTC) + timedelta(days=1),
+            )
+            session.add(approval)
+            await session.flush()
+            approval_id = approval.id
+            step_id = step.id
+            task_id = task.id
+
+        async with factory() as session:
+            card = await build_status_card(session, task_id)
+            assert "Требуется отдельное разрешение" in card.html
+            assert "android-sdk" in card.html
+            assert card.buttons == ("approve", "reject")
+
+        async with factory.begin() as session:
+            await decide_result(session, approval_id, decision="approve", deciding_user_id=42)
+
+        async with factory() as session:
+            persisted_approval = await session.get(Approval, approval_id)
+            persisted_step = await session.get(Step, step_id)
+            persisted_task = await session.get(Task, task_id)
+            assert (
+                persisted_approval is not None
+                and persisted_approval.status is ApprovalStatus.APPROVED
+            )
+            assert persisted_step is not None and persisted_step.status is StepStatus.QUEUED
+            assert persisted_task is not None and persisted_task.status is TaskStatus.EXECUTING
+        await engine.dispose()
+
+    asyncio.run(scenario())

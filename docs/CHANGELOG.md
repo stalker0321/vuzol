@@ -4,6 +4,10 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added `coding.v3` two-stage stack authorization: plan approval records the environment but missing
+  tools require a separate hash-bound Telegram approval; the default-off Android adapter installs
+  only reviewed offline SDK/JDK/Gradle tar bundles atomically into managed storage, rejects unsafe or
+  changed archives, and mounts approved toolchains read-only only in artifact sandboxes;
 - added `coding.v2` trusted non-web artifact production: approved bounded commands run without a
   shell in the pinned offline validation sandbox, rootless worktree access is leased and revoked,
   tracked source mutation fails closed, APK/package files and JSON acceptance reports are stored

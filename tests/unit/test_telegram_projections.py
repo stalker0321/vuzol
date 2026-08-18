@@ -3,12 +3,14 @@
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import pytest
 
 from vuzol.storage.types import ApprovalStatus, StepStatus, TaskStatus, WorktreeDeliveryState
 from vuzol.telegram.projections import (
     EditRateLimiter,
+    _approval_buttons,
     _approval_display_summary,
     _approval_fact_lines,
     _approval_status_label,
@@ -108,6 +110,27 @@ def test_approval_facts_show_trusted_artifact_types() -> None:
     )
 
     assert "✅ Артефакты: <code>cli_transcript, cli_transcript_evidence</code>" in lines
+
+
+def test_capability_approval_explains_separate_offline_installation() -> None:
+    lines = _approval_fact_lines(
+        {
+            "schema_version": "capability-provisioning-approval.v1",
+            "bundles": [
+                {
+                    "capability_key": "android-sdk",
+                    "archive_bytes": 2 * 1024 * 1024,
+                    "archive_sha256": "a" * 64,
+                }
+            ],
+        },
+        "Установить Android SDK",
+    )
+    approval = MagicMock(requested_action="install_capabilities")
+
+    assert any("android-sdk" in line for line in lines)
+    assert any("2.0 МБ" in line for line in lines)
+    assert _approval_buttons(approval) == ("approve", "reject")
 
 
 def test_task_status_button_matrix_is_exhaustive_and_has_no_retry_ui() -> None:

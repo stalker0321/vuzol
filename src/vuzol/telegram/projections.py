@@ -172,6 +172,7 @@ _STEP_TYPE_LABELS = {
     "execute_code": "Выполнение кода",
     "validate": "Проверка",
     "review": "Ревью",
+    "ensure_capabilities": "Подготовка инструментов",
     "produce_artifacts": "Подготовка артефактов",
     "build_static": "Сборка сайта",
     "approval": "Решение / апрув",
@@ -905,6 +906,9 @@ def _approval_fact_lines(
 ) -> list[str]:
     """One canonical fact block shared by project and global approval cards."""
 
+    if envelope.get("schema_version") == "capability-provisioning-approval.v1":
+        return _capability_approval_fact_lines(envelope, human_summary)
+
     display_summary = _approval_display_summary(human_summary)
     lines = ["<b>Что изменится</b>", f"• {telegram_html(display_summary)}"]
     raw_paths = envelope.get("changed_files")
@@ -949,6 +953,46 @@ def _approval_fact_lines(
         lines.append(f"✅ Артефакты: <code>{telegram_html(', '.join(artifact_types))}</code>")
     lines.extend(("", "Применить этот результат локально?"))
     return lines
+
+
+def _capability_approval_fact_lines(
+    envelope: Mapping[str, object], human_summary: str
+) -> list[str]:
+    lines = ["<b>Требуется отдельное разрешение</b>", f"• {telegram_html(human_summary)}"]
+    raw_bundles = envelope.get("bundles")
+    bundles = raw_bundles if isinstance(raw_bundles, list) else []
+    total_bytes = 0
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        key = bundle.get("capability_key")
+        size = bundle.get("archive_bytes")
+        digest = bundle.get("archive_sha256")
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+            total_bytes += size
+        if isinstance(key, str) and isinstance(digest, str):
+            lines.append(
+                f"• <code>{telegram_html(key)}</code> · SHA-256 "
+                f"<code>{telegram_html(digest[:12])}…</code>"
+            )
+    lines.extend(
+        (
+            f"• Объём bundle: {_format_bytes(total_bytes)}",
+            "• Установка: управляемое хранилище Vuzol, без системного package manager",
+            "• После установки toolchain монтируется в sandbox только для чтения",
+            "",
+            "Разрешить установку этих инструментов?",
+        )
+    )
+    return lines
+
+
+def _approval_buttons(approval: Approval) -> tuple[str, ...]:
+    return (
+        ("approve", "reject")
+        if approval.requested_action == "install_capabilities"
+        else ("approve", "redo", "reject")
+    )
 
 
 def _approval_display_summary(summary: str) -> str:
@@ -1196,6 +1240,16 @@ def _format_duration_ru(seconds: int) -> str:
     return f"{secs} с"
 
 
+def _format_bytes(value: int) -> str:
+    if value >= 1024 * 1024 * 1024:
+        return f"{value / (1024 * 1024 * 1024):.1f} ГБ"
+    if value >= 1024 * 1024:
+        return f"{value / (1024 * 1024):.1f} МБ"
+    if value >= 1024:
+        return f"{value / 1024:.1f} КБ"
+    return f"{value} Б"
+
+
 async def enqueue_project_status_dashboard(session: AsyncSession, chat_id: int) -> None:
     """Queue a refresh of the existing «Статус проектов» topic (kind=task_dashboard).
 
@@ -1405,6 +1459,8 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         and plan_size is not None
         and materialization.ordinal == int(plan_size)
         and task.status is TaskStatus.WAITING_APPROVAL
+        and step is not None
+        and step.step_type == "approval"
     )
     final_package_delivery_failure = bool(
         materialization is not None
@@ -1451,6 +1507,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         and materialization is not None
         and plan_size is not None
         and materialization.ordinal == int(plan_size)
+        and approval.requested_action == "apply_result"
     ):
         # The final item has finished its own work. Its approval belongs to the
         # whole accepted package and is rendered on a separate package-result
@@ -1522,7 +1579,7 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
     elif approval is not None and step is not None:
         envelope = verified_envelope(step, approval)
         lines.extend(("", *_approval_fact_lines(envelope, approval.human_summary)))
-        buttons = ("approve", "redo", "reject")
+        buttons = _approval_buttons(approval)
     else:
         buttons = (
             ("start",)
@@ -1624,7 +1681,7 @@ async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> Stat
     buttons: tuple[str, ...]
     if approval.status is ApprovalStatus.PENDING:
         lines.extend(("", *_approval_fact_lines(envelope, approval.human_summary)))
-        buttons = ("approve", "redo", "reject")
+        buttons = _approval_buttons(approval)
     else:
         lines.extend(
             (

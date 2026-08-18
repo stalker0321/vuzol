@@ -38,6 +38,7 @@ from vuzol.config.runtime import RuntimeConfiguration, get_runtime_configuration
 from vuzol.config.secrets import ScopedSecretResolver, SecretResolutionError
 from vuzol.config.settings import (
     BackupSettings,
+    CapabilityProvisioningSettings,
     ConcurrencyLimits,
     DatabaseSettings,
     DiskPressureSettings,
@@ -59,6 +60,7 @@ __all__ = [
     "BackupSettings",
     "BudgetMode",
     "Capability",
+    "CapabilityProvisioningSettings",
     "CommandDefinition",
     "ConcurrencyLimits",
     "ConfigurationBundle",

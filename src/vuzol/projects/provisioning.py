@@ -75,7 +75,6 @@ async def reconcile_imported_environments(
                     )
                     .where(
                         ProjectProvisioning.status == ProjectProvisioningStatus.COMPLETED,
-                        ProjectProvisioning.source_repository_url.is_not(None),
                         ProjectEnvironmentRevision.id.is_(None),
                     )
                     .order_by(ProjectProvisioning.created_at)
@@ -345,12 +344,11 @@ class ProjectProvisioningService:
             if row.status is ProjectProvisioningStatus.PENDING:
                 row.status = ProjectProvisioningStatus.REPOSITORY_CREATED
                 row.default_branch = default_branch
-                if row.source_repository_url is not None:
-                    await record_detected_environment(
-                        session,
-                        project_id=row.project_id,
-                        repository=repository,
-                    )
+                await record_detected_environment(
+                    session,
+                    project_id=row.project_id,
+                    repository=repository,
+                )
         if topic_thread_id is None:
             async with self._factory.begin() as session:
                 row = await session.get(ProjectProvisioning, provisioning_id, with_for_update=True)

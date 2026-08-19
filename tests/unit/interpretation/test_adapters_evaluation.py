@@ -249,6 +249,67 @@ def test_provider_errors_and_fake_transcriber_are_explicit() -> None:
     asyncio.run(scenario())
 
 
+def test_discussion_invalid_output_gets_one_schema_repair() -> None:
+    async def scenario() -> None:
+        requests: list[dict[str, object]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            user_payload = json.loads(body["messages"][1]["content"])
+            requests.append(user_payload)
+            if len(requests) == 1:
+                content = {
+                    "interaction_mode": "discussion",
+                    "confidence": 0.9,
+                    "user_visible_summary": "Создать задачу.",
+                    "task_request": {
+                        "summary": "Обновить оформление",
+                        "goal": "Оформить сайт в неоновых цветах.",
+                    },
+                }
+            else:
+                content = {
+                    "interaction_mode": "task_request",
+                    "confidence": 0.9,
+                    "should_create_task": True,
+                    "user_visible_summary": "Создать задачу.",
+                    "task_request": {
+                        "summary": "Обновить оформление",
+                        "goal": "Оформить сайт в неоновых цветах.",
+                    },
+                }
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": json.dumps(content)}}]},
+            )
+
+        async with httpx.AsyncClient(
+            base_url="https://provider.example/v1",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            interpreter = OpenAICompatibleInterpreter(
+                base_url="https://provider.example/v1",
+                credential=SecretStr("key"),
+                profile_id="profile",
+                model="model",
+                client=client,
+            )
+            result = await interpreter.interpret_discussion(
+                DiscussionInterpretRequest(
+                    original_input="сделай оформление сайта в неоновых цветах",
+                    project_id="vuzol",
+                    user_id=42,
+                )
+            )
+
+        assert result.should_create_task
+        assert len(requests) == 2
+        assert requests[0]["repair_error"] is None
+        assert "payload does not match interaction_mode" in str(requests[1]["repair_error"])
+
+    asyncio.run(scenario())
+
+
 def test_automatic_execution_requires_current_eligible_report(tmp_path: Path) -> None:
     report_path = tmp_path / "report.json"
     report = EvaluationReport(

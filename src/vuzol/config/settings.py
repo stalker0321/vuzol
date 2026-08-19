@@ -321,7 +321,7 @@ class ExecutionSettings(BaseModel):
         default=None,
         pattern=r"^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$",
     )
-    proxy_runtime_root: Path = Path("/run/vuzol/proxy")
+    proxy_runtime_root: Path = Path("/var/lib/vuzol-proxy-runtime")
     sandbox_seccomp_profile: Path | None = None
     sandbox_seccomp_profile_sha256: str | None = Field(
         default=None,

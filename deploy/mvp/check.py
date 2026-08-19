@@ -18,6 +18,7 @@ DEPLOYED = Path("/opt/vuzol")
 REGISTRY = Path("/etc/vuzol/executor-registries.toml")
 MIRROR = Path("/srv/vuzol/repositories/vuzol")
 SOCKET = Path("/run/user/994/docker.sock")
+PROXY_RUNTIME = Path("/var/lib/vuzol-proxy-runtime")
 INTERPRETER_CONTAINER = "vuzol-interpreter-1"
 GATES = ("format-check", "lint", "type-check", "security", "test")
 VALIDATION_ENVIRONMENT = {
@@ -334,7 +335,7 @@ def _proxy_runtime_is_empty() -> bool:
             "sudo",
             "-n",
             "find",
-            "/run/vuzol/proxy",
+            str(PROXY_RUNTIME),
             "-mindepth",
             "1",
             "-maxdepth",
@@ -364,7 +365,7 @@ def check(expected_sha: str) -> dict[str, object]:
         raise MvpCheckError("managed source mirror base ref differs from the deployed SHA")
     _managed_mirror_is_connected()
     pid_before, restarts_before = _service_snapshot()
-    runtime = Path("/run/vuzol/proxy")
+    runtime = PROXY_RUNTIME
     if not runtime.is_dir() or runtime.stat().st_mode & 0o777 != 0o700:
         raise MvpCheckError("systemd-managed proxy runtime directory is unavailable")
     document = _registry()

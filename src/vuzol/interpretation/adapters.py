@@ -147,10 +147,25 @@ class OpenAICompatibleInterpreter:
     async def interpret_discussion(
         self, request: DiscussionInterpretRequest
     ) -> DiscussionInterpretation:
+        try:
+            return await self._interpret_discussion_once(request, repair_error=None)
+        except InvalidInterpreterOutput as first_error:
+            return await self._interpret_discussion_once(
+                request,
+                repair_error=str(first_error)[:1_000],
+            )
+
+    async def _interpret_discussion_once(
+        self,
+        request: DiscussionInterpretRequest,
+        *,
+        repair_error: str | None,
+    ) -> DiscussionInterpretation:
         user_payload = {
             "prompt_version": DISCUSSION_PROMPT_VERSION,
             "input": request.model_dump(mode="json"),
             "discussion_schema": DiscussionInterpretation.model_json_schema(),
+            "repair_error": repair_error,
         }
         payload = {
             "model": self._model,

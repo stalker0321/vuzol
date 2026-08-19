@@ -34,6 +34,7 @@ from vuzol.execution.access import (
     _map_id,
     _read_id_map,
     _require_trusted_command,
+    _select_chown_command,
     _set_xattr,
 )
 from vuzol.execution.artifacts import ArtifactSecretError, ArtifactStore
@@ -199,6 +200,7 @@ __all__ = [
     "_require_trusted_command",
     "_sandbox_gate_runner",
     "_seccomp_profile",
+    "_select_chown_command",
     "_set_numeric_acl",
     "_set_xattr",
     "_single_regular_tar_file",

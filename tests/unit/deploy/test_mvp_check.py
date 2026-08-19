@@ -96,7 +96,7 @@ def test_mvp_check_inspects_protected_runtime_without_direct_traversal(
             "sudo",
             "-n",
             "find",
-            "/run/vuzol/proxy",
+            "/var/lib/vuzol-proxy-runtime",
             "-mindepth",
             "1",
             "-maxdepth",

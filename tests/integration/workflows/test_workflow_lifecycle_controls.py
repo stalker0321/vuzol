@@ -84,6 +84,56 @@ def test_materialized_workflow_reaches_completion(postgres_dsn: str) -> None:
 
 
 @pytest.mark.postgresql
+def test_capability_preflight_advances_without_reversing_task_status(
+    postgres_dsn: str,
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        draft = planned_coding_draft().model_copy(update={"needs_planning": False})
+        task_id, interpretation_id = await seed_interpreted(factory, draft)
+        async with factory.begin() as session:
+            run = await materialize_run(
+                session,
+                task_id=task_id,
+                workflow=compile_workflow(draft, interpretation_id=interpretation_id),
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+                prompt_revision="capability-preflight-v1",
+                automatic_start=True,
+            )
+            run_id = run.id
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None and task.status is TaskStatus.CONTEXT_PREPARED
+            token = await claim_step(
+                session,
+                owner="applier",
+                lease_seconds=60,
+                capabilities=frozenset({"host_admin"}),
+                step_types=frozenset({"ensure_capabilities"}),
+            )
+        assert token is not None
+        async with factory.begin() as session:
+            await start_step(session, token)
+            await commit_step_outcome(session, token, StepOutcome.succeeded())
+        async with factory() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None and task.status is TaskStatus.CONTEXT_PREPARED
+            steps = tuple(
+                await session.scalars(
+                    select(Step).where(Step.run_id == run_id).order_by(Step.ordinal)
+                )
+            )
+            assert steps[1].step_type == "ensure_capabilities"
+            assert steps[1].status is StepStatus.COMPLETED
+            assert steps[2].step_type == "prepare_context"
+            assert steps[2].status is StepStatus.QUEUED
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_completed_plan_enqueues_system_trace(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

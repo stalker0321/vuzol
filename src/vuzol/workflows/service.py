@@ -550,6 +550,7 @@ def derive_task_status(steps: tuple[Step, ...], run_status: RunStatus) -> TaskSt
     ):
         return TaskStatus.RETRYING
     mapping = {
+        "ensure_capabilities": TaskStatus.CONTEXT_PREPARED,
         "prepare_context": TaskStatus.CONTEXT_PREPARED,
         "plan": TaskStatus.PLANNED,
         "validate": TaskStatus.VALIDATING,

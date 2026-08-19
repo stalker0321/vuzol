@@ -234,6 +234,21 @@ def test_task_status_derivation_covers_run_and_step_categories() -> None:
         derive_task_status((step("prepare_context"),), RunStatus.RUNNING)
         is TaskStatus.CONTEXT_PREPARED
     )
+    capability_preflight = derive_task_status(
+        (
+            step("ensure_capabilities"),
+            step("prepare_context", StepStatus.PENDING),
+        ),
+        RunStatus.RUNNING,
+    )
+    prepared_context = derive_task_status(
+        (
+            step("ensure_capabilities", StepStatus.COMPLETED),
+            step("prepare_context"),
+        ),
+        RunStatus.RUNNING,
+    )
+    assert capability_preflight is prepared_context is TaskStatus.CONTEXT_PREPARED
 
 
 def test_cancellation_context_notifies_waiters() -> None:

@@ -15,9 +15,11 @@ from ._execution_helpers import (
     _map_id,
     _read_id_map,
     _require_trusted_command,
+    _select_chown_command,
     asyncio,
     envelope,
     os,
+    patch,
     pytest,
 )
 
@@ -261,3 +263,23 @@ def test_rootless_mapping_and_acl_helpers_fail_closed(tmp_path: Path) -> None:
     link.symlink_to(tmp_path)
     with pytest.raises(WorktreeAccessError, match="contained regular directory"):
         _collect_entries(link)
+
+
+def test_chown_command_falls_back_to_trusted_gnu_provider() -> None:
+    def require(candidate: Path) -> None:
+        if candidate == Path("/usr/bin/chown"):
+            raise WorktreeAccessError("required ACL command is unsafe: chown")
+
+    with patch("vuzol.execution.access._require_trusted_command", side_effect=require):
+        assert _select_chown_command() == Path("/usr/bin/gnuchown")
+
+
+def test_chown_command_fails_closed_without_a_trusted_provider() -> None:
+    with (
+        patch(
+            "vuzol.execution.access._require_trusted_command",
+            side_effect=WorktreeAccessError("unsafe"),
+        ),
+        pytest.raises(WorktreeAccessError, match="no trusted chown"),
+    ):
+        _select_chown_command()

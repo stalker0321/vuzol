@@ -20,6 +20,7 @@ _ACL_ENTRY_SIZE = 8
 _BATCH_SIZE = 100
 _ACCESS_XATTR = "system.posix_acl_access"
 _DEFAULT_XATTR = "system.posix_acl_default"
+_CHOWN_COMMANDS = (Path("/usr/bin/chown"), Path("/usr/bin/gnuchown"))
 
 
 class WorktreeAccessError(RuntimeError):
@@ -158,7 +159,7 @@ class WorktreeAccessManager:
         self._setfacl = Path("/usr/bin/setfacl")
         self._getfacl = Path("/usr/bin/getfacl")
         self._nsenter = Path("/usr/bin/nsenter")
-        self._chown = Path("/usr/bin/chown")
+        self._chown = _select_chown_command()
 
     async def preflight(self, identities: tuple[tuple[int, int], ...]) -> None:
         for command in (self._setfacl, self._getfacl, self._nsenter, self._chown):
@@ -368,6 +369,18 @@ def _require_trusted_command(path: Path) -> None:
         or not os.access(path, os.X_OK)
     ):
         raise WorktreeAccessError(f"required ACL command is unsafe: {path.name}")
+
+
+def _select_chown_command() -> Path:
+    """Select a regular trusted chown binary across supported Ubuntu providers."""
+
+    for candidate in _CHOWN_COMMANDS:
+        try:
+            _require_trusted_command(candidate)
+        except WorktreeAccessError:
+            continue
+        return candidate
+    raise WorktreeAccessError("no trusted chown command is available")
 
 
 def _collect_entries(root: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:

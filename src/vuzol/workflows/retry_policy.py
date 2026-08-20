@@ -7,6 +7,7 @@ EXPLICITLY_RETRYABLE_FAILURES = frozenset(
     {
         "authentication",
         "cancelled",
+        "dependency_provisioning_failed",
         "independent_review_required",
         "quota_exhausted",
         "rate_limited",

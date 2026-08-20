@@ -1007,6 +1007,7 @@ def _dependency_approval_fact_lines(
     raw_requirements = envelope.get("requirements")
     requirements = raw_requirements if isinstance(raw_requirements, list) else []
     providers: set[str] = set()
+    custom_sources: list[dict[str, object]] = []
     for requirement in requirements:
         if not isinstance(requirement, dict):
             continue
@@ -1014,6 +1015,9 @@ def _dependency_approval_fact_lines(
         provider = requirement.get("registry_provider")
         digest = requirement.get("manifest_sha256")
         raw_dependencies = requirement.get("direct_dependencies")
+        raw_sources = requirement.get("custom_sources")
+        if isinstance(raw_sources, list):
+            custom_sources.extend(source for source in raw_sources if isinstance(source, dict))
         count = len(raw_dependencies) if isinstance(raw_dependencies, list) else 0
         if isinstance(provider, str) and provider:
             providers.add(provider)
@@ -1024,6 +1028,25 @@ def _dependency_approval_fact_lines(
             )
     if providers:
         lines.append("• Реестры: " + telegram_html(", ".join(sorted(providers))))
+    if custom_sources:
+        lines.extend(("", "<b>Пользовательские источники</b>"))
+        for source in custom_sources:
+            package = source.get("package_name")
+            kind = source.get("source_kind")
+            url = source.get("source_url")
+            pin = source.get("source_pin")
+            if (
+                isinstance(package, str)
+                and isinstance(kind, str)
+                and isinstance(url, str)
+                and isinstance(pin, str)
+            ):
+                lines.append(
+                    f"⚠️ <code>{telegram_html(package)}</code> · {telegram_html(kind)} · "
+                    f"<code>{telegram_html(url[:200])}{'…' if len(url) > 200 else ''}</code> · pin "
+                    f"<code>{telegram_html(pin[:12])}…</code>"
+                )
+        lines.append("• Источник явно зарегистрирован пользователем только для этого проекта")
     lines.extend(
         (
             "• Сеть: только перечисленные HTTPS-реестры через контролируемый proxy",

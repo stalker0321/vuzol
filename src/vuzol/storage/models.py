@@ -335,6 +335,49 @@ class TopicMapping(IdentityMixin, TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class ProjectDependencySource(IdentityMixin, TimestampMixin, Base):
+    """One user-originated custom dependency source scoped to a project/package."""
+
+    __tablename__ = "project_dependency_sources"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "ecosystem",
+            "package_name",
+            "source_kind",
+            "source_url",
+            "source_pin",
+            name="uq_project_dependency_source_exact",
+        ),
+        CheckConstraint(
+            "ecosystem IN ('python', 'node')",
+            name="project_dependency_source_ecosystem",
+        ),
+        CheckConstraint(
+            "source_kind IN ('git', 'https')",
+            name="project_dependency_source_kind",
+        ),
+        CheckConstraint(
+            "(source_kind = 'git' AND source_pin ~ '^[0-9a-f]{40}$') OR "
+            "(source_kind = 'https' AND source_pin ~ '^[0-9a-f]{64}$')",
+            name="project_dependency_source_pin",
+        ),
+        CheckConstraint(
+            "ecosystem <> 'node' OR source_kind = 'git'",
+            name="project_dependency_source_node_git_only",
+        ),
+    )
+
+    project_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    ecosystem: Mapped[str] = mapped_column(String(20), nullable=False)
+    package_name: Mapped[str] = mapped_column(String(214), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_pin: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SecretIngressRequest(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "secret_ingress_requests"
 

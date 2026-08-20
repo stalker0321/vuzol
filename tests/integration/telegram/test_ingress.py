@@ -22,6 +22,7 @@ from vuzol.config import (
 from vuzol.config.settings import SecretIngressSettings
 from vuzol.storage.models import (
     ExternalInbox,
+    ProjectDependencySource,
     ProjectDiscussionSession,
     ProjectProvisioning,
     Run,
@@ -89,6 +90,45 @@ def inbox_runtime(tmp_path: Path) -> RuntimeConfiguration:
         settings=configured.settings,
         registries=build_bundle(document, configured.settings),
     )
+
+
+@pytest.mark.postgresql
+def test_project_source_command_persists_user_trust_and_revocation(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        service = TelegramIngressService(telegram_runtime(tmp_path), factory)
+        command = (
+            "/source add python internal-demo git "
+            "https://github.com/acme/internal-demo.git " + "a" * 40
+        )
+
+        added = await service.accept_message(message(901, 1001, text=command))
+        repeated = await service.accept_message(message(902, 1002, text=command))
+
+        assert added.status is IngressStatus.HANDLED
+        assert repeated.status is IngressStatus.HANDLED
+        async with factory() as session:
+            sources = tuple((await session.scalars(select(ProjectDependencySource))).all())
+            assert len(sources) == 1
+            source = sources[0]
+            assert source.project_id == "vuzol"
+            assert source.created_by_user_id == 42
+            assert source.revoked_at is None
+            source_id = source.id
+
+        removed = await service.accept_message(
+            message(903, 1003, text=f"/source remove {source_id}")
+        )
+
+        assert removed.status is IngressStatus.HANDLED
+        async with factory() as session:
+            source = await session.get(ProjectDependencySource, source_id)
+            assert source is not None and source.revoked_at is not None
+        await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.postgresql

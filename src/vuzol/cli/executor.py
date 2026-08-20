@@ -52,6 +52,7 @@ from vuzol.workflows.worker import RoutedWorkflowWorker, WorkflowWorker
 
 VALIDATION_IMAGE_PREFLIGHT_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("/usr/bin/make", "--version"),
+    ("/usr/bin/git", "--version"),
     ("python", "--version"),
     ("uv", "--version"),
 )

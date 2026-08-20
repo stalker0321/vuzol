@@ -10,10 +10,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.config.models import TopicConfig, TopicKind
 from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
+from vuzol.projects.custom_sources import (
+    AddSourceCommand,
+    CustomSourceError,
+    RemoveSourceCommand,
+    is_source_command,
+    parse_source_command,
+)
 from vuzol.projects.importing import ProjectImportError, parse_github_repository_url
 from vuzol.providers.subscription_limits import SUBSCRIPTION_LIMITS_DESTINATION
 from vuzol.security.secret_ingress import create_request, parse_secret_command
 from vuzol.storage.models import (
+    ProjectDependencySource,
     ProjectDiscussionSession,
     ProjectProvisioning,
     Task,
@@ -117,6 +125,12 @@ class TelegramIngressService:
                 if not topic.enabled:
                     raise TelegramPolicyError("project topic is disabled")
                 return await self._handle_plan_command(update, topic)
+            if is_source_command(update.text):
+                if topic.kind is not TopicKind.PROJECT or topic.project_id is None:
+                    raise TelegramPolicyError("/source is only available in a project topic")
+                if not topic.enabled:
+                    raise TelegramPolicyError("project topic is disabled")
+                return await self._handle_source_command(update, topic)
             if not topic.enabled or not topic.accepts_new_tasks:
                 raise TelegramPolicyError("topic does not accept new tasks")
         except (TelegramPolicyError, RegistryError) as error:
@@ -767,5 +781,105 @@ class TelegramIngressService:
             )
             await uow.inbox.mark_processed(
                 inbox_id, entity_type="telegram_command", entity_id=inbox_id
+            )
+        return IngressResult(status=IngressStatus.HANDLED)
+
+    async def _handle_source_command(
+        self, update: MessageUpdate, topic: TopicConfig
+    ) -> IngressResult:
+        """Persist explicit user trust for one exact project dependency source."""
+
+        assert topic.project_id is not None
+        try:
+            command = parse_source_command(update.text)
+        except CustomSourceError as error:
+            raise TelegramPolicyError(str(error)) from error
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            assert uow.session is not None
+            if isinstance(command, AddSourceCommand):
+                source = await uow.session.scalar(
+                    select(ProjectDependencySource).where(
+                        ProjectDependencySource.project_id == topic.project_id,
+                        ProjectDependencySource.ecosystem == command.ecosystem,
+                        ProjectDependencySource.package_name == command.package_name,
+                        ProjectDependencySource.source_kind == command.source_kind,
+                        ProjectDependencySource.source_url == command.source_url,
+                        ProjectDependencySource.source_pin == command.source_pin,
+                    )
+                )
+                if source is None:
+                    source = ProjectDependencySource(
+                        project_id=topic.project_id,
+                        ecosystem=command.ecosystem,
+                        package_name=command.package_name,
+                        source_kind=command.source_kind,
+                        source_url=command.source_url,
+                        source_pin=command.source_pin,
+                        created_by_user_id=update.user_id,
+                    )
+                    uow.session.add(source)
+                    await uow.session.flush()
+                elif source.revoked_at is not None:
+                    source.revoked_at = None
+                    source.created_by_user_id = update.user_id
+                source_id = source.id
+                body = (
+                    "<b>Источник проекта зарегистрирован</b>\n\n"
+                    f"• {html.escape(command.ecosystem)} · "
+                    f"<code>{html.escape(command.package_name)}</code>\n"
+                    f"• {html.escape(command.source_kind)}: "
+                    f"<code>{html.escape(command.source_url)}</code>\n"
+                    f"• pin: <code>{html.escape(command.source_pin)}</code>\n\n"
+                    f"Отозвать: <code>/source remove {source_id}</code>"
+                )
+            else:
+                assert isinstance(command, RemoveSourceCommand)
+                source = await uow.session.scalar(
+                    select(ProjectDependencySource).where(
+                        ProjectDependencySource.id == command.source_id,
+                        ProjectDependencySource.project_id == topic.project_id,
+                    )
+                )
+                if source is None:
+                    raise TelegramPolicyError("project source is not found")
+                source.revoked_at = func.now()
+                source_id = source.id
+                body = f"<b>Доверие к источнику отозвано</b>\n\n• <code>{source_id}</code>"
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="send_message",
+                entity_type="project_dependency_source",
+                entity_id=source_id,
+                idempotency_key=f"telegram:project-source:{inbox_id}",
+                payload={
+                    "role": "project_source_confirmation",
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "html": body,
+                },
+            )
+            await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="delete_message",
+                entity_type="telegram_inbox",
+                entity_id=inbox_id,
+                idempotency_key=f"telegram:delete-command:{update.chat_id}:{update.message_id}",
+                payload={
+                    "role": "user_command_delete",
+                    "chat_id": update.chat_id,
+                    "message_thread_id": update.message_thread_id,
+                    "message_id": update.message_id,
+                },
+            )
+            await uow.inbox.mark_processed(
+                inbox_id, entity_type="project_dependency_source", entity_id=source_id
             )
         return IngressResult(status=IngressStatus.HANDLED)

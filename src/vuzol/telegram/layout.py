@@ -114,6 +114,10 @@ def build_help_card(kind: TopicKind) -> str:
                 "Ответьте на сообщение задачи, чтобы продолжить её.",
                 "<code>/model</code> — выбрать исполнителя проекта.",
                 "<code>/plan</code> — показать текущий план.",
+                (
+                    "<code>/source add python|node PACKAGE git|https URL PIN</code> — "
+                    "доверить проекту точный внешний источник."
+                ),
             )
         )
     elif kind is TopicKind.INBOX:

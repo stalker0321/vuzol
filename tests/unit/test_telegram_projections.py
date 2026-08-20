@@ -147,6 +147,14 @@ def test_dependency_approval_explains_registry_and_immutable_environment() -> No
                     "registry_provider": "Python Packaging Authority",
                     "manifest_sha256": "b" * 64,
                     "direct_dependencies": ["httpx==1.0", "pydantic==2.0"],
+                    "custom_sources": [
+                        {
+                            "package_name": "internal-demo",
+                            "source_kind": "git",
+                            "source_url": "https://github.com/acme/internal-demo.git",
+                            "source_pin": "c" * 40,
+                        }
+                    ],
                 }
             ],
         },
@@ -156,6 +164,7 @@ def test_dependency_approval_explains_registry_and_immutable_environment() -> No
 
     assert any("python" in line and "зависимостей: 2" in line for line in lines)
     assert any("Python Packaging Authority" in line for line in lines)
+    assert any("internal-demo" in line and "github.com" in line for line in lines)
     assert any("только для чтения" in line for line in lines)
     assert _approval_buttons(approval) == ("approve", "reject")
 

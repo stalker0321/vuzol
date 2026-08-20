@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import DependencyProvisioningSettings
 from vuzol.execution.dependency_build import DependencyBuildError
 from vuzol.execution.paths import PathViolation, contained, trusted_root
+from vuzol.projects.custom_sources import CustomDependencySource
 from vuzol.projects.dependencies import (
     DEPENDENCY_APPROVAL_SCHEMA,
     DependencyEnvironment,
@@ -24,7 +25,7 @@ from vuzol.projects.dependencies import (
 )
 from vuzol.projects.source_catalog import SourceCatalog
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import Approval, Step, Task, Worktree
+from vuzol.storage.models import Approval, ProjectDependencySource, Step, Task, Worktree
 from vuzol.storage.types import ApprovalStatus, StepStatus
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -69,7 +70,7 @@ class DependencyProvisioningHandler:
             return StepOutcome(kind=OutcomeKind.CANCELLED, result={}, category="cancelled")
         side_effect_started = False
         try:
-            task, step, worktree, approval = await self._load(request)
+            task, step, worktree, approval, custom_sources = await self._load(request)
             if task.project_id is None:
                 raise DependencyError("dependency task has no project")
             root = contained(self._worktree_root, Path(worktree.path))
@@ -77,6 +78,7 @@ class DependencyProvisioningHandler:
                 root,
                 self._catalog,
                 maximum_direct_dependencies=self._settings.maximum_direct_dependencies,
+                custom_sources=custom_sources,
             )
             if not requirements:
                 return StepOutcome.succeeded({"status": "skipped", "environments": []})
@@ -173,7 +175,13 @@ class DependencyProvisioningHandler:
 
     async def _load(
         self, request: StepExecutionRequest
-    ) -> tuple[Task, Step, Worktree, Approval | None]:
+    ) -> tuple[
+        Task,
+        Step,
+        Worktree,
+        Approval | None,
+        tuple[CustomDependencySource, ...],
+    ]:
         async with self._factory() as session:
             task = await session.get(Task, request.task_id)
             step = await session.get(Step, request.step_id)
@@ -189,6 +197,20 @@ class DependencyProvisioningHandler:
                 .order_by(Approval.requested_at.desc())
                 .limit(1)
             )
+            source_rows = (
+                ()
+                if task is None or task.project_id is None
+                else tuple(
+                    (
+                        await session.scalars(
+                            select(ProjectDependencySource).where(
+                                ProjectDependencySource.project_id == task.project_id,
+                                ProjectDependencySource.revoked_at.is_(None),
+                            )
+                        )
+                    ).all()
+                )
+            )
         if task is None or step is None or worktree is None:
             raise LookupError("dependency provisioning state is incomplete")
         if (
@@ -198,7 +220,19 @@ class DependencyProvisioningHandler:
             or step.run_id != request.run_id
         ):
             raise LeaseLost("dependency provisioning step lease is stale")
-        return task, step, worktree, approval
+        sources = tuple(
+            CustomDependencySource(
+                id=row.id,
+                project_id=row.project_id,
+                ecosystem=row.ecosystem,
+                package_name=row.package_name,
+                source_kind=row.source_kind,
+                source_url=row.source_url,
+                source_pin=row.source_pin,
+            )
+            for row in source_rows
+        )
+        return task, step, worktree, approval, sources
 
     async def _request_approval(
         self,

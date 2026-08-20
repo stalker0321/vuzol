@@ -188,7 +188,7 @@ async def prepare_delivery(
             html=build_help_card(topic_kind),
             message_role=HELP_CARD_ROLE,
         )
-    if item.payload.get("role") == "project_import_prompt":
+    if item.payload.get("role") in {"project_import_prompt", "project_source_confirmation"}:
         try:
             chat_id = int(item.payload["chat_id"])
             thread_id = int(item.payload["message_thread_id"])
@@ -200,7 +200,7 @@ async def prepare_delivery(
             chat_id=chat_id,
             thread_id=thread_id,
             html=html_body,
-            message_role="project_import_prompt",
+            message_role=str(item.payload["role"]),
         )
     if item.payload.get("role") in {PROJECT_MODEL_PICKER_ROLE, PROJECT_MODEL_CONFIRM_ROLE}:
         return _prepare_project_model_message(item)

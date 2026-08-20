@@ -1,10 +1,12 @@
 import hashlib
 import json
+import uuid
 from pathlib import Path
 
 import pytest
 
 from vuzol.execution.codex import _apply_dependency_environment
+from vuzol.projects.custom_sources import CustomDependencySource
 from vuzol.projects.dependencies import (
     DEPENDENCY_RECEIPT,
     DependencyEnvironment,
@@ -50,6 +52,95 @@ def test_registry_request_rejects_custom_dependency_sources(
         inspect_dependency_requests(
             tmp_path, SourceCatalog.builtin(), maximum_direct_dependencies=10
         )
+
+
+@pytest.mark.parametrize(
+    ("ecosystem", "manifest_name", "content", "package"),
+    (
+        (
+            "python",
+            "pyproject.toml",
+            '[project]\ndependencies=["demo @ git+https://github.com/acme/demo.git@'
+            + "a" * 40
+            + '"]',
+            "demo",
+        ),
+        (
+            "node",
+            "package.json",
+            json.dumps(
+                {"dependencies": {"@acme/demo": "git+https://github.com/acme/demo.git#" + "a" * 40}}
+            ),
+            "@acme/demo",
+        ),
+    ),
+)
+def test_user_registered_git_source_is_bound_into_dependency_request(
+    tmp_path: Path,
+    ecosystem: str,
+    manifest_name: str,
+    content: str,
+    package: str,
+) -> None:
+    (tmp_path / manifest_name).write_text(content)
+    source = CustomDependencySource(
+        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        project_id="demo-project",
+        ecosystem=ecosystem,
+        package_name=package,
+        source_kind="git",
+        source_url="https://github.com/acme/demo.git",
+        source_pin="a" * 40,
+    )
+
+    request = inspect_dependency_requests(
+        tmp_path,
+        SourceCatalog.builtin(),
+        maximum_direct_dependencies=10,
+        custom_sources=(source,),
+    )[0]
+
+    assert request.custom_sources == (source,)
+    assert "github.com" in request.registry_hosts
+    assert request.approval_record()["custom_sources"] == [source.approval_record()]
+
+
+def test_unregistered_pinned_source_returns_copyable_registration_hint(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\ndependencies=["demo @ git+https://github.com/acme/demo.git@' + "a" * 40 + '"]'
+    )
+
+    with pytest.raises(DependencyError, match=r"/source add python demo git"):
+        inspect_dependency_requests(
+            tmp_path, SourceCatalog.builtin(), maximum_direct_dependencies=10
+        )
+
+
+def test_registered_python_https_artifact_requires_exact_sha256(tmp_path: Path) -> None:
+    digest = "b" * 64
+    url = "https://packages.example.com/demo-1.0-py3-none-any.whl"
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\ndependencies=["demo @ {url}#sha256={digest}"]'
+    )
+    source = CustomDependencySource(
+        id=uuid.uuid4(),
+        project_id="demo-project",
+        ecosystem="python",
+        package_name="demo",
+        source_kind="https",
+        source_url=url,
+        source_pin=digest,
+    )
+
+    request = inspect_dependency_requests(
+        tmp_path,
+        SourceCatalog.builtin(),
+        maximum_direct_dependencies=10,
+        custom_sources=(source,),
+    )[0]
+
+    assert request.custom_sources == (source,)
+    assert "packages.example.com" in request.registry_hosts
 
 
 def test_immutable_environment_receipt_is_reused_and_fails_closed(tmp_path: Path) -> None:

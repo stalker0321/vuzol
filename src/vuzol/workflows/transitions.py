@@ -32,6 +32,10 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.CONTEXT_PREPARED: frozenset(
         {
             TaskStatus.PLANNED,
+            # Capability/dependency preflight may discover that the approved
+            # project stack is not installed yet.  That approval boundary can
+            # be reached before the workflow enters EXECUTING.
+            TaskStatus.WAITING_APPROVAL,
             TaskStatus.EXECUTING,
             TaskStatus.AWAITING_USER,
             TaskStatus.PAUSED,

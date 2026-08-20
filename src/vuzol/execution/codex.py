@@ -297,7 +297,18 @@ class ExecutionEnvelopeFactory:
     ) -> ProcessEnvelope:
         if argv not in TRUSTED_GATE_COMMANDS.values():
             raise ValueError("gate command is absent from the trusted registry")
-        return await self._build_validation_envelope(context, argv, timeout_seconds)
+        managed_runtime = await self._managed_artifact_runtime(context.worktree_id)
+        normalized = (
+            _artifact_argv(argv, managed_executables=dict(managed_runtime.executables))
+            if argv and argv[0] in {"node", "npm"}
+            else argv
+        )
+        return await self._build_validation_envelope(
+            context,
+            normalized,
+            timeout_seconds,
+            managed_runtime=managed_runtime,
+        )
 
     async def build_artifact(
         self,
@@ -944,9 +955,9 @@ def _artifact_argv(
 ) -> tuple[str, ...]:
     if not argv or len(argv) > 32:
         raise ValueError("artifact command must contain 1..32 arguments")
-    executable = _ARTIFACT_EXECUTABLES.get(argv[0])
-    if executable is None and managed_executables is not None:
-        executable = managed_executables.get(argv[0])
+    executable = managed_executables.get(argv[0]) if managed_executables is not None else None
+    if executable is None:
+        executable = _ARTIFACT_EXECUTABLES.get(argv[0])
     if executable is None:
         raise ValueError(f"artifact executable is not allowed: {argv[0]}")
     if any(not value or len(value) > 500 or "\x00" in value for value in argv):

@@ -36,6 +36,9 @@ from vuzol.workflows.ports import CancellationContext
 
 TRUSTED_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
     "vuzol secret-scan": ("/usr/local/bin/vuzol-secret-scan",),
+    # The executable is resolved to the approved managed Node toolchain when
+    # the validation sandbox envelope is built.
+    "node --test": ("node", "--test"),
     "make build": ("/usr/bin/make", "build"),
     "make test": ("/usr/bin/make", "test"),
     "make format-check": ("/usr/bin/make", "format-check"),

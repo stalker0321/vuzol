@@ -30,19 +30,19 @@ Updated: 2026-08-18
 - Added artifact types to the result approval card and bound artifact IDs, types, sizes and content
   hashes into the immutable approval envelope.
 - Added `coding.v3` with a separate capability-installation approval before project execution.
-  The first adapter installs only hash-pinned, operator-staged Android SDK/JDK/Gradle tar bundles
-  into managed storage, default-off, without shell/package-manager/network access. Approved
-  toolchains are mounted read-only only for artifact production; plan approval alone never grants
-  installation permission.
+  The default-off, manifest-driven installer accepts any hash-pinned, operator-staged archive
+  toolchain without a per-stack Python adapter. It records a validated immutable receipt and exposes
+  only declared commands/environment paths read-only during artifact production, without shell,
+  package-manager or network access. Plan approval alone never grants installation permission.
 
 The pre-existing untracked root-owned `package-lock.json` belongs to the user and must remain
 untracked and untouched.
 
 ## Still required after this revision
 
-1. Add additional offline adapters beyond Android and document the operator process that assembles,
-   audits and stages production toolchain bundles. Python and Node already use installed runtimes;
-   unknown runtimes remain `Needs setup`.
+1. Add a reviewed online catalogue/downloader if desired. Offline adapters are now manifest-driven,
+   so archive-based toolchains no longer require Python changes, but bytes must still be staged and
+   hash-pinned by an operator. Python and Node can continue to use installed runtimes.
 2. Replace the free-port probe with a stronger reservation or supervised socket handoff if preview
    concurrency becomes high.
 3. Decide whether to add wildcard `*.test.hryshyn.dev`; it removes the absolute-path limitation but

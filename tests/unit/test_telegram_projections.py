@@ -119,6 +119,7 @@ def test_capability_approval_explains_separate_offline_installation() -> None:
             "bundles": [
                 {
                     "capability_key": "android-sdk",
+                    "version": "35.0.0",
                     "archive_bytes": 2 * 1024 * 1024,
                     "archive_sha256": "a" * 64,
                 }
@@ -129,6 +130,7 @@ def test_capability_approval_explains_separate_offline_installation() -> None:
     approval = MagicMock(requested_action="install_capabilities")
 
     assert any("android-sdk" in line for line in lines)
+    assert any("35.0.0" in line for line in lines)
     assert any("2.0 МБ" in line for line in lines)
     assert _approval_buttons(approval) == ("approve", "reject")
 

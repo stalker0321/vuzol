@@ -37,7 +37,7 @@ def test_settings_reject_invalid_port() -> None:
 def test_capability_provisioning_is_default_off_and_uses_separate_absolute_roots() -> None:
     configured = CapabilityProvisioningSettings()
     assert configured.enabled is False
-    assert configured.allowed_capabilities == ("android-sdk",)
+    assert configured.allowed_capabilities == ()
     with raises(ValidationError, match="absolute"):
         CapabilityProvisioningSettings(bundle_root=Path("bundles"))
     with raises(ValidationError, match="separate"):

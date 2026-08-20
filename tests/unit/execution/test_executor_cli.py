@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from vuzol.projects.toolchains import TOOLCHAIN_RECEIPT, ToolchainSpec
+
 from ._execution_helpers import (
     Any,
     AsyncMock,
@@ -32,7 +34,9 @@ from ._execution_helpers import (
 
 
 @pytest.mark.anyio
-async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
+async def test_codex_envelope_and_lifecycle_mocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Test envelope factory and persisted process lifecycle."""
     worktree_root = tmp_path / "worktrees"
     artifact_root = tmp_path / "artifacts"
@@ -268,7 +272,46 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
         step_id=step_id,
         lease=MagicMock(generation=1),
     )
-    mock_settings.capability_provisioning.toolchain_root.mkdir()
+    toolchain = mock_settings.capability_provisioning.toolchain_root / "android-sdk"
+    for relative in (
+        "android-sdk/platform-tools/adb",
+        "jdk/bin/java",
+        "gradle/bin/gradle",
+    ):
+        executable = toolchain / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"tool")
+        executable.chmod(0o555)
+    receipt = toolchain / TOOLCHAIN_RECEIPT
+    receipt.write_text(
+        json.dumps(
+            ToolchainSpec(
+                capability_key="android-sdk",
+                version="35.0-test",
+                archive_sha256="a" * 64,
+                executables=(
+                    ("adb", "android-sdk/platform-tools/adb"),
+                    ("gradle", "gradle/bin/gradle"),
+                    ("java", "jdk/bin/java"),
+                ),
+                environment=(
+                    ("ANDROID_HOME", "android-sdk"),
+                    ("ANDROID_SDK_ROOT", "android-sdk"),
+                    ("GRADLE_HOME", "gradle"),
+                    ("JAVA_HOME", "jdk"),
+                ),
+            ).receipt()
+        )
+    )
+    receipt.chmod(0o444)
+    monkeypatch.setattr(
+        "vuzol.execution.codex.current_environment",
+        AsyncMock(
+            return_value=MagicMock(
+                contract={"capabilities": {"android-sdk": {"provisioning": "automatic"}}}
+            )
+        ),
+    )
     artifact_envelope = await envf.build_artifact(
         artifact_request,
         worktree_id=mock_wt.id,
@@ -285,6 +328,16 @@ async def test_codex_envelope_and_lifecycle_mocks(tmp_path: Path) -> None:
     assert artifact_envelope.sandbox.mounts[-1].mode is MountMode.READ_ONLY
     assert artifact_envelope.sandbox.environment["ANDROID_HOME"] == (
         "/toolchains/android-sdk/android-sdk"
+    )
+    gradle_envelope = await envf.build_artifact(
+        artifact_request,
+        worktree_id=mock_wt.id,
+        argv=("gradle", "assembleDebug"),
+        timeout_seconds=30,
+    )
+    assert gradle_envelope.argv == (
+        "/toolchains/android-sdk/gradle/bin/gradle",
+        "assembleDebug",
     )
     with pytest.raises(ValueError, match="trusted registry"):
         await envf.build_gate(

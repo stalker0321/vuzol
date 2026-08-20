@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from vuzol.projects.capabilities import (
@@ -5,6 +6,7 @@ from vuzol.projects.capabilities import (
     blocking_capabilities,
     preflight_capabilities,
 )
+from vuzol.projects.toolchains import TOOLCHAIN_RECEIPT, ToolchainSpec
 
 
 def test_preflight_classifies_host_external_and_privileged_requirements() -> None:
@@ -42,7 +44,7 @@ def test_unknown_automatic_capability_fails_closed() -> None:
     )
 
     assert checks[0].state is CapabilityState.NEEDS_SETUP
-    assert checks[0].detail == "no trusted adapter is registered"
+    assert checks[0].detail == "managed toolchain is not installed"
 
 
 def test_preflight_accepts_complete_managed_android_toolchain(tmp_path: Path) -> None:
@@ -56,6 +58,22 @@ def test_preflight_accepts_complete_managed_android_toolchain(tmp_path: Path) ->
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"tool")
         path.chmod(0o555)
+    receipt = root / "android-sdk" / TOOLCHAIN_RECEIPT
+    receipt.write_text(
+        json.dumps(
+            ToolchainSpec(
+                capability_key="android-sdk",
+                version="35.0-test",
+                archive_sha256="a" * 64,
+                executables=(
+                    ("adb", "android-sdk/platform-tools/adb"),
+                    ("gradle", "gradle/bin/gradle"),
+                    ("java", "jdk/bin/java"),
+                ),
+            ).receipt()
+        )
+    )
+    receipt.chmod(0o444)
 
     checks = preflight_capabilities(
         {"capabilities": {"android-sdk": {"label": "Android SDK", "provisioning": "automatic"}}},
@@ -64,6 +82,7 @@ def test_preflight_accepts_complete_managed_android_toolchain(tmp_path: Path) ->
     )
 
     assert checks[0].state is CapabilityState.READY
+    assert checks[0].detail == "managed android-sdk 35.0-test is available"
 
 
 def test_preflight_does_not_expose_host_android_tools_to_artifact_sandbox() -> None:
@@ -73,7 +92,7 @@ def test_preflight_does_not_expose_host_android_tools_to_artifact_sandbox() -> N
     )
 
     assert checks[0].state is CapabilityState.NEEDS_SETUP
-    assert checks[0].detail == "managed Android toolchain is not installed"
+    assert checks[0].detail == "managed toolchain is not installed"
 
 
 def test_preflight_ignores_malformed_contract_and_defaults_label() -> None:

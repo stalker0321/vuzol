@@ -4,6 +4,20 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- hardened the managed runtime preview (ADR-0010): `publish_preview` no longer
+  executes project code inside the retained worktree. The approved
+  `result_commit` is exported with `git archive` into a disposable per-run
+  runtime directory (bounded by `VUZOL_PREVIEW_EXPORT_MAX_BYTES` and
+  `VUZOL_PREVIEW_EXPORT_MAX_FILES`, traversal-safe unpacking, staging plus
+  atomic replace), and the preview process starts through a standalone
+  Landlock confinement wrapper whose only writable path is that per-run
+  directory. Confinement fails closed with dedicated blocked categories
+  (`preview_confinement_unavailable`, `preview_materialization_failed`,
+  `preview_export_too_large`) instead of falling back to an unconstrained
+  spawn; replacement previews and publisher startup remove orphaned runtime
+  state. Fixes the `three-body-problem` preview failure where a service
+  writing next to its own files exited with ENOENT under the publisher
+  sandbox;
 - added `coding.v4` dependency provisioning: Python and Node manifests are normalized into
   hash-bound requests, a separate Telegram approval authorizes controlled-registry resolution, and
   the rootless builder stores immutable per-project environments which later agent, validation and

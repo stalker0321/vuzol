@@ -480,6 +480,8 @@ class Settings(BaseSettings):
     preview_site_base_url: HttpUrl = HttpUrl("https://test.hryshyn.dev")
     preview_gateway_host: str = "127.0.0.1"
     preview_gateway_port: int = Field(default=8091, ge=1024, le=65535)
+    preview_export_max_bytes: int = Field(default=250_000_000, ge=1)
+    preview_export_max_files: int = Field(default=100_000, ge=1)
     secret_file_root: Path = Path("/run/secrets")
     concurrency: ConcurrencyLimits = ConcurrencyLimits()
     database: DatabaseSettings = DatabaseSettings()

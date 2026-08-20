@@ -289,6 +289,14 @@ def test_prepared_context_can_wait_for_stack_approval() -> None:
     )
 
 
+def test_retrying_task_can_wait_for_stack_approval() -> None:
+    workflow_transitions._check(
+        TaskStatus.RETRYING,
+        TaskStatus.WAITING_APPROVAL,
+        workflow_transitions.TASK_TRANSITIONS,
+    )
+
+
 @pytest.mark.parametrize("target", [TaskStatus.PLANNED, TaskStatus.CONTEXT_PREPARED])
 def test_retrying_task_can_restore_early_workflow_status(target: TaskStatus) -> None:
     workflow_transitions._check(

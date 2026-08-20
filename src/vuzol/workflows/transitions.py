@@ -141,6 +141,7 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         {
             TaskStatus.CONTEXT_PREPARED,
             TaskStatus.PLANNED,
+            TaskStatus.WAITING_APPROVAL,
             TaskStatus.EXECUTING,
             TaskStatus.VALIDATING,
             TaskStatus.REVIEWING,

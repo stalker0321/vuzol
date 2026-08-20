@@ -18,7 +18,11 @@ from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
-from vuzol.workflows.runtime_preview import PreviewRuntimeRegistry, RuntimePreviewHandler
+from vuzol.workflows.runtime_preview import (
+    PreviewRuntimeRegistry,
+    RuntimePreviewHandler,
+    cleanup_orphaned_runtimes,
+)
 from vuzol.workflows.static_publish import StaticPublishHandler
 from vuzol.workflows.worker import WorkflowWorker
 
@@ -40,6 +44,7 @@ async def run() -> None:
         factory = create_session_factory(engine)
         owner = f"{socket.gethostname()}:{os.getpid()}:publisher"
         preview_registry = PreviewRuntimeRegistry()
+        cleanup_orphaned_runtimes(settings.preview_site_root / ".runtime")
         runtime_preview = RuntimePreviewHandler(factory, runtime, preview_registry)
         static_preview = StaticPublishHandler(factory, runtime, preview=True)
         worker = WorkflowWorker(

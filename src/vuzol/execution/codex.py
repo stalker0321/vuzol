@@ -31,7 +31,9 @@ from vuzol.execution.finalization import (
 from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
+from vuzol.project_environment import current_environment
 from vuzol.projects.executor_preference import apply_profile_overrides
+from vuzol.projects.toolchains import ToolchainRuntime, toolchain_runtime
 from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.grok import (
     GROK_DIAGNOSTIC_FILE_MAX_BYTES,
@@ -54,7 +56,6 @@ _ARTIFACT_EXECUTABLES = {
     "make": "/usr/bin/make",
     "node": "/usr/bin/node",
     "npm": "/usr/bin/npm",
-    "gradle": "/toolchains/android-sdk/gradle/bin/gradle",
     "./gradlew": "/workspace/gradlew",
 }
 
@@ -283,7 +284,8 @@ class ExecutionEnvelopeFactory:
     ) -> ProcessEnvelope:
         """Build a no-network validation envelope for an approved component command."""
 
-        normalized = _artifact_argv(argv)
+        managed_runtime = await self._managed_artifact_runtime(worktree_id)
+        normalized = _artifact_argv(argv, managed_executables=dict(managed_runtime.executables))
         context = GateExecutionContext(
             task_id=request.task_id,
             run_id=request.run_id,
@@ -294,8 +296,38 @@ class ExecutionEnvelopeFactory:
             lease_generation=request.lease.generation,
         )
         return await self._build_validation_envelope(
-            context, normalized, timeout_seconds, include_toolchains=True
+            context,
+            normalized,
+            timeout_seconds,
+            managed_runtime=managed_runtime,
         )
+
+    async def _managed_artifact_runtime(self, worktree_id: uuid.UUID) -> ToolchainRuntime:
+        root = self._settings.capability_provisioning.toolchain_root
+        if not root.is_dir():
+            return ToolchainRuntime()
+        async with self._factory() as session:
+            worktree = await session.get(Worktree, worktree_id)
+            environment = (
+                None
+                if worktree is None
+                else await current_environment(session, worktree.project_id)
+            )
+        if worktree is None or environment is None:
+            return ToolchainRuntime()
+        raw = environment.contract.get("capabilities")
+        capability_keys = (
+            tuple(
+                key
+                for key, value in raw.items()
+                if isinstance(key, str)
+                and isinstance(value, dict)
+                and value.get("provisioning", "automatic") == "automatic"
+            )
+            if isinstance(raw, dict)
+            else ()
+        )
+        return toolchain_runtime(trusted_root(root, create=False), capability_keys)
 
     async def build_canonicalizer(
         self,
@@ -326,7 +358,7 @@ class ExecutionEnvelopeFactory:
         argv: tuple[str, ...],
         timeout_seconds: int,
         *,
-        include_toolchains: bool = False,
+        managed_runtime: ToolchainRuntime | None = None,
     ) -> ProcessEnvelope:
         async with self._factory() as session:
             worktree = await session.get(Worktree, context.worktree_id)
@@ -391,7 +423,7 @@ class ExecutionEnvelopeFactory:
                 "GIT_CONFIG_VALUE_0": "/workspace",
             }
             toolchain_root = self._settings.capability_provisioning.toolchain_root
-            if include_toolchains and toolchain_root.is_dir():
+            if managed_runtime is not None and managed_runtime.executables:
                 mounts.append(
                     SandboxMount(
                         source=trusted_root(toolchain_root, create=False),
@@ -400,20 +432,11 @@ class ExecutionEnvelopeFactory:
                         purpose="approved-capability-toolchains",
                     )
                 )
-                environment.update(
-                    {
-                        "ANDROID_HOME": "/toolchains/android-sdk/android-sdk",
-                        "ANDROID_SDK_ROOT": "/toolchains/android-sdk/android-sdk",
-                        "JAVA_HOME": "/toolchains/android-sdk/jdk",
-                        "GRADLE_HOME": "/toolchains/android-sdk/gradle",
-                        "PATH": (
-                            "/toolchains/android-sdk/gradle/bin:"
-                            "/toolchains/android-sdk/jdk/bin:"
-                            "/toolchains/android-sdk/android-sdk/platform-tools:"
-                            + environment["PATH"]
-                        ),
-                    }
-                )
+                environment.update(dict(managed_runtime.environment))
+                if managed_runtime.path_entries:
+                    environment["PATH"] = (
+                        ":".join(managed_runtime.path_entries) + ":" + environment["PATH"]
+                    )
             spec = SandboxSpec(
                 image=sandbox.image,
                 uid=sandbox.uid,
@@ -787,10 +810,14 @@ def _remove_staged_diagnostics(paths: tuple[Path, Path]) -> None:
             directory.rmdir()
 
 
-def _artifact_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
+def _artifact_argv(
+    argv: tuple[str, ...], *, managed_executables: dict[str, str] | None = None
+) -> tuple[str, ...]:
     if not argv or len(argv) > 32:
         raise ValueError("artifact command must contain 1..32 arguments")
     executable = _ARTIFACT_EXECUTABLES.get(argv[0])
+    if executable is None and managed_executables is not None:
+        executable = managed_executables.get(argv[0])
     if executable is None:
         raise ValueError(f"artifact executable is not allowed: {argv[0]}")
     if any(not value or len(value) > 500 or "\x00" in value for value in argv):

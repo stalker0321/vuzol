@@ -44,34 +44,56 @@ bundle is available, Vuzol creates a second immutable approval containing the ca
 bundle SHA-256, byte size, environment revision/hash, and managed installation root. Rejecting this
 approval cancels the task without installing anything.
 
-Capability provisioning is default-off. The initial trusted adapter is `android-sdk`; it accepts
-only an operator-staged uncompressed tar bundle and adjacent `android-sdk.json` manifest under the
-configured read-only bundle root. The archive must contain executable
-`android-sdk/platform-tools/adb`, `jdk/bin/java`, and `gradle/bin/gradle`. Absolute/traversing paths,
-links, special files, writable manifests, oversized archives, hash changes, environment changes, and
-partial target directories all fail closed. Vuzol never invokes `apt`, a shell, or an online SDK
-installer, and never accepts third-party licences on the user's behalf.
+Capability provisioning is default-off. Installation is manifest-driven rather than hard-coded per
+stack. A root-trusted `<capability-key>.json` manifest and its uncompressed tar archive are staged
+under the configured read-only bundle root. The v2 manifest declares the exact version, SHA-256,
+bounded command-to-executable mappings, and optional sandbox environment roots. Adding Rust, Go,
+Flutter, Terraform, or another archive-based toolchain therefore does not require a Vuzol code
+release. An optional deployment allowlist can further restrict staged keys; an empty allowlist still
+requires a trusted manifest and does not permit model-supplied installers.
 
-After approval, the applier extracts into a same-filesystem temporary directory, verifies required
-executables, and atomically renames it under `/var/lib/vuzol/toolchains/android-sdk`. Artifact
-commands receive the managed toolchain as a read-only `/toolchains` mount with bounded Android/JDK/
-Gradle environment variables. Normal validation gates do not receive this mount.
+Absolute/traversing paths, links, special files, writable manifests, oversized archives, duplicate
+commands/environment variables, hash changes, environment changes, and partial target directories
+all fail closed. Vuzol never invokes `apt`, a shell, or an online installer, and never accepts
+third-party licences on the user's behalf.
+
+After approval, the applier extracts into a same-filesystem temporary directory, verifies every
+declared executable and environment path, writes an immutable installation receipt, and atomically
+renames it under `/var/lib/vuzol/toolchains/<capability-key>`. Preflight and sandbox construction use
+that receipt rather than a Python registry. Artifact commands receive only the toolchains declared
+by the current project as a read-only `/toolchains` mount; their commands, `PATH` entries, and
+environment roots are derived from the receipt. Normal validation gates do not receive this mount.
 
 Example manifest:
 
 ```json
 {
-  "schema_version": "capability-bundle.v1",
-  "capability_key": "android-sdk",
-  "archive": "android-sdk.tar",
-  "sha256": "<64 lowercase hex characters>"
+  "schema_version": "capability-bundle.v2",
+  "capability_key": "rust-toolchain",
+  "version": "1.89.0",
+  "archive": "rust-toolchain-1.89.0.tar",
+  "sha256": "<64 lowercase hex characters>",
+  "executables": {
+    "cargo": "bin/cargo",
+    "rustc": "bin/rustc"
+  },
+  "environment": {
+    "CARGO_HOME": "cargo-home"
+  }
 }
 ```
 
 Enabling the adapter requires
-`VUZOL_CAPABILITY_PROVISIONING__ENABLED=true`. If provisioning is disabled, no supported adapter is
-registered, or the reviewed bundle is absent, the task remains `Needs setup`; plan approval is never
-silently promoted into installation permission.
+`VUZOL_CAPABILITY_PROVISIONING__ENABLED=true`. If provisioning is disabled or the reviewed bundle is
+absent, the task remains `Needs setup`; plan approval is never silently promoted into installation
+permission. Online discovery/download remains a separate trust boundary: v2 installs only staged,
+hash-pinned bytes.
+
+The staging procedure is deliberately administrative: assemble the archive outside Vuzol, review
+its provenance and licence, compute its SHA-256, write the matching v2 manifest, and place both as
+non-writable regular files in the bundle root. Test `inspect_bundle(<key>)` before enabling a real
+task. Replacing either file creates different approval evidence; an already approved request cannot
+silently install the replacement.
 
 ## Typed result artifacts
 

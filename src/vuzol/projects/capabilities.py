@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from vuzol.projects.toolchains import load_installed_toolchain
+
 
 class CapabilityState(StrEnum):
     READY = "ready"
@@ -62,24 +64,25 @@ def preflight_capabilities(
                 )
             )
             continue
-        if key == "android-sdk":
-            state = (
-                CapabilityState.READY
-                if _managed_capability_ready(key, managed_toolchain_root)
-                else CapabilityState.NEEDS_SETUP
-            )
-            detail = (
-                "managed Android toolchain is available"
-                if state is CapabilityState.READY
-                else "managed Android toolchain is not installed"
-            )
-            checks.append(CapabilityCheck(key, label, state, detail))
-            continue
         executable = _EXECUTABLES.get(key)
-        if executable is None:
+        installed = (
+            None
+            if managed_toolchain_root is None
+            else load_installed_toolchain(managed_toolchain_root, key)
+        )
+        if installed is not None:
             checks.append(
                 CapabilityCheck(
-                    key, label, CapabilityState.NEEDS_SETUP, "no trusted adapter is registered"
+                    key,
+                    label,
+                    CapabilityState.READY,
+                    f"managed {key} {installed.version} is available",
+                )
+            )
+        elif executable is None:
+            checks.append(
+                CapabilityCheck(
+                    key, label, CapabilityState.NEEDS_SETUP, "managed toolchain is not installed"
                 )
             )
         elif which(executable) is None:
@@ -93,21 +96,6 @@ def preflight_capabilities(
                 CapabilityCheck(key, label, CapabilityState.READY, f"{executable} is available")
             )
     return tuple(checks)
-
-
-def _managed_capability_ready(key: str, root: Path | None) -> bool:
-    if key != "android-sdk" or root is None:
-        return False
-    target = root / "android-sdk"
-    required = (
-        target / "android-sdk/platform-tools/adb",
-        target / "jdk/bin/java",
-        target / "gradle/bin/gradle",
-    )
-    return all(
-        path.is_file() and not path.is_symlink() and path.stat().st_mode & 0o111
-        for path in required
-    )
 
 
 def blocking_capabilities(checks: tuple[CapabilityCheck, ...]) -> tuple[CapabilityCheck, ...]:

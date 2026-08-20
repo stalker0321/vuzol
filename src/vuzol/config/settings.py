@@ -141,7 +141,9 @@ class CapabilityProvisioningSettings(BaseModel):
     enabled: bool = False
     bundle_root: Path = Path("/etc/vuzol/capability-bundles")
     toolchain_root: Path = Path("/var/lib/vuzol/toolchains")
-    allowed_capabilities: tuple[str, ...] = ("android-sdk",)
+    # Empty means every capability with a trusted, operator-staged manifest is
+    # eligible. A non-empty tuple is an additional deployment allowlist.
+    allowed_capabilities: tuple[str, ...] = ()
     maximum_bundle_bytes: int = Field(default=4_000_000_000, ge=1, le=20_000_000_000)
     maximum_files: int = Field(default=200_000, ge=1, le=1_000_000)
 

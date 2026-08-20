@@ -20,6 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import CapabilityProvisioningSettings
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.project_environment import current_environment
+from vuzol.projects.toolchains import (
+    TOOLCHAIN_RECEIPT,
+    TOOLCHAIN_RECEIPT_SCHEMA,
+    ToolchainReceiptError,
+    ToolchainSpec,
+    load_installed_toolchain,
+    parse_toolchain_spec,
+)
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import Approval, ProjectEnvironmentRevision, Step, Task
 from vuzol.storage.types import ApprovalStatus, StepStatus
@@ -28,16 +36,9 @@ from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.result_approval import envelope_hash, verified_envelope
 
 CAPABILITY_APPROVAL_SCHEMA = "capability-provisioning-approval.v1"
-CAPABILITY_BUNDLE_SCHEMA = "capability-bundle.v1"
+CAPABILITY_BUNDLE_SCHEMA = "capability-bundle.v2"
 CAPABILITY_APPROVAL_TTL = timedelta(days=7)
 
-_REQUIRED_PATHS = {
-    "android-sdk": (
-        "android-sdk/platform-tools/adb",
-        "jdk/bin/java",
-        "gradle/bin/gradle",
-    ),
-}
 _HOST_EXECUTABLES = {
     "git": ("git",),
     "node-runtime": ("node",),
@@ -55,14 +56,32 @@ class CapabilityBundle:
     archive: Path
     archive_sha256: str
     archive_bytes: int
-    required_paths: tuple[str, ...]
+    version: str
+    executables: tuple[tuple[str, str], ...]
+    environment: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def required_paths(self) -> tuple[str, ...]:
+        return tuple(path for _command, path in self.executables)
+
+    def toolchain_spec(self) -> ToolchainSpec:
+        return ToolchainSpec(
+            capability_key=self.capability_key,
+            version=self.version,
+            archive_sha256=self.archive_sha256,
+            executables=self.executables,
+            environment=self.environment,
+        )
 
     def approval_record(self) -> dict[str, object]:
         return {
             "capability_key": self.capability_key,
             "archive_sha256": self.archive_sha256,
             "archive_bytes": self.archive_bytes,
+            "version": self.version,
             "required_paths": list(self.required_paths),
+            "executables": {command: path for command, path in self.executables},
+            "environment": {name: path for name, path in self.environment},
         }
 
 
@@ -78,22 +97,18 @@ class OfflineCapabilityInstaller:
         host = _HOST_EXECUTABLES.get(capability_key)
         if host is not None and all(shutil.which(executable) is not None for executable in host):
             return True
-        required = _REQUIRED_PATHS.get(capability_key)
-        if required is None:
-            return False
-        target = self._settings.toolchain_root / capability_key
-        return all(_safe_executable(target, relative) for relative in required)
+        return load_installed_toolchain(self._settings.toolchain_root, capability_key) is not None
 
     def inspect_bundle(self, capability_key: str) -> CapabilityBundle:
         if not self._settings.enabled:
             raise CapabilityProvisioningError("offline capability provisioning is disabled")
-        if capability_key not in self._settings.allowed_capabilities:
+        if (
+            self._settings.allowed_capabilities
+            and capability_key not in self._settings.allowed_capabilities
+        ):
             raise CapabilityProvisioningError(
                 "capability is absent from the provisioning allowlist"
             )
-        required = _REQUIRED_PATHS.get(capability_key)
-        if required is None:
-            raise CapabilityProvisioningError("no trusted installer is registered")
         bundle_root = trusted_root(self._settings.bundle_root, create=False)
         manifest_path = contained(
             bundle_root, bundle_root / f"{capability_key}.json", must_exist=False
@@ -126,7 +141,29 @@ class OfflineCapabilityInstaller:
         measured = _sha256_file(archive)
         if measured != expected_hash:
             raise CapabilityProvisioningError("capability bundle hash does not match its manifest")
-        return CapabilityBundle(capability_key, archive, measured, size, required)
+        try:
+            spec = parse_toolchain_spec(
+                {
+                    "schema_version": TOOLCHAIN_RECEIPT_SCHEMA,
+                    "capability_key": capability_key,
+                    "version": raw.get("version"),
+                    "archive_sha256": measured,
+                    "executables": raw.get("executables"),
+                    "environment": raw.get("environment", {}),
+                },
+                expected_key=capability_key,
+            )
+        except ToolchainReceiptError as error:
+            raise CapabilityProvisioningError(str(error)) from error
+        return CapabilityBundle(
+            capability_key,
+            archive,
+            measured,
+            size,
+            spec.version,
+            spec.executables,
+            spec.environment,
+        )
 
     def install(self, bundle: CapabilityBundle) -> None:
         current = self.inspect_bundle(bundle.capability_key)
@@ -149,6 +186,21 @@ class OfflineCapabilityInstaller:
                     raise CapabilityProvisioningError(
                         f"capability bundle is missing required executable: {relative}"
                     )
+            for _name, relative in bundle.environment:
+                if not _safe_runtime_path(temporary, relative):
+                    raise CapabilityProvisioningError(
+                        f"capability bundle is missing environment path: {relative}"
+                    )
+            temporary.chmod(0o755)
+            receipt = contained(temporary, temporary / TOOLCHAIN_RECEIPT, must_exist=False)
+            receipt.write_text(
+                json.dumps(
+                    bundle.toolchain_spec().receipt(), sort_keys=True, separators=(",", ":")
+                ),
+                encoding="utf-8",
+            )
+            receipt.chmod(0o444)
+            temporary.chmod(0o555)
             os.replace(temporary, target)
         except BaseException:
             shutil.rmtree(temporary, ignore_errors=True)
@@ -487,6 +539,17 @@ def _safe_executable(root: Path, relative: str) -> bool:
         return False
     return (
         stat.S_ISREG(metadata.st_mode) and not path.is_symlink() and bool(metadata.st_mode & 0o111)
+    )
+
+
+def _safe_runtime_path(root: Path, relative: str) -> bool:
+    try:
+        path = contained(root, root.joinpath(*PurePosixPath(relative).parts))
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return not path.is_symlink() and (
+        stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)
     )
 
 

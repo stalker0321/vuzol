@@ -966,13 +966,17 @@ def _capability_approval_fact_lines(
         if not isinstance(bundle, dict):
             continue
         key = bundle.get("capability_key")
+        version = bundle.get("version")
         size = bundle.get("archive_bytes")
         digest = bundle.get("archive_sha256")
         if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
             total_bytes += size
         if isinstance(key, str) and isinstance(digest, str):
+            version_suffix = (
+                f" {telegram_html(version)}" if isinstance(version, str) and version else ""
+            )
             lines.append(
-                f"• <code>{telegram_html(key)}</code> · SHA-256 "
+                f"• <code>{telegram_html(key)}</code>{version_suffix} · SHA-256 "
                 f"<code>{telegram_html(digest[:12])}…</code>"
             )
     lines.extend(

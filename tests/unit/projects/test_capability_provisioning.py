@@ -88,8 +88,20 @@ def _android_bundle(
             {
                 "schema_version": CAPABILITY_BUNDLE_SCHEMA,
                 "capability_key": "android-sdk",
+                "version": "35.0-test",
                 "archive": archive.name,
                 "sha256": digest,
+                "executables": {
+                    "adb": "android-sdk/platform-tools/adb",
+                    "java": "jdk/bin/java",
+                    "gradle": "gradle/bin/gradle",
+                },
+                "environment": {
+                    "ANDROID_HOME": "android-sdk",
+                    "ANDROID_SDK_ROOT": "android-sdk",
+                    "JAVA_HOME": "jdk",
+                    "GRADLE_HOME": "gradle",
+                },
             }
         )
     )
@@ -154,6 +166,43 @@ def test_offline_android_bundle_is_verified_installed_and_idempotent(tmp_path: P
     assert (settings.toolchain_root / "android-sdk/jdk/bin/java").stat().st_mode & 0o111
 
 
+def test_manifest_installs_a_new_toolchain_without_a_registered_adapter(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    archive = settings.bundle_root / "rust-toolchain.tar"
+    with tarfile.open(archive, "w") as output:
+        for name, content in (("bin/cargo", b"cargo"), ("bin/rustc", b"rustc")):
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = 0o755
+            output.addfile(info, io.BytesIO(content))
+        cargo_home = tarfile.TarInfo("cargo-home")
+        cargo_home.type = tarfile.DIRTYPE
+        cargo_home.mode = 0o755
+        output.addfile(cargo_home)
+    archive.chmod(0o644)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    manifest = settings.bundle_root / "rust-toolchain.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": CAPABILITY_BUNDLE_SCHEMA,
+                "capability_key": "rust-toolchain",
+                "version": "1.89.0",
+                "archive": archive.name,
+                "sha256": digest,
+                "executables": {"cargo": "bin/cargo", "rustc": "bin/rustc"},
+                "environment": {"CARGO_HOME": "cargo-home"},
+            }
+        )
+    )
+    manifest.chmod(0o644)
+    installer = OfflineCapabilityInstaller(settings)
+
+    installer.install(installer.inspect_bundle("rust-toolchain"))
+
+    assert installer.ready("rust-toolchain")
+
+
 @pytest.mark.parametrize("unsafe", ("../escape", "/absolute"))
 def test_offline_bundle_rejects_escaping_archive_entries(tmp_path: Path, unsafe: str) -> None:
     settings = _settings(tmp_path)
@@ -172,8 +221,9 @@ def test_offline_bundle_is_default_off_allowlisted_and_hash_bound(tmp_path: Path
     settings = _settings(tmp_path / "enabled")
     _android_bundle(settings)
     installer = OfflineCapabilityInstaller(settings)
+    restricted = settings.model_copy(update={"allowed_capabilities": ("android-sdk",)})
     with pytest.raises(CapabilityProvisioningError, match="allowlist"):
-        installer.inspect_bundle("unknown-sdk")
+        OfflineCapabilityInstaller(restricted).inspect_bundle("unknown-sdk")
     archive = settings.bundle_root / "android-sdk.tar"
     archive.write_bytes(archive.read_bytes() + b"tampered")
     with pytest.raises(CapabilityProvisioningError, match="hash"):
@@ -295,7 +345,12 @@ async def test_missing_android_bundle_requests_separate_hash_bound_approval(
         settings.bundle_root / "android-sdk.tar",
         digest,
         123,
-        ("android-sdk/platform-tools/adb", "jdk/bin/java", "gradle/bin/gradle"),
+        "35.0-test",
+        (
+            ("adb", "android-sdk/platform-tools/adb"),
+            ("gradle", "gradle/bin/gradle"),
+            ("java", "jdk/bin/java"),
+        ),
     )
     request = _request()
     task, step, environment = _state(request)
@@ -372,7 +427,12 @@ async def test_approved_capability_bundle_is_installed_consumed_and_reported(
         settings.bundle_root / "android-sdk.tar",
         digest,
         (settings.bundle_root / "android-sdk.tar").stat().st_size,
-        ("android-sdk/platform-tools/adb", "jdk/bin/java", "gradle/bin/gradle"),
+        "35.0-test",
+        (
+            ("adb", "android-sdk/platform-tools/adb"),
+            ("gradle", "gradle/bin/gradle"),
+            ("java", "jdk/bin/java"),
+        ),
     )
     request = _request()
     task, step, environment = _state(request)

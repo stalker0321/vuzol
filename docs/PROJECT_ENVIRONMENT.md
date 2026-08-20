@@ -119,9 +119,28 @@ Receipts bind the manifest, input lockfile, registry and generated lockfile hash
 artifact production and later agent sessions mount a matching environment read-only. A new manifest
 hash creates a new environment and approval instead of mutating the old one.
 
-Custom URLs and Git dependencies currently fail closed as an untrusted source. Project-scoped
-user-originated source registration is the next revision; approving a normal plan or letting the
-model write a URL does not make that URL trusted.
+Custom URLs and Git dependencies fail closed unless the user explicitly registers the exact source
+in that project's Telegram topic:
+
+```text
+/source add python PACKAGE git HTTPS_URL 40_CHAR_COMMIT
+/source add node PACKAGE git HTTPS_URL 40_CHAR_COMMIT
+/source add python PACKAGE https HTTPS_ARTIFACT_URL 64_CHAR_SHA256
+/source remove SOURCE_UUID
+```
+
+The source row is scoped to project, ecosystem and package and records the Telegram user. Git URLs
+must use an exact lowercase 40-character commit. Python HTTPS artifacts must carry the matching
+`#sha256=` reference in `pyproject.toml`; Node HTTPS artifacts are intentionally unsupported until
+npm download-time digest enforcement can be guaranteed. Query strings, credentials, fragments,
+private/IP destinations and mutable branch/tag pins are rejected.
+
+Once the manifest matches a registered source, its ID, URL and pin become part of the immutable
+dependency approval and environment key. The source host is added to the same ephemeral controlled
+proxy allowlist. Python Git builds may execute the trusted source's build backend, but only inside
+the bounded dependency-builder sandbox with no host repository or credentials mounted. Revocation
+prevents new requests and future mounts whose manifest can no longer reproduce the same approved
+source set; it does not rewrite old immutable environments.
 
 ## Typed result artifacts
 

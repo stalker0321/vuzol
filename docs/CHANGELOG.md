@@ -11,6 +11,9 @@ This file records completed implementation changes, not plans or speculative ide
 - added a root-shipped source catalogue and content-addressed downloader for pinned Go, Node,
   Gradle and Java archives. Downloads begin only after the existing installation approval, enforce
   exact HTTPS hosts/redirects, byte size and SHA-256, and are reused from a non-writable cache;
+- added project-scoped `/source` registration for user-trusted custom dependencies. Python and Node
+  Git sources require an exact 40-character commit; Python HTTPS artifacts require SHA-256. The
+  persisted user provenance is bound into the dependency approval and can be explicitly revoked;
 - generalized `coding.v3` two-stage stack authorization: plan approval records the environment but
   missing tools require a separate hash-bound Telegram approval; the default-off manifest-driven
   installer can install any reviewed offline archive toolchain without a code change, records a

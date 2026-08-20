@@ -137,7 +137,7 @@ async def test_validation_image_preflight_uses_fixed_offline_commands_and_fails_
         runtime, registries, seccomp_profile=seccomp, seccomp_digest=digest
     )
 
-    assert runtime.run.await_count == 3
+    assert runtime.run.await_count == 4
     envelopes = [call.args[0] for call in runtime.run.await_args_list]
     assert tuple(envelope.argv for envelope in envelopes) == VALIDATION_IMAGE_PREFLIGHT_COMMANDS
     assert all(envelope.sandbox.image == sandbox.image for envelope in envelopes)

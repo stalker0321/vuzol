@@ -449,8 +449,29 @@ def test_redo_and_reject_do_not_apply_the_retained_result(
     asyncio.run(scenario())
 
 
-def test_capability_installation_uses_separate_approval_and_requeues_exact_step(
+@pytest.mark.parametrize(
+    ("requested_action", "schema_version", "step_type", "evidence_key"),
+    (
+        (
+            "install_capabilities",
+            "capability-provisioning-approval.v1",
+            "ensure_capabilities",
+            "android-sdk",
+        ),
+        (
+            "install_dependencies",
+            "dependency-provisioning-approval.v1",
+            "ensure_dependencies",
+            "python",
+        ),
+    ),
+)
+def test_installation_uses_separate_approval_and_requeues_exact_step(
     postgres_dsn: str,
+    requested_action: str,
+    schema_version: str,
+    step_type: str,
+    evidence_key: str,
 ) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
@@ -484,7 +505,7 @@ def test_capability_installation_uses_separate_approval_and_requeues_exact_step(
                 run_id=run.id,
                 ordinal=1,
                 dependency_metadata={"predecessor_ordinals": [0]},
-                step_type="ensure_capabilities",
+                step_type=step_type,
                 queue_class=QueueClass.PRIVILEGED,
                 status=StepStatus.WAITING_APPROVAL,
                 required_capabilities=["host_admin"],
@@ -496,23 +517,34 @@ def test_capability_installation_uses_separate_approval_and_requeues_exact_step(
             )
             session.add(step)
             await session.flush()
-            envelope = {
-                "schema_version": "capability-provisioning-approval.v1",
-                "requested_action": "install_capabilities",
+            envelope: dict[str, object] = {
+                "schema_version": schema_version,
+                "requested_action": requested_action,
                 "step_id": str(step.id),
-                "bundles": [
+            }
+            if requested_action == "install_capabilities":
+                envelope["bundles"] = [
                     {
                         "capability_key": "android-sdk",
                         "archive_sha256": "c" * 64,
                         "archive_bytes": 1024,
                     }
-                ],
-            }
+                ]
+            else:
+                envelope["requirements"] = [
+                    {
+                        "ecosystem": "python",
+                        "registry_provider": "Python Packaging Authority",
+                        "manifest_sha256": "c" * 64,
+                        "direct_dependencies": ["httpx==1"],
+                        "custom_sources": [],
+                    }
+                ]
             step.payload = {"action_envelope": envelope}
             approval = Approval(
                 step_id=step.id,
                 action_envelope_hash=envelope_hash(envelope),
-                requested_action="install_capabilities",
+                requested_action=requested_action,
                 normalized_target="android-project:managed-toolchains",
                 human_summary="Установить Android SDK",
                 token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
@@ -528,7 +560,7 @@ def test_capability_installation_uses_separate_approval_and_requeues_exact_step(
         async with factory() as session:
             card = await build_status_card(session, task_id)
             assert "Требуется отдельное разрешение" in card.html
-            assert "android-sdk" in card.html
+            assert evidence_key in card.html
             assert card.buttons == ("approve", "reject")
 
         async with factory.begin() as session:

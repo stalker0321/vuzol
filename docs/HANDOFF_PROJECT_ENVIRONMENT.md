@@ -42,15 +42,17 @@ Updated: 2026-08-20
   registries in the rootless controlled-proxy sandbox; npm lifecycle scripts and source builds are
   disabled. The resulting project/hash-specific environment is frozen and mounted read-only into
   validation, artifact production and subsequent agent sessions.
+- Added user-originated project source trust with `/source add`. Exact Git commits are supported for
+  Python/Node and SHA-256-pinned HTTPS artifacts for Python. Sources are scoped to one project,
+  ecosystem and package, displayed in the installation approval, and revocable by UUID.
 
 The pre-existing untracked root-owned `package-lock.json` belongs to the user and must remain
 untracked and untouched.
 
 ## Still required after this revision
 
-1. Add project-scoped user-supplied HTTPS/Git sources. They must be explicitly entered by the user,
-   never inferred as trusted from model-written repository content, and pinned to a digest or commit
-   where the protocol permits it.
+1. Add a friendlier multi-step source registration card if the explicit `/source` command proves too
+   cumbersome. Do not weaken the exact project/package/pin binding.
 2. Replace the free-port probe with a stronger reservation or supervised socket handoff if preview
    concurrency becomes high.
 3. Decide whether to add wildcard `*.test.hryshyn.dev`; it removes the absolute-path limitation but

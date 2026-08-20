@@ -45,3 +45,13 @@ def test_retry_policy_allows_explicit_independent_review_retry_after_exhaustion(
             failure_category="independent_review_required",
         )
     )
+
+
+def test_dependency_setup_failure_is_retryable_after_source_registration() -> None:
+    assert blocked_step_is_retryable(
+        _step(
+            failure_category="dependency_provisioning_failed",
+            attempt_count=2,
+            max_attempts=2,
+        )
+    )

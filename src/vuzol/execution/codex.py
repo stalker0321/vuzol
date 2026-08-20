@@ -33,6 +33,7 @@ from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
 from vuzol.project_environment import current_environment
+from vuzol.projects.custom_sources import CustomDependencySource
 from vuzol.projects.dependencies import (
     DependencyEnvironment,
     inspect_dependency_requests,
@@ -50,7 +51,7 @@ from vuzol.providers.grok import (
 )
 from vuzol.providers.kimi import canonical_kimi_argv
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
-from vuzol.storage.models import Step, SupervisedProcess, Worktree
+from vuzol.storage.models import ProjectDependencySource, Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
@@ -181,7 +182,13 @@ class ExecutionEnvelopeFactory:
                 ),
             ]
             dependency_runtime = self._dependency_runtime(
-                worktree_path, project_id=worktree.project_id
+                worktree_path,
+                project_id=worktree.project_id,
+                custom_sources=(
+                    await _project_dependency_sources(session, worktree.project_id)
+                    if self._settings.dependency_provisioning.enabled is True
+                    else ()
+                ),
             )
             mounts.extend(dependency_runtime.mounts)
             environment.update(dict(dependency_runtime.environment))
@@ -441,7 +448,13 @@ class ExecutionEnvelopeFactory:
                 "GIT_CONFIG_VALUE_0": "/workspace",
             }
             dependency_runtime = self._dependency_runtime(
-                worktree_path, project_id=worktree.project_id
+                worktree_path,
+                project_id=worktree.project_id,
+                custom_sources=(
+                    await _project_dependency_sources(session, worktree.project_id)
+                    if self._settings.dependency_provisioning.enabled is True
+                    else ()
+                ),
             )
             mounts.extend(dependency_runtime.mounts)
             environment.update(dict(dependency_runtime.environment))
@@ -492,7 +505,13 @@ class ExecutionEnvelopeFactory:
                 sandbox=spec,
             )
 
-    def _dependency_runtime(self, worktree: Path, *, project_id: str) -> _DependencyRuntime:
+    def _dependency_runtime(
+        self,
+        worktree: Path,
+        *,
+        project_id: str,
+        custom_sources: tuple[CustomDependencySource, ...],
+    ) -> _DependencyRuntime:
         settings = self._settings.dependency_provisioning
         if settings.enabled is not True:
             return _DependencyRuntime()
@@ -500,6 +519,7 @@ class ExecutionEnvelopeFactory:
             worktree,
             SourceCatalog.builtin(),
             maximum_direct_dependencies=settings.maximum_direct_dependencies,
+            custom_sources=custom_sources,
         )
         environments = tuple(
             dependency_environment
@@ -788,6 +808,33 @@ def _apply_dependency_environment(
         )
         return
     raise ValueError("approved dependency ecosystem has no runtime mapping")
+
+
+async def _project_dependency_sources(
+    session: AsyncSession, project_id: str
+) -> tuple[CustomDependencySource, ...]:
+    rows = tuple(
+        (
+            await session.scalars(
+                select(ProjectDependencySource).where(
+                    ProjectDependencySource.project_id == project_id,
+                    ProjectDependencySource.revoked_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    return tuple(
+        CustomDependencySource(
+            id=row.id,
+            project_id=row.project_id,
+            ecosystem=row.ecosystem,
+            package_name=row.package_name,
+            source_kind=row.source_kind,
+            source_url=row.source_url,
+            source_pin=row.source_pin,
+        )
+        for row in rows
+    )
 
 
 def _worktree_git_metadata(worktree: Path) -> Path:

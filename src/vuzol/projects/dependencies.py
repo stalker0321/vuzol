@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vuzol.execution.paths import contained, trusted_root
+from vuzol.projects.custom_sources import (
+    CustomDependencySource,
+    CustomSourceError,
+    normalize_package_name,
+    parse_source_command,
+)
 from vuzol.projects.source_catalog import PackageRegistry, SourceCatalog
 
 DEPENDENCY_APPROVAL_SCHEMA = "dependency-provisioning-approval.v1"
@@ -34,6 +40,7 @@ class DependencyRequest:
     direct_dependencies: tuple[str, ...]
     registry_provider: str
     registry_hosts: tuple[str, ...]
+    custom_sources: tuple[CustomDependencySource, ...] = ()
     input_lockfile_name: str | None = None
     input_lockfile_sha256: str | None = None
 
@@ -50,6 +57,7 @@ class DependencyRequest:
             "direct_dependencies": list(self.direct_dependencies),
             "registry_provider": self.registry_provider,
             "registry_hosts": list(self.registry_hosts),
+            "custom_sources": [source.approval_record() for source in self.custom_sources],
             "input_lockfile_name": self.input_lockfile_name,
             "input_lockfile_sha256": self.input_lockfile_sha256,
         }
@@ -77,6 +85,7 @@ def inspect_dependency_requests(
     catalog: SourceCatalog,
     *,
     maximum_direct_dependencies: int,
+    custom_sources: tuple[CustomDependencySource, ...] = (),
 ) -> tuple[DependencyRequest, ...]:
     root = trusted_root(worktree, create=False)
     requests: list[DependencyRequest] = []
@@ -88,7 +97,10 @@ def inspect_dependency_requests(
         if not manifest.exists():
             continue
         content = _trusted_manifest(manifest)
-        dependencies = parser(content)
+        dependencies, matched_sources = parser(
+            content,
+            tuple(source for source in custom_sources if source.ecosystem == ecosystem),
+        )
         if not dependencies:
             continue
         if len(dependencies) > maximum_direct_dependencies:
@@ -104,6 +116,7 @@ def inspect_dependency_requests(
                 content,
                 dependencies,
                 registry,
+                custom_sources=matched_sources,
                 input_lockfile_name=lockfile_name,
                 input_lockfile_sha256=lockfile_sha256,
             )
@@ -173,6 +186,7 @@ def _request(
     dependencies: tuple[str, ...],
     registry: PackageRegistry,
     *,
+    custom_sources: tuple[CustomDependencySource, ...],
     input_lockfile_name: str | None,
     input_lockfile_sha256: str | None,
 ) -> DependencyRequest:
@@ -182,7 +196,10 @@ def _request(
         manifest_sha256=hashlib.sha256(content).hexdigest(),
         direct_dependencies=dependencies,
         registry_provider=registry.provider,
-        registry_hosts=registry.hosts,
+        registry_hosts=tuple(
+            sorted({*registry.hosts, *(source.hostname for source in custom_sources)})
+        ),
+        custom_sources=custom_sources,
         input_lockfile_name=input_lockfile_name,
         input_lockfile_sha256=input_lockfile_sha256,
     )
@@ -206,7 +223,9 @@ def _trusted_manifest(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _python_dependencies(content: bytes) -> tuple[str, ...]:
+def _python_dependencies(
+    content: bytes, sources: tuple[CustomDependencySource, ...]
+) -> tuple[tuple[str, ...], tuple[CustomDependencySource, ...]]:
     try:
         raw = tomllib.loads(content.decode("utf-8"))
         project = raw.get("project", {})
@@ -216,17 +235,38 @@ def _python_dependencies(content: bytes) -> tuple[str, ...]:
     if not isinstance(values, list):
         raise DependencyError("Python dependencies must be a list")
     normalized: list[str] = []
+    matched: list[CustomDependencySource] = []
     for value in values:
-        if not isinstance(value, str) or not value or len(value) > 500 or "@" in value:
+        if not isinstance(value, str) or not value or len(value) > 500:
             raise DependencyError("Python dependency requires a custom source")
-        name = re.split(r"[<>=!~; ]", value, maxsplit=1)[0]
+        name = (
+            value.partition(" @ ")[0]
+            if " @ " in value
+            else re.split(r"[<>=!~; ]", value, maxsplit=1)[0]
+        )
         if _PYTHON_NAME.fullmatch(name) is None:
             raise DependencyError("Python dependency name is unsafe")
+        custom = _match_python_source(value.strip(), sources)
+        if custom is not None:
+            normalized.append(value.strip())
+            matched.append(custom)
+            continue
+        if "@" in value or "://" in value or "git+" in value:
+            hint = _registration_hint("python", name.split("[", 1)[0], value)
+            raise DependencyError(
+                "Python dependency requires a user-registered custom source"
+                + (f": {hint}" if hint is not None else "")
+            )
         normalized.append(value.strip())
-    return tuple(sorted(set(normalized), key=str.casefold))
+    return (
+        tuple(sorted(set(normalized), key=str.casefold)),
+        tuple(sorted(set(matched), key=lambda source: str(source.id))),
+    )
 
 
-def _node_dependencies(content: bytes) -> tuple[str, ...]:
+def _node_dependencies(
+    content: bytes, sources: tuple[CustomDependencySource, ...]
+) -> tuple[tuple[str, ...], tuple[CustomDependencySource, ...]]:
     try:
         raw = json.loads(content)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -234,11 +274,21 @@ def _node_dependencies(content: bytes) -> tuple[str, ...]:
     if not isinstance(raw, dict):
         raise DependencyError("Node dependency manifest must be an object")
     normalized: list[str] = []
+    matched: list[CustomDependencySource] = []
     for section_name in ("dependencies", "devDependencies"):
         section = raw.get(section_name, {})
         if not isinstance(section, dict):
             raise DependencyError("Node dependency section must be an object")
         for name, version in section.items():
+            custom = (
+                _match_node_source(name, version, sources)
+                if isinstance(name, str) and isinstance(version, str)
+                else None
+            )
+            if custom is not None:
+                normalized.append(f"{name}@{version}")
+                matched.append(custom)
+                continue
             if (
                 not isinstance(name, str)
                 or _NODE_NAME.fullmatch(name) is None
@@ -246,9 +296,84 @@ def _node_dependencies(content: bytes) -> tuple[str, ...]:
                 or _NODE_VERSION.fullmatch(version) is None
                 or len(version) > 200
             ):
-                raise DependencyError("Node dependency requires a custom source")
+                hint = (
+                    _registration_hint("node", name, version)
+                    if isinstance(name, str) and isinstance(version, str)
+                    else None
+                )
+                raise DependencyError(
+                    "Node dependency requires a user-registered custom source"
+                    + (f": {hint}" if hint is not None else "")
+                )
             normalized.append(f"{name}@{version}")
-    return tuple(sorted(set(normalized), key=str.casefold))
+    return (
+        tuple(sorted(set(normalized), key=str.casefold)),
+        tuple(sorted(set(matched), key=lambda source: str(source.id))),
+    )
+
+
+def _match_python_source(
+    requirement: str, sources: tuple[CustomDependencySource, ...]
+) -> CustomDependencySource | None:
+    name, separator, location = requirement.partition(" @ ")
+    if not separator:
+        return None
+    normalized_name = normalize_package_name("python", name.split("[", 1)[0])
+    for source in sources:
+        if normalize_package_name("python", source.package_name) != normalized_name:
+            continue
+        expected = (
+            f"git+{source.source_url}@{source.source_pin}"
+            if source.source_kind == "git"
+            else f"{source.source_url}#sha256={source.source_pin}"
+        )
+        if location == expected:
+            return source
+    return None
+
+
+def _match_node_source(
+    name: str, version: str, sources: tuple[CustomDependencySource, ...]
+) -> CustomDependencySource | None:
+    for source in sources:
+        if normalize_package_name("node", source.package_name) != normalize_package_name(
+            "node", name
+        ):
+            continue
+        expected = (
+            f"git+{source.source_url}#{source.source_pin}"
+            if source.source_kind == "git"
+            else f"{source.source_url}#sha256={source.source_pin}"
+        )
+        if version == expected:
+            return source
+    return None
+
+
+def _registration_hint(ecosystem: str, package_name: str, specification: str) -> str | None:
+    location = specification.partition(" @ ")[2] if ecosystem == "python" else specification
+    kind: str
+    url: str
+    pin: str
+    if location.startswith("git+https://"):
+        delimiter = "@" if ecosystem == "python" else "#"
+        raw_url, separator, pin = location.removeprefix("git+").rpartition(delimiter)
+        if not separator:
+            return None
+        kind, url = "git", raw_url
+    elif ecosystem == "python" and "#sha256=" in location:
+        url, separator, pin = location.rpartition("#sha256=")
+        if not separator:
+            return None
+        kind = "https"
+    else:
+        return None
+    command = f"/source add {ecosystem} {package_name} {kind} {url} {pin}"
+    try:
+        parse_source_command(command)
+    except CustomSourceError:
+        return None
+    return command
 
 
 def _sha256_regular(path: Path) -> str | None:

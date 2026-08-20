@@ -206,8 +206,9 @@ class SandboxedDependencyBuilder:
                 "--no-install-project",
                 "--no-dev",
                 "--no-editable",
-                "--no-build",
             )
+            if not request.custom_sources:
+                argv = (*argv, "--no-build")
             if request.input_lockfile_name is not None:
                 argv = (*argv, "--locked")
             environment.update(

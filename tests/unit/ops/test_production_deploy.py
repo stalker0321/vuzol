@@ -26,6 +26,7 @@ class FakeRunner:
         self.image = OLD
         self.fail_restart_once = fail_restart_once
         self.calls: list[tuple[str, ...]] = []
+        self.compose_environments: list[dict[str, str]] = []
 
     def __call__(
         self,
@@ -53,8 +54,9 @@ class FakeRunner:
             if operation[0] == "fetch":
                 return ""
         if command[:3] == ("docker", "compose", "--project-directory"):
+            assert env is not None
+            self.compose_environments.append(dict(env))
             if "build" in command:
-                assert env is not None
                 self.image = env["VUZOL_BUILD_GIT_SHA"]
             return ""
         if command[:2] == ("systemctl", "restart"):
@@ -80,7 +82,10 @@ def config(tmp_path: Path) -> DeploymentConfig:
     service_env = tmp_path / "service.env"
     uv = tmp_path / "uv"
     runtime_env.write_text("RUNTIME=yes\n")
-    service_env.write_text("VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_DATABASE_DSN\n")
+    service_env.write_text(
+        "VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_DATABASE_DSN\n"
+        "VUZOL_OPENROUTER_PLANNER_API_KEY=test-openrouter-key\n"  # pragma: allowlist secret
+    )
     uv.write_text("")
     return DeploymentConfig(
         source=source,
@@ -104,6 +109,15 @@ def test_deploy_attests_checkout_image_and_services(tmp_path: Path) -> None:
     assert result.deployed_sha == NEW
     assert runner.current == NEW and runner.image == NEW
     assert any(call[:2] == ("systemctl", "restart") for call in runner.calls)
+    assert runner.compose_environments
+    assert all(
+        environment["VUZOL_OPENROUTER_PLANNER_API_KEY"] == "test-openrouter-key"
+        for environment in runner.compose_environments
+    )
+    assert all(
+        "VUZOL_DATABASE_DSN_REFERENCE" not in environment
+        for environment in runner.compose_environments
+    )
 
 
 def test_failed_activation_rolls_code_and_image_back(tmp_path: Path) -> None:

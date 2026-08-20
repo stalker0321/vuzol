@@ -53,6 +53,7 @@ async def run() -> None:
             credential=resolver.get(profile.credential_reference, f"profile:{profile.id}"),
             profile_id=profile.id,
             model=profile.model,
+            provider_routing=profile.provider_routing,
             timeout_seconds=config.provider_timeout_seconds,
         )
 

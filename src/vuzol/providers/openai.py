@@ -197,6 +197,8 @@ def _payload(request: ProviderRequest, profile: ProviderProfileConfig) -> dict[s
             {"role": "user", "content": json.dumps(user_data, ensure_ascii=False)},
         ],
     }
+    if profile.provider_routing is not None:
+        payload["provider"] = profile.provider_routing.model_dump(mode="json")
     if _uses_reasoning_chat_parameters(profile.model):
         payload["max_completion_tokens"] = request.max_output_tokens
         payload["reasoning_effort"] = "minimal"

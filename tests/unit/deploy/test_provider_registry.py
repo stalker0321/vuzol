@@ -36,6 +36,24 @@ def test_production_kimi_profile_is_pinned_to_free_model() -> None:
     assert profiles[0]["model"] == "moonshotai/kimi-k3-free"
 
 
+def test_production_planner_uses_deepseek_via_deepinfra_with_router_fallbacks() -> None:
+    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
+    profile = next(
+        profile
+        for profile in registry["profiles"]
+        if profile["id"] == "openrouter-deepseek-planner-prod"
+    )
+
+    assert profile["model"] == "deepseek/deepseek-v4-flash-0731"
+    assert profile["api_base_url"] == "https://openrouter.ai/api/v1"
+    assert profile["credential_reference"] == "env:VUZOL_OPENROUTER_PLANNER_API_KEY"
+    assert profile["roles"] == ["planner", "reviewer"]
+    assert profile["provider_routing"] == {
+        "order": ["deepinfra/fp8"],
+        "allow_fallbacks": True,
+    }
+
+
 def test_nvidia_glm_worker_profile_is_prepared_but_not_routable_without_agent_transport() -> None:
     registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
     profile = next(profile for profile in registry["profiles"] if profile["id"] == "nvidia-glm-5-2")

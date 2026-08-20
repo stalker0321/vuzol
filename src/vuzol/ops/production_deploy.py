@@ -14,6 +14,7 @@ from pathlib import Path
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 INTERPRETER_CONTAINER = "vuzol-interpreter-1"
 IMAGE_SHA_LABEL = "dev.hryshyn.vuzol.git-sha"
+COMPOSE_SHARED_SERVICE_KEYS = ("VUZOL_OPENROUTER_PLANNER_API_KEY",)
 DEFAULT_SERVICES = (
     "vuzol-applier.service",
     "vuzol-executor.service",
@@ -260,7 +261,12 @@ class ProductionDeployer:
         )
 
     def _compose_environment(self, sha: str) -> dict[str, str]:
-        return {**os.environ, "VUZOL_BUILD_GIT_SHA": sha}
+        environment = {**os.environ, "VUZOL_BUILD_GIT_SHA": sha}
+        service_environment = load_environment(self._config.service_env)
+        for key in COMPOSE_SHARED_SERVICE_KEYS:
+            if key in service_environment:
+                environment[key] = service_environment[key]
+        return environment
 
     def _git(self, repository: Path, *args: str) -> str:
         return self._run(("git", "-C", str(repository), *args), None, None)

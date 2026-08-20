@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 from pydantic import SecretStr, ValidationError
 
+from vuzol.config.models import OpenRouterProviderRouting
 from vuzol.interpretation.discussion import (
     DISCUSSION_PROMPT_VERSION,
     DiscussionInterpretation,
@@ -89,6 +90,7 @@ class OpenAICompatibleInterpreter:
         credential: SecretStr,
         profile_id: str,
         model: str,
+        provider_routing: OpenRouterProviderRouting | None = None,
         timeout_seconds: float = 30,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -96,6 +98,7 @@ class OpenAICompatibleInterpreter:
         self._credential = credential
         self._profile_id = profile_id
         self._model = model
+        self._provider_routing = provider_routing
         self._timeout = timeout_seconds
         self._client = client
 
@@ -122,6 +125,7 @@ class OpenAICompatibleInterpreter:
             "response_format": {"type": "json_object"},
             "temperature": 0,
         }
+        self._apply_provider_routing(payload)
         try:
             response = await self._post("/chat/completions", json=payload)
             response.raise_for_status()
@@ -176,6 +180,7 @@ class OpenAICompatibleInterpreter:
             "response_format": {"type": "json_object"},
             "temperature": 0,
         }
+        self._apply_provider_routing(payload)
         try:
             response = await self._post("/chat/completions", json=payload)
             response.raise_for_status()
@@ -193,6 +198,10 @@ class OpenAICompatibleInterpreter:
             return await self._client.post(path, headers=headers, timeout=self._timeout, **kwargs)
         async with httpx.AsyncClient(base_url=self._base_url) as client:
             return await client.post(path, headers=headers, timeout=self._timeout, **kwargs)
+
+    def _apply_provider_routing(self, payload: dict[str, Any]) -> None:
+        if self._provider_routing is not None:
+            payload["provider"] = self._provider_routing.model_dump(mode="json")
 
 
 class OpenAICompatibleTranscriber:

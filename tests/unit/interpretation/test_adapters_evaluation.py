@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from vuzol.config import OpenRouterProviderRouting
 from vuzol.interpretation.discussion import DiscussionInterpretRequest
 
 from ._test_interpretation_helpers import (
@@ -148,6 +149,10 @@ def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
             assert "do not execute" in body["messages"][0]["content"]
             assert "separate project-pinned worker" in body["messages"][0]["content"]
             user_payload = json.loads(body["messages"][1]["content"])
+            assert body["provider"] == {
+                "order": ["deepinfra/fp8"],
+                "allow_fallbacks": True,
+            }
             assert user_payload["prompt_version"] == "project-discussion-v1"
             assert user_payload["input"]["project_id"] == "vuzol"
             assert user_payload["discussion_schema"]["additionalProperties"] is False
@@ -181,6 +186,9 @@ def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
                 credential=SecretStr("key"),
                 profile_id="profile",
                 model="model",
+                provider_routing=OpenRouterProviderRouting(
+                    order=("deepinfra/fp8",), allow_fallbacks=True
+                ),
                 client=client,
             )
             result = await interpreter.interpret_discussion(

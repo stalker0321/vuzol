@@ -9,7 +9,8 @@ import shutil
 import stat
 import tarfile
 import uuid
-from dataclasses import dataclass
+import zipfile
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -20,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import CapabilityProvisioningSettings
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.project_environment import current_environment
+from vuzol.projects.source_catalog import SourceCatalog, ToolchainSource
+from vuzol.projects.source_download import SourceDownloadError, TrustedSourceDownloader
 from vuzol.projects.toolchains import (
     TOOLCHAIN_RECEIPT,
     TOOLCHAIN_RECEIPT_SCHEMA,
@@ -41,13 +44,33 @@ CAPABILITY_APPROVAL_TTL = timedelta(days=7)
 
 _HOST_EXECUTABLES = {
     "git": ("git",),
-    "node-runtime": ("node",),
     "python-runtime": ("python3",),
 }
 
 
 class CapabilityProvisioningError(RuntimeError):
     pass
+
+
+def _skippable_catalogue_symlink(bundle: CapabilityBundle, member: tarfile.TarInfo) -> bool:
+    """Skip only Node's three known convenience links from the hash-bound archive."""
+
+    if bundle.source is None or bundle.capability_key != "node-runtime" or not member.issym():
+        return False
+    return (member.name, member.linkname) in {
+        (
+            "node-v24.19.0-linux-x64/bin/corepack",
+            "../lib/node_modules/corepack/dist/corepack.js",
+        ),
+        (
+            "node-v24.19.0-linux-x64/bin/npm",
+            "../lib/node_modules/npm/bin/npm-cli.js",
+        ),
+        (
+            "node-v24.19.0-linux-x64/bin/npx",
+            "../lib/node_modules/npm/bin/npx-cli.js",
+        ),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +82,8 @@ class CapabilityBundle:
     version: str
     executables: tuple[tuple[str, str], ...]
     environment: tuple[tuple[str, str], ...] = ()
+    archive_format: str = "tar"
+    source: ToolchainSource | None = None
 
     @property
     def required_paths(self) -> tuple[str, ...]:
@@ -82,12 +107,26 @@ class CapabilityBundle:
             "required_paths": list(self.required_paths),
             "executables": {command: path for command, path in self.executables},
             "environment": {name: path for name, path in self.environment},
+            "source_kind": "catalogue" if self.source is not None else "operator_staged",
+            "source_provider": None if self.source is None else self.source.provider,
+            "source_url": None if self.source is None else self.source.url,
         }
 
 
 class OfflineCapabilityInstaller:
-    def __init__(self, settings: CapabilityProvisioningSettings) -> None:
+    def __init__(
+        self,
+        settings: CapabilityProvisioningSettings,
+        *,
+        catalog: SourceCatalog | None = None,
+        downloader: TrustedSourceDownloader | None = None,
+    ) -> None:
         self._settings = settings
+        self._catalog = catalog or SourceCatalog.builtin()
+        self._downloader = downloader or TrustedSourceDownloader(
+            settings.download_cache_root,
+            maximum_bytes=settings.maximum_bundle_bytes,
+        )
 
     @property
     def installation_root(self) -> Path:
@@ -113,6 +152,25 @@ class OfflineCapabilityInstaller:
         manifest_path = contained(
             bundle_root, bundle_root / f"{capability_key}.json", must_exist=False
         )
+        if not manifest_path.exists():
+            source = self._catalog.toolchain(capability_key)
+            if source is None:
+                raise CapabilityProvisioningError(
+                    "capability bundle is unavailable and no trusted source is registered"
+                )
+            suffix = ".zip" if source.archive_format == "zip" else ".tar"
+            archive = self._settings.download_cache_root / (source.spec.archive_sha256 + suffix)
+            return CapabilityBundle(
+                capability_key=capability_key,
+                archive=archive,
+                archive_sha256=source.spec.archive_sha256,
+                archive_bytes=source.archive_bytes,
+                version=source.spec.version,
+                executables=source.spec.executables,
+                environment=source.spec.environment,
+                archive_format=source.archive_format,
+                source=source,
+            )
         _require_trusted_regular_file(manifest_path)
         try:
             raw = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -169,6 +227,11 @@ class OfflineCapabilityInstaller:
         current = self.inspect_bundle(bundle.capability_key)
         if current != bundle:
             raise CapabilityProvisioningError("capability bundle changed after approval")
+        if bundle.source is not None:
+            try:
+                bundle = replace(bundle, archive=self._downloader.materialize(bundle.source))
+            except SourceDownloadError as error:
+                raise CapabilityProvisioningError(str(error)) from error
         root = trusted_root(self._settings.toolchain_root, create=True)
         target = contained(root, root / bundle.capability_key, must_exist=False)
         if target.exists():
@@ -207,15 +270,20 @@ class OfflineCapabilityInstaller:
             raise
 
     def _extract(self, bundle: CapabilityBundle, destination: Path) -> None:
+        if bundle.archive_format == "zip":
+            self._extract_zip(bundle, destination)
+            return
         total = 0
         directories: set[Path] = {destination}
         try:
-            with tarfile.open(bundle.archive, mode="r:") as archive:
+            with tarfile.open(bundle.archive, mode="r:*") as archive:
                 members = archive.getmembers()
                 if len(members) > self._settings.maximum_files:
                     raise CapabilityProvisioningError("capability bundle contains too many files")
                 for member in members:
                     relative = PurePosixPath(member.name)
+                    if _skippable_catalogue_symlink(bundle, member):
+                        continue
                     if (
                         not member.name
                         or relative.is_absolute()
@@ -258,6 +326,59 @@ class OfflineCapabilityInstaller:
                 ):
                     directory.chmod(0o555)
         except (OSError, tarfile.TarError) as error:
+            raise CapabilityProvisioningError("capability bundle extraction failed") from error
+
+    def _extract_zip(self, bundle: CapabilityBundle, destination: Path) -> None:
+        total = 0
+        directories: set[Path] = {destination}
+        try:
+            with zipfile.ZipFile(bundle.archive) as archive:
+                members = archive.infolist()
+                if len(members) > self._settings.maximum_files:
+                    raise CapabilityProvisioningError("capability bundle contains too many files")
+                for member in members:
+                    relative = PurePosixPath(member.filename)
+                    mode = member.external_attr >> 16
+                    if (
+                        not member.filename
+                        or relative.is_absolute()
+                        or ".." in relative.parts
+                        or stat.S_ISLNK(mode)
+                        or not (member.is_dir() or stat.S_ISREG(mode) or mode == 0)
+                    ):
+                        raise CapabilityProvisioningError(
+                            "capability bundle contains unsafe entries"
+                        )
+                    total += member.file_size
+                    if total > self._settings.maximum_bundle_bytes:
+                        raise CapabilityProvisioningError(
+                            "expanded capability bundle exceeds policy"
+                        )
+                    target = contained(
+                        destination,
+                        destination.joinpath(*relative.parts),
+                        must_exist=False,
+                    )
+                    if member.is_dir():
+                        target.mkdir(parents=True, exist_ok=True, mode=0o755)
+                        directories.add(target)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                    directories.update((target.parent, *target.parent.parents))
+                    with archive.open(member) as source, target.open("xb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                    target.chmod(0o555 if mode & 0o111 else 0o444)
+                for directory in sorted(
+                    (
+                        path
+                        for path in directories
+                        if destination == path or destination in path.parents
+                    ),
+                    key=lambda path: len(path.parts),
+                    reverse=True,
+                ):
+                    directory.chmod(0o555)
+        except (OSError, zipfile.BadZipFile) as error:
             raise CapabilityProvisioningError("capability bundle extraction failed") from error
 
 

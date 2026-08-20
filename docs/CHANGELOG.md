@@ -4,6 +4,13 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- added `coding.v4` dependency provisioning: Python and Node manifests are normalized into
+  hash-bound requests, a separate Telegram approval authorizes controlled-registry resolution, and
+  the rootless builder stores immutable per-project environments which later agent, validation and
+  artifact sandboxes mount read-only instead of downloading packages for every task;
+- added a root-shipped source catalogue and content-addressed downloader for pinned Go, Node,
+  Gradle and Java archives. Downloads begin only after the existing installation approval, enforce
+  exact HTTPS hosts/redirects, byte size and SHA-256, and are reused from a non-writable cache;
 - generalized `coding.v3` two-stage stack authorization: plan approval records the environment but
   missing tools require a separate hash-bound Telegram approval; the default-off manifest-driven
   installer can install any reviewed offline archive toolchain without a code change, records a

@@ -1,6 +1,6 @@
 # Handoff: project environment contracts
 
-Updated: 2026-08-18
+Updated: 2026-08-20
 
 ## Completed in this workstream
 
@@ -34,15 +34,23 @@ Updated: 2026-08-18
   toolchain without a per-stack Python adapter. It records a validated immutable receipt and exposes
   only declared commands/environment paths read-only during artifact production, without shell,
   package-manager or network access. Plan approval alone never grants installation permission.
+- Added the reviewed online source catalogue for pinned Go, Node, Gradle and Java archives. The
+  applier downloads only after approval, verifies exact size and SHA-256, constrains redirects, and
+  caches immutable content-addressed bytes.
+- Added `coding.v4` with a separate dependency approval after code generation. Python
+  `pyproject.toml` and Node `package.json` dependencies resolve only through catalogued HTTPS
+  registries in the rootless controlled-proxy sandbox; npm lifecycle scripts and source builds are
+  disabled. The resulting project/hash-specific environment is frozen and mounted read-only into
+  validation, artifact production and subsequent agent sessions.
 
 The pre-existing untracked root-owned `package-lock.json` belongs to the user and must remain
 untracked and untouched.
 
 ## Still required after this revision
 
-1. Add a reviewed online catalogue/downloader if desired. Offline adapters are now manifest-driven,
-   so archive-based toolchains no longer require Python changes, but bytes must still be staged and
-   hash-pinned by an operator. Python and Node can continue to use installed runtimes.
+1. Add project-scoped user-supplied HTTPS/Git sources. They must be explicitly entered by the user,
+   never inferred as trusted from model-written repository content, and pinned to a digest or commit
+   where the protocol permits it.
 2. Replace the free-port probe with a stronger reservation or supervised socket handoff if preview
    concurrency becomes high.
 3. Decide whether to add wildcard `*.test.hryshyn.dev`; it removes the absolute-path limitation but

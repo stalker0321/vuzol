@@ -8,7 +8,7 @@ Type=simple
 User=vuzol-executor
 Group=vuzol-executor
 EnvironmentFile=/etc/vuzol/executor.env
-StateDirectory=vuzol-proxy-runtime
+StateDirectory=vuzol-proxy-runtime vuzol/dependency-environments
 StateDirectoryMode=0700
 
 # The rootless Docker daemon is deployed as a linger-enabled systemd USER unit
@@ -64,7 +64,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
-ReadWritePaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /var/lib/vuzol-provider-state
+ReadWritePaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /var/lib/vuzol-provider-state /var/lib/vuzol/dependency-environments
 ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol /var/lib/vuzol/toolchains
 
 [Install]

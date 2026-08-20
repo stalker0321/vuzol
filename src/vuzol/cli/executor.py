@@ -23,6 +23,7 @@ from vuzol.execution.artifact_production import (
 )
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.codex import ExecutionEnvelopeFactory, SandboxCodexTransport
+from vuzol.execution.dependency_build import SandboxedDependencyBuilder
 from vuzol.execution.domain import ProcessEnvelope, SandboxSpec
 from vuzol.execution.finalization import TrustedGateRunner, WorkerFinalizer
 from vuzol.execution.git import LocalGit
@@ -35,6 +36,7 @@ from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_prof
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
+from vuzol.projects.dependency_provisioning import DependencyProvisioningHandler
 from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.grok import GrokCliAdapter
 from vuzol.providers.handlers import ProviderStepHandler, executor_provider_handlers
@@ -45,7 +47,7 @@ from vuzol.providers.registry import AdapterRegistry
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
-from vuzol.workflows.ports import CancellationContext
+from vuzol.workflows.ports import CancellationContext, StepHandler
 from vuzol.workflows.worker import RoutedWorkflowWorker, WorkflowWorker
 
 VALIDATION_IMAGE_PREFLIGHT_COMMANDS: tuple[tuple[str, ...], ...] = (
@@ -94,21 +96,23 @@ async def run() -> None:
             seccomp_profile=seccomp_profile,
             seccomp_digest=seccomp_digest,
         )
-    worktree_access = WorktreeAccessManager(
-        settings.worktree_root,
-        RootlessIdentityResolver(settings.execution.rootless_docker_socket),
-    )
-    await worktree_access.preflight(
-        tuple(
-            sorted(
-                {
-                    (sandbox.uid, sandbox.gid)
-                    for sandbox in runtime.registries.sandboxes.items()
-                    if sandbox.enabled
-                }
-            )
+    identity_resolver = RootlessIdentityResolver(settings.execution.rootless_docker_socket)
+    worktree_access = WorktreeAccessManager(settings.worktree_root, identity_resolver)
+    sandbox_identities = tuple(
+        sorted(
+            {
+                (sandbox.uid, sandbox.gid)
+                for sandbox in runtime.registries.sandboxes.items()
+                if sandbox.enabled
+            }
         )
     )
+    await worktree_access.preflight(sandbox_identities)
+    dependency_access = WorktreeAccessManager(
+        settings.dependency_provisioning.environment_root, identity_resolver
+    )
+    if settings.dependency_provisioning.enabled:
+        await dependency_access.preflight(sandbox_identities)
     engine = create_engine(settings, resolve_database_dsn(settings))
     try:
         # S-2.1: fail closed before profile sync, proxy reconcile, ready, or claim loops.
@@ -151,6 +155,8 @@ async def run() -> None:
             if networked and settings.execution.proxy_image is not None
             else None
         )
+        if settings.dependency_provisioning.enabled and proxy_manager is None:
+            raise RuntimeError("dependency provisioning requires the controlled proxy runtime")
         if proxy_manager is not None:
             report = await ProxyStartupReconciler(
                 factory,
@@ -241,16 +247,35 @@ async def run() -> None:
             artifact_store,
             worktree_root=settings.worktree_root,
         )
+        dependency_builder = (
+            None
+            if proxy_manager is None
+            else SandboxedDependencyBuilder(
+                settings,
+                runtime.registries,
+                sandbox_runtime,
+                proxy_manager,
+                dependency_access,
+            )
+        )
+        dependency_handler = DependencyProvisioningHandler(
+            factory,
+            settings.dependency_provisioning,
+            dependency_builder,
+            worktree_root=settings.worktree_root,
+        )
+        worktree_handlers: dict[str, StepHandler] = {
+            "prepare_worktree": worktree_handler,
+            "ensure_dependencies": dependency_handler,
+            "validate": validation_handler,
+            "produce_artifacts": artifact_handler,
+            "build_static": static_build_handler,
+        }
         worktree_worker = WorkflowWorker(
             settings,
             factory,
             owner=f"{owner}:worktree",
-            handlers={
-                "prepare_worktree": worktree_handler,
-                "validate": validation_handler,
-                "produce_artifacts": artifact_handler,
-                "build_static": static_build_handler,
-            },
+            handlers=worktree_handlers,
             queue_classes=frozenset({QueueClass.HEAVY}),
         )
         provider_worker = RoutedWorkflowWorker(

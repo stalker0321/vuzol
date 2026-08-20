@@ -3,6 +3,7 @@ import io
 import json
 import tarfile
 import uuid
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,8 @@ from vuzol.projects.capability_provisioning import (
     _requirements,
     _verify_environment,
 )
+from vuzol.projects.source_catalog import SourceCatalog, ToolchainSource
+from vuzol.projects.toolchains import ToolchainSpec
 from vuzol.storage.types import ApprovalStatus, StepStatus
 from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -201,6 +204,49 @@ def test_manifest_installs_a_new_toolchain_without_a_registered_adapter(tmp_path
     installer.install(installer.inspect_bundle("rust-toolchain"))
 
     assert installer.ready("rust-toolchain")
+
+
+def test_catalogued_toolchain_downloads_only_during_install_and_supports_zip(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    archive = tmp_path / "gradle.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        info = zipfile.ZipInfo("gradle/bin/gradle")
+        info.external_attr = 0o100755 << 16
+        output.writestr(info, b"gradle")
+    content = archive.read_bytes()
+    source = ToolchainSource(
+        spec=ToolchainSpec(
+            capability_key="gradle-toolchain",
+            version="1.0",
+            archive_sha256=hashlib.sha256(content).hexdigest(),
+            executables=(("gradle", "gradle/bin/gradle"),),
+            environment=(("GRADLE_HOME", "gradle"),),
+        ),
+        provider="Gradle",
+        url="https://downloads.example.com/gradle.zip",
+        redirect_hosts=(),
+        archive_bytes=len(content),
+        archive_format="zip",
+    )
+    downloader = MagicMock()
+    downloader.materialize.return_value = archive
+    installer = OfflineCapabilityInstaller(
+        settings,
+        catalog=SourceCatalog(toolchains=(source,), registries=()),
+        downloader=downloader,
+    )
+
+    bundle = installer.inspect_bundle("gradle-toolchain")
+    assert bundle.source == source
+    assert bundle.approval_record()["source_url"] == source.url
+    downloader.materialize.assert_not_called()
+
+    installer.install(bundle)
+
+    downloader.materialize.assert_called_once_with(source)
+    assert installer.ready("gradle-toolchain")
 
 
 @pytest.mark.parametrize("unsafe", ("../escape", "/absolute"))

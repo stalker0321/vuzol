@@ -49,21 +49,23 @@ These rules are non-negotiable unless explicitly changed through an ADR.
 33. Sandbox network access is deny-by-default and enabled only by explicit policy.
 34. Host safety cannot depend on parsing or classifying arbitrary shell syntax correctly.
 35. Approval covers an immutable action envelope; any material change invalidates it.
+36. Plan approval authorizes the declared stack, not downloading or installing missing bytes;
+    every toolchain or dependency installation requires its own source- and hash-bound approval.
 
 ## Context
 
-36. Full Telegram topic history is never sent by default.
-37. Large instruction or memory files are not repeatedly injected as a single prompt blob.
-38. Context assembly is budgeted, source-linked, and task-scoped.
-39. Unchanged summaries and indexes are reused by content hash.
-40. Git and the filesystem remain the source of truth for repository content.
-41. Every run records the workflow, policy, configuration, prompt, and repository revisions needed to explain its behavior.
+37. Full Telegram topic history is never sent by default.
+38. Large instruction or memory files are not repeatedly injected as a single prompt blob.
+39. Context assembly is budgeted, source-linked, and task-scoped.
+40. Unchanged summaries and indexes are reused by content hash.
+41. Git and the filesystem remain the source of truth for repository content.
+42. Every run records the workflow, policy, configuration, prompt, and repository revisions needed to explain its behavior.
 
 ## Scope and operations
 
-42. The MVP runs as a modular monolith plus workers and PostgreSQL.
-43. Logical component boundaries do not require separate services.
-44. One heavy execution slot is the default on the current VPS.
-45. Vector search, graph storage, formal durable runtimes, and web dashboards require measured justification.
-46. An implementation step must not silently implement later roadmap items.
-47. Cost, token, attempt, duration, storage, and concurrency limits are enforceable policy, not advisory metadata.
+43. The MVP runs as a modular monolith plus workers and PostgreSQL.
+44. Logical component boundaries do not require separate services.
+45. One heavy execution slot is the default on the current VPS.
+46. Vector search, graph storage, formal durable runtimes, and web dashboards require measured justification.
+47. An implementation step must not silently implement later roadmap items.
+48. Cost, token, attempt, duration, storage, and concurrency limits are enforceable policy, not advisory metadata.

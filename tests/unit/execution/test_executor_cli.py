@@ -533,6 +533,18 @@ def test_current_coding_workflow_checks_capabilities_before_context() -> None:
     assert context.predecessors == ("ensure_capabilities",)
 
 
+def test_current_coding_workflow_approves_dependencies_before_validation() -> None:
+    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
+
+    coding = WORKFLOW_REGISTRY["coding.v4"]
+    dependency = next(step for step in coding.steps if step.key == "ensure_dependencies")
+    validation = next(step for step in coding.steps if step.key == "validate")
+
+    assert dependency.predecessors == ("execute_code",)
+    assert dependency.idempotency_class is IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
+    assert validation.predecessors == ("ensure_dependencies",)
+
+
 def test_grok_execution_boundary_accepts_only_canonical_runtime() -> None:
     from vuzol.execution.codex import _provider_state_runtime, _require_provider_command
     from vuzol.providers.grok import canonical_grok_argv
@@ -577,6 +589,10 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
         credential_reference=None,
     )
     settings = MagicMock()
+    settings.dependency_provisioning.enabled = False
+    settings.dependency_provisioning.environment_root = Path(
+        "/var/lib/vuzol/dependency-environments"
+    )
     settings.service_name = "vuzol"
     settings.log_level = "INFO"
     settings.execution.enabled = True

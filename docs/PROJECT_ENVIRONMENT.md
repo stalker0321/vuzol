@@ -32,33 +32,35 @@ host adapters. Unknown automatic capabilities fail closed as `Needs setup`; priv
 requirements are never silently installed. A blocked item remains resumable after setup instead of
 being reported as a model failure.
 
-Current trusted executable checks cover Node.js, Python, Android SDK and Git. This registry is
-intentionally small and should grow only together with a bounded adapter and tests.
+Host checks cover Python and Git. Node, Go, Java and Gradle use managed toolchains when declared;
+Android and other tools still require a reviewed source entry or operator-staged bundle.
 
 ## Separate toolchain installation approval
 
 `coding.v3` checks the approved environment before repository work begins. Approving a plan records
 the chosen stack, but does not authorize a host/toolchain mutation. If a declared capability is
-already present, execution continues without another prompt. If it is absent and a trusted offline
-bundle is available, Vuzol creates a second immutable approval containing the capability key, exact
-bundle SHA-256, byte size, environment revision/hash, and managed installation root. Rejecting this
-approval cancels the task without installing anything.
+already present, execution continues without another prompt. If it is absent and a trusted source is
+available, Vuzol creates a second immutable approval containing the capability key, exact archive
+SHA-256, byte size, environment revision/hash, source provider, and managed installation root.
+Rejecting this approval cancels the task without downloading or installing anything.
 
-Capability provisioning is default-off. Installation is manifest-driven rather than hard-coded per
-stack. A root-trusted `<capability-key>.json` manifest and its uncompressed tar archive are staged
-under the configured read-only bundle root. The v2 manifest declares the exact version, SHA-256,
-bounded command-to-executable mappings, and optional sandbox environment roots. Adding Rust, Go,
-Flutter, Terraform, or another archive-based toolchain therefore does not require a Vuzol code
-release. An optional deployment allowlist can further restrict staged keys; an empty allowlist still
-requires a trusted manifest and does not permit model-supplied installers.
+Capability provisioning is default-off. Installation remains manifest-driven rather than hard-coded
+per stack. A root-trusted `<capability-key>.json` plus archive may be staged under the read-only
+bundle root. When no staged manifest exists, the root-shipped catalogue can supply an exact HTTPS
+URL, redirect hosts, version, size, SHA-256, archive format, executable mappings and environment
+roots. The first catalogue revision includes Go, Node, Gradle and Java. An optional deployment
+allowlist restricts both paths, and model-supplied URLs are never accepted.
 
-Absolute/traversing paths, links, special files, writable manifests, oversized archives, duplicate
+Absolute/traversing paths, unrecognized links, special files, writable manifests, oversized archives, duplicate
 commands/environment variables, hash changes, environment changes, and partial target directories
 all fail closed. Vuzol never invokes `apt`, a shell, or an online installer, and never accepts
 third-party licences on the user's behalf.
 
-After approval, the applier extracts into a same-filesystem temporary directory, verifies every
-declared executable and environment path, writes an immutable installation receipt, and atomically
+For a catalogue source, downloading starts only after approval. The downloader permits the exact
+catalogued HTTPS origin and redirect hosts, requires the exact byte count and SHA-256, and publishes
+the archive into an immutable content-addressed cache. The applier then extracts into a
+same-filesystem temporary directory, verifies every declared executable and environment path,
+writes an immutable installation receipt, and atomically
 renames it under `/var/lib/vuzol/toolchains/<capability-key>`. Preflight and sandbox construction use
 that receipt rather than a Python registry. Artifact commands receive only the toolchains declared
 by the current project as a read-only `/toolchains` mount; their commands, `PATH` entries, and
@@ -86,14 +88,40 @@ Example manifest:
 Enabling the adapter requires
 `VUZOL_CAPABILITY_PROVISIONING__ENABLED=true`. If provisioning is disabled or the reviewed bundle is
 absent, the task remains `Needs setup`; plan approval is never silently promoted into installation
-permission. Online discovery/download remains a separate trust boundary: v2 installs only staged,
-hash-pinned bytes.
+permission. The catalogue is code-reviewed deployment policy rather than online discovery. Updating
+a version, URL, host, size or hash requires a Vuzol release and creates different approval evidence.
 
 The staging procedure is deliberately administrative: assemble the archive outside Vuzol, review
 its provenance and licence, compute its SHA-256, write the matching v2 manifest, and place both as
 non-writable regular files in the bundle root. Test `inspect_bundle(<key>)` before enabling a real
 task. Replacing either file creates different approval evidence; an already approved request cannot
 silently install the replacement.
+
+## Separate package dependency approval
+
+`coding.v4` inspects dependency manifests after the agent has produced the proposed source and
+before validation. Python PEP 621 dependencies from `pyproject.toml` and Node dependencies from
+`package.json` are normalized, bounded and bound to the manifest and any existing lockfile hash.
+When the matching immutable environment is absent, Vuzol presents a separate approval naming the
+ecosystem, registry provider, direct-dependency count and manifest hash.
+
+Approval permits only that exact request. Resolution runs as the sandbox UID in the project's
+pinned validation image, with no direct network and an ephemeral controlled HTTPS proxy limited to
+the catalogue hosts. Python uses `uv` without project/editable/dev/source builds; Node uses the
+managed Node toolchain and npm with lifecycle scripts, audit and funding calls disabled. Existing
+lockfiles must remain unchanged. The generated lockfile is retained in the receipt environment but
+is not written into the agent worktree during this revision.
+
+Successful environments live at
+`/var/lib/vuzol/dependency-environments/<project>/<ecosystem>/<request-hash>`. Files and directories
+are non-writable; only relative symbolic links resolving inside the environment are accepted.
+Receipts bind the manifest, input lockfile, registry and generated lockfile hashes. Validation,
+artifact production and later agent sessions mount a matching environment read-only. A new manifest
+hash creates a new environment and approval instead of mutating the old one.
+
+Custom URLs and Git dependencies currently fail closed as an untrusted source. Project-scoped
+user-originated source registration is the next revision; approving a normal plan or letting the
+model write a URL does not make that URL trusted.
 
 ## Typed result artifacts
 

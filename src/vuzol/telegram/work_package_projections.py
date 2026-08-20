@@ -340,11 +340,11 @@ async def build_work_package_plan_card(
                 .order_by(Approval.created_at.desc())
                 .limit(1)
             )
-            status = (
-                "Tool installation approval"
-                if requested_action == "install_capabilities"
-                else "Result approval"
-            )
+            approval_statuses: dict[str | None, str] = {
+                "install_capabilities": "Tool installation approval",
+                "install_dependencies": "Dependency installation approval",
+            }
+            status = approval_statuses.get(requested_action, "Result approval")
     if _status_card or _action_card:
         preference = await load_preference(session, discussion.project_id)
         if package.status is WorkPackageStatus.PAUSED and preference.worker_key is not None:

@@ -62,6 +62,7 @@ def test_definitions_are_valid_and_stable() -> None:
         "infrastructure.v1",
         "coding.v2",
         "coding.v3",
+        "coding.v4",
     ]
     for definition in WORKFLOW_DEFINITIONS:
         validate_definition(definition)
@@ -81,6 +82,7 @@ def test_compiler_resolves_optional_predecessors() -> None:
         "prepare_context",
         "prepare_worktree",
         "execute_code",
+        "ensure_dependencies",
         "validate",
         "review",
         "produce_artifacts",
@@ -131,7 +133,7 @@ def test_architecture_workflow_uses_read_only_agent_without_delivery_gates() -> 
 def test_project_topics_select_architecture_and_current_coding_workflow() -> None:
     assert configured_topic_workflow("adaptive_task", TaskType.ARCHITECTURE) is None
     assert configured_topic_workflow("coding_task", TaskType.ARCHITECTURE) is None
-    assert configured_topic_workflow("coding_task", TaskType.CODING) == "coding.v3"
+    assert configured_topic_workflow("coding_task", TaskType.CODING) == "coding.v4"
 
 
 def test_legacy_coding_workflow_remains_available_without_artifact_production() -> None:

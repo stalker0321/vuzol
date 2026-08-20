@@ -1,0 +1,128 @@
+{
+  "schema_version": "vuzol-source-catalog.v1",
+  "toolchains": [
+    {
+      "capability_key": "go-toolchain",
+      "version": "1.27.0",
+      "provider": "The Go Project",
+      "url": "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz",
+      "redirect_hosts": [],
+      "sha256": "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
+      "bytes": 70523269,
+      "archive_format": "tar",
+      "executables": {
+        "go": "go/bin/go",
+        "gofmt": "go/bin/gofmt"
+      },
+      "environment": {
+        "GOROOT": "go"
+      }
+    },
+    {
+      "capability_key": "node-runtime",
+      "version": "24.19.0",
+      "provider": "OpenJS Foundation / Node.js",
+      "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.gz",
+      "redirect_hosts": [],
+      "sha256": "f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4",
+      "bytes": 57409532,
+      "archive_format": "tar",
+      "executables": {
+        "node": "node-v24.19.0-linux-x64/bin/node",
+        "npm": "node-v24.19.0-linux-x64/lib/node_modules/npm/bin/npm-cli.js",
+        "npx": "node-v24.19.0-linux-x64/lib/node_modules/npm/bin/npx-cli.js"
+      },
+      "environment": {}
+    },
+    {
+      "capability_key": "gradle-toolchain",
+      "version": "9.7.1",
+      "provider": "Gradle Inc.",
+      "url": "https://services.gradle.org/distributions/gradle-9.7.1-bin.zip",
+      "redirect_hosts": [
+        "github.com",
+        "release-assets.githubusercontent.com"
+      ],
+      "sha256": "acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a",
+      "bytes": 151433392,
+      "archive_format": "zip",
+      "executables": {
+        "gradle": "gradle-9.7.1/bin/gradle"
+      },
+      "environment": {
+        "GRADLE_HOME": "gradle-9.7.1"
+      }
+    },
+    {
+      "capability_key": "java-runtime",
+      "version": "25.0.4+7",
+      "provider": "Eclipse Adoptium",
+      "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4%2B7/OpenJDK25U-jdk_x64_linux_hotspot_25.0.4_7.tar.gz",
+      "redirect_hosts": [
+        "release-assets.githubusercontent.com"
+      ],
+      "sha256": "e58fcdcd637b25c03ca84cbbcefc70d11efb8f4b4cbd05decc9f661769d77f94",
+      "bytes": 141328157,
+      "archive_format": "tar",
+      "executables": {
+        "jar": "jdk-25.0.4+7/bin/jar",
+        "java": "jdk-25.0.4+7/bin/java",
+        "javac": "jdk-25.0.4+7/bin/javac"
+      },
+      "environment": {
+        "JAVA_HOME": "jdk-25.0.4+7"
+      }
+    }
+  ],
+  "registries": [
+    {
+      "ecosystem": "python",
+      "provider": "Python Packaging Authority",
+      "hosts": ["pypi.org", "files.pythonhosted.org"],
+      "manifests": ["pyproject.toml"],
+      "lockfiles": ["uv.lock"]
+    },
+    {
+      "ecosystem": "node",
+      "provider": "npm, Inc.",
+      "hosts": ["registry.npmjs.org"],
+      "manifests": ["package.json"],
+      "lockfiles": ["package-lock.json"]
+    },
+    {
+      "ecosystem": "java",
+      "provider": "Maven Central and Google Maven",
+      "hosts": ["repo.maven.apache.org", "dl.google.com"],
+      "manifests": ["pom.xml", "build.gradle", "build.gradle.kts"],
+      "lockfiles": ["gradle.lockfile"]
+    },
+    {
+      "ecosystem": "rust",
+      "provider": "The Rust Project",
+      "hosts": ["index.crates.io", "static.crates.io"],
+      "manifests": ["Cargo.toml"],
+      "lockfiles": ["Cargo.lock"]
+    },
+    {
+      "ecosystem": "go",
+      "provider": "The Go Project",
+      "hosts": ["proxy.golang.org", "sum.golang.org"],
+      "manifests": ["go.mod"],
+      "lockfiles": ["go.sum"]
+    },
+    {
+      "ecosystem": "dotnet",
+      "provider": "Microsoft / NuGet",
+      "hosts": ["api.nuget.org"],
+      "manifests": ["*.csproj"],
+      "lockfiles": ["packages.lock.json"]
+    },
+    {
+      "ecosystem": "dart",
+      "provider": "Dart and Flutter teams",
+      "hosts": ["pub.dev", "storage.googleapis.com"],
+      "manifests": ["pubspec.yaml"],
+      "lockfiles": ["pubspec.lock"]
+    }
+  ]
+}

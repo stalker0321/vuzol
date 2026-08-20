@@ -477,13 +477,59 @@ async def _prepare_work_package_projection(
         raise PermanentDeliveryError("invalid_work_package_projection_operation")
     link = None
     if role != WORK_PACKAGE_STATUS_ROLE:
-        link = await session.scalar(
-            select(TelegramMessageLink).where(
-                TelegramMessageLink.work_package_id == package_id,
-                TelegramMessageLink.message_role == role,
+        if role == WORK_PACKAGE_ACTION_ROLE:
+            plan_link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.work_package_id == package_id,
+                    TelegramMessageLink.message_role == WORK_PACKAGE_PLAN_ROLE,
+                )
             )
-        )
+            action_link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.work_package_id == package_id,
+                    TelegramMessageLink.message_role == WORK_PACKAGE_ACTION_ROLE,
+                )
+            )
+            # Action state (pause, final approval, completed) belongs to the
+            # durable plan card whenever that card is known.  Keeping its
+            # message id avoids duplicate cards after an ambiguous Telegram
+            # edit outcome: a later projection can always converge it again.
+            link = (
+                action_link
+                if item.operation_type == "clear_action" and action_link is not None
+                else plan_link or action_link
+            )
+        else:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.work_package_id == package_id,
+                    TelegramMessageLink.message_role == role,
+                )
+            )
     if item.operation_type in {"clear_detail", "clear_action", "clear_plan"}:
+        if (
+            item.operation_type == "clear_action"
+            and link is not None
+            and link.message_role == WORK_PACKAGE_PLAN_ROLE
+        ):
+            try:
+                card = await build_work_package_plan_card(session, package_id)
+            except WorkPackageProjectionError as error:
+                raise PermanentDeliveryError(str(error)) from error
+            return PreparedDelivery(
+                DeliveryAction.EDIT_STATUS,
+                chat_id=link.chat_id,
+                thread_id=link.message_thread_id,
+                html=card.html,
+                revision=card.status_generation,
+                link_id=link.id,
+                message_id=link.message_id,
+                message_role=WORK_PACKAGE_PLAN_ROLE,
+                callback_buttons=card.callback_buttons,
+                work_package_id=card.package_id,
+                plan_revision_id=card.revision_id,
+                control_status_generation=card.status_generation,
+            )
         if link is None:
             return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
         return PreparedDelivery(
@@ -537,7 +583,7 @@ async def _prepare_work_package_projection(
         revision=card.status_generation,
         link_id=None if link is None else link.id,
         message_id=None if link is None else link.message_id,
-        message_role=card.role,
+        message_role=card.role if link is None else link.message_role,
         callback_buttons=card.callback_buttons,
         work_package_id=card.package_id,
         plan_revision_id=card.revision_id,

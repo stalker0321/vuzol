@@ -69,6 +69,7 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     ),
     TaskStatus.EXECUTING: frozenset(
         {
+            TaskStatus.CONTEXT_PREPARED,
             TaskStatus.VALIDATING,
             TaskStatus.REVIEWING,
             TaskStatus.WAITING_APPROVAL,

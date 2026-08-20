@@ -173,6 +173,7 @@ _STEP_TYPE_LABELS = {
     "validate": "Проверка",
     "review": "Ревью",
     "ensure_capabilities": "Подготовка инструментов",
+    "ensure_dependencies": "Подготовка зависимостей",
     "produce_artifacts": "Подготовка артефактов",
     "build_static": "Сборка сайта",
     "approval": "Решение / апрув",
@@ -908,6 +909,8 @@ def _approval_fact_lines(
 
     if envelope.get("schema_version") == "capability-provisioning-approval.v1":
         return _capability_approval_fact_lines(envelope, human_summary)
+    if envelope.get("schema_version") == "dependency-provisioning-approval.v1":
+        return _dependency_approval_fact_lines(envelope, human_summary)
 
     display_summary = _approval_display_summary(human_summary)
     lines = ["<b>Что изменится</b>", f"• {telegram_html(display_summary)}"]
@@ -962,6 +965,7 @@ def _capability_approval_fact_lines(
     raw_bundles = envelope.get("bundles")
     bundles = raw_bundles if isinstance(raw_bundles, list) else []
     total_bytes = 0
+    source_providers: set[str] = set()
     for bundle in bundles:
         if not isinstance(bundle, dict):
             continue
@@ -969,6 +973,9 @@ def _capability_approval_fact_lines(
         version = bundle.get("version")
         size = bundle.get("archive_bytes")
         digest = bundle.get("archive_sha256")
+        provider = bundle.get("source_provider")
+        if isinstance(provider, str) and provider:
+            source_providers.add(provider)
         if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
             total_bytes += size
         if isinstance(key, str) and isinstance(digest, str):
@@ -979,9 +986,11 @@ def _capability_approval_fact_lines(
                 f"• <code>{telegram_html(key)}</code>{version_suffix} · SHA-256 "
                 f"<code>{telegram_html(digest[:12])}…</code>"
             )
+    if source_providers:
+        lines.append("• Источники: " + telegram_html(", ".join(sorted(source_providers))))
     lines.extend(
         (
-            f"• Объём bundle: {_format_bytes(total_bytes)}",
+            f"• Скачать/проверить: {_format_bytes(total_bytes)}",
             "• Установка: управляемое хранилище Vuzol, без системного package manager",
             "• После установки toolchain монтируется в sandbox только для чтения",
             "",
@@ -991,10 +1000,46 @@ def _capability_approval_fact_lines(
     return lines
 
 
+def _dependency_approval_fact_lines(
+    envelope: Mapping[str, object], human_summary: str
+) -> list[str]:
+    lines = ["<b>Требуется отдельное разрешение</b>", f"• {telegram_html(human_summary)}"]
+    raw_requirements = envelope.get("requirements")
+    requirements = raw_requirements if isinstance(raw_requirements, list) else []
+    providers: set[str] = set()
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        ecosystem = requirement.get("ecosystem")
+        provider = requirement.get("registry_provider")
+        digest = requirement.get("manifest_sha256")
+        raw_dependencies = requirement.get("direct_dependencies")
+        count = len(raw_dependencies) if isinstance(raw_dependencies, list) else 0
+        if isinstance(provider, str) and provider:
+            providers.add(provider)
+        if isinstance(ecosystem, str) and isinstance(digest, str):
+            lines.append(
+                f"• <code>{telegram_html(ecosystem)}</code> · зависимостей: {count} · "
+                f"manifest SHA-256 <code>{telegram_html(digest[:12])}…</code>"
+            )
+    if providers:
+        lines.append("• Реестры: " + telegram_html(", ".join(sorted(providers))))
+    lines.extend(
+        (
+            "• Сеть: только перечисленные HTTPS-реестры через контролируемый proxy",
+            "• Скрипты установки пакетов отключены там, где это поддерживает ecosystem",
+            "• Результат сохраняется отдельно и монтируется в sandbox только для чтения",
+            "",
+            "Разрешить скачать и собрать эти зависимости?",
+        )
+    )
+    return lines
+
+
 def _approval_buttons(approval: Approval) -> tuple[str, ...]:
     return (
         ("approve", "reject")
-        if approval.requested_action == "install_capabilities"
+        if approval.requested_action in {"install_capabilities", "install_dependencies"}
         else ("approve", "redo", "reject")
     )
 

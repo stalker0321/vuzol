@@ -141,13 +141,14 @@ class CapabilityProvisioningSettings(BaseModel):
     enabled: bool = False
     bundle_root: Path = Path("/etc/vuzol/capability-bundles")
     toolchain_root: Path = Path("/var/lib/vuzol/toolchains")
+    download_cache_root: Path = Path("/var/lib/vuzol/capability-downloads")
     # Empty means every capability with a trusted, operator-staged manifest is
     # eligible. A non-empty tuple is an additional deployment allowlist.
     allowed_capabilities: tuple[str, ...] = ()
     maximum_bundle_bytes: int = Field(default=4_000_000_000, ge=1, le=20_000_000_000)
     maximum_files: int = Field(default=200_000, ge=1, le=1_000_000)
 
-    @field_validator("bundle_root", "toolchain_root")
+    @field_validator("bundle_root", "toolchain_root", "download_cache_root")
     @classmethod
     def require_absolute_roots(cls, value: Path) -> Path:
         if not value.is_absolute():
@@ -167,11 +168,34 @@ class CapabilityProvisioningSettings(BaseModel):
 
     @model_validator(mode="after")
     def require_separate_roots(self) -> "CapabilityProvisioningSettings":
-        bundle = self.bundle_root.resolve()
-        toolchain = self.toolchain_root.resolve()
-        if bundle == toolchain or bundle in toolchain.parents or toolchain in bundle.parents:
-            raise ValueError("capability bundle and toolchain roots must be separate")
+        roots = (
+            self.bundle_root.resolve(),
+            self.toolchain_root.resolve(),
+            self.download_cache_root.resolve(),
+        )
+        for index, root in enumerate(roots):
+            for other in roots[index + 1 :]:
+                if root == other or root in other.parents or other in root.parents:
+                    raise ValueError("capability storage roots must be separate")
         return self
+
+
+class DependencyProvisioningSettings(BaseModel):
+    """Default-off immutable project dependency environments."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    environment_root: Path = Path("/var/lib/vuzol/dependency-environments")
+    maximum_environment_bytes: int = Field(default=5_000_000_000, ge=1, le=20_000_000_000)
+    maximum_direct_dependencies: int = Field(default=200, ge=1, le=2_000)
+
+    @field_validator("environment_root")
+    @classmethod
+    def require_absolute_root(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("dependency environment root must be absolute")
+        return value
 
 
 class RetentionDefaults(BaseModel):
@@ -476,6 +500,9 @@ class Settings(BaseSettings):
     capability_provisioning: CapabilityProvisioningSettings = Field(
         default_factory=CapabilityProvisioningSettings
     )
+    dependency_provisioning: DependencyProvisioningSettings = Field(
+        default_factory=DependencyProvisioningSettings
+    )
 
     @field_validator(
         "repository_root",
@@ -501,6 +528,8 @@ class Settings(BaseSettings):
             self.worktree_root,
             self.artifact_root,
             self.capability_provisioning.toolchain_root,
+            self.capability_provisioning.download_cache_root,
+            self.dependency_provisioning.environment_root,
         )
         resolved = tuple(root.resolve() for root in roots)
         for index, root in enumerate(resolved):

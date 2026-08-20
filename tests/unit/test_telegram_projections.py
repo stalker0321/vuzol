@@ -122,6 +122,7 @@ def test_capability_approval_explains_separate_offline_installation() -> None:
                     "version": "35.0.0",
                     "archive_bytes": 2 * 1024 * 1024,
                     "archive_sha256": "a" * 64,
+                    "source_provider": "Google Android",
                 }
             ],
         },
@@ -131,7 +132,31 @@ def test_capability_approval_explains_separate_offline_installation() -> None:
 
     assert any("android-sdk" in line for line in lines)
     assert any("35.0.0" in line for line in lines)
+    assert any("Google Android" in line for line in lines)
     assert any("2.0 МБ" in line for line in lines)
+    assert _approval_buttons(approval) == ("approve", "reject")
+
+
+def test_dependency_approval_explains_registry_and_immutable_environment() -> None:
+    lines = _approval_fact_lines(
+        {
+            "schema_version": "dependency-provisioning-approval.v1",
+            "requirements": [
+                {
+                    "ecosystem": "python",
+                    "registry_provider": "Python Packaging Authority",
+                    "manifest_sha256": "b" * 64,
+                    "direct_dependencies": ["httpx==1.0", "pydantic==2.0"],
+                }
+            ],
+        },
+        "Собрать зависимости Python",
+    )
+    approval = MagicMock(requested_action="install_dependencies")
+
+    assert any("python" in line and "зависимостей: 2" in line for line in lines)
+    assert any("Python Packaging Authority" in line for line in lines)
+    assert any("только для чтения" in line for line in lines)
     assert _approval_buttons(approval) == ("approve", "reject")
 
 

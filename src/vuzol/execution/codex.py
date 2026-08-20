@@ -6,6 +6,7 @@ import hashlib
 import json
 import stat
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
@@ -32,7 +33,13 @@ from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceLease, ProxyServiceManager
 from vuzol.project_environment import current_environment
+from vuzol.projects.dependencies import (
+    DependencyEnvironment,
+    inspect_dependency_requests,
+    load_dependency_environment,
+)
 from vuzol.projects.executor_preference import apply_profile_overrides
+from vuzol.projects.source_catalog import SourceCatalog
 from vuzol.projects.toolchains import ToolchainRuntime, toolchain_runtime
 from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.grok import (
@@ -58,6 +65,12 @@ _ARTIFACT_EXECUTABLES = {
     "npm": "/usr/bin/npm",
     "./gradlew": "/workspace/gradlew",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _DependencyRuntime:
+    mounts: tuple[SandboxMount, ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
 
 
 class ExecutionEnvelopeFactory:
@@ -167,6 +180,11 @@ class ExecutionEnvelopeFactory:
                     purpose="worktree-git-metadata",
                 ),
             ]
+            dependency_runtime = self._dependency_runtime(
+                worktree_path, project_id=worktree.project_id
+            )
+            mounts.extend(dependency_runtime.mounts)
+            environment.update(dict(dependency_runtime.environment))
             if profile.provider == "grok":
                 staging = (
                     self._artifact_root
@@ -422,6 +440,11 @@ class ExecutionEnvelopeFactory:
                 "GIT_CONFIG_KEY_0": "safe.directory",
                 "GIT_CONFIG_VALUE_0": "/workspace",
             }
+            dependency_runtime = self._dependency_runtime(
+                worktree_path, project_id=worktree.project_id
+            )
+            mounts.extend(dependency_runtime.mounts)
+            environment.update(dict(dependency_runtime.environment))
             toolchain_root = self._settings.capability_provisioning.toolchain_root
             if managed_runtime is not None and managed_runtime.executables:
                 mounts.append(
@@ -468,6 +491,40 @@ class ExecutionEnvelopeFactory:
                 stdin="",
                 sandbox=spec,
             )
+
+    def _dependency_runtime(self, worktree: Path, *, project_id: str) -> _DependencyRuntime:
+        settings = self._settings.dependency_provisioning
+        if settings.enabled is not True:
+            return _DependencyRuntime()
+        requests = inspect_dependency_requests(
+            worktree,
+            SourceCatalog.builtin(),
+            maximum_direct_dependencies=settings.maximum_direct_dependencies,
+        )
+        environments = tuple(
+            dependency_environment
+            for request in requests
+            if (
+                dependency_environment := load_dependency_environment(
+                    settings.environment_root, project_id, request
+                )
+            )
+            is not None
+        )
+        mounts: list[SandboxMount] = []
+        environment: dict[str, str] = {}
+        for dependency in environments:
+            target = Path("/dependencies") / dependency.request.ecosystem
+            mounts.append(
+                SandboxMount(
+                    source=dependency.root,
+                    target=target,
+                    mode=MountMode.READ_ONLY,
+                    purpose="approved-project-dependencies",
+                )
+            )
+            _apply_dependency_environment(environment, dependency, target)
+        return _DependencyRuntime(tuple(mounts), tuple(sorted(environment.items())))
 
     async def mark_running(self, process_id: uuid.UUID, container_name: str) -> None:
         async with self._factory.begin() as session:
@@ -706,6 +763,31 @@ def _validate_fenced_binding(invocation: CodexInvocation, worktree: Worktree, st
         or worktree.task_id != invocation.task_id
     ):
         raise ValueError("sandbox invocation is not bound to the current fenced lease")
+
+
+def _apply_dependency_environment(
+    environment: dict[str, str], dependency: DependencyEnvironment, target: Path
+) -> None:
+    if dependency.request.ecosystem == "python":
+        library = dependency.root / "venv" / "lib"
+        candidates = tuple(
+            path
+            for path in library.glob("python*/site-packages")
+            if path.is_dir() and not path.is_symlink()
+        )
+        if len(candidates) != 1:
+            raise ValueError("approved Python environment has no unique site-packages path")
+        relative = candidates[0].relative_to(dependency.root)
+        environment["PYTHONPATH"] = f"{target.joinpath(relative)}:/workspace/src"
+        return
+    if dependency.request.ecosystem == "node":
+        modules = target / "node_modules"
+        environment["NODE_PATH"] = str(modules)
+        environment["PATH"] = (
+            f"{modules}/.bin:/opt/vuzol-validation/bin:/usr/local/bin:/usr/bin:/bin"
+        )
+        return
+    raise ValueError("approved dependency ecosystem has no runtime mapping")
 
 
 def _worktree_git_metadata(worktree: Path) -> Path:

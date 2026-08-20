@@ -27,6 +27,12 @@ Set `VUZOL_REGISTRY_FILE` to enable a registry document. Before app or worker st
 
 Invalid configuration stops the process before it starts accepting work.
 
+Capability provisioning uses three mutually separate absolute roots: the root-readable staged
+bundle directory, managed toolchain storage, and the content-addressed download cache. Dependency
+provisioning has its own environment root and is independently default-off. Enabling dependency
+provisioning requires the executor's controlled proxy runtime because package managers never receive
+direct egress.
+
 `VUZOL_REGISTRY_OVERLAY_FILE` optionally points to the JSON registry fragment owned by the bounded
 project provisioner. Static configuration is loaded first and the overlay is appended before the
 same cross-registry validation and revision calculation. The provisioner writes the overlay with an

@@ -291,6 +291,36 @@ def _coding_v3() -> WorkflowDefinition:
 WORKFLOW_DEFINITIONS = (*WORKFLOW_DEFINITIONS, _coding_v3())
 
 
+def _coding_v4() -> WorkflowDefinition:
+    coding_v3 = next(
+        definition for definition in WORKFLOW_DEFINITIONS if definition.stable_id == "coding.v3"
+    )
+    steps: list[StepDefinition] = []
+    for step in coding_v3.steps:
+        if step.key == "validate":
+            steps.append(
+                _step(
+                    "ensure_dependencies",
+                    "execute_code",
+                    queue=QueueClass.HEAVY,
+                    capabilities=frozenset({Capability.PROJECT_SHELL, Capability.FILESYSTEM_WRITE}),
+                    idempotency=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+                    timeout=1_800,
+                )
+            )
+            step = replace(step, predecessors=("ensure_dependencies",))
+        steps.append(step)
+    return WorkflowDefinition(
+        workflow_type="coding",
+        version="4",
+        task_types=coding_v3.task_types,
+        steps=tuple(steps),
+    )
+
+
+WORKFLOW_DEFINITIONS = (*WORKFLOW_DEFINITIONS, _coding_v4())
+
+
 def validate_definition(definition: WorkflowDefinition) -> None:
     keys = [step.key for step in definition.steps]
     if len(keys) != len(set(keys)):

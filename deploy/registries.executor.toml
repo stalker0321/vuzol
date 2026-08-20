@@ -72,16 +72,16 @@ destinations = [
 ]
 
 [[profiles]]
-id = "openai-planner-prod"
+id = "openrouter-deepseek-planner-prod"
 provider = "openai-compatible"
-model = "gpt-5-nano-2025-08-07"
-api_base_url = "https://api.openai.com/v1"
+model = "deepseek/deepseek-v4-flash-0731"
+api_base_url = "https://openrouter.ai/api/v1"
 launch_mode = "api"
-credential_reference = "env:VUZOL_OPENAI_PLANNER_API_KEY"
+credential_reference = "env:VUZOL_OPENROUTER_PLANNER_API_KEY"
 credential_required = true
 capabilities = []
 concurrency_limit = 10
-context_limit = 100000
+context_limit = 1048576
 output_limit = 1000
 cost_class = "cheap"
 roles = ["planner", "reviewer"]
@@ -89,10 +89,14 @@ routing_priority = 50
 supported_task_types = ["architecture", "coding", "research", "infrastructure", "file_processing", "general"]
 fallback_profile_ids = []
 sandbox_required = false
-input_cost_units_per_million = 0.05
-output_cost_units_per_million = 0.40
+input_cost_units_per_million = 0.08
+output_cost_units_per_million = 0.18
 minimum_unknown_usage_cost = 0.001
 enabled = true
+
+[profiles.provider_routing]
+order = ["deepinfra/fp8"]
+allow_fallbacks = true
 
 [[profiles]]
 id = "codex-subscription-prod"

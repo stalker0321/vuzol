@@ -95,6 +95,33 @@ async def test_openai_adapter_uses_gpt5_chat_completion_parameters() -> None:
 
 
 @pytest.mark.anyio
+async def test_openai_adapter_sends_openrouter_provider_routing() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == "deepseek/deepseek-v4-flash-0731"
+        assert payload["provider"] == {
+            "order": ["deepinfra/fp8"],
+            "allow_fallbacks": True,
+        }
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://openrouter.ai/api/v1"
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("test-key"), client=client)
+        selected = profile(
+            "deepseek-planner",
+            model="deepseek/deepseek-v4-flash-0731",
+            api_base_url="https://openrouter.ai/api/v1",
+            provider_routing={"order": ["deepinfra/fp8"], "allow_fallbacks": True},
+        )
+        await adapter.execute(provider_request(), selected, CancellationContext())
+
+
+@pytest.mark.anyio
 async def test_openai_adapter_maps_errors_without_response_body() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(

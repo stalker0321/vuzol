@@ -190,21 +190,29 @@ def _require_provider_profiles(document: dict[str, object]) -> None:
     planners = [
         item
         for item in profiles
-        if isinstance(item, dict) and item.get("id") == "openai-planner-prod"
+        if isinstance(item, dict) and item.get("id") == "openrouter-deepseek-planner-prod"
     ]
     if len(planners) != 1:
-        raise MvpCheckError("openai-planner-prod is not uniquely configured")
+        raise MvpCheckError("openrouter-deepseek-planner-prod is not uniquely configured")
     planner = planners[0]
     expected = {
         "provider": "openai-compatible",
-        "model": "gpt-5-nano-2025-08-07",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "api_base_url": "https://openrouter.ai/api/v1",
         "launch_mode": "api",
         "roles": ["planner", "reviewer"],
         "output_limit": 1_000,
         "enabled": True,
     }
     if any(planner.get(key) != value for key, value in expected.items()):
-        raise MvpCheckError("openai-planner-prod does not match the bounded production policy")
+        raise MvpCheckError(
+            "openrouter-deepseek-planner-prod does not match the bounded production policy"
+        )
+    if planner.get("provider_routing") != {
+        "order": ["deepinfra/fp8"],
+        "allow_fallbacks": True,
+    }:
+        raise MvpCheckError("OpenRouter planner provider routing does not match policy")
 
 
 def _validation_gates(image: str) -> None:

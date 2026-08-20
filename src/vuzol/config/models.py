@@ -3,7 +3,7 @@
 from enum import StrEnum
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
@@ -257,6 +257,25 @@ class ProjectConfig(FrozenModel):
     static_deployment: StaticDeploymentConfig | None = None
 
 
+ProviderEndpointSlug = Annotated[
+    str,
+    Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9._/-]*$"),
+]
+
+
+class OpenRouterProviderRouting(FrozenModel):
+    """Bounded OpenRouter provider selection sent with each inference request."""
+
+    order: tuple[ProviderEndpointSlug, ...] = Field(min_length=1, max_length=20)
+    allow_fallbacks: bool = True
+
+    @model_validator(mode="after")
+    def validate_unique_order(self) -> "OpenRouterProviderRouting":
+        if len(set(self.order)) != len(self.order):
+            raise ValueError("OpenRouter provider order must not contain duplicates")
+        return self
+
+
 class ProviderProfileConfig(FrozenModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     provider: str = Field(min_length=1)
@@ -267,6 +286,7 @@ class ProviderProfileConfig(FrozenModel):
         pattern=r"^(low|medium|high|xhigh|max|ultra)$",
     )
     api_base_url: HttpUrl | None = None
+    provider_routing: OpenRouterProviderRouting | None = None
     launch_mode: LaunchMode
     credential_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
     credential_required: bool = True
@@ -312,6 +332,11 @@ class ProviderProfileConfig(FrozenModel):
                         raise ValueError("provider API base URL must use a global address")
         if self.launch_mode is LaunchMode.API and self.api_base_url is None:
             raise ValueError("API profile requires api_base_url")
+        if self.provider_routing is not None:
+            if self.launch_mode is not LaunchMode.API or self.api_base_url is None:
+                raise ValueError("OpenRouter provider routing requires an API profile")
+            if self.api_base_url.host != "openrouter.ai":
+                raise ValueError("OpenRouter provider routing requires openrouter.ai")
         if self.launch_mode is LaunchMode.CLI:
             if self.runtime_identity is None or self.state_directory is None:
                 raise ValueError("CLI profile requires runtime_identity and state_directory")

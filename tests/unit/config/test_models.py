@@ -150,6 +150,45 @@ def test_provider_api_base_url_is_safe_https_origin() -> None:
             )
 
 
+def test_openrouter_provider_routing_is_bounded_to_openrouter_api_profiles() -> None:
+    configured = ProviderProfileConfig.model_validate(
+        {
+            "id": "deepseek-planner",
+            "provider": "openai-compatible",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "api_base_url": "https://openrouter.ai/api/v1",
+            "provider_routing": {
+                "order": ["deepinfra/fp8"],
+                "allow_fallbacks": True,
+            },
+            "launch_mode": "api",
+            "credential_reference": "env:OPENROUTER_KEY",
+            "capabilities": [],
+            "concurrency_limit": 1,
+            "cost_class": "cheap",
+            "supported_task_types": ["general"],
+            "sandbox_required": False,
+        }
+    )
+
+    assert configured.provider_routing is not None
+    assert configured.provider_routing.order == ("deepinfra/fp8",)
+    assert configured.provider_routing.allow_fallbacks
+
+    for base_url, order in (
+        ("https://provider.example/v1", ["deepinfra/fp8"]),
+        ("https://openrouter.ai/api/v1", ["deepinfra/fp8", "deepinfra/fp8"]),
+    ):
+        with pytest.raises(ValidationError):
+            ProviderProfileConfig.model_validate(
+                {
+                    **configured.model_dump(mode="json"),
+                    "api_base_url": base_url,
+                    "provider_routing": {"order": order, "allow_fallbacks": True},
+                }
+            )
+
+
 def test_unknown_capability_is_rejected() -> None:
     with pytest.raises(ValidationError, match="Input should be"):
         ProviderProfileConfig.model_validate(

@@ -41,6 +41,7 @@ from vuzol.telegram.domain import (
 )
 from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.telegram.work_package_projections import (
+    WORK_PACKAGE_ACTION_ROLE,
     WORK_PACKAGE_DETAIL_ROLE,
     WORK_PACKAGE_PLAN_ROLE,
     WORK_PACKAGE_PROJECTION_DESTINATION,
@@ -213,6 +214,94 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
         )
     assert status_link is not None and status_link.message_id == 700
     assert client.pinned == []
+    await engine.dispose()
+
+
+async def test_action_projection_edits_and_restores_durable_plan_card(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    result, _ = await _seed(factory)
+    client = FakeTelegramClient(next_message_id=751)
+    delivery = TelegramDeliveryService(
+        factory,
+        client,
+        owner="wp-action-delivery",
+        lease_seconds=30,
+        max_attempts=3,
+        retry_min_seconds=1,
+        retry_max_seconds=10,
+    )
+    assert await delivery.deliver_one()
+
+    async with UnitOfWork(factory) as uow:
+        await uow.outbox.enqueue(
+            destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+            operation_type="render_action",
+            entity_type="work_package",
+            entity_id=result.package_id,
+            idempotency_key=f"wp:test:action:{result.package_id}",
+            payload={"package_id": str(result.package_id)},
+        )
+    assert await delivery.deliver_one()
+    assert len(client.sent) == 1
+    assert client.edited[-1][1] == 751
+
+    async with factory() as session:
+        plan_link = await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.work_package_id == result.package_id,
+                TelegramMessageLink.message_role == WORK_PACKAGE_PLAN_ROLE,
+            )
+        )
+        action_link = await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.work_package_id == result.package_id,
+                TelegramMessageLink.message_role == WORK_PACKAGE_ACTION_ROLE,
+            )
+        )
+    assert plan_link is not None and plan_link.message_id == 751
+    assert action_link is None
+
+    async with UnitOfWork(factory) as uow:
+        await uow.outbox.enqueue(
+            destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+            operation_type="clear_action",
+            entity_type="work_package",
+            entity_id=result.package_id,
+            idempotency_key=f"wp:test:clear-action:{result.package_id}",
+            payload={"package_id": str(result.package_id)},
+        )
+    assert await delivery.deliver_one()
+    assert len(client.edited) == 2
+    assert client.edited[-1][1] == 751
+    assert client.deleted == []
+
+    async with factory.begin() as session:
+        session.add(
+            TelegramMessageLink(
+                chat_id=-100,
+                message_thread_id=10,
+                message_id=752,
+                message_role=WORK_PACKAGE_ACTION_ROLE,
+                projection_revision=1,
+                work_package_id=result.package_id,
+                plan_revision_id=result.revision_id,
+                control_status_generation=1,
+            )
+        )
+        session.add(
+            TransactionalOutbox(
+                destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+                operation_type="clear_action",
+                linked_entity_type="work_package",
+                linked_entity_id=result.package_id,
+                idempotency_key=f"wp:test:clear-legacy-action:{result.package_id}",
+                payload={"package_id": str(result.package_id)},
+            )
+        )
+    assert await delivery.deliver_one()
+    assert client.deleted == [(-100, 752)]
     await engine.dispose()
 
 

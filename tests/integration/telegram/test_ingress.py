@@ -124,8 +124,8 @@ def test_project_source_command_persists_user_trust_and_revocation(
 
         assert removed.status is IngressStatus.HANDLED
         async with factory() as session:
-            source = await session.get(ProjectDependencySource, source_id)
-            assert source is not None and source.revoked_at is not None
+            revoked = await session.get(ProjectDependencySource, source_id)
+            assert revoked is not None and revoked.revoked_at is not None
         await engine.dispose()
 
     asyncio.run(scenario())

@@ -50,6 +50,7 @@ from vuzol.workflows.ports import CancellationContext
 
 INDEPENDENT_REVIEW_SCHEMA = "independent-review.v1"
 _PROMPT_REVISION = "independent-review-v1"
+_REVIEW_REASONING_MAX_TOKENS = 2_000
 # Keep the complete diff in the independent-review bundle whenever it still fits
 # the reviewer's 32k-token input allowance.  The old 60k-character boundary was
 # substantially below that allowance and made ordinary front-end changes fail
@@ -417,6 +418,7 @@ def _build_request(
         encoded[offset : offset + _MAX_CONTEXT_ITEM_CHARS]
         for offset in range(0, len(encoded), _MAX_CONTEXT_ITEM_CHARS)
     )
+    max_output_tokens = min(int(profile.output_limit or 4_000), 4_000)
     return ProviderRequest(
         task_id=task_id,
         run_id=run_id,
@@ -450,7 +452,8 @@ def _build_request(
         # Reviews can contain several concrete findings. Keep the provider
         # profile as the upper bound, but allow up to 4k completion tokens so
         # a valid JSON report is not cut off mid-object.
-        max_output_tokens=min(int(profile.output_limit or 4_000), 4_000),
+        max_output_tokens=max_output_tokens,
+        reasoning_max_tokens=min(_REVIEW_REASONING_MAX_TOKENS, max_output_tokens),
         reserved_cost_units=Decimal("0"),
         reserved_quota_units=Decimal("0"),
         sandbox_reference=None,

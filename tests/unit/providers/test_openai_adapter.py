@@ -141,6 +141,36 @@ async def test_openai_adapter_sends_openrouter_provider_routing() -> None:
 
 
 @pytest.mark.anyio
+async def test_openai_adapter_sends_reasoning_limit_for_reviewer() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["max_tokens"] == 4_000
+        assert payload["reasoning"] == {"enabled": True, "max_tokens": 2_000}
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://openrouter.ai/api/v1"
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("test-key"), client=client)
+        selected = profile(
+            "deepseek-reviewer",
+            model="deepseek/deepseek-v4-flash-0731",
+            api_base_url="https://openrouter.ai/api/v1",
+        )
+        request = provider_request().model_copy(
+            update={
+                "role": ProviderRole.REVIEWER,
+                "max_output_tokens": 4_000,
+                "reasoning_max_tokens": 2_000,
+            }
+        )
+        await adapter.execute(request, selected, CancellationContext())
+
+
+@pytest.mark.anyio
 async def test_openai_adapter_maps_errors_without_response_body() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(

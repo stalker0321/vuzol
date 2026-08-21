@@ -207,6 +207,8 @@ def test_large_review_bundle_is_complete_across_hashed_context_chunks() -> None:
     )
 
     assert len(request.context) > 1
+    assert request.max_output_tokens == 1_000
+    assert request.reasoning_max_tokens == min(2_000, request.max_output_tokens)
     encoded = "".join(item.content for item in request.context)
     assert json.loads(encoded)["diff"].endswith("x" * 25_000)
     assert all(

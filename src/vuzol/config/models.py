@@ -3,7 +3,7 @@
 from enum import StrEnum
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
@@ -257,22 +257,43 @@ class ProjectConfig(FrozenModel):
     static_deployment: StaticDeploymentConfig | None = None
 
 
-ProviderEndpointSlug = Annotated[
-    str,
-    Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9._/-]*$"),
+OpenRouterSortBy = Literal["price", "throughput", "latency"]
+OpenRouterSortPartition = Literal["model", "none"]
+OpenRouterQuantization = Literal[
+    "int4", "int8", "fp4", "fp6", "fp8", "fp16", "bf16", "fp32", "unknown"
 ]
+
+
+class OpenRouterSort(FrozenModel):
+    by: OpenRouterSortBy
+    partition: OpenRouterSortPartition = "model"
+
+
+class OpenRouterPreferredMinThroughput(FrozenModel):
+    p50: int | None = Field(default=None, gt=0)
+    p75: int | None = Field(default=None, gt=0)
+    p90: int | None = Field(default=None, gt=0)
+    p99: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def require_percentile(self) -> "OpenRouterPreferredMinThroughput":
+        if not any(value is not None for value in (self.p50, self.p75, self.p90, self.p99)):
+            raise ValueError("OpenRouter throughput requires at least one percentile")
+        return self
 
 
 class OpenRouterProviderRouting(FrozenModel):
     """Bounded OpenRouter provider selection sent with each inference request."""
 
-    order: tuple[ProviderEndpointSlug, ...] = Field(min_length=1, max_length=20)
+    sort: OpenRouterSort
+    preferred_min_throughput: OpenRouterPreferredMinThroughput
+    quantizations: tuple[OpenRouterQuantization, ...] = Field(min_length=1, max_length=8)
     allow_fallbacks: bool = True
 
     @model_validator(mode="after")
-    def validate_unique_order(self) -> "OpenRouterProviderRouting":
-        if len(set(self.order)) != len(self.order):
-            raise ValueError("OpenRouter provider order must not contain duplicates")
+    def validate_unique_quantizations(self) -> "OpenRouterProviderRouting":
+        if len(set(self.quantizations)) != len(self.quantizations):
+            raise ValueError("OpenRouter quantizations must not contain duplicates")
         return self
 
 

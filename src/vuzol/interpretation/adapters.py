@@ -201,7 +201,8 @@ class OpenAICompatibleInterpreter:
 
     def _apply_provider_routing(self, payload: dict[str, Any]) -> None:
         if self._provider_routing is not None:
-            payload["provider"] = self._provider_routing.model_dump(mode="json")
+            payload["provider"] = self._provider_routing.model_dump(mode="json", exclude_none=True)
+            payload["reasoning"] = {"effort": "none"}
 
 
 class OpenAICompatibleTranscriber:

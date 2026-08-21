@@ -95,7 +95,9 @@ minimum_unknown_usage_cost = 0.001
 enabled = true
 
 [profiles.provider_routing]
-order = ["deepinfra/fp8"]
+sort = { by = "price", partition = "none" }
+preferred_min_throughput = { p90 = 70 }
+quantizations = ["int8", "fp8"]
 allow_fallbacks = true
 
 [[profiles]]

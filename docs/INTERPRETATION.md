@@ -57,10 +57,10 @@ Configure provider registry entries with `provider = "openai-compatible"`, `mode
 - `VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID` for voice;
 - bounded poll, lease, attempt, timeout, and retry settings shown in `.env.example`.
 
-OpenRouter profiles may additionally declare a bounded `provider_routing` table. For example,
-`order = ["deepinfra/fp8"]` with `allow_fallbacks = true` tries that endpoint first and then lets
-OpenRouter select another endpoint for the same model when it is unavailable. The policy is sent
-on both task interpretation and project-discussion planning requests.
+OpenRouter profiles may additionally declare a bounded `provider_routing` table. The production
+policy sorts by price, prefers endpoints with p90 throughput of at least 70 tokens per second,
+allows int8 and fp8 quantizations, and keeps provider fallbacks enabled. The policy is sent on
+both task interpretation and project-discussion planning requests.
 
 Start the optional runtime with `docker compose --profile interpretation up`. It also needs the
 single Telegram bot token for attachment reads; it does not introduce another bot.

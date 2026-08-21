@@ -1,4 +1,5 @@
 import asyncio
+import ctypes
 import io
 import json
 import os
@@ -840,6 +841,60 @@ def test_landlock_abi_version_is_not_negative() -> None:
 
 
 @pytest.mark.parametrize(
+    ("abi_version", "expected"),
+    [
+        (1, (1 << 13) - 1),
+        (2, (1 << 14) - 1),
+        (3, (1 << 15) - 1),
+        (4, (1 << 15) - 1),
+        (5, (1 << 16) - 1),
+    ],
+)
+def test_landlock_supported_fs_access_matches_abi(abi_version: int, expected: int) -> None:
+    assert landlock._supported_fs_access(abi_version) == expected
+
+
+def test_landlock_apply_uses_compatible_ruleset_size_and_rights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read_only = tmp_path / "read-only"
+    read_write = tmp_path / "read-write"
+    device = tmp_path / "device"
+    read_only.mkdir()
+    read_write.mkdir()
+    device.write_text("device", encoding="utf-8")
+    calls: list[tuple[int, tuple[object, ...]]] = []
+
+    def syscall(number: int, *arguments: object) -> int:
+        calls.append((number, arguments))
+        if number == landlock._LANDLOCK_CREATE_RULESET:
+            return os.open(os.devnull, os.O_RDONLY)
+        return 0
+
+    fake = SimpleNamespace(syscall=syscall, prctl=MagicMock(return_value=0))
+    monkeypatch.setattr(landlock, "_load_libc", lambda: fake)
+    monkeypatch.setattr(landlock, "landlock_abi_version", lambda: 1)
+
+    landlock.apply_confinement(
+        (str(read_only),),
+        (str(read_write),),
+        ((str(device), landlock.ACCESS_FS_READ_FILE | landlock.ACCESS_FS_IOCTL_DEV),),
+    )
+
+    create_call = next(
+        arguments for number, arguments in calls if number == landlock._LANDLOCK_CREATE_RULESET
+    )
+    assert create_call[1] == ctypes.sizeof(ctypes.c_uint64)
+    assert cast(Any, create_call[0])._obj.handled_access_fs == (1 << 13) - 1
+    add_calls = [arguments for number, arguments in calls if number == landlock._LANDLOCK_ADD_RULE]
+    assert cast(Any, add_calls[0][2])._obj.allowed_access == landlock._READ_ONLY_ACCESS & (
+        (1 << 13) - 1
+    )
+    assert cast(Any, add_calls[1][2])._obj.allowed_access == landlock.ACCESS_FS_READ_FILE
+    assert cast(Any, add_calls[2][2])._obj.allowed_access == (1 << 13) - 1
+
+
+@pytest.mark.parametrize(
     "arguments",
     [
         (),
@@ -881,6 +936,7 @@ def test_landlock_apply_reports_ruleset_creation_failure(
 ) -> None:
     fake = SimpleNamespace(syscall=MagicMock(return_value=-1))
     monkeypatch.setattr(landlock, "_load_libc", lambda: fake)
+    monkeypatch.setattr(landlock, "landlock_abi_version", lambda: 1)
 
     with pytest.raises(landlock.LandlockUnavailable, match="landlock_create_ruleset"):
         landlock.apply_confinement((), (str(tmp_path),))

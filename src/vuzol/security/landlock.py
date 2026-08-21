@@ -29,6 +29,7 @@ _LANDLOCK_RESTRICT_SELF = 446
 _LANDLOCK_GET_ABI_VERSION = 1
 _LANDLOCK_RULE_PATH_BENEATH = 1
 _PR_SET_NO_NEW_PRIVS = 38
+_RULESET_ATTR_FS_SIZE = ctypes.sizeof(ctypes.c_uint64)
 
 ACCESS_FS_EXECUTE = 1 << 0
 ACCESS_FS_WRITE_FILE = 1 << 1
@@ -47,7 +48,7 @@ ACCESS_FS_REFER = 1 << 13
 ACCESS_FS_TRUNCATE = 1 << 14
 ACCESS_FS_IOCTL_DEV = 1 << 15
 
-_ALL_FS_ACCESS = (1 << 16) - 1
+_BASE_FS_ACCESS = (1 << 13) - 1
 _READ_ONLY_ACCESS = (
     ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR | ACCESS_FS_IOCTL_DEV
 )
@@ -98,6 +99,18 @@ def landlock_abi_version() -> int:
     return version if version > 0 else 0
 
 
+def _supported_fs_access(abi_version: int) -> int:
+    """Return filesystem rights understood by the requested Landlock ABI."""
+    access = _BASE_FS_ACCESS
+    if abi_version >= 2:
+        access |= ACCESS_FS_REFER
+    if abi_version >= 3:
+        access |= ACCESS_FS_TRUNCATE
+    if abi_version >= 5:
+        access |= ACCESS_FS_IOCTL_DEV
+    return access
+
+
 def _add_rule(libc: ctypes.CDLL, ruleset_fd: int, path: str, access: int) -> None:
     try:
         flags = os.O_PATH | os.O_DIRECTORY
@@ -127,22 +140,29 @@ def apply_confinement(
     read_only: Sequence[str],
     read_write: Sequence[str],
     extra_rules: Sequence[tuple[str, int]] = (),
+    *,
+    abi_version: int | None = None,
 ) -> None:
     """Restrict the calling thread to the declared paths; inherited across exec."""
+    if abi_version is None:
+        abi_version = landlock_abi_version()
+    if abi_version < 1:
+        raise LandlockUnavailable("Landlock ABI is unavailable")
+    handled_access = _supported_fs_access(abi_version)
     libc = _load_libc()
-    attr = _RulesetAttr(handled_access_fs=_ALL_FS_ACCESS, handled_access_net=0)
+    attr = _RulesetAttr(handled_access_fs=handled_access, handled_access_net=0)
     ruleset_fd = _syscall(
-        libc, _LANDLOCK_CREATE_RULESET, ctypes.byref(attr), ctypes.sizeof(attr), 0
+        libc, _LANDLOCK_CREATE_RULESET, ctypes.byref(attr), _RULESET_ATTR_FS_SIZE, 0
     )
     if ruleset_fd < 0:
         raise LandlockUnavailable(f"landlock_create_ruleset failed: errno {ctypes.get_errno()}")
     try:
         for path in read_only:
-            _add_rule(libc, ruleset_fd, path, _READ_ONLY_ACCESS)
+            _add_rule(libc, ruleset_fd, path, _READ_ONLY_ACCESS & handled_access)
         for path, access in extra_rules:
-            _add_rule(libc, ruleset_fd, path, access)
+            _add_rule(libc, ruleset_fd, path, access & handled_access)
         for path in read_write:
-            _add_rule(libc, ruleset_fd, path, _ALL_FS_ACCESS)
+            _add_rule(libc, ruleset_fd, path, handled_access)
         if int(libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) != 0:
             raise LandlockUnavailable("prctl(PR_SET_NO_NEW_PRIVS) failed")
         if _syscall(libc, _LANDLOCK_RESTRICT_SELF, ruleset_fd, 0) != 0:
@@ -221,6 +241,7 @@ def main(argv: Sequence[str]) -> int:
             read_only=tuple(dict.fromkeys(default_dirs + read_only)),
             read_write=tuple(read_write),
             extra_rules=device_rules,
+            abi_version=landlock_abi_version(),
         )
     except LandlockUnavailable as error:
         print(f"vuzol-landlock: confinement unavailable: {error}", file=sys.stderr)

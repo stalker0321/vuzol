@@ -391,7 +391,7 @@ async def _enqueue_project_topic_refresh(
 ) -> None:
     from sqlalchemy import select
 
-    from vuzol.storage.models import ProjectDiscussionSession, TopicMapping
+    from vuzol.storage.models import ProjectDiscussionSession, TelegramMessageLink, TopicMapping
 
     discussion = await session.scalar(
         select(ProjectDiscussionSession)
@@ -424,6 +424,14 @@ async def _enqueue_project_topic_refresh(
         )
     )
     if mapping is not None:
+        status_link = await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.chat_id == chat_id,
+                TelegramMessageLink.message_thread_id == thread_id,
+                TelegramMessageLink.message_role == "work_package_status",
+            )
+        )
+        revision = max(1, int(status_link.projection_revision) + 1) if status_link else 1
         session.add(
             TransactionalOutbox(
                 destination="work_package_projection",
@@ -435,7 +443,7 @@ async def _enqueue_project_topic_refresh(
                     "chat_id": chat_id,
                     "thread_id": thread_id,
                     "project_id": project_id,
-                    "revision": 1,
+                    "revision": revision,
                 },
             )
         )

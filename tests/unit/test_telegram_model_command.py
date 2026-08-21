@@ -592,6 +592,29 @@ async def test_project_model_controller_auto_and_effort_and_grok(
 
 
 @pytest.mark.anyio
+async def test_model_change_bumps_legacy_topic_status_revision() -> None:
+    from vuzol.telegram.model_command import _enqueue_project_topic_refresh
+
+    mapping = SimpleNamespace(id=uuid4())
+    status_link = SimpleNamespace(projection_revision=7)
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=[None, mapping, status_link])
+    session.add = MagicMock()
+
+    await _enqueue_project_topic_refresh(
+        session,
+        project_id="bill-buddy",
+        chat_id=-100,
+        thread_id=20,
+        action_id=uuid4(),
+    )
+
+    outbox = session.add.call_args.args[0]
+    assert outbox.operation_type == "render_topic_idle"
+    assert outbox.payload["revision"] == 8
+
+
+@pytest.mark.anyio
 async def test_project_model_controller_rejects_incomplete_and_non_project() -> None:
     from pathlib import Path
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from ._test_providers_helpers import (
     CancellationContext,
     OpenAICompatibleAdapter,
@@ -247,6 +249,44 @@ async def test_openai_adapter_rejects_invalid_structured_output(content: str) ->
         with pytest.raises(ProviderFailure) as captured:
             await adapter.execute(request, profile("profile"), CancellationContext())
     assert captured.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+
+
+@pytest.mark.anyio
+async def test_openai_adapter_logs_bounded_structured_output_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    content = '{"api_key":"secret-value","verdict":'
+    caplog.set_level(logging.WARNING, logger="vuzol.providers.openai")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": content},
+                            "finish_reason": "length",
+                        }
+                    ]
+                },
+                headers={"x-request-id": "provider-request-1"},
+            )
+        ),
+        base_url="https://provider.example/v1",
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("key"), client=client)
+        with pytest.raises(ProviderFailure, match="finish_reason=length"):
+            await adapter.execute(
+                provider_request(structured=True), profile("profile"), CancellationContext()
+            )
+
+    record = next(item for item in caplog.records if item.name == "vuzol.providers.openai")
+    assert record.event == "provider.structured_output_invalid"
+    assert record.reason == "json_parse"
+    assert record.finish_reason == "length"
+    assert record.provider_request_id == "provider-request-1"
+    assert "secret-value" not in record.content_excerpt
+    assert "[REDACTED]" in record.content_excerpt
 
 
 @pytest.mark.anyio

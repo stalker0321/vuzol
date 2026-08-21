@@ -1,6 +1,8 @@
 """Generic OpenAI-compatible model-only provider adapter."""
 
+import hashlib
 import json
+import re
 import time
 from typing import Any
 
@@ -11,6 +13,7 @@ from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import SecretStr
 
 from vuzol.config.models import ProviderProfileConfig, ProviderRole
+from vuzol.observability import get_logger
 from vuzol.providers.domain import (
     EffectiveProfileState,
     NormalizedUsage,
@@ -21,6 +24,16 @@ from vuzol.providers.domain import (
 )
 from vuzol.providers.errors import ProviderFailure
 from vuzol.workflows.ports import CancellationContext
+
+_LOGGER = get_logger(__name__)
+_DIAGNOSTIC_EXCERPT_CHARS = 4_000
+_SECRET_SHAPED_OUTPUT = (
+    re.compile(
+        r"(?i)(api[_-]?key|authorization|bearer|token|password|secret)"
+        r"\s*[\"']?\s*[:=]\s*[\"']?[^,\s\"'}]+"
+    ),
+    re.compile(r"(?i)sk-[A-Za-z0-9_-]{20,}"),
+)
 
 
 class OpenAICompatibleAdapter:
@@ -87,27 +100,64 @@ class OpenAICompatibleAdapter:
                 try:
                     decoded = json.loads(str(content))
                 except (TypeError, json.JSONDecodeError) as error:
+                    _log_structured_output_failure(
+                        request=request,
+                        response=response,
+                        content=content,
+                        finish_reason=choice.get("finish_reason"),
+                        reason="json_parse",
+                        error=error,
+                    )
                     raise ProviderFailure(
                         ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
                         retryable=True,
                         request_sent=True,
-                        safe_summary="provider returned invalid structured output",
+                        safe_summary=_structured_output_failure_summary(
+                            "provider returned invalid structured output",
+                            finish_reason=choice.get("finish_reason"),
+                            content=content,
+                        ),
                     ) from error
                 if not isinstance(decoded, dict):
+                    _log_structured_output_failure(
+                        request=request,
+                        response=response,
+                        content=content,
+                        finish_reason=choice.get("finish_reason"),
+                        reason="non_object",
+                        error=None,
+                    )
                     raise ProviderFailure(
                         ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
                         retryable=True,
                         request_sent=True,
-                        safe_summary="provider returned non-object structured output",
+                        safe_summary=_structured_output_failure_summary(
+                            "provider returned non-object structured output",
+                            finish_reason=choice.get("finish_reason"),
+                            content=content,
+                        ),
                     )
                 try:
                     Draft202012Validator(request.output_json_schema).validate(decoded)
                 except JsonSchemaValidationError as error:
+                    _log_structured_output_failure(
+                        request=request,
+                        response=response,
+                        content=content,
+                        finish_reason=choice.get("finish_reason"),
+                        reason="schema_validation",
+                        error=error,
+                    )
                     raise ProviderFailure(
                         ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
                         retryable=True,
                         request_sent=True,
-                        safe_summary="provider output does not match the required schema",
+                        safe_summary=_structured_output_failure_summary(
+                            "provider output does not match the required schema",
+                            finish_reason=choice.get("finish_reason"),
+                            content=content,
+                            error=error,
+                        ),
                     ) from error
                 structured = decoded
                 text = None
@@ -225,6 +275,75 @@ def _payload(request: ProviderRequest, profile: ProviderProfileConfig) -> dict[s
             # without implementing OpenAI's strict json_schema extension.
             payload["response_format"] = {"type": "json_object"}
     return payload
+
+
+def _log_structured_output_failure(
+    *,
+    request: ProviderRequest,
+    response: httpx.Response,
+    content: object,
+    finish_reason: object,
+    reason: str,
+    error: Exception | None,
+) -> None:
+    """Record enough bounded evidence to diagnose malformed provider JSON safely."""
+
+    raw = str(content)
+    redacted = _redact_output(raw)
+    details: dict[str, object] = {
+        "event": "provider.structured_output_invalid",
+        "task_id": str(request.task_id),
+        "run_id": str(request.run_id),
+        "step_id": str(request.step_id),
+        "provider_request_id": response.headers.get("x-request-id"),
+        "reason": reason,
+        "finish_reason": str(finish_reason) if finish_reason is not None else None,
+        "content_type": type(content).__name__,
+        "content_chars": len(raw),
+        "content_sha256": hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest(),
+        "content_excerpt": _bounded_excerpt(redacted),
+    }
+    if isinstance(error, json.JSONDecodeError):
+        details["json_error"] = error.msg
+        details["json_error_position"] = error.pos
+    elif isinstance(error, JsonSchemaValidationError):
+        details["schema_error"] = error.message[:500]
+        details["schema_path"] = str(error.json_path)[:500]
+    _LOGGER.warning("Provider returned invalid structured output", extra=details)
+
+
+def _structured_output_failure_summary(
+    prefix: str,
+    *,
+    finish_reason: object,
+    content: object,
+    error: Exception | None = None,
+) -> str:
+    details = [
+        f"finish_reason={finish_reason}" if finish_reason is not None else None,
+        f"response_chars={len(str(content))}",
+    ]
+    if isinstance(error, json.JSONDecodeError):
+        details.append(f"json_error={error.msg}")
+    elif isinstance(error, JsonSchemaValidationError):
+        details.append(f"schema_path={error.json_path}")
+    suffix = "; ".join(item for item in details if item is not None)
+    return f"{prefix} ({suffix})"[:500]
+
+
+def _redact_output(value: str) -> str:
+    redacted = value
+    for pattern in _SECRET_SHAPED_OUTPUT:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
+
+
+def _bounded_excerpt(value: str) -> str:
+    if len(value) <= _DIAGNOSTIC_EXCERPT_CHARS:
+        return value
+    half = _DIAGNOSTIC_EXCERPT_CHARS // 2
+    omitted = len(value) - (half * 2)
+    return f"{value[:half]}\n...[{omitted} chars omitted]...\n{value[-half:]}"
 
 
 def _uses_reasoning_chat_parameters(model: str) -> bool:

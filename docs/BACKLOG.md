@@ -14,6 +14,16 @@ either move bounded repository recon/context before planning so it can produce
 project-aware plans, or restrict planner usage to genuinely multi-stage/orchestration-heavy
 tasks where a separate planning step adds value.
 
+### TODO — Selectively adopt Benjamin-Plus ideas
+
+Do not integrate Benjamin-Plus as a whole injected skill; instead later port
+only the behaviors that fit VUZOL mechanically into the harness/scheduler:
+batched reconnaissance, bounded/keyhole reads, one-shot dependency preflight,
+stop immediately once task checks are green, and suppression of polling,
+repeated, or failed-approach loops. Add lightweight instrumentation for
+duplicate tool work, retries, polling, tokens/cost, and wall time so the
+changes can be A/B tested rather than assumed useful.
+
 ### Build an interpreter/planner evaluation corpus
 
 Create an agreed corpus of roughly 20 realistic requests spanning trivial,

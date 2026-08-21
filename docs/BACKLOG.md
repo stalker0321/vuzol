@@ -5,6 +5,15 @@ deferred. Completed work belongs in `CHANGELOG.md`.
 
 ## Next after Telegram dogfood testing
 
+### TODO — Revisit planner architecture
+
+The current coding planner runs before repository context is prepared, so it
+can only generate generic “inspect → fix → test” plans that add little value
+over the executor’s own reasoning. Keep the planner disabled for now; later
+either move bounded repository recon/context before planning so it can produce
+project-aware plans, or restrict planner usage to genuinely multi-stage/orchestration-heavy
+tasks where a separate planning step adds value.
+
 ### Build an interpreter/planner evaluation corpus
 
 Create an agreed corpus of roughly 20 realistic requests spanning trivial,

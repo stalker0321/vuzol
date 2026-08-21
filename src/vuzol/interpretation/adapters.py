@@ -107,6 +107,7 @@ class OpenAICompatibleInterpreter:
     ) -> InterpretationResult:
         started = time.monotonic()
         schema = TaskDraft.model_json_schema()
+        schema["properties"].pop("needs_planning", None)
         user_payload = {
             "prompt_version": INTERPRETER_PROMPT_VERSION,
             "input": request.model_dump(mode="json"),

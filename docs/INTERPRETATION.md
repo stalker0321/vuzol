@@ -63,7 +63,9 @@ allows int8 and fp8 quantizations, and keeps provider fallbacks enabled. The pol
 both task interpretation and project-discussion planning requests.
 
 Planner output and reasoning budgets are configured independently through
-`limits.planner_output_tokens` and `limits.planner_reasoning_tokens`. Routing persists the
+`limits.planner_output_tokens` and `limits.planner_reasoning_tokens`. The per-task coding planner
+is currently disabled while its repository-context boundary is being revisited; routing and
+budget fields remain available for the later reintroduction. When enabled, routing persists the
 reasoning budget with the leased planner step, and the OpenAI-compatible adapter forwards both
 values in the provider request.
 

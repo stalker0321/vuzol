@@ -76,7 +76,7 @@ class TaskDraft(FrozenModel):
     required_capabilities: frozenset[Capability] = frozenset()
     suggested_complexity: SuggestedComplexity
     suggested_risk: RiskLevel
-    needs_planning: bool
+    needs_planning: bool = Field(default=False, exclude=True)
     needs_clarification: bool
     referenced_task_id: uuid.UUID | None = None
     normalized_title: str = Field(min_length=1, max_length=120)

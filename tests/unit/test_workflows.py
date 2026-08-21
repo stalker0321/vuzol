@@ -68,7 +68,7 @@ def test_definitions_are_valid_and_stable() -> None:
         validate_definition(definition)
 
 
-def test_compiler_resolves_optional_predecessors() -> None:
+def test_compiler_skips_disabled_planner() -> None:
     interpretation_id = uuid.uuid4()
     without_optional = compile_workflow(draft(), interpretation_id=interpretation_id)
     with_optional = compile_workflow(
@@ -96,7 +96,7 @@ def test_compiler_resolves_optional_predecessors() -> None:
     assert approve.step_type == "approval"
     assert approve.payload == {"requested_action": "apply_result"}
     assert without_optional.steps[1].predecessor_ordinals == (0,)
-    assert "plan" in [step.key for step in with_optional.steps]
+    assert "plan" not in [step.key for step in with_optional.steps]
     assert "review" in [step.key for step in with_optional.steps]
 
 
@@ -118,7 +118,6 @@ def test_architecture_workflow_uses_read_only_agent_without_delivery_gates() -> 
     assert workflow.workflow_type == "architecture"
     assert [step.step_type for step in workflow.steps] == [
         "interpret",
-        "plan",
         "prepare_context",
         "prepare_worktree",
         "execute_agent",

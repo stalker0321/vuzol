@@ -102,6 +102,11 @@ def test_task_schema_exposes_architecture_as_a_distinct_agent_task() -> None:
     assert "task_summary" in schema["required"]
 
 
+def test_planning_hint_is_not_serialized() -> None:
+    value = draft(needs_planning=True)
+    assert "needs_planning" not in value.model_dump(mode="json")
+
+
 def test_legacy_task_draft_derives_summary_from_normalized_title() -> None:
     value = draft()
     assert value.task_summary == "Inspect service"

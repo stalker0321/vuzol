@@ -29,7 +29,7 @@ def compile_workflow(
         raise WorkflowDefinitionError(f"incompatible workflow: {stable_id}")
 
     flags = {
-        "needs_planning": draft.needs_planning,
+        "needs_planning": False,
         # Coding results always receive a cheap mechanical review. The review
         # step re-evaluates risk from the measured diff and only invokes an
         # independent model when the runtime facts require it.

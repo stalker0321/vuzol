@@ -447,7 +447,10 @@ def _build_request(
         timeout_seconds=min(float(timeout_seconds), 600.0),
         deadline=None,
         max_input_tokens=min(int(profile.context_limit or 32_000), 32_000),
-        max_output_tokens=min(int(profile.output_limit or 2_000), 2_000),
+        # Reviews can contain several concrete findings. Keep the provider
+        # profile as the upper bound, but allow up to 4k completion tokens so
+        # a valid JSON report is not cut off mid-object.
+        max_output_tokens=min(int(profile.output_limit or 4_000), 4_000),
         reserved_cost_units=Decimal("0"),
         reserved_quota_units=Decimal("0"),
         sandbox_reference=None,

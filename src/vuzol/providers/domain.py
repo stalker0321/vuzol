@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from vuzol.config.models import Capability, ProviderRole
 
@@ -80,9 +80,19 @@ class ProviderRequest(FrozenProviderModel):
     deadline: datetime | None = None
     max_input_tokens: int = Field(ge=1)
     max_output_tokens: int = Field(ge=1)
+    reasoning_max_tokens: int | None = Field(default=None, ge=1)
     reserved_cost_units: Decimal = Field(ge=0)
     reserved_quota_units: Decimal = Field(ge=0)
     sandbox_reference: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_reasoning_budget(self) -> "ProviderRequest":
+        if (
+            self.reasoning_max_tokens is not None
+            and self.reasoning_max_tokens > self.max_output_tokens
+        ):
+            raise ValueError("reasoning token limit must not exceed output token limit")
+        return self
 
 
 class ProviderResult(FrozenProviderModel):

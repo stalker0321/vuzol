@@ -228,7 +228,8 @@ class HardLimits(BaseModel):
     step_output_tokens: int = Field(default=25_000, ge=1)
     provider_call_input_tokens: int = Field(default=100_000, ge=1)
     provider_call_output_tokens: int = Field(default=25_000, ge=1)
-    planner_output_tokens: int = Field(default=1_000, ge=1)
+    planner_output_tokens: int = Field(default=3_000, ge=1)
+    planner_reasoning_tokens: int = Field(default=1_800, ge=1)
     # Primary plus bounded fallbacks. Four leaves room for a provider-originated
     # cancellation followed by a quota-triggered account failover.
     provider_attempts: int = Field(default=6, ge=1, le=20)
@@ -238,6 +239,12 @@ class HardLimits(BaseModel):
     task_duration_seconds: int = Field(default=7_200, ge=1)
     artifact_bytes: int = Field(default=100_000_000, ge=1)
     input_bytes: int = Field(default=25_000_000, ge=1)
+
+    @model_validator(mode="after")
+    def validate_planner_reasoning_budget(self) -> "HardLimits":
+        if self.planner_reasoning_tokens > self.planner_output_tokens:
+            raise ValueError("planner reasoning token limit must not exceed planner output limit")
+        return self
 
 
 class DatabaseSettings(BaseModel):

@@ -379,6 +379,8 @@ async def claim_routed_step(
             "provider_attempt": attempt,
             "budget_reservation_id": str(reservation.id),
         }
+        if role is ProviderRole.PLANNER:
+            next_payload["reasoning_max_tokens"] = settings.limits.planner_reasoning_tokens
         if project_pin is not None and pin_family_ids is not None:
             if selected.id not in pin_family_ids:
                 # Defensive: fence must make this unreachable; never mis-attribute.

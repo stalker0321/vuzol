@@ -201,7 +201,7 @@ def _require_provider_profiles(document: dict[str, object]) -> None:
         "api_base_url": "https://openrouter.ai/api/v1",
         "launch_mode": "api",
         "roles": ["planner", "reviewer"],
-        "output_limit": 1_000,
+        "output_limit": 3_000,
         "enabled": True,
     }
     if any(planner.get(key) != value for key, value in expected.items()):

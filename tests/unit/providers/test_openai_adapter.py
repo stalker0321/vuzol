@@ -7,6 +7,7 @@ from ._test_providers_helpers import (
     OpenAICompatibleAdapter,
     ProviderErrorCategory,
     ProviderFailure,
+    ProviderRole,
     SecretStr,
     httpx,
     json,
@@ -105,7 +106,8 @@ async def test_openai_adapter_sends_openrouter_provider_routing() -> None:
             "quantizations": ["int8", "fp8"],
             "allow_fallbacks": True,
         }
-        assert "reasoning" not in payload
+        assert payload["max_tokens"] == 3_000
+        assert payload["reasoning"] == {"enabled": True, "max_tokens": 1_800}
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
@@ -126,7 +128,14 @@ async def test_openai_adapter_sends_openrouter_provider_routing() -> None:
                 "allow_fallbacks": True,
             },
         )
-        await adapter.execute(provider_request(), selected, CancellationContext())
+        request = provider_request().model_copy(
+            update={
+                "role": ProviderRole.PLANNER,
+                "max_output_tokens": 3_000,
+                "reasoning_max_tokens": 1_800,
+            }
+        )
+        await adapter.execute(request, selected, CancellationContext())
 
 
 @pytest.mark.anyio

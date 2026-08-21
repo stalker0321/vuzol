@@ -62,6 +62,11 @@ policy sorts by price, prefers endpoints with p90 throughput of at least 70 toke
 allows int8 and fp8 quantizations, and keeps provider fallbacks enabled. The policy is sent on
 both task interpretation and project-discussion planning requests.
 
+Planner output and reasoning budgets are configured independently through
+`limits.planner_output_tokens` and `limits.planner_reasoning_tokens`. Routing persists the
+reasoning budget with the leased planner step, and the OpenAI-compatible adapter forwards both
+values in the provider request.
+
 Start the optional runtime with `docker compose --profile interpretation up`. It also needs the
 single Telegram bot token for attachment reads; it does not introduce another bot.
 

@@ -10,7 +10,7 @@ from jsonschema.exceptions import SchemaError
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import SecretStr
 
-from vuzol.config.models import ProviderProfileConfig
+from vuzol.config.models import ProviderProfileConfig, ProviderRole
 from vuzol.providers.domain import (
     EffectiveProfileState,
     NormalizedUsage,
@@ -205,6 +205,11 @@ def _payload(request: ProviderRequest, profile: ProviderProfileConfig) -> dict[s
     else:
         payload["temperature"] = 0
         payload["max_tokens"] = request.max_output_tokens
+        if request.role is ProviderRole.PLANNER and request.reasoning_max_tokens is not None:
+            payload["reasoning"] = {
+                "enabled": True,
+                "max_tokens": request.reasoning_max_tokens,
+            }
     if request.output_json_schema is not None:
         if _uses_openai_strict_schema(profile):
             payload["response_format"] = {

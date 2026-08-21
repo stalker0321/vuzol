@@ -830,6 +830,13 @@ class ProviderStepHandler:
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
+            reasoning_max_tokens = step.payload.get("reasoning_max_tokens")
+            if reasoning_max_tokens is not None and (
+                isinstance(reasoning_max_tokens, bool)
+                or not isinstance(reasoning_max_tokens, int)
+                or reasoning_max_tokens < 1
+            ):
+                raise LookupError("provider reasoning token budget is invalid")
             return (
                 ProviderRequest(
                     task_id=task.id,
@@ -853,6 +860,7 @@ class ProviderStepHandler:
                     timeout_seconds=step.timeout_seconds,
                     max_input_tokens=reservation.reserved_input_tokens,
                     max_output_tokens=reservation.reserved_output_tokens,
+                    reasoning_max_tokens=reasoning_max_tokens,
                     reserved_cost_units=Decimal(reservation.reserved_cost_units),
                     reserved_quota_units=Decimal(reservation.reserved_quota_units),
                     sandbox_reference=(f"worktree:{worktree.id}" if worktree is not None else None),

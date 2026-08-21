@@ -7,12 +7,22 @@ from vuzol.config import (
     BackupSettings,
     CapabilityProvisioningSettings,
     ExecutionSettings,
+    HardLimits,
     InterpretationSettings,
     Settings,
     SubscriptionLimitSettings,
     TelegramDogfoodSettings,
     TelegramSettings,
 )
+
+
+def test_planner_reasoning_budget_is_bounded_by_output_budget() -> None:
+    configured = HardLimits(planner_output_tokens=3_000, planner_reasoning_tokens=1_800)
+
+    assert configured.planner_output_tokens == 3_000
+    assert configured.planner_reasoning_tokens == 1_800
+    with raises(ValidationError, match="reasoning token limit"):
+        HardLimits(planner_output_tokens=1_000, planner_reasoning_tokens=1_001)
 
 
 def test_settings_accept_valid_values() -> None:

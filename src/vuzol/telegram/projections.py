@@ -1711,11 +1711,14 @@ async def _published_preview_url(session: AsyncSession, task_id: uuid.UUID) -> s
         .join(Run, Step.run_id == Run.id)
         .where(
             Run.task_id == task_id,
-            Step.step_type == "publish_static",
+            # Server projects expose an ephemeral runtime preview while static
+            # projects use the persistent publisher.  Both are user-facing
+            # prototypes and must be shown in the result card.
+            Step.step_type.in_(("publish_preview", "publish_static")),
             Step.status == StepStatus.COMPLETED,
             Step.result.is_not(None),
         )
-        .order_by(Run.created_at.desc(), Step.ordinal.desc())
+        .order_by(Run.created_at.desc(), Step.updated_at.desc(), Step.ordinal.desc())
         .limit(1)
     )
     raw_result = getattr(step, "result", None)

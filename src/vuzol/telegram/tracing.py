@@ -25,6 +25,10 @@ ORCHESTRATION_TRACE_ROLE = "orchestration_trace"
 INTERPRETER_TRACE_KIND = "interpreter"
 PLANNER_TRACE_KIND = "planner"
 _TRACE_SAMPLE_NAMESPACE = b"vuzol-orchestration-trace-v1:"
+# Keep both interpreter drafts readable in Telegram.  These are presentation
+# bounds only; the persisted model output and the validated draft are complete.
+_INTERPRETER_RAW_JSON_LIMIT = 1_800
+_INTERPRETER_POLICY_JSON_LIMIT = 1_800
 
 
 def orchestration_trace_sample_bucket(task_id: uuid.UUID) -> int:
@@ -159,7 +163,7 @@ def build_interpreter_trace_html(
         [
             "",
             "<b>Выход модели — TaskDraft</b>",
-            _json_pre(raw, limit=1_550),
+            _json_pre(raw, limit=_INTERPRETER_RAW_JSON_LIMIT),
         ]
     )
     if changed:
@@ -167,7 +171,7 @@ def build_interpreter_trace_html(
             [
                 "",
                 "<b>После deterministic policy</b>",
-                _json_pre(effective, limit=1_050),
+                _json_pre(effective, limit=_INTERPRETER_POLICY_JSON_LIMIT),
             ]
         )
     return "\n".join(lines)

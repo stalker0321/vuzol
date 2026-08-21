@@ -100,9 +100,12 @@ async def test_openai_adapter_sends_openrouter_provider_routing() -> None:
         payload = json.loads(request.content)
         assert payload["model"] == "deepseek/deepseek-v4-flash-0731"
         assert payload["provider"] == {
-            "order": ["deepinfra/fp8"],
+            "sort": {"by": "price", "partition": "none"},
+            "preferred_min_throughput": {"p90": 70},
+            "quantizations": ["int8", "fp8"],
             "allow_fallbacks": True,
         }
+        assert "reasoning" not in payload
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
@@ -116,7 +119,12 @@ async def test_openai_adapter_sends_openrouter_provider_routing() -> None:
             "deepseek-planner",
             model="deepseek/deepseek-v4-flash-0731",
             api_base_url="https://openrouter.ai/api/v1",
-            provider_routing={"order": ["deepinfra/fp8"], "allow_fallbacks": True},
+            provider_routing={
+                "sort": {"by": "price", "partition": "none"},
+                "preferred_min_throughput": {"p90": 70},
+                "quantizations": ["int8", "fp8"],
+                "allow_fallbacks": True,
+            },
         )
         await adapter.execute(provider_request(), selected, CancellationContext())
 

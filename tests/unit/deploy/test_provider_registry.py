@@ -49,7 +49,9 @@ def test_production_planner_uses_deepseek_via_deepinfra_with_router_fallbacks() 
     assert profile["credential_reference"] == "env:VUZOL_OPENROUTER_PLANNER_API_KEY"
     assert profile["roles"] == ["planner", "reviewer"]
     assert profile["provider_routing"] == {
-        "order": ["deepinfra/fp8"],
+        "sort": {"by": "price", "partition": "none"},
+        "preferred_min_throughput": {"p90": 70},
+        "quantizations": ["int8", "fp8"],
         "allow_fallbacks": True,
     }
 

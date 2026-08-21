@@ -209,7 +209,9 @@ def _require_provider_profiles(document: dict[str, object]) -> None:
             "openrouter-deepseek-planner-prod does not match the bounded production policy"
         )
     if planner.get("provider_routing") != {
-        "order": ["deepinfra/fp8"],
+        "sort": {"by": "price", "partition": "none"},
+        "preferred_min_throughput": {"p90": 70},
+        "quantizations": ["int8", "fp8"],
         "allow_fallbacks": True,
     }:
         raise MvpCheckError("OpenRouter planner provider routing does not match policy")

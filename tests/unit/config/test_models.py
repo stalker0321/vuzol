@@ -158,7 +158,9 @@ def test_openrouter_provider_routing_is_bounded_to_openrouter_api_profiles() -> 
             "model": "deepseek/deepseek-v4-flash-0731",
             "api_base_url": "https://openrouter.ai/api/v1",
             "provider_routing": {
-                "order": ["deepinfra/fp8"],
+                "sort": {"by": "price", "partition": "none"},
+                "preferred_min_throughput": {"p90": 70},
+                "quantizations": ["int8", "fp8"],
                 "allow_fallbacks": True,
             },
             "launch_mode": "api",
@@ -172,19 +174,38 @@ def test_openrouter_provider_routing_is_bounded_to_openrouter_api_profiles() -> 
     )
 
     assert configured.provider_routing is not None
-    assert configured.provider_routing.order == ("deepinfra/fp8",)
+    assert configured.provider_routing.sort.by == "price"
+    assert configured.provider_routing.sort.partition == "none"
+    assert configured.provider_routing.preferred_min_throughput.p90 == 70
+    assert configured.provider_routing.quantizations == ("int8", "fp8")
     assert configured.provider_routing.allow_fallbacks
 
-    for base_url, order in (
-        ("https://provider.example/v1", ["deepinfra/fp8"]),
-        ("https://openrouter.ai/api/v1", ["deepinfra/fp8", "deepinfra/fp8"]),
+    for base_url, routing in (
+        (
+            "https://provider.example/v1",
+            {
+                "sort": {"by": "price", "partition": "none"},
+                "preferred_min_throughput": {"p90": 70},
+                "quantizations": ["int8", "fp8"],
+                "allow_fallbacks": True,
+            },
+        ),
+        (
+            "https://openrouter.ai/api/v1",
+            {
+                "sort": {"by": "price", "partition": "none"},
+                "preferred_min_throughput": {"p90": 70},
+                "quantizations": ["int8", "int8"],
+                "allow_fallbacks": True,
+            },
+        ),
     ):
         with pytest.raises(ValidationError):
             ProviderProfileConfig.model_validate(
                 {
                     **configured.model_dump(mode="json"),
                     "api_base_url": base_url,
-                    "provider_routing": {"order": order, "allow_fallbacks": True},
+                    "provider_routing": routing,
                 }
             )
 

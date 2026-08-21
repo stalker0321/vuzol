@@ -150,9 +150,12 @@ def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
             assert "separate project-pinned worker" in body["messages"][0]["content"]
             user_payload = json.loads(body["messages"][1]["content"])
             assert body["provider"] == {
-                "order": ["deepinfra/fp8"],
+                "sort": {"by": "price", "partition": "none"},
+                "preferred_min_throughput": {"p90": 70},
+                "quantizations": ["int8", "fp8"],
                 "allow_fallbacks": True,
             }
+            assert body["reasoning"] == {"effort": "none"}
             assert user_payload["prompt_version"] == "project-discussion-v1"
             assert user_payload["input"]["project_id"] == "vuzol"
             assert user_payload["discussion_schema"]["additionalProperties"] is False
@@ -186,8 +189,13 @@ def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
                 credential=SecretStr("key"),
                 profile_id="profile",
                 model="model",
-                provider_routing=OpenRouterProviderRouting(
-                    order=("deepinfra/fp8",), allow_fallbacks=True
+                provider_routing=OpenRouterProviderRouting.model_validate(
+                    {
+                        "sort": {"by": "price", "partition": "none"},
+                        "preferred_min_throughput": {"p90": 70},
+                        "quantizations": ["int8", "fp8"],
+                        "allow_fallbacks": True,
+                    }
                 ),
                 client=client,
             )

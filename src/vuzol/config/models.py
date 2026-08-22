@@ -306,6 +306,13 @@ class ProviderProfileConfig(FrozenModel):
         default=None,
         pattern=r"^(low|medium|high|xhigh|max|ultra)$",
     )
+    # Role-scoped reasoning controls for OpenAI-compatible API profiles.
+    # max_reasoning_tokens is only a soft upstream hint: several providers
+    # (DeepSeek family) ignore reasoning caps entirely, so output_limit must be
+    # sized for the worst case. reasoning_enabled=False disables thinking where
+    # the provider supports it; None keeps provider defaults.
+    max_reasoning_tokens: int | None = Field(default=None, ge=1)
+    reasoning_enabled: bool | None = None
     api_base_url: HttpUrl | None = None
     provider_routing: OpenRouterProviderRouting | None = None
     launch_mode: LaunchMode

@@ -55,6 +55,8 @@ async def run() -> None:
             model=profile.model,
             provider_routing=profile.provider_routing,
             timeout_seconds=config.provider_timeout_seconds,
+            output_token_limit=profile.output_limit,
+            reasoning_enabled=profile.reasoning_enabled,
         )
 
     interpreter = build_interpreter(primary_profile.id)

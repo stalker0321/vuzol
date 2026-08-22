@@ -413,3 +413,82 @@ def test_empty_evaluation_is_never_eligible() -> None:
         assert not report.automatic_execution_eligible
 
     asyncio.run(scenario())
+
+
+def test_openai_interpreter_sends_profile_token_and_reasoning_limits() -> None:
+    async def scenario() -> None:
+        bodies: list[dict[str, object]] = []
+
+        async def handler(provider_request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(provider_request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": json.dumps(draft().model_dump(mode="json"))}}
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                },
+            )
+
+        async with httpx.AsyncClient(
+            base_url="https://provider.example/v1",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            interpreter = OpenAICompatibleInterpreter(
+                base_url="https://provider.example/v1",
+                credential=SecretStr("test-key"),
+                profile_id="interpreter",
+                model="model",
+                output_token_limit=1_000,
+                reasoning_enabled=False,
+                client=client,
+            )
+            await interpreter.interpret(request())
+
+        assert bodies[0]["max_tokens"] == 1_000
+        assert bodies[0]["reasoning"] == {"enabled": False}
+
+    asyncio.run(scenario())
+
+
+def test_openai_interpreter_keeps_legacy_reasoning_default_for_openrouter() -> None:
+    async def scenario() -> None:
+        bodies: list[dict[str, object]] = []
+
+        async def handler(provider_request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(provider_request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": json.dumps(draft().model_dump(mode="json"))}}
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                },
+            )
+
+        async with httpx.AsyncClient(
+            base_url="https://openrouter.ai/api/v1",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            interpreter = OpenAICompatibleInterpreter(
+                base_url="https://openrouter.ai/api/v1",
+                credential=SecretStr("test-key"),
+                profile_id="interpreter",
+                model="model",
+                provider_routing=OpenRouterProviderRouting.model_validate(
+                    {
+                        "sort": {"by": "price", "partition": "none"},
+                        "preferred_min_throughput": {"p90": 70},
+                        "quantizations": ["int8"],
+                    }
+                ),
+                client=client,
+            )
+            await interpreter.interpret(request())
+
+        assert "max_tokens" not in bodies[0]
+        assert bodies[0]["reasoning"] == {"effort": "none"}
+
+    asyncio.run(scenario())

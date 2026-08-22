@@ -520,6 +520,7 @@ def test_grok_event_summary_proves_permission_cancellation_and_correlates_sequen
     assert summary["last_permission_decision"] == "cancelled"
     assert summary["last_safe_command_identity"] == "make test"
     assert summary["last_tool_kind"] == "Bash"
+    assert summary["last_provider_tool_name"] == "run_terminal_command"
     assert summary["last_native_tool_request_sequence"] == 2
     assert summary["last_permission_event_sequence"] == 4
     assert summary["last_native_tool_result_sequence"] is None
@@ -617,6 +618,42 @@ def test_grok_event_summary_hashes_unsafe_commands_without_retaining_them(
     assert flags[flag] is True
     assert command not in serialized
     assert "SECRET" not in serialized
+
+
+def test_grok_forensic_diagnostics_preserve_native_tool_identity_without_payload() -> None:
+    from vuzol.providers.grok import build_grok_forensic_diagnostics
+
+    forensic = build_grok_forensic_diagnostics(
+        [
+            json.dumps(
+                {
+                    "type": "tool_started",
+                    "tool_name": "ExitPlanMode",
+                    "raw_secret": "PRIVATE_THOUGHT",
+                }
+            )
+        ],
+        [
+            json.dumps(
+                {
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": "call-exit-plan",
+                            "rawInput": {"plan": "PRIVATE_PLAN"},
+                            "_meta": {"x.ai/tool": {"name": "ExitPlanMode"}},
+                        }
+                    },
+                }
+            )
+        ],
+    )
+
+    serialized = forensic.decode()
+    assert "ExitPlanMode" in serialized
+    assert "PRIVATE" not in serialized
+    assert "raw_input_sha256" in serialized
 
 
 def test_grok_event_summary_drops_edit_read_grep_paths_and_payloads() -> None:

@@ -379,6 +379,7 @@ _SAFE_TOOL_KINDS = {
     "run_terminal_command": "Bash",
     "search_replace": "Edit",
 }
+_SAFE_PROVIDER_TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_PROVIDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SAFE_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
@@ -518,6 +519,8 @@ def summarize_grok_events(
             last_tool.get("permission_sequence") if last_tool else None
         ),
         "last_tool_kind": last_tool.get("tool_kind") if last_tool else None,
+        "last_provider_tool_name": (last_tool.get("provider_tool_name") if last_tool else None),
+        "last_tool_call_id": last_tool.get("tool_call_id") if last_tool else None,
         "last_safe_command_identity": (
             last_tool.get("safe_command_identity") if last_tool else None
         ),
@@ -537,6 +540,26 @@ def summarize_grok_events(
         "missing_evidence_reason": missing_evidence_reason,
         "final_text_generation_began": final_text_generation_began,
     }
+
+
+def build_grok_forensic_diagnostics(
+    diagnostic_events: Iterable[str], session_updates: Iterable[str]
+) -> bytes:
+    """Build bounded, content-free forensic evidence for a failed Grok session."""
+
+    return (
+        json.dumps(
+            {
+                "schema_version": "grok-forensic-diagnostics.v1",
+                "diagnostic_events": _forensic_diagnostic_events(diagnostic_events),
+                "session_updates": _forensic_session_updates(session_updates),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
 
 
 def _summarize_diagnostic_events(
@@ -602,6 +625,7 @@ def _summarize_diagnostic_events(
         tool_name = event.get("tool_name")
         if isinstance(tool_name, str):
             safe_event["tool_kind"] = _SAFE_TOOL_KINDS.get(tool_name, "Unknown")
+            safe_event["provider_tool_name"] = _safe_provider_tool_name(tool_name)
         phase = _safe_value(event.get("phase"), _SAFE_PHASES)
         if phase is not None:
             safe_event["phase"] = phase
@@ -624,6 +648,7 @@ def _summarize_diagnostic_events(
                 "ordinal": tool_count,
                 "request_sequence": sequence,
                 "tool_kind": safe_event.get("tool_kind", "Unknown"),
+                "provider_tool_name": safe_event.get("provider_tool_name", "Unknown"),
                 "permission_sequence": None,
                 "permission_decision": "unresolved",
                 "result_sequence": None,
@@ -702,6 +727,7 @@ def _summarize_session_updates(lines: Iterable[str] | None) -> dict[str, Any]:
                 "session_update_sequence": sequence,
                 "tool_call_id": call_id,
                 "tool_kind": _update_tool_kind(update),
+                "provider_tool_name": _update_tool_name(update),
                 "result_received_in_session": False,
                 **_safe_command_summary(command),
             }
@@ -819,6 +845,94 @@ def _update_tool_kind(update: dict[str, object]) -> str:
     tool = metadata.get("x.ai/tool") if isinstance(metadata, dict) else None
     name = tool.get("name") if isinstance(tool, dict) else None
     return _SAFE_TOOL_KINDS.get(name, "Unknown") if isinstance(name, str) else "Unknown"
+
+
+def _update_tool_name(update: dict[str, object]) -> str:
+    metadata = update.get("_meta")
+    tool = metadata.get("x.ai/tool") if isinstance(metadata, dict) else None
+    name = tool.get("name") if isinstance(tool, dict) else None
+    return _safe_provider_tool_name(name)
+
+
+def _safe_provider_tool_name(value: object) -> str:
+    if isinstance(value, str) and _SAFE_PROVIDER_TOOL_NAME.fullmatch(value):
+        return value
+    return "Unknown"
+
+
+def _forensic_diagnostic_events(lines: Iterable[str]) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for sequence, raw_line in enumerate(lines, start=1):
+        try:
+            event = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeError):
+            records.append(_forensic_malformed_record(sequence, raw_line))
+            continue
+        if not isinstance(event, dict):
+            records.append(_forensic_malformed_record(sequence, raw_line))
+            continue
+        record: dict[str, object] = {
+            "sequence": sequence,
+            "type": event.get("type") if isinstance(event.get("type"), str) else "Unknown",
+        }
+        for key in ("phase", "decision", "outcome", "cancellation_category"):
+            value = event.get(key)
+            if isinstance(value, str) and len(value) <= 128:
+                record[key] = value
+        tool_name = event.get("tool_name")
+        if isinstance(tool_name, str):
+            record["provider_tool_name"] = _safe_provider_tool_name(tool_name)
+        records.append(record)
+    return records
+
+
+def _forensic_session_updates(lines: Iterable[str]) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for sequence, raw_line in enumerate(lines, start=1):
+        try:
+            event = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeError):
+            records.append(_forensic_malformed_record(sequence, raw_line))
+            continue
+        if not isinstance(event, dict) or event.get("method") != "session/update":
+            continue
+        params = event.get("params")
+        update = params.get("update") if isinstance(params, dict) else None
+        if not isinstance(update, dict):
+            continue
+        record: dict[str, object] = {
+            "sequence": sequence,
+            "session_update": update.get("sessionUpdate")
+            if isinstance(update.get("sessionUpdate"), str)
+            else "Unknown",
+        }
+        call_id = _safe_tool_call_id(update.get("toolCallId"))
+        if call_id is not None:
+            record["tool_call_id"] = call_id
+        record["provider_tool_name"] = _update_tool_name(update)
+        status = update.get("status")
+        if isinstance(status, str) and len(status) <= 128:
+            record["status"] = status
+        raw_input = update.get("rawInput")
+        if isinstance(raw_input, dict):
+            encoded = json.dumps(raw_input, ensure_ascii=False, sort_keys=True).encode()
+            record["raw_input_keys"] = sorted(
+                key for key in raw_input if isinstance(key, str) and len(key) <= 128
+            )
+            record["raw_input_sha256"] = hashlib.sha256(encoded).hexdigest()
+            record["raw_input_byte_length"] = len(encoded)
+        records.append(record)
+    return records
+
+
+def _forensic_malformed_record(sequence: int, raw_line: str) -> dict[str, object]:
+    encoded = raw_line.encode(errors="replace")
+    return {
+        "sequence": sequence,
+        "type": "malformed",
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "byte_length": len(encoded),
+    }
 
 
 def _permission_decision(value: object) -> str | None:

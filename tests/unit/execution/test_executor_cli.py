@@ -378,6 +378,36 @@ async def test_codex_envelope_and_lifecycle_mocks(
         "stdout",
         "stderr",
     ]
+    stored_process[0].command_envelope = {"argv": ["codex", "exec", "--json"]}
+    stored_process[0].runtime_metadata = {
+        "configured_deadline_seconds": 30,
+        "cancellation_classification": None,
+        "cancellation_initiator": None,
+        "cleanup_initiator": "sandbox_transport_finally",
+    }
+    await envf.complete(
+        pid,
+        CodexProcessResult(
+            1,
+            '{"type":"error","message":"SECRET_PROVIDER_FAILURE"}',
+            "provider unavailable",
+            20,
+        ),
+        mock_art,
+    )
+    codex_metadata = stored_process[0].runtime_metadata
+    assert codex_metadata["last_provider_event_type"] == "error"
+    assert codex_metadata["provider_diagnostic_failure_signals"] == [
+        "process_exit:1",
+        "event:error",
+        "stderr_nonempty",
+    ]
+    codex_persisted = {
+        call.kwargs["artifact_type"]: call.kwargs["content"]
+        for call in mock_art.persist.await_args_list
+    }
+    assert b'"provider":"codex"' in codex_persisted["provider-diagnostics"]
+    assert b"SECRET_PROVIDER_FAILURE" not in codex_persisted["provider-diagnostics"]
     staging = artifact_root / "execution" / str(step_id) / "1"
     staging.mkdir(parents=True)
     stored_process[0].command_envelope = {"argv": ["grok"]}
@@ -478,10 +508,17 @@ async def test_codex_envelope_and_lifecycle_mocks(
     assert proven["last_permission_decision"] == "cancelled"
     assert proven["last_native_tool_request_sequence"] == 2
     assert proven["last_native_tool_result_sequence"] is None
+    assert proven["last_provider_tool_name"] == "run_terminal_command"
+    assert proven["last_tool_call_id"] == "call-1aa3af3d-e549-4c73-ac4e-fc0c08302ed2-31"
+    assert "provider_diagnostics_artifact_id" in proven
     assert proven["cancellation_evidence_completeness"] == "complete"
-    proven_artifact = mock_art.persist.await_args_list[-1].kwargs["content"]
-    assert b"make test" in proven_artifact
-    assert b"SECRET" not in proven_artifact
+    persisted = {
+        call.kwargs["artifact_type"]: call.kwargs["content"]
+        for call in mock_art.persist.await_args_list
+    }
+    assert b"make test" in persisted["provider-event-summary"]
+    assert b"run_terminal_command" in persisted["provider-diagnostics"]
+    assert b"SECRET" not in persisted["provider-diagnostics"]
     assert not staged_paths[0].exists() and not staged_paths[1].exists()
     await envf.fail_unknown(pid)
     assert stored_process[0].status.value == "unknown"

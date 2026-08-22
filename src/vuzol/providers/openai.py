@@ -30,7 +30,7 @@ _DIAGNOSTIC_EXCERPT_CHARS = 4_000
 _SECRET_SHAPED_OUTPUT = (
     re.compile(
         r"(?i)(api[_-]?key|authorization|bearer|token|password|secret)"
-        r"\s*[\"']?\s*[:=]\s*[\"']?[^,\s\"'}]+"
+        r"\s*\\?[\"']?\s*[:=]\s*\\?[\"']?[^,\s\"'}]+"
     ),
     re.compile(r"(?i)sk-[A-Za-z0-9_-]{20,}"),
 )
@@ -103,6 +103,8 @@ class OpenAICompatibleAdapter:
                     _log_structured_output_failure(
                         request=request,
                         response=response,
+                        body=body,
+                        message=choice.get("message"),
                         content=content,
                         finish_reason=choice.get("finish_reason"),
                         reason="json_parse",
@@ -122,6 +124,8 @@ class OpenAICompatibleAdapter:
                     _log_structured_output_failure(
                         request=request,
                         response=response,
+                        body=body,
+                        message=choice.get("message"),
                         content=content,
                         finish_reason=choice.get("finish_reason"),
                         reason="non_object",
@@ -143,6 +147,8 @@ class OpenAICompatibleAdapter:
                     _log_structured_output_failure(
                         request=request,
                         response=response,
+                        body=body,
+                        message=choice.get("message"),
                         content=content,
                         finish_reason=choice.get("finish_reason"),
                         reason="schema_validation",
@@ -281,6 +287,8 @@ def _log_structured_output_failure(
     *,
     request: ProviderRequest,
     response: httpx.Response,
+    body: object,
+    message: object,
     content: object,
     finish_reason: object,
     reason: str,
@@ -302,6 +310,14 @@ def _log_structured_output_failure(
         "content_chars": len(raw),
         "content_sha256": hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest(),
         "content_excerpt": _bounded_excerpt(redacted),
+        "message_keys": sorted(message) if isinstance(message, dict) else None,
+        # The bounded response excerpt is the actual provider response, not a
+        # reconstructed parser input. It lets us inspect reasoning/refusal/tool
+        # fields when message.content is null, while still redacting secrets.
+        "response_body_excerpt": _bounded_excerpt(
+            _redact_output(json.dumps(body, ensure_ascii=False, default=str)),
+            limit=12_000,
+        ),
     }
     if isinstance(error, json.JSONDecodeError):
         details["json_error"] = error.msg
@@ -338,10 +354,10 @@ def _redact_output(value: str) -> str:
     return redacted
 
 
-def _bounded_excerpt(value: str) -> str:
-    if len(value) <= _DIAGNOSTIC_EXCERPT_CHARS:
+def _bounded_excerpt(value: str, *, limit: int = _DIAGNOSTIC_EXCERPT_CHARS) -> str:
+    if len(value) <= limit:
         return value
-    half = _DIAGNOSTIC_EXCERPT_CHARS // 2
+    half = limit // 2
     omitted = len(value) - (half * 2)
     return f"{value[:half]}\n...[{omitted} chars omitted]...\n{value[-half:]}"
 

@@ -315,7 +315,10 @@ async def test_openai_adapter_logs_bounded_structured_output_diagnostics(
     assert record.reason == "json_parse"
     assert record.finish_reason == "length"
     assert record.provider_request_id == "provider-request-1"
+    assert record.message_keys == ["content"]
+    assert "verdict" in record.response_body_excerpt
     assert "secret-value" not in record.content_excerpt
+    assert "secret-value" not in record.response_body_excerpt
     assert "[REDACTED]" in record.content_excerpt
 
 

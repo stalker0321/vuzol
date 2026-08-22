@@ -17,6 +17,11 @@ from vuzol.config.models import SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
 from vuzol.execution.artifacts import ArtifactStore
+from vuzol.execution.diagnostics import (
+    build_cli_forensic_diagnostics,
+    should_capture_cli_forensics,
+    summarize_cli_process,
+)
 from vuzol.execution.domain import (
     MountMode,
     ProcessEnvelope,
@@ -45,6 +50,7 @@ from vuzol.projects.toolchains import ToolchainRuntime, toolchain_runtime
 from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.grok import (
     GROK_DIAGNOSTIC_FILE_MAX_BYTES,
+    build_grok_forensic_diagnostics,
     canonical_grok_argv,
     staged_grok_diagnostic_paths,
     summarize_grok_events,
@@ -597,12 +603,61 @@ class ExecutionEnvelopeFactory:
             )
             process.stdout_artifact_id = stdout.id
             process.stderr_artifact_id = stderr.id
-            argv = process.command_envelope.get("argv", [])
-            if isinstance(argv, list) and argv[:1] == ["grok"]:
-                event_summary = _summarize_grok_process(
+            argv = _diagnostic_argv(process.command_envelope.get("argv", []))
+            provider = _diagnostic_provider(argv)
+            generic_summary = summarize_cli_process(
+                provider=provider,
+                argv=argv,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+            )
+            event_summary: dict[str, object] | None = None
+            provider_details: dict[str, object] | None = None
+            forensic_artifact = None
+            if provider == "grok":
+                event_summary, forensic_diagnostics = _collect_grok_process_evidence(
                     result.stdout,
                     self._attempt_staging(process),
                 )
+                if forensic_diagnostics is not None:
+                    try:
+                        decoded_details = json.loads(forensic_diagnostics)
+                    except (json.JSONDecodeError, TypeError):
+                        decoded_details = None
+                    if isinstance(decoded_details, dict):
+                        provider_details = decoded_details
+                stop_reason = event_summary["last_stop_reason"]
+                if stop_reason == "Cancelled":
+                    signals = generic_summary.get("failure_signals")
+                    if isinstance(signals, list) and (
+                        "provider_stop_reason:Cancelled" not in signals
+                    ):
+                        generic_summary["failure_signals"] = [
+                            *signals,
+                            "provider_stop_reason:Cancelled",
+                        ]
+            if should_capture_cli_forensics(generic_summary):
+                forensic_artifact = await artifacts.persist(
+                    session,
+                    task_id=process.task_id,
+                    run_id=process.run_id,
+                    step_id=process.step_id,
+                    artifact_type="provider-diagnostics",
+                    content=build_cli_forensic_diagnostics(
+                        provider=provider,
+                        argv=argv,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        exit_code=result.exit_code,
+                        provider_details=provider_details,
+                    ),
+                    media_type="application/json",
+                    sensitivity="private",
+                    visibility="private",
+                    producer_process_id=process.id,
+                )
+            if event_summary is not None:
                 provider_events = await artifacts.persist(
                     session,
                     task_id=process.task_id,
@@ -625,6 +680,8 @@ class ExecutionEnvelopeFactory:
                         "process_signal": None,
                         "last_provider_event_type": event_summary["last_event_type"],
                         "last_provider_stop_reason": stop_reason,
+                        "last_provider_tool_name": event_summary["last_provider_tool_name"],
+                        "last_tool_call_id": event_summary["last_tool_call_id"],
                     }
                 )
                 if stop_reason == "Cancelled":
@@ -652,7 +709,25 @@ class ExecutionEnvelopeFactory:
                             "last_permission_decision": event_summary["last_permission_decision"],
                         }
                     )
-                process.runtime_metadata = metadata
+            else:
+                metadata = dict(process.runtime_metadata)
+                metadata.update(
+                    {
+                        "actual_elapsed_ms": result.duration_ms,
+                        "process_exit_code": result.exit_code,
+                        "process_signal": None,
+                        "last_provider_event_type": generic_summary["last_event_type"],
+                        "last_provider_stop_reason": generic_summary["last_stop_reason"],
+                        "last_provider_tool_name": generic_summary["last_provider_tool_name"],
+                        "last_tool_call_id": generic_summary["last_tool_call_id"],
+                    }
+                )
+            signals = generic_summary.get("failure_signals")
+            if isinstance(signals, list) and signals:
+                metadata["provider_diagnostic_failure_signals"] = signals
+            if forensic_artifact is not None:
+                metadata["provider_diagnostics_artifact_id"] = str(forensic_artifact.id)
+            process.runtime_metadata = metadata
             process.exit_code = result.exit_code
             process.outcome = (
                 ProcessOutcome.SUCCEEDED if result.exit_code == 0 else ProcessOutcome.FAILED
@@ -901,23 +976,57 @@ def _provider_state_runtime(provider: str) -> tuple[Path, dict[str, str]]:
     raise ValueError("sandbox rejected an unsupported CLI provider")
 
 
+def _diagnostic_argv(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return ()
+    return tuple(value)
+
+
+def _diagnostic_provider(argv: tuple[str, ...]) -> str:
+    if not argv:
+        return "unknown"
+    if argv[0] in {"codex", "grok"}:
+        return argv[0]
+    if argv[0] == "sh" and len(argv) > 2 and "kimi --model" in argv[2]:
+        return "kimi"
+    return argv[0]
+
+
 def _summarize_grok_process(stdout: str, staging: Path) -> dict[str, object]:
+    summary, _forensic_diagnostics = _collect_grok_process_evidence(stdout, staging)
+    return summary
+
+
+def _collect_grok_process_evidence(
+    stdout: str, staging: Path
+) -> tuple[dict[str, object], bytes | None]:
     protocol_summary = summarize_grok_events(stdout)
     session_id = protocol_summary["provider_session_id"]
     if not isinstance(session_id, str):
-        return protocol_summary
+        return protocol_summary, None
     paths = staged_grok_diagnostic_paths(staging, session_id)
     if paths is None:
-        return protocol_summary
+        return protocol_summary, None
     try:
         with contextlib.ExitStack() as stack:
             diagnostic_stream = _open_staged_diagnostic(stack, staging, paths[0])
             update_stream = _open_staged_diagnostic(stack, staging, paths[1])
-            return summarize_grok_events(
+            diagnostic_lines = tuple(diagnostic_stream) if diagnostic_stream is not None else None
+            update_lines = tuple(update_stream) if update_stream is not None else None
+            summary = summarize_grok_events(
                 stdout,
-                diagnostic_events=diagnostic_stream,
-                session_updates=update_stream,
+                diagnostic_events=diagnostic_lines,
+                session_updates=update_lines,
             )
+            forensic = (
+                build_grok_forensic_diagnostics(
+                    diagnostic_lines or (),
+                    update_lines or (),
+                )
+                if diagnostic_lines is not None or update_lines is not None
+                else None
+            )
+            return summary, forensic
     finally:
         _remove_staged_diagnostics(paths)
 

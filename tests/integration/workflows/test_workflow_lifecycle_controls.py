@@ -134,6 +134,10 @@ def test_capability_preflight_advances_without_reversing_task_status(
 
 
 @pytest.mark.postgresql
+@pytest.mark.skip(
+    reason="per-task planner is temporarily disabled in compile_workflow "
+    "(docs/BACKLOG.md, 'Revisit planner architecture'); re-enable with the planner"
+)
 def test_completed_plan_enqueues_system_trace(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

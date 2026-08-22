@@ -18,6 +18,22 @@ Provider profiles are configured in the TOML registry. Common fields include:
 API profiles require a credential-free HTTPS `api_base_url`. Credentials remain scoped references,
 such as `env:VUZOL_OPENAI_EXECUTOR_API_KEY`; only the selected adapter resolves its reference.
 
+### Role map: transcription is not interpretation
+
+Telegram voice messages pass through two independent provider stages with separate models,
+profiles, and credentials:
+
+- **Transcription** (voice audio → raw text) routes to a `transcriber` profile, e.g.
+  `openai-transcriber` on the OpenAI transcription API (`gpt-4o-transcribe`, credential
+  `env:VUZOL_OPENAI_TRANSCRIPTION_API_KEY`), pinned via
+  `VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID`.
+- **Interpretation** (raw text → TaskDraft JSON) routes to an `interpreter` profile, pinned
+  via `VUZOL_INTERPRETATION__PROFILE_ID`; in production this is an OpenRouter DeepSeek role
+  profile, not the OpenAI transcription account.
+
+Changing, rotating, or rate-limiting one stage never affects the other; each profile carries
+its own `credential_reference`.
+
 ### Role-scoped profiles
 
 One account should not carry one limit for every role. A profile may declare

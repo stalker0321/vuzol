@@ -92,6 +92,8 @@ class OpenAICompatibleInterpreter:
         model: str,
         provider_routing: OpenRouterProviderRouting | None = None,
         timeout_seconds: float = 30,
+        output_token_limit: int | None = None,
+        reasoning_enabled: bool | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -100,6 +102,8 @@ class OpenAICompatibleInterpreter:
         self._model = model
         self._provider_routing = provider_routing
         self._timeout = timeout_seconds
+        self._output_token_limit = output_token_limit
+        self._reasoning_enabled = reasoning_enabled
         self._client = client
 
     async def interpret(
@@ -126,7 +130,7 @@ class OpenAICompatibleInterpreter:
             "response_format": {"type": "json_object"},
             "temperature": 0,
         }
-        self._apply_provider_routing(payload)
+        self._apply_call_parameters(payload)
         try:
             response = await self._post("/chat/completions", json=payload)
             response.raise_for_status()
@@ -181,7 +185,7 @@ class OpenAICompatibleInterpreter:
             "response_format": {"type": "json_object"},
             "temperature": 0,
         }
-        self._apply_provider_routing(payload)
+        self._apply_call_parameters(payload)
         try:
             response = await self._post("/chat/completions", json=payload)
             response.raise_for_status()
@@ -200,10 +204,23 @@ class OpenAICompatibleInterpreter:
         async with httpx.AsyncClient(base_url=self._base_url) as client:
             return await client.post(path, headers=headers, timeout=self._timeout, **kwargs)
 
-    def _apply_provider_routing(self, payload: dict[str, Any]) -> None:
+    def _apply_call_parameters(self, payload: dict[str, Any]) -> None:
         if self._provider_routing is not None:
             payload["provider"] = self._provider_routing.model_dump(mode="json", exclude_none=True)
-            payload["reasoning"] = {"effort": "none"}
+        if self._output_token_limit is not None:
+            payload["max_tokens"] = self._output_token_limit
+        reasoning = self._reasoning_parameter()
+        if reasoning is not None:
+            payload["reasoning"] = reasoning
+
+    def _reasoning_parameter(self) -> dict[str, Any] | None:
+        if self._reasoning_enabled is not None:
+            return {"enabled": self._reasoning_enabled}
+        # Legacy behavior: OpenRouter-routed interpretation calls disable
+        # thinking unless the profile overrides it.
+        if self._provider_routing is not None:
+            return {"effort": "none"}
+        return None
 
 
 class OpenAICompatibleTranscriber:

@@ -418,7 +418,15 @@ def _build_request(
         encoded[offset : offset + _MAX_CONTEXT_ITEM_CHARS]
         for offset in range(0, len(encoded), _MAX_CONTEXT_ITEM_CHARS)
     )
-    max_output_tokens = min(int(profile.output_limit or 4_000), 4_000)
+    # The profile is the operator-declared bound for this reviewer role. The
+    # old hard 4k clamp defeated per-role profiles: reasoning-heavy models need
+    # a larger total window because upstreams may ignore reasoning caps.
+    total_output_tokens = int(profile.output_limit or 4_000)
+    reasoning_budget = (
+        min(profile.max_reasoning_tokens, total_output_tokens)
+        if profile.max_reasoning_tokens is not None
+        else min(_REVIEW_REASONING_MAX_TOKENS, total_output_tokens)
+    )
     return ProviderRequest(
         task_id=task_id,
         run_id=run_id,
@@ -449,11 +457,10 @@ def _build_request(
         timeout_seconds=min(float(timeout_seconds), 600.0),
         deadline=None,
         max_input_tokens=min(int(profile.context_limit or 32_000), 32_000),
-        # Reviews can contain several concrete findings. Keep the provider
-        # profile as the upper bound, but allow up to 4k completion tokens so
-        # a valid JSON report is not cut off mid-object.
-        max_output_tokens=max_output_tokens,
-        reasoning_max_tokens=min(_REVIEW_REASONING_MAX_TOKENS, max_output_tokens),
+        # Reviews can contain several concrete findings. The profile bound must
+        # leave room for both unbounded upstream reasoning and the JSON report.
+        max_output_tokens=total_output_tokens,
+        reasoning_max_tokens=reasoning_budget,
         reserved_cost_units=Decimal("0"),
         reserved_quota_units=Decimal("0"),
         sandbox_reference=None,

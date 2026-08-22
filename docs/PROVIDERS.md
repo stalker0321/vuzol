@@ -18,6 +18,38 @@ Provider profiles are configured in the TOML registry. Common fields include:
 API profiles require a credential-free HTTPS `api_base_url`. Credentials remain scoped references,
 such as `env:VUZOL_OPENAI_EXECUTOR_API_KEY`; only the selected adapter resolves its reference.
 
+### Role-scoped profiles
+
+One account should not carry one limit for every role. A profile may declare
+`base_profile_id` and inherit every unset field from the referenced profile in the same
+registry file. The base carries the shared account facts (model, credential, routing,
+context limit) and stays disabled; each role profile overrides only what differs:
+
+```toml
+[[profiles]]
+id = "openrouter-base"
+model = "deepseek/deepseek-v4-flash-0731"
+api_base_url = "https://openrouter.ai/api/v1"
+output_limit = 8000
+roles = []
+enabled = false
+
+[[profiles]]
+id = "openrouter-reviewer"
+base_profile_id = "openrouter-base"
+roles = ["reviewer"]
+output_limit = 6000
+enabled = true
+```
+
+API profiles may also carry role-scoped reasoning controls:
+
+- `reasoning_enabled = false` explicitly disables thinking for providers that support
+  the OpenRouter unified reasoning parameter (verified for the DeepSeek family);
+- `max_reasoning_tokens` is only a soft upstream hint. Several providers ignore
+  reasoning caps entirely and count reasoning against `max_tokens`, so `output_limit`
+  must be sized for the worst case instead of relying on the cap.
+
 CLI profiles require a unique `runtime_identity` and absolute `state_directory`. Enabled CLI
 profiles cannot share or nest state directories. The example registry contains two disabled,
 structurally isolated Codex profiles. Vuzol does not copy or inspect their authentication files.

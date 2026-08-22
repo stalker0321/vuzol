@@ -19,6 +19,7 @@ from vuzol.providers.budgets import BudgetExceeded
 from vuzol.providers.domain import (
     NormalizedUsage,
     ProviderErrorCategory,
+    ProviderRequest,
     ProviderResult,
     ProviderResultStatus,
 )
@@ -44,29 +45,32 @@ def _api_profile(
     profile_id: str,
     roles: set[ProviderRole],
     priority: int = 50,
+    **changes: object,
 ) -> ProviderProfileConfig:
-    return ProviderProfileConfig(
-        id=profile_id,
-        provider="openai-compatible",
-        model="gpt-test",
-        api_base_url=HttpUrl("https://api.example.com/v1"),
-        launch_mode=LaunchMode.API,
-        credential_reference="env:VUZOL_OPENAI_PLANNER_API_KEY",
-        credential_required=True,
-        capabilities=frozenset(),
-        concurrency_limit=2,
-        context_limit=8_000,
-        output_limit=1_000,
-        cost_class=CostClass.CHEAP,
-        roles=frozenset(roles),
-        routing_priority=priority,
-        supported_task_types=frozenset({"coding"}),
-        sandbox_required=False,
-        input_cost_units_per_million=0.1,
-        output_cost_units_per_million=0.2,
-        minimum_unknown_usage_cost=0.001,
-        enabled=True,
-    )
+    values: dict[str, object] = {
+        "id": profile_id,
+        "provider": "openai-compatible",
+        "model": "gpt-test",
+        "api_base_url": HttpUrl("https://api.example.com/v1"),
+        "launch_mode": LaunchMode.API,
+        "credential_reference": "env:VUZOL_OPENAI_PLANNER_API_KEY",
+        "credential_required": True,
+        "capabilities": frozenset(),
+        "concurrency_limit": 2,
+        "context_limit": 8_000,
+        "output_limit": 1_000,
+        "cost_class": CostClass.CHEAP,
+        "roles": frozenset(roles),
+        "routing_priority": priority,
+        "supported_task_types": frozenset({"coding"}),
+        "sandbox_required": False,
+        "input_cost_units_per_million": 0.1,
+        "output_cost_units_per_million": 0.2,
+        "minimum_unknown_usage_cost": 0.001,
+        "enabled": True,
+    }
+    values.update(changes)
+    return ProviderProfileConfig.model_validate(values)
 
 
 def _lease() -> LeaseToken:
@@ -215,6 +219,65 @@ def test_large_review_bundle_is_complete_across_hashed_context_chunks() -> None:
         item.content_hash == hashlib.sha256(item.content.encode()).hexdigest()
         for item in request.context
     )
+
+
+def _build_request_for_profile(profile: ProviderProfileConfig) -> ProviderRequest:
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="task",
+        changed_files=("x.py",),
+        diff=b"+x",
+    )
+    return _build_request(
+        task=SimpleNamespace(task_draft={"goal": "x"}, original_text="x"),  # type: ignore[arg-type]
+        risk=RiskLevel.HIGH,
+        inspection=inspection,
+        base_commit="a" * 40,
+        result_commit="b" * 40,
+        diff_hash=inspection.diff_hash,
+        gates=[],
+        mechanical_findings=(),
+        task_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_id=uuid.uuid4(),
+        timeout_seconds=60,
+        profile=profile,
+        policy_revision="test-policy.v1",
+        provider_attempt=1,
+    )
+
+
+def test_build_request_uses_profile_role_limits() -> None:
+    sized = _build_request_for_profile(
+        _api_profile(
+            profile_id="reviewer",
+            roles={ProviderRole.REVIEWER},
+            output_limit=6_000,
+        )
+    )
+    assert sized.max_output_tokens == 6_000
+    assert sized.reasoning_max_tokens == 2_000
+
+    hinted = _build_request_for_profile(
+        _api_profile(
+            profile_id="reviewer",
+            roles={ProviderRole.REVIEWER},
+            output_limit=4_000,
+            max_reasoning_tokens=1_500,
+        )
+    )
+    assert hinted.max_output_tokens == 4_000
+    assert hinted.reasoning_max_tokens == 1_500
+
+    clamped = _build_request_for_profile(
+        _api_profile(
+            profile_id="reviewer",
+            roles={ProviderRole.REVIEWER},
+            output_limit=6_000,
+            max_reasoning_tokens=8_000,
+        )
+    )
+    assert clamped.reasoning_max_tokens == 6_000
 
 
 @pytest.mark.anyio

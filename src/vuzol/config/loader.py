@@ -34,9 +34,58 @@ def load_document(path: Path) -> RegistryDocument:
         else:
             with path.open("rb") as config_file:
                 raw = tomllib.load(config_file)
-        return RegistryDocument.model_validate(raw)
+        return RegistryDocument.model_validate(_resolve_profile_inheritance(raw))
+    except ConfigurationLoadError:
+        raise
     except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError, ValidationError) as error:
         raise ConfigurationLoadError(f"invalid registry file {path}: {error}") from error
+
+
+def _resolve_profile_inheritance(raw: object) -> object:
+    """Flatten ``base_profile_id`` chains before validation.
+
+    Merging happens on raw tables so an unset child key genuinely inherits the
+    base value instead of silently falling back to a model default.
+    """
+
+    if not isinstance(raw, dict):
+        return raw
+    profiles = raw.get("profiles")
+    if not isinstance(profiles, list):
+        return raw
+    by_id: dict[str, dict[str, object]] = {}
+    for entry in profiles:
+        if not isinstance(entry, dict):
+            raise ConfigurationLoadError("profile entries must be tables")
+        profile_id = entry.get("id")
+        if isinstance(profile_id, str):
+            if profile_id in by_id:
+                raise ConfigurationLoadError(f"duplicate profile id {profile_id!r}")
+            by_id[profile_id] = entry
+
+    def resolve(entry: dict[str, object], chain: tuple[str, ...]) -> dict[str, object]:
+        base_id = entry.get("base_profile_id")
+        if base_id is None:
+            return entry
+        entry_id = entry.get("id")
+        if not isinstance(base_id, str):
+            raise ConfigurationLoadError(
+                f"profile {entry_id!r} base_profile_id must be a string"
+            )
+        if base_id in chain:
+            raise ConfigurationLoadError(
+                f"profile inheritance cycle: {' -> '.join((*chain, base_id))}"
+            )
+        base_entry = by_id.get(base_id)
+        if base_entry is None:
+            raise ConfigurationLoadError(
+                f"profile {entry_id!r} inherits unknown profile {base_id!r}"
+            )
+        merged = {**resolve(base_entry, (*chain, base_id)), **entry}
+        merged.pop("base_profile_id", None)
+        return merged
+
+    return {**raw, "profiles": [resolve(entry, ()) for entry in profiles]}
 
 
 def merge_documents(base: RegistryDocument, overlay: RegistryDocument) -> RegistryDocument:

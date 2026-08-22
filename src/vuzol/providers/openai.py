@@ -261,11 +261,9 @@ def _payload(request: ProviderRequest, profile: ProviderProfileConfig) -> dict[s
     else:
         payload["temperature"] = 0
         payload["max_tokens"] = request.max_output_tokens
-        if request.reasoning_max_tokens is not None:
-            payload["reasoning"] = {
-                "enabled": True,
-                "max_tokens": request.reasoning_max_tokens,
-            }
+        reasoning_parameter = _reasoning_parameter(request, profile)
+        if reasoning_parameter is not None:
+            payload["reasoning"] = reasoning_parameter
     if request.output_json_schema is not None:
         if _uses_openai_strict_schema(profile):
             payload["response_format"] = {
@@ -366,6 +364,32 @@ def _uses_reasoning_chat_parameters(model: str) -> bool:
     """Use the Chat Completions parameter set required by GPT-5 models."""
 
     return model.lower().startswith("gpt-5")
+
+
+def _reasoning_parameter(
+    request: ProviderRequest, profile: ProviderProfileConfig
+) -> dict[str, Any] | None:
+    """Build the OpenRouter unified reasoning parameter for the request.
+
+    ``reasoning_enabled=False`` wins over any budget: providers that cannot cap
+    thinking (DeepSeek family) still honor an explicit disable. The budget is a
+    hint only — it is ignored by some upstreams, so output_limit carries the
+    real bound.
+    """
+
+    if profile.reasoning_enabled is False:
+        return {"enabled": False}
+    budget = (
+        request.reasoning_max_tokens
+        if request.reasoning_max_tokens is not None
+        else profile.max_reasoning_tokens
+    )
+    if budget is None and profile.reasoning_enabled is not True:
+        return None
+    parameter: dict[str, Any] = {"enabled": True}
+    if budget is not None:
+        parameter["max_tokens"] = budget
+    return parameter
 
 
 def _uses_openai_strict_schema(profile: ProviderProfileConfig) -> bool:

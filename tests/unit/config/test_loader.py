@@ -322,3 +322,122 @@ def test_restore_dsn_none_omits_extra_policy_entry(tmp_path: Path) -> None:
 
     assert "env:RESTORE_DSN" not in policy
     assert policy["env:DATABASE_DSN"] == frozenset({"system:database", "system:backup"})
+
+
+def _write_registry(tmp_path: Path, content: str) -> Path:
+    document = tmp_path / "registries.toml"
+    document.write_text(content)
+    return document
+
+
+_BASE_PROFILE = """
+[[profiles]]
+id = "base"
+provider = "openai-compatible"
+model = "base-model"
+api_base_url = "https://openrouter.ai/api/v1"
+launch_mode = "api"
+credential_reference = "env:PROFILE_KEY"
+capabilities = []
+concurrency_limit = 7
+output_limit = 8000
+cost_class = "cheap"
+roles = []
+supported_task_types = ["general"]
+sandbox_required = false
+enabled = false
+
+[profiles.provider_routing]
+sort = { by = "price", partition = "none" }
+preferred_min_throughput = { p90 = 70 }
+quantizations = ["int8"]
+allow_fallbacks = true
+"""
+
+
+def test_profile_inheritance_resolves_base_and_overrides(tmp_path: Path) -> None:
+    path = _write_registry(
+        tmp_path,
+        _BASE_PROFILE
+        + '''
+[[profiles]]
+id = "child"
+base_profile_id = "base"
+roles = ["reviewer"]
+output_limit = 6000
+enabled = true
+''',
+    )
+
+    document = load_document(path)
+
+    assert [item.id for item in document.profiles] == ["base", "child"]
+    child = document.profiles[1]
+    assert child.model == "base-model"
+    assert child.credential_reference == "env:PROFILE_KEY"
+    assert child.concurrency_limit == 7
+    assert child.output_limit == 6_000
+    assert {role.value for role in child.roles} == {"reviewer"}
+    assert child.enabled is True
+    assert child.provider_routing is not None
+    assert child.provider_routing.sort.by == "price"
+
+
+def test_profile_inheritance_missing_base_fails_with_file_context(tmp_path: Path) -> None:
+    path = _write_registry(
+        tmp_path,
+        '''
+[[profiles]]
+id = "orphan"
+base_profile_id = "missing"
+provider = "p"
+model = "m"
+launch_mode = "api"
+api_base_url = "https://provider.example/v1"
+concurrency_limit = 1
+cost_class = "cheap"
+supported_task_types = ["general"]
+''',
+    )
+
+    with pytest.raises(ConfigurationLoadError, match=r"orphan.*inherits unknown profile"):
+        load_document(path)
+
+
+def test_profile_inheritance_cycle_fails(tmp_path: Path) -> None:
+    path = _write_registry(
+        tmp_path,
+        '''
+[[profiles]]
+id = "a"
+base_profile_id = "b"
+
+[[profiles]]
+id = "b"
+base_profile_id = "a"
+''',
+    )
+
+    with pytest.raises(ConfigurationLoadError, match="cycle"):
+        load_document(path)
+
+
+def test_duplicate_profile_id_fails(tmp_path: Path) -> None:
+    path = _write_registry(
+        tmp_path,
+        _BASE_PROFILE
+        + '''
+[[profiles]]
+id = "base"
+provider = "openai-compatible"
+model = "other-model"
+launch_mode = "cli"
+concurrency_limit = 1
+cost_class = "cheap"
+capabilities = []
+supported_task_types = ["general"]
+''',
+    )
+
+    with pytest.raises(ConfigurationLoadError, match="duplicate profile id 'base'"):
+        load_document(path)

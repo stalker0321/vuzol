@@ -12,7 +12,9 @@ from vuzol.storage import Base, resolve_database_dsn
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Alembic defaults to disable_existing_loggers=True, which flips `.disabled`
+    # on every logger instantiated before migrations run in-process.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

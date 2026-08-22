@@ -13,12 +13,15 @@ from vuzol.config import (
     CostClass,
     InterpretationSettings,
     LaunchMode,
+    OpenRouterProviderRouting,
     ProviderProfileConfig,
     RegistryDocument,
     RuntimeConfiguration,
+    ScopedSecretResolver,
     Settings,
     build_bundle,
 )
+from vuzol.config.models import Capability
 from vuzol.storage.migration_preflight import MigrationHeadError
 
 
@@ -195,3 +198,164 @@ def test_interpreter_fails_closed_disposes_once_without_pipeline(
     assert order == ["require_migration_head"]
     assert engine.dispose_calls == 1
     assert engine.disposed
+
+
+def _bundle_with_profile(profile: ProviderProfileConfig, tmp_path: Path) -> Any:
+    settings = Settings(
+        environment="test",
+        database_dsn_reference="env:DB_DSN",
+        telegram_bot_token_reference="env:BOT_TOKEN",  # noqa: S106  # pragma: allowlist secret
+        repository_root=tmp_path / "repositories",
+        artifact_root=tmp_path / "artifacts",
+        secret_file_root=tmp_path / "secrets",
+        interpretation=InterpretationSettings(profile_id=profile.id),
+    )
+    settings.repository_root.mkdir(exist_ok=True)
+    return build_bundle(
+        RegistryDocument(profiles=(profile,)),
+        settings,
+        environment={
+            "DB_DSN": "postgresql+psycopg://user:pass@db/vuzol",  # pragma: allowlist secret
+            "BOT_TOKEN": "telegram-token",
+            "MODEL_KEY": "model-key",
+        },
+    )
+
+
+def test_interpreter_builder_wires_profile_limits_reasoning_and_routing(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    routing = OpenRouterProviderRouting.model_validate(
+        {
+            "sort": {"by": "price", "partition": "none"},
+            "preferred_min_throughput": {"p90": 70},
+            "quantizations": ["int8"],
+        }
+    )
+    profile = ProviderProfileConfig(
+        id="interpreter",
+        provider="openai-compatible",
+        model="deepseek/deepseek-v4-flash-0731",
+        api_base_url=HttpUrl("https://openrouter.ai/api/v1"),
+        launch_mode=LaunchMode.API,
+        credential_reference="env:MODEL_KEY",
+        output_limit=1_000,
+        reasoning_enabled=False,
+        provider_routing=routing,
+        capabilities=frozenset(),
+        concurrency_limit=1,
+        cost_class=CostClass.CHEAP,
+        supported_task_types=frozenset({"general"}),
+        sandbox_required=False,
+    )
+    bundle = _bundle_with_profile(profile, tmp_path)
+    monkeypatch.setenv("MODEL_KEY", "model-key")  # pragma: allowlist secret
+    resolver = ScopedSecretResolver(
+        access_policy={"env:MODEL_KEY": frozenset({"profile:interpreter"})},
+        secret_file_root=tmp_path,
+    )
+
+    adapter = interpreter_cli.build_profile_interpreter(
+        bundle,
+        resolver,
+        profile_id="interpreter",
+        timeout_seconds=7.5,
+    )
+
+    assert adapter._base_url == "https://openrouter.ai/api/v1"
+    assert adapter._credential.get_secret_value() == "model-key"
+    assert adapter._output_token_limit == 1_000
+    assert adapter._reasoning_enabled is False
+    assert adapter._provider_routing is routing
+    assert adapter._timeout == 7.5
+
+
+def test_transcriber_builder_wires_transcription_timeout(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    profile = ProviderProfileConfig(
+        id="transcriber",
+        provider="openai-compatible",
+        model="gpt-4o-transcribe",
+        api_base_url=HttpUrl("https://api.openai.com/v1"),
+        launch_mode=LaunchMode.API,
+        credential_reference="env:MODEL_KEY",
+        capabilities=frozenset({Capability.TRANSCRIPTION}),
+        concurrency_limit=1,
+        cost_class=CostClass.CHEAP,
+        supported_task_types=frozenset({"file_processing"}),
+        sandbox_required=False,
+    )
+    bundle = _bundle_with_profile(profile, tmp_path)
+    monkeypatch.setenv("MODEL_KEY", "model-key")  # pragma: allowlist secret
+    resolver = ScopedSecretResolver(
+        access_policy={"env:MODEL_KEY": frozenset({"profile:transcriber"})},
+        secret_file_root=tmp_path,
+    )
+
+    transcriber = interpreter_cli.build_profile_transcriber(
+        bundle,
+        resolver,
+        profile_id="transcriber",
+        timeout_seconds=30.0,
+    )
+
+    assert transcriber._base_url == "https://api.openai.com/v1"
+    assert transcriber._credential.get_secret_value() == "model-key"
+    assert transcriber._timeout == 30.0
+
+
+def test_builder_rejects_non_api_profiles_and_missing_credentials(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    cli_profile = ProviderProfileConfig(
+        id="codex-executor",
+        provider="codex",
+        model="gpt-5.6-sol",
+        launch_mode=LaunchMode.CLI,
+        runtime_identity="vuzol-executor",
+        state_directory=tmp_path / "state",
+        concurrency_limit=1,
+        credential_required=False,
+        enabled=False,
+        capabilities=frozenset(),
+        cost_class=CostClass.STRONG,
+        supported_task_types=frozenset({"coding"}),
+        sandbox_required=True,
+    )
+    no_credential_profile = ProviderProfileConfig(
+        id="keyless",
+        provider="openai-compatible",
+        model="model",
+        api_base_url=HttpUrl("https://provider.example/v1"),
+        launch_mode=LaunchMode.API,
+        credential_required=False,
+        capabilities=frozenset(),
+        concurrency_limit=1,
+        cost_class=CostClass.CHEAP,
+        supported_task_types=frozenset({"general"}),
+        sandbox_required=False,
+    )
+    resolver = ScopedSecretResolver(access_policy={}, secret_file_root=tmp_path)
+
+    with pytest.raises(ValueError, match="unsupported interpreter profile"):
+        interpreter_cli.build_profile_interpreter(
+            _bundle_with_profile(cli_profile, tmp_path),
+            resolver,
+            profile_id="codex-executor",
+            timeout_seconds=1.0,
+        )
+    with pytest.raises(ValueError, match="interpreter profile has no credential"):
+        interpreter_cli.build_profile_interpreter(
+            _bundle_with_profile(no_credential_profile, tmp_path),
+            resolver,
+            profile_id="keyless",
+            timeout_seconds=1.0,
+        )
+    with pytest.raises(ValueError, match="unsupported transcription profile"):
+        interpreter_cli.build_profile_transcriber(
+            _bundle_with_profile(cli_profile, tmp_path),
+            resolver,
+            profile_id="codex-executor",
+            timeout_seconds=1.0,
+        )

@@ -1,13 +1,15 @@
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import func, select, update
-from telegram.error import NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError
 
 from tests.integration.storage.helpers import storage
 from vuzol.storage.models import (
+    Approval,
     Interpretation,
     ProjectNamingRequest,
     Run,
@@ -19,6 +21,7 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.types import (
+    ApprovalStatus,
     DeliveryStatus,
     IdempotencyClass,
     IntakeStatus,
@@ -30,12 +33,26 @@ from vuzol.storage.types import (
     TaskStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram.delivery import TelegramDeliveryService
+from vuzol.telegram.delivery import (
+    DeliveryAction,
+    PermanentDeliveryError,
+    TelegramDeliveryService,
+    prepare_delivery,
+)
+from vuzol.telegram.layout import HISTORY_TOPIC_KIND, STATUS_DASHBOARD_TOPIC_KIND
 from vuzol.telegram.projections import (
+    PROJECT_STATUS_DASHBOARD_ROLE,
+    TASK_HISTORY_ROLE,
     FakeTelegramClient,
     enqueue_task_status_projection,
 )
-from vuzol.telegram.tracing import ORCHESTRATION_TRACE_ROLE
+from vuzol.telegram.tracing import (
+    INTERPRETER_TRACE_KIND,
+    ORCHESTRATION_TRACE_ROLE,
+    PLANNER_TRACE_KIND,
+)
+from vuzol.telegram.work_package_projections import WORK_PACKAGE_PROJECTION_DESTINATION
+from vuzol.workflows.result_approval import envelope_hash
 
 pytestmark = pytest.mark.postgresql
 
@@ -847,6 +864,1059 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
             assert links[0].message_id == 200
             assert links[0].message_thread_id == dashboard_thread
             assert links[0].task_id is None
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def _outbox(**overrides: Any) -> TransactionalOutbox:
+    values: dict[str, Any] = {
+        "destination": "telegram",
+        "operation_type": "send_message",
+        "linked_entity_type": "none",
+        "linked_entity_id": uuid.uuid4(),
+        "idempotency_key": f"probe:{uuid.uuid4()}",
+        "payload": {},
+    }
+    values.update(overrides)
+    return TransactionalOutbox(**values)
+
+
+async def _prepare_raises(
+    factory: Any, item: TransactionalOutbox, category: str
+) -> PermanentDeliveryError:
+    async with factory() as session:
+        with pytest.raises(PermanentDeliveryError) as excinfo:
+            await prepare_delivery(session, item)
+    assert excinfo.value.category == category
+    return excinfo.value
+
+
+@pytest.mark.postgresql
+def test_prepare_rejects_unsupported_telegram_operation(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        error = await _prepare_raises(
+            factory,
+            _outbox(operation_type="edit_stuff"),
+            "unsupported_telegram_operation",
+        )
+        assert error.category == "unsupported_telegram_operation"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+@pytest.mark.parametrize(
+    ("chat_id", "message_id"),
+    [
+        (None, 5),
+        ("not-int", 5),
+        (-100, None),
+        (-100, "not-int"),
+    ],
+)
+def test_command_delete_rejects_invalid_payload(
+    postgres_dsn: str, chat_id: Any, message_id: Any
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        payload: dict[str, Any] = {"role": "user_command_delete"}
+        if chat_id is not None:
+            payload["chat_id"] = chat_id
+        if message_id is not None:
+            payload["message_id"] = message_id
+        await _prepare_raises(
+            factory,
+            _outbox(operation_type="delete_message", payload=payload),
+            "invalid_command_delete_payload",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_help_card_rejects_invalid_payload(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(payload={"role": "help_card", "chat_id": -100}),
+            "invalid_help_payload",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_import_prompt_rejects_invalid_payload(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(
+                payload={
+                    "role": "project_import_prompt",
+                    "chat_id": -100,
+                    "message_thread_id": 10,
+                }
+            ),
+            "invalid_project_import_prompt",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_secret_ingress_delivery_and_invalid_payload(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        valid = _outbox(
+            payload={
+                "role": "secret_ingress",
+                "chat_id": -100,
+                "message_thread_id": 10,
+                "html": "<b>Token</b>",
+                "callback_buttons": [[["Открыть", "v1:sec:abc"]]],
+            }
+        )
+        async with factory() as session:
+            prepared = await prepare_delivery(session, valid)
+        assert prepared.html == "<b>Token</b>"
+        assert prepared.message_role == "secret_ingress"
+        assert prepared.callback_buttons == ((("Открыть", "v1:sec:abc"),),)
+        broken = dict(valid.payload)
+        del broken["callback_buttons"]
+        await _prepare_raises(
+            factory,
+            _outbox(payload=broken),
+            "invalid_secret_ingress_payload",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"role": "project_model_picker", "message_thread_id": 5, "html": "pick"},
+        {"role": "project_model_picker", "chat_id": -100, "message_thread_id": 5, "html": "  "},
+        {
+            "role": "project_model_picker",
+            "chat_id": -100,
+            "message_thread_id": 5,
+            "html": "pick",
+            "callback_buttons": "nope",
+        },
+        {
+            "role": "project_model_picker",
+            "chat_id": -100,
+            "message_thread_id": 5,
+            "html": "pick",
+            "callback_buttons": ["nope"],
+        },
+        {
+            "role": "project_model_picker",
+            "chat_id": -100,
+            "message_thread_id": 5,
+            "html": "pick",
+            "callback_buttons": [[["a", "b", "c"]]],
+        },
+        {
+            "role": "project_model_picker",
+            "chat_id": -100,
+            "message_thread_id": 5,
+            "html": "pick",
+            "callback_buttons": [[[7, "d"]]],
+        },
+        {
+            "role": "project_model_picker",
+            "chat_id": -100,
+            "message_thread_id": 5,
+            "html": "pick",
+            "message_id": "later",
+        },
+        {
+            "role": "project_model_picker",
+            "chat_id": -100,
+            "message_thread_id": 5,
+            "html": "pick",
+            "message_id": 0,
+        },
+    ],
+)
+def test_model_picker_rejects_invalid_payloads(postgres_dsn: str, payload: dict[str, Any]) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(factory, _outbox(payload=payload), "invalid_model_picker_payload")
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_project_naming_missing_row_fails_closed(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(linked_entity_type="project_naming", linked_entity_id=uuid.uuid4()),
+            "project_naming_missing",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_project_naming_stale_projection_is_noop(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        options = [
+            {"display_name": f"Project {index + 1}", "project_id": f"project-{index + 1}"}
+            for index in range(9)
+        ]
+        async with factory.begin() as session:
+            task = Task(
+                user_id=42,
+                source_chat_id=-100,
+                source_thread_id=10,
+                original_text="Build a project",
+                task_type="infrastructure",
+                status=TaskStatus.AWAITING_USER,
+            )
+            session.add(task)
+            await session.flush()
+            naming = ProjectNamingRequest(
+                task_id=task.id,
+                requested_by_user_id=42,
+                chat_id=-100,
+                source_thread_id=10,
+                description="Build another project",
+                options=options,
+                revision=2,
+                status=ProjectNamingStatus.PENDING,
+            )
+            session.add(naming)
+            await session.flush()
+            session.add(
+                TelegramMessageLink(
+                    chat_id=-100,
+                    message_thread_id=10,
+                    message_id=555,
+                    task_id=naming.task_id,
+                    message_role="project_naming",
+                    projection_revision=3,
+                )
+            )
+            item = TransactionalOutbox(
+                destination="telegram",
+                operation_type="send_message",
+                linked_entity_type="project_naming",
+                linked_entity_id=naming.id,
+                idempotency_key=f"names:{naming.id}:2",
+                payload={"role": "project_name_options", "revision": 2},
+            )
+        async with factory() as session:
+            prepared = await prepare_delivery(session, item)
+        assert prepared.action is DeliveryAction.NOOP
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_provisioning_projection_rejects_bad_role_and_missing_row(
+    postgres_dsn: str,
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="project_provisioning",
+                payload={"role": "bogus"},
+            ),
+            "invalid_project_delivery_payload",
+        )
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="project_provisioning",
+                payload={"role": "project_created"},
+            ),
+            "project_provisioning_missing",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_intake_projection_missing_row_fails_closed(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="telegram_intake",
+                payload={"role": "intake_ack"},
+            ),
+            "telegram_intake_missing",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_task_projection_requires_source_thread(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=None,
+                original_text="no thread",
+                task_type="general",
+            )
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="task",
+                linked_entity_id=task.id,
+                payload={"role": "intake_ack"},
+            ),
+            "telegram_task_projection_missing",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_semantic_clarification_validates_interpretation(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, _ = await seed_delivery(factory, original_text="unclear request")
+        missing_interpretation = _outbox(
+            linked_entity_type="telegram_intake",
+            payload={"role": "semantic_clarification", "interpretation_id": str(uuid.uuid4())},
+        )
+        async with factory() as session:
+            intake_id = await session.scalar(select(TelegramIntakeMessage.id))
+        assert intake_id is not None
+        missing_interpretation.linked_entity_id = intake_id
+        await _prepare_raises(factory, missing_interpretation, "interpretation_missing")
+        bad_uuid = _outbox(
+            linked_entity_type="telegram_intake",
+            linked_entity_id=intake_id,
+            payload={"role": "semantic_clarification", "interpretation_id": "nope"},
+        )
+        await _prepare_raises(factory, bad_uuid, "invalid_interpretation_id")
+        async with factory.begin() as session:
+            interpretation = Interpretation(
+                task_id=task_id,
+                original_input_hash="c" * 64,
+                task_draft={"task_type": "general", "operation": "create"},
+                profile_id="interpreter",
+                model="test-model",
+                prompt_version="v1",
+                schema_version="1.4",
+            )
+            session.add(interpretation)
+            await session.flush()
+            no_question = _outbox(
+                linked_entity_type="telegram_intake",
+                linked_entity_id=intake_id,
+                payload={
+                    "role": "semantic_clarification",
+                    "interpretation_id": str(interpretation.id),
+                },
+            )
+        await _prepare_raises(factory, no_question, "clarification_question_missing")
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_clarification_rejects_invalid_candidate_ids(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        _task_id, _outbox_id = await seed_delivery(
+            factory, candidates=(uuid.uuid4(),), message_id=91
+        )
+        async with factory.begin() as session:
+            intake = await session.scalar(select(TelegramIntakeMessage))
+            assert intake is not None
+            intake.ambiguous_task_ids = ["not-a-uuid"]
+            intake_id = intake.id
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="telegram_intake",
+                linked_entity_id=intake_id,
+                payload={"role": "clarification"},
+            ),
+            "invalid_candidate_task_id",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_status_card_rejects_unknown_role(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        _task_id, _outbox_id = await seed_delivery(factory, message_id=92)
+        async with factory() as session:
+            intake_id = await session.scalar(select(TelegramIntakeMessage.id))
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="telegram_intake",
+                linked_entity_id=intake_id,
+                payload={"role": "bogus"},
+            ),
+            "invalid_telegram_payload",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_approval_card_requires_topic_registry(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, _outbox_id = await seed_delivery(factory, message_id=93)
+        async with factory.begin() as session:
+            intake_id = await session.scalar(select(TelegramIntakeMessage.id))
+            run = Run(
+                task_id=task_id,
+                workflow_type="coding",
+                workflow_version="1",
+                status=RunStatus.RUNNING,
+                selected_route={},
+                budget_mode="strong",
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+            )
+            session.add(run)
+            await session.flush()
+            step = Step(
+                run_id=run.id,
+                ordinal=1,
+                step_type="approval",
+                queue_class=QueueClass.PRIVILEGED,
+                status=StepStatus.WAITING_APPROVAL,
+                payload={},
+                retry_class=RetryClass.NEVER,
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                max_attempts=1,
+                timeout_seconds=120,
+            )
+            session.add(step)
+            await session.flush()
+            envelope = {"schema_version": "result-approval.v1", "step_id": str(step.id)}
+            step.payload = {"action_envelope": envelope}
+            session.add(
+                Approval(
+                    step_id=step.id,
+                    action_envelope_hash=envelope_hash(envelope),
+                    requested_action="apply_result",
+                    normalized_target="vuzol:main",
+                    human_summary="done",
+                    token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+                    status=ApprovalStatus.PENDING,
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="telegram_intake",
+                linked_entity_id=intake_id,
+                payload={"role": "approval_card"},
+            ),
+            "approval_topic_missing",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+@pytest.mark.parametrize(
+    ("operation_type", "linked_entity_type", "category"),
+    [
+        ("render_plan", "task", "invalid_work_package_projection_entity"),
+        ("render_widget", "work_package", "invalid_work_package_projection_operation"),
+    ],
+)
+def test_work_package_projection_rejects_wrong_entity_and_operation(
+    postgres_dsn: str, operation_type: str, linked_entity_type: str, category: str
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(
+                destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+                operation_type=operation_type,
+                linked_entity_type=linked_entity_type,
+            ),
+            category,
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_work_package_render_wraps_projection_errors(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        bad_page = await _prepare_raises(
+            factory,
+            _outbox(
+                destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+                operation_type="render_plan",
+                linked_entity_type="work_package",
+                payload={"page": "first"},
+            ),
+            "invalid_page",
+        )
+        assert bad_page.category == "invalid_page"
+        missing = await _prepare_raises(
+            factory,
+            _outbox(
+                destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+                operation_type="render_status",
+                linked_entity_type="work_package",
+            ),
+            "package_missing",
+        )
+        assert missing.category == "package_missing"
+        clear_noop = _outbox(
+            destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+            operation_type="clear_detail",
+            linked_entity_type="work_package",
+        )
+        async with factory() as session:
+            prepared = await prepare_delivery(session, clear_noop)
+        assert prepared.action is DeliveryAction.NOOP
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_topic_status_validates_mapping_and_payload(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(
+                destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+                linked_entity_type="topic_mapping",
+                operation_type="render_topic_status",
+                payload={"role": "topic_idle"},
+            ),
+            "topic_status_mapping_missing",
+        )
+        async with factory.begin() as session:
+            mapping = TopicMapping(
+                chat_id=-100,
+                message_thread_id=44,
+                topic_kind="project",
+                project_id="proj-1",
+                accepts_new_tasks=False,
+                default_workflow="simple_model",
+                enabled=True,
+            )
+            session.add(mapping)
+            await session.flush()
+            mapping_id = mapping.id
+        incomplete = _outbox(
+            destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+            linked_entity_type="topic_mapping",
+            linked_entity_id=mapping_id,
+            operation_type="render_topic_status",
+            payload={"role": "topic_idle", "chat_id": "-100", "thread_id": 44},
+        )
+        await _prepare_raises(factory, incomplete, "invalid_topic_status_payload")
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_trace_rejects_invalid_or_missing_task(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(
+                payload={
+                    "role": ORCHESTRATION_TRACE_ROLE,
+                    "trace_kind": INTERPRETER_TRACE_KIND,
+                    "task_id": "nope",
+                }
+            ),
+            "invalid_orchestration_trace_task_id",
+        )
+        await _prepare_raises(
+            factory,
+            _outbox(
+                payload={
+                    "role": ORCHESTRATION_TRACE_ROLE,
+                    "trace_kind": INTERPRETER_TRACE_KIND,
+                    "task_id": str(uuid.uuid4()),
+                }
+            ),
+            "orchestration_trace_task_missing",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def _seed_interpreter_trace_outbox(task_id: uuid.UUID, interpretation_id: uuid.UUID) -> Any:
+    return _outbox(
+        linked_entity_type="interpretation",
+        linked_entity_id=interpretation_id,
+        payload={
+            "role": ORCHESTRATION_TRACE_ROLE,
+            "trace_kind": INTERPRETER_TRACE_KIND,
+            "task_id": str(task_id),
+            "model_task_draft": {"task_type": "coding", "operation": "create"},
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "duration_ms": 90,
+            "repaired": False,
+        },
+    )
+
+
+@pytest.mark.postgresql
+def test_interpreter_trace_requires_matching_interpretation(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                original_text="trace me",
+                task_type="coding",
+            )
+            task_id = task.id
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="interpretation",
+                payload={
+                    "role": ORCHESTRATION_TRACE_ROLE,
+                    "trace_kind": INTERPRETER_TRACE_KIND,
+                    "task_id": str(task_id),
+                },
+            ),
+            "orchestration_trace_interpretation_missing",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_trace_system_thread_falls_back_to_mapping_then_fails_closed(
+    postgres_dsn: str,
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                original_text="fallback trace",
+                task_type="coding",
+            )
+            interpretation = Interpretation(
+                task_id=task.id,
+                original_input_hash="d" * 64,
+                task_draft={
+                    "task_type": "coding",
+                    "operation": "create",
+                    "normalized_title": "Fallback trace",
+                    "clarification_question": "what scope?",
+                },
+                profile_id="interpreter",
+                model="test-model",
+                prompt_version="v1",
+                schema_version="1.4",
+            )
+            uow.session.add(interpretation)
+            await uow.session.flush()
+            item = _seed_interpreter_trace_outbox(task.id, interpretation.id)
+            uow.session.add(item)
+            await uow.session.flush()
+            item_id = item.id
+        async with factory() as session:
+            fresh = await session.get(TransactionalOutbox, item_id)
+            assert fresh is not None
+            with pytest.raises(PermanentDeliveryError) as excinfo:
+                await prepare_delivery(session, fresh)
+        assert excinfo.value.category == "system_topic_missing"
+        async with factory.begin() as session:
+            session.add(
+                TopicMapping(
+                    chat_id=-100,
+                    message_thread_id=66,
+                    topic_kind="system",
+                    accepts_new_tasks=False,
+                    default_workflow="simple_model",
+                    enabled=True,
+                )
+            )
+        async with factory() as session:
+            fresh = await session.get(TransactionalOutbox, item_id)
+            assert fresh is not None
+            prepared = await prepare_delivery(session, fresh)
+        assert prepared.action is DeliveryAction.SEND_STATUS
+        assert prepared.thread_id == 66
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_planner_trace_validates_kind_step_and_run(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            other = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                original_text="other task",
+                task_type="coding",
+            )
+            run_id = await uow.runs.create(
+                task_id=other.id,
+                workflow_type="coding",
+                workflow_version="1",
+                budget_mode="balanced",
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+            )
+            step_id = await uow.steps.create(
+                run_id=run_id,
+                ordinal=1,
+                step_type="plan",
+                idempotency_class=IdempotencyClass.ISOLATED_RETRYABLE,
+                max_attempts=3,
+            )
+        base = {
+            "role": ORCHESTRATION_TRACE_ROLE,
+            "task_id": str(other.id),
+        }
+        await _prepare_raises(
+            factory,
+            _outbox(payload={**base, "trace_kind": "mystery"}),
+            "invalid_orchestration_trace_kind",
+        )
+        await _prepare_raises(
+            factory,
+            _outbox(
+                linked_entity_type="step",
+                payload={**base, "trace_kind": PLANNER_TRACE_KIND},
+            ),
+            "orchestration_trace_planner_missing",
+        )
+        mismatch = _outbox(
+            linked_entity_type="step",
+            linked_entity_id=step_id.id,
+            payload={**base, "trace_kind": PLANNER_TRACE_KIND},
+        )
+        async with UnitOfWork(factory) as uow:
+            victim = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=11,
+                original_text="victim task",
+                task_type="coding",
+            )
+            mismatch.payload["task_id"] = str(victim.id)
+        await _prepare_raises(factory, mismatch, "orchestration_trace_run_missing")
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_traces_are_skipped_when_sampling_disabled(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with UnitOfWork(factory) as uow:
+            task = await uow.tasks.create(
+                user_id=42,
+                chat_id=-100,
+                thread_id=10,
+                original_text="sampled away",
+                task_type="coding",
+            )
+            run_id = await uow.runs.create(
+                task_id=task.id,
+                workflow_type="coding",
+                workflow_version="1",
+                budget_mode="balanced",
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+            )
+            step_id = await uow.steps.create(
+                run_id=run_id,
+                ordinal=1,
+                step_type="plan",
+                idempotency_class=IdempotencyClass.ISOLATED_RETRYABLE,
+                max_attempts=3,
+            )
+        item = _outbox(
+            linked_entity_type="step",
+            linked_entity_id=step_id.id,
+            payload={
+                "role": ORCHESTRATION_TRACE_ROLE,
+                "trace_kind": PLANNER_TRACE_KIND,
+                "task_id": str(task.id),
+            },
+        )
+        async with factory() as session:
+            prepared = await prepare_delivery(session, item, trace_enabled=False)
+        assert prepared.action is DeliveryAction.NOOP
+        assert prepared.thread_id is None
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_history_report_validates_status_and_skips_without_report(
+    postgres_dsn: str,
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(
+                payload={
+                    "role": TASK_HISTORY_ROLE,
+                    "task_id": str(uuid.uuid4()),
+                    "terminal_status": "bogus",
+                }
+            ),
+            "invalid_history_terminal_status",
+        )
+        item = _outbox(payload={"role": TASK_HISTORY_ROLE, "task_id": str(uuid.uuid4())})
+        async with factory() as session:
+            prepared = await prepare_delivery(session, item)
+        assert prepared.action is DeliveryAction.NOOP
+        assert prepared.chat_id == 0
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_history_report_is_sent_once_per_task(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with factory.begin() as session:
+            task = Task(
+                user_id=42,
+                source_chat_id=-100,
+                source_thread_id=10,
+                original_text="finished work",
+                task_type="general",
+                status=TaskStatus.COMPLETED,
+            )
+            session.add(task)
+            await session.flush()
+            task_id = task.id
+        async with factory.begin() as session:
+            session.add(
+                TopicMapping(
+                    chat_id=-100,
+                    message_thread_id=10,
+                    topic_kind=HISTORY_TOPIC_KIND.value,
+                    default_workflow="simple_model",
+                    enabled=True,
+                )
+            )
+        item = _outbox(payload={"role": TASK_HISTORY_ROLE, "task_id": str(task_id)})
+        async with factory() as session:
+            first = await prepare_delivery(session, item)
+        assert first.action is DeliveryAction.SEND_STATUS
+        assert first.message_role == TASK_HISTORY_ROLE
+        async with factory.begin() as session:
+            session.add(
+                TelegramMessageLink(
+                    chat_id=first.chat_id,
+                    message_thread_id=first.thread_id,
+                    message_id=808,
+                    task_id=task_id,
+                    message_role=TASK_HISTORY_ROLE,
+                    projection_revision=first.revision or 1,
+                )
+            )
+        async with factory() as session:
+            second = await prepare_delivery(session, item)
+        assert second.action is DeliveryAction.NOOP
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_dashboard_rejects_invalid_chat_and_requires_mapping(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        await _prepare_raises(
+            factory,
+            _outbox(payload={"role": PROJECT_STATUS_DASHBOARD_ROLE}),
+            "invalid_dashboard_chat_id",
+        )
+        await _prepare_raises(
+            factory,
+            _outbox(payload={"role": PROJECT_STATUS_DASHBOARD_ROLE, "chat_id": -100}),
+            "status_dashboard_topic_missing",
+        )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_dashboard_same_revision_is_noop(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        async with factory.begin() as session:
+            session.add(
+                TopicMapping(
+                    chat_id=-100,
+                    message_thread_id=77,
+                    topic_kind=STATUS_DASHBOARD_TOPIC_KIND.value,
+                    accepts_new_tasks=False,
+                    default_workflow="simple_model",
+                    enabled=True,
+                )
+            )
+        item = _outbox(payload={"role": PROJECT_STATUS_DASHBOARD_ROLE, "chat_id": -100})
+        async with factory() as session:
+            first = await prepare_delivery(session, item)
+        assert first.action is DeliveryAction.SEND_STATUS
+        revision = first.revision
+        assert revision is not None
+        async with factory.begin() as session:
+            session.add(
+                TelegramMessageLink(
+                    chat_id=-100,
+                    message_thread_id=77,
+                    message_id=909,
+                    message_role=PROJECT_STATUS_DASHBOARD_ROLE,
+                    projection_revision=revision,
+                )
+            )
+        async with factory() as session:
+            second = await prepare_delivery(session, item)
+        assert second.action is DeliveryAction.NOOP
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+class _ZeroMessageClient(FakeTelegramClient):
+    async def send_message(self, **kwargs: Any) -> int:
+        await super().send_message(**kwargs)
+        return 0
+
+
+@pytest.mark.postgresql
+@pytest.mark.parametrize(
+    ("failure", "expected_category"),
+    [
+        (Forbidden("bot blocked"), "telegram_forbidden"),
+        (TelegramError("weird"), "telegram_telegramerror"),
+    ],
+)
+def test_client_errors_dead_letter_outbox_item(
+    postgres_dsn: str, failure: Exception, expected_category: str
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        _task_id, outbox_id = await seed_delivery(factory, message_id=94)
+        delivery = service(factory, FakeTelegramClient(fail=failure))
+        assert await delivery.deliver_one()
+        async with factory() as session:
+            item = await session.get(TransactionalOutbox, outbox_id)
+            assert item is not None
+            assert item.status is DeliveryStatus.DEAD_LETTER
+            assert item.last_error_category == expected_category
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_bad_request_delete_is_retried_as_transient(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        # BadRequest subclasses NetworkError, so the transient handler precedes the
+        # dead-letter handler for every action; deletes are retried, not buried.
+        async with UnitOfWork(factory) as uow:
+            outbox_id = await uow.outbox.enqueue(
+                destination="telegram",
+                operation_type="delete_message",
+                entity_type="none",
+                entity_id=uuid.uuid4(),
+                idempotency_key=f"delete:{uuid.uuid4()}",
+                payload={"role": "user_command_delete", "chat_id": -100, "message_id": 55},
+            )
+        delivery = service(factory, FakeTelegramClient(fail=BadRequest("bad request")))
+        assert await delivery.deliver_one()
+        async with factory() as session:
+            item = await session.get(TransactionalOutbox, outbox_id)
+            assert item is not None
+            assert item.status is DeliveryStatus.PENDING
+            assert item.last_error_category == "badrequest"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_send_without_confirmed_message_id_marks_ambiguous(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        _task_id, outbox_id = await seed_delivery(factory, message_id=95)
+        client = _ZeroMessageClient(next_message_id=1)
+        delivery = service(factory, client)
+        assert await delivery.deliver_one()
+        assert len(client.sent) == 1
+        async with factory() as session:
+            item = await session.get(TransactionalOutbox, outbox_id)
+            assert item is not None
+            assert item.status is DeliveryStatus.AMBIGUOUS
         await engine.dispose()
 
     asyncio.run(scenario())

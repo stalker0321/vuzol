@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -24,6 +25,8 @@ from vuzol.storage.migration_preflight import (
     classify_migration_head,
     fetch_observed_revisions,
     is_undefined_table_error,
+    load_expected_heads,
+    load_known_revisions,
     make_strict_ancestor_predicate,
     require_migration_head,
     resolve_alembic_script_location,
@@ -523,3 +526,210 @@ def test_ancestor_predicate_wraps_graph_constructor_failure(
 
     assert excinfo.value.code == CODE_SCRIPTS_UNAVAILABLE
     assert str(excinfo.value) == "alembic revision graph could not be loaded"
+
+
+def _write_revision_chain(tmp_path: Path) -> Path:
+    versions = tmp_path / "alembic" / "versions"
+    versions.mkdir(parents=True, exist_ok=True)
+    (versions / "aaaa_base.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+        encoding="utf-8",
+    )
+    (versions / "bbbb_head.py").write_text(
+        'revision = "bbbb"\ndown_revision = "aaaa"\n',
+        encoding="utf-8",
+    )
+    return tmp_path / "alembic"
+
+
+def _hide_alembic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "alembic", None)
+    monkeypatch.setitem(sys.modules, "alembic.script", None)
+
+
+def test_loaders_fail_closed_without_alembic_package(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _hide_alembic(monkeypatch)
+
+    with pytest.raises(MigrationHeadError) as heads_error:
+        load_expected_heads(tmp_path)
+    with pytest.raises(MigrationHeadError) as known_error:
+        load_known_revisions(tmp_path)
+    with pytest.raises(MigrationHeadError) as ancestor_error:
+        make_strict_ancestor_predicate(tmp_path)
+
+    for error in (heads_error, known_error, ancestor_error):
+        assert error.value.code == CODE_SCRIPTS_UNAVAILABLE
+        assert str(error.value) == "alembic package is unavailable"
+
+
+def test_load_expected_heads_wraps_graph_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "alembic.script.ScriptDirectory",
+        lambda _location: (_ for _ in ()).throw(ValueError("broken")),
+    )
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        load_expected_heads(tmp_path)
+
+    assert excinfo.value.code == CODE_SCRIPTS_UNAVAILABLE
+    assert str(excinfo.value) == "alembic script directory could not be loaded"
+
+
+def test_load_known_revisions_wraps_graph_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "alembic.script.ScriptDirectory",
+        lambda _location: (_ for _ in ()).throw(ValueError("broken")),
+    )
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        load_known_revisions(tmp_path)
+
+    assert excinfo.value.code == CODE_SCRIPTS_UNAVAILABLE
+    assert str(excinfo.value) == "alembic revision graph could not be loaded"
+
+
+def test_load_expected_heads_requires_at_least_one_head(tmp_path: Path) -> None:
+    script_location = tmp_path / "alembic"
+    (script_location / "versions").mkdir(parents=True)
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        load_expected_heads(script_location)
+
+    assert excinfo.value.code == CODE_SCRIPTS_UNAVAILABLE
+    assert str(excinfo.value) == "alembic script directory has no heads"
+
+
+def test_ancestor_predicate_membership_and_graph_errors(tmp_path: Path) -> None:
+    predicate = make_strict_ancestor_predicate(_write_revision_chain(tmp_path))
+
+    assert predicate("bbbb", "bbbb") is False
+    assert predicate("aaaa", "bbbb") is True
+    assert predicate("ghost", "bbbb") is False
+    assert predicate("aaaa", "ghost") is False
+
+
+@pytest.mark.anyio
+async def test_verify_loads_known_via_injected_loader() -> None:
+    report = await verify_migration_head(
+        expected_heads=frozenset({"h1"}),
+        fetch_observed=lambda: _observed("foreign_stamp"),
+        load_known=lambda: frozenset({"h1"}),
+    )
+    assert report.ok is False
+    assert report.code == CODE_UNKNOWN
+
+
+@pytest.mark.anyio
+async def test_production_path_honors_injected_known_loader(tmp_path: Path) -> None:
+    report = await verify_migration_head(
+        alembic_script_location=_write_revision_chain(tmp_path),
+        fetch_observed=lambda: _observed("ghost"),
+        load_known=lambda: frozenset({"aaaa"}),
+    )
+    assert report.ok is False
+    assert report.expected_heads == ("bbbb",)
+    assert report.code == CODE_UNKNOWN
+
+
+@pytest.mark.anyio
+async def test_fetch_observed_success_filters_blank_rows() -> None:
+    class _Result:
+        def scalars(self) -> object:
+            return SimpleNamespace(all=lambda: ["r1", None, "", "r2"])
+
+    class _Conn:
+        async def execute(self, _statement: object) -> object:
+            return _Result()
+
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    engine = MagicMock(spec=AsyncEngine)
+    engine.connect.return_value = _Conn()
+
+    observed = await fetch_observed_revisions(engine)
+
+    assert observed == frozenset({"r1", "r2"})
+
+
+@pytest.mark.anyio
+async def test_fetch_observed_timeout_is_unreachable() -> None:
+    class _Conn:
+        async def execute(self, _statement: object) -> object:
+            raise TimeoutError
+
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    engine = MagicMock(spec=AsyncEngine)
+    engine.connect.return_value = _Conn()
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        await fetch_observed_revisions(engine)
+
+    assert excinfo.value.code == CODE_UNREACHABLE
+
+
+@pytest.mark.anyio
+async def test_fetch_observed_unexpected_error_is_unreachable() -> None:
+    class _Conn:
+        async def execute(self, _statement: object) -> object:
+            raise ValueError("driver exploded")
+
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    engine = MagicMock(spec=AsyncEngine)
+    engine.connect.return_value = _Conn()
+
+    with pytest.raises(MigrationHeadError) as excinfo:
+        await fetch_observed_revisions(engine)
+
+    assert excinfo.value.code == CODE_UNREACHABLE
+    assert "driver exploded" not in str(excinfo.value)
+
+
+def test_undefined_table_detected_through_cause_chain() -> None:
+    error = RuntimeError("outer failure")
+    error.__cause__ = _OrigSqlState("wrapped", sqlstate="42P01")
+
+    assert is_undefined_table_error(error) is True
+
+
+def test_cause_chain_sqlstate_is_authoritative_false() -> None:
+    error = RuntimeError("outer failure")
+    error.__cause__ = _OrigSqlState("permission denied", sqlstate="42501")
+
+    assert is_undefined_table_error(error) is False
+
+
+@pytest.mark.anyio
+async def test_partial_head_overlap_falls_to_mismatch() -> None:
+    def never_ancestor(_revision: str, _head: str) -> bool:
+        return False
+
+    code = classify_migration_head(
+        expected_heads=frozenset({"h1", "h2"}),
+        observed=frozenset({"h1"}),
+        known_revisions=frozenset({"h1", "h2"}),
+        is_strict_ancestor=never_ancestor,
+    )
+    assert code == CODE_MISMATCH

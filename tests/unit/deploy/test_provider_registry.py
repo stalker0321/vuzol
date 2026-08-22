@@ -48,7 +48,7 @@ def test_production_planner_uses_deepseek_via_deepinfra_with_router_fallbacks() 
     assert profile["api_base_url"] == "https://openrouter.ai/api/v1"
     assert profile["credential_reference"] == "env:VUZOL_OPENROUTER_PLANNER_API_KEY"
     assert profile["roles"] == ["planner", "reviewer"]
-    assert profile["output_limit"] == 4_000
+    assert profile["output_limit"] == 8_000
     assert profile["provider_routing"] == {
         "sort": {"by": "price", "partition": "none"},
         "preferred_min_throughput": {"p90": 70},

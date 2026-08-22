@@ -120,8 +120,10 @@ provider response bodies and exceptions do not enter task state, events, Telegra
 
 The worker can execute safe, model-only OpenAI-compatible steps such as simple answers, planning,
 research synthesis, and summarization. Automatic workflow start remains disabled by default.
-Production planning uses a dedicated GPT-5 nano API profile with a bounded 1,000-token output;
-empty or token-truncated planner output is rejected rather than completed, and a validated plan is
+Production planning uses a dedicated OpenRouter DeepSeek API profile
+(`openrouter-deepseek-planner-prod`, a role-scoped child of the shared account base) with a
+bounded 3,000-token output window and an explicit reasoning cap; empty or token-truncated planner
+output is rejected rather than completed, and a validated plan is
 handed to downstream `execute_code` / `execute_agent` steps as bounded redacted context items.
 Content-quality plan rejection is recorded as a provider failure observation (not a success) and
 reconciles usage under the planner failure category, but it does **not** force cross-profile

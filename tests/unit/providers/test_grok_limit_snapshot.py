@@ -884,3 +884,260 @@ def test_profiles_root_symlink_rejected(tmp_path: Path) -> None:
     with pytest.raises(GrokLimitSnapshotError) as err:
         load_bindings(bindings)
     assert err.value.code == CODE_EXPORT_PATH_REJECTED
+
+
+def test_bindings_rejects_profiles_root_that_is_file(tmp_path: Path) -> None:
+    obstacle = tmp_path / "profiles"
+    obstacle.write_text("not a directory", encoding="utf-8")
+    bindings = tmp_path / "b.json"
+    _write_bindings(bindings, root=obstacle, bindings=[])
+    with pytest.raises(GrokLimitSnapshotError) as err:
+        load_bindings(bindings)
+    assert err.value.code == CODE_EXPORT_PATH_REJECTED
+
+
+@pytest.mark.parametrize("leaf", [".hidden", "..hidden", "a b", ".x y"])
+def test_bindings_rejects_unsafe_leaf_shapes(tmp_path: Path, leaf: str) -> None:
+    root = tmp_path / "profiles"
+    root.mkdir()
+    bindings = tmp_path / "b.json"
+    _write_bindings(
+        bindings,
+        root=root,
+        bindings=[{"profile_id": "p1", "account_leaf": leaf}],
+    )
+    with pytest.raises(GrokLimitSnapshotError) as err:
+        load_bindings(bindings)
+    assert err.value.code == CODE_EXPORT_BINDINGS_INVALID
+
+
+def test_export_rejects_nonregular_log(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    root.mkdir()
+    logs = root / "acc" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "unified.jsonl").mkdir()
+    bindings = tmp_path / "b.json"
+    out = tmp_path / "out.json"
+    _write_bindings(
+        bindings,
+        root=root,
+        bindings=[{"profile_id": "p1", "account_leaf": "acc"}],
+    )
+    with pytest.raises(GrokLimitSnapshotError) as err:
+        export_grok_limit_snapshot(bindings, out)
+    assert err.value.code == CODE_EXPORT_PATH_REJECTED
+
+
+def test_export_rejects_unreadable_log(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    root.mkdir()
+    account = _account_logs(root, "acc", principal="prin-a")
+    log = account / "logs" / "unified.jsonl"
+    log.chmod(0o200)
+    try:
+        bindings = tmp_path / "b.json"
+        out = tmp_path / "out.json"
+        _write_bindings(
+            bindings,
+            root=root,
+            bindings=[{"profile_id": "p1", "account_leaf": "acc"}],
+        )
+        with pytest.raises(GrokLimitSnapshotError) as err:
+            export_grok_limit_snapshot(bindings, out)
+        assert err.value.code == CODE_EXPORT_PATH_REJECTED
+    finally:
+        log.chmod(0o600)
+
+
+def test_scan_skips_oversized_lines_but_finds_signals(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    root.mkdir()
+    logs = root / "acc" / "logs"
+    logs.mkdir(parents=True)
+    giant = json.dumps({"pad": "y" * 150_000})
+    lines = [
+        json.dumps({"principal_id": "prin-a", "msg": "session"}),
+        giant,
+        json.dumps(
+            {
+                "msg": "billing: fetched credits config",
+                "ctx": {"config": {"creditUsagePercent": 40}},
+            }
+        ),
+        giant,
+    ]
+    log = logs / "unified.jsonl"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(log, 0o600)
+    bindings = tmp_path / "b.json"
+    out = tmp_path / "out.json"
+    _write_bindings(
+        bindings,
+        root=root,
+        bindings=[
+            {
+                "profile_id": "p1",
+                "account_leaf": "acc",
+                "expected_principal_digest": principal_digest("prin-a"),
+            }
+        ],
+    )
+    assert export_grok_limit_snapshot(bindings, out) == 1
+    result = load_grok_limit_entry(out, "p1")
+    assert result.ok and result.entry is not None
+    assert result.entry.remaining_percent == 60
+
+
+def test_export_rejects_output_parent_not_a_directory(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    root.mkdir()
+    _account_logs(root, "acc", principal="prin-a")
+    bindings = tmp_path / "b.json"
+    blocker = tmp_path / "blocker"
+    blocker.write_text("occupied\n", encoding="utf-8")
+    _write_bindings(
+        bindings,
+        root=root,
+        bindings=[{"profile_id": "p1", "account_leaf": "acc"}],
+    )
+    with pytest.raises(GrokLimitSnapshotError) as err:
+        export_grok_limit_snapshot(bindings, blocker / "out.json")
+    assert err.value.code == CODE_EXPORT_PATH_REJECTED
+
+
+def test_export_requires_expected_parent_uid_and_gid(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    root.mkdir()
+    _account_logs(root, "acc", principal="prin-a")
+    bindings = tmp_path / "b.json"
+    out = tmp_path / "snap" / "grok.json"
+    out.parent.mkdir()
+    out.parent.chmod(0o2750)
+    try:
+        _write_bindings(
+            bindings,
+            root=root,
+            bindings=[{"profile_id": "p1", "account_leaf": "acc"}],
+        )
+        with pytest.raises(GrokLimitSnapshotError) as err:
+            export_grok_limit_snapshot(bindings, out, expected_uid=os.getuid() + 1)
+        assert err.value.code == CODE_EXPORT_OWNERSHIP_FAILED
+        assert "uid" in str(err.value)
+        with pytest.raises(GrokLimitSnapshotError) as err:
+            export_grok_limit_snapshot(bindings, out, expected_gid=os.getgid() + 1)
+        assert err.value.code == CODE_EXPORT_OWNERSHIP_FAILED
+        assert "gid" in str(err.value)
+    finally:
+        out.parent.chmod(0o750)
+
+
+def test_publish_failure_cleans_up_and_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    root.mkdir()
+    _account_logs(root, "acc", principal="prin-a")
+    bindings = tmp_path / "b.json"
+    out = tmp_path / "frozen" / "grok.json"
+    out.parent.mkdir()
+    _write_bindings(
+        bindings,
+        root=root,
+        bindings=[{"profile_id": "p1", "account_leaf": "acc"}],
+    )
+    out.parent.chmod(0o555)
+    try:
+        with pytest.raises(GrokLimitSnapshotError) as err:
+            export_grok_limit_snapshot(bindings, out)
+        assert err.value.code == CODE_EXPORT_OWNERSHIP_FAILED
+        assert not out.exists()
+        assert list(out.parent.glob(".grok-limit-*")) == []
+    finally:
+        out.parent.chmod(0o750)
+
+
+def test_bindings_rejects_invalid_utf8(tmp_path: Path) -> None:
+    bindings = tmp_path / "b.json"
+    bindings.write_bytes(b'{"schema_version":"\xff\xfe"}')
+    with pytest.raises(GrokLimitSnapshotError) as err:
+        load_bindings(bindings)
+    assert err.value.code == CODE_EXPORT_BINDINGS_INVALID
+
+
+def test_bindings_rejects_directory_input(tmp_path: Path) -> None:
+    bindings = tmp_path / "b-dir"
+    bindings.mkdir()
+    with pytest.raises(GrokLimitSnapshotError) as err:
+        load_bindings(bindings)
+    assert err.value.code == CODE_EXPORT_BINDINGS_INVALID
+
+
+def test_load_rejects_observation_ahead_of_generated_window(tmp_path: Path) -> None:
+    generated = datetime.now(UTC).replace(microsecond=0) - timedelta(seconds=30)
+    document = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "generated_at": generated.isoformat(),
+        "entries": [
+            {
+                "profile_id": "p1",
+                "principal_digest": "a" * 64,
+                "remaining_percent": 50,
+                "reset_at": None,
+                "plan_label": "Super",
+                "observed_at": (generated + timedelta(seconds=75)).isoformat(),
+            }
+        ],
+    }
+    path = tmp_path / "snapshot.json"
+    _write_snapshot(path, document)
+    result = load_grok_limit_entry(path, "p1", now=generated + timedelta(seconds=30))
+    assert result.code == CODE_SNAPSHOT_INVALID
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda doc: {**doc, "generated_at": ""},
+        lambda doc: {**doc, "entries": [{**doc["entries"][0], "observed_at": ""}]},
+        lambda doc: {**doc, "entries": [{**doc["entries"][0], "reset_at": ""}]},
+    ],
+)
+def test_load_rejects_empty_datetime_strings(tmp_path: Path, mutation: Any) -> None:
+    now = datetime.now(UTC)
+    document: Any = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "generated_at": now.isoformat(),
+        "entries": [
+            {
+                "profile_id": "p1",
+                "principal_digest": "a" * 64,
+                "remaining_percent": 50,
+                "reset_at": None,
+                "plan_label": "Super",
+                "observed_at": now.isoformat(),
+            }
+        ],
+    }
+    path = tmp_path / "snapshot.json"
+    _write_snapshot(path, mutation(document))
+    assert load_grok_limit_entry(path, "p1").code == CODE_SNAPSHOT_INVALID
+
+
+def test_export_normalizes_naive_now_to_utc(tmp_path: Path) -> None:
+    root = tmp_path / "profiles"
+    root.mkdir()
+    _account_logs(root, "acc", principal="prin-a")
+    bindings = tmp_path / "b.json"
+    out = tmp_path / "out.json"
+    _write_bindings(
+        bindings,
+        root=root,
+        bindings=[{"profile_id": "p1", "account_leaf": "acc"}],
+    )
+    expected = datetime.now(UTC).replace(microsecond=0)
+    assert export_grok_limit_snapshot(bindings, out, now=expected.replace(tzinfo=None)) == 1
+    raw = json.loads(out.read_text(encoding="utf-8"))
+    generated = datetime.fromisoformat(raw["generated_at"])
+    assert generated.tzinfo is not None
+    assert abs(generated - expected) <= timedelta(seconds=2)
+    result = load_grok_limit_entry(out, "p1")
+    assert result.ok and result.entry is not None

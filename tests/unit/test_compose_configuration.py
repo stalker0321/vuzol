@@ -7,6 +7,10 @@ def test_interpreter_receives_scoped_openai_credential_from_compose_env() -> Non
     assert "VUZOL_OPENAI_INTERPRETER_API_KEY: ${VUZOL_OPENAI_INTERPRETER_API_KEY:-}" in interpreter
     assert "VUZOL_OPENROUTER_PLANNER_API_KEY: ${VUZOL_OPENROUTER_PLANNER_API_KEY:-}" in interpreter
     assert (
+        "VUZOL_OPENROUTER_INTERPRETER_API_KEY: ${VUZOL_OPENROUTER_INTERPRETER_API_KEY:-}"
+        in interpreter
+    )
+    assert (
         "VUZOL_OPENAI_TRANSCRIPTION_API_KEY: ${VUZOL_OPENAI_TRANSCRIPTION_API_KEY:-}" in interpreter
     )
     assert 'user: "${VUZOL_RUNTIME_UID:-1000}:10001"' in interpreter

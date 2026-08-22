@@ -34,6 +34,18 @@ def test_coverage_precision_rejects_unrounded_below_threshold() -> None:
     assert "coverage report --precision=6 --fail-under=90" in makefile
 
 
+def _isolated_coverage_env(coverage_file: Path) -> dict[str, str]:
+    """Keep the nested pytest run from writing into the outer coverage data file."""
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("COV_CORE") and key != "COVERAGE_FILE"
+    }
+    env["COVERAGE_FILE"] = str(coverage_file)
+    return env
+
+
 def test_pytest_failure_and_below_threshold_are_nonzero(tmp_path: Path) -> None:
     """Subprocess pytest must return non-zero for failures and coverage miss."""
 
@@ -53,7 +65,7 @@ def test_pytest_failure_and_below_threshold_are_nonzero(tmp_path: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
-        env={**os.environ, "COVERAGE_FILE": str(root / ".coverage")},
+        env=_isolated_coverage_env(root / ".coverage"),
     )
     assert below.returncode != 0
     assert "fail-under=90" in below.stdout or "FAILED" in below.stdout or below.returncode != 0

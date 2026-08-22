@@ -8,7 +8,11 @@ from contextlib import suppress
 
 from telegram import Bot
 
-from vuzol.config import ScopedSecretResolver, get_runtime_configuration
+from vuzol.config import (
+    ConfigurationBundle,
+    ScopedSecretResolver,
+    get_runtime_configuration,
+)
 from vuzol.interpretation.adapters import (
     OpenAICompatibleInterpreter,
     OpenAICompatibleTranscriber,
@@ -19,6 +23,51 @@ from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.telegram.adapter import PythonTelegramClient, resolve_bot_token
+
+
+def build_profile_interpreter(
+    registries: ConfigurationBundle,
+    resolver: ScopedSecretResolver,
+    *,
+    profile_id: str,
+    timeout_seconds: float,
+) -> OpenAICompatibleInterpreter:
+    profile = registries.profiles.get(profile_id)
+    if profile.provider != "openai-compatible" or profile.api_base_url is None:
+        raise ValueError(f"unsupported interpreter profile: {profile.id}")
+    if profile.credential_reference is None:
+        raise ValueError(f"interpreter profile has no credential: {profile.id}")
+    return OpenAICompatibleInterpreter(
+        base_url=str(profile.api_base_url),
+        credential=resolver.get(profile.credential_reference, f"profile:{profile.id}"),
+        profile_id=profile.id,
+        model=profile.model,
+        provider_routing=profile.provider_routing,
+        timeout_seconds=timeout_seconds,
+        output_token_limit=profile.output_limit,
+        reasoning_enabled=profile.reasoning_enabled,
+    )
+
+
+def build_profile_transcriber(
+    registries: ConfigurationBundle,
+    resolver: ScopedSecretResolver,
+    *,
+    profile_id: str,
+    timeout_seconds: float,
+) -> OpenAICompatibleTranscriber:
+    profile = registries.profiles.get(profile_id)
+    if profile.provider != "openai-compatible" or profile.api_base_url is None:
+        raise ValueError(f"unsupported transcription profile: {profile.id}")
+    if profile.credential_reference is None:
+        raise ValueError(f"transcription profile has no credential: {profile.id}")
+    return OpenAICompatibleTranscriber(
+        base_url=str(profile.api_base_url),
+        credential=resolver.get(profile.credential_reference, f"profile:{profile.id}"),
+        profile_id=profile.id,
+        model=profile.model,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 async def run() -> None:
@@ -42,37 +91,27 @@ async def run() -> None:
         secret_file_root=settings.secret_file_root,
     )
 
-    def build_interpreter(profile_id: str) -> OpenAICompatibleInterpreter:
-        profile = runtime.registries.profiles.get(profile_id)
-        if profile.provider != "openai-compatible" or profile.api_base_url is None:
-            raise ValueError(f"unsupported interpreter profile: {profile.id}")
-        if profile.credential_reference is None:
-            raise ValueError(f"interpreter profile has no credential: {profile.id}")
-        return OpenAICompatibleInterpreter(
-            base_url=str(profile.api_base_url),
-            credential=resolver.get(profile.credential_reference, f"profile:{profile.id}"),
-            profile_id=profile.id,
-            model=profile.model,
-            provider_routing=profile.provider_routing,
+    interpreter = build_profile_interpreter(
+        runtime.registries,
+        resolver,
+        profile_id=primary_profile.id,
+        timeout_seconds=config.provider_timeout_seconds,
+    )
+    fallbacks = tuple(
+        build_profile_interpreter(
+            runtime.registries,
+            resolver,
+            profile_id=profile_id,
             timeout_seconds=config.provider_timeout_seconds,
-            output_token_limit=profile.output_limit,
-            reasoning_enabled=profile.reasoning_enabled,
         )
-
-    interpreter = build_interpreter(primary_profile.id)
-    fallbacks = tuple(build_interpreter(profile_id) for profile_id in fallback_ids)
+        for profile_id in fallback_ids
+    )
     transcriber = None
     if config.transcription_profile_id is not None:
-        profile = runtime.registries.profiles.get(config.transcription_profile_id)
-        if profile.provider != "openai-compatible" or profile.api_base_url is None:
-            raise ValueError(f"unsupported transcription profile: {profile.id}")
-        if profile.credential_reference is None:
-            raise ValueError(f"transcription profile has no credential: {profile.id}")
-        transcriber = OpenAICompatibleTranscriber(
-            base_url=str(profile.api_base_url),
-            credential=resolver.get(profile.credential_reference, f"profile:{profile.id}"),
-            profile_id=profile.id,
-            model=profile.model,
+        transcriber = build_profile_transcriber(
+            runtime.registries,
+            resolver,
+            profile_id=config.transcription_profile_id,
             timeout_seconds=config.transcription_timeout_seconds,
         )
     engine = create_engine(settings, resolve_database_dsn(settings))

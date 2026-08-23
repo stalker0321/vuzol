@@ -28,6 +28,15 @@ def clean_postgres(request: pytest.FixtureRequest) -> Iterator[None]:
     postgres_dsn = str(request.getfixturevalue("postgres_dsn"))
     sync_dsn = postgres_dsn.replace("postgresql+psycopg://", "postgresql://", 1)
     with psycopg.connect(sync_dsn, autocommit=True) as connection:
+        # A previously failed test may leak its engine with an idle-in-transaction
+        # connection; those relations blocks would deadlock every later TRUNCATE.
+        connection.execute(
+            """
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = current_database() AND pid <> pg_backend_pid()
+            """
+        )
         tables = connection.execute(
             """
             SELECT tablename FROM pg_tables

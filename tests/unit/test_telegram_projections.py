@@ -3,6 +3,7 @@
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,12 +15,19 @@ from vuzol.telegram.projections import (
     _approval_display_summary,
     _approval_fact_lines,
     _approval_status_label,
+    _concise_completion_report,
+    _format_bytes,
     _format_duration_ru,
+    _humanize_model_slug,
+    _task_identity_footer,
     delivery_state_label,
+    format_executor_model,
+    model_label_for_profile,
     split_message,
     status_buttons,
     step_status_label,
     step_type_label,
+    task_sense_sentence,
     telegram_html,
     user_status_label,
 )
@@ -188,3 +196,95 @@ def test_task_status_button_matrix_is_exhaustive_and_has_no_retry_ui() -> None:
         buttons = tuple(status_buttons(status.value))
         assert buttons == expected.get(status, ())
         assert "retry" not in buttons
+
+
+def test_task_sense_sentence_cuts_at_first_separator_and_bounds_length() -> None:
+    def sense(draft: object, original: str = "") -> str:
+        return task_sense_sentence(SimpleNamespace(task_draft=draft, original_text=original))
+
+    assert sense({"task_summary": "Add retries. Then backoff!"}) == "Add retries"
+    assert sense({"normalized_title": "Stop! Hammer time"}) == "Stop"
+    # Whitespace collapses before separator search, so newlines never split.
+    assert sense({"goal": "Fix\nthe\nleak"}) == "Fix the leak"
+    assert sense({}, original="Ship it. Today") == "Ship it"
+    long = "слово " * 40
+    bounded = sense({"task_summary": long})
+    assert bounded.endswith("…")
+    assert len(bounded) <= 158
+    assert sense("not-a-dict") == "Без описания"
+    assert sense({"task_summary": "   "}) == "Без описания"
+    assert sense({"task_summary": ".!?."}) == "Без описания"
+
+
+def test_numberless_tasks_show_stable_short_identity_code() -> None:
+    task_id = uuid.uuid4()
+    footer = _task_identity_footer(
+        SimpleNamespace(public_task_number=None, topic_task_number=None, id=task_id)
+    )
+    assert footer == f"<i>код ·{task_id.hex[-8:]}</i>"
+
+
+def test_executor_labels_infer_provider_family_from_profile_or_model() -> None:
+    assert model_label_for_profile(None) == "ещё не назначен"
+    assert model_label_for_profile("grok-build-prod") == "Grok Build"
+    assert (
+        model_label_for_profile(
+            "api",
+            profile_models={"api": "qwen3-max"},
+            profile_efforts={"api": "high"},
+        )
+        == "Qwen3 Max · high"
+    )
+    # A step model without a codex/grok profile renders as a generic humanized slug.
+    assert model_label_for_profile("api", profile_models={"api": "x"}, model="gpt-5.6-sol") == (
+        "GPT-5.6 Sol"
+    )
+
+    assert format_executor_model(None, profile_id="api") == "api"
+    assert format_executor_model("", profile_id="api", effort="high") == "api · high"
+    assert format_executor_model("grok-build") == "Grok Build"
+    assert format_executor_model("grok") == "Grok"
+    assert format_executor_model("kimi-k2") == "Kimi K2"
+    assert format_executor_model("gpt-5.6-mini", provider="codex") == "Codex GPT-5.6 Mini"
+    assert format_executor_model("o3-pro", provider="codex") == "Codex O3 Pro"
+
+
+def test_model_slug_humanizer_drops_calendar_versions_and_keeps_case() -> None:
+    assert _humanize_model_slug("grok-build-2025-08-07") == "Grok Build"
+    assert _humanize_model_slug("gpt") == "GPT"
+    assert _humanize_model_slug("gpt-5.1") == "GPT-5.1"
+    assert _humanize_model_slug("Claude-Sonnet-4") == "Claude Sonnet 4"
+
+
+def test_byte_formatter_uses_binary_units() -> None:
+    assert _format_bytes(2 * 1024**3) == "2.0 ГБ"
+    assert _format_bytes(1536 * 1024) == "1.5 МБ"
+    assert _format_bytes(2048) == "2.0 КБ"
+    assert _format_bytes(512) == "512 Б"
+
+
+def test_completion_report_keeps_bounded_bullets_and_drops_handoff_sections() -> None:
+    report = _concise_completion_report(
+        "Auth rewritten.\n"
+        "\n"
+        "Реализовано:\n"
+        "- added retry loop\n"
+        "- hardened parser\n"
+        "- third fix\n"
+        "- fourth fix\n"
+        "- fifth fix\n"
+        "- sixth fix\n"
+        "- seventh fix\n"
+        "\n"
+        "Следующие шаги:\n"
+        "- deploy to prod",
+        bullet_limit=6,
+    )
+
+    assert report.startswith("Auth rewritten.")
+    assert "• seventh fix" not in report
+    for bullet in ("added retry loop", "hardened parser", "sixth fix"):
+        assert f"• {bullet}" in report
+    assert "Следующие шаги" not in report and "deploy" not in report
+
+    assert _concise_completion_report("\n \n") == "Без описания"

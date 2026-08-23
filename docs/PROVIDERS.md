@@ -11,28 +11,55 @@ Provider profiles are configured in the TOML registry. Common fields include:
 - `capabilities` and `supported_task_types`;
 - `cost_class`: cheap, balanced, or strong;
 - `routing_priority`, where lower values are preferred after policy filtering;
-- context/output and concurrency limits;
+- model-level ceilings: `context_limit`, `output_limit`, and `concurrency_limit`;
 - explicit `fallback_profile_ids`;
 - conservative cost and quota accounting values.
 
 API profiles require a credential-free HTTPS `api_base_url`. Credentials remain scoped references,
 such as `env:VUZOL_OPENAI_EXECUTOR_API_KEY`; only the selected adapter resolves its reference.
 
-### Role map: transcription is not interpretation
+Profile limits are model ceilings, not role budgets. Routing rejects any request whose
+`max_output_tokens` exceeds the profile `output_limit`. How much a role actually requests is a
+separate, narrower budget from `HardLimits` (process settings, overridable via `VUZOL_LIMITS__*`),
+which must fit under the ceiling. Example: the planner profile may allow 8,000 output tokens while
+the planner itself budgets 3,000.
 
-Telegram voice messages pass through two independent provider stages with separate models,
-profiles, and credentials:
+### Role map
 
-- **Transcription** (voice audio → raw text) routes to a `transcriber` profile, e.g.
-  `openai-transcriber` on the OpenAI transcription API (`gpt-4o-transcribe`, credential
-  `env:VUZOL_OPENAI_TRANSCRIPTION_API_KEY`), pinned via
-  `VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID`.
-- **Interpretation** (raw text → TaskDraft JSON) routes to an `interpreter` profile, pinned
-  via `VUZOL_INTERPRETATION__PROFILE_ID`; in production this is an OpenRouter DeepSeek role
-  profile, not the OpenAI transcription account.
+Roles are declared per profile and selected either by environment pin (interpretation stages) or
+by workflow step type (`src/vuzol/providers/routing.py`):
 
-Changing, rotating, or rate-limiting one stage never affects the other; each profile carries
-its own `credential_reference`.
+| Role | Responsibility | Selected by |
+| --- | --- | --- |
+| `transcriber` | Telegram voice/audio → raw transcript text | `VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID` |
+| `interpreter` | raw text plus bounded context → TaskDraft JSON | `VUZOL_INTERPRETATION__PROFILE_ID` |
+| `planner` | task → bounded plan JSON consumed by coding steps | `plan` step |
+| `executor` | coding/agent work in sandboxes (`execute_code`, `execute_agent`) and model-only steps (`execute_model`, `research_execute`) | corresponding steps |
+| `reviewer` | independent read-only review of a finished result | `review` step |
+| `summarizer` | result synthesis | `synthesize` step |
+
+Transcription and interpretation are two independent stages with separate models, profiles, and
+credentials. A voice message is transcribed first, then interpreted; changing, rotating, or
+rate-limiting one stage never affects the other. Both stages run only inside the dedicated
+interpretation runtime — they are not workflow steps. The same runtime drives project-discussion
+responses through the interpreter profile.
+
+### Where profiles live
+
+There is no single registry file. Each runtime loads its own registry document plus the shared
+append-only project overlay:
+
+| Runtime | Registry source | Notes |
+| --- | --- | --- |
+| Worker, executor, applier | `/etc/vuzol/executor-registries.toml` | repo mirror: `deploy/registries.executor.toml` |
+| Project provisioner | `/etc/vuzol/executor-registries.toml` | writes dynamic projects into the overlay |
+| Telegram ingress and delivery | `/etc/vuzol/telegram-registries.toml` | topics and projects needed at the chat boundary |
+| Interpretation runtime (container) | host registry mounted via `VUZOL_REGISTRY_FILE_HOST` | interpreter and transcriber profiles live here, pinned by `VUZOL_INTERPRETATION__PROFILE_ID` and `VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID` |
+
+Every service also appends `/var/lib/vuzol/registry/projects.json` (the provisioner-owned overlay,
+see [Configuration](CONFIGURATION.md)) and resolves role budgets from process settings. Two
+checked-in files pin production registry facts and must change together with any registry edit:
+`deploy/mvp/check.py` and `tests/unit/deploy/test_provider_registry.py`.
 
 ### Role-scoped profiles
 
@@ -58,13 +85,19 @@ output_limit = 6000
 enabled = true
 ```
 
+This mechanism suits deployments that share one provider account across roles. The current
+production registry instead gives every role its own account and credential reference.
+
 API profiles may also carry role-scoped reasoning controls:
 
 - `reasoning_enabled = false` explicitly disables thinking for providers that support
   the OpenRouter unified reasoning parameter (verified for the DeepSeek family);
 - `max_reasoning_tokens` is only a soft upstream hint. Several providers ignore
   reasoning caps entirely and count reasoning against `max_tokens`, so `output_limit`
-  must be sized for the worst case instead of relying on the cap.
+  must be sized for the worst case instead of relying on the cap;
+- `model_reasoning_effort` maps onto the OpenRouter unified `reasoning.effort` hint for
+  API profiles (CLI profiles forward it to the agent CLI instead). Like every reasoning
+  control it is advisory; `output_limit` remains the enforced bound.
 
 CLI profiles require a unique `runtime_identity` and absolute `state_directory`. Enabled CLI
 profiles cannot share or nest state directories. The example registry contains two disabled,
@@ -120,10 +153,18 @@ provider response bodies and exceptions do not enter task state, events, Telegra
 
 The worker can execute safe, model-only OpenAI-compatible steps such as simple answers, planning,
 research synthesis, and summarization. Automatic workflow start remains disabled by default.
-Production planning uses a dedicated OpenRouter DeepSeek API profile
-(`openrouter-deepseek-planner-prod`, a role-scoped child of the shared account base) with a
-bounded 3,000-token output window and an explicit reasoning cap; empty or token-truncated planner
-output is rejected rather than completed, and a validated plan is
+
+The production executor registry (`deploy/registries.executor.toml`) currently routes:
+
+| Role | Profile | Model | Credential | Output bound |
+| --- | --- | --- | --- | --- |
+| planner | `openrouter-deepseek-planner-prod` | DeepSeek via OpenRouter | `VUZOL_OPENROUTER_PLANNER_API_KEY` | `HardLimits.planner_output_tokens` (default 3,000, reasoning 1,800) under the profile `output_limit` of 8,000 |
+| reviewer | `openrouter-mimo-reviewer-prod` | Xiaomi MiMo-V2.5 via OpenRouter, reasoning effort `low` | `VUZOL_OPENROUTER_REVIEWER_API_KEY` | derives its window from its own profile `output_limit` (8,000) |
+| executor | `codex-subscription-prod`, `grok-subscription-a/b`, `tokenrouter-kimi-a` | subscription agent CLIs | subscription auth (no API keys) | sandbox-bound |
+| interpreter / transcriber | configured in the interpreter registry, not this mirror | DeepSeek-based interpretation; OpenAI transcription API | their own credential references | their own profile limits |
+
+Planning runs on the dedicated DeepSeek API profile with the planner budget from `HardLimits`;
+empty or token-truncated planner output is rejected rather than completed, and a validated plan is
 handed to downstream `execute_code` / `execute_agent` steps as bounded redacted context items.
 Content-quality plan rejection is recorded as a provider failure observation (not a success) and
 reconciles usage under the planner failure category, but it does **not** force cross-profile

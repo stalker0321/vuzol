@@ -4,6 +4,14 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- moved the independent code reviewer off the shared DeepSeek planner profile onto a
+  dedicated `openrouter-mimo-reviewer-prod` OpenRouter profile (`xiaomi/mimo-v2.5`,
+  reasoning effort `low`, its own `VUZOL_OPENROUTER_REVIEWER_API_KEY` credential
+  reference, unchanged 8,000-token output bound). The DeepSeek profile keeps its
+  model-level 8,000-token routing bound while planner output remains budgeted at
+  3,000 tokens through `HardLimits`. API profiles now map `model_reasoning_effort`
+  onto the OpenRouter unified `reasoning.effort` hint, and the MVP readiness check
+  pins both role profiles;
 - hardened the managed runtime preview (ADR-0010): `publish_preview` no longer
   executes project code inside the retained worktree. The approved
   `result_commit` is exported with `git archive` into a disposable per-run

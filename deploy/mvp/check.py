@@ -200,8 +200,8 @@ def _require_provider_profiles(document: dict[str, object]) -> None:
         "model": "deepseek/deepseek-v4-flash-0731",
         "api_base_url": "https://openrouter.ai/api/v1",
         "launch_mode": "api",
-        "roles": ["planner", "reviewer"],
-        "output_limit": 3_000,
+        "roles": ["planner"],
+        "output_limit": 8_000,
         "enabled": True,
     }
     if any(planner.get(key) != value for key, value in expected.items()):
@@ -215,6 +215,29 @@ def _require_provider_profiles(document: dict[str, object]) -> None:
         "allow_fallbacks": True,
     }:
         raise MvpCheckError("OpenRouter planner provider routing does not match policy")
+    reviewers = [
+        item
+        for item in profiles
+        if isinstance(item, dict) and item.get("id") == "openrouter-mimo-reviewer-prod"
+    ]
+    if len(reviewers) != 1:
+        raise MvpCheckError("openrouter-mimo-reviewer-prod is not uniquely configured")
+    reviewer = reviewers[0]
+    reviewer_expected = {
+        "provider": "openai-compatible",
+        "model": "xiaomi/mimo-v2.5",
+        "model_reasoning_effort": "low",
+        "api_base_url": "https://openrouter.ai/api/v1",
+        "launch_mode": "api",
+        "credential_reference": "env:VUZOL_OPENROUTER_REVIEWER_API_KEY",
+        "roles": ["reviewer"],
+        "output_limit": 8_000,
+        "enabled": True,
+    }
+    if any(reviewer.get(key) != value for key, value in reviewer_expected.items()):
+        raise MvpCheckError(
+            "openrouter-mimo-reviewer-prod does not match the bounded production policy"
+        )
 
 
 def _validation_gates(image: str) -> None:

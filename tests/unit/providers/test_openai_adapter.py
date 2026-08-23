@@ -190,6 +190,67 @@ async def test_openai_adapter_profile_disable_beats_request_reasoning_budget() -
 
 
 @pytest.mark.anyio
+async def test_openai_adapter_sends_profile_reasoning_effort_without_budget() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == "xiaomi/mimo-v2.5"
+        assert payload["max_tokens"] == 8_000
+        assert payload["reasoning"] == {"enabled": True, "effort": "low"}
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://openrouter.ai/api/v1"
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("test-key"), client=client)
+        selected = profile(
+            "mimo-reviewer",
+            model="xiaomi/mimo-v2.5",
+            api_base_url="https://openrouter.ai/api/v1",
+            model_reasoning_effort="low",
+        )
+        request = provider_request().model_copy(
+            update={
+                "role": ProviderRole.REVIEWER,
+                "max_output_tokens": 8_000,
+            }
+        )
+        await adapter.execute(request, selected, CancellationContext())
+
+
+@pytest.mark.anyio
+async def test_openai_adapter_combines_reasoning_effort_with_budget() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["reasoning"] == {"enabled": True, "max_tokens": 2_000, "effort": "low"}
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://openrouter.ai/api/v1"
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("test-key"), client=client)
+        selected = profile(
+            "mimo-reviewer",
+            model="xiaomi/mimo-v2.5",
+            api_base_url="https://openrouter.ai/api/v1",
+            model_reasoning_effort="low",
+        )
+        request = provider_request().model_copy(
+            update={
+                "role": ProviderRole.REVIEWER,
+                "max_output_tokens": 8_000,
+                "reasoning_max_tokens": 2_000,
+            }
+        )
+        await adapter.execute(request, selected, CancellationContext())
+
+
+@pytest.mark.anyio
 async def test_openai_adapter_falls_back_to_profile_reasoning_budget() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)

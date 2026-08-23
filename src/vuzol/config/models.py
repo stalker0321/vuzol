@@ -301,7 +301,9 @@ class ProviderProfileConfig(FrozenModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
-    # Optional reasoning effort for models that expose it (Codex Sol/Terra/etc.).
+    # Optional reasoning effort for models that expose it. CLI profiles forward
+    # it to the agent CLI; API profiles map it onto the OpenRouter unified
+    # reasoning.effort hint.
     model_reasoning_effort: str | None = Field(
         default=None,
         pattern=r"^(low|medium|high|xhigh|max|ultra)$",

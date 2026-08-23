@@ -47,7 +47,7 @@ def test_production_planner_uses_deepseek_via_deepinfra_with_router_fallbacks() 
     assert profile["model"] == "deepseek/deepseek-v4-flash-0731"
     assert profile["api_base_url"] == "https://openrouter.ai/api/v1"
     assert profile["credential_reference"] == "env:VUZOL_OPENROUTER_PLANNER_API_KEY"
-    assert profile["roles"] == ["planner", "reviewer"]
+    assert profile["roles"] == ["planner"]
     assert profile["output_limit"] == 8_000
     assert profile["provider_routing"] == {
         "sort": {"by": "price", "partition": "none"},
@@ -55,6 +55,26 @@ def test_production_planner_uses_deepseek_via_deepinfra_with_router_fallbacks() 
         "quantizations": ["int8", "fp8"],
         "allow_fallbacks": True,
     }
+
+
+def test_production_reviewer_uses_mimo_via_openrouter_with_low_effort() -> None:
+    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
+    profile = next(
+        profile
+        for profile in registry["profiles"]
+        if profile["id"] == "openrouter-mimo-reviewer-prod"
+    )
+
+    assert profile["model"] == "xiaomi/mimo-v2.5"
+    assert profile["model_reasoning_effort"] == "low"
+    assert profile["api_base_url"] == "https://openrouter.ai/api/v1"
+    assert profile["credential_reference"] == "env:VUZOL_OPENROUTER_REVIEWER_API_KEY"
+    assert profile["credential_required"] is True
+    assert profile["launch_mode"] == "api"
+    assert profile["roles"] == ["reviewer"]
+    assert profile["output_limit"] == 8_000
+    assert profile["sandbox_required"] is False
+    assert profile["enabled"] is True
 
 
 def test_nvidia_glm_worker_profile_is_prepared_but_not_routable_without_agent_transport() -> None:

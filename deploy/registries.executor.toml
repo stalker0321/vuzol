@@ -84,13 +84,43 @@ concurrency_limit = 10
 context_limit = 1048576
 output_limit = 8000
 cost_class = "cheap"
-roles = ["planner", "reviewer"]
+roles = ["planner"]
 routing_priority = 50
 supported_task_types = ["architecture", "coding", "research", "infrastructure", "file_processing", "general"]
 fallback_profile_ids = []
 sandbox_required = false
 input_cost_units_per_million = 0.08
 output_cost_units_per_million = 0.18
+minimum_unknown_usage_cost = 0.001
+enabled = true
+
+[profiles.provider_routing]
+sort = { by = "price", partition = "none" }
+preferred_min_throughput = { p90 = 70 }
+quantizations = ["int8", "fp8"]
+allow_fallbacks = true
+
+[[profiles]]
+id = "openrouter-mimo-reviewer-prod"
+provider = "openai-compatible"
+model = "xiaomi/mimo-v2.5"
+model_reasoning_effort = "low"
+api_base_url = "https://openrouter.ai/api/v1"
+launch_mode = "api"
+credential_reference = "env:VUZOL_OPENROUTER_REVIEWER_API_KEY"
+credential_required = true
+capabilities = []
+concurrency_limit = 10
+context_limit = 1000000
+output_limit = 8000
+cost_class = "cheap"
+roles = ["reviewer"]
+routing_priority = 50
+supported_task_types = ["architecture", "coding", "research", "infrastructure", "file_processing", "general"]
+fallback_profile_ids = []
+sandbox_required = false
+input_cost_units_per_million = 0.14
+output_cost_units_per_million = 0.28
 minimum_unknown_usage_cost = 0.001
 enabled = true
 

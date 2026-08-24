@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 
 from ._test_providers_helpers import (
     CancellationContext,
@@ -408,7 +409,9 @@ async def test_openai_adapter_logs_bounded_structured_output_diagnostics(
                 provider_request(structured=True), profile("profile"), CancellationContext()
             )
 
-    record = next(item for item in caplog.records if item.name == "vuzol.providers.openai")
+    record = cast(
+        Any, next(item for item in caplog.records if item.name == "vuzol.providers.openai")
+    )
     assert record.event == "provider.structured_output_invalid"
     assert record.reason == "json_parse"
     assert record.finish_reason == "length"

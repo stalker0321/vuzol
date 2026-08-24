@@ -359,14 +359,14 @@ def test_profile_inheritance_resolves_base_and_overrides(tmp_path: Path) -> None
     path = _write_registry(
         tmp_path,
         _BASE_PROFILE
-        + '''
+        + """
 [[profiles]]
 id = "child"
 base_profile_id = "base"
 roles = ["reviewer"]
 output_limit = 6000
 enabled = true
-''',
+""",
     )
 
     document = load_document(path)
@@ -386,7 +386,7 @@ enabled = true
 def test_profile_inheritance_missing_base_fails_with_file_context(tmp_path: Path) -> None:
     path = _write_registry(
         tmp_path,
-        '''
+        """
 [[profiles]]
 id = "orphan"
 base_profile_id = "missing"
@@ -397,7 +397,7 @@ api_base_url = "https://provider.example/v1"
 concurrency_limit = 1
 cost_class = "cheap"
 supported_task_types = ["general"]
-''',
+""",
     )
 
     with pytest.raises(ConfigurationLoadError, match=r"orphan.*inherits unknown profile"):
@@ -407,7 +407,7 @@ supported_task_types = ["general"]
 def test_profile_inheritance_cycle_fails(tmp_path: Path) -> None:
     path = _write_registry(
         tmp_path,
-        '''
+        """
 [[profiles]]
 id = "a"
 base_profile_id = "b"
@@ -415,7 +415,7 @@ base_profile_id = "b"
 [[profiles]]
 id = "b"
 base_profile_id = "a"
-''',
+""",
     )
 
     with pytest.raises(ConfigurationLoadError, match="cycle"):
@@ -426,7 +426,7 @@ def test_duplicate_profile_id_fails(tmp_path: Path) -> None:
     path = _write_registry(
         tmp_path,
         _BASE_PROFILE
-        + '''
+        + """
 [[profiles]]
 id = "base"
 provider = "openai-compatible"
@@ -436,7 +436,7 @@ concurrency_limit = 1
 cost_class = "cheap"
 capabilities = []
 supported_task_types = ["general"]
-''',
+""",
     )
 
     with pytest.raises(ConfigurationLoadError, match="duplicate profile id 'base'"):

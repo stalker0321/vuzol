@@ -57,7 +57,7 @@ dependency-audit:
 secret-scan:
 	@command -v gitleaks >/dev/null 2>&1 || (echo "gitleaks is required" >&2; exit 2)
 	gitleaks git --no-banner --redact --log-opts="--all"
-	$(UV) run detect-secrets-hook $$(git ls-files -co --exclude-standard)
+	$(UV) run detect-secrets-hook --baseline .secrets.baseline $$(git ls-files -co --exclude-standard)
 
 security: dependency-audit secret-scan
 

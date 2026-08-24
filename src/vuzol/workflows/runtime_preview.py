@@ -37,7 +37,10 @@ from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 _PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _GITDIR_POINTER = re.compile(r"gitdir:\s*(.+?)\s*\Z", re.DOTALL)
-_SUPPORTED_EXECUTABLES = {"node": "/usr/bin/node"}
+# Values are binary names resolved against the worker PATH, mirroring the
+# capability preflight; hard-coded absolute paths break on hosts where the
+# runtime lives elsewhere (managed toolchains, CI runners).
+_SUPPORTED_EXECUTABLES = {"node": "node"}
 
 
 class PreviewMaterializationError(RuntimeError):
@@ -267,7 +270,8 @@ class RuntimePreviewHandler:
             )
         ):
             return _needs_setup("web runtime command is missing or invalid")
-        executable = _SUPPORTED_EXECUTABLES.get(command[0])
+        executable_name = _SUPPORTED_EXECUTABLES.get(command[0])
+        executable = shutil.which(executable_name) if executable_name is not None else None
         if executable is None or not Path(executable).is_file():  # noqa: ASYNC240
             return _needs_setup(f"runtime adapter is unavailable for {command[0]}")
         commit = worktree.result_commit

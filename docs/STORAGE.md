@@ -25,7 +25,7 @@ The committed credentials are local-development defaults only. Production suppli
 
 ## Schema
 
-The initial foundation and subsequent migrations currently expose 22 application tables:
+The initial foundation and subsequent migrations currently expose 42 application tables:
 
 - canonical workflow: `tasks`, `runs`, `steps`, `events`;
 - delivery: `external_inbox`, `transactional_outbox`, `topic_mappings`, `telegram_message_links`;
@@ -34,9 +34,19 @@ The initial foundation and subsequent migrations currently expose 22 application
   `validation_results`, `routing_decisions`, `profile_health_observations`,
   `configuration_revisions`, `provider_profiles`;
 - execution resources: `worktrees`, `supervised_processes`.
-- project lifecycle: `project_provisioning`.
+- project lifecycle: `project_provisioning`;
+- intake/control: `telegram_intake_messages`, `telegram_control_actions`,
+  `topic_task_counters`;
+- project collaboration: `project_discussion_sessions`, `conversation_turns`,
+  `conversation_summaries`, `accepted_decisions`;
+- planning/packaging: `work_packages`, `plan_revisions`, `plan_revision_items`,
+  `work_item_drafts`, `materialization_links`, `edit_sessions`,
+  `work_package_open_details`;
+- platform/configuration: `secret_ingress_requests`, `subscription_limit_snapshots`,
+  `project_dependency_sources`, `project_environment_revisions`,
+  `project_naming_requests`, `project_executor_preferences`.
 
-Stable searchable concepts are columns; provider-neutral envelopes use JSONB. All timestamps are timezone-aware. Telegram IDs use signed `BIGINT`. All 27 foreign keys use `RESTRICT`; deleting a Telegram projection cannot cascade into canonical state.
+Stable searchable concepts are columns; provider-neutral envelopes use JSONB. All timestamps are timezone-aware. Telegram IDs use signed `BIGINT`. All foreign keys (63 single-column plus 11 composite constraints) use `RESTRICT`; deleting a Telegram projection cannot cascade into canonical state.
 
 ## Transactions
 

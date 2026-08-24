@@ -5,7 +5,9 @@ Vuzol separates process settings, non-secret registries, and secret values.
 ## Format
 
 Process settings use `VUZOL_` environment variables with `__` for nested fields. Static project,
-provider-profile, and Telegram-topic registries use TOML. TOML was selected because Python 3.12
+provider-profile, and Telegram-topic registries are authored in TOML by convention (the loader
+selects TOML or JSON purely by file suffix, which is also how the JSON overlay fragment is read).
+TOML was selected because Python 3.12
 parses it without a runtime dependency, it supports typed tables and arrays, and application modules
 never need to parse it directly.
 
@@ -23,9 +25,12 @@ Set `VUZOL_REGISTRY_FILE` to enable a registry document. Before app or worker st
 - unique CLI runtime identities and non-overlapping absolute state directories;
 - topic-to-project mappings;
 - network destination policy;
-- required scoped secret references.
+- the scoped secret-access policy, including presence of the configured database DSN and
+  Telegram bot-token references.
 
-Invalid configuration stops the process before it starts accepting work.
+Per-profile provider credentials are resolved lazily on first provider use rather than at startup;
+a missing profile credential surfaces when a provider call resolves it. Invalid configuration stops
+the process before it starts accepting work.
 
 Capability provisioning uses three mutually separate absolute roots: the root-readable staged
 bundle directory, managed toolchain storage, and the content-addressed download cache. Dependency

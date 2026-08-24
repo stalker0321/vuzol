@@ -221,10 +221,10 @@ async def test_openai_adapter_sends_profile_reasoning_effort_without_budget() ->
 
 
 @pytest.mark.anyio
-async def test_openai_adapter_combines_reasoning_effort_with_budget() -> None:
+async def test_openai_adapter_effort_replaces_request_reasoning_budget() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        assert payload["reasoning"] == {"enabled": True, "max_tokens": 2_000, "effort": "low"}
+        assert payload["reasoning"] == {"enabled": True, "effort": "low"}
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},

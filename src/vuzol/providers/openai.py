@@ -373,29 +373,25 @@ def _reasoning_parameter(
 
     ``reasoning_enabled=False`` wins over any budget: providers that cannot cap
     thinking (DeepSeek family) still honor an explicit disable. ``effort`` maps
-    the profile's ``model_reasoning_effort`` onto OpenRouter's bounded enum.
-    Budget and effort are hints only — they are ignored by some upstreams, so
-    output_limit carries the real bound.
+    the profile's ``model_reasoning_effort`` onto OpenRouter's bounded enum and
+    is mutually exclusive with a token budget upstream, so it replaces any
+    budget hint.
     """
 
     if profile.reasoning_enabled is False:
         return {"enabled": False}
+    if profile.model_reasoning_effort is not None:
+        return {"enabled": True, "effort": profile.model_reasoning_effort}
     budget = (
         request.reasoning_max_tokens
         if request.reasoning_max_tokens is not None
         else profile.max_reasoning_tokens
     )
-    if (
-        budget is None
-        and profile.model_reasoning_effort is None
-        and profile.reasoning_enabled is not True
-    ):
+    if budget is None and profile.reasoning_enabled is not True:
         return None
     parameter: dict[str, Any] = {"enabled": True}
     if budget is not None:
         parameter["max_tokens"] = budget
-    if profile.model_reasoning_effort is not None:
-        parameter["effort"] = profile.model_reasoning_effort
     return parameter
 
 

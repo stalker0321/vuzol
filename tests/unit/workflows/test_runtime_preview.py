@@ -150,6 +150,22 @@ def _allow_confinement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(landlock, "landlock_abi_version", lambda: 8)
 
 
+def _allow_node_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Make the preview runtime host-independent: CI runners ship no Node."""
+
+    import vuzol.workflows.runtime_preview as runtime_module
+
+    fake = tmp_path / "node"
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setattr(runtime_module, "_SUPPORTED_EXECUTABLES", {"node": str(fake)})
+    monkeypatch.setattr(
+        runtime_module,
+        "preflight_capabilities",
+        lambda _contract, managed_toolchain_root=None: (),
+    )
+
+
 def _prepare_git_pointer(tmp_path: Path) -> None:
     common = tmp_path / "repositories" / "demo" / ".git" / "worktrees" / "abc"
     common.mkdir(parents=True)
@@ -193,6 +209,7 @@ async def test_runtime_preview_publishes_healthy_service(
         AsyncMock(return_value={"status_code": 200, "path": "/ready"}),
     )
     _allow_confinement(monkeypatch)
+    _allow_node_runtime(monkeypatch, tmp_path)
     _prepare_git_pointer(tmp_path)
     archive = _mock_materialization(monkeypatch, {"server.js": b"console.log(1);"})
     spawn = _mock_healthy_spawn(monkeypatch)
@@ -217,7 +234,7 @@ async def test_runtime_preview_publishes_healthy_service(
     spec = json.loads(argv[2])
     assert spec["read_write"] == [str(target.runtime_dir)]
     assert argv[3] == "--"
-    assert argv[4] == "/usr/bin/node"
+    assert argv[4] == str(tmp_path / "node")
     kwargs = spawn.await_args.kwargs
     assert kwargs["env"]["HOST"] == "127.0.0.1"
     assert kwargs["env"]["PORT"] == "43210"
@@ -317,6 +334,7 @@ async def test_runtime_preview_rejects_invalid_runtime_contracts(
         "current_environment",
         AsyncMock(return_value=_environment(command=command, capabilities={})),
     )
+    _allow_node_runtime(monkeypatch, tmp_path)
 
     outcome = await handler.execute(_request(), CancellationContext())
 
@@ -339,6 +357,7 @@ async def test_runtime_preview_fails_closed_without_landlock(
         runtime_module, "current_environment", AsyncMock(return_value=_environment())
     )
     monkeypatch.setattr(landlock, "landlock_abi_version", lambda: 0)
+    _allow_node_runtime(monkeypatch, tmp_path)
     archive = _mock_materialization(monkeypatch)
     spawn = _mock_healthy_spawn(monkeypatch)
 

@@ -5,6 +5,38 @@ deferred. Completed work belongs in `CHANGELOG.md`.
 
 ## Next after Telegram dogfood testing
 
+### URGENT — Work-item discussion never mutates the plan
+
+**Priority:** immediate fix; this blocks the entire dogfood loop for
+iterating on a running work item.
+
+Observed live on task `4190012` (three-body-problem, 2026-08-24): the user
+requested a scope simplification inside the work-item discussion («сделай
+панель просто…», «го», «да, делай»). The discussion interpreter classified
+every message as non-mutating (`should_mutate_plan=false`) or refused control
+(`control_requires_button`), while the assistant replied conversationally as
+if the change were accepted ("Ок — упрощаем панель"). Result: no edit session,
+no plan revision, no confirmation card — the user waits for an approval that
+can never arrive, and retry keeps reviewing the stale scope.
+
+Required behavior:
+
+1. An explicit scope change in a work-item discussion must produce an
+   authoritative artifact — an edit session and a revised plan (or revised
+   item) with an approval card carrying buttons. Textual agreement by the
+   assistant without a following card is a contract violation.
+2. The interpretation prompt/policy must stop classifying concrete scope
+   changes as ordinary discussion turns.
+3. The assistant must never claim acceptance ("ок, делаем") for something the
+   policy will refuse two turns later.
+
+Open design question (from the operator): the «Изменить» button lives under
+the *task* status card, not under the plan, yet today the only mutation path
+is a whole-plan revision. Maybe the confirmation should come back as an
+updated *task/item-level* card (revised goal, scope, completion criteria)
+instead of re-approving the entire plan. Decide granularity before
+implementing: per-item revision cards vs full-plan revision cards.
+
 ### TODO — Revisit planner architecture
 
 The current coding planner runs before repository context is prepared, so it

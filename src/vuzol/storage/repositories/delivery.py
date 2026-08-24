@@ -16,7 +16,12 @@ from vuzol.storage.models import (
     TopicMapping,
     TransactionalOutbox,
 )
-from vuzol.storage.types import ControlActionStatus, DeliveryStatus, InboxStatus
+from vuzol.storage.types import (
+    ControlActionStatus,
+    DeliveryStatus,
+    InboxStatus,
+    IntakeStatus,
+)
 
 
 class InboxRepository:
@@ -203,6 +208,13 @@ class TelegramIntakeRepository:
         self._session.add(message)
         await self._session.flush()
         return message.id
+
+    async def set_status(self, intake_id: uuid.UUID, status: IntakeStatus) -> None:
+        await self._session.execute(
+            update(TelegramIntakeMessage)
+            .where(TelegramIntakeMessage.id == intake_id)
+            .values(status=status)
+        )
 
 
 class TelegramControlActionRepository:

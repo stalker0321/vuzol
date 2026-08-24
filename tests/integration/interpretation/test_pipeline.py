@@ -173,6 +173,8 @@ def test_text_interpretation_persists_draft_and_original_input(
             assert task is not None and task.original_text == "inspect this project"
             assert task.status is TaskStatus.INTERPRETED
             assert task.task_draft["normalized_title"] == "Inspect project"
+            intake = await session.scalar(select(TelegramIntakeMessage))
+            assert intake is not None and intake.status is IntakeStatus.COMPLETED
             assert interpretation is not None and interpretation.transcript is None
             assert len(interpretation.original_input_hash) == 64
             assert trace is not None
@@ -245,6 +247,10 @@ def test_discussion_runtime_hands_user_turn_to_hidden_project_agent(
             assert len(tasks) == 1
             assert tasks[0].task_type == "discussion_agent_internal"
             assert tasks[0].topic_task_number is None
+            discussion_intake = await session.scalar(select(TelegramIntakeMessage))
+            assert (
+                discussion_intake is not None and discussion_intake.status is IntakeStatus.COMPLETED
+            )
             dashboard = await build_project_status_dashboard(session, -100)
             assert "Сейчас нет активных задач." in dashboard.html
             steps = (
@@ -877,10 +883,19 @@ def test_clarification_answer_is_persisted_before_reinterpretation(
         async with factory() as session:
             decision = await session.scalar(select(ClarificationDecision))
             task = await session.get(Task, first.task_id)
+            intakes = (
+                await session.scalars(
+                    select(TelegramIntakeMessage).order_by(TelegramIntakeMessage.created_at)
+                )
+            ).all()
             assert decision is not None
             assert decision.question == "Which environment should be inspected?"
             assert decision.answer == "Use the staging environment"
             assert task is not None and task.status is TaskStatus.INTERPRETED
+            assert [intake.status for intake in intakes] == [
+                IntakeStatus.NEEDS_CLARIFICATION,
+                IntakeStatus.COMPLETED,
+            ]
         await engine.dispose()
 
     asyncio.run(scenario())

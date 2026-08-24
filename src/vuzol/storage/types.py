@@ -169,6 +169,7 @@ class IntakeStatus(StrEnum):
     RECEIVED = "received"
     AWAITING_INTERPRETATION = "awaiting_interpretation"
     NEEDS_CLARIFICATION = "needs_clarification"
+    COMPLETED = "completed"
     REJECTED = "rejected"
 
 

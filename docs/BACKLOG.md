@@ -5,6 +5,16 @@ deferred. Completed work belongs in `CHANGELOG.md`.
 
 ## Next after Telegram dogfood testing
 
+### URGENT — Task failures are silent in-place message edits
+
+When a task fails or blocks, the existing status card is edited in place far
+up the topic history. Nothing new appears, nothing is pinned, nothing
+notifies — the operator has no signal that work stopped and waits for them.
+Design a proper failure notification surface (fresh terminal card in the
+topic, a mention/ping, or a digest in the system topic) without turning every
+transient retry into noise. Decide the trigger policy: which terminal states
+notify, and whether repeated identical outcomes collapse into one update.
+
 ### URGENT — Work-item discussion never mutates the plan
 
 **Priority:** immediate fix; this blocks the entire dogfood loop for

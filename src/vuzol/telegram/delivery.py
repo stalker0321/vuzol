@@ -466,6 +466,7 @@ async def _prepare_work_package_projection(
     package_id = item.linked_entity_id
     role = {
         "render_plan": WORK_PACKAGE_PLAN_ROLE,
+        "repost_plan": WORK_PACKAGE_PLAN_ROLE,
         "clear_plan": WORK_PACKAGE_PLAN_ROLE,
         "render_status": WORK_PACKAGE_STATUS_ROLE,
         "render_action": WORK_PACKAGE_ACTION_ROLE,
@@ -475,6 +476,34 @@ async def _prepare_work_package_projection(
     }.get(item.operation_type)
     if role is None:
         raise PermanentDeliveryError("invalid_work_package_projection_operation")
+    if item.operation_type == "repost_plan":
+        # A finished package must be visible where the user is looking, not in
+        # an edited card far up the topic history. Send a fresh plan card and
+        # retire stale plan links so later renders converge on this message.
+        try:
+            card = await build_work_package_plan_card(session, package_id)
+        except WorkPackageProjectionError as error:
+            raise PermanentDeliveryError(str(error)) from error
+        stale_links = await session.scalars(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.work_package_id == package_id,
+                TelegramMessageLink.message_role == WORK_PACKAGE_PLAN_ROLE,
+            )
+        )
+        for stale_link in stale_links:
+            await session.delete(stale_link)
+        return PreparedDelivery(
+            DeliveryAction.SEND_STATUS,
+            chat_id=card.chat_id,
+            thread_id=card.thread_id,
+            html=card.html,
+            revision=card.status_generation,
+            message_role=WORK_PACKAGE_PLAN_ROLE,
+            callback_buttons=card.callback_buttons,
+            work_package_id=card.package_id,
+            plan_revision_id=card.revision_id,
+            control_status_generation=card.status_generation,
+        )
     link = None
     if role != WORK_PACKAGE_STATUS_ROLE:
         if role == WORK_PACKAGE_ACTION_ROLE:

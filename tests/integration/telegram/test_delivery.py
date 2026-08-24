@@ -1920,3 +1920,61 @@ def test_send_without_confirmed_message_id_marks_ambiguous(postgres_dsn: str) ->
         await engine.dispose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_repost_plan_sends_fresh_card_and_retires_stale_links(postgres_dsn: str) -> None:
+    from tests.integration.telegram.test_projections import _materialize_plan_item
+    from vuzol.telegram.work_package_projections import WORK_PACKAGE_PLAN_ROLE
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        _, package_id = await _materialize_plan_item(factory, ordinal=2)
+        async with factory() as session:
+            session.add(
+                TelegramMessageLink(
+                    chat_id=-100,
+                    message_thread_id=92,
+                    message_id=111,
+                    work_package_id=package_id,
+                    message_role=WORK_PACKAGE_PLAN_ROLE,
+                )
+            )
+            session.add(
+                TelegramMessageLink(
+                    chat_id=-100,
+                    message_thread_id=92,
+                    message_id=222,
+                    work_package_id=package_id,
+                    message_role=WORK_PACKAGE_PLAN_ROLE,
+                )
+            )
+
+        async with factory() as session:
+            prepared = await prepare_delivery(
+                session,
+                _outbox(
+                    destination=WORK_PACKAGE_PROJECTION_DESTINATION,
+                    operation_type="repost_plan",
+                    linked_entity_type="work_package",
+                    linked_entity_id=package_id,
+                ),
+            )
+
+        assert prepared.action is DeliveryAction.SEND_STATUS
+        assert prepared.message_id is None
+        assert prepared.message_role == WORK_PACKAGE_PLAN_ROLE
+        assert prepared.work_package_id == package_id
+        assert prepared.revision is not None
+
+        async with factory() as session:
+            remaining = await session.scalars(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.work_package_id == package_id,
+                    TelegramMessageLink.message_role == WORK_PACKAGE_PLAN_ROLE,
+                )
+            )
+            assert remaining.all() == []
+        await engine.dispose()
+
+    asyncio.run(scenario())

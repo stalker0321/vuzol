@@ -74,12 +74,14 @@ from vuzol.storage.models import (
     WorkPackage,
 )
 from vuzol.storage.records import OutboxLeaseToken
+from vuzol.storage.repositories import TelegramIntakeRepository
 from vuzol.storage.types import (
     USER_TERMINAL_TASK_STATUSES,
     ConversationTurnRole,
     ConversationTurnSource,
     DeliveryStatus,
     EditSessionStatus,
+    IntakeStatus,
     InteractionMode,
     ProjectNamingStatus,
     TaskStatus,
@@ -424,6 +426,9 @@ class InterpretationPipeline:
                     classifier_confidence=result.confidence,
                     memory_pack=fresh_memory,
                 )
+                await TelegramIntakeRepository(uow.session).set_status(
+                    intake.id, IntakeStatus.COMPLETED
+                )
                 await complete_outbox_item(uow.session, token)
                 return
             if (
@@ -441,6 +446,9 @@ class InterpretationPipeline:
                 except DomainError as error:
                     raise PermanentPipelineError(f"discussion_plan_{error}") from error
                 assert uow.session is not None
+                await TelegramIntakeRepository(uow.session).set_status(
+                    intake.id, IntakeStatus.COMPLETED
+                )
                 await complete_outbox_item(uow.session, token)
                 return
             assistant_turn_id, _ = await memory.append_turn(
@@ -470,6 +478,9 @@ class InterpretationPipeline:
                 },
             )
             assert uow.session is not None
+            await TelegramIntakeRepository(uow.session).set_status(
+                intake.id, IntakeStatus.COMPLETED
+            )
             await complete_outbox_item(uow.session, token)
 
     async def _process_attachment(self, token: OutboxLeaseToken) -> None:
@@ -644,6 +655,12 @@ class InterpretationPipeline:
                         payload={"task_id": str(task.id)},
                     )
                 )
+            await TelegramIntakeRepository(session).set_status(
+                intake.id,
+                IntakeStatus.NEEDS_CLARIFICATION
+                if policy.draft.needs_clarification
+                else IntakeStatus.COMPLETED,
+            )
             await complete_outbox_item(session, token)
 
     async def _process_project_name_regeneration(self, token: OutboxLeaseToken) -> None:

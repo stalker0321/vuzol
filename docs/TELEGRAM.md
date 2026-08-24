@@ -14,9 +14,9 @@ Allowed chat and user IDs are checked before message content is persisted or int
 ## Processes and delivery
 
 `vuzol-telegram` owns long-polling ingress. `vuzol-telegram-delivery` is a separate long-running
-consumer that owns only outbox rows whose destination is `telegram`; it never claims
-`workflow_control`, `telegram_file`, or future provider destinations. Attachment download remains
-deferred to Step 05.
+consumer that owns only outbox rows whose destination is `telegram` or `work_package_projection`;
+it never claims `workflow_control`, `telegram_file`, or future provider destinations. Attachment
+download remains deferred to Step 05.
 
 Delivery claims use PostgreSQL `SKIP LOCKED`, lease owner, expiry, and a monotonically increasing
 fencing generation. A crashed worker's expired item can be reclaimed, while stale generations
@@ -35,9 +35,9 @@ Updates are keyed by bot identity and update ID in `external_inbox`. Inbox recei
 creation, message links, and acknowledgement outbox records share one database transaction.
 Topic scope is resolved from stable chat and thread IDs, never a display name.
 
-Task affinity is resolved from a reply-linked task first, then exactly one active task in the
-topic. Multiple active tasks produce a persisted clarification state. Step 05 will handle semantic
-interpretation and explicit references.
+Task affinity is resolved from a reply-linked task first, then from exactly one `awaiting_user`
+task in the topic awaiting a clarification answer; otherwise a new task is created. Step 05 will
+handle semantic interpretation and explicit references.
 
 Attachment metadata is validated before download. Counts, declared sizes, media types, unsafe
 filenames, and archives are bounded or rejected. The Step 05 interpreter runtime owns durable
@@ -154,10 +154,16 @@ executor steps for the project until changed again. It is not a per-task overrid
 
 Choices:
 
-- **Routing (auto)** — restore deterministic capability/health/budget routing (default);
+- **Routing (auto)** — restore deterministic capability/health/budget routing across all enabled
+  executor accounts (default);
 - **Sol / Terra / Luna** — pin the Codex CLI executor and select the product model variant, then
   choose reasoning effort (`low` / `medium` / `high` / `xhigh`);
-- **Grok** — pin the first healthy Grok CLI executor profile (same-family fallbacks only).
+- **Grok** — pin a Grok CLI executor profile;
+- **Kimi K3 Free** — pin a Kimi CLI executor profile.
+
+The picker opens with an account stage: users first choose among the enabled CLI executor accounts
+(OpenAI / xAI / TokenRouter per connection label) and then the product model. Pinning an explicit
+account disables same-family fallbacks; only auto routing falls back within the family.
 
 Pinned selection applies only to coding/agent CLI steps (`execute_code` / `execute_agent`). It uses
 the router's trusted-profile path and stores model/effort overrides on the claimed step payload so
@@ -208,23 +214,24 @@ unsuccessful terminal outcomes are appended once to `История`; history ke
 separate from either the result or failure reason. Successful reports retain one factual outcome
 and at most six implementation bullets; provider hand-off sections such as plans, file lists, run
 instructions, and suggested next steps are omitted. Project cards and history identify the actual
-execution worker model from `execute_code` / `execute_agent` rather than a planner or reviewer.
+execution worker model from worker steps (`execute_model`, `execute_code`, `execute_agent`,
+`research_execute`, `synthesize`) rather than a planner or reviewer.
 
 Control buttons use Russian labels while keeping stable callback action tokens. The exact rendered
 matrix is:
 
 | Persisted state / projection condition | Labels shown | Callback actions | Target |
 |---|---|---|---|
-| Pending exact-result approval (takes precedence over task controls) | `Принять`, `Переделать`, `Отклонить` | `approve`, `redo`, `reject` | approval ID |
+| Pending exact-result approval (takes precedence over task controls); capability/dependency provisioning approvals show only `Принять` / `Отклонить` | `Принять`, `Переделать`, `Отклонить` | `approve`, `redo`, `reject` | approval ID |
 | Run is `created` and no pending result approval exists | `Старт` | `start` | task ID |
 | Task is `received`, `context_prepared`, `planned`, `waiting_approval`, `executing`, `validating`, `reviewing`, or `retrying` | `Пауза`, `Отмена` | `pause`, `cancel` | task ID |
 | Task is `paused` | `Продолжить`, `Отмена` | `resume`, `cancel` | task ID |
-| Task is `interpreted`, `awaiting_user`, `quota_exhausted`, or terminal (`blocked`, `failed`, `cancelled`, `rolled_back`, `completed`) | no buttons | — | — |
+| Task is `interpreted`, `awaiting_user`, `quota_exhausted`, or terminal (`blocked`, `failed`, `cancelled`, `rolled_back`, `completed`) | no buttons; work-package items additionally render `Повторить` and `Изменить` on the status card for failed/blocked/quota-exhausted plans | — | — |
 | Approval is no longer pending | no buttons; persisted decision is shown | — | — |
 
-Vuzol does **not** render a `Retry` button on status or approval cards. The stable `retry` callback
-token remains accepted for bounded control/recovery paths, but it is not generated by the normal
-Telegram UI. A `retrying` task therefore shows `Пауза` and `Отмена`, not `Retry`.
+The stable legacy `retry` callback token is not generated by the normal Telegram UI, but work-package
+item cards do render fenced item-level `Повторить` (retry) and `Изменить` buttons. A `retrying` task
+therefore shows `Пауза` and `Отмена`.
 
 Approve, Redo, and Reject callbacks target the persisted approval ID, not a mutable task label. The
 canonical approval envelope binds the target head, base and result commits, diff hash, gate
@@ -275,8 +282,9 @@ configuration, run `docker compose --profile telegram up`.
 3. Send a task containing `<`, `>`, and `&`; confirm one escaped status card appears in the topic.
 4. Restart delivery and confirm the delivered acknowledgement is not duplicated.
 5. Continue the task and confirm its existing status card is edited rather than duplicated.
-6. Create multiple active tasks, send an ambiguous continuation, and confirm the clarification
-   lists candidates without associating the message with either task.
+6. Create two active tasks where exactly one is `awaiting_user`, send a plain continuation, and
+   confirm it lands on that task as a clarification answer; a standalone message with no
+   `awaiting_user` task creates a new task.
 7. Temporarily break network access, restore it, and confirm bounded retry. Simulate an unknown
    send outcome only in a controlled environment and confirm the row remains `ambiguous` without
    automatic resend.

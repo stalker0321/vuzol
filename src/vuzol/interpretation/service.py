@@ -11,7 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, RuntimeConfiguration, TopicKind
-from vuzol.discussion.agent import DISCUSSION_INTERNAL_TASK_TYPE, schedule_discussion_agent
+from vuzol.discussion.agent import (
+    DISCUSSION_INTERNAL_TASK_TYPE,
+    schedule_discussion_agent,
+    unwrap_agent_reply,
+)
 from vuzol.discussion.application import apply_plan_request_in_uow
 from vuzol.discussion.domain import DomainError
 from vuzol.discussion.memory_service import DiscussionMemoryService
@@ -955,9 +959,10 @@ def _required_uuid(payload: dict[str, object], key: str) -> uuid.UUID:
 
 
 def _discussion_reply_text(result: DiscussionInterpretation) -> str:
+    summary = unwrap_agent_reply(result.user_visible_summary)
     if not result.clarification_question:
-        return result.user_visible_summary
-    return f"{result.user_visible_summary}\n\n{result.clarification_question}"
+        return summary
+    return f"{summary}\n\n{unwrap_agent_reply(result.clarification_question)}"
 
 
 async def _enqueue_interpretation(

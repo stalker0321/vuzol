@@ -1,0 +1,11 @@
+# Gitleaks runs with default rules plus this allowlist. The detect-secrets
+# baseline necessarily contains hashed copies of known, audited findings.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Audited detect-secrets baseline and pinned toolchain checksums"
+paths = [
+    '''^\.secrets\.baseline$''',
+    '''^src/vuzol/projects/source_catalog\.v1\.json$''',
+]

@@ -200,7 +200,7 @@ def test_task_status_button_matrix_is_exhaustive_and_has_no_retry_ui() -> None:
 
 def test_task_sense_sentence_cuts_at_first_separator_and_bounds_length() -> None:
     def sense(draft: object, original: str = "") -> str:
-        return task_sense_sentence(SimpleNamespace(task_draft=draft, original_text=original))
+        return task_sense_sentence(SimpleNamespace(task_draft=draft, original_text=original))  # type: ignore[arg-type]
 
     assert sense({"task_summary": "Add retries. Then backoff!"}) == "Add retries"
     assert sense({"normalized_title": "Stop! Hammer time"}) == "Stop"
@@ -219,7 +219,9 @@ def test_task_sense_sentence_cuts_at_first_separator_and_bounds_length() -> None
 def test_numberless_tasks_show_stable_short_identity_code() -> None:
     task_id = uuid.uuid4()
     footer = _task_identity_footer(
-        SimpleNamespace(public_task_number=None, topic_task_number=None, id=task_id)
+        SimpleNamespace(  # type: ignore[arg-type]
+            public_task_number=None, topic_task_number=None, id=task_id
+        )
     )
     assert footer == f"<i>код ·{task_id.hex[-8:]}</i>"
 

@@ -296,6 +296,7 @@ async def _materialize_plan_item(
             created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
             actor_type="planner_model",
         )
+        assert uow.session is not None
         task = await uow.tasks.create(
             user_id=42,
             chat_id=-100,
@@ -380,7 +381,8 @@ def test_terminal_history_report_shows_worker_preview_and_token_totals(postgres_
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         async with UnitOfWork(factory) as uow:
-            uow.session.add(  # type: ignore[union-attr]
+            assert uow.session is not None
+            uow.session.add(
                 TopicMapping(
                     chat_id=-100,
                     message_thread_id=40,
@@ -429,7 +431,7 @@ def test_terminal_history_report_shows_worker_preview_and_token_totals(postgres_
                 "status": "published",
                 "public_url": "https://preview.vuzol.local/docs",
             }
-            uow.session.add(  # type: ignore[union-attr]
+            uow.session.add(
                 UsageRecord(
                     provider="codex",
                     profile_id="codex-subscription-prod",
@@ -470,7 +472,8 @@ def test_history_report_guards_on_status_and_expected_status(postgres_dsn: str) 
         engine, factory = storage(postgres_dsn)
         completed_id = uuid.uuid4()
         async with UnitOfWork(factory) as uow:
-            uow.session.add(  # type: ignore[union-attr]
+            assert uow.session is not None
+            uow.session.add(
                 TopicMapping(
                     chat_id=-100,
                     message_thread_id=40,
@@ -517,7 +520,8 @@ def test_enqueue_history_report_is_idempotent_per_outcome(postgres_dsn: str) -> 
         engine, factory = storage(postgres_dsn)
         task_id = uuid.uuid4()
         async with UnitOfWork(factory) as uow:
-            uow.session.add(  # type: ignore[union-attr]
+            assert uow.session is not None
+            uow.session.add(
                 TopicMapping(
                     chat_id=-100,
                     message_thread_id=40,
@@ -579,7 +583,8 @@ def test_threadless_task_refresh_updates_only_global_dashboard(postgres_dsn: str
         engine, factory = storage(postgres_dsn)
         task_id = uuid.uuid4()
         async with UnitOfWork(factory) as uow:
-            uow.session.add(  # type: ignore[union-attr]
+            assert uow.session is not None
+            uow.session.add(
                 TopicMapping(
                     chat_id=-100,
                     message_thread_id=30,
@@ -667,7 +672,8 @@ def test_terminal_projections_sequence_work_package_observation_once(postgres_ds
         linked_id, package_id = await _materialize_plan_item(factory, ordinal=1)
         plain_id = uuid.uuid4()
         async with UnitOfWork(factory) as uow:
-            uow.session.add(  # type: ignore[union-attr]
+            assert uow.session is not None
+            uow.session.add(
                 TopicMapping(
                     chat_id=-100,
                     message_thread_id=40,
@@ -717,12 +723,13 @@ def test_approval_cards_render_pending_question_then_final_decision(postgres_dsn
         engine, factory = storage(postgres_dsn)
         task_id = uuid.uuid4()
         now = datetime.now(UTC)
-        envelope = {
+        envelope: dict[str, object] = {
             "step_id": None,
             "changed_files": ["src/auth.py", "src/auth_test.py"],
             "gates": [{"name": "tests", "duration_ms": 4200}, "junk-entry"],
         }
         async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
             task = await uow.tasks.create(
                 user_id=42,
                 chat_id=-100,
@@ -751,7 +758,7 @@ def test_approval_cards_render_pending_question_then_final_decision(postgres_dsn
             stored_step = await uow.session.get(Step, step.id)
             assert stored_step is not None
             stored_step.payload = {"action_envelope": envelope}
-            uow.session.add(  # type: ignore[union-attr]
+            uow.session.add(
                 Approval(
                     step_id=step.id,
                     action_envelope_hash=envelope_hash(envelope),
@@ -796,7 +803,8 @@ def test_dashboard_resolves_executors_pins_and_subscription_limits(postgres_dsn:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         async with UnitOfWork(factory) as uow:
-            uow.session.add(  # type: ignore[union-attr]
+            assert uow.session is not None
+            uow.session.add(
                 ProjectExecutorPreference(
                     project_id="vuzol",
                     mode="pin",
@@ -879,7 +887,7 @@ def test_dashboard_resolves_executors_pins_and_subscription_limits(postgres_dsn:
             stored_good = await uow.session.get(Step, good_step.id)
             assert stored_junk is not None and stored_good is not None
             stored_junk.executor_profile_id = "api"
-            stored_junk.result = "not-a-mapping"
+            stored_junk.result = "not-a-mapping"  # type: ignore[assignment]
             stored_good.executor_profile_id = "api"
             stored_good.result = {"model": "qwen3-max"}
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from vuzol.config import OpenRouterProviderRouting
 from vuzol.interpretation.discussion import DiscussionInterpretRequest
 
@@ -82,7 +84,7 @@ def test_openai_compatible_adapters_parse_provider_neutral_results() -> None:
     async def scenario() -> None:
         valid_draft = draft().model_dump(mode="json")
         system_prompts: list[str] = []
-        user_payloads: list[dict[str, object]] = []
+        user_payloads: list[dict[str, Any]] = []
 
         async def handler(provider_request: httpx.Request) -> httpx.Response:
             assert provider_request.headers["authorization"] == "Bearer test-key"

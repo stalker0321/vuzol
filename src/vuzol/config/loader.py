@@ -69,9 +69,7 @@ def _resolve_profile_inheritance(raw: object) -> object:
             return entry
         entry_id = entry.get("id")
         if not isinstance(base_id, str):
-            raise ConfigurationLoadError(
-                f"profile {entry_id!r} base_profile_id must be a string"
-            )
+            raise ConfigurationLoadError(f"profile {entry_id!r} base_profile_id must be a string")
         if base_id in chain:
             raise ConfigurationLoadError(
                 f"profile inheritance cycle: {' -> '.join((*chain, base_id))}"

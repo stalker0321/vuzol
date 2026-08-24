@@ -5,6 +5,18 @@ deferred. Completed work belongs in `CHANGELOG.md`.
 
 ## Next after Telegram dogfood testing
 
+### TODO — Discussion intake lifecycle is write-only
+
+`IntakeStatus` never advances past `awaiting_interpretation`: no code path
+writes any later state, so the interpreter backlog (73 rows as of 2026-08-24)
+is indistinguishable from real pending work at a glance. Related findings from
+the same review: three `discussion_classify` jobs are dead-lettered
+(`provider_unavailable` ×2, `discussion_context_mismatch` ×1), meaning real
+user messages were silently dropped after retry exhaustion. Needed: either
+record actual terminal intake states or stop pretending the field tracks
+progress, plus minimal operator tooling to inspect and re-drive dead-lettered
+classify jobs instead of querying `transactional_outbox` by hand.
+
 ### URGENT — Task failures are silent in-place message edits
 
 When a task fails or blocks, the existing status card is edited in place far

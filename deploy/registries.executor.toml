@@ -126,7 +126,7 @@ enabled = true
 
 [profiles.provider_routing]
 sort = { by = "price", partition = "none" }
-preferred_min_throughput = { p90 = 70 }
+preferred_min_throughput = { p90 = 50 }
 quantizations = ["int8", "fp8"]
 allow_fallbacks = true
 

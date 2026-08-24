@@ -90,7 +90,7 @@ class OpenAICompatibleAdapter:
                 timeout_seconds=request.timeout_seconds,
             )
             if response.status_code >= 400:
-                raise _http_failure(response)
+                raise _http_failure(response, profile=profile)
             body = response.json()
             choice = body["choices"][0]
             content = choice["message"]["content"]
@@ -405,7 +405,7 @@ def _uses_openai_strict_schema(profile: ProviderProfileConfig) -> bool:
     return "api.openai.com" in str(profile.api_base_url or "").lower()
 
 
-def _http_failure(response: httpx.Response) -> ProviderFailure:
+def _http_failure(response: httpx.Response, *, profile: ProviderProfileConfig) -> ProviderFailure:
     status = response.status_code
     retry_after = _retry_after(response.headers.get("retry-after"))
     if status in {401, 403}:
@@ -426,6 +426,23 @@ def _http_failure(response: httpx.Response) -> ProviderFailure:
     else:
         category = ProviderErrorCategory.PERMANENT_REQUEST
         retryable = False
+    # Bounded, secret-redacted diagnostics: raw bodies never enter task state,
+    # but an operator needs the failure shape to configure the profile.
+    _LOGGER.warning(
+        "Provider returned HTTP failure",
+        extra={
+            "event": "provider.http_failure",
+            "profile_id": profile.id,
+            "model": profile.model,
+            "status": status,
+            "category": category.value,
+            "provider_request_id": response.headers.get("x-request-id"),
+            "content_type": response.headers.get("content-type"),
+            "response_body_excerpt": _bounded_excerpt(
+                _redact_output(response.text), limit=_DIAGNOSTIC_EXCERPT_CHARS
+            ),
+        },
+    )
     return ProviderFailure(
         category,
         retryable=retryable,

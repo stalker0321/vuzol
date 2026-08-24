@@ -503,6 +503,15 @@ class WorkPackageSequencer:
         return revision
 
     async def _projection(self, package_id: uuid.UUID, generation: int, reason: str) -> None:
+        if reason == "completed":
+            await self._uow.outbox.enqueue(
+                destination="work_package_projection",
+                operation_type="repost_plan",
+                entity_type="work_package",
+                entity_id=package_id,
+                idempotency_key=f"wp:repost:{package_id}:{generation}:{reason}",
+                payload={"package_id": str(package_id)},
+            )
         await self._uow.outbox.enqueue(
             destination="work_package_projection",
             operation_type="render_status",

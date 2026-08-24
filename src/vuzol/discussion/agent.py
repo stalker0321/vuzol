@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from decimal import Decimal
 
@@ -32,7 +33,7 @@ from vuzol.workflows.service import materialize_run
 
 DISCUSSION_INTERNAL_TASK_TYPE = "discussion_agent_internal"
 DISCUSSION_AGENT_SCHEMA_VERSION = "discussion-agent-reply.v1"
-DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v1"
+DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v2"
 DISCUSSION_REPLY_MAX_CHARS = 4_000
 
 
@@ -42,6 +43,58 @@ class DiscussionAgentReply(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reply: str = Field(min_length=1, max_length=DISCUSSION_REPLY_MAX_CHARS)
+
+
+_REPLY_UNWRAP_DEPTH = 3
+
+
+def unwrap_agent_reply(reply: str) -> str:
+    """Extract the user-facing text from a contract-violating agent reply.
+
+    The runtime contract requires the final agent message to be exactly one
+    ``{"reply": "..."}`` object. Models occasionally violate it by prepending
+    prose, wrapping the object in code fences, or nesting a second envelope
+    inside the ``reply`` string. In those cases the innermost ``reply`` value
+    is the real answer and everything around it is throwaway scaffolding, so
+    peel it off. Anything that is not a strict trailing envelope is returned
+    unchanged.
+    """
+
+    candidate = reply.strip()
+    if candidate.startswith("```"):
+        first_newline = candidate.find("\n")
+        if first_newline != -1 and candidate.endswith("```"):
+            candidate = candidate[first_newline + 1 : -3].strip()
+    for _ in range(_REPLY_UNWRAP_DEPTH):
+        envelope = _trailing_reply_envelope(candidate)
+        if envelope is None:
+            return candidate
+        candidate = envelope.strip()
+    return candidate
+
+
+def _trailing_reply_envelope(text: str) -> str | None:
+    """Return the ``reply`` value when ``text`` ends with a strict envelope.
+
+    Models append the envelope after throwaway preamble, so the tightest match
+    is the rightmost ``{`` whose suffix parses as exactly one object carrying a
+    single non-empty string ``reply`` field.
+    """
+
+    for begin in reversed([index for index, character in enumerate(text) if character == "{"]):
+        block = text[begin:]
+        if not block.endswith("}"):
+            continue
+        try:
+            parsed = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict) or set(parsed) != {"reply"}:
+            continue
+        inner = parsed["reply"]
+        if isinstance(inner, str) and inner.strip():
+            return inner
+    return None
 
 
 async def schedule_discussion_agent(
@@ -209,7 +262,7 @@ class DeliverDiscussionReplyHandler:
                     category="discussion_reply_invalid",
                 )
             try:
-                reply = DiscussionAgentReply.model_validate(structured).reply
+                reply = unwrap_agent_reply(DiscussionAgentReply.model_validate(structured).reply)
                 session_id = uuid.UUID(str(task.task_draft["discussion_session_id"]))
                 source_turn_id = uuid.UUID(str(task.task_draft["source_turn_id"]))
                 mode = InteractionMode(str(task.task_draft["interaction_mode"]))
@@ -260,6 +313,11 @@ context, but file edits are forbidden. Reply in the user's language and keep it 
 Use lightweight Markdown suitable for Telegram: short bold headings, bullets, numbered lists,
 quotes, and code blocks when useful. Do not use Markdown tables; express comparisons as compact
 lists instead. Keep the complete final reply within {DISCUSSION_REPLY_MAX_CHARS} characters.
+
+Output contract (violations are discarded): your final message must be exactly one JSON object
+of the form {{"reply": "<your answer>"}} and nothing else. Never write prose before or after the
+object, never wrap it in code fences, and never embed another JSON object inside the reply string.
+The reply string itself is plain Markdown for the user.
 
 Accepted decisions:
 {decisions}

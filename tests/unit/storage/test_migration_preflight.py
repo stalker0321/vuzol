@@ -650,7 +650,7 @@ async def test_fetch_observed_success_filters_blank_rows() -> None:
         async def execute(self, _statement: object) -> object:
             return _Result()
 
-        async def __aenter__(self) -> "_Conn":
+        async def __aenter__(self) -> _Conn:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -670,7 +670,7 @@ async def test_fetch_observed_timeout_is_unreachable() -> None:
         async def execute(self, _statement: object) -> object:
             raise TimeoutError
 
-        async def __aenter__(self) -> "_Conn":
+        async def __aenter__(self) -> _Conn:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -691,7 +691,7 @@ async def test_fetch_observed_unexpected_error_is_unreachable() -> None:
         async def execute(self, _statement: object) -> object:
             raise ValueError("driver exploded")
 
-        async def __aenter__(self) -> "_Conn":
+        async def __aenter__(self) -> _Conn:
             return self
 
         async def __aexit__(self, *_args: object) -> None:

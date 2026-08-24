@@ -148,6 +148,9 @@ quota remains `unknown` when a provider does not expose authoritative data.
 Adapters normalize authentication, quota, rate-limit, timeout, unavailable, invalid-output,
 cancelled, context-size, unsupported-capability, permanent-request, and unknown failures. Raw
 provider response bodies and exceptions do not enter task state, events, Telegram, or logs.
+HTTP failures additionally emit a bounded `provider.http_failure` log event (status, category,
+request id, secret-redacted body excerpt) so a misbehaving endpoint can be diagnosed from the
+worker journal alone.
 
 ## Current execution boundary
 

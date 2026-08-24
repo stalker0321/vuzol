@@ -28,6 +28,7 @@ Run these cases in order after a staging/dogfood deployment. Stop at the first f
 | ID | Action | Expected result |
 |---|---|---|
 | T01 | Send a four-item implementation request and approve its plan. | One plan card exists; execution starts at `1/4`; the compact first line fits mobile width and names the selected worker. |
+| T01a | Let the package finish all items. | A fresh plan card is reposted into the topic (old plan links retire), followed by the status card and the final action card, so the approval state is visible at the bottom of the thread. |
 | T02 | Let item 1 finish. | Item 2 starts without a per-item approval; progress becomes `2/4`; cumulative token usage does not reset. |
 | T03 | Press `Остановить` while item 2 is active. | The active task is cancelled once, the package becomes stopped, stale action buttons disappear, and `Возобновить` is shown. |
 | T04 | Press `Возобновить`. | A fresh attempt for item 2 starts; item 1 is not materialized or committed again. |

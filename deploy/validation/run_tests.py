@@ -3,6 +3,7 @@
 
 import os
 import shutil
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -122,7 +123,17 @@ def main() -> int:
         log.close()
         shutil.rmtree(DATA, ignore_errors=True)
         shutil.rmtree(SOCKET, ignore_errors=True)
-        shutil.rmtree(TEST_TMP, ignore_errors=True)
+        shutil.rmtree(TEST_TMP, onexc=_retry_writable)
+
+
+def _retry_writable(function: object, failed_path: str, _exc_info: object) -> None:
+    """Clear read-only modes left by toolchain installs, then retry removal."""
+
+    try:
+        os.chmod(failed_path, stat.S_IRWXU)
+        function(failed_path)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

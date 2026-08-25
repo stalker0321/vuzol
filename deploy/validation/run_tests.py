@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Run the Vuzol suite offline with an isolated local PostgreSQL instance."""
 
+import contextlib
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -71,6 +73,7 @@ def main() -> int:
             raise RuntimeError("offline PostgreSQL did not become ready")
         _run(
             str(POSTGRES_BIN / "createuser"),
+            "-s",
             "-h",
             str(SOCKET),
             "-U",
@@ -123,7 +126,18 @@ def main() -> int:
         log.close()
         shutil.rmtree(DATA, ignore_errors=True)
         shutil.rmtree(SOCKET, ignore_errors=True)
-        shutil.rmtree(TEST_TMP, onexc=_retry_writable)
+        for _attempt in range(5):
+            with contextlib.suppress(OSError):
+                shutil.rmtree(TEST_TMP, onexc=_retry_writable)
+            if not os.path.exists(TEST_TMP):
+                break
+            time.sleep(0.5)
+        else:
+            print(
+                "offline test sweep failed to remove the temporary directory",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _retry_writable(function: object, failed_path: str, _exc_info: object) -> None:

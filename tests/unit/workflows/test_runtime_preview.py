@@ -384,6 +384,7 @@ async def test_runtime_preview_blocks_oversized_export_by_bytes(
         runtime_module, "current_environment", AsyncMock(return_value=_environment())
     )
     _allow_confinement(monkeypatch)
+    _allow_node_runtime(monkeypatch, tmp_path)
     _prepare_git_pointer(tmp_path)
     _mock_materialization(monkeypatch, {"server.js": b"x" * 32})
     spawn = _mock_healthy_spawn(monkeypatch)
@@ -412,6 +413,7 @@ async def test_runtime_preview_blocks_export_with_too_many_files(
         runtime_module, "current_environment", AsyncMock(return_value=_environment())
     )
     _allow_confinement(monkeypatch)
+    _allow_node_runtime(monkeypatch, tmp_path)
     _prepare_git_pointer(tmp_path)
     _mock_materialization(monkeypatch, {"one.js": b"1", "two.js": b"2"})
 
@@ -436,6 +438,7 @@ async def test_runtime_preview_blocks_traversing_archive_member(
         runtime_module, "current_environment", AsyncMock(return_value=_environment())
     )
     _allow_confinement(monkeypatch)
+    _allow_node_runtime(monkeypatch, tmp_path)
     _prepare_git_pointer(tmp_path)
     _mock_materialization(monkeypatch, {"../escape.js": b"evil"})
 
@@ -461,6 +464,7 @@ async def test_runtime_preview_blocks_failed_git_archive(
         runtime_module, "current_environment", AsyncMock(return_value=_environment())
     )
     _allow_confinement(monkeypatch)
+    _allow_node_runtime(monkeypatch, tmp_path)
     _prepare_git_pointer(tmp_path)
     _mock_materialization(monkeypatch, {}, status=128, stderr=b"fatal: not a valid object name")
 
@@ -486,6 +490,7 @@ async def test_runtime_preview_maps_confinement_exit_code(
         runtime_module, "current_environment", AsyncMock(return_value=_environment())
     )
     _allow_confinement(monkeypatch)
+    _allow_node_runtime(monkeypatch, tmp_path)
     _prepare_git_pointer(tmp_path)
     _mock_materialization(monkeypatch)
     process = SimpleNamespace(returncode=98, terminate=MagicMock(), wait=AsyncMock())
@@ -574,6 +579,7 @@ async def test_runtime_preview_stops_unhealthy_process(
         runtime_module, "current_environment", AsyncMock(return_value=_environment())
     )
     _allow_confinement(monkeypatch)
+    _allow_node_runtime(monkeypatch, tmp_path)
     _prepare_git_pointer(tmp_path)
     _mock_materialization(monkeypatch)
     process = SimpleNamespace(

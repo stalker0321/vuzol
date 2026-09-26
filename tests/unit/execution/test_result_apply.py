@@ -77,6 +77,7 @@ async def test_result_apply_fails_closed_before_recording_delivery(failure: str)
     handler._load = AsyncMock(return_value=(approval_id, envelope, worktree))  # type: ignore[method-assign]
     handler._assert_current_lease = AsyncMock()  # type: ignore[method-assign]
     handler._record_applied = AsyncMock()  # type: ignore[method-assign]
+    handler._record_intent = AsyncMock(return_value=uuid.uuid4())  # type: ignore[method-assign]
 
     outcome = await handler.execute(MagicMock(), CancellationContext())
 
@@ -108,6 +109,7 @@ async def test_result_apply_tolerates_unrelated_bundle_revision_drift() -> None:
     handler._load = AsyncMock(return_value=(approval_id, envelope, worktree))  # type: ignore[method-assign]
     handler._assert_current_lease = AsyncMock()  # type: ignore[method-assign]
     handler._record_applied = AsyncMock()  # type: ignore[method-assign]
+    handler._record_intent = AsyncMock(return_value=uuid.uuid4())  # type: ignore[method-assign]
 
     outcome = await handler.execute(MagicMock(), CancellationContext())
 
@@ -137,6 +139,7 @@ async def test_result_apply_records_the_exact_successful_operation() -> None:
     handler._load = AsyncMock(return_value=(approval_id, envelope, worktree))  # type: ignore[method-assign]
     handler._assert_current_lease = AsyncMock()  # type: ignore[method-assign]
     handler._record_applied = AsyncMock()  # type: ignore[method-assign]
+    handler._record_intent = AsyncMock(return_value=uuid.uuid4())  # type: ignore[method-assign]
 
     outcome = await handler.execute(MagicMock(), CancellationContext())
 

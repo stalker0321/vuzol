@@ -1281,6 +1281,63 @@ class InputBinding(IdentityMixin, Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class Effect(IdentityMixin, TimestampMixin, Base):
+    """Durable intent/receipt for one mutating operation (WP05, effect.v1).
+
+    Owner = applier. The stable ``operation_key`` is written before launch and
+    reused on retry. ``context`` carries adapter-specific, non-secret observation
+    data (for the Git adapter: repository path, target branch, expected head and
+    result commit).
+    """
+
+    __tablename__ = "effects"
+
+    schema_version: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="effect.v1", server_default="effect.v1"
+    )
+    operation_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    step_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="RESTRICT"))
+    horizon_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    attempt_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    effect_class: Mapped[str] = mapped_column(String(30), nullable=False)
+    target_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    target_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    idempotency: Mapped[str] = mapped_column(String(30), nullable=False)
+    permission_envelope_hash: Mapped[str | None] = mapped_column(String(64))
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("approvals.id", ondelete="RESTRICT")
+    )
+    approval_envelope_hash: Mapped[str | None] = mapped_column(String(64))
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="intent_recorded",
+        server_default="intent_recorded",
+        index=True,
+    )
+    launch_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    launch_dispatch_token: Mapped[str | None] = mapped_column(String(255))
+    launch_generation: Mapped[int | None] = mapped_column(Integer)
+    receipt_status: Mapped[str | None] = mapped_column(String(20))
+    receipt_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    receipt_external_ref: Mapped[str | None] = mapped_column(String(500))
+    receipt_output_hash: Mapped[str | None] = mapped_column(String(64))
+    reconcile_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="not_started", server_default="not_started"
+    )
+    reconcile_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconcile_method: Mapped[str | None] = mapped_column(String(100))
+    context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )
+
+
 class UsageRecord(IdentityMixin, Base):
     __tablename__ = "usage_records"
 

@@ -15,7 +15,11 @@ from vuzol.storage.repositories.delivery import (
     TopicMappingRepository,
 )
 from vuzol.storage.repositories.discussion import DiscussionRepository
-from vuzol.storage.repositories.evidence import ApprovalRepository, ModelRepository
+from vuzol.storage.repositories.evidence import (
+    ApprovalRepository,
+    InputBindingRepository,
+    ModelRepository,
+)
 from vuzol.storage.repositories.work_packages import WorkPackageRepository
 
 __all__ = [
@@ -23,6 +27,7 @@ __all__ = [
     "DiscussionRepository",
     "EventRepository",
     "InboxRepository",
+    "InputBindingRepository",
     "ModelRepository",
     "OutboxRepository",
     "RunRepository",

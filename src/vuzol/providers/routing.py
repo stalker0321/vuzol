@@ -44,6 +44,7 @@ from vuzol.providers.policy import (
     RoutingRequest,
     select_profile,
 )
+from vuzol.providers.result_schema import result_schema_for_step, schema_char_count
 from vuzol.storage.leasing import STEP_CLAIM_LOCK_KEY
 from vuzol.storage.models import RoutingDecision, Run, Step, Task
 from vuzol.storage.records import LeaseToken
@@ -168,7 +169,7 @@ async def claim_routed_step(
         routing_task_type = (
             "architecture" if task.task_type == "discussion_agent_internal" else task.task_type
         )
-        estimated_input = _estimated_input_tokens(task)
+        estimated_input = _estimated_input_tokens(task, step, run)
         requested_output = (
             settings.limits.planner_output_tokens
             if role is ProviderRole.PLANNER
@@ -584,10 +585,28 @@ async def _block_route(
         await enqueue_terminal_task_projections(session, task, run)
 
 
-def _estimated_input_tokens(task: Task) -> int:
+def _estimated_input_tokens(task: Task, step: Step, run: Run) -> int:
+    """Estimate the full provider input, not just the original text.
+
+    Includes the task draft, the step's declared context-manifest estimate, the
+    output JSON schema and the system/prompt revisions so the reservation is not
+    systematically undersized (gap E21).
+    """
+
     characters = len(task.original_text) + len(
         json.dumps(task.task_draft, ensure_ascii=False, sort_keys=True)
     )
+    payload = step.payload if isinstance(step.payload, dict) else {}
+    context_tokens = payload.get("context_estimate_tokens")
+    if (
+        isinstance(context_tokens, int)
+        and not isinstance(context_tokens, bool)
+        and context_tokens > 0
+    ):
+        characters += context_tokens * 4
+    _name, _version, schema = result_schema_for_step(step.step_type, task.task_draft)
+    characters += schema_char_count(schema)
+    characters += len(run.policy_revision) + len(run.prompt_revision or "")
     return max(1, (characters + 3) // 4)
 
 

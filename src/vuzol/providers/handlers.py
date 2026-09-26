@@ -7,11 +7,19 @@ from decimal import Decimal
 from pathlib import Path
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import AgentRuntimeContract, Capability, ProviderProfileConfig
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.context.resolver import (
+    RESEARCH_RESULT_SCHEMA,
+    RESEARCH_RESULT_SCHEMA_VERSION,
+    BindingError,
+    estimate_tokens,
+    pack_context,
+    resolve_context,
+)
 from vuzol.execution.access import (
     WorktreeAccessError,
     WorktreeAccessLease,
@@ -46,6 +54,7 @@ from vuzol.providers.domain import (
     ProviderErrorCategory,
     ProviderRequest,
     ProviderResult,
+    ProviderResultStatus,
 )
 from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.health import record_failure_observation, record_success_observation
@@ -58,9 +67,11 @@ from vuzol.providers.planner_handoff import (
 )
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
+from vuzol.providers.result_schema import result_schema_for_step
 from vuzol.providers.routing import PROVIDER_STEP_ROLES
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import (
+    InputBinding,
     ProviderBudgetReservation,
     Run,
     Step,
@@ -68,6 +79,7 @@ from vuzol.storage.models import (
     Task,
     Worktree,
 )
+from vuzol.storage.repositories import InputBindingRepository
 from vuzol.storage.types import BudgetReservationStatus, StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -190,6 +202,14 @@ class ProviderStepHandler:
                 reservation_id=reservation_id,
                 category=error.category,
                 summary=error.summary,
+                error=error,
+            )
+        except BindingError as error:
+            return await self._pre_provider_failure(
+                request,
+                reservation_id=reservation_id,
+                category=f"context_binding_{error.category}",
+                summary=str(error),
                 error=error,
             )
         except (LookupError, ValueError) as error:
@@ -433,6 +453,9 @@ class ProviderStepHandler:
                         session,
                         profile,
                         configuration_revision=configuration_revision,
+                    )
+                    await self._persist_input_bindings(
+                        session, request=request, result=result
                     )
                 finalization_result = (
                     finalized
@@ -890,6 +913,68 @@ class ProviderStepHandler:
             Path(worktree.path), sandbox_uid=sandbox.uid, sandbox_gid=sandbox.gid
         )
 
+    async def _persist_input_bindings(
+        self,
+        session: AsyncSession,
+        *,
+        request: StepExecutionRequest,
+        result: ProviderResult,
+    ) -> None:
+        """Bind a research result to its synthesize consumer (new path only)."""
+
+        if request.step_type != "research_execute" or self._artifacts is None:
+            return
+        content = _research_result_bytes(result)
+        if not content:
+            return
+        step = await session.get(Step, request.step_id)
+        task = await session.get(Task, request.task_id)
+        if step is None or task is None:
+            return
+        artifact = await self._artifacts.persist(
+            session,
+            task_id=task.id,
+            run_id=request.run_id,
+            step_id=step.id,
+            artifact_type="research_result",
+            content=content,
+            media_type="application/json",
+            sensitivity="internal",
+            visibility="private",
+        )
+        token_estimate = estimate_tokens(content)
+        consumers = await _consumer_steps(
+            session, run_id=request.run_id, producer_ordinal=step.ordinal
+        )
+        bindings = InputBindingRepository(session)
+        for consumer in consumers:
+            existing = [
+                row
+                for row in await bindings.for_consumer(consumer.id)
+                if row.slot == "predecessor_result"
+            ]
+            if existing:
+                continue
+            await bindings.add(
+                InputBinding(
+                    consumer_step_id=consumer.id,
+                    producer_step_id=step.id,
+                    artifact_id=artifact.id,
+                    slot="predecessor_result",
+                    schema_name=RESEARCH_RESULT_SCHEMA,
+                    schema_version=RESEARCH_RESULT_SCHEMA_VERSION,
+                    content_hash=artifact.content_hash,
+                    scope_project_id=task.project_id,
+                    access_scope="private",
+                    required=True,
+                    status="resolved",
+                    resolved_at=func.now(),
+                )
+            )
+            # Manifest-first estimate: the consumer reservation can size the
+            # predecessor context before its bytes are resolved in _build_request.
+            consumer.payload = {**consumer.payload, "context_estimate_tokens": token_estimate}
+
     async def _build_request(
         self, request: StepExecutionRequest
     ) -> tuple[ProviderRequest, str, uuid.UUID, str]:
@@ -962,6 +1047,17 @@ class ProviderStepHandler:
                 repair = repair_context_item(step)
                 if repair is not None:
                     context = (*context, repair)
+            elif step.step_type == "synthesize":
+                # Vertical slice: a research result bound to this step is packed
+                # into the synthesis input. No binding rows => legacy behavior.
+                resolved = await resolve_context(
+                    session,
+                    self._artifacts,
+                    consumer_step_id=step.id,
+                    project_id=task.project_id,
+                )
+                if not resolved.is_empty:
+                    context = pack_context(resolved, role="summarizer")[1]
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
@@ -1007,6 +1103,42 @@ class ProviderStepHandler:
 
 
 SAFE_PROVIDER_STEP_TYPES = frozenset({"execute_model", "research_execute", "synthesize", "plan"})
+
+
+def _research_result_bytes(result: ProviderResult) -> bytes:
+    if result.status is not ProviderResultStatus.SUCCEEDED:
+        return b""
+    payload = {
+        "schema_version": RESEARCH_RESULT_SCHEMA_VERSION,
+        "text": result.text,
+        "structured_output": result.structured_output,
+        "finish_reason": result.finish_reason,
+        "provider_request_id": result.provider_request_id,
+    }
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+
+
+async def _consumer_steps(
+    session: AsyncSession, *, run_id: uuid.UUID, producer_ordinal: int
+) -> tuple[Step, ...]:
+    """Return downstream steps that declare ``producer_ordinal`` as a predecessor."""
+
+    steps = (await session.scalars(select(Step).where(Step.run_id == run_id))).all()
+    consumers: list[Step] = []
+    for candidate in steps:
+        if candidate.step_type != "synthesize":
+            continue
+        metadata = (
+            candidate.dependency_metadata
+            if isinstance(candidate.dependency_metadata, dict)
+            else {}
+        )
+        predecessors = metadata.get("predecessor_ordinals", [])
+        if isinstance(predecessors, list) and producer_ordinal in predecessors:
+            consumers.append(candidate)
+    return tuple(consumers)
 
 
 def repair_context_item(step: Step) -> ContextItem | None:
@@ -1115,23 +1247,7 @@ def executor_provider_handlers(handler: ProviderStepHandler) -> dict[str, Provid
 def _step09a_result_schema(
     step_type: str, task_draft: dict[str, object]
 ) -> tuple[str | None, str | None, dict[str, object] | None]:
-    if step_type == "execute_agent" and task_draft.get("discussion_agent_contract"):
-        from vuzol.discussion.agent import DiscussionAgentReply
-
-        return (
-            "DiscussionAgentReply",
-            "discussion-agent-reply.v1",
-            DiscussionAgentReply.model_json_schema(),
-        )
-    if step_type != "execute_code" or "step09a_capsule" not in task_draft:
-        return None, None, None
-    from vuzol.experiments.domain import WorkerEditReport
-
-    return (
-        "WorkerEditReport",
-        "step09a-worker-edit-report.v1",
-        WorkerEditReport.model_json_schema(),
-    )
+    return result_schema_for_step(step_type, task_draft)
 
 
 def _is_runtime_certification(task_draft: dict[str, object]) -> bool:

@@ -239,6 +239,7 @@ class TelegramControlService:
                     self._session_factory,
                     enabled=True,
                     authorized_user_ids=frozenset(self._runtime.settings.allowed_user_ids),
+                    horizon_enabled=self._runtime.settings.horizon.enabled,
                 ).apply(
                     AuthoritativeControlCommand(
                         action=action,

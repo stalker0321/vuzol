@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vuzol.config.settings import HorizonSettings, Settings
+from vuzol.discussion.application import PackageControlIngress
 from vuzol.discussion.horizon import (
     HORIZON_STATUS_MAPPING,
     budget_state,
@@ -129,3 +130,12 @@ async def test_exhausted_queue_completes_when_flag_off() -> None:
     assert result.completed is True
     assert package.status is WorkPackageStatus.COMPLETED
     assert package.horizon_phase is None
+
+
+def test_ingress_horizon_wiring_defaults_off() -> None:
+    default = PackageControlIngress(MagicMock(), enabled=True, authorized_user_ids=frozenset({1}))
+    assert default._horizon_enabled is False
+    flagged = PackageControlIngress(
+        MagicMock(), enabled=True, authorized_user_ids=frozenset({1}), horizon_enabled=True
+    )
+    assert flagged._horizon_enabled is True

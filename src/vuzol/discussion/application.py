@@ -251,10 +251,12 @@ class PackageControlIngress:
         *,
         enabled: bool,
         authorized_user_ids: frozenset[int],
+        horizon_enabled: bool = False,
     ) -> None:
         self._factory = session_factory
         self._enabled = enabled
         self._authorized_user_ids = authorized_user_ids
+        self._horizon_enabled = horizon_enabled
 
     async def apply(self, command: AuthoritativeControlCommand) -> PackageControlResult:
         if not self._enabled:
@@ -295,6 +297,7 @@ class PackageControlIngress:
                     h8=command.h8,
                     expected_status_generation=approved_generation,
                     user_id=command.user_id,
+                    horizon_enabled=self._horizon_enabled,
                 )
                 generation = sequence.status_generation
                 code = PackageControlResultCode.APPLIED
@@ -316,6 +319,7 @@ class PackageControlIngress:
                     h8=command.h8,
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
+                    horizon_enabled=self._horizon_enabled,
                 )
                 revision_id = None
                 generation = sequence.status_generation
@@ -349,7 +353,9 @@ class PackageControlIngress:
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
                 )
-                await WorkPackageSequencer(uow).materialize_running(package_id=command.package_id)
+                await WorkPackageSequencer(uow).materialize_running(
+                    package_id=command.package_id, horizon_enabled=self._horizon_enabled
+                )
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.STOP_PACKAGE:
@@ -394,6 +400,7 @@ class PackageControlIngress:
                     h8=restarted_revision.content_hash[:8],
                     expected_status_generation=approved_generation,
                     user_id=command.user_id,
+                    horizon_enabled=self._horizon_enabled,
                 )
                 generation = sequence.status_generation
                 revision_id = restarted_revision.id

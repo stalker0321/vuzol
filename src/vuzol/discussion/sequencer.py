@@ -17,7 +17,7 @@ from vuzol.discussion.domain import (
     control_transition_target,
     require_generation,
 )
-from vuzol.discussion.horizon import is_horizon
+from vuzol.discussion.horizon import is_horizon, needs_approval_gate
 from vuzol.interpretation.domain import (
     TASK_DRAFT_SCHEMA_VERSION,
     SuggestedComplexity,
@@ -446,6 +446,35 @@ class WorkPackageSequencer:
             )
             await self._projection(package.id, package.version, "completed")
             return SequenceResult(package.id, package.version, None, None, completed=True)
+
+        if (
+            horizon_enabled
+            and is_horizon(package.goal, package.exit_criteria)
+            and needs_approval_gate(item.needs_approval)
+        ):
+            # Item-level approval is a runtime gate: the item is not
+            # materialized until explicitly approved. Repeat observations are
+            # idempotent (no new event/generation). Approval-to-continue is a
+            # separate control (next increment).
+            if package.horizon_phase == "waiting_approval":
+                return SequenceResult(package.id, package.version, None, ordinal)
+            package.horizon_phase = "waiting_approval"
+            package.version += 1
+            await self._uow.events.append(
+                entity_type="work_package",
+                entity_id=package.id,
+                event_type=WorkPackageEvent.PACKAGE_WAITING_APPROVAL.value,
+                actor_type="system",
+                previous_state=WorkPackageStatus.RUNNING.value,
+                new_state=WorkPackageStatus.RUNNING.value,
+                payload={
+                    "revision_id": str(revision.id),
+                    "ordinal": ordinal,
+                    "horizon_phase": "waiting_approval",
+                },
+            )
+            await self._projection(package.id, package.version, "waiting_approval")
+            return SequenceResult(package.id, package.version, None, ordinal)
 
         discussion = await self._uow.session.get(ProjectDiscussionSession, package.session_id)
         if discussion is None:

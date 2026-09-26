@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vuzol.config import CapabilityProvisioningSettings
+from vuzol.projects.capability_provisioning import (
+    CapabilityProvisioningHandler,
+    OfflineCapabilityInstaller,
+)
 from vuzol.projects.installations import (
+    CapabilityPinMismatch,
     InstallationState,
+    enforce_run_pins,
     installation_states,
     pin_capability,
     pin_matches,
@@ -115,6 +126,80 @@ def test_installation_records_and_health_ttl(postgres_dsn: str, tmp_path: Path) 
             )
         async with factory() as session:
             states = await installation_states(session, now=moment)
+            assert states["node-runtime"] == "failed"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+async def _seed_run(factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
+    async with UnitOfWork(factory) as uow:
+        task = await uow.tasks.create(
+            user_id=1, chat_id=-100, original_text="pin", task_type="coding"
+        )
+        assert uow.session is not None
+        stored = await uow.session.get(Task, task.id)
+        assert stored is not None
+        stored.status = TaskStatus.EXECUTING
+        return await uow.runs.create(
+            task_id=task.id,
+            workflow_type="coding",
+            workflow_version="1",
+            budget_mode="balanced",
+            configuration_revision="a" * 64,
+            policy_revision="b" * 64,
+            status=RunStatus.RUNNING,
+        )
+
+
+def test_enforce_run_pins_fails_closed_on_toolchain_change(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        root = _install_toolchain(tmp_path / "toolchains", _spec("1.0.0"))
+        run_id = await _seed_run(factory)
+        async with factory.begin() as session:
+            await enforce_run_pins(
+                session, run_id=run_id, root=root, capability_keys=("node-runtime",)
+            )
+        async with factory() as session:
+            states = await installation_states(session)
+            assert states == {}  # pins are not installations
+        # The installer downgrades/upgrades the receipt in place.
+        _install_toolchain(root, _spec("2.0.0"))
+        with pytest.raises(CapabilityPinMismatch):
+            async with factory.begin() as session:
+                await enforce_run_pins(
+                    session, run_id=run_id, root=root, capability_keys=("node-runtime",)
+                )
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_post_install_probe_records_installation(postgres_dsn: str, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        root = _install_toolchain(tmp_path / "toolchains", _spec("1.0.0"))
+        settings = CapabilityProvisioningSettings(toolchain_root=root, enabled=True)
+        installer = OfflineCapabilityInstaller(settings)
+        handler = CapabilityProvisioningHandler(factory, installer)
+        environment = SimpleNamespace(
+            contract={"capabilities": {"node-runtime": {"provisioning": "automatic"}}}
+        )
+        await handler._record_installations(
+            ("node-runtime",), cast(Any, environment), failed=False
+        )
+        async with factory() as session:
+            states = await installation_states(session)
+            assert states["node-runtime"] == "installed"
+        # A failed probe is recorded as failed, excluding the capability.
+        await handler._record_installations(
+            ("node-runtime",), cast(Any, environment), failed=True
+        )
+        async with factory() as session:
+            states = await installation_states(session)
             assert states["node-runtime"] == "failed"
         await engine.dispose()
 

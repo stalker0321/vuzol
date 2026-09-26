@@ -20,7 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import CapabilityProvisioningSettings
 from vuzol.execution.paths import contained, trusted_root
-from vuzol.project_environment import current_environment
+from vuzol.project_environment import current_environment, environment_hash
+from vuzol.projects.installations import (
+    InstallationState,
+    probe_toolchain,
+    record_installation,
+)
 from vuzol.projects.source_catalog import SourceCatalog, ToolchainSource
 from vuzol.projects.source_download import SourceDownloadError, TrustedSourceDownloader
 from vuzol.projects.toolchains import (
@@ -131,6 +136,14 @@ class OfflineCapabilityInstaller:
     @property
     def installation_root(self) -> Path:
         return self._settings.toolchain_root
+
+    @property
+    def node_id(self) -> str:
+        return self._settings.node_id
+
+    @property
+    def health_ttl_seconds(self) -> int:
+        return self._settings.health_ttl_seconds
 
     def ready(self, capability_key: str) -> bool:
         host = _HOST_EXECUTABLES.get(capability_key)
@@ -452,7 +465,11 @@ class CapabilityProvisioningHandler:
                 side_effect_started = True
                 self._installer.install(bundle)
             if any(not self._installer.ready(key) for key in missing):
+                await self._record_installations(missing, environment, failed=True)
                 raise CapabilityProvisioningError("installed capability did not pass its probe")
+            # WP03: persist the verified installation (receipt/env hash/health
+            # TTL) from the existing post-install probe. Approval path unchanged.
+            await self._record_installations(missing, environment, failed=False)
             await self._consume(request, approval.id)
             return StepOutcome.succeeded(
                 {
@@ -472,6 +489,35 @@ class CapabilityProvisioningHandler:
                 summary=str(error)[:500],
                 unknown_effects=side_effect_started,
             )
+
+    async def _record_installations(
+        self,
+        missing: tuple[str, ...],
+        environment: ProjectEnvironmentRevision,
+        *,
+        failed: bool,
+    ) -> None:
+        """Persist verified installations from the existing post-install probe."""
+
+        root = self._installer.installation_root
+        env_hash = environment_hash(environment.contract)
+        for key in missing:
+            if load_installed_toolchain(root, key) is None:
+                continue
+            state, spec, detail = probe_toolchain(root, key, confined_roots=(root,))
+            if failed and state is InstallationState.INSTALLED:
+                state = InstallationState.FAILED
+                detail = "installed capability did not pass its probe"
+            async with self._factory.begin() as session:
+                await record_installation(
+                    session,
+                    probe=(state, spec, detail),
+                    capability_key=key,
+                    installation_root=root,
+                    node_id=self._installer.node_id,
+                    environment_hash=env_hash,
+                    health_ttl_seconds=self._installer.health_ttl_seconds,
+                )
 
     async def _load(
         self, request: StepExecutionRequest

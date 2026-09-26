@@ -156,11 +156,13 @@ def _allow_node_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
 
     import vuzol.workflows.runtime_preview as runtime_module
 
-    fake = tmp_path / "toolchains" / "node"
-    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake = tmp_path / "node"
     fake.write_text("#!/bin/sh\n", encoding="utf-8")
     fake.chmod(0o755)
     monkeypatch.setattr(runtime_module, "_SUPPORTED_EXECUTABLES", {"node": str(fake)})
+    # The real preview ruleset reads only interpreter/system paths plus the
+    # source root; align the E23 gate with it by pointing the source root here.
+    monkeypatch.setattr(runtime_module, "_source_root", lambda: tmp_path)
     monkeypatch.setattr(
         runtime_module,
         "preflight_capabilities",
@@ -236,7 +238,7 @@ async def test_runtime_preview_publishes_healthy_service(
     spec = json.loads(argv[2])
     assert spec["read_write"] == [str(target.runtime_dir)]
     assert argv[3] == "--"
-    assert argv[4] == str(tmp_path / "toolchains" / "node")
+    assert argv[4] == str(tmp_path / "node")
     kwargs = spawn.await_args.kwargs
     assert kwargs["env"]["HOST"] == "127.0.0.1"
     assert kwargs["env"]["PORT"] == "43210"

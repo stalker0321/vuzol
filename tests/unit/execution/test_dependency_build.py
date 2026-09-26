@@ -573,3 +573,40 @@ def test_freeze_pins_exact_read_only_modes(tmp_path: Path) -> None:
     assert script.stat().st_mode & 0o777 == 0o555
     assert data.stat().st_mode & 0o777 == 0o444
     assert nested.stat().st_mode & 0o777 == 0o555
+
+
+class _AsyncContext:
+    async def __aenter__(self) -> MagicMock:
+        return MagicMock()
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+@pytest.mark.anyio
+async def test_dependency_build_enforces_run_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vuzol.projects.installations import CapabilityPinMismatch
+
+    settings = _settings(tmp_path)
+    settings.capability_provisioning.toolchain_root.mkdir(parents=True, exist_ok=True)
+    factory = MagicMock()
+    factory.begin.return_value = _AsyncContext()
+    builder = SandboxedDependencyBuilder(
+        settings, MagicMock(), MagicMock(), MagicMock(), MagicMock(), factory=factory
+    )
+    monkeypatch.setattr(
+        "vuzol.execution.dependency_build.enforce_run_pins",
+        AsyncMock(side_effect=CapabilityPinMismatch("changed")),
+    )
+
+    with pytest.raises(CapabilityPinMismatch):
+        await builder.build(
+            cast(Any, SimpleNamespace(run_id=uuid.uuid4())),
+            project_id="project",
+            worktree_id=uuid.uuid4(),
+            worktree=_worktree(tmp_path, _request(ecosystem="node")),
+            request=_request(ecosystem="node"),
+            cancellation=CancellationContext(),
+        )

@@ -51,6 +51,12 @@ missing receipt, or an executable outside the approved read roots, yields
 `installed` while the TTL holds, `stale` once it lapses, otherwise the stored
 status.
 
+`record_installation` is called from the existing post-install probe in
+`CapabilityProvisioningHandler.execute` (after `installer.install` + `ready()`):
+managed capabilities are probed and recorded with the environment hash; a failed
+probe is recorded as `failed` before the step blocks. Approval-path code is not
+touched.
+
 `preflight_capabilities(..., installation_status=..., approved_roots=...)`
 excludes `stale`/`failed` installations (→ `NEEDS_SETUP`) and rejects a
 PATH-resolved host executable that is not readable under the real confinement
@@ -61,11 +67,13 @@ roots. Discovery still performs no install and returns no permission.
 An executable resolved with `shutil.which` may live outside the paths the
 confined child can read (e.g. a per-user NVM install under `$HOME`), so `which()`
 alone is not proof. `vuzol.security.confined_paths` answers "would the confined
-process read/execute this path?" against the **actual** ruleset roots:
-`landlock.interpreter_read_only()` (system/interpreter paths) plus declared
-extras (the preview source root and the approved managed-toolchain root).
-`executable_within_roots` uses `os.path.realpath` containment. `$HOME` is never
-added; a `.nvm` binary is rejected.
+process read/execute this path?" against the **actual** ruleset:
+`landlock.interpreter_read_only()` (system/interpreter paths) plus the preview
+spec's `read_only` root (`_source_root()`). Managed toolchain paths under
+`toolchain_root` are **not** part of that ruleset and are therefore rejected —
+the gate and the ruleset are aligned exactly, so a path is accepted only if the
+child could actually execute it. `executable_within_roots` uses
+`os.path.realpath` containment; `$HOME` is never added.
 
 Both consumers use it:
 
@@ -73,17 +81,22 @@ Both consumers use it:
   before spawning, returning `environment_setup_required` with a clear summary
   instead of a Landlock `PermissionError`.
 - `probe_toolchain` requires managed executables to be readable in the confined
-  environment.
+  environment (the sandbox mounts `toolchain_root`, so that root is the probe's
+  confined root).
 
 ## Run version pins (`capability_run_pins`)
 
 New additive table. `pin_capability(session, run_id, spec)` records the exact
 `(version, receipt_hash)` a run first resolved; `pin_matches` returns `False` if
-the on-disk receipt no longer matches. Installing or downgrading a toolchain
-therefore cannot silently change how an already-pinned run resolves its
-executable. Historical runs have no pins and keep reading the on-disk receipt
-(legacy behavior). (True "keep using the old bytes" would need versioned
-installation directories — an installer-backend change, out of WP03 scope.)
+the on-disk receipt no longer matches. The resolution paths enforce this:
+`execution/codex.py:_managed_artifact_runtime` and
+`execution/dependency_build.py:build` call `enforce_run_pins` before mounting a
+managed runtime, so installing or downgrading a toolchain **fails closed**
+(`CapabilityPinMismatch`) instead of silently changing how an already-pinned run
+resolves its executable. Historical runs have no pins and keep reading the
+on-disk receipt (legacy behavior). (True "keep using the old bytes" would need
+versioned installation directories — an installer-backend change, out of WP03
+scope.)
 
 ## How to add a capability on the current backend
 

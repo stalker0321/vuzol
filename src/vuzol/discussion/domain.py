@@ -34,6 +34,7 @@ class WorkPackageEvent(StrEnum):
     PACKAGE_ITEM_MATERIALIZED = "work_package.item_materialized"
     PACKAGE_COMPLETED = "work_package.completed"
     PACKAGE_EVALUATING = "work_package.evaluating"
+    PACKAGE_WAITING_APPROVAL = "work_package.waiting_approval"
     DETAIL_POINTER_CHANGED = "work_package.detail_pointer_changed"
     EDIT_SESSION_OPENED = "edit_session.opened"
     EDIT_SESSION_CLOSED = "edit_session.closed"

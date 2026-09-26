@@ -23,7 +23,7 @@ from vuzol.discussion.horizon import (
 from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.discussion.service import WorkPackageService
 from vuzol.storage.models import WorkPackage
-from vuzol.storage.types import WorkPackageStatus
+from vuzol.storage.types import EstimatedComplexity, RiskLevel, WorkPackageStatus
 
 
 def test_flag_default_off() -> None:
@@ -188,3 +188,70 @@ async def test_restart_continues_approved_horizon_without_new_revision() -> None
     payload = uow.events.append.call_args.kwargs["payload"]
     assert payload["restart"] is True
     assert payload["horizon_continued"] is True
+
+
+def _approval_item() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        item_id=uuid.uuid4(),
+        summary="gated step",
+        goal="gated goal",
+        expected_outcome="gated outcome",
+        completion_criteria=("check",),
+        allowed_scope="src/**",
+        out_of_scope=(),
+        dependencies=(),
+        trusted_checks=(),
+        suggested_risk=RiskLevel.LOW,
+        needs_approval=True,
+        estimated_complexity=EstimatedComplexity.SMALL,
+    )
+
+
+@pytest.mark.anyio
+async def test_needs_approval_item_waits_behind_flag() -> None:
+    sequencer, uow = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    revision = SimpleNamespace(id=uuid.uuid4())
+    uow.session.scalar = AsyncMock(side_effect=[None, _approval_item(), None, _approval_item()])
+
+    result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
+
+    assert result.completed is False
+    assert result.task_id is None
+    assert package.status is WorkPackageStatus.RUNNING
+    assert package.horizon_phase == "waiting_approval"
+    event = uow.events.append.call_args.kwargs
+    assert event["event_type"] == "work_package.waiting_approval"
+
+    # Repeat observation is idempotent: no new generation or event.
+    before = package.version
+    uow.events.append.reset_mock()
+    repeat = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
+    assert repeat.completed is False
+    assert package.version == before
+    uow.events.append.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_needs_approval_item_materializes_when_flag_off() -> None:
+    sequencer, uow = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    revision = SimpleNamespace(id=uuid.uuid4(), approved_by_user_id=42)
+    task_id = uuid.uuid4()
+    discussion = SimpleNamespace(chat_id=-100, message_thread_id=10)
+    task = MagicMock()
+    task.id = task_id
+    task.source_chat_id = None
+    task.source_thread_id = None
+    uow.session.scalar = AsyncMock(side_effect=[None, _approval_item()])
+    uow.session.get = AsyncMock(side_effect=[discussion, task])
+    uow.session.flush = AsyncMock()
+    uow.tasks.create = AsyncMock(return_value=SimpleNamespace(id=task_id))
+    uow.work_packages.add_materialization = AsyncMock()
+
+    result = await sequencer._materialize_current(package, revision, horizon_enabled=False)  # type: ignore[arg-type]
+
+    assert result.completed is False
+    assert result.task_id == task_id
+    assert package.horizon_phase is None

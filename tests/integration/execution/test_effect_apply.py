@@ -464,6 +464,32 @@ def test_revoked_grant_does_not_start_an_effect(postgres_dsn: str, tmp_path: Pat
     asyncio.run(scenario())
 
 
+def test_stale_generation_cannot_record_intent_or_settle(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        seed = await _seed(factory, tmp_path)
+        git = CountingGit()
+        # Another worker took over the lease: the persisted generation moved on.
+        async with factory.begin() as session:
+            step = await session.get(Step, seed.step_id, with_for_update=True)
+            assert step is not None
+            step.lease_generation = 2
+            step.lease_owner = "other-applier"
+        handler = ResultApplyHandler(factory, _registries(seed.repository), git)
+        outcome = await handler.execute(_request(seed), CancellationContext())
+        assert outcome.kind is OutcomeKind.CANCELLED
+        assert git.apply_calls == 0
+        assert await git.read_ref(seed.repository, "main") == seed.base
+        async with factory() as session:
+            effects = list((await session.scalars(select(Effect))).all())
+            assert effects == []
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_effect_settle_helper_is_idempotent() -> None:
     effect = Effect(
         operation_key="op",

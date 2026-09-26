@@ -2,19 +2,20 @@
 
 import uuid
 from collections.abc import Mapping
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.ops.disk_pressure import DISK_PRESSURE_CATEGORY
+from vuzol.project_environment import current_environment, environment_hash
 from vuzol.storage.errors import EntityNotFound, LeaseLost
 from vuzol.storage.models import (
     Event,
     Run,
     Step,
     Task,
+    Worktree,
 )
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import RunStatus, StepStatus, TaskStatus
@@ -24,6 +25,19 @@ from vuzol.telegram.projections import (
 )
 from vuzol.telegram.tracing import enqueue_planner_trace
 from vuzol.workflows.domain import MaterializedWorkflow, OutcomeKind, StepOutcome
+from vuzol.workflows.recovery_policy import (
+    DEFAULT_RECOVERY_POLICY,
+    FINGERPRINT_SCHEMA,
+    RecoveryAction,
+    RecoveryPolicy,
+    RecoveryState,
+    append_fingerprint_history,
+    decide_recovery,
+    failure_fingerprint,
+    fingerprint_components,
+    recovery_attempt_summary,
+)
+from vuzol.workflows.result_approval import envelope_hash
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
 
@@ -184,7 +198,9 @@ async def commit_step_outcome(
     outcome: StepOutcome,
     *,
     retry_delay_seconds: float = 0,
+    recovery_policy: RecoveryPolicy | None = None,
 ) -> None:
+    policy = recovery_policy or DEFAULT_RECOVERY_POLICY
     step = await session.scalar(select(Step).where(Step.id == token.step.id).with_for_update())
     if (
         step is None
@@ -200,34 +216,38 @@ async def commit_step_outcome(
     if outcome.kind is OutcomeKind.SUCCEEDED:
         await transition_step(session, step, StepStatus.COMPLETED, actor_type="worker")
         step.result = outcome.result
-    elif outcome.kind is OutcomeKind.TRANSIENT_FAILURE and (
-        outcome.category == DISK_PRESSURE_CATEGORY or _can_retry(step)
-    ):
-        # disk_pressure is host backpressure: always requeue (even NEVER/ISOLATED_RETRYABLE
-        # heavy steps such as prepare_worktree) and refund the claim attempt burn.
-        await transition_step(session, step, StepStatus.QUEUED, actor_type="worker")
-        step.available_at = func.now() + timedelta(seconds=retry_delay_seconds)
-        step.failure_category = outcome.category
-        step.failure_summary = outcome.summary
-        if outcome.category == DISK_PRESSURE_CATEGORY and step.attempt_count > 0:
-            step.attempt_count -= 1
-        if step.step_type == "plan" and outcome.result:
-            # Retry diagnostics only for plan outcomes (handoff rejection payload).
-            step.result = outcome.result
     elif outcome.kind is OutcomeKind.TRANSIENT_FAILURE:
-        # Automatic retries are exhausted, but the operation is known to be safe to
-        # retry explicitly after the user changes a provider, credential, or quota.
-        await transition_step(session, step, StepStatus.BLOCKED, actor_type="worker")
-        await transition_run(session, run, RunStatus.BLOCKED, actor_type="worker")
+        state, _components = await _build_recovery_state(session, run, step, outcome, policy)
+        action = decide_recovery(state, policy)
+        _emit_recovery_event(session, run, step, state, action)
+        if action is RecoveryAction.WAIT:
+            # Host/provider backpressure: retry later without burning an LLM
+            # attempt, bounded by the backpressure wait cap (aging).
+            await transition_step(session, step, StepStatus.QUEUED, actor_type="worker")
+            step.available_at = func.now() + timedelta(seconds=retry_delay_seconds)
+            if step.attempt_count > 0:
+                step.attempt_count -= 1
+            step.payload = {
+                **step.payload,
+                "backpressure_count": state.backpressure_count + 1,
+            }
+            if step.step_type == "plan" and outcome.result:
+                step.result = outcome.result
+        elif action is RecoveryAction.RETRY:
+            await transition_step(session, step, StepStatus.QUEUED, actor_type="worker")
+            step.available_at = func.now() + timedelta(seconds=retry_delay_seconds)
+            if step.step_type == "plan" and outcome.result:
+                step.result = outcome.result
+        else:
+            await _block_for_attention(session, run, step)
     elif outcome.kind is OutcomeKind.NEEDS_USER_INPUT:
         await transition_step(session, step, StepStatus.AWAITING_USER, actor_type="worker")
         await transition_run(session, run, RunStatus.AWAITING_USER, actor_type="worker")
     elif outcome.kind is OutcomeKind.NEEDS_APPROVAL:
         await transition_step(session, step, StepStatus.WAITING_APPROVAL, actor_type="worker")
     elif outcome.kind is OutcomeKind.BLOCKED or outcome.unknown_effects:
-        if not await _schedule_bounded_repair(session, run, step, outcome):
-            await transition_step(session, step, StepStatus.BLOCKED, actor_type="worker")
-            await transition_run(session, run, RunStatus.BLOCKED, actor_type="worker")
+        if not await _schedule_bounded_repair(session, run, step, outcome, policy):
+            await _block_for_attention(session, run, step)
             step.unknown_effects = outcome.unknown_effects
     elif outcome.kind is OutcomeKind.CANCELLED:
         await transition_step(session, step, StepStatus.CANCELLED, actor_type="worker")
@@ -273,25 +293,20 @@ async def _schedule_bounded_repair(
     run: Run,
     failed_step: Step,
     outcome: StepOutcome,
+    policy: RecoveryPolicy = DEFAULT_RECOVERY_POLICY,
 ) -> bool:
-    """Schedule up to three worker repairs in the current human-approved epoch."""
+    """Schedule a worker repair under the shared, fingerprinted recovery bounds."""
 
     task = await session.get(Task, run.task_id)
     if task is None:
         return False
-    repair_epoch = task.budget_epoch
-    previous_epoch = failed_step.payload.get("repair_epoch")
-    repair_count = (
-        int(failed_step.payload.get("repair_count", 0)) if previous_epoch == repair_epoch else 0
-    )
-
-    if (
-        outcome.unknown_effects
-        or failed_step.step_type not in {"validate", "review"}
-        or not (outcome.category or "").startswith(("validation_", "review_"))
-        or repair_count >= 3
-    ):
+    state, components = await _build_recovery_state(session, run, failed_step, outcome, policy)
+    action = decide_recovery(state, policy)
+    _emit_recovery_event(session, run, failed_step, state, action)
+    if action is not RecoveryAction.REPAIR:
         return False
+    repair_epoch = task.budget_epoch
+    repair_count = state.repair_count
     worker = await session.scalar(
         select(Step)
         .where(
@@ -334,6 +349,7 @@ async def _schedule_bounded_repair(
                 "category": outcome.category,
                 "summary": (outcome.summary or "")[:2_000],
                 "validation_result": outcome.result,
+                "failure_fingerprint": state.fingerprint,
             },
         },
         retry_class=worker.retry_class,
@@ -353,6 +369,13 @@ async def _schedule_bounded_repair(
         "repair_count": repair_count + 1,
         "repair_epoch": repair_epoch,
         "repair_scheduled_step_id": str(repair.id),
+        "failure_fingerprint": state.fingerprint,
+        "failure_fingerprint_schema": FINGERPRINT_SCHEMA,
+        "failure_fingerprint_components": components,
+        "failure_fingerprint_history": append_fingerprint_history(
+            failed_step.payload.get("failure_fingerprint_history"), state.fingerprint or ""
+        ),
+        "last_recovery_summary": recovery_attempt_summary(state, action),
     }
     session.add(
         Event(
@@ -366,6 +389,8 @@ async def _schedule_bounded_repair(
                 "category": outcome.category,
                 "repair_count": repair_count + 1,
                 "repair_epoch": repair_epoch,
+                "task_repair_count": state.task_repair_count + 1,
+                "fingerprint": state.fingerprint,
             },
         )
     )
@@ -567,6 +592,127 @@ def _can_retry(step: Step) -> bool:
         and step.attempt_count < step.max_attempts
         and step.idempotency_class in {IdempotencyClass.READ_ONLY, IdempotencyClass.IDEMPOTENT}
     )
+
+
+def _recovery_deadline_exceeded(run: Run, step: Step, policy: RecoveryPolicy) -> bool:
+    started = run.started_at or step.created_at
+    if started is None:
+        return False
+    return (datetime.now(UTC) - started).total_seconds() > policy.recovery_deadline_seconds
+
+
+async def _build_recovery_state(
+    session: AsyncSession,
+    run: Run,
+    step: Step,
+    outcome: StepOutcome,
+    policy: RecoveryPolicy,
+) -> tuple[RecoveryState, dict[str, str]]:
+    """Assemble the persisted-fact inputs for the pure decision table."""
+
+    payload = step.payload if isinstance(step.payload, dict) else {}
+    evidence_hash = (
+        envelope_hash(outcome.result)
+        if isinstance(outcome.result, dict) and outcome.result
+        else None
+    )
+    environment_hash_value: str | None = None
+    task = await session.get(Task, run.task_id)
+    if task is not None and task.project_id is not None:
+        revision = await current_environment(session, task.project_id)
+        if revision is not None:
+            environment_hash_value = environment_hash(revision.contract)
+    worktree = await session.scalar(
+        select(Worktree)
+        .where(Worktree.run_id == run.id)
+        .order_by(Worktree.created_at.desc())
+        .limit(1)
+    )
+    result_hash = None
+    if worktree is not None:
+        result_hash = worktree.diff_hash or worktree.result_commit
+    worker = await session.scalar(
+        select(Step)
+        .where(
+            Step.run_id == run.id,
+            Step.step_type == "execute_code",
+            Step.status == StepStatus.COMPLETED,
+        )
+        .order_by(Step.ordinal.desc())
+        .limit(1)
+    )
+    strategy_hash = envelope_hash(
+        {
+            "profile": worker.executor_profile_id if worker is not None else None,
+            "policy_revision": run.policy_revision,
+            "prompt_revision": run.prompt_revision,
+        }
+    )
+    components = fingerprint_components(
+        step_type=step.step_type,
+        category=outcome.category,
+        evidence_hash=evidence_hash,
+        environment_hash=environment_hash_value,
+        result_hash=result_hash,
+        strategy_hash=strategy_hash,
+    )
+    raw_history = payload.get("failure_fingerprint_history")
+    seen = (
+        frozenset(str(item) for item in raw_history)
+        if isinstance(raw_history, list)
+        else frozenset()
+    )
+    task_repair_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(Step)
+            .where(
+                Step.run_id == run.id,
+                Step.dependency_metadata["template_key"].as_string() == "repair_code",
+            )
+        )
+        or 0
+    )
+    state = RecoveryState(
+        outcome_kind=outcome.kind.value,
+        category=outcome.category,
+        step_type=step.step_type,
+        unknown_effects=outcome.unknown_effects,
+        retryable=_can_retry(step),
+        fingerprint=failure_fingerprint(components),
+        seen_fingerprints=seen,
+        repair_count=int(payload.get("repair_count", 0)),
+        task_repair_count=task_repair_count,
+        backpressure_count=int(payload.get("backpressure_count", 0)),
+        deadline_exceeded=_recovery_deadline_exceeded(run, step, policy),
+    )
+    return state, components
+
+
+def _emit_recovery_event(
+    session: AsyncSession,
+    run: Run,
+    step: Step,
+    state: RecoveryState,
+    action: RecoveryAction,
+) -> None:
+    session.add(
+        Event(
+            entity_type="run",
+            entity_id=run.id,
+            event_type="workflow.recovery_decision",
+            actor_type="workflow_manager",
+            payload={
+                "failed_step_id": str(step.id),
+                **recovery_attempt_summary(state, action),
+            },
+        )
+    )
+
+
+async def _block_for_attention(session: AsyncSession, run: Run, step: Step) -> None:
+    await transition_step(session, step, StepStatus.BLOCKED, actor_type="worker")
+    await transition_run(session, run, RunStatus.BLOCKED, actor_type="worker")
 
 
 async def _steps_for_run(

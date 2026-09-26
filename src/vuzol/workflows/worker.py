@@ -21,6 +21,7 @@ from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import QueueClass
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest, StepHandler
+from vuzol.workflows.recovery_policy import recovery_policy_from_settings
 from vuzol.workflows.service import commit_step_outcome
 
 
@@ -45,6 +46,7 @@ class WorkflowWorker:
         self._queue_classes = queue_classes
         self._profile_limits = dict(profile_limits or {})
         self._free_space_probe = free_space_probe
+        self._recovery_policy = recovery_policy_from_settings(settings.workflow)
 
     async def process_one(self) -> bool:
         limits = self._settings.concurrency
@@ -119,6 +121,7 @@ class WorkflowWorker:
                 token,
                 outcome,
                 retry_delay_seconds=self._retry_delay(token.step.id, token.step.lease_generation),
+                recovery_policy=self._recovery_policy,
             )
         return True
 

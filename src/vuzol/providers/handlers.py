@@ -1149,7 +1149,7 @@ def repair_context_item(step: Step) -> ContextItem | None:
         return None
     allowed = {
         key: raw.get(key)
-        for key in ("source", "category", "summary", "validation_result")
+        for key in ("source", "category", "summary", "validation_result", "failure_fingerprint")
         if raw.get(key) is not None
     }
     content = json.dumps(
@@ -1164,9 +1164,15 @@ def repair_context_item(step: Step) -> ContextItem | None:
         sort_keys=True,
         separators=(",", ":"),
     )[:4_000]
+    fingerprint = raw.get("failure_fingerprint")
+    reference = (
+        f"repair:{step.id}:{fingerprint[:12]}"
+        if isinstance(fingerprint, str) and fingerprint
+        else f"repair:{step.id}:1"
+    )
     return ContextItem(
         source="system_repair",
-        reference=f"repair:{step.id}:1",
+        reference=reference,
         content=content,
         content_hash=hashlib.sha256(content.encode()).hexdigest(),
     )

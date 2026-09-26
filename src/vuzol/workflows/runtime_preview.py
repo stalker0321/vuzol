@@ -252,12 +252,7 @@ class RuntimePreviewHandler:
                     self._runtime.settings.capability_provisioning.toolchain_root
                 ),
                 installation_status=installation_status,
-                approved_roots=confined_paths.read_only_roots(
-                    (
-                        _source_root(),
-                        self._runtime.settings.capability_provisioning.toolchain_root,
-                    )
-                ),
+                approved_roots=confined_paths.read_only_roots((_source_root(),)),
             )
             if check.state is not CapabilityState.READY
         )
@@ -291,11 +286,10 @@ class RuntimePreviewHandler:
         # E23: an executable resolved through PATH must be readable by the real
         # confined child. Without this, a per-user NVM binary passes `which()`
         # and then dies with PermissionError inside Landlock. The check uses the
-        # actual ruleset roots (system/interpreter paths, the source root and the
-        # approved managed-toolchain root); it never adds $HOME.
-        confined_roots = confined_paths.read_only_roots(
-            (_source_root(), self._runtime.settings.capability_provisioning.toolchain_root)
-        )
+        # actual ruleset roots (interpreter/system paths plus the spec's
+        # read-only source root); it never adds $HOME. Managed toolchain paths
+        # are not in this ruleset, so they are correctly rejected here.
+        confined_roots = confined_paths.read_only_roots((_source_root(),))
         if not confined_paths.executable_within_roots(Path(executable), confined_roots):
             return _needs_setup(
                 f"{command[0]} executable is not readable in the confined preview runtime"

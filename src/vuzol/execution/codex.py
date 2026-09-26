@@ -45,6 +45,7 @@ from vuzol.projects.dependencies import (
     load_dependency_environment,
 )
 from vuzol.projects.executor_preference import apply_profile_overrides
+from vuzol.projects.installations import enforce_run_pins
 from vuzol.projects.source_catalog import SourceCatalog
 from vuzol.projects.toolchains import ToolchainRuntime, toolchain_runtime
 from vuzol.providers.codex import canonical_codex_argv
@@ -369,7 +370,17 @@ class ExecutionEnvelopeFactory:
             if isinstance(raw, dict)
             else ()
         )
-        return toolchain_runtime(trusted_root(root, create=False), capability_keys)
+        verified_root = trusted_root(root, create=False)
+        # WP03: pin the resolved versions on first use and fail closed if the
+        # on-disk toolchain changed (downgrade/upgrade) for this run.
+        async with self._factory.begin() as session:
+            await enforce_run_pins(
+                session,
+                run_id=worktree.run_id,
+                root=verified_root,
+                capability_keys=capability_keys,
+            )
+        return toolchain_runtime(verified_root, capability_keys)
 
     async def build_canonicalizer(
         self,

@@ -257,6 +257,7 @@ async def run() -> None:
                 sandbox_runtime,
                 proxy_manager,
                 dependency_access,
+                factory=factory,
             )
         )
         dependency_handler = DependencyProvisioningHandler(

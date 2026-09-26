@@ -30,6 +30,14 @@ class InstallationState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class CapabilityPinMismatch(RuntimeError):
+    """An installed toolchain changed after the run pinned its version.
+
+    Raised from the resolution path so a downgrade/upgrade fails closed instead
+    of silently changing how an in-flight run resolves its executable.
+    """
+
+
 def receipt_digest(spec: ToolchainSpec) -> str:
     encoded = json.dumps(spec.receipt(), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -177,3 +185,48 @@ async def pin_matches(
     if pin is None:
         return True
     return pin.receipt_hash == receipt_digest(spec)
+
+
+async def enforce_run_pins(
+    session: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    root: Path,
+    capability_keys: tuple[str, ...],
+) -> None:
+    """Pin each resolved toolchain on first use; fail closed on later drift.
+
+    Called by the resolution paths (`execution/codex.py`,
+    `execution/dependency_build.py`) before a managed runtime is mounted. A
+    missing toolchain is skipped (the caller handles "not installed"); an
+    already-pinned toolchain whose receipt hash changed raises.
+    """
+
+    for capability_key in sorted(set(capability_keys)):
+        spec = load_installed_toolchain(root, capability_key)
+        if spec is None:
+            continue
+        existing = await session.scalar(
+            select(CapabilityRunPin).where(
+                CapabilityRunPin.run_id == run_id,
+                CapabilityRunPin.capability_key == capability_key,
+            )
+        )
+        digest = receipt_digest(spec)
+        if existing is None:
+            session.add(
+                CapabilityRunPin(
+                    run_id=run_id,
+                    capability_key=capability_key,
+                    version=spec.version,
+                    receipt_hash=digest,
+                    pinned_at=datetime.now(UTC),
+                )
+            )
+            continue
+        if existing.receipt_hash != digest:
+            raise CapabilityPinMismatch(
+                f"capability {capability_key} changed after this run pinned "
+                f"version {existing.version}"
+            )
+    await session.flush()

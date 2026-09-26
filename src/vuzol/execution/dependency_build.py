@@ -10,6 +10,8 @@ import stat
 import uuid
 from pathlib import Path
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from vuzol.config import DependencyProvisioningSettings, Settings
 from vuzol.config.models import SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
@@ -26,6 +28,7 @@ from vuzol.projects.dependencies import (
     dependency_environment_path,
     load_dependency_environment,
 )
+from vuzol.projects.installations import enforce_run_pins
 from vuzol.projects.toolchains import toolchain_runtime
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
@@ -42,6 +45,8 @@ class SandboxedDependencyBuilder:
         runtime: SandboxRuntime,
         proxy: ProxyServiceManager,
         access: WorktreeAccessManager,
+        *,
+        factory: async_sessionmaker[AsyncSession] | None = None,
     ) -> None:
         self._settings = settings
         self._dependency_settings: DependencyProvisioningSettings = settings.dependency_provisioning
@@ -49,6 +54,7 @@ class SandboxedDependencyBuilder:
         self._runtime = runtime
         self._proxy = proxy
         self._access = access
+        self._factory = factory
 
     async def build(
         self,
@@ -65,6 +71,18 @@ class SandboxedDependencyBuilder:
         )
         if existing is not None:
             return existing
+        if request.ecosystem == "node" and self._factory is not None:
+            toolchain_root = self._settings.capability_provisioning.toolchain_root
+            if toolchain_root.is_dir():
+                # WP03: fail closed if the managed Node toolchain changed after
+                # this run pinned its version.
+                async with self._factory.begin() as session:
+                    await enforce_run_pins(
+                        session,
+                        run_id=step_request.run_id,
+                        root=trusted_root(toolchain_root, create=False),
+                        capability_keys=("node-runtime",),
+                    )
         target = dependency_environment_path(
             self._dependency_settings.environment_root, project_id, request
         )

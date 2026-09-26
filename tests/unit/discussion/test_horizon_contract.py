@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vuzol.config.settings import Settings
+from vuzol.config.settings import HorizonSettings, Settings
 from vuzol.discussion.horizon import (
     HORIZON_STATUS_MAPPING,
     budget_state,
@@ -27,7 +27,7 @@ from vuzol.storage.types import WorkPackageStatus
 def test_flag_default_off() -> None:
     assert Settings().horizon.enabled is False
     assert horizon_enabled(Settings()) is False
-    assert horizon_enabled(Settings(horizon={"enabled": True})) is True
+    assert horizon_enabled(Settings(horizon=HorizonSettings(enabled=True))) is True
 
 
 def test_empty_exit_criteria_is_not_success() -> None:

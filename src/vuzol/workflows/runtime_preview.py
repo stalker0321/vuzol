@@ -29,7 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import RuntimeConfiguration
 from vuzol.project_environment import current_environment
 from vuzol.projects.capabilities import CapabilityState, preflight_capabilities
-from vuzol.security import landlock
+from vuzol.projects.installations import installation_states
+from vuzol.security import confined_paths, landlock
 from vuzol.storage.models import MaterializationLink, Task, WorkPackage, Worktree
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -231,6 +232,12 @@ class RuntimePreviewHandler:
                 if task is None or task.project_id is None
                 else await current_environment(session, task.project_id)
             )
+            installation_status = await installation_states(
+                session,
+                node_id=str(
+                    getattr(self._runtime.settings.capability_provisioning, "node_id", "local")
+                ),
+            )
         if task is None or task.project_id is None or worktree is None:
             return StepOutcome.succeeded({"status": "skipped", "reason": "project_missing"})
         component = _web_component(None if environment is None else environment.contract)
@@ -243,6 +250,13 @@ class RuntimePreviewHandler:
                 contract,
                 managed_toolchain_root=(
                     self._runtime.settings.capability_provisioning.toolchain_root
+                ),
+                installation_status=installation_status,
+                approved_roots=confined_paths.read_only_roots(
+                    (
+                        _source_root(),
+                        self._runtime.settings.capability_provisioning.toolchain_root,
+                    )
                 ),
             )
             if check.state is not CapabilityState.READY
@@ -274,6 +288,18 @@ class RuntimePreviewHandler:
         executable = shutil.which(executable_name) if executable_name is not None else None
         if executable is None or not Path(executable).is_file():  # noqa: ASYNC240
             return _needs_setup(f"runtime adapter is unavailable for {command[0]}")
+        # E23: an executable resolved through PATH must be readable by the real
+        # confined child. Without this, a per-user NVM binary passes `which()`
+        # and then dies with PermissionError inside Landlock. The check uses the
+        # actual ruleset roots (system/interpreter paths, the source root and the
+        # approved managed-toolchain root); it never adds $HOME.
+        confined_roots = confined_paths.read_only_roots(
+            (_source_root(), self._runtime.settings.capability_provisioning.toolchain_root)
+        )
+        if not confined_paths.executable_within_roots(Path(executable), confined_roots):
+            return _needs_setup(
+                f"{command[0]} executable is not readable in the confined preview runtime"
+            )
         commit = worktree.result_commit
         if commit is None or _COMMIT.fullmatch(commit) is None:
             return StepOutcome(

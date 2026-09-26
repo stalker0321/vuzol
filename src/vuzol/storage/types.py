@@ -100,6 +100,26 @@ class BudgetReservationStatus(StrEnum):
     RELEASED = "released"
 
 
+class AccountingPurpose(StrEnum):
+    """Why a provider invocation happened. Orthogonal to AttemptKind."""
+
+    INTAKE = "intake"
+    PLANNING = "planning"
+    CODING = "coding"
+    REVIEW = "review"
+    RESEARCH = "research"
+    SETUP = "setup"
+
+
+class AttemptKind(StrEnum):
+    """Lineage of an invocation. Orthogonal to AccountingPurpose."""
+
+    INITIAL = "initial"
+    REPAIR = "repair"
+    RETRY = "retry"
+    TAKEOVER = "takeover"
+
+
 class ApprovalStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"

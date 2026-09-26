@@ -27,7 +27,14 @@ from vuzol.projects.executor_preference import (
     resolve_route_pin,
     same_family_fallback_ids,
 )
-from vuzol.providers.budgets import BudgetExceeded, estimate_reservation, reserve_budget
+from vuzol.providers.budgets import (
+    BudgetExceeded,
+    accounting_for_profile,
+    attempt_kind_for_step,
+    estimate_reservation,
+    purpose_for_step_type,
+    reserve_budget,
+)
 from vuzol.providers.domain import EffectiveProfileState
 from vuzol.providers.fallback_policy import should_fallback_provider
 from vuzol.providers.health import effective_health
@@ -323,6 +330,11 @@ async def claim_routed_step(
                     provider_attempt=attempt,
                     estimate=estimate,
                     limits=settings.limits,
+                    accounting=accounting_for_profile(
+                        profile,
+                        purpose=purpose_for_step_type(step.step_type),
+                        attempt_kind=attempt_kind_for_step(step),
+                    ),
                 )
             except BudgetExceeded:
                 continue

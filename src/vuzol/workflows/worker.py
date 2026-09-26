@@ -1,6 +1,7 @@
 """Bounded fenced workflow worker."""
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Mapping
 
@@ -11,6 +12,7 @@ from vuzol.config import Capability, Settings
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.ops.disk_pressure import FreeSpaceProbe
 from vuzol.ops.telegram_dogfood import DogfoodFault, consume_fault
+from vuzol.providers.budgets import close_step_reservations
 from vuzol.providers.routing import claim_routed_step
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_step, heartbeat_step, start_step
@@ -98,6 +100,18 @@ class WorkflowWorker:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
         if cancellation.requested and not commit_after_cancellation:
+            # The handler's own accounting transaction rolled back with the
+            # cancellation. Close any reservation it left behind so a cancelled
+            # step cannot leak daily caps; charge conservatively because the
+            # provider call may already have been sent.
+            async with self._factory.begin() as session:
+                with contextlib.suppress(Exception):
+                    await close_step_reservations(
+                        session,
+                        step_id=token.step.id,
+                        outcome="cancelled",
+                        release=False,
+                    )
             return True
         async with self._factory.begin() as session:
             await commit_step_outcome(

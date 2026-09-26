@@ -106,6 +106,14 @@ class OpenAICompatibleInterpreter:
         self._reasoning_enabled = reasoning_enabled
         self._client = client
 
+    @property
+    def profile_id(self) -> str:
+        return self._profile_id
+
+    @property
+    def model(self) -> str:
+        return self._model
+
     async def interpret(
         self, request: InterpretationInput, *, repair_error: str | None = None
     ) -> InterpretationResult:
@@ -240,6 +248,14 @@ class OpenAICompatibleTranscriber:
         self._model = model
         self._timeout = timeout_seconds
         self._client = client
+
+    @property
+    def profile_id(self) -> str:
+        return self._profile_id
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     async def transcribe(self, request: TranscriptionInput) -> TranscriptionResult:
         started = time.monotonic()

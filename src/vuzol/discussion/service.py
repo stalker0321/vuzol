@@ -29,6 +29,7 @@ from vuzol.discussion.domain import (
     semantic_plan_hash,
     semantic_revision_hash,
 )
+from vuzol.discussion.horizon import is_horizon
 from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
     EditSession,
@@ -184,6 +185,7 @@ class WorkPackageService:
         h8: str,
         expected_status_generation: int,
         user_id: int,
+        horizon_enabled: bool = False,
     ) -> RevisionResult:
         """Clone a stopped approved revision so a fresh task can be materialized safely."""
 
@@ -193,6 +195,33 @@ class WorkPackageService:
         revision = await self._fenced_revision(package_id, revision_number, h8)
         if package.head_revision_id != revision.id or package.approved_revision_id != revision.id:
             raise DomainError("approval_binding_mismatch")
+        if horizon_enabled and is_horizon(package.goal, package.exit_criteria):
+            # Approved horizon continues: no new DRAFT revision, no re-approve.
+            # Generation is unchanged; resume is an explicit start/observe step.
+            package.pause_reason = None
+            package.last_failure_task_id = None
+            await self._event(
+                package.id,
+                WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
+                "user",
+                previous_state=WorkPackageStatus.STOPPED.value,
+                new_state=WorkPackageStatus.STOPPED.value,
+                payload={
+                    "previous_revision_id": str(revision.id),
+                    "new_revision_id": str(revision.id),
+                    "requested_by_user_id": user_id,
+                    "restart": True,
+                    "horizon_continued": True,
+                    "status_generation": package.version,
+                },
+            )
+            return RevisionResult(
+                package.id,
+                revision.id,
+                revision.revision_number,
+                revision.content_hash,
+                package.version,
+            )
         result = await self.revise_draft(
             package_id=package_id,
             expected_status_generation=expected_status_generation,

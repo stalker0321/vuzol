@@ -14,6 +14,7 @@ from vuzol.discussion.domain import (
     PlanDraft,
     canonical_plan_body,
 )
+from vuzol.discussion.horizon import is_horizon
 from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.interpretation.discussion import (
@@ -379,21 +380,31 @@ class PackageControlIngress:
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.RESTART_PACKAGE:
+                resume_package = await uow.work_packages.get_package(command.package_id)
+                horizon_resume = self._horizon_enabled and is_horizon(
+                    resume_package.goal, resume_package.exit_criteria
+                )
                 restart = await service.restart_plan(
                     package_id=command.package_id,
                     revision_number=command.plan_revision_number,
                     h8=command.h8,
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
+                    horizon_enabled=horizon_resume,
                 )
                 restarted_revision = await uow.work_packages.get_revision(restart.revision_id)
-                approved_generation = await service.approve(
-                    package_id=command.package_id,
-                    revision_number=restarted_revision.revision_number,
-                    h8=restarted_revision.content_hash[:8],
-                    expected_status_generation=restart.status_generation,
-                    user_id=command.user_id,
-                )
+                if horizon_resume:
+                    # Continued horizon is already APPROVED on the same
+                    # revision: resume directly without re-approve.
+                    approved_generation = restart.status_generation
+                else:
+                    approved_generation = await service.approve(
+                        package_id=command.package_id,
+                        revision_number=restarted_revision.revision_number,
+                        h8=restarted_revision.content_hash[:8],
+                        expected_status_generation=restart.status_generation,
+                        user_id=command.user_id,
+                    )
                 sequence = await WorkPackageSequencer(uow).start(
                     package_id=command.package_id,
                     revision_number=restarted_revision.revision_number,

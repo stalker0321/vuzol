@@ -35,6 +35,7 @@ class WorkPackageEvent(StrEnum):
     PACKAGE_COMPLETED = "work_package.completed"
     PACKAGE_EVALUATING = "work_package.evaluating"
     PACKAGE_WAITING_APPROVAL = "work_package.waiting_approval"
+    PACKAGE_ITEM_APPROVED = "work_package.item_approved"
     DETAIL_POINTER_CHANGED = "work_package.detail_pointer_changed"
     EDIT_SESSION_OPENED = "edit_session.opened"
     EDIT_SESSION_CLOSED = "edit_session.closed"
@@ -52,6 +53,7 @@ class PackageControlAction(StrEnum):
     FINISH_PACKAGE = "finish_package"
     RESTART_PACKAGE = "restart_package"
     REQUEST_REPLAN = "request_replan"
+    APPROVE_ITEM = "approve_item"
 
 
 class DomainError(RuntimeError):
@@ -440,6 +442,10 @@ def control_transition_target(
                 }
             ),
             WorkPackageStatus.PAUSED,
+        ),
+        PackageControlAction.APPROVE_ITEM: (
+            frozenset({WorkPackageStatus.RUNNING}),
+            WorkPackageStatus.RUNNING,
         ),
     }
     sources, target = allowed[action]

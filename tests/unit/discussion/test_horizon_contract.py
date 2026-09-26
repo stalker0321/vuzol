@@ -9,6 +9,7 @@ import pytest
 
 from vuzol.config.settings import HorizonSettings, Settings
 from vuzol.discussion.application import PackageControlIngress
+from vuzol.discussion.domain import DomainError
 from vuzol.discussion.horizon import (
     HORIZON_STATUS_MAPPING,
     budget_state,
@@ -255,3 +256,86 @@ async def test_needs_approval_item_materializes_when_flag_off() -> None:
     assert result.completed is False
     assert result.task_id == task_id
     assert package.horizon_phase is None
+
+
+def _waiting_package() -> tuple[WorkPackage, uuid.UUID]:
+    revision_id = uuid.uuid4()
+    package = WorkPackage(
+        session_id=uuid.uuid4(),
+        project_id="test",
+        status=WorkPackageStatus.RUNNING,
+        title="horizon package",
+    )
+    package.id = uuid.uuid4()
+    package.goal = "ship the horizon"
+    package.exit_criteria = None
+    package.version = 5
+    package.cursor_ordinal = 1
+    package.running_revision_id = revision_id
+    package.head_revision_id = revision_id
+    package.approved_revision_id = revision_id
+    package.horizon_phase = "waiting_approval"
+    return package, revision_id
+
+
+@pytest.mark.anyio
+async def test_approve_waiting_item_records_single_use_marker() -> None:
+    package, revision_id = _waiting_package()
+    item_pk = uuid.uuid4()
+    uow = MagicMock()
+    uow.work_packages.get_package = AsyncMock(return_value=package)
+    uow.work_packages.get_fenced_revision = AsyncMock(
+        return_value=SimpleNamespace(id=revision_id, revision_number=1, content_hash="ab" * 32)
+    )
+    uow.work_packages.resolve_fenced_item = AsyncMock(return_value=(revision_id, item_pk))
+    uow.session = MagicMock()
+    uow.session.get = AsyncMock(return_value=SimpleNamespace(needs_approval=True))
+    uow.events.append = AsyncMock()
+    service = WorkPackageService(cast(Any, uow))
+
+    generation = await service.approve_waiting_item(
+        package_id=package.id,
+        revision_number=1,
+        h8="ab" * 8,
+        expected_status_generation=5,
+        ordinal=1,
+        user_id=7,
+        horizon_enabled=True,
+    )
+
+    assert generation == 6
+    assert package.horizon_phase == "item_approved:1"
+
+
+@pytest.mark.anyio
+async def test_approve_waiting_item_rejects_wrong_ordinal_and_flag_off() -> None:
+    package, revision_id = _waiting_package()
+    uow = MagicMock()
+    uow.work_packages.get_package = AsyncMock(return_value=package)
+    uow.work_packages.get_fenced_revision = AsyncMock(
+        return_value=SimpleNamespace(id=revision_id, revision_number=1, content_hash="ab" * 32)
+    )
+    uow.session = MagicMock()
+    uow.events.append = AsyncMock()
+    service = WorkPackageService(cast(Any, uow))
+
+    with pytest.raises(DomainError, match="item_not_waiting_approval"):
+        await service.approve_waiting_item(
+            package_id=package.id,
+            revision_number=1,
+            h8="ab" * 8,
+            expected_status_generation=5,
+            ordinal=2,
+            user_id=7,
+            horizon_enabled=True,
+        )
+    with pytest.raises(DomainError, match="horizon_not_enabled"):
+        await service.approve_waiting_item(
+            package_id=package.id,
+            revision_number=1,
+            h8="ab" * 8,
+            expected_status_generation=5,
+            ordinal=1,
+            user_id=7,
+            horizon_enabled=False,
+        )

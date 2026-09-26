@@ -451,11 +451,12 @@ class WorkPackageSequencer:
             horizon_enabled
             and is_horizon(package.goal, package.exit_criteria)
             and needs_approval_gate(item.needs_approval)
+            and package.horizon_phase != f"item_approved:{ordinal}"
         ):
             # Item-level approval is a runtime gate: the item is not
-            # materialized until explicitly approved. Repeat observations are
-            # idempotent (no new event/generation). Approval-to-continue is a
-            # separate control (next increment).
+            # materialized until explicitly approved (approve_waiting_item
+            # records an ``item_approved:{ordinal}`` marker that lets exactly
+            # this ordinal through). Repeat observations are idempotent.
             if package.horizon_phase == "waiting_approval":
                 return SequenceResult(package.id, package.version, None, ordinal)
             package.horizon_phase = "waiting_approval"
@@ -475,6 +476,10 @@ class WorkPackageSequencer:
             )
             await self._projection(package.id, package.version, "waiting_approval")
             return SequenceResult(package.id, package.version, None, ordinal)
+
+        if (package.horizon_phase or "").startswith("item_approved:"):
+            # Approved marker is single-use: clear it as the item materializes.
+            package.horizon_phase = None
 
         discussion = await self._uow.session.get(ProjectDiscussionSession, package.session_id)
         if discussion is None:

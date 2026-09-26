@@ -359,6 +359,23 @@ class PackageControlIngress:
                 )
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
+            elif command.action is PackageControlAction.APPROVE_ITEM:
+                if command.item_ordinal is None:
+                    raise DomainError("ordinal_missing")
+                generation = await service.approve_waiting_item(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    ordinal=command.item_ordinal,
+                    user_id=command.user_id,
+                    horizon_enabled=self._horizon_enabled,
+                )
+                await WorkPackageSequencer(uow).materialize_running(
+                    package_id=command.package_id, horizon_enabled=self._horizon_enabled
+                )
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
             elif command.action is PackageControlAction.STOP_PACKAGE:
                 generation = await service.stop_package(
                     package_id=command.package_id,

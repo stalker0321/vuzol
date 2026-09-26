@@ -647,7 +647,10 @@ class WorkPackageSequenceConsumer:
                     or item.linked_entity_type != "task"
                 ):
                     raise ValueError("invalid_sequence_item")
-                await WorkPackageSequencer(uow).observe_terminal(task_id=item.linked_entity_id)
+                await WorkPackageSequencer(uow).observe_terminal(
+                    task_id=item.linked_entity_id,
+                    horizon_enabled=self._settings.horizon.enabled,
+                )
                 await complete_outbox_item(uow.session, token)
         except (DomainError, ValueError) as error:
             category = str(error)

@@ -17,6 +17,7 @@ from vuzol.discussion.domain import (
     control_transition_target,
     require_generation,
 )
+from vuzol.discussion.horizon import is_horizon
 from vuzol.interpretation.domain import (
     TASK_DRAFT_SCHEMA_VERSION,
     SuggestedComplexity,
@@ -95,6 +96,7 @@ class WorkPackageSequencer:
         h8: str,
         expected_status_generation: int,
         user_id: int,
+        horizon_enabled: bool = False,
     ) -> SequenceResult:
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         require_generation(package.version, expected_status_generation)
@@ -126,7 +128,7 @@ class WorkPackageSequencer:
                 "started_by_user_id": user_id,
             },
         )
-        return await self._materialize_current(package, revision)
+        return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
 
     async def _first_unfinished_ordinal(self, package_id: uuid.UUID, revision: PlanRevision) -> int:
         """Carry an unchanged, completed prefix across plan revisions."""
@@ -167,7 +169,9 @@ class WorkPackageSequencer:
                 return item.ordinal
         return len(current_items) + 1
 
-    async def observe_terminal(self, *, task_id: uuid.UUID) -> SequenceResult | None:
+    async def observe_terminal(
+        self, *, task_id: uuid.UUID, horizon_enabled: bool = False
+    ) -> SequenceResult | None:
         """Consume terminal evidence once; duplicate observations are harmless."""
 
         assert self._uow.session is not None
@@ -236,9 +240,11 @@ class WorkPackageSequencer:
 
         package.cursor_ordinal = link.ordinal + 1
         package.version += 1
-        return await self._materialize_current(package, revision)
+        return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
 
-    async def materialize_running(self, *, package_id: uuid.UUID) -> SequenceResult:
+    async def materialize_running(
+        self, *, package_id: uuid.UUID, horizon_enabled: bool = False
+    ) -> SequenceResult:
         """Materialize the fenced cursor after an explicit skip/recovery transition."""
 
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
@@ -249,7 +255,7 @@ class WorkPackageSequencer:
         revision = await self._uow.work_packages.get_revision(package.running_revision_id)
         if revision.id != package.head_revision_id:
             raise DomainError("stale_revision")
-        return await self._materialize_current(package, revision)
+        return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
 
     async def retry_failed_item(
         self,
@@ -375,7 +381,9 @@ class WorkPackageSequencer:
         await self._projection(package.id, package.version, "failed_item_retry")
         return SequenceResult(package.id, package.version, task.id, link.ordinal)
 
-    async def _materialize_current(self, package: object, revision: PlanRevision) -> SequenceResult:
+    async def _materialize_current(
+        self, package: object, revision: PlanRevision, *, horizon_enabled: bool = False
+    ) -> SequenceResult:
         from vuzol.storage.models import WorkPackage
 
         assert isinstance(package, WorkPackage)
@@ -400,6 +408,23 @@ class WorkPackageSequencer:
             )
         )
         if item is None:
+            if horizon_enabled and is_horizon(package.goal, package.exit_criteria):
+                # Horizon v1 (WP08): an exhausted queue is not success. The
+                # package stays RUNNING in the evaluating phase until
+                # acceptance is recorded; COMPLETED requires accepted=true.
+                package.horizon_phase = "evaluating"
+                package.version += 1
+                await self._uow.events.append(
+                    entity_type="work_package",
+                    entity_id=package.id,
+                    event_type=WorkPackageEvent.PACKAGE_EVALUATING.value,
+                    actor_type="system",
+                    previous_state=WorkPackageStatus.RUNNING.value,
+                    new_state=WorkPackageStatus.RUNNING.value,
+                    payload={"revision_id": str(revision.id), "horizon_phase": "evaluating"},
+                )
+                await self._projection(package.id, package.version, "evaluating")
+                return SequenceResult(package.id, package.version, None, None, completed=False)
             package.status = WorkPackageStatus.COMPLETED
             package.cursor_ordinal = None
             package.pause_reason = None

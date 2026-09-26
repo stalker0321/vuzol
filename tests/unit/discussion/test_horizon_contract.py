@@ -1,5 +1,12 @@
 """Horizon v1 contract helpers + opt-in flag (WP08, ADR-A01.5)."""
 
+import uuid
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from vuzol.config.settings import Settings
 from vuzol.discussion.horizon import (
     HORIZON_STATUS_MAPPING,
@@ -12,6 +19,8 @@ from vuzol.discussion.horizon import (
     parse_budget,
     unmet_exit_criteria,
 )
+from vuzol.discussion.sequencer import WorkPackageSequencer
+from vuzol.storage.models import WorkPackage
 from vuzol.storage.types import WorkPackageStatus
 
 
@@ -69,3 +78,54 @@ def test_deadline_and_approval_gate() -> None:
     assert deadline_exceeded(deadline=None, now=now) is False
     assert needs_approval_gate(True) is True
     assert needs_approval_gate(False) is False
+
+
+def _sequencer() -> tuple[WorkPackageSequencer, MagicMock]:
+    uow = MagicMock()
+    uow.session.scalar = AsyncMock(return_value=None)
+    uow.session.get = AsyncMock(return_value=None)
+    uow.events.append = AsyncMock()
+    uow.outbox.enqueue = AsyncMock()
+    return WorkPackageSequencer(cast(Any, uow)), uow
+
+
+def _running_package(*, goal: str | None) -> WorkPackage:
+    package = WorkPackage(
+        session_id=uuid.uuid4(),
+        project_id="test",
+        status=WorkPackageStatus.RUNNING,
+        title="horizon package",
+    )
+    package.id = uuid.uuid4()
+    package.goal = goal
+    package.exit_criteria = None
+    package.cursor_ordinal = 1
+    package.version = 1
+    package.horizon_phase = None
+    return package
+
+
+@pytest.mark.anyio
+async def test_exhausted_queue_enters_evaluating_behind_flag() -> None:
+    sequencer, _ = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    revision = SimpleNamespace(id=uuid.uuid4())
+
+    result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
+
+    assert result.completed is False
+    assert package.status is WorkPackageStatus.RUNNING
+    assert package.horizon_phase == "evaluating"
+
+
+@pytest.mark.anyio
+async def test_exhausted_queue_completes_when_flag_off() -> None:
+    sequencer, _ = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    revision = SimpleNamespace(id=uuid.uuid4())
+
+    result = await sequencer._materialize_current(package, revision, horizon_enabled=False)  # type: ignore[arg-type]
+
+    assert result.completed is True
+    assert package.status is WorkPackageStatus.COMPLETED
+    assert package.horizon_phase is None

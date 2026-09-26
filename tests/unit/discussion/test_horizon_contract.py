@@ -177,8 +177,11 @@ async def test_restart_continues_approved_horizon_without_new_revision() -> None
 
     assert result.revision_id == revision_id
     assert result.revision_number == 2
-    assert result.status_generation == 3
-    assert package.version == 3
+    assert result.status_generation == 4
+    assert package.version == 4
+    assert package.status is WorkPackageStatus.APPROVED
+    assert package.approved_revision_id == revision_id
+    assert package.head_revision_id == revision_id
     assert package.pause_reason is None
     assert package.last_failure_task_id is None
     uow.work_packages.get_head_revision.assert_not_called()

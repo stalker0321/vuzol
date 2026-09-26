@@ -197,15 +197,18 @@ class WorkPackageService:
             raise DomainError("approval_binding_mismatch")
         if horizon_enabled and is_horizon(package.goal, package.exit_criteria):
             # Approved horizon continues: no new DRAFT revision, no re-approve.
-            # Generation is unchanged; resume is an explicit start/observe step.
+            # The package returns to APPROVED on the same approved revision so
+            # the sequencer can resume it directly (approve is skipped).
+            package.status = WorkPackageStatus.APPROVED
             package.pause_reason = None
             package.last_failure_task_id = None
+            package.version += 1
             await self._event(
                 package.id,
                 WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
                 "user",
                 previous_state=WorkPackageStatus.STOPPED.value,
-                new_state=WorkPackageStatus.STOPPED.value,
+                new_state=WorkPackageStatus.APPROVED.value,
                 payload={
                     "previous_revision_id": str(revision.id),
                     "new_revision_id": str(revision.id),

@@ -3,10 +3,14 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.providers.budgets import close_step_reservations, release_orphan_reservations
 from vuzol.storage.models import Run, Step, Task
 from vuzol.storage.types import IdempotencyClass, RunStatus, StepStatus, TaskStatus
 from vuzol.telegram.projections import enqueue_terminal_task_projections
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
+
+# Reservations younger than this are left alone: a live claim may still settle.
+ORPHAN_RESERVATION_MIN_AGE_SECONDS = 900
 
 
 async def recover_expired_steps(session: AsyncSession, *, batch_size: int) -> int:
@@ -23,6 +27,13 @@ async def recover_expired_steps(session: AsyncSession, *, batch_size: int) -> in
     steps = tuple((await session.scalars(statement)).all())
     for step in steps:
         await _recover_one(session, step)
+    # Bounded sweep for reservations leaked outside the expired-lease path
+    # (handler crash/shutdown after the step already became terminal).
+    await release_orphan_reservations(
+        session,
+        older_than_seconds=ORPHAN_RESERVATION_MIN_AGE_SECONDS,
+        batch_size=batch_size,
+    )
     return len(steps)
 
 
@@ -106,5 +117,14 @@ async def _recover_one(session: AsyncSession, step: Step) -> None:
         terminal_outcome = True
     step.lease_owner = None
     step.lease_expires_at = None
+    # Close any budget reservation left behind by the dead worker. A step that
+    # never started (LEASED only) is released; anything that may have reached the
+    # provider is charged conservatively so a crashed call does not leak caps.
+    await close_step_reservations(
+        session,
+        step_id=step.id,
+        outcome="lease_expired" if not leased_only else "lease_expired_before_start",
+        release=leased_only,
+    )
     if terminal_outcome:
         await enqueue_terminal_task_projections(session, task, run)

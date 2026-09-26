@@ -2,25 +2,109 @@
 
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_UP, Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import ProviderProfileConfig
+from vuzol.config.revision import content_revision
 from vuzol.config.settings import HardLimits
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import ProviderBudgetReservation, Step, Task, UsageRecord
 from vuzol.storage.records import LeaseToken
-from vuzol.storage.types import BudgetReservationStatus, StepStatus
+from vuzol.storage.types import (
+    AttemptKind,
+    BudgetReservationStatus,
+    StepStatus,
+)
 
 BUDGET_LOCK_KEY = 8_946_527_101
 MONEY_QUANTUM = Decimal("0.000001")
+DEFAULT_ACCOUNTING_CURRENCY = "USD"
+# Rows written before the accounting ledger existed are marked legacy; orphan
+# settlement without a live profile is marked unknown.
+LEGACY_PRICING_REVISION = "legacy"
+UNKNOWN_PRICING_REVISION = "unknown"
+ORPHAN_PROVIDER = "unknown"
+ORPHAN_MODEL = "unknown"
 
 
 class BudgetExceeded(RuntimeError):
     """A hard budget cannot accommodate another provider call."""
+
+
+@dataclass(frozen=True, slots=True)
+class AccountingContext:
+    """Orthogonal attribution for one provider invocation (ADR-A02).
+
+    ``purpose`` and ``attempt_kind`` are independent dimensions; the same rows
+    produce both the purpose breakdown and the retry subtotal without double
+    counting.
+    """
+
+    purpose: str
+    attempt_kind: str = AttemptKind.INITIAL.value
+    pricing_revision: str | None = None
+    currency: str = DEFAULT_ACCOUNTING_CURRENCY
+    horizon_id: uuid.UUID | None = None
+
+
+def accounting_for_profile(
+    profile: ProviderProfileConfig,
+    *,
+    purpose: str,
+    attempt_kind: str = AttemptKind.INITIAL.value,
+    horizon_id: uuid.UUID | None = None,
+) -> AccountingContext:
+    """Bind a profile to its pricing revision (the current config content hash)."""
+
+    return AccountingContext(
+        purpose=purpose,
+        attempt_kind=attempt_kind,
+        pricing_revision=content_revision(profile),
+        currency=DEFAULT_ACCOUNTING_CURRENCY,
+        horizon_id=horizon_id,
+    )
+
+
+_STEP_PURPOSE = {
+    "plan": "planning",
+    "execute_model": "coding",
+    "execute_code": "coding",
+    "execute_agent": "coding",
+    "research_execute": "research",
+    "synthesize": "research",
+    "privileged_execute": "setup",
+    "ensure_capabilities": "setup",
+    "ensure_dependencies": "setup",
+}
+
+
+def purpose_for_step_type(step_type: str) -> str:
+    """Map a provider step type to its accounting purpose."""
+
+    return _STEP_PURPOSE.get(step_type, "coding")
+
+
+def attempt_kind_for_payload(payload: object, *, attempt_count: int = 1) -> str:
+    """Classify an invocation as initial/repair/retry from persisted facts."""
+
+    mapping = payload if isinstance(payload, dict) else {}
+    if mapping.get("repair_context") is not None:
+        return AttemptKind.REPAIR.value
+    if attempt_count > 1:
+        return AttemptKind.RETRY.value
+    return AttemptKind.INITIAL.value
+
+
+def attempt_kind_for_step(step: Step) -> str:
+    """Classify an invocation as initial/repair/retry from persisted step facts."""
+
+    payload = step.payload if isinstance(step.payload, dict) else {}
+    return attempt_kind_for_payload(payload, attempt_count=step.attempt_count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +171,7 @@ async def reserve_budget(
     estimate: ReservationEstimate,
     limits: HardLimits,
     enforce_task_token_limits: bool = True,
+    accounting: AccountingContext | None = None,
 ) -> ProviderBudgetReservation:
     await session.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK_KEY)))
     existing = await session.scalar(
@@ -156,6 +241,11 @@ async def reserve_budget(
         reserved_cost_units=estimate.cost_units,
         reserved_quota_units=estimate.quota_units,
         status=BudgetReservationStatus.RESERVED,
+        purpose=accounting.purpose if accounting is not None else None,
+        attempt_kind=accounting.attempt_kind if accounting is not None else None,
+        horizon_id=accounting.horizon_id if accounting is not None else None,
+        pricing_revision=accounting.pricing_revision if accounting is not None else None,
+        currency=accounting.currency if accounting is not None else None,
     )
     session.add(reservation)
     await session.flush()
@@ -173,6 +263,7 @@ async def reconcile_usage(
     provider_request_id: str | None,
     outcome: str,
     conservative: bool = False,
+    accounting: AccountingContext | None = None,
 ) -> UsageRecord:
     reservation = await session.scalar(
         select(ProviderBudgetReservation)
@@ -196,6 +287,50 @@ async def reconcile_usage(
     )
     if step is None or reservation.step_id != step.id:
         raise LeaseLost(f"step lease lost before usage reconciliation: {token.step.id}")
+    if accounting is not None:
+        _apply_accounting(reservation, accounting)
+    record = _settle_reservation(
+        reservation,
+        provider=provider,
+        model=model,
+        usage=usage,
+        provider_request_id=provider_request_id,
+        outcome=outcome,
+        conservative=conservative,
+        late_receipt=False,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+def _apply_accounting(
+    reservation: ProviderBudgetReservation, accounting: AccountingContext
+) -> None:
+    reservation.purpose = accounting.purpose
+    reservation.attempt_kind = accounting.attempt_kind
+    reservation.horizon_id = accounting.horizon_id
+    reservation.pricing_revision = accounting.pricing_revision
+    reservation.currency = accounting.currency
+
+
+def _settle_reservation(
+    reservation: ProviderBudgetReservation,
+    *,
+    provider: str,
+    model: str,
+    usage: NormalizedUsage | None,
+    provider_request_id: str | None,
+    outcome: str,
+    conservative: bool,
+    late_receipt: bool,
+) -> UsageRecord:
+    """Write one invocation row for a locked reservation.
+
+    Money-only: the caller owns any lease/step fencing. Unknown usage falls back
+    to the conservative reservation floor and is explicitly marked ``cost_known
+    = false`` so that unknown is never reported as zero.
+    """
 
     unknown = usage is None or usage.cost_units is None
     input_tokens = (
@@ -230,7 +365,7 @@ async def reconcile_usage(
         else BudgetReservationStatus.RECONCILED
     )
     reservation.reconciled_at = func.now()
-    record = UsageRecord(
+    return UsageRecord(
         provider=provider,
         profile_id=reservation.profile_id,
         model=model,
@@ -239,6 +374,8 @@ async def reconcile_usage(
         step_id=reservation.step_id,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        # cached_tokens are recorded for provenance but never priced or added on
+        # top of input_tokens, so cached usage cannot be double-charged.
         cached_tokens=usage.cached_tokens if usage is not None else None,
         cost_units=cost,
         quota_units=quota,
@@ -246,6 +383,119 @@ async def reconcile_usage(
         provider_request_id=provider_request_id,
         reservation_id=reservation.id,
         outcome=outcome,
+        purpose=reservation.purpose,
+        attempt_kind=reservation.attempt_kind,
+        horizon_id=reservation.horizon_id,
+        pricing_revision=reservation.pricing_revision,
+        currency=reservation.currency,
+        cost_known=not unknown,
+        late_receipt=late_receipt,
+    )
+
+
+async def record_late_receipt(
+    session: AsyncSession,
+    *,
+    reservation_id: uuid.UUID,
+    provider: str,
+    model: str,
+    usage: NormalizedUsage | None,
+    provider_request_id: str | None,
+    outcome: str,
+    conservative: bool = True,
+    accounting: AccountingContext | None = None,
+) -> UsageRecord | None:
+    """Settle money for a provider call whose originating lease was lost.
+
+    Deliberately NOT fenced by the step lease and deliberately does not touch
+    Step/Run/Task business state (report §22): a late receipt accounts cost but
+    never advances or rewinds execution. Idempotent by ``reservation_id``.
+    """
+
+    reservation = await session.scalar(
+        select(ProviderBudgetReservation)
+        .where(ProviderBudgetReservation.id == reservation_id)
+        .with_for_update()
+    )
+    if reservation is None:
+        raise LookupError(f"unknown budget reservation: {reservation_id}")
+    existing = await session.scalar(
+        select(UsageRecord).where(UsageRecord.reservation_id == reservation_id)
+    )
+    if existing is not None:
+        return existing
+    if reservation.status is BudgetReservationStatus.RELEASED:
+        return None
+    if accounting is not None:
+        _apply_accounting(reservation, accounting)
+    record = _settle_reservation(
+        reservation,
+        provider=provider,
+        model=model,
+        usage=usage,
+        provider_request_id=provider_request_id,
+        outcome=outcome,
+        conservative=conservative,
+        late_receipt=True,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+async def record_intake_usage(
+    session: AsyncSession,
+    *,
+    profile: ProviderProfileConfig,
+    usage: NormalizedUsage | None,
+    purpose: str,
+    task_id: uuid.UUID | None,
+    provider_request_id: str | None = None,
+    outcome: str = "succeeded",
+    attempt_kind: str = AttemptKind.INITIAL.value,
+    horizon_id: uuid.UUID | None = None,
+) -> UsageRecord:
+    """Write one intake/review invocation that has no workflow reservation.
+
+    Uses the same ledger table as workflow calls so intake cost is visible in
+    the shared breakdown. Because there is no reservation, an unknown price is
+    charged the profile's conservative unknown floor and marked ``cost_known =
+    false`` instead of being silently treated as zero.
+    """
+
+    accounted = account_usage(profile, usage) if usage is not None else None
+    cost_known = accounted is not None and accounted.cost_units is not None
+    cost = (
+        accounted.cost_units
+        if accounted is not None and accounted.cost_units is not None
+        else Decimal(str(profile.minimum_unknown_usage_cost)).quantize(
+            MONEY_QUANTUM, rounding=ROUND_UP
+        )
+    )
+    quota = accounted.quota_units if accounted is not None else None
+    record = UsageRecord(
+        provider=profile.provider,
+        profile_id=profile.id,
+        model=profile.model,
+        task_id=task_id,
+        run_id=None,
+        step_id=None,
+        input_tokens=usage.input_tokens if usage is not None else None,
+        output_tokens=usage.output_tokens if usage is not None else None,
+        cached_tokens=usage.cached_tokens if usage is not None else None,
+        cost_units=cost,
+        quota_units=quota,
+        duration_ms=usage.duration_ms if usage is not None else 0,
+        provider_request_id=provider_request_id,
+        reservation_id=None,
+        outcome=outcome,
+        purpose=purpose,
+        attempt_kind=attempt_kind,
+        horizon_id=horizon_id,
+        pricing_revision=content_revision(profile),
+        currency=DEFAULT_ACCOUNTING_CURRENCY,
+        cost_known=cost_known,
+        late_receipt=False,
     )
     session.add(record)
     await session.flush()
@@ -272,6 +522,28 @@ async def release_reservation(
     )
     if step is None or reservation.step_id != step.id:
         raise LeaseLost(f"step lease lost before budget release: {token.step.id}")
+    if reservation.status is BudgetReservationStatus.RESERVED:
+        reservation.status = BudgetReservationStatus.RELEASED
+        reservation.reconciled_at = func.now()
+
+
+async def release_reservation_unfenced(
+    session: AsyncSession, *, reservation_id: uuid.UUID
+) -> None:
+    """Release a reservation whose lease is already gone.
+
+    Used only when it is known that no provider request was sent (e.g. an
+    authentication rejection), so the reservation must not be charged by the
+    orphan sweep. Never mutates Step/Run/Task state.
+    """
+
+    reservation = await session.scalar(
+        select(ProviderBudgetReservation)
+        .where(ProviderBudgetReservation.id == reservation_id)
+        .with_for_update()
+    )
+    if reservation is None:
+        raise LookupError(f"unknown budget reservation: {reservation_id}")
     if reservation.status is BudgetReservationStatus.RESERVED:
         reservation.status = BudgetReservationStatus.RELEASED
         reservation.reconciled_at = func.now()
@@ -335,3 +607,174 @@ async def _reserved_totals(
         statement = statement.where(ProviderBudgetReservation.budget_epoch == budget_epoch)
     row = (await session.execute(statement)).one()
     return int(row[0]), int(row[1]), Decimal(row[2]), Decimal(row[3])
+
+
+async def close_step_reservations(
+    session: AsyncSession,
+    *,
+    step_id: uuid.UUID,
+    outcome: str,
+    release: bool,
+    provider: str = ORPHAN_PROVIDER,
+    model: str = ORPHAN_MODEL,
+    accounting: AccountingContext | None = None,
+) -> int:
+    """Close every still-RESERVED reservation for a step.
+
+    Used by lease recovery and cancellation where the originating lease is gone,
+    so the fenced ``reconcile_usage``/``release_reservation`` paths cannot run.
+    ``release=True`` is only safe when the handler never started (the step was
+    still LEASED/QUEUED); otherwise the call is charged conservatively.
+    """
+
+    reservations = tuple(
+        (
+            await session.scalars(
+                select(ProviderBudgetReservation)
+                .where(
+                    ProviderBudgetReservation.step_id == step_id,
+                    ProviderBudgetReservation.status == BudgetReservationStatus.RESERVED,
+                )
+                .with_for_update()
+            )
+        ).all()
+    )
+    closed = 0
+    for reservation in reservations:
+        existing = await session.scalar(
+            select(UsageRecord.id).where(UsageRecord.reservation_id == reservation.id)
+        )
+        if existing is not None:
+            continue
+        if release:
+            reservation.status = BudgetReservationStatus.RELEASED
+            reservation.reconciled_at = func.now()
+        else:
+            if accounting is not None:
+                _apply_accounting(reservation, accounting)
+            session.add(
+                _settle_reservation(
+                    reservation,
+                    provider=provider,
+                    model=model,
+                    usage=None,
+                    provider_request_id=None,
+                    outcome=outcome,
+                    conservative=True,
+                    late_receipt=True,
+                )
+            )
+        closed += 1
+    await session.flush()
+    return closed
+
+
+async def release_orphan_reservations(
+    session: AsyncSession,
+    *,
+    older_than_seconds: int = 900,
+    batch_size: int = 100,
+) -> int:
+    """Bounded sweep closing reservations leaked by a dead worker.
+
+    A reservation that is still RESERVED after its step stopped being actively
+    leased can otherwise hold daily caps forever. Bounded by age and batch size;
+    it never runs inside a request path and never overrides an active lease.
+    """
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=max(0, older_than_seconds))
+    reservations = tuple(
+        (
+            await session.scalars(
+                select(ProviderBudgetReservation)
+                .where(
+                    ProviderBudgetReservation.status == BudgetReservationStatus.RESERVED,
+                    ProviderBudgetReservation.created_at < cutoff,
+                )
+                .order_by(ProviderBudgetReservation.created_at, ProviderBudgetReservation.id)
+                .with_for_update(skip_locked=True)
+                .limit(batch_size)
+            )
+        ).all()
+    )
+    closed = 0
+    for reservation in reservations:
+        step = await session.scalar(
+            select(Step).where(Step.id == reservation.step_id).with_for_update()
+        )
+        if (
+            step is not None
+            and step.status in (StepStatus.LEASED, StepStatus.RUNNING)
+            and step.lease_expires_at is not None
+            and step.lease_expires_at > now
+        ):
+            continue
+        existing = await session.scalar(
+            select(UsageRecord.id).where(UsageRecord.reservation_id == reservation.id)
+        )
+        if existing is not None:
+            continue
+        never_started = step is None or step.status in (
+            StepStatus.PENDING,
+            StepStatus.QUEUED,
+            StepStatus.LEASED,
+        )
+        if never_started:
+            reservation.status = BudgetReservationStatus.RELEASED
+            reservation.reconciled_at = func.now()
+        else:
+            # The handler may have reached the provider before dying. Charge the
+            # conservative floor and mark it unknown rather than dropping it.
+            session.add(
+                _settle_reservation(
+                    reservation,
+                    provider=ORPHAN_PROVIDER,
+                    model=ORPHAN_MODEL,
+                    usage=None,
+                    provider_request_id=None,
+                    outcome="orphan_recovered",
+                    conservative=True,
+                    late_receipt=True,
+                )
+            )
+        closed += 1
+    await session.flush()
+    return closed
+
+
+async def usage_totals_by_purpose(
+    session: AsyncSession, *, task_id: uuid.UUID | None = None
+) -> list[tuple[str | None, Decimal, int]]:
+    """Purpose breakdown and invocation count (one projection of the rows)."""
+
+    statement = select(
+        UsageRecord.purpose,
+        func.coalesce(func.sum(UsageRecord.cost_units), 0),
+        func.count(),
+    ).group_by(UsageRecord.purpose)
+    if task_id is not None:
+        statement = statement.where(UsageRecord.task_id == task_id)
+    rows = (await session.execute(statement)).all()
+    return [
+        (str(row[0]) if row[0] is not None else None, Decimal(row[1]), int(row[2]))
+        for row in rows
+    ]
+
+
+async def usage_retry_subtotal(
+    session: AsyncSession, *, task_id: uuid.UUID | None = None
+) -> tuple[Decimal, int]:
+    """Retry/repair subtotal: another projection of the same rows, never an addend."""
+
+    statement = select(
+        func.coalesce(func.sum(UsageRecord.cost_units), 0),
+        func.count(),
+    ).where(
+        UsageRecord.attempt_kind.is_not(None),
+        UsageRecord.attempt_kind != AttemptKind.INITIAL.value,
+    )
+    if task_id is not None:
+        statement = statement.where(UsageRecord.task_id == task_id)
+    row = (await session.execute(statement)).one()
+    return Decimal(row[0]), int(row[1])

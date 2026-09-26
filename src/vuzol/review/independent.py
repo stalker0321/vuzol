@@ -24,8 +24,10 @@ from vuzol.execution.domain import GitInspection
 from vuzol.providers.budgets import (
     BudgetExceeded,
     account_usage,
+    accounting_for_profile,
     estimate_reservation,
     reconcile_usage,
+    record_late_receipt,
     release_reservation,
     reserve_budget,
 )
@@ -43,6 +45,7 @@ from vuzol.review.domain import (
     ReviewVerdict,
     ReviewVerdictKind,
 )
+from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import Task
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import RiskLevel
@@ -173,6 +176,7 @@ class DatabaseReviewAccounting:
                     # by the mandatory safety verdict. Review remains bounded by
                     # its own call/step limits and by task/daily cost limits.
                     enforce_task_token_limits=False,
+                    accounting=accounting_for_profile(profile, purpose="review"),
                 )
             except BudgetExceeded as error:
                 raise IndependentReviewError(
@@ -195,18 +199,35 @@ class DatabaseReviewAccounting:
         conservative: bool,
     ) -> None:
         usage = account_usage(profile, result.usage) if result is not None else None
-        async with self._factory.begin() as session:
-            await reconcile_usage(
-                session,
-                reservation_id=reservation.id,
-                token=lease,
-                provider=profile.provider,
-                model=profile.model,
-                usage=usage,
-                provider_request_id=result.provider_request_id if result is not None else None,
-                outcome=outcome,
-                conservative=conservative,
-            )
+        accounting = accounting_for_profile(profile, purpose="review")
+        provider_request_id = result.provider_request_id if result is not None else None
+        try:
+            async with self._factory.begin() as session:
+                await reconcile_usage(
+                    session,
+                    reservation_id=reservation.id,
+                    token=lease,
+                    provider=profile.provider,
+                    model=profile.model,
+                    usage=usage,
+                    provider_request_id=provider_request_id,
+                    outcome=outcome,
+                    conservative=conservative,
+                    accounting=accounting,
+                )
+        except LeaseLost:
+            async with self._factory.begin() as session:
+                await record_late_receipt(
+                    session,
+                    reservation_id=reservation.id,
+                    provider=profile.provider,
+                    model=profile.model,
+                    usage=usage,
+                    provider_request_id=provider_request_id,
+                    outcome=outcome,
+                    conservative=True,
+                    accounting=accounting,
+                )
 
     async def release(self, *, reservation: ReviewBudgetReservation, lease: LeaseToken) -> None:
         async with self._factory.begin() as session:

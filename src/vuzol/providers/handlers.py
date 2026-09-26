@@ -29,9 +29,20 @@ from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import get_logger
 from vuzol.projects.executor_preference import apply_profile_overrides
-from vuzol.providers.budgets import account_usage, reconcile_usage, release_reservation
+from vuzol.providers.budgets import (
+    AccountingContext,
+    account_usage,
+    accounting_for_profile,
+    attempt_kind_for_payload,
+    purpose_for_step_type,
+    reconcile_usage,
+    record_late_receipt,
+    release_reservation,
+    release_reservation_unfenced,
+)
 from vuzol.providers.domain import (
     ContextItem,
+    NormalizedUsage,
     ProviderErrorCategory,
     ProviderRequest,
     ProviderResult,
@@ -86,6 +97,77 @@ class ProviderStepHandler:
         self._agent_certificates = agent_certificates
         self._redaction_patterns = redaction_patterns
         self._commit_messages = DatabaseCommitMessageResolver(factory)
+
+    def _accounting(
+        self, request: StepExecutionRequest, profile: ProviderProfileConfig
+    ) -> AccountingContext:
+        raw_attempt = request.payload.get("provider_attempt")
+        attempt_count = raw_attempt if isinstance(raw_attempt, int) else 1
+        return accounting_for_profile(
+            profile,
+            purpose=purpose_for_step_type(request.step_type),
+            attempt_kind=attempt_kind_for_payload(request.payload, attempt_count=attempt_count),
+        )
+
+    async def _record_late_receipt(
+        self,
+        request: StepExecutionRequest,
+        *,
+        profile: ProviderProfileConfig,
+        reservation_id: uuid.UUID,
+        usage: NormalizedUsage | None,
+        provider_request_id: str | None,
+        outcome: str,
+    ) -> None:
+        """Account a provider call whose originating lease was lost.
+
+        Money and business state are separate paths (report §22): the receipt is
+        recorded in its own transaction without a live lease, and Step/Run/Task
+        state is left untouched for normal lease recovery to handle.
+        """
+
+        try:
+            async with self._factory.begin() as session:
+                await record_late_receipt(
+                    session,
+                    reservation_id=reservation_id,
+                    provider=profile.provider,
+                    model=profile.model,
+                    usage=usage,
+                    provider_request_id=provider_request_id,
+                    outcome=outcome,
+                    conservative=True,
+                    accounting=self._accounting(request, profile),
+                )
+        except Exception as error:
+            get_logger(__name__).error(
+                "provider.late_receipt_failed",
+                extra={
+                    "task_id": str(request.task_id),
+                    "step_id": str(request.step_id),
+                    "reservation_id": str(reservation_id),
+                    "error_type": type(error).__name__,
+                    "error_location": _safe_exception_location(error),
+                },
+            )
+
+    async def _record_late_release(
+        self, request: StepExecutionRequest, *, reservation_id: uuid.UUID
+    ) -> None:
+        """Release a never-sent reservation whose lease was already lost."""
+
+        try:
+            async with self._factory.begin() as session:
+                await release_reservation_unfenced(session, reservation_id=reservation_id)
+        except Exception as error:
+            get_logger(__name__).error(
+                "provider.late_release_failed",
+                extra={
+                    "step_id": str(request.step_id),
+                    "reservation_id": str(reservation_id),
+                    "error_type": type(error).__name__,
+                },
+            )
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -222,32 +304,46 @@ class ProviderStepHandler:
                     category=failure.category.value,
                     summary=failure.safe_summary,
                 )
-            async with self._factory.begin() as session:
-                if failure.category is ProviderErrorCategory.AUTHENTICATION:
-                    # Authentication rejection happens before generation. Charging the
-                    # full reservation fabricates usage and can prevent a retry on a
-                    # newly selected provider.
-                    await release_reservation(
-                        session, reservation_id=reservation_id, token=request.lease
-                    )
-                else:
-                    await reconcile_usage(
+            try:
+                async with self._factory.begin() as session:
+                    if failure.category is ProviderErrorCategory.AUTHENTICATION:
+                        # Authentication rejection happens before generation. Charging the
+                        # full reservation fabricates usage and can prevent a retry on a
+                        # newly selected provider.
+                        await release_reservation(
+                            session, reservation_id=reservation_id, token=request.lease
+                        )
+                    else:
+                        await reconcile_usage(
+                            session,
+                            reservation_id=reservation_id,
+                            token=request.lease,
+                            provider=profile.provider,
+                            model=profile.model,
+                            usage=None,
+                            provider_request_id=None,
+                            outcome=failure.category.value,
+                            conservative=True,
+                            accounting=self._accounting(request, profile),
+                        )
+                    await record_failure_observation(
                         session,
+                        profile,
+                        configuration_revision=configuration_revision,
+                        failure=failure,
+                    )
+            except LeaseLost:
+                if failure.category is ProviderErrorCategory.AUTHENTICATION:
+                    await self._record_late_release(request, reservation_id=reservation_id)
+                else:
+                    await self._record_late_receipt(
+                        request,
+                        profile=profile,
                         reservation_id=reservation_id,
-                        token=request.lease,
-                        provider=profile.provider,
-                        model=profile.model,
                         usage=None,
                         provider_request_id=None,
                         outcome=failure.category.value,
-                        conservative=True,
                     )
-                await record_failure_observation(
-                    session,
-                    profile,
-                    configuration_revision=configuration_revision,
-                    failure=failure,
-                )
             await self._retain_active_worktree(request)
             return StepOutcome(
                 kind=(
@@ -293,74 +389,102 @@ class ProviderStepHandler:
                 assess_planner_provider_result(result)
             except PlannerResultUnusable as error:
                 plan_rejection = error
-        async with self._factory.begin() as session:
-            accounted_usage = account_usage(profile, result.usage)
-            if plan_rejection is not None:
-                # Content-quality rejection is not a profile outage, but it is not a success.
-                await reconcile_usage(
-                    session,
-                    reservation_id=reservation_id,
-                    token=request.lease,
-                    provider=profile.provider,
-                    model=profile.model,
-                    usage=accounted_usage,
-                    provider_request_id=result.provider_request_id,
-                    outcome=plan_rejection.category,
-                )
-                await record_failure_observation(
-                    session,
-                    profile,
-                    configuration_revision=configuration_revision,
-                    failure=ProviderFailure(
-                        category=ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
-                        retryable=True,
-                        request_sent=True,
-                        safe_summary=plan_rejection.summary,
-                    ),
-                )
-            else:
-                await reconcile_usage(
-                    session,
-                    reservation_id=reservation_id,
-                    token=request.lease,
-                    provider=profile.provider,
-                    model=profile.model,
-                    usage=accounted_usage,
-                    provider_request_id=result.provider_request_id,
-                    outcome=result.status.value,
-                )
-                await record_success_observation(
-                    session,
-                    profile,
-                    configuration_revision=configuration_revision,
-                )
-            finalization_result = (
-                finalized
-                if finalized is not None
-                else finalization_failure.result
-                if finalization_failure is not None
-                else None
-            )
-            if finalization_result is not None and self._finalizer is not None:
-                await self._finalizer.persist(
-                    session,
-                    task_id=request.task_id,
-                    run_id=request.run_id,
-                    step_id=request.step_id,
-                    result=finalization_result,
-                )
-            if (
-                request.step_type in {"execute_code", "execute_agent"}
-                and self._worktrees is not None
-            ):
-                wt = await session.scalar(select(Worktree).where(Worktree.run_id == request.run_id))
-                if wt is not None:
-                    await self._worktrees.retain(
+        accounted_usage = account_usage(profile, result.usage)
+        lease_lost = False
+        try:
+            async with self._factory.begin() as session:
+                if plan_rejection is not None:
+                    # Content-quality rejection is not a profile outage, but it is not a success.
+                    await reconcile_usage(
                         session,
-                        worktree_id=wt.id,
-                        artifacts=self._artifacts,
-                        step_id=request.step_id,
+                        reservation_id=reservation_id,
+                        token=request.lease,
+                        provider=profile.provider,
+                        model=profile.model,
+                        usage=accounted_usage,
+                        provider_request_id=result.provider_request_id,
+                        outcome=plan_rejection.category,
+                        accounting=self._accounting(request, profile),
                     )
+                    await record_failure_observation(
+                        session,
+                        profile,
+                        configuration_revision=configuration_revision,
+                        failure=ProviderFailure(
+                            category=ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+                            retryable=True,
+                            request_sent=True,
+                            safe_summary=plan_rejection.summary,
+                        ),
+                    )
+                else:
+                    await reconcile_usage(
+                        session,
+                        reservation_id=reservation_id,
+                        token=request.lease,
+                        provider=profile.provider,
+                        model=profile.model,
+                        usage=accounted_usage,
+                        provider_request_id=result.provider_request_id,
+                        outcome=result.status.value,
+                        accounting=self._accounting(request, profile),
+                    )
+                    await record_success_observation(
+                        session,
+                        profile,
+                        configuration_revision=configuration_revision,
+                    )
+                finalization_result = (
+                    finalized
+                    if finalized is not None
+                    else finalization_failure.result
+                    if finalization_failure is not None
+                    else None
+                )
+                if finalization_result is not None and self._finalizer is not None:
+                    await self._finalizer.persist(
+                        session,
+                        task_id=request.task_id,
+                        run_id=request.run_id,
+                        step_id=request.step_id,
+                        result=finalization_result,
+                    )
+                if (
+                    request.step_type in {"execute_code", "execute_agent"}
+                    and self._worktrees is not None
+                ):
+                    wt = await session.scalar(
+                        select(Worktree).where(Worktree.run_id == request.run_id)
+                    )
+                    if wt is not None:
+                        await self._worktrees.retain(
+                            session,
+                            worktree_id=wt.id,
+                            artifacts=self._artifacts,
+                            step_id=request.step_id,
+                        )
+        except LeaseLost:
+            lease_lost = True
+        if lease_lost:
+            # Money and business state are separate paths: record the receipt, do
+            # not persist business state under a lost lease.
+            await self._record_late_receipt(
+                request,
+                profile=profile,
+                reservation_id=reservation_id,
+                usage=accounted_usage,
+                provider_request_id=result.provider_request_id,
+                outcome=(
+                    plan_rejection.category if plan_rejection is not None else result.status.value
+                ),
+            )
+            return StepOutcome(
+                kind=OutcomeKind.TRANSIENT_FAILURE,
+                result={},
+                category="lease_lost",
+                summary="provider result settled after the step lease was lost",
+                unknown_effects=False,
+            )
         if plan_rejection is not None:
             return StepOutcome(
                 kind=OutcomeKind.TRANSIENT_FAILURE,
@@ -688,23 +812,34 @@ class ProviderStepHandler:
             request_sent=True,
             safe_summary="provider execution failed unexpectedly",
         )
-        async with self._factory.begin() as session:
-            await reconcile_usage(
-                session,
+        try:
+            async with self._factory.begin() as session:
+                await reconcile_usage(
+                    session,
+                    reservation_id=reservation_id,
+                    token=request.lease,
+                    provider=profile.provider,
+                    model=profile.model,
+                    usage=None,
+                    provider_request_id=None,
+                    outcome=failure.category.value,
+                    conservative=True,
+                    accounting=self._accounting(request, profile),
+                )
+                await record_failure_observation(
+                    session,
+                    profile,
+                    configuration_revision=configuration_revision,
+                    failure=failure,
+                )
+        except LeaseLost:
+            await self._record_late_receipt(
+                request,
+                profile=profile,
                 reservation_id=reservation_id,
-                token=request.lease,
-                provider=profile.provider,
-                model=profile.model,
                 usage=None,
                 provider_request_id=None,
                 outcome=failure.category.value,
-                conservative=True,
-            )
-            await record_failure_observation(
-                session,
-                profile,
-                configuration_revision=configuration_revision,
-                failure=failure,
             )
         await self._retain_active_worktree(request)
         return StepOutcome(

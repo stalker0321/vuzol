@@ -3,7 +3,7 @@
 import hashlib
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -54,6 +54,8 @@ from vuzol.interpretation.ports import (
     TranscriptionUnavailable,
 )
 from vuzol.observability import get_logger
+from vuzol.providers.budgets import record_intake_usage
+from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
@@ -97,6 +99,10 @@ INTERPRETATION_DESTINATIONS = frozenset(
     {"telegram_file", "interpretation", DISCUSSION_CLASSIFY_DESTINATION}
 )
 
+# Observer signature is keyword-only and stable so callers can account every
+# attempt (including failures) without importing provider internals.
+InterpreterAttemptObserver = Callable[..., Awaitable[None]]
+
 
 class PermanentPipelineError(RuntimeError):
     def __init__(self, category: str) -> None:
@@ -112,20 +118,54 @@ async def interpret_with_recovery(
     primary: SemanticInterpreter,
     fallbacks: Sequence[SemanticInterpreter],
     request: InterpretationInput,
+    *,
+    on_attempt: InterpreterAttemptObserver | None = None,
 ) -> InterpretationResult:
+    async def observe(
+        interpreter: object,
+        result: InterpretationResult | None,
+        *,
+        attempt_kind: str,
+        outcome: str,
+    ) -> None:
+        if on_attempt is None:
+            return
+        await on_attempt(
+            profile_id=(
+                result.profile_id
+                if result is not None
+                else getattr(interpreter, "profile_id", None)
+            ),
+            model=(result.model if result is not None else getattr(interpreter, "model", None)),
+            attempt_kind=attempt_kind,
+            outcome=outcome,
+            input_tokens=result.input_tokens if result is not None else None,
+            output_tokens=result.output_tokens if result is not None else None,
+            duration_ms=result.duration_ms if result is not None else None,
+            provider_request_id=result.provider_request_id if result is not None else None,
+        )
+
     try:
-        return await primary.interpret(request)
+        result = await primary.interpret(request)
+        await observe(primary, result, attempt_kind="initial", outcome="succeeded")
+        return result
     except InvalidInterpreterOutput as first_error:
+        await observe(primary, None, attempt_kind="initial", outcome="invalid_output")
         try:
-            return await primary.interpret(request, repair_error=str(first_error)[:1_000])
+            result = await primary.interpret(request, repair_error=str(first_error)[:1_000])
+            await observe(primary, result, attempt_kind="repair", outcome="succeeded")
+            return result
         except (InvalidInterpreterOutput, InterpreterUnavailable):
-            pass
+            await observe(primary, None, attempt_kind="repair", outcome="repair_failed")
     except InterpreterUnavailable:
-        pass
+        await observe(primary, None, attempt_kind="initial", outcome="unavailable")
     for fallback in fallbacks:
         try:
-            return await fallback.interpret(request)
+            result = await fallback.interpret(request)
+            await observe(fallback, result, attempt_kind="retry", outcome="succeeded")
+            return result
         except (InvalidInterpreterOutput, InterpreterUnavailable):
+            await observe(fallback, None, attempt_kind="retry", outcome="fallback_failed")
             continue
     raise InterpreterUnavailable("all_interpreters_unavailable")
 
@@ -134,13 +174,31 @@ async def interpret_discussion_with_recovery(
     primary: SemanticDiscussionInterpreter,
     fallbacks: Sequence[SemanticDiscussionInterpreter],
     request: DiscussionInterpretRequest,
+    *,
+    on_attempt: InterpreterAttemptObserver | None = None,
 ) -> DiscussionInterpretation:
-    for interpreter in (primary, *fallbacks):
+    for index, interpreter in enumerate((primary, *fallbacks)):
+        attempt_kind = "initial" if index == 0 else "retry"
         try:
             candidate = await interpreter.interpret_discussion(request)
-            return enforce_discussion_policy(request, candidate)
+            result = enforce_discussion_policy(request, candidate)
         except (InvalidInterpreterOutput, InterpreterUnavailable):
+            if on_attempt is not None:
+                await on_attempt(
+                    profile_id=getattr(interpreter, "profile_id", None),
+                    model=getattr(interpreter, "model", None),
+                    attempt_kind=attempt_kind,
+                    outcome="failed",
+                )
             continue
+        if on_attempt is not None:
+            await on_attempt(
+                profile_id=getattr(interpreter, "profile_id", None),
+                model=getattr(interpreter, "model", None),
+                attempt_kind=attempt_kind,
+                outcome="succeeded",
+            )
+        return result
     raise InterpreterUnavailable("all_discussion_interpreters_unavailable")
 
 
@@ -150,15 +208,24 @@ async def regenerate_project_names(
     request: InterpretationInput,
     *,
     previous_project_ids: frozenset[str],
+    on_attempt: InterpreterAttemptObserver | None = None,
 ) -> InterpretationResult:
     instruction = (
         "Generate exactly nine entirely new project_name_options for the same idea. "
         "Do not reuse these project_id values: " + ", ".join(sorted(previous_project_ids))
     )
-    for interpreter in (primary, *fallbacks):
+    for index, interpreter in enumerate((primary, *fallbacks)):
+        attempt_kind = "initial" if index == 0 else "retry"
         try:
             result = await interpreter.interpret(request, repair_error=instruction[:1_000])
         except (InvalidInterpreterOutput, InterpreterUnavailable):
+            if on_attempt is not None:
+                await on_attempt(
+                    profile_id=getattr(interpreter, "profile_id", None),
+                    model=getattr(interpreter, "model", None),
+                    attempt_kind=attempt_kind,
+                    outcome="failed",
+                )
             continue
         generated_ids = {option.project_id for option in result.draft.project_name_options}
         if (
@@ -166,7 +233,29 @@ async def regenerate_project_names(
             and len(generated_ids) == 9
             and generated_ids.isdisjoint(previous_project_ids)
         ):
+            if on_attempt is not None:
+                await on_attempt(
+                    profile_id=result.profile_id,
+                    model=result.model,
+                    attempt_kind=attempt_kind,
+                    outcome="succeeded",
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    duration_ms=result.duration_ms,
+                    provider_request_id=result.provider_request_id,
+                )
             return result
+        if on_attempt is not None:
+            await on_attempt(
+                profile_id=result.profile_id,
+                model=result.model,
+                attempt_kind=attempt_kind,
+                outcome="rejected",
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                duration_ms=result.duration_ms,
+                provider_request_id=result.provider_request_id,
+            )
     raise InterpreterUnavailable("all_interpreters_unavailable")
 
 
@@ -194,6 +283,65 @@ class InterpretationPipeline:
         self._transcriber = transcriber
         self._owner = owner
         self._logger = get_logger(__name__)
+
+    def _attempt_observer(
+        self, *, task_id: uuid.UUID | None, purpose: str = "intake"
+    ) -> InterpreterAttemptObserver:
+        """Record every interpreter/transcriber attempt in the shared ledger.
+
+        Successful calls carry measured tokens; failed attempts are recorded with
+        a conservative unknown floor so retries are visible without inventing a
+        fake zero cost.
+        """
+
+        async def observe(
+            *,
+            profile_id: str | None,
+            model: str | None,
+            attempt_kind: str,
+            outcome: str,
+            input_tokens: int | None = None,
+            output_tokens: int | None = None,
+            duration_ms: int | None = None,
+            provider_request_id: str | None = None,
+        ) -> None:
+            if profile_id is None:
+                return
+            try:
+                profile = self._runtime.registries.profiles.get(profile_id)
+            except Exception:
+                return
+            usage = None
+            if input_tokens is not None or output_tokens is not None or duration_ms is not None:
+                usage = NormalizedUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration_ms=duration_ms or 0,
+                )
+            try:
+                async with self._factory.begin() as session:
+                    await record_intake_usage(
+                        session,
+                        profile=profile,
+                        usage=usage,
+                        purpose=purpose,
+                        task_id=task_id,
+                        provider_request_id=provider_request_id,
+                        outcome=outcome,
+                        attempt_kind=attempt_kind,
+                    )
+            except Exception as error:
+                self._logger.error(
+                    "interpretation.accounting_failed",
+                    extra={
+                        "profile_id": profile_id,
+                        "attempt_kind": attempt_kind,
+                        "outcome": outcome,
+                        "error_type": type(error).__name__,
+                    },
+                )
+
+        return observe
 
     async def process_one(self) -> bool:
         settings = self._runtime.settings.interpretation
@@ -333,6 +481,7 @@ class InterpretationPipeline:
             self._discussion_interpreter,
             self._discussion_fallbacks,
             request,
+            on_attempt=self._attempt_observer(task_id=intake.task_id),
         )
         if (
             result.interaction_mode is InteractionMode.PLAN_REQUEST
@@ -352,6 +501,7 @@ class InterpretationPipeline:
                     self._discussion_interpreter,
                     self._discussion_fallbacks,
                     request,
+                    on_attempt=self._attempt_observer(task_id=intake.task_id),
                 )
         self._logger.info(
             "Discussion interpretation completed",
@@ -527,6 +677,14 @@ class InterpretationPipeline:
             )
             transcript = result.transcript
             uncertain = result.uncertain
+            await self._attempt_observer(task_id=task_id)(
+                profile_id=getattr(self._transcriber, "profile_id", None),
+                model=getattr(self._transcriber, "model", None),
+                attempt_kind="initial",
+                outcome="succeeded",
+                duration_ms=result.duration_ms,
+                provider_request_id=result.provider_request_id,
+            )
         async with self._factory.begin() as session:
             if task_id is not None:
                 task = await session.get(Task, task_id, with_for_update=True)
@@ -578,7 +736,12 @@ class InterpretationPipeline:
                 raise PermanentPipelineError("interpretable_task_missing")
             request = await self._build_input(session, intake, item)
             task_id = intake.task_id
-        result = await interpret_with_recovery(self._interpreter, self._fallbacks, request)
+        result = await interpret_with_recovery(
+            self._interpreter,
+            self._fallbacks,
+            request,
+            on_attempt=self._attempt_observer(task_id=task_id),
+        )
         policy = enforce_interpretation_policy(
             request,
             result.draft,
@@ -698,6 +861,7 @@ class InterpretationPipeline:
             self._fallbacks,
             request,
             previous_project_ids=previous_project_ids,
+            on_attempt=self._attempt_observer(task_id=naming.task_id),
         )
         policy = enforce_interpretation_policy(
             request,

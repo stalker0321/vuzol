@@ -1253,6 +1253,24 @@ class UsageRecord(IdentityMixin, Base):
         ForeignKey("provider_budget_reservations.id", ondelete="RESTRICT"), unique=True
     )
     outcome: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Additive accounting provenance (WP01). Legacy rows are backfilled with
+    # pricing_revision='legacy' and cost_known=false; purpose/attempt_kind/currency
+    # stay NULL rather than fabricated.
+    purpose: Mapped[str | None] = mapped_column(String(30))
+    attempt_kind: Mapped[str | None] = mapped_column(String(20))
+    horizon_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    pricing_revision: Mapped[str | None] = mapped_column(String(100))
+    currency: Mapped[str | None] = mapped_column(String(16))
+    # cost_known=false means the recorded cost is a conservative reservation floor,
+    # not measured usage. Unknown is never zero.
+    cost_known: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # True when a receipt was settled after the originating lease was lost. Such a
+    # row affects money only and never changes business state.
+    late_receipt: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -1371,6 +1389,7 @@ class ProviderBudgetReservation(IdentityMixin, Base):
         UniqueConstraint("step_id", "provider_attempt", name="uq_budget_step_attempt"),
         CheckConstraint("budget_epoch >= 0", name="provider_budget_reservations_epoch_nonnegative"),
         Index("ix_provider_budget_reservations_task_epoch", "task_id", "budget_epoch"),
+        Index("ix_provider_budget_reservations_status", "status"),
     )
 
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -1385,6 +1404,13 @@ class ProviderBudgetReservation(IdentityMixin, Base):
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     budget_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     provider_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Additive attempt provenance (WP01). Nullable so legacy reservations and
+    # non-workflow callers do not have to fabricate a purpose.
+    purpose: Mapped[str | None] = mapped_column(String(30))
+    attempt_kind: Mapped[str | None] = mapped_column(String(20))
+    horizon_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    pricing_revision: Mapped[str | None] = mapped_column(String(100))
+    currency: Mapped[str | None] = mapped_column(String(16))
     reserved_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
     reserved_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
     reserved_cost_units: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)

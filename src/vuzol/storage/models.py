@@ -1233,6 +1233,54 @@ class Artifact(IdentityMixin, TimestampMixin, Base):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class InputBinding(IdentityMixin, Base):
+    """One explicit, hash-pinned predecessor output for a consumer step (WP02).
+
+    Created by the producer after its result is persisted and resolved by the
+    consumer before its provider request is built. Required bindings fail closed
+    on missing/unresolved/wrong-hash/foreign-scope/expired content.
+    """
+
+    __tablename__ = "input_bindings"
+    __table_args__ = (
+        UniqueConstraint("consumer_step_id", "slot", name="uq_input_binding_consumer_slot"),
+    )
+
+    consumer_step_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    producer_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), index=True
+    )
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT")
+    )
+    slot: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        default="predecessor_result",
+        server_default="predecessor_result",
+    )
+    schema_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    scope_project_id: Mapped[str | None] = mapped_column(String(100))
+    access_scope: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="private", server_default="private"
+    )
+    required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default="pending"
+    )
+    freshness_max_age_seconds: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class UsageRecord(IdentityMixin, Base):
     __tablename__ = "usage_records"
 

@@ -19,6 +19,7 @@ from vuzol.config import (
 )
 from vuzol.discussion.agent import DeliverDiscussionReplyHandler
 from vuzol.discussion.sequencer import WorkPackageSequenceConsumer
+from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.git import LocalGit
 from vuzol.observability import configure_logging, get_logger
 from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
@@ -162,10 +163,17 @@ async def run() -> None:
         )
         worker: Processor = internal_worker
         if adapter_registry is not None:
+            artifact_store = ArtifactStore(
+                settings.artifact_root,
+                max_bytes=settings.limits.artifact_bytes,
+                retention_days=settings.retention.artifact_days,
+                redaction_patterns=settings.redaction_patterns,
+            )
             provider_handler = ProviderStepHandler(
                 factory,
                 runtime.registries,
                 adapter_registry,
+                artifacts=artifact_store,
                 redaction_patterns=settings.redaction_patterns,
             )
             routed_worker = RoutedWorkflowWorker(

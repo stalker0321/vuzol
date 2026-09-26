@@ -65,6 +65,24 @@ class ArtifactStore:
             matched = matched or substitutions > 0
         return redacted, self._redaction_revision if matched else None
 
+    def read(self, content_uri: str) -> bytes:
+        """Read immutable bytes back for a persisted artifact reference.
+
+        The reference is validated against the configured root before any read,
+        so a tampered or foreign URI fails closed.
+        """
+
+        prefix = "artifact:"
+        if not content_uri.startswith(prefix):
+            raise ArtifactError("artifact reference is not a managed artifact URI")
+        relative = content_uri[len(prefix) :]
+        if not relative or relative.startswith("/") or ".." in Path(relative).parts:
+            raise ArtifactError("artifact reference is unsafe")
+        destination = contained(self._root, self._root / relative)
+        if not destination.is_file():
+            raise ArtifactError("artifact bytes are missing")
+        return destination.read_bytes()
+
     async def persist(
         self,
         session: AsyncSession,

@@ -476,6 +476,16 @@ class BackupSettings(BaseModel):
         return self
 
 
+class HorizonSettings(BaseModel):
+    """Opt-in horizon v1 runtime over WorkPackage (WP08, ADR-A01.5)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Default off: the legacy WorkPackage lifecycle stays the only executable
+    # path. Rollback is flag off; pinned runs continue/pause explicitly.
+    enabled: bool = False
+
+
 class Settings(BaseSettings):
     """Process settings loaded at the composition boundary."""
 
@@ -535,6 +545,7 @@ class Settings(BaseSettings):
     dependency_provisioning: DependencyProvisioningSettings = Field(
         default_factory=DependencyProvisioningSettings
     )
+    horizon: HorizonSettings = Field(default_factory=HorizonSettings)
 
     @field_validator(
         "repository_root",

@@ -12,9 +12,7 @@ from enum import StrEnum
 
 from vuzol.storage.types import WorkPackageStatus
 
-HORIZON_PHASES = frozenset(
-    {"evaluating", "waiting_resource", "waiting_approval", "waiting_input"}
-)
+HORIZON_PHASES = frozenset({"evaluating", "waiting_resource", "waiting_approval", "waiting_input"})
 
 # Frozen mapping WorkPackageStatus(+phase,+accepted) <-> ADR-A01.5 horizon.status.
 # Changing this is a contract change (documented in docs/HORIZON_RUNTIME.md).
@@ -75,9 +73,7 @@ def horizon_status(status: WorkPackageStatus, phase: str | None, accepted: bool)
     return HORIZON_STATUS_MAPPING["cancelled"]
 
 
-def unmet_exit_criteria(
-    exit_criteria: object, satisfied: frozenset[str]
-) -> tuple[str, ...]:
+def unmet_exit_criteria(exit_criteria: object, satisfied: frozenset[str]) -> tuple[str, ...]:
     """Return the criteria ids that are not backed by retained evidence.
 
     An empty/missing criteria list is *not* success: it is reported as unmet
@@ -137,3 +133,10 @@ def needs_approval_gate(needs_approval: bool) -> bool:
     """Item-level approval requirement is a runtime gate, not just stored data."""
 
     return bool(needs_approval)
+
+
+def horizon_enabled(settings: object) -> bool:
+    """Opt-in gate: the horizon flow runs only when the flag is on."""
+
+    flag = getattr(settings, "horizon", None)
+    return bool(getattr(flag, "enabled", False))

@@ -3,7 +3,7 @@
 import uuid
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -24,7 +24,12 @@ from vuzol.discussion.horizon import (
 from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.discussion.service import WorkPackageService
 from vuzol.storage.models import WorkPackage
-from vuzol.storage.types import EstimatedComplexity, RiskLevel, WorkPackageStatus
+from vuzol.storage.types import (
+    EstimatedComplexity,
+    RiskLevel,
+    WorkPackagePauseReason,
+    WorkPackageStatus,
+)
 
 
 def test_flag_default_off() -> None:
@@ -339,3 +344,82 @@ async def test_approve_waiting_item_rejects_wrong_ordinal_and_flag_off() -> None
             user_id=7,
             horizon_enabled=False,
         )
+
+
+def _scalars_result(rows: list[object]) -> MagicMock:
+    result = MagicMock()
+    result.all = MagicMock(return_value=rows)
+    return result
+
+
+@pytest.mark.anyio
+async def test_lifetime_budget_counts_shared_retry_history() -> None:
+    sequencer, uow = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    package.lifetime_budget = {"max_attempts": 1}
+    revision = SimpleNamespace(id=uuid.uuid4())
+    task_a, task_b = uuid.uuid4(), uuid.uuid4()
+    uow.session.scalar = AsyncMock(side_effect=[None, SimpleNamespace(needs_approval=False)])
+    uow.session.scalars = AsyncMock(
+        side_effect=[
+            _scalars_result([task_a]),
+            _scalars_result([{"task_id": str(task_a), "previous_task_id": str(task_b)}]),
+        ]
+    )
+    with patch("vuzol.providers.budgets.usage_totals_by_purpose", new=AsyncMock(return_value=[])):
+        result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
+
+    # Two attempts lifetime (current link + retried-away task) exhaust max 1.
+    assert result.completed is False
+    assert result.task_id is None
+    assert package.status is WorkPackageStatus.PAUSED
+    assert package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED
+    payload = uow.events.append.call_args.kwargs["payload"]
+    assert payload["reason"] == "lifetime_budget_exhausted"
+
+
+@pytest.mark.anyio
+async def test_passed_deadline_pauses_without_new_task() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    sequencer, uow = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    package.deadline = datetime.now(UTC) - timedelta(seconds=1)
+    revision = SimpleNamespace(id=uuid.uuid4())
+    uow.session.scalar = AsyncMock(side_effect=[None, SimpleNamespace(needs_approval=False)])
+
+    result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
+
+    assert result.completed is False
+    assert result.task_id is None
+    assert package.status is WorkPackageStatus.PAUSED
+    payload = uow.events.append.call_args.kwargs["payload"]
+    assert payload["reason"] == "deadline_exceeded"
+
+
+@pytest.mark.anyio
+async def test_within_lifetime_budget_materializes() -> None:
+    sequencer, uow = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    package.lifetime_budget = {"max_attempts": 5}
+    revision = SimpleNamespace(id=uuid.uuid4(), approved_by_user_id=42)
+    task_id = uuid.uuid4()
+    item = _approval_item()
+    item.needs_approval = False
+    discussion = SimpleNamespace(chat_id=-100, message_thread_id=10)
+    task = MagicMock()
+    task.id = task_id
+    task.source_chat_id = None
+    task.source_thread_id = None
+    uow.session.scalar = AsyncMock(side_effect=[None, item])
+    uow.session.scalars = AsyncMock(side_effect=[_scalars_result([]), _scalars_result([])])
+    uow.session.get = AsyncMock(side_effect=[discussion, task])
+    uow.session.flush = AsyncMock()
+    uow.tasks.create = AsyncMock(return_value=SimpleNamespace(id=task_id))
+    uow.work_packages.add_materialization = AsyncMock()
+    with patch("vuzol.providers.budgets.usage_totals_by_purpose", new=AsyncMock(return_value=[])):
+        result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
+
+    assert result.completed is False
+    assert result.task_id == task_id
+    assert package.status is WorkPackageStatus.RUNNING

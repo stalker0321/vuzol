@@ -17,7 +17,14 @@ from vuzol.discussion.domain import (
     control_transition_target,
     require_generation,
 )
-from vuzol.discussion.horizon import is_horizon, needs_approval_gate
+from vuzol.discussion.horizon import (
+    HorizonBudgetState,
+    budget_state,
+    deadline_exceeded,
+    is_horizon,
+    needs_approval_gate,
+    parse_budget,
+)
 from vuzol.interpretation.domain import (
     TASK_DRAFT_SCHEMA_VERSION,
     SuggestedComplexity,
@@ -32,6 +39,7 @@ from vuzol.storage.leasing import (
     dead_letter_outbox_item,
 )
 from vuzol.storage.models import (
+    Event,
     Interpretation,
     MaterializationLink,
     PlanRevision,
@@ -381,6 +389,87 @@ class WorkPackageSequencer:
         await self._projection(package.id, package.version, "failed_item_retry")
         return SequenceResult(package.id, package.version, task.id, link.ordinal)
 
+    async def _lifetime_spend(self, package: object) -> tuple[float, int]:
+        """Lifetime spend across every task the horizon ever materialized.
+
+        Retry re-links ``MaterializationLink.task_id`` in place, so
+        retried-away attempts are recovered from ``PACKAGE_RETRIED`` event
+        payloads (``task_id``/``previous_task_id``). Cost is a plain lifetime
+        sum per task (no epoch filter); attempts is the task-set size.
+        """
+
+        from decimal import Decimal
+
+        from vuzol.providers.budgets import usage_totals_by_purpose
+
+        assert self._uow.session is not None
+        assert hasattr(package, "id")
+        linked = set(
+            (
+                await self._uow.session.scalars(
+                    select(MaterializationLink.task_id).where(
+                        MaterializationLink.work_package_id == package.id
+                    )
+                )
+            ).all()
+        )
+        payloads = (
+            await self._uow.session.scalars(
+                select(Event.payload).where(
+                    Event.entity_type == "work_package",
+                    Event.entity_id == package.id,
+                    Event.event_type == WorkPackageEvent.PACKAGE_RETRIED.value,
+                )
+            )
+        ).all()
+        candidate = set(linked)
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            for key in ("task_id", "previous_task_id"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    try:
+                        candidate.add(uuid.UUID(value))
+                    except ValueError:
+                        continue
+        spent = Decimal(0)
+        for task_id in candidate:
+            for _, cost, _ in await usage_totals_by_purpose(self._uow.session, task_id=task_id):
+                spent += cost
+        return float(spent), len(candidate)
+
+    async def _pause_for_horizon_limit(
+        self, package: object, revision: PlanRevision, ordinal: int, reason: str
+    ) -> SequenceResult:
+        """Pause on an exhausted lifetime budget or a passed deadline."""
+
+        from vuzol.storage.models import WorkPackage
+        from vuzol.storage.types import WorkPackagePauseReason
+
+        assert isinstance(package, WorkPackage)
+        assert self._uow.session is not None
+        package.status = WorkPackageStatus.PAUSED
+        package.pause_reason = WorkPackagePauseReason.ITEM_BLOCKED
+        package.version += 1
+        await self._uow.events.append(
+            entity_type="work_package",
+            entity_id=package.id,
+            event_type=WorkPackageEvent.PACKAGE_PAUSED.value,
+            actor_type="system",
+            previous_state=WorkPackageStatus.RUNNING.value,
+            new_state=WorkPackageStatus.PAUSED.value,
+            payload={
+                "revision_id": str(revision.id),
+                "ordinal": ordinal,
+                "reason": reason,
+                "failure_task_id": None,
+                "status_generation": package.version,
+            },
+        )
+        await self._projection(package.id, package.version, "horizon_limit")
+        return SequenceResult(package.id, package.version, None, ordinal)
+
     async def _materialize_current(
         self, package: object, revision: PlanRevision, *, horizon_enabled: bool = False
     ) -> SequenceResult:
@@ -446,6 +535,31 @@ class WorkPackageSequencer:
             )
             await self._projection(package.id, package.version, "completed")
             return SequenceResult(package.id, package.version, None, None, completed=True)
+
+        if (
+            horizon_enabled
+            and is_horizon(package.goal, package.exit_criteria)
+            and (package.lifetime_budget is not None or package.deadline is not None)
+        ):
+            # Lifetime composes over Task.budget_epoch: retry epochs never
+            # reset it, so spend is summed across all linked tasks including
+            # retried-away attempts (see _lifetime_spend).
+            from datetime import UTC, datetime
+
+            budget = parse_budget(package.lifetime_budget)
+            if budget is not None:
+                spent_cost, spent_attempts = await self._lifetime_spend(package)
+                if (
+                    budget_state(budget, spent_cost=spent_cost, spent_attempts=spent_attempts)
+                    is HorizonBudgetState.EXHAUSTED
+                ):
+                    return await self._pause_for_horizon_limit(
+                        package, revision, ordinal, "lifetime_budget_exhausted"
+                    )
+            if deadline_exceeded(deadline=package.deadline, now=datetime.now(UTC)):
+                return await self._pause_for_horizon_limit(
+                    package, revision, ordinal, "deadline_exceeded"
+                )
 
         if (
             horizon_enabled

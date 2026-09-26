@@ -332,6 +332,11 @@ class WorkflowSettings(BaseModel):
     recovery_interval_seconds: float = Field(default=15.0, ge=1, le=600)
     recovery_batch_size: int = Field(default=100, ge=1, le=1_000)
     claim_candidate_limit: int = Field(default=20, ge=1, le=100)
+    # WP04 recovery bounds are policy, not magic constants (invariant 48).
+    max_step_repairs: int = Field(default=3, ge=1, le=20)
+    max_task_repairs: int = Field(default=6, ge=1, le=50)
+    max_backpressure_waits: int = Field(default=5, ge=1, le=50)
+    recovery_deadline_seconds: int = Field(default=3_600, ge=60, le=86_400)
 
     @model_validator(mode="after")
     def validate_timing(self) -> "WorkflowSettings":
@@ -339,6 +344,8 @@ class WorkflowSettings(BaseModel):
             raise ValueError("workflow heartbeat must be less than one third of lease")
         if self.retry_min_seconds > self.retry_max_seconds:
             raise ValueError("workflow retry minimum must not exceed maximum")
+        if self.max_step_repairs > self.max_task_repairs:
+            raise ValueError("per-step repair cap must not exceed the task repair cap")
         return self
 
 

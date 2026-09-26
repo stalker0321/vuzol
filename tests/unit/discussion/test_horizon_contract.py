@@ -21,6 +21,7 @@ from vuzol.discussion.horizon import (
     unmet_exit_criteria,
 )
 from vuzol.discussion.sequencer import WorkPackageSequencer
+from vuzol.discussion.service import WorkPackageService
 from vuzol.storage.models import WorkPackage
 from vuzol.storage.types import WorkPackageStatus
 
@@ -139,3 +140,48 @@ def test_ingress_horizon_wiring_defaults_off() -> None:
         MagicMock(), enabled=True, authorized_user_ids=frozenset({1}), horizon_enabled=True
     )
     assert flagged._horizon_enabled is True
+
+
+@pytest.mark.anyio
+async def test_restart_continues_approved_horizon_without_new_revision() -> None:
+    revision_id = uuid.uuid4()
+    package = WorkPackage(
+        session_id=uuid.uuid4(),
+        project_id="test",
+        status=WorkPackageStatus.STOPPED,
+        title="horizon package",
+    )
+    package.id = uuid.uuid4()
+    package.goal = "ship the horizon"
+    package.exit_criteria = None
+    package.version = 3
+    package.head_revision_id = revision_id
+    package.approved_revision_id = revision_id
+    package.last_failure_task_id = uuid.uuid4()
+    uow = MagicMock()
+    uow.work_packages.get_package = AsyncMock(return_value=package)
+    uow.work_packages.get_fenced_revision = AsyncMock(
+        return_value=SimpleNamespace(id=revision_id, revision_number=2, content_hash="ab" * 32)
+    )
+    uow.events.append = AsyncMock()
+    service = WorkPackageService(cast(Any, uow))
+
+    result = await service.restart_plan(
+        package_id=package.id,
+        revision_number=2,
+        h8="ab" * 8,
+        expected_status_generation=3,
+        user_id=7,
+        horizon_enabled=True,
+    )
+
+    assert result.revision_id == revision_id
+    assert result.revision_number == 2
+    assert result.status_generation == 3
+    assert package.version == 3
+    assert package.pause_reason is None
+    assert package.last_failure_task_id is None
+    uow.work_packages.get_head_revision.assert_not_called()
+    payload = uow.events.append.call_args.kwargs["payload"]
+    assert payload["restart"] is True
+    assert payload["horizon_continued"] is True

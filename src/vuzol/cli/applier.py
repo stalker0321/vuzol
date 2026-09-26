@@ -7,6 +7,7 @@ import socket
 from contextlib import suppress
 
 from vuzol.config import Capability, get_runtime_configuration
+from vuzol.execution.effect_reconciliation import EffectReconciler
 from vuzol.execution.git import LocalGit
 from vuzol.execution.result_apply import ResultApplyHandler
 from vuzol.observability import configure_logging, get_logger
@@ -44,6 +45,30 @@ async def run() -> None:
         await require_migration_head(engine)
         factory = create_session_factory(engine)
         owner = f"{socket.gethostname()}:{os.getpid()}:applier"
+        # Reconcile unsettled apply effects before claiming new work (WP05): a
+        # crash between the Git CAS and the business-state record must be settled
+        # from the observed ref, never re-dispatched.
+        report = await EffectReconciler(
+            factory,
+            LocalGit(),
+            runtime.registries,
+            owner=f"{owner}:effect-reconcile",
+        ).reconcile_startup()
+        if not report.lock_acquired:
+            get_logger(__name__).warning(
+                "effect reconciliation lock was unavailable; settlement skipped",
+                extra={"event": "applier.effect_reconciliation_lock_timeout"},
+            )
+        if report.decisions:
+            get_logger(__name__).info(
+                "reconciled unsettled apply effects",
+                extra={
+                    "event": "applier.effect_reconciliation",
+                    "confirmed": report.confirmed_count,
+                    "denied": report.denied_count,
+                    "uncertain": report.uncertain_count,
+                },
+            )
         controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
         handler = ResultApplyHandler(factory, runtime.registries, LocalGit())
         capability_handler = CapabilityProvisioningHandler(

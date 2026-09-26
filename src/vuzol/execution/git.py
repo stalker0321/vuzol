@@ -128,6 +128,18 @@ class LocalGit:
             raise GitError("Git returned an invalid commit identity")
         return commit
 
+    async def read_ref(self, repository: Path, branch: str) -> str | None:
+        """Observe a branch tip without raising when it does not exist yet."""
+
+        target_ref = f"refs/heads/{branch}"
+        raw = await self._optional(repository, "rev-parse", "--verify", f"{target_ref}^{{commit}}")
+        if raw is None:
+            return None
+        commit = raw.decode().strip()
+        if len(commit) not in {40, 64} or any(char not in "0123456789abcdef" for char in commit):
+            raise GitError("Git returned an invalid commit identity")
+        return commit
+
     async def require_clean_source(self, repository: Path) -> None:
         status = await self._run(repository, "status", "--porcelain=v2", "--untracked-files=all")
         if status:

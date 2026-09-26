@@ -10,9 +10,28 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import DeliveryMode
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.execution.effect import (
+    EFFECT_CLASS_ISOLATED_MUTATION,
+    IDEMPOTENCY_RECONCILABLE,
+    STATUS_DISPATCHED,
+    STATUS_INTENT_RECORDED,
+    STATUS_UNCERTAIN,
+    TARGET_KIND_GIT_REF,
+    EffectIntent,
+    apply_operation_key,
+    record_intent,
+    settle_applied,
+)
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import Approval, MaterializationLink, Step, WorkPackage, Worktree
+from vuzol.storage.models import (
+    Approval,
+    Effect,
+    MaterializationLink,
+    Step,
+    WorkPackage,
+    Worktree,
+)
 from vuzol.storage.types import ApprovalStatus, StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -69,6 +88,12 @@ class ResultApplyHandler:
                     result={},
                     category="cancelled_before_apply",
                 )
+            effect_id = await self._record_intent(
+                request,
+                approval_id=approval_id,
+                envelope=envelope,
+                worktree=worktree,
+            )
             await self._git.apply_result(
                 project.repository_path,
                 Path(worktree.path),
@@ -82,6 +107,7 @@ class ResultApplyHandler:
                 worktree_id=worktree.id,
                 operation_hash=envelope_hash(envelope),
                 target_branch=envelope["target_branch"],
+                effect_id=effect_id,
             )
         except LeaseLost:
             cancellation.request()
@@ -156,6 +182,71 @@ class ResultApplyHandler:
                 raise ValueError("retained result changed after approval was requested")
             return approval_id, envelope, worktree
 
+    async def _record_intent(
+        self,
+        request: StepExecutionRequest,
+        *,
+        approval_id: uuid.UUID,
+        envelope: dict[str, Any],
+        worktree: Worktree,
+    ) -> uuid.UUID:
+        """Persist the stable effect intent before the Git side effect (ADR-A01)."""
+
+        operation_key = apply_operation_key(
+            approval_id=approval_id,
+            result_commit=envelope["result_commit"],
+            target_branch=envelope["target_branch"],
+        )
+        payload_hash = envelope_hash(envelope)
+        intent = EffectIntent(
+            operation_key=operation_key,
+            step_id=request.step_id,
+            task_id=request.task_id,
+            run_id=request.run_id,
+            effect_class=EFFECT_CLASS_ISOLATED_MUTATION,
+            target_kind=TARGET_KIND_GIT_REF,
+            target_reference=f"refs/heads/{envelope['target_branch']}",
+            idempotency=IDEMPOTENCY_RECONCILABLE,
+            payload_hash=payload_hash,
+            lease_generation=request.lease.generation,
+            permission_envelope_hash=payload_hash,
+            approval_id=approval_id,
+            approval_envelope_hash=payload_hash,
+            context={
+                "project_id": worktree.project_id,
+                "worktree_id": str(worktree.id),
+                "target_branch": envelope["target_branch"],
+                "expected_head": envelope["expected_target_head"],
+                "result_commit": envelope["result_commit"],
+            },
+        )
+        async with self._factory.begin() as session:
+            step = await session.scalar(
+                select(Step)
+                .where(
+                    Step.id == request.step_id,
+                    Step.run_id == request.run_id,
+                    Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
+                    Step.lease_owner == request.lease.owner,
+                    Step.lease_generation == request.lease.generation,
+                )
+                .with_for_update()
+            )
+            if step is None:
+                raise LeaseLost(
+                    f"apply step lease lost before effect intent: {request.step_id}"
+                )
+            approval = await session.scalar(
+                select(Approval).where(Approval.id == approval_id).with_for_update()
+            )
+            if approval is None or approval.status not in {
+                ApprovalStatus.APPROVED,
+                ApprovalStatus.CONSUMED,
+            }:
+                raise ValueError("result has not been approved")
+            effect = await record_intent(session, intent)
+        return effect.id
+
     async def _record_applied(
         self,
         request: StepExecutionRequest,
@@ -164,6 +255,7 @@ class ResultApplyHandler:
         worktree_id: uuid.UUID,
         operation_hash: str,
         target_branch: str,
+        effect_id: uuid.UUID | None = None,
     ) -> None:
         async with self._factory.begin() as session:
             step = await session.scalar(
@@ -212,6 +304,17 @@ class ResultApplyHandler:
                     raise LookupError("applied package disappeared")
                 if target_branch == package.integration_branch:
                     package.integration_head_commit = worktree.result_commit
+            if effect_id is not None:
+                effect = await session.get(Effect, effect_id, with_for_update=True)
+                if effect is not None and effect.status in {
+                    STATUS_INTENT_RECORDED,
+                    STATUS_DISPATCHED,
+                    STATUS_UNCERTAIN,
+                }:
+                    settle_applied(
+                        effect,
+                        external_ref=f"refs/heads/{target_branch}@{worktree.result_commit}",
+                    )
             await session.flush()
 
     async def _assert_current_lease(self, request: StepExecutionRequest) -> None:

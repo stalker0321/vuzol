@@ -2,7 +2,7 @@ import asyncio
 import logging
 import signal
 from collections.abc import Callable
-from types import FrameType
+from types import FrameType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -362,6 +362,17 @@ async def test_applier_composes_narrow_control_and_privileged_worker(
     monkeypatch.setattr(applier_cli, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(applier_cli, "WorkflowControlConsumer", lambda *_args, **_kwargs: controls)
     monkeypatch.setattr(applier_cli, "ResultApplyHandler", MagicMock())
+    reconciler = MagicMock()
+    reconciler.reconcile_startup = AsyncMock(
+        return_value=SimpleNamespace(
+            lock_acquired=True,
+            decisions=(),
+            confirmed_count=0,
+            denied_count=0,
+            uncertain_count=0,
+        )
+    )
+    monkeypatch.setattr(applier_cli, "EffectReconciler", lambda *_args, **_kwargs: reconciler)
     monkeypatch.setattr(applier_cli, "WorkflowWorker", lambda *_args, **_kwargs: worker)
     monkeypatch.setattr("vuzol.cli.applier.asyncio.Event", Stop)
 

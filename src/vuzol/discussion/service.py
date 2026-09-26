@@ -714,6 +714,67 @@ class WorkPackageService:
         )
         return package.version
 
+    async def approve_waiting_item(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        ordinal: int,
+        user_id: int,
+        horizon_enabled: bool = False,
+    ) -> int:
+        """Approve a needs_approval item waiting in the horizon gate.
+
+        Records a single-use ``item_approved:{ordinal}`` marker so the next
+        ``materialize_running`` step lets exactly this ordinal through.
+        Only horizon packages behind the flag.
+        """
+
+        package, revision = await self._queue_control_package(
+            package_id, revision_number, h8, expected_status_generation
+        )
+        control_transition_target(package.status, PackageControlAction.APPROVE_ITEM)
+        if package.running_revision_id != revision.id:
+            raise DomainError("stale_revision")
+        if not (horizon_enabled and is_horizon(package.goal, package.exit_criteria)):
+            raise DomainError("horizon_not_enabled")
+        if package.horizon_phase != "waiting_approval" or package.cursor_ordinal != ordinal:
+            raise DomainError("item_not_waiting_approval")
+        assert self._uow.session is not None
+        item = await self._uow.session.get(
+            PlanRevisionItem, await self._waiting_item_pk(package_id, revision_number, h8, ordinal)
+        )
+        if item is None or not item.needs_approval:
+            raise DomainError("item_not_waiting_approval")
+        package.horizon_phase = f"item_approved:{ordinal}"
+        package.version += 1
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_ITEM_APPROVED,
+            "user",
+            previous_state=WorkPackageStatus.RUNNING.value,
+            new_state=WorkPackageStatus.RUNNING.value,
+            payload={
+                "revision_id": str(revision.id),
+                "ordinal": ordinal,
+                "approved_by_user_id": user_id,
+                "status_generation": package.version,
+            },
+        )
+        return package.version
+
+    async def _waiting_item_pk(
+        self, package_id: uuid.UUID, revision_number: int, h8: str, ordinal: int
+    ) -> uuid.UUID:
+        resolved = await self._uow.work_packages.resolve_fenced_item(
+            package_id=package_id, revision_number=revision_number, h8=h8, ordinal=ordinal
+        )
+        if resolved is None:
+            raise DomainError("stale_revision")
+        return resolved[1]
+
     async def stop_package(
         self,
         *,

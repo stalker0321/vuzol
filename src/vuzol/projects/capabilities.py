@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from vuzol.projects.descriptors import host_executables
 from vuzol.projects.toolchains import load_installed_toolchain
+from vuzol.security.confined_paths import executable_within_roots
 
 
 class CapabilityState(StrEnum):
@@ -25,11 +27,7 @@ class CapabilityCheck:
     detail: str
 
 
-_EXECUTABLES = {
-    "node-runtime": "node",
-    "python-runtime": "python3",
-    "git": "git",
-}
+_EXECUTABLES = host_executables()
 
 
 def preflight_capabilities(
@@ -37,8 +35,15 @@ def preflight_capabilities(
     *,
     which: Callable[[str], str | None] = shutil.which,
     managed_toolchain_root: Path | None = None,
+    installation_status: Mapping[str, str] | None = None,
+    approved_roots: tuple[Path, ...] | None = None,
 ) -> tuple[CapabilityCheck, ...]:
-    """Classify every declared requirement without mutating the host."""
+    """Classify every declared requirement without mutating the host.
+
+    ``installation_status`` carries the persisted probe state (stale/failed
+    installations are excluded). Discovery never installs and never grants
+    permissions.
+    """
 
     raw = contract.get("capabilities")
     if not isinstance(raw, dict):
@@ -64,6 +69,14 @@ def preflight_capabilities(
                 )
             )
             continue
+        status = None if installation_status is None else installation_status.get(key)
+        if status in {"stale", "failed"}:
+            checks.append(
+                CapabilityCheck(
+                    key, label, CapabilityState.NEEDS_SETUP, f"installation is {status}"
+                )
+            )
+            continue
         executable = _EXECUTABLES.get(key)
         installed = (
             None
@@ -85,16 +98,29 @@ def preflight_capabilities(
                     key, label, CapabilityState.NEEDS_SETUP, "managed toolchain is not installed"
                 )
             )
-        elif which(executable) is None:
-            checks.append(
-                CapabilityCheck(
-                    key, label, CapabilityState.NEEDS_SETUP, f"{executable} is not installed"
-                )
-            )
         else:
-            checks.append(
-                CapabilityCheck(key, label, CapabilityState.READY, f"{executable} is available")
-            )
+            resolved = which(executable)
+            if resolved is None:
+                checks.append(
+                    CapabilityCheck(
+                        key, label, CapabilityState.NEEDS_SETUP, f"{executable} is not installed"
+                    )
+                )
+            elif approved_roots is not None and not executable_within_roots(
+                Path(resolved), approved_roots
+            ):
+                checks.append(
+                    CapabilityCheck(
+                        key,
+                        label,
+                        CapabilityState.NEEDS_SETUP,
+                        f"{executable} is not readable in the confined environment",
+                    )
+                )
+            else:
+                checks.append(
+                    CapabilityCheck(key, label, CapabilityState.READY, f"{executable} is available")
+                )
     return tuple(checks)
 
 

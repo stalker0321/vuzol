@@ -1338,6 +1338,58 @@ class Effect(IdentityMixin, TimestampMixin, Base):
     )
 
 
+class CapabilityInstallation(IdentityMixin, TimestampMixin, Base):
+    """Verified installation state for one capability on one node (WP03).
+
+    Descriptor != installation != permission grant. This record carries the
+    receipt hash, the environment hash it was verified against, the last probe
+    result and a health TTL. A stale/failed probe excludes the capability.
+    """
+
+    __tablename__ = "capability_installations"
+    __table_args__ = (
+        UniqueConstraint("capability_key", "node_id", name="uq_capability_installation_node"),
+    )
+
+    capability_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="unknown", server_default="unknown", index=True
+    )
+    receipt_hash: Mapped[str | None] = mapped_column(String(64))
+    environment_hash: Mapped[str | None] = mapped_column(String(64))
+    installation_root: Mapped[str] = mapped_column(String(1000), nullable=False)
+    node_id: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="local", server_default="local"
+    )
+    probe_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="unknown", server_default="unknown"
+    )
+    probed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    health_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detail: Mapped[str | None] = mapped_column(String(500))
+
+
+class CapabilityRunPin(IdentityMixin, TimestampMixin, Base):
+    """Pins the verified toolchain version a run resolved, so later installs or
+    downgrades cannot silently change an in-flight run (WP03)."""
+
+    __tablename__ = "capability_run_pins"
+    __table_args__ = (
+        UniqueConstraint("run_id", "capability_key", name="uq_capability_run_pin"),
+    )
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    capability_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    receipt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    pinned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class UsageRecord(IdentityMixin, Base):
     __tablename__ = "usage_records"
 

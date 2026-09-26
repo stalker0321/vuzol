@@ -83,6 +83,7 @@ def _request() -> StepExecutionRequest:
 
 def _handler(tmp_path: Path) -> tuple[RuntimePreviewHandler, MagicMock, MagicMock]:
     read_session = MagicMock()
+    read_session.scalars = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))
     write_session = MagicMock()
     factory = MagicMock(return_value=AsyncContext(read_session))
     factory.begin.return_value = AsyncContext(write_session)

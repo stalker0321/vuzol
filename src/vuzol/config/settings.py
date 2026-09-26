@@ -147,6 +147,22 @@ class CapabilityProvisioningSettings(BaseModel):
     allowed_capabilities: tuple[str, ...] = ()
     maximum_bundle_bytes: int = Field(default=4_000_000_000, ge=1, le=20_000_000_000)
     maximum_files: int = Field(default=200_000, ge=1, le=1_000_000)
+    # Static local node descriptor (WP03): identity, probe TTL and secret
+    # references (never values).
+    node_id: str = Field(default="local", pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    health_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    secret_refs: tuple[str, ...] = ()
+
+    @field_validator("secret_refs")
+    @classmethod
+    def validate_secret_refs(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        import re
+
+        if len(set(value)) != len(value) or any(
+            re.fullmatch(r"(env|file):.+", item) is None for item in value
+        ):
+            raise ValueError("capability secret references must be env:/file: references")
+        return value
 
     @field_validator("bundle_root", "toolchain_root", "download_cache_root")
     @classmethod

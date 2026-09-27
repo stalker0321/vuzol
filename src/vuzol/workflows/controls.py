@@ -31,7 +31,6 @@ from vuzol.workflows.service import (
     _enqueue_telegram_projection,
     activate_ready_steps,
     derive_task_status,
-    start_run,
 )
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
@@ -84,6 +83,8 @@ class WorkflowControlConsumer:
         return True
 
     async def _apply(self, session: AsyncSession, action: TelegramControlAction) -> None:
+        from vuzol.workflows.application import Principal, apply_task_command
+
         actor_id = str(action.requested_by_user_id)
         if action.action_kind in {"approve", "redo", "reject"}:
             if action.approval_id is None:
@@ -103,14 +104,33 @@ class WorkflowControlConsumer:
         if action.task_id is None:
             raise ValueError("workflow control requires a task target")
         if action.action_kind == "pause":
-            await pause_task(session, action.task_id, actor_id=actor_id)
+            await apply_task_command(
+                session,
+                task_id=action.task_id,
+                command="pause",
+                principal=Principal(action.requested_by_user_id, "telegram"),
+            )
         elif action.action_kind == "resume":
-            await resume_task(session, action.task_id, actor_id=actor_id)
+            await apply_task_command(
+                session,
+                task_id=action.task_id,
+                command="resume",
+                principal=Principal(action.requested_by_user_id, "telegram"),
+            )
         elif action.action_kind == "cancel":
-            await cancel_task(session, action.task_id, actor_id=actor_id)
+            await apply_task_command(
+                session,
+                task_id=action.task_id,
+                command="cancel",
+                principal=Principal(action.requested_by_user_id, "telegram"),
+            )
         elif action.action_kind == "start":
-            task, run, _steps = await _locked_context(session, action.task_id)
-            await start_run(session, run, task=task, actor_type="user", actor_id=actor_id)
+            await apply_task_command(
+                session,
+                task_id=action.task_id,
+                command="start",
+                principal=Principal(action.requested_by_user_id, "telegram"),
+            )
         else:
             raise ValueError(f"unsupported workflow control: {action.action_kind}")
 

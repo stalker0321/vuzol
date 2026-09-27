@@ -29,7 +29,6 @@ from vuzol.storage.types import (
 )
 from vuzol.telegram.projections import enqueue_project_status_dashboard
 from vuzol.workflows.compiler import compile_workflow
-from vuzol.workflows.controls import cancel_task, pause_task, resume_task
 from vuzol.workflows.service import materialize_run, start_run
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
@@ -153,15 +152,21 @@ class WorkflowDispatcher:
             TaskAction.RESUME_TASK,
             TaskAction.CANCEL_TASK,
         }:
+            from vuzol.workflows.application import Principal, apply_task_command
+
             if draft.referenced_task_id is None:
                 raise WorkflowDispatchError("control target is ambiguous")
-            actor_id = str(task.user_id)
-            operation = {
-                TaskAction.PAUSE_TASK: pause_task,
-                TaskAction.RESUME_TASK: resume_task,
-                TaskAction.CANCEL_TASK: cancel_task,
+            command = {
+                TaskAction.PAUSE_TASK: "pause",
+                TaskAction.RESUME_TASK: "resume",
+                TaskAction.CANCEL_TASK: "cancel",
             }[draft.action]
-            await operation(session, draft.referenced_task_id, actor_id=actor_id)
+            await apply_task_command(
+                session,
+                task_id=draft.referenced_task_id,
+                command=command,
+                principal=Principal(task.user_id, "telegram"),
+            )
             await self._complete_carrier(session, task, draft.referenced_task_id)
             return
         if draft.action in {TaskAction.APPROVE_STEP, TaskAction.REJECT_STEP}:

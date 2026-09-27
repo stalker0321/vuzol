@@ -4,6 +4,9 @@ Identical user actions over Telegram and CLI/API: commands run against the
 domain operations with an explicit principal (no fake chat/user IDs) and a
 task-level CAS (stale revision never applies a control). Inspect is strictly
 read-only: no locks, no writes, no outbox rows.
+
+Both Telegram ingress (`workflows/controls._apply`, `workflows/dispatch`)
+and the operator CLI route through `apply_task_command` here.
 """
 
 from __future__ import annotations
@@ -60,6 +63,81 @@ def validate_command(command: object) -> TaskCommand:
         raise ValueError(f"unknown task command: {command}") from error
 
 
+async def _read_version(session: AsyncSession, task_id: uuid.UUID) -> int:
+    task = await session.get(Task, task_id)
+    if task is None:
+        raise ValueError(f"task not found: {task_id}")
+    return task.version
+
+
+async def _start(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    actor_id: str,
+    expected_task_version: int | None,
+) -> bool:
+    task, run, _ = await _locked_context(session, task_id)
+    if expected_task_version is not None and task.version != expected_task_version:
+        raise ValueError(f"stale task version: expected {expected_task_version}")
+    before = task.version
+    await start_run(session, run, task=task, actor_type="user", actor_id=actor_id)
+    return task.version != before
+
+
+async def apply_task_command(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    command: TaskCommand | str,
+    principal: Principal,
+    expected_task_version: int | None = None,
+) -> TaskCommandResult:
+    """Session-level core shared by Telegram ingress, dispatch and the CLI."""
+
+    action = validate_command(command)
+    validate_principal(principal)
+    actor_id = str(principal.user_id)
+    if action is TaskCommand.INSPECT:
+        task = await session.get(Task, task_id)
+        if task is None:
+            raise ValueError(f"task not found: {task_id}")
+        return TaskCommandResult(
+            task_id=task.id,
+            version=task.version,
+            status=task.status.value,
+            applied=False,
+        )
+    if action is TaskCommand.START:
+        applied = await _start(session, task_id, actor_id, expected_task_version)
+    elif action is TaskCommand.PAUSE:
+        before = await _read_version(session, task_id)
+        await pause_task(
+            session, task_id, actor_id=actor_id, expected_task_version=expected_task_version
+        )
+        applied = (await _read_version(session, task_id)) != before
+    elif action is TaskCommand.RESUME:
+        before = await _read_version(session, task_id)
+        await resume_task(
+            session, task_id, actor_id=actor_id, expected_task_version=expected_task_version
+        )
+        applied = (await _read_version(session, task_id)) != before
+    else:
+        before = await _read_version(session, task_id)
+        await cancel_task(
+            session, task_id, actor_id=actor_id, expected_task_version=expected_task_version
+        )
+        applied = (await _read_version(session, task_id)) != before
+    task = await session.get(Task, task_id)
+    if task is None:
+        raise ValueError(f"task not found: {task_id}")
+    return TaskCommandResult(
+        task_id=task.id,
+        version=task.version,
+        status=task.status.value,
+        applied=applied,
+    )
+
+
 class TaskControlService:
     """Application boundary for task commands; Telegram-free, CLI-ready."""
 
@@ -74,75 +152,12 @@ class TaskControlService:
         principal: Principal,
         expected_task_version: int | None = None,
     ) -> TaskCommandResult:
-        action = validate_command(command)
-        validate_principal(principal)
-        if action is TaskCommand.INSPECT:
-            return await self._inspect(task_id)
-        actor_id = str(principal.user_id)
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
-            session = uow.session
-            if action is TaskCommand.START:
-                applied = await self._start(session, task_id, actor_id, expected_task_version)
-            elif action is TaskCommand.PAUSE:
-                before = await self._version(session, task_id)
-                await pause_task(
-                    session, task_id, actor_id=actor_id, expected_task_version=expected_task_version
-                )
-                applied = await self._changed(session, task_id, before)
-            elif action is TaskCommand.RESUME:
-                before = await self._version(session, task_id)
-                await resume_task(
-                    session, task_id, actor_id=actor_id, expected_task_version=expected_task_version
-                )
-                applied = await self._changed(session, task_id, before)
-            else:
-                before = await self._version(session, task_id)
-                await cancel_task(
-                    session, task_id, actor_id=actor_id, expected_task_version=expected_task_version
-                )
-                applied = await self._changed(session, task_id, before)
-            task = await session.get(Task, task_id)
-            assert task is not None
-            return TaskCommandResult(
-                task_id=task.id,
-                version=task.version,
-                status=task.status.value,
-                applied=applied,
+            return await apply_task_command(
+                uow.session,
+                task_id=task_id,
+                command=command,
+                principal=principal,
+                expected_task_version=expected_task_version,
             )
-
-    async def _inspect(self, task_id: uuid.UUID) -> TaskCommandResult:
-        async with UnitOfWork(self._factory) as uow:
-            assert uow.session is not None
-            task = await uow.session.get(Task, task_id)
-            assert task is not None
-            return TaskCommandResult(
-                task_id=task.id,
-                version=task.version,
-                status=task.status.value,
-                applied=False,
-            )
-
-    @staticmethod
-    async def _version(session: AsyncSession, task_id: uuid.UUID) -> int:
-        task = await session.get(Task, task_id)
-        assert task is not None
-        return task.version
-
-    @staticmethod
-    async def _changed(session: AsyncSession, task_id: uuid.UUID, before: int) -> bool:
-        return (await TaskControlService._version(session, task_id)) != before
-
-    @staticmethod
-    async def _start(
-        session: AsyncSession,
-        task_id: uuid.UUID,
-        actor_id: str,
-        expected_task_version: int | None,
-    ) -> bool:
-        task, run, _ = await _locked_context(session, task_id)
-        if expected_task_version is not None and task.version != expected_task_version:
-            raise ValueError(f"stale task version: expected {expected_task_version}")
-        before = task.version
-        await start_run(session, run, task=task, actor_type="user", actor_id=actor_id)
-        return task.version != before

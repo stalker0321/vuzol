@@ -104,3 +104,34 @@ def test_invalid_report_never_produces_context() -> None:
             claims=(),
             created_at="2026-09-27T10:10:00Z",
         )
+
+
+def test_conflicting_marker_lists_both_sources() -> None:
+    first = _source()
+    second = Source(
+        source_id="s2",
+        uri="fixture://rival.md",
+        retriever="local-docs-fixture",
+        retrieved_at="2026-09-27T10:05:00Z",
+        content="rival bytes",
+        scope="vuzol",
+        freshness_class="stale",
+    )
+    report = bind_report(
+        research_id=str(uuid.uuid4()),
+        question="Is live web allowed in CI?",
+        sources=(first, second),
+        claims=(
+            Claim(
+                claim_id="c1",
+                statement="Sources disagree on live web in CI.",
+                support="conflicting",
+                citations=(("s1", "para 3"), ("s2", "para 1")),
+            ),
+        ),
+        created_at="2026-09-27T10:10:00Z",
+    )
+    block = build_synthesis_context(report)
+    assert "[conflicting] c1" in block
+    assert "s1 @ para 3" in block
+    assert "s2 @ para 1 (stale)" in block

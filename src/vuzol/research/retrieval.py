@@ -8,9 +8,11 @@ Retrieved bytes are opaque data: never executed, injection stays inert.
 from __future__ import annotations
 
 import hashlib
+import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from vuzol.projects.descriptors import CapabilityDescriptor, descriptor_for_capability
 
@@ -113,16 +115,11 @@ class ApprovedHttpRetrieval:
 
 
 def _urllib_get(uri: str, bounds: RetrievalBounds) -> TransportResponse:
-    import urllib.request
-
+    opener = urllib.request.build_opener(_NoAutoRedirect)
     request = urllib.request.Request(uri, headers={"User-Agent": "vuzol-research/1"})  # noqa: S310
     try:
-        with urllib.request.urlopen(request, timeout=bounds.timeout_seconds) as reply:  # noqa: S310
+        with opener.open(request, timeout=bounds.timeout_seconds) as reply:
             status = reply.status
-            if status in (301, 302, 303, 307, 308):
-                return TransportResponse(
-                    status_code=status, content=b"", location=reply.headers.get("Location")
-                )
             chunks: list[bytes] = []
             remaining = bounds.max_bytes + 1
             while remaining > 0:
@@ -132,12 +129,42 @@ def _urllib_get(uri: str, bounds: RetrievalBounds) -> TransportResponse:
                 chunks.append(chunk)
                 remaining -= len(chunk)
             return TransportResponse(status_code=status, content=b"".join(chunks))
+    except _CapturedRedirect as redirect:
+        return TransportResponse(
+            status_code=redirect.status_code, content=b"", location=redirect.location
+        )
     except TimeoutError as error:
         raise RetrievalError("timeout") from error
+    except urllib.error.HTTPError as error:
+        raise RetrievalError("fetch_failed") from error
     except RetrievalError:
         raise
     except Exception as error:
         raise RetrievalError("fetch_failed") from error
+
+
+class _CapturedRedirect(Exception):
+    """A 3xx response surfaced to the fetch loop instead of auto-followed."""
+
+    def __init__(self, status_code: int, location: str | None) -> None:
+        super().__init__(f"redirect {status_code}")
+        self.status_code = status_code
+        self.location = location
+
+
+class _NoAutoRedirect(urllib.request.HTTPRedirectHandler):
+    """Disable urlopen redirect-following so allowlist/bounds see every hop."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: object,
+        newurl: str,
+    ) -> NoReturn:
+        raise _CapturedRedirect(code, newurl)
 
 
 @dataclass(frozen=True, slots=True)

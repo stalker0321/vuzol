@@ -32,6 +32,7 @@ from vuzol.discussion.domain import (
 from vuzol.discussion.horizon import is_horizon
 from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
+    Artifact,
     EditSession,
     MaterializationLink,
     PlanRevision,
@@ -387,6 +388,81 @@ class WorkPackageService:
                 "status_generation": package.version,
             },
         )
+        return package.version
+
+    async def record_acceptance(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        accepted: bool,
+        artifact_id: uuid.UUID | None,
+        user_id: int,
+        horizon_enabled: bool = False,
+    ) -> int:
+        """Record the acceptance verdict for an evaluating horizon package.
+
+        Accept closes the horizon (``COMPLETED`` with retained evidence);
+        reject keeps it ``RUNNING``/``evaluating`` for bounded corrective
+        work through the existing retry/skip controls.
+        """
+
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_generation(package.version, expected_status_generation)
+        if package.status is not WorkPackageStatus.RUNNING:
+            raise DomainError("invalid_transition")
+        if not (horizon_enabled and is_horizon(package.goal, package.exit_criteria)):
+            raise DomainError("horizon_not_enabled")
+        if package.horizon_phase != "evaluating":
+            raise DomainError("not_evaluating")
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if package.running_revision_id != revision.id or package.head_revision_id != revision.id:
+            raise DomainError("approval_binding_mismatch")
+        if not accepted:
+            package.version += 1
+            await self._event(
+                package.id,
+                WorkPackageEvent.PACKAGE_ACCEPTANCE_REJECTED,
+                "user",
+                previous_state=WorkPackageStatus.RUNNING.value,
+                new_state=WorkPackageStatus.RUNNING.value,
+                payload={
+                    "revision_id": str(revision.id),
+                    "rejected_by_user_id": user_id,
+                    "status_generation": package.version,
+                },
+            )
+            return package.version
+        if artifact_id is not None:
+            assert self._uow.session is not None
+            artifact = await self._uow.session.get(Artifact, artifact_id)
+            if artifact is None:
+                raise DomainError("artifact_missing")
+        package.acceptance_artifact_id = artifact_id
+        package.accepted_at = datetime.now(UTC)
+        package.horizon_phase = None
+        package.status = WorkPackageStatus.COMPLETED
+        package.cursor_ordinal = None
+        package.pause_reason = None
+        package.last_failure_task_id = None
+        package.version += 1
+        await self._release_discussion(package)
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_ACCEPTED,
+            "user",
+            previous_state=WorkPackageStatus.RUNNING.value,
+            new_state=WorkPackageStatus.COMPLETED.value,
+            payload={
+                "revision_id": str(revision.id),
+                "acceptance_artifact_id": None if artifact_id is None else str(artifact_id),
+                "accepted_by_user_id": user_id,
+                "status_generation": package.version,
+            },
+        )
+        await self._enqueue_plan_projection(package.id, package.version, "accepted")
         return package.version
 
     async def _release_discussion(self, package: WorkPackage) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,9 +20,16 @@ from vuzol.discussion.application import (
     PackageControlResultCode,
     PackageControlSource,
 )
+from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.discussion.service import RevisionResult
-from vuzol.storage.models import PlanRevision, Task, WorkPackage
-from vuzol.storage.types import PlanRevisionCreatedBy, PlanRevisionState, WorkPackageStatus
+from vuzol.storage.models import Event, MaterializationLink, PlanRevision, Task, WorkPackage
+from vuzol.storage.types import (
+    PlanRevisionCreatedBy,
+    PlanRevisionState,
+    TaskStatus,
+    WorkPackagePauseReason,
+    WorkPackageStatus,
+)
 from vuzol.storage.unit_of_work import UnitOfWork
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
@@ -262,4 +271,128 @@ async def test_revision_conflict_on_rewritten_past_item(
                 actor_type="user",
                 horizon_enabled=True,
             )
+    await engine.dispose()
+
+
+async def _approved_horizon_package(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    lifetime_budget: dict[str, object] | None = None,
+    deadline: datetime | None = None,
+) -> RevisionResult:
+    async with UnitOfWork(factory) as uow:
+        session_id = await uow.discussions.create_session(
+            project_id="vuzol", chat_id=-100, message_thread_id=10
+        )
+        created = await WorkPackageService(uow).create_draft(
+            session_id=session_id,
+            project_id="vuzol",
+            plan=_plan(),
+            created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+            actor_type="planner_model",
+            goal="ship the horizon",
+            lifetime_budget=lifetime_budget,
+            deadline=deadline,
+        )
+        await WorkPackageService(uow).approve(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=1,
+            user_id=42,
+        )
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        assert package is not None and package.goal == "ship the horizon"
+    return created
+
+
+async def test_passed_deadline_pauses_horizon_without_new_task(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    created = await _approved_horizon_package(
+        factory, deadline=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    async with UnitOfWork(factory) as uow:
+        sequence = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=2,
+            user_id=42,
+            horizon_enabled=True,
+        )
+    assert sequence.task_id is None and not sequence.completed
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        task_count = await session.scalar(select(Task).limit(1))
+        reasons = list(
+            (
+                await session.scalars(
+                    select(Event.payload).where(
+                        Event.entity_id == created.package_id,
+                        Event.event_type == "work_package.paused",
+                    )
+                )
+            ).all()
+        )
+    assert package is not None and package.status is WorkPackageStatus.PAUSED
+    assert package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED
+    assert task_count is None
+    assert reasons and reasons[-1]["reason"] == "deadline_exceeded"
+    await engine.dispose()
+
+
+async def test_shared_lifetime_budget_stops_partial_progress(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    created = await _approved_horizon_package(factory, lifetime_budget={"max_attempts": 1})
+    async with UnitOfWork(factory) as uow:
+        first = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=2,
+            user_id=42,
+            horizon_enabled=True,
+        )
+    assert first.ordinal == 1 and first.task_id is not None
+    async with factory.begin() as session:
+        task = await session.get(Task, first.task_id, with_for_update=True)
+        assert task is not None
+        task.status = TaskStatus.COMPLETED
+    async with UnitOfWork(factory) as uow:
+        second = await WorkPackageSequencer(uow).observe_terminal(
+            task_id=first.task_id, horizon_enabled=True
+        )
+    # One lifetime attempt spent of max one: partial progress stops here.
+    assert second is not None and second.task_id is None and not second.completed
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        links = tuple(
+            (
+                await session.scalars(
+                    select(MaterializationLink).where(
+                        MaterializationLink.work_package_id == created.package_id
+                    )
+                )
+            ).all()
+        )
+        reasons = list(
+            (
+                await session.scalars(
+                    select(Event.payload).where(
+                        Event.entity_id == created.package_id,
+                        Event.event_type == "work_package.paused",
+                    )
+                )
+            ).all()
+        )
+    assert package is not None and package.status is WorkPackageStatus.PAUSED
+    assert package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED
+    assert package.cursor_ordinal == 2
+    assert len(links) == 1
+    assert reasons and reasons[-1]["reason"] == "lifetime_budget_exhausted"
     await engine.dispose()

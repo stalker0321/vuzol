@@ -470,6 +470,38 @@ class WorkPackageSequencer:
         await self._projection(package.id, package.version, "horizon_limit")
         return SequenceResult(package.id, package.version, None, ordinal)
 
+    async def _check_horizon_limits(
+        self, package: object, revision: PlanRevision, ordinal: int
+    ) -> SequenceResult | None:
+        """Pause on an exhausted lifetime budget or a passed deadline.
+
+        Lifetime composes over Task.budget_epoch: retry epochs never reset
+        it, so spend is summed across all linked tasks including retried-away
+        and cancelled attempts (see _lifetime_spend). Returns None when the
+        package is within limits.
+        """
+
+        from datetime import UTC, datetime
+
+        from vuzol.storage.models import WorkPackage
+
+        assert isinstance(package, WorkPackage)
+        budget = parse_budget(package.lifetime_budget)
+        if budget is not None:
+            spent_cost, spent_attempts = await self._lifetime_spend(package)
+            if (
+                budget_state(budget, spent_cost=spent_cost, spent_attempts=spent_attempts)
+                is HorizonBudgetState.EXHAUSTED
+            ):
+                return await self._pause_for_horizon_limit(
+                    package, revision, ordinal, "lifetime_budget_exhausted"
+                )
+        if deadline_exceeded(deadline=package.deadline, now=datetime.now(UTC)):
+            return await self._pause_for_horizon_limit(
+                package, revision, ordinal, "deadline_exceeded"
+            )
+        return None
+
     async def _materialize_current(
         self, package: object, revision: PlanRevision, *, horizon_enabled: bool = False
     ) -> SequenceResult:
@@ -480,6 +512,17 @@ class WorkPackageSequencer:
         ordinal = package.cursor_ordinal
         if ordinal is None:
             raise DomainError("cursor_missing")
+        if (
+            horizon_enabled
+            and is_horizon(package.goal, package.exit_criteria)
+            and (package.lifetime_budget is not None or package.deadline is not None)
+        ):
+            # Limits are checked before any resume/materialize decision, so a
+            # stale link (e.g. to a cancelled task after restart) cannot
+            # bypass an exhausted budget or a passed deadline.
+            limited = await self._check_horizon_limits(package, revision, ordinal)
+            if limited is not None:
+                return limited
         existing = await self._uow.session.scalar(
             select(MaterializationLink).where(
                 MaterializationLink.work_package_id == package.id,
@@ -535,31 +578,6 @@ class WorkPackageSequencer:
             )
             await self._projection(package.id, package.version, "completed")
             return SequenceResult(package.id, package.version, None, None, completed=True)
-
-        if (
-            horizon_enabled
-            and is_horizon(package.goal, package.exit_criteria)
-            and (package.lifetime_budget is not None or package.deadline is not None)
-        ):
-            # Lifetime composes over Task.budget_epoch: retry epochs never
-            # reset it, so spend is summed across all linked tasks including
-            # retried-away attempts (see _lifetime_spend).
-            from datetime import UTC, datetime
-
-            budget = parse_budget(package.lifetime_budget)
-            if budget is not None:
-                spent_cost, spent_attempts = await self._lifetime_spend(package)
-                if (
-                    budget_state(budget, spent_cost=spent_cost, spent_attempts=spent_attempts)
-                    is HorizonBudgetState.EXHAUSTED
-                ):
-                    return await self._pause_for_horizon_limit(
-                        package, revision, ordinal, "lifetime_budget_exhausted"
-                    )
-            if deadline_exceeded(deadline=package.deadline, now=datetime.now(UTC)):
-                return await self._pause_for_horizon_limit(
-                    package, revision, ordinal, "deadline_exceeded"
-                )
 
         if (
             horizon_enabled

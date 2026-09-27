@@ -21,6 +21,14 @@ from enum import StrEnum
 PROCEDURE_DESCRIPTORS_SCHEMA = "procedure-descriptors.v1"
 
 
+class ProcedureApprovalMismatch(RuntimeError):
+    """A promotion approval does not bind the procedure being promoted."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = "procedure_approval_mismatch"
+
+
 class ProcedureStage(StrEnum):
     ENVIRONMENT = "environment"
     GATES = "gates"
@@ -31,6 +39,46 @@ class ProcedureStatus(StrEnum):
     DRAFT = "draft"
     PROMOTED = "promoted"
     REVOKED = "revoked"
+
+
+@dataclass(frozen=True, slots=True)
+class ProcedureApproval:
+    """Hash-bound promotion approval (lead decision 2, minimal).
+
+    Issuance stays with the current policy/owner; the registry only verifies
+    that the presented envelope binds this exact procedure ref + descriptor
+    hash to an approver. No approval object, no promotion.
+    """
+
+    procedure_ref: str
+    descriptor_hash: str
+    approver: str
+    envelope_hash: str
+
+    def canonical_envelope(self) -> dict[str, object]:
+        return {
+            "procedure_ref": self.procedure_ref,
+            "descriptor_hash": self.descriptor_hash,
+            "approver": self.approver,
+        }
+
+
+def approve_procedure(descriptor: ProcedureDescriptor, *, approver: str) -> ProcedureApproval:
+    """Issue a promotion approval (caller acts under current policy)."""
+
+    approval = ProcedureApproval(
+        procedure_ref=descriptor.ref,
+        descriptor_hash=descriptor.descriptor_hash,
+        approver=approver,
+        envelope_hash="",
+    )
+    encoded = json.dumps(approval.canonical_envelope(), sort_keys=True, separators=(",", ":"))
+    return ProcedureApproval(
+        procedure_ref=approval.procedure_ref,
+        descriptor_hash=approval.descriptor_hash,
+        approver=approval.approver,
+        envelope_hash=hashlib.sha256(encoded.encode()).hexdigest(),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,16 +153,37 @@ class ProcedureRegistry:
     _promoted: dict[str, ProcedureDescriptor] = field(default_factory=dict)
     _status: dict[str, ProcedureStatus] = field(default_factory=dict)
 
-    def promote(self, descriptor: ProcedureDescriptor) -> None:
-        """Explicit promotion (caller enforces approval under current policy)."""
+    def promote(self, descriptor: ProcedureDescriptor, *, approval: ProcedureApproval) -> None:
+        """Explicit promotion gated by a hash-bound approval (lead decision 2).
 
+        The envelope must bind this exact ref + descriptor hash; issuance
+        itself stays under the current policy on the caller's side.
+        """
+
+        expected = approve_procedure(descriptor, approver=approval.approver)
+        if (
+            approval.procedure_ref != descriptor.ref
+            or approval.descriptor_hash != descriptor.descriptor_hash
+            or approval.envelope_hash != expected.envelope_hash
+        ):
+            raise ProcedureApprovalMismatch(
+                f"approval does not bind {descriptor.ref}@{descriptor.descriptor_hash}"
+            )
         self._promoted[descriptor.ref] = descriptor
         self._status[descriptor.ref] = ProcedureStatus.PROMOTED
 
-    def revoke(self, ref: str) -> None:
-        if ref not in self._promoted:
+    def revoke(self, ref: str) -> tuple[str, ...]:
+        """Revoke and return the capability keys the caller must quarantine.
+
+        Quarantine itself (failed-probe exclusion) is applied by the caller
+        through record_installation; the registry only resolves.
+        """
+
+        descriptor = self._promoted.get(ref)
+        if descriptor is None or self._status.get(ref) is not ProcedureStatus.PROMOTED:
             raise KeyError(f"unknown procedure {ref}")
         self._status[ref] = ProcedureStatus.REVOKED
+        return descriptor.requires
 
     def lookup(self, ref: str) -> ProcedureDescriptor | None:
         """Resolve a promoted, non-revoked procedure. Drafts never resolve here."""

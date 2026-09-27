@@ -199,10 +199,26 @@ async def decide_result(
     await _enqueue_telegram_projection(session, task, run)
 
 
+def _check_task_version(task: Task, expected_task_version: int | None) -> None:
+    """Task-level CAS: a stale control never applies (lead decision 2).
+
+    Compares against Task.version under the row lock, mirroring the
+    require_generation contract; None preserves the legacy unchecked path.
+    """
+
+    if expected_task_version is not None and task.version != expected_task_version:
+        raise ValueError(f"stale task version: expected {expected_task_version}")
+
+
 async def pause_task(
-    session: AsyncSession, task_id: uuid.UUID, *, actor_id: str | None = None
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    *,
+    actor_id: str | None = None,
+    expected_task_version: int | None = None,
 ) -> None:
     task, run, steps = await _locked_context(session, task_id)
+    _check_task_version(task, expected_task_version)
     if run.status is RunStatus.PAUSED:
         await _noop(session, run.id, "pause", actor_id)
         return
@@ -229,9 +245,14 @@ async def pause_task(
 
 
 async def resume_task(
-    session: AsyncSession, task_id: uuid.UUID, *, actor_id: str | None = None
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    *,
+    actor_id: str | None = None,
+    expected_task_version: int | None = None,
 ) -> None:
     task, run, _current_steps = await _locked_context(session, task_id)
+    _check_task_version(task, expected_task_version)
     if run.status is RunStatus.RUNNING:
         await _noop(session, run.id, "resume", actor_id)
         return
@@ -244,9 +265,14 @@ async def resume_task(
 
 
 async def cancel_task(
-    session: AsyncSession, task_id: uuid.UUID, *, actor_id: str | None = None
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    *,
+    actor_id: str | None = None,
+    expected_task_version: int | None = None,
 ) -> None:
     task, run, steps = await _locked_context(session, task_id)
+    _check_task_version(task, expected_task_version)
     if run.status is RunStatus.CANCELLED:
         await _noop(session, run.id, "cancel", actor_id)
         return

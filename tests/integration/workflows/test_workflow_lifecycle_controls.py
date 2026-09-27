@@ -245,6 +245,45 @@ def test_pause_resume_and_cancel_are_persisted(postgres_dsn: str) -> None:
 
 
 @pytest.mark.postgresql
+def test_stale_task_version_rejects_control(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, interpretation_id = await seed_interpreted(factory)
+        async with factory.begin() as session:
+            await materialize_run(
+                session,
+                task_id=task_id,
+                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+                prompt_revision=None,
+                automatic_start=True,
+            )
+        async with factory() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            generation = task.version
+        async with factory.begin() as session:
+            with pytest.raises(ValueError, match="stale task version"):
+                await pause_task(
+                    session, task_id, actor_id="1", expected_task_version=generation + 1
+                )
+        async with factory.begin() as session:
+            await pause_task(session, task_id, actor_id="1", expected_task_version=generation)
+        async with factory() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None and task.status is TaskStatus.PAUSED
+        async with factory.begin() as session:
+            with pytest.raises(ValueError, match="stale task version"):
+                await resume_task(session, task_id, actor_id="1", expected_task_version=generation)
+        async with factory.begin() as session:
+            await cancel_task(session, task_id, actor_id="1")
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_workflow_control_outbox_applies_cancel(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

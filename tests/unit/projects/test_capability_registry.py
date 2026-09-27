@@ -10,8 +10,10 @@ from vuzol.projects.descriptors import (
     CAPABILITY_DESCRIPTORS_SCHEMA,
     LOCAL_NODE_SCHEMA,
     CapabilityDescriptor,
+    CapabilityKind,
     builtin_descriptors,
     descriptor_for,
+    descriptor_for_capability,
     host_executables,
     local_node_descriptor,
 )
@@ -93,8 +95,7 @@ def test_discovery_rejects_executable_outside_approved_roots() -> None:
     nvm = "/home/user/.nvm/versions/node/v24/bin/node"
     # Legacy behavior (no roots) still trusts PATH; with roots it must fail closed.
     assert (
-        preflight_capabilities(contract, which=lambda _name: nvm)[0].state
-        is CapabilityState.READY
+        preflight_capabilities(contract, which=lambda _name: nvm)[0].state is CapabilityState.READY
     )
     confined = preflight_capabilities(
         contract, which=lambda _name: nvm, approved_roots=(Path("/usr"),)
@@ -109,3 +110,16 @@ def test_discovery_never_installs_or_grants_permissions() -> None:
     checks = preflight_capabilities(contract, which=lambda _name: "/usr/bin/node")
     assert all(check.state in set(CapabilityState) for check in checks)
     assert all(not hasattr(check, "grant") for check in checks)
+
+
+def test_web_research_resolves_to_read_only_retrieval_descriptor() -> None:
+    from vuzol.config.models import Capability
+
+    descriptor = descriptor_for_capability(Capability.WEB_RESEARCH.value)
+    assert descriptor is not None
+    assert descriptor.key == "web-research"
+    assert descriptor.label == "Web research"
+    assert descriptor.kind is CapabilityKind.ACTION
+    assert descriptor.effect_class.value == "read_only"
+    assert descriptor.host_executable is None
+    assert descriptor_for_capability("code_edit") is None

@@ -284,6 +284,61 @@ def test_stale_task_version_rejects_control(postgres_dsn: str) -> None:
 
 
 @pytest.mark.postgresql
+def test_task_control_service_pause_inspect_and_retry(postgres_dsn: str) -> None:
+    from vuzol.workflows.application import Principal, TaskControlService
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, interpretation_id = await seed_interpreted(factory)
+        async with factory.begin() as session:
+            await materialize_run(
+                session,
+                task_id=task_id,
+                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+                prompt_revision=None,
+                automatic_start=True,
+            )
+        service = TaskControlService(factory)
+        principal = Principal(user_id=7, ingress_source="cli")
+        async with factory() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            generation = task.version
+            outbox_before = await session.scalar(
+                select(func.count()).select_from(TransactionalOutbox)
+            )
+        paused = await service.execute(
+            task_id=task_id,
+            command="pause",
+            principal=principal,
+            expected_task_version=generation,
+        )
+        assert paused.applied is True
+        # Retry with the consumed generation is stale: single transition.
+        with pytest.raises(ValueError, match="stale task version"):
+            await service.execute(
+                task_id=task_id,
+                command="pause",
+                principal=principal,
+                expected_task_version=generation,
+            )
+        seen = await service.execute(task_id=task_id, command="inspect", principal=principal)
+        assert seen.applied is False and seen.version == generation + 1
+        async with factory() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None and task.status is TaskStatus.PAUSED
+            outbox_after = await session.scalar(
+                select(func.count()).select_from(TransactionalOutbox)
+            )
+            assert outbox_after == outbox_before
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_workflow_control_outbox_applies_cancel(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

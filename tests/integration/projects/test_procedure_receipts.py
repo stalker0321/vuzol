@@ -84,3 +84,44 @@ async def test_failed_probe_installation_excluded_from_selection(
     assert states["python-runtime"] == InstallationState.FAILED.value
     assert states["python-runtime"] != InstallationState.INSTALLED.value
     await engine.dispose()
+
+
+async def test_second_resolution_reuses_healthy_installation_without_setup(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    from sqlalchemy import func, select
+
+    from vuzol.storage.models import CapabilityInstallation
+
+    engine, factory = storage(postgres_dsn)
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        await record_installation(
+            uow.session,
+            probe=(InstallationState.INSTALLED, None, "healthy fixture install"),
+            capability_key="python-runtime",
+            installation_root=tmp_path / "tools",
+            node_id="local",
+            environment_hash="a" * 64,
+            health_ttl_seconds=3600,
+        )
+    for _ in ("first horizon", "second horizon"):
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            states = await installation_states(uow.session, node_id="local")
+        assert states["python-runtime"] == InstallationState.INSTALLED.value
+    # No new setup: exactly one installation row, same environment hash.
+    async with factory() as session:
+        rows = tuple(
+            (
+                await session.scalars(
+                    select(CapabilityInstallation).where(
+                        CapabilityInstallation.capability_key == "python-runtime"
+                    )
+                )
+            ).all()
+        )
+        count = await session.scalar(select(func.count()).select_from(CapabilityInstallation))
+    assert len(rows) == 1 and count == 1
+    assert rows[0].environment_hash == "a" * 64
+    await engine.dispose()

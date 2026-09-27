@@ -602,7 +602,9 @@ async def build_task_history_report(
         return None
     if expected_status is not None and task.status is not expected_status:
         return None
-    if not task.source_chat_id:
+    if task.source_chat_id is None or task.source_chat_id == 0:
+        # Explicit: tasks without a chat (CLI/API ingress) have no Telegram
+        # surface; 0 is rejected explicitly, never a silent sentinel.
         return None
     mapping = await session.scalar(
         select(TopicMapping).where(
@@ -1385,7 +1387,9 @@ async def enqueue_task_status_projection(
 ) -> None:
     """Refresh a task's project-topic card and the global active dashboard."""
 
-    if not task.source_chat_id:
+    if task.source_chat_id is None or task.source_chat_id == 0:
+        # Explicit: tasks without a chat (CLI/API ingress) have no Telegram
+        # surface; 0 is rejected explicitly, never a silent sentinel.
         return
     chat_id = int(task.source_chat_id)
     if task.source_thread_id is None:

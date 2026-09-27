@@ -97,8 +97,11 @@ class Task(IdentityMixin, TimestampMixin, Base):
     )
 
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     source_thread_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Explicit ingress origin (telegram/cli/api/legacy). NULL chat means no
+    # chat; no sentinel value (such as 0) carries that meaning.
+    ingress_source: Mapped[str | None] = mapped_column(String(20))
     topic_task_number: Mapped[int | None] = mapped_column(Integer)
     public_task_number: Mapped[int | None] = mapped_column(BigInteger)
     project_id: Mapped[str | None] = mapped_column(String(100), index=True)
@@ -1390,9 +1393,7 @@ class CapabilityRunPin(IdentityMixin, TimestampMixin, Base):
     downgrades cannot silently change an in-flight run (WP03)."""
 
     __tablename__ = "capability_run_pins"
-    __table_args__ = (
-        UniqueConstraint("run_id", "capability_key", name="uq_capability_run_pin"),
-    )
+    __table_args__ = (UniqueConstraint("run_id", "capability_key", name="uq_capability_run_pin"),)
 
     run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True

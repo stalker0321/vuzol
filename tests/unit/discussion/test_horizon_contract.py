@@ -219,7 +219,7 @@ async def test_needs_approval_item_waits_behind_flag() -> None:
     sequencer, uow = _sequencer()
     package = _running_package(goal="ship the horizon")
     revision = SimpleNamespace(id=uuid.uuid4())
-    uow.session.scalar = AsyncMock(side_effect=[None, _approval_item(), None, _approval_item()])
+    uow.session.scalar = AsyncMock(side_effect=[_approval_item(), None, _approval_item(), None])
 
     result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
 
@@ -250,7 +250,7 @@ async def test_needs_approval_item_materializes_when_flag_off() -> None:
     task.id = task_id
     task.source_chat_id = None
     task.source_thread_id = None
-    uow.session.scalar = AsyncMock(side_effect=[None, _approval_item()])
+    uow.session.scalar = AsyncMock(side_effect=[_approval_item(), None])
     uow.session.get = AsyncMock(side_effect=[discussion, task])
     uow.session.flush = AsyncMock()
     uow.tasks.create = AsyncMock(return_value=SimpleNamespace(id=task_id))
@@ -359,7 +359,7 @@ async def test_lifetime_budget_counts_shared_retry_history() -> None:
     package.lifetime_budget = {"max_attempts": 1}
     revision = SimpleNamespace(id=uuid.uuid4())
     task_a, task_b = uuid.uuid4(), uuid.uuid4()
-    uow.session.scalar = AsyncMock(side_effect=[None, SimpleNamespace(needs_approval=False)])
+    uow.session.scalar = AsyncMock(side_effect=[SimpleNamespace(needs_approval=False), None])
     uow.session.scalars = AsyncMock(
         side_effect=[
             _scalars_result([task_a]),
@@ -386,7 +386,7 @@ async def test_passed_deadline_pauses_without_new_task() -> None:
     package = _running_package(goal="ship the horizon")
     package.deadline = datetime.now(UTC) - timedelta(seconds=1)
     revision = SimpleNamespace(id=uuid.uuid4())
-    uow.session.scalar = AsyncMock(side_effect=[None, SimpleNamespace(needs_approval=False)])
+    uow.session.scalar = AsyncMock(side_effect=[SimpleNamespace(needs_approval=False)])
 
     result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
 
@@ -411,7 +411,7 @@ async def test_within_lifetime_budget_materializes() -> None:
     task.id = task_id
     task.source_chat_id = None
     task.source_thread_id = None
-    uow.session.scalar = AsyncMock(side_effect=[None, item])
+    uow.session.scalar = AsyncMock(side_effect=[item, None])
     uow.session.scalars = AsyncMock(side_effect=[_scalars_result([]), _scalars_result([])])
     uow.session.get = AsyncMock(side_effect=[discussion, task])
     uow.session.flush = AsyncMock()
@@ -423,6 +423,70 @@ async def test_within_lifetime_budget_materializes() -> None:
     assert result.completed is False
     assert result.task_id == task_id
     assert package.status is WorkPackageStatus.RUNNING
+
+
+@pytest.mark.anyio
+async def test_queue_end_reaches_evaluating_despite_exhausted_budget() -> None:
+    sequencer, uow = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    package.lifetime_budget = {"max_attempts": 1}
+    revision = SimpleNamespace(id=uuid.uuid4())
+    task_a, task_b = uuid.uuid4(), uuid.uuid4()
+    # Queue-end: no item at the cursor.
+    uow.session.scalar = AsyncMock(return_value=None)
+    uow.session.scalars = AsyncMock(
+        side_effect=[
+            _scalars_result([task_a]),
+            _scalars_result([{"task_id": str(task_a), "previous_task_id": str(task_b)}]),
+        ]
+    )
+    with patch("vuzol.providers.budgets.usage_totals_by_purpose", new=AsyncMock(return_value=[])):
+        result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
+
+    # Finished work reaches evaluating even though lifetime is exhausted,
+    # so acceptance stays callable.
+    assert result.completed is False
+    assert package.status is WorkPackageStatus.RUNNING
+    assert package.horizon_phase == "evaluating"
+    event = uow.events.append.call_args.kwargs
+    assert event["event_type"] == "work_package.evaluating"
+
+    artifact_id = uuid.uuid4()
+    package.running_revision_id = revision.id
+    package.head_revision_id = revision.id
+    package.approved_revision_id = revision.id
+    service, svc_uow = _acceptance_service(package, revision.id, artifact_id)
+    generation = await service.record_acceptance(
+        package_id=package.id,
+        revision_number=1,
+        h8="ab" * 8,
+        expected_status_generation=package.version,
+        accepted=True,
+        artifact_id=artifact_id,
+        user_id=7,
+        horizon_enabled=True,
+    )
+    assert generation == package.version
+    assert package.status.value == WorkPackageStatus.COMPLETED.value
+    event = svc_uow.events.append.call_args.kwargs
+    assert event["event_type"] == "work_package.accepted"
+
+
+@pytest.mark.anyio
+async def test_queue_end_reaches_evaluating_despite_passed_deadline() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    sequencer, uow = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    package.deadline = datetime.now(UTC) - timedelta(seconds=1)
+    revision = SimpleNamespace(id=uuid.uuid4())
+    uow.session.scalar = AsyncMock(return_value=None)
+
+    result = await sequencer._materialize_current(package, revision, horizon_enabled=True)  # type: ignore[arg-type]
+
+    assert result.completed is False
+    assert package.status is WorkPackageStatus.RUNNING
+    assert package.horizon_phase == "evaluating"
 
 
 def _evaluating_package() -> tuple[WorkPackage, uuid.UUID]:

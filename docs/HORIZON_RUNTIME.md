@@ -50,11 +50,14 @@ Standard `WorkPackage` states apply. Horizon adds transient phases recorded in
   (choice is the explicit replan/approve path); rolling revisions may only
   change future items (past ordinals below the cursor keep identity + content,
   else `revision_conflict`).
-- **limits** — before materialization, lifetime spend (links ∪ retried-away
-  tasks from `PACKAGE_RETRIED` payloads, cost summed with no epoch filter)
-  is checked via `budget_state`; exhausted budget or passed deadline pauses
-  (`PAUSED` + `ITEM_BLOCKED`, payload reason). Retry epochs never reset
-  lifetime. Resume from a limit pause is via replan.
+- **limits** — order is queue-end → limits → resume/materialize: an
+  exhausted queue always reaches `evaluating` first (acceptance stays callable
+  even if the budget is spent or the deadline passed — limits gate new spend,
+  not acceptance of finished work). For pending items, lifetime spend (links ∪
+  retried-away/cancelled tasks, cost summed with no epoch filter) is checked
+  via `budget_state`; exhausted budget or passed deadline pauses (`PAUSED` +
+  `ITEM_BLOCKED`, payload reason), including on resume with a stale link.
+  Retry epochs never reset lifetime. Resume from a limit pause is via replan.
 
 `result_approval.py` is untouched: final approval stays under current policy.
 

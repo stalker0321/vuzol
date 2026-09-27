@@ -512,26 +512,6 @@ class WorkPackageSequencer:
         ordinal = package.cursor_ordinal
         if ordinal is None:
             raise DomainError("cursor_missing")
-        if (
-            horizon_enabled
-            and is_horizon(package.goal, package.exit_criteria)
-            and (package.lifetime_budget is not None or package.deadline is not None)
-        ):
-            # Limits are checked before any resume/materialize decision, so a
-            # stale link (e.g. to a cancelled task after restart) cannot
-            # bypass an exhausted budget or a passed deadline.
-            limited = await self._check_horizon_limits(package, revision, ordinal)
-            if limited is not None:
-                return limited
-        existing = await self._uow.session.scalar(
-            select(MaterializationLink).where(
-                MaterializationLink.work_package_id == package.id,
-                MaterializationLink.plan_revision_id == revision.id,
-                MaterializationLink.ordinal == ordinal,
-            )
-        )
-        if existing is not None:
-            return SequenceResult(package.id, package.version, existing.task_id, ordinal)
         item = await self._uow.session.scalar(
             select(PlanRevisionItem).where(
                 PlanRevisionItem.plan_revision_id == revision.id,
@@ -578,6 +558,28 @@ class WorkPackageSequencer:
             )
             await self._projection(package.id, package.version, "completed")
             return SequenceResult(package.id, package.version, None, None, completed=True)
+
+        if (
+            horizon_enabled
+            and is_horizon(package.goal, package.exit_criteria)
+            and (package.lifetime_budget is not None or package.deadline is not None)
+        ):
+            # Limits gate pending items only: the queue-end branch above
+            # already returned, so finished work always reaches evaluating
+            # (acceptance stays callable). A stale link (e.g. to a cancelled
+            # task after restart) still cannot bypass an exhausted budget.
+            limited = await self._check_horizon_limits(package, revision, ordinal)
+            if limited is not None:
+                return limited
+        existing = await self._uow.session.scalar(
+            select(MaterializationLink).where(
+                MaterializationLink.work_package_id == package.id,
+                MaterializationLink.plan_revision_id == revision.id,
+                MaterializationLink.ordinal == ordinal,
+            )
+        )
+        if existing is not None:
+            return SequenceResult(package.id, package.version, existing.task_id, ordinal)
 
         if (
             horizon_enabled

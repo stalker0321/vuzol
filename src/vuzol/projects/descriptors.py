@@ -167,6 +167,13 @@ def builtin_descriptors() -> tuple[CapabilityDescriptor, ...]:
             effect_class=EffectClass.HOST_PRIVILEGED,
             secret_refs=(),
         ),
+        _descriptor(
+            "web-research",
+            label="Web research",
+            kind=CapabilityKind.ACTION,
+            effect_class=EffectClass.READ_ONLY,
+            secret_refs=(),
+        ),
     )
 
 
@@ -177,6 +184,21 @@ _DESCRIPTORS_BY_KEY: dict[str, CapabilityDescriptor] = {
 
 def descriptor_for(key: str) -> CapabilityDescriptor | None:
     return _DESCRIPTORS_BY_KEY.get(key)
+
+
+# Capability enum value (vuzol.config.models.Capability) -> descriptor key.
+# Only capabilities with a vetted retrieval/execution meaning are mapped;
+# unmapped capabilities have no registry selection.
+CAPABILITY_DESCRIPTOR_KEYS: dict[str, str] = {
+    "web_research": "web-research",
+}
+
+
+def descriptor_for_capability(capability: str) -> CapabilityDescriptor | None:
+    """Select the registry descriptor backing a capability label (WP06)."""
+
+    key = CAPABILITY_DESCRIPTOR_KEYS.get(capability)
+    return descriptor_for(key) if key is not None else None
 
 
 def host_executables() -> dict[str, str]:

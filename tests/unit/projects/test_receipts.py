@@ -3,7 +3,11 @@
 import hashlib
 import json
 
-from vuzol.projects.procedures import ProcedureRegistry, repo_quality_procedure
+from vuzol.projects.procedures import (
+    ProcedureRegistry,
+    approve_procedure,
+    repo_quality_procedure,
+)
 from vuzol.projects.receipts import (
     GateResult,
     ProcedureReceipt,
@@ -51,7 +55,7 @@ def test_receipt_canonical_bytes_are_stable() -> None:
 def test_second_lookup_reuses_procedure_without_new_setup() -> None:
     procedure = repo_quality_procedure()
     registry = ProcedureRegistry()
-    registry.promote(procedure)
+    registry.promote(procedure, approval=approve_procedure(procedure, approver="lead"))
     first = registry.lookup(procedure.ref)
     second = registry.lookup(procedure.ref)
     assert first is not None and second is not None

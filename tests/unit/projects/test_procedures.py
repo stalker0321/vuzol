@@ -5,9 +5,12 @@ import pytest
 from vuzol.projects.procedures import (
     PROCEDURE_DESCRIPTORS_SCHEMA,
     DraftStore,
+    ProcedureApproval,
+    ProcedureApprovalMismatch,
     ProcedureRegistry,
     ProcedureStage,
     ProcedureStatus,
+    approve_procedure,
     repo_quality_procedure,
 )
 
@@ -32,16 +35,34 @@ def test_draft_invisible_to_other_tasks_until_promoted() -> None:
     assert drafts.draft_for(procedure.ref, author="alice") == procedure
     assert drafts.draft_for(procedure.ref, author="bob") is None
     assert registry.lookup(procedure.ref) is None
-    registry.promote(procedure)
+    registry.promote(procedure, approval=approve_procedure(procedure, approver="lead"))
     assert registry.lookup(procedure.ref) == procedure
     assert registry.list_promoted() == (procedure.ref,)
+
+
+def test_promote_without_binding_approval_fails_closed() -> None:
+    procedure = repo_quality_procedure()
+    registry = ProcedureRegistry()
+    forged = ProcedureApproval(
+        procedure_ref=procedure.ref,
+        descriptor_hash="0" * 64,
+        approver="mallory",
+        envelope_hash="0" * 64,
+    )
+    with pytest.raises(ProcedureApprovalMismatch):
+        registry.promote(procedure, approval=forged)
+    assert registry.lookup(procedure.ref) is None
+    other = approve_procedure(repo_quality_procedure(), approver="lead")
+    registry.promote(procedure, approval=other)
+    assert registry.lookup(procedure.ref) == procedure
 
 
 def test_revoked_procedure_no_longer_resolves() -> None:
     procedure = repo_quality_procedure()
     registry = ProcedureRegistry()
-    registry.promote(procedure)
-    registry.revoke(procedure.ref)
+    registry.promote(procedure, approval=approve_procedure(procedure, approver="lead"))
+    quarantined = registry.revoke(procedure.ref)
+    assert quarantined == procedure.requires
     assert registry.lookup(procedure.ref) is None
     assert registry.list_promoted() == ()
     with pytest.raises(KeyError, match="unknown procedure"):

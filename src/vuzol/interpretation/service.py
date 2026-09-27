@@ -596,6 +596,7 @@ class InterpretationPipeline:
                         request=request,
                         result=result,
                         planner_profile=getattr(self._discussion_interpreter, "profile_id", None),
+                        horizon_enabled=self._runtime.settings.horizon.enabled,
                     )
                 except DomainError as error:
                     raise PermanentPipelineError(f"discussion_plan_{error}") from error

@@ -74,9 +74,11 @@ class DiscussionPlanApplicationService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         enabled: bool,
+        horizon_enabled: bool = False,
     ) -> None:
         self._factory = session_factory
         self._enabled = enabled
+        self._horizon_enabled = horizon_enabled
 
     async def apply_plan_request(
         self,
@@ -105,6 +107,7 @@ class DiscussionPlanApplicationService:
                 planner_profile=planner_profile,
                 plan=plan,
                 intent=intent,
+                horizon_enabled=self._horizon_enabled,
             )
 
     async def apply_item_edit(
@@ -150,6 +153,7 @@ class DiscussionPlanApplicationService:
                 expected_session_generation=context.session_generation,
                 replacement=replacement,
                 user_id=request.user_id,
+                horizon_enabled=self._horizon_enabled,
             )
             await enqueue_plan_projection(uow, revision_result)
             return revision_result
@@ -168,6 +172,7 @@ async def apply_plan_request_in_uow(
     planner_profile: str | None = None,
     plan: PlanDraft | None = None,
     intent: PlanRequestIntent | None = None,
+    horizon_enabled: bool = False,
 ) -> RevisionResult:
     """Materialize an already policy-fenced plan in the caller's transaction."""
 
@@ -219,6 +224,7 @@ async def apply_plan_request_in_uow(
         actor_type="planner_model",
         planner_profile=planner_profile,
         prompt_version=result.prompt_version,
+        horizon_enabled=horizon_enabled,
     )
     await enqueue_plan_projection(uow, revision_result)
     return revision_result

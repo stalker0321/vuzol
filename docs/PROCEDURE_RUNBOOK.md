@@ -54,17 +54,32 @@ Rules:
   to its author (`draft_for(ref, author=...)` returns None for anyone else);
   drafts never appear in `ProcedureRegistry.lookup`/`list_promoted`, so other
   tasks cannot resolve them.
-- **Promote**: explicit `ProcedureRegistry.promote(descriptor)` — allowed
-  only with an approval under the current policy (the registry records the
-  fact; approval itself follows the standard approval flow, single-use
-  hash-bound envelope). No auto-promotion.
+- **Promote**: explicit `ProcedureRegistry.promote(descriptor,
+  approval=...)` — the envelope must hash-bind this exact `procedure_ref` +
+  `descriptor_hash` to an approver (`approve_procedure`, issuance under the
+  current policy on the caller's side); forged/mismatched approvals raise
+  `ProcedureApprovalMismatch` and the procedure never resolves. No
+  auto-promotion.
 - **Revoke**: explicit `ProcedureRegistry.revoke(ref)` — the ref stops
-  resolving immediately; already-published receipts/artifacts stay readable
-  (evidence is append-only).
+  resolving immediately and returns the capability keys the caller must
+  quarantine (failed-probe exclusion via `record_installation`); already-
+  published receipts/artifacts stay readable (evidence is append-only).
 - **Failed probe → quarantine by exclusion**: `record_installation` with a
   failed probe stores `status=failed`; `installation_states` reports `failed`,
   never `installed`, so stage A excludes it from selection. Revocation of
   grants additionally flows through the WP05 permission check.
+
+## 3b. Execution (stages over existing ports)
+
+`src/vuzol/projects/runner.py:run_procedure` — lookup (promoted only) →
+stage A (all `requires` healthy in `installation_states`, else
+`environment_not_ready` before any gate runs) → stage B (gate ids resolved
+against the `TRUSTED_GATE_COMMANDS` allowlist, unknown rejected; every gate
+runs, results collected) → stage C (receipt built; any failed gate raises
+`ProcedureRunFailed` carrying the receipt as evidence). `publish_receipt_artifact`
+persists through the WP02 artifact contract. Gate execution itself is an
+injected port (`GateRunner`); `LocalGateRunner` runs allowlisted commands
+locally with a timeout.
 
 ## 4. Rollback
 

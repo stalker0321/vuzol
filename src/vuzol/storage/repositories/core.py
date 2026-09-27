@@ -53,12 +53,13 @@ class TaskRepository:
         self,
         *,
         user_id: int,
-        chat_id: int,
+        chat_id: int | None,
         original_text: str,
         task_type: str,
         task_draft: Mapping[str, Any] | None = None,
         thread_id: int | None = None,
         project_id: str | None = None,
+        ingress_source: str | None = None,
     ) -> TaskRecord:
         topic_task_number: int | None = None
         public_task_number: int | None = None
@@ -83,6 +84,7 @@ class TaskRepository:
             topic_task_number=topic_task_number,
             public_task_number=public_task_number,
             project_id=project_id,
+            ingress_source=ingress_source,
             original_text=original_text,
             task_type=task_type,
             task_draft=dict(task_draft or {}),

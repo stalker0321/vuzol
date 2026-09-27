@@ -819,6 +819,10 @@ async def _prepare_orchestration_trace(
     task = await session.get(Task, task_id)
     if task is None:
         raise PermanentDeliveryError("orchestration_trace_task_missing")
+    if task.source_chat_id is None:
+        # Explicit: orchestration traces are Telegram-only; chatless tasks
+        # carry no trace destination.
+        raise PermanentDeliveryError("orchestration_trace_chat_missing")
     trace_kind = item.payload.get("trace_kind")
     if trace_kind == INTERPRETER_TRACE_KIND:
         interpretation = await session.get(Interpretation, item.linked_entity_id)

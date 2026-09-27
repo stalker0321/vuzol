@@ -423,3 +423,135 @@ async def test_within_lifetime_budget_materializes() -> None:
     assert result.completed is False
     assert result.task_id == task_id
     assert package.status is WorkPackageStatus.RUNNING
+
+
+def _evaluating_package() -> tuple[WorkPackage, uuid.UUID]:
+    revision_id = uuid.uuid4()
+    package = WorkPackage(
+        session_id=uuid.uuid4(),
+        project_id="test",
+        status=WorkPackageStatus.RUNNING,
+        title="horizon package",
+    )
+    package.id = uuid.uuid4()
+    package.goal = "ship the horizon"
+    package.exit_criteria = None
+    package.version = 4
+    package.running_revision_id = revision_id
+    package.head_revision_id = revision_id
+    package.approved_revision_id = revision_id
+    package.horizon_phase = "evaluating"
+    return package, revision_id
+
+
+def _acceptance_service(
+    package: WorkPackage, revision_id: uuid.UUID, artifact_id: uuid.UUID | None
+) -> tuple[WorkPackageService, MagicMock]:
+    uow = MagicMock()
+    uow.work_packages.get_package = AsyncMock(return_value=package)
+    uow.work_packages.get_fenced_revision = AsyncMock(
+        return_value=SimpleNamespace(id=revision_id, revision_number=1, content_hash="ab" * 32)
+    )
+    discussion = SimpleNamespace(active_work_package_id=package.id)
+    gets: list[object] = []
+    if artifact_id is not None:
+        gets.append(SimpleNamespace(id=artifact_id))
+    gets.append(discussion)
+    uow.session = MagicMock()
+    uow.session.get = AsyncMock(side_effect=gets)
+    uow.events.append = AsyncMock()
+    uow.outbox.enqueue = AsyncMock()
+    return WorkPackageService(cast(Any, uow)), uow
+
+
+@pytest.mark.anyio
+async def test_record_acceptance_closes_horizon_with_evidence() -> None:
+    package, revision_id = _evaluating_package()
+    artifact_id = uuid.uuid4()
+    service, uow = _acceptance_service(package, revision_id, artifact_id)
+
+    generation = await service.record_acceptance(
+        package_id=package.id,
+        revision_number=1,
+        h8="ab" * 8,
+        expected_status_generation=4,
+        accepted=True,
+        artifact_id=artifact_id,
+        user_id=7,
+        horizon_enabled=True,
+    )
+
+    assert generation == 5
+    assert package.status is WorkPackageStatus.COMPLETED
+    assert package.acceptance_artifact_id == artifact_id
+    assert package.accepted_at is not None
+    assert package.horizon_phase is None
+    event = uow.events.append.call_args.kwargs
+    assert event["event_type"] == "work_package.accepted"
+
+
+@pytest.mark.anyio
+async def test_rejected_acceptance_stays_evaluating() -> None:
+    package, revision_id = _evaluating_package()
+    service, uow = _acceptance_service(package, revision_id, None)
+
+    generation = await service.record_acceptance(
+        package_id=package.id,
+        revision_number=1,
+        h8="ab" * 8,
+        expected_status_generation=4,
+        accepted=False,
+        artifact_id=None,
+        user_id=7,
+        horizon_enabled=True,
+    )
+
+    assert generation == 5
+    assert package.status is WorkPackageStatus.RUNNING
+    assert package.horizon_phase == "evaluating"
+    assert package.accepted_at is None
+    event = uow.events.append.call_args.kwargs
+    assert event["event_type"] == "work_package.acceptance_rejected"
+
+
+@pytest.mark.anyio
+async def test_record_acceptance_rejects_flag_off_and_missing_artifact() -> None:
+    package, revision_id = _evaluating_package()
+    service, _ = _acceptance_service(package, revision_id, None)
+
+    with pytest.raises(DomainError, match="horizon_not_enabled"):
+        await service.record_acceptance(
+            package_id=package.id,
+            revision_number=1,
+            h8="ab" * 8,
+            expected_status_generation=4,
+            accepted=True,
+            artifact_id=None,
+            user_id=7,
+            horizon_enabled=False,
+        )
+
+    missing_id = uuid.uuid4()
+    uow_missing = MagicMock()
+    uow_missing.work_packages.get_package = AsyncMock(return_value=package)
+    uow_missing.work_packages.get_fenced_revision = AsyncMock(
+        return_value=SimpleNamespace(id=revision_id, revision_number=1, content_hash="ab" * 32)
+    )
+    uow_missing.session = MagicMock()
+    uow_missing.session.get = AsyncMock(
+        side_effect=[None, SimpleNamespace(active_work_package_id=package.id)]
+    )
+    uow_missing.events.append = AsyncMock()
+    uow_missing.outbox.enqueue = AsyncMock()
+    service2 = WorkPackageService(cast(Any, uow_missing))
+    with pytest.raises(DomainError, match="artifact_missing"):
+        await service2.record_acceptance(
+            package_id=package.id,
+            revision_number=1,
+            h8="ab" * 8,
+            expected_status_generation=4,
+            accepted=True,
+            artifact_id=missing_id,
+            user_id=7,
+            horizon_enabled=True,
+        )

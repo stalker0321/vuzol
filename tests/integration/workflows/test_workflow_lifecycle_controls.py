@@ -722,3 +722,21 @@ def test_manual_start_is_idempotent_and_heartbeat_uses_database_time(
         await engine.dispose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_unknown_task_id_rejected_uniformly(postgres_dsn: str) -> None:
+    from vuzol.workflows.application import Principal, TaskControlService
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        service = TaskControlService(factory)
+        principal = Principal(user_id=7, ingress_source="cli")
+        missing = uuid.uuid4()
+        with pytest.raises(ValueError, match="task not found"):
+            await service.execute(task_id=missing, command="inspect", principal=principal)
+        with pytest.raises(ValueError, match="task not found"):
+            await service.execute(task_id=missing, command="pause", principal=principal)
+        await engine.dispose()
+
+    asyncio.run(scenario())

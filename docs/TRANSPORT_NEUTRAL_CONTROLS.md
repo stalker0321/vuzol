@@ -6,12 +6,13 @@ micromanagement.
 ## 1. Application commands
 
 `src/vuzol/workflows/application.py:TaskControlService` — the single
-application boundary for task commands `start/pause/cancel/resume/inspect`:
-
-- Every command runs the same domain operations (`workflows/controls.py`)
-  with an explicit `Principal(user_id, ingress_source)`; transports differ
-  only in how the principal is established (Telegram allowlist vs operator
-  `--user-id`), never in the transition applied (parity-tested).
+application boundary for task commands `start/pause/cancel/resume/inspect`.
+Both Telegram ingress (`WorkflowControlConsumer._apply` for callbacks,
+`WorkflowDispatcher` for model-text controls) and the operator CLI route
+through `apply_task_command` here with an explicit `Principal`
+(`telegram` from the control action author, `cli`/`api` from the operator);
+transports differ only in how the principal is established, never in the
+transition applied (parity-tested: real consumer path vs service path).
 - Mutating commands take `expected_task_version`: a stale control never
   applies (`ValueError: stale task version` → existing dead-letter path).
   `None` preserves the legacy unchecked path.

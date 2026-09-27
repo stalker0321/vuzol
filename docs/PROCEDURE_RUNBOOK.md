@@ -97,9 +97,10 @@ The second caller resolves the same promoted ref with zero new setup:
   (`descriptor_hash` equal) — unit-covered by
   `test_second_lookup_reuses_procedure_without_new_setup`.
 - Environment reuse is measured, not assumed: stage A re-checks
-  `installation_states` + `enforce_run_pins` on every call; a toolchain
-  change under a pinned run raises `CapabilityPinMismatch` instead of
-  silently re-resolving (existing T014 behavior).
+  `installation_states` on every call and compares the pinned
+  `environment_hash` before any gate runs; a toolchain change under a pinned
+  run raises `CapabilityPinMismatch` (via `run_pin_mismatch`, same fail-closed
+  contract as `enforce_run_pins`) instead of silently re-resolving.
 
 ## 6. Cleanup
 

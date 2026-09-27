@@ -68,3 +68,29 @@ def test_citation_to_unknown_source_fails_closed() -> None:
         )
     )
     assert "citation_source_unknown" in validate_report(report)  # type: ignore[arg-type]
+
+
+def test_conflicting_claim_requires_two_citations() -> None:
+    single = _report(
+        claims=(
+            Claim(
+                claim_id="c1",
+                statement="Policy is disputed.",
+                support="conflicting",
+                citations=(("s1", "para 1"),),
+            ),
+        )
+    )
+    assert "conflicting_claim_needs_two_citations" in validate_report(single)  # type: ignore[arg-type]
+    double = _report(
+        sources=(_source("s1"), _source("s2")),
+        claims=(
+            Claim(
+                claim_id="c1",
+                statement="Policy is disputed.",
+                support="conflicting",
+                citations=(("s1", "para 1"), ("s2", "para 2")),
+            ),
+        ),
+    )
+    assert validate_report(double) == ()  # type: ignore[arg-type]

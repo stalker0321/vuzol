@@ -326,7 +326,15 @@ async def test_passed_deadline_pauses_horizon_without_new_task(
     assert sequence.task_id is None and not sequence.completed
     async with factory() as session:
         package = await session.get(WorkPackage, created.package_id)
-        task_count = await session.scalar(select(Task).limit(1))
+        links = tuple(
+            (
+                await session.scalars(
+                    select(MaterializationLink).where(
+                        MaterializationLink.work_package_id == created.package_id
+                    )
+                )
+            ).all()
+        )
         reasons = list(
             (
                 await session.scalars(
@@ -339,7 +347,7 @@ async def test_passed_deadline_pauses_horizon_without_new_task(
         )
     assert package is not None and package.status is WorkPackageStatus.PAUSED
     assert package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED
-    assert task_count is None
+    assert links == ()
     assert reasons and reasons[-1]["reason"] == "deadline_exceeded"
     await engine.dispose()
 
@@ -393,6 +401,65 @@ async def test_shared_lifetime_budget_stops_partial_progress(
     assert package is not None and package.status is WorkPackageStatus.PAUSED
     assert package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED
     assert package.cursor_ordinal == 2
+    assert len(links) == 1
+    assert reasons and reasons[-1]["reason"] == "lifetime_budget_exhausted"
+    await engine.dispose()
+
+
+async def test_cancelled_attempt_counts_in_shared_lifetime_budget(
+    postgres_dsn: str,
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    created = await _approved_horizon_package(factory, lifetime_budget={"max_attempts": 1})
+    async with UnitOfWork(factory) as uow:
+        first = await WorkPackageSequencer(uow).start(
+            package_id=created.package_id,
+            revision_number=1,
+            h8=created.content_hash[:8],
+            expected_status_generation=2,
+            user_id=42,
+            horizon_enabled=True,
+        )
+    assert first.ordinal == 1 and first.task_id is not None
+    ingress = PackageControlIngress(
+        factory, enabled=True, authorized_user_ids=frozenset({42}), horizon_enabled=True
+    )
+    stopped = await ingress.apply(_command(PackageControlAction.STOP_PACKAGE, created, 3, "stop-1"))
+    assert stopped.code is PackageControlResultCode.APPLIED
+    async with factory() as session:
+        task = await session.get(Task, first.task_id)
+        assert task is not None and task.status is TaskStatus.CANCELLED
+    restarted = await ingress.apply(
+        _command(PackageControlAction.RESTART_PACKAGE, created, 4, "restart-1")
+    )
+    assert restarted.code is PackageControlResultCode.APPLIED
+    # The single cancelled attempt already spent the lifetime budget: resume
+    # pauses instead of returning the stale link or materializing anew.
+    async with factory() as session:
+        package = await session.get(WorkPackage, created.package_id)
+        tasks = tuple((await session.scalars(select(Task))).all())
+        links = tuple(
+            (
+                await session.scalars(
+                    select(MaterializationLink).where(
+                        MaterializationLink.work_package_id == created.package_id
+                    )
+                )
+            ).all()
+        )
+        reasons = list(
+            (
+                await session.scalars(
+                    select(Event.payload).where(
+                        Event.entity_id == created.package_id,
+                        Event.event_type == "work_package.paused",
+                    )
+                )
+            ).all()
+        )
+    assert package is not None and package.status is WorkPackageStatus.PAUSED
+    assert package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED
+    assert len(tasks) == 1 and tasks[0].status is TaskStatus.CANCELLED
     assert len(links) == 1
     assert reasons and reasons[-1]["reason"] == "lifetime_budget_exhausted"
     await engine.dispose()

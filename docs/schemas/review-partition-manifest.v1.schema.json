@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "review-partition-manifest.v1",
+  "description": "Deterministic partition manifest for bounded independent review (WP07).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_revision",
+    "base_commit",
+    "result_commit",
+    "partitions",
+    "generated_inventory",
+    "lockfile_inventory",
+    "truncated",
+    "total_files",
+    "total_chars"
+  ],
+  "properties": {
+    "schema_version": {"const": "review-partition-manifest.v1"},
+    "policy_revision": {"type": "string"},
+    "base_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "result_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "diff_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "partitions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["partition_id", "files", "level", "char_count", "diff_truncated"],
+        "properties": {
+          "partition_id": {"type": "string", "pattern": "^p[0-9]{2}$"},
+          "files": {"type": "array", "minItems": 1, "maxItems": 80, "items": {"type": "string"}},
+          "file_classes": {"type": "array", "items": {"type": "string"}},
+          "level": {"enum": ["L0", "L1", "L2", "L3"]},
+          "diff_hash": {"type": ["string", "null"]},
+          "char_count": {"type": "integer", "minimum": 0},
+          "diff_truncated": {"type": "boolean"},
+          "generated_files": {"type": "array", "items": {"type": "string"}},
+          "lockfile_files": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "generated_inventory": {"type": "array", "items": {"type": "string"}},
+    "lockfile_inventory": {"type": "array", "items": {"type": "string"}},
+    "truncated": {"type": "boolean"},
+    "total_files": {"type": "integer", "minimum": 1},
+    "total_chars": {"type": "integer", "minimum": 0}
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "review-aggregate.v1",
+  "description": "Deterministic aggregate of per-partition review verdicts (WP07).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_revision",
+    "base_commit",
+    "result_commit",
+    "verdict",
+    "partition_count",
+    "cross_partition_findings",
+    "unknown_usage"
+  ],
+  "properties": {
+    "schema_version": {"const": "review-aggregate.v1"},
+    "policy_revision": {"type": "string"},
+    "base_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "result_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "diff_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "verdict": {"enum": ["pass", "pass_with_warnings", "changes_required", "blocked"]},
+    "partition_count": {"type": "integer", "minimum": 1, "maximum": 8},
+    "cross_partition_findings": {"type": "array", "items": {"type": "object"}},
+    "unknown_usage": {"type": "boolean"}
+  }
+}

@@ -9,7 +9,7 @@ import pytest
 
 from vuzol.config.settings import HorizonSettings, Settings
 from vuzol.discussion.application import PackageControlIngress
-from vuzol.discussion.domain import DomainError
+from vuzol.discussion.domain import DomainError, PlanDraft, PlanItemDraft
 from vuzol.discussion.horizon import (
     HORIZON_STATUS_MAPPING,
     budget_state,
@@ -555,3 +555,143 @@ async def test_record_acceptance_rejects_flag_off_and_missing_artifact() -> None
             user_id=7,
             horizon_enabled=True,
         )
+
+
+def _revise_plan(*, first_summary: str = "Step 1") -> PlanDraft:
+    return PlanDraft(
+        title="Horizon plan",
+        items=tuple(
+            PlanItemDraft(
+                local_id=f"item-{ordinal}",
+                summary=first_summary if ordinal == 1 else f"Step {ordinal}",
+                goal=f"Goal {ordinal}",
+                expected_outcome=f"Outcome {ordinal}",
+                completion_criteria=(f"Check {ordinal}",),
+                allowed_scope="src/**",
+            )
+            for ordinal in (1, 2)
+        ),
+    )
+
+
+def _revise_package(*, status: WorkPackageStatus, cursor: int | None) -> WorkPackage:
+    package = WorkPackage(
+        session_id=uuid.uuid4(),
+        project_id="test",
+        status=status,
+        title="horizon package",
+    )
+    package.id = uuid.uuid4()
+    package.goal = "ship the horizon"
+    package.exit_criteria = None
+    package.version = 3
+    package.cursor_ordinal = cursor
+    return package
+
+
+def _revise_uow(package: WorkPackage, *, item_ids: tuple[uuid.UUID, ...]) -> MagicMock:
+    uow = MagicMock()
+    uow.work_packages.get_package = AsyncMock(return_value=package)
+    uow.work_packages.get_head_revision = AsyncMock(
+        return_value=SimpleNamespace(id=uuid.uuid4(), revision_number=1, state="draft")
+    )
+    uow.work_packages.resolve_item_identities = AsyncMock(return_value=item_ids)
+    prev = SimpleNamespace(
+        ordinal=1,
+        item_id=item_ids[0],
+        summary="Step 1",
+        goal="Goal 1",
+        expected_outcome="Outcome 1",
+        completion_criteria=["Check 1"],
+    )
+    scalars_result = MagicMock()
+    scalars_result.all = MagicMock(return_value=[prev])
+    uow.session = MagicMock()
+    uow.session.scalars = AsyncMock(return_value=scalars_result)
+    uow.work_packages.add_revision = AsyncMock()
+    uow.work_packages.add_revision_item = AsyncMock()
+    uow.work_packages.close_open_edit_sessions = AsyncMock(return_value=[])
+    uow.work_packages.clear_open_detail = AsyncMock()
+    uow.events.append = AsyncMock()
+    uow.outbox.enqueue = AsyncMock()
+    return uow
+
+
+@pytest.mark.anyio
+async def test_goal_change_requires_choice() -> None:
+    from vuzol.storage.types import PlanRevisionCreatedBy
+
+    package = _revise_package(status=WorkPackageStatus.DRAFT, cursor=None)
+    package.version = 1
+    uow = _revise_uow(package, item_ids=(uuid.uuid4(), uuid.uuid4()))
+    service = WorkPackageService(cast(Any, uow))
+
+    with pytest.raises(DomainError, match="goal_change_requires_choice"):
+        await service.revise_draft(
+            package_id=package.id,
+            expected_status_generation=1,
+            plan=_revise_plan(),
+            created_by=PlanRevisionCreatedBy.USER,
+            actor_type="user",
+            goal="a different product goal",
+            horizon_enabled=True,
+        )
+    uow.work_packages.add_revision.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_past_item_rewrite_is_revision_conflict() -> None:
+    from vuzol.storage.types import PlanRevisionCreatedBy
+
+    package = _revise_package(status=WorkPackageStatus.RUNNING, cursor=2)
+    uow = _revise_uow(package, item_ids=(uuid.uuid4(), uuid.uuid4()))
+    service = WorkPackageService(cast(Any, uow))
+
+    with pytest.raises(DomainError, match="revision_conflict"):
+        await service.revise_draft(
+            package_id=package.id,
+            expected_status_generation=3,
+            plan=_revise_plan(first_summary="Rewritten history"),
+            created_by=PlanRevisionCreatedBy.USER,
+            actor_type="user",
+            horizon_enabled=True,
+        )
+    uow.work_packages.add_revision.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_future_only_rolling_revision_passes() -> None:
+    from vuzol.storage.types import PlanRevisionCreatedBy
+
+    package = _revise_package(status=WorkPackageStatus.RUNNING, cursor=2)
+    uow = _revise_uow(package, item_ids=(uuid.uuid4(), uuid.uuid4()))
+    # Past ordinal keeps the stored identity; patch the mock to match.
+    prev_id = uuid.uuid4()
+    uow.work_packages.resolve_item_identities = AsyncMock(return_value=(prev_id, uuid.uuid4()))
+    scalars_result = MagicMock()
+    scalars_result.all = MagicMock(
+        return_value=[
+            SimpleNamespace(
+                ordinal=1,
+                item_id=prev_id,
+                summary="Step 1",
+                goal="Goal 1",
+                expected_outcome="Outcome 1",
+                completion_criteria=["Check 1"],
+            )
+        ]
+    )
+    uow.session.scalars = AsyncMock(return_value=scalars_result)
+    service = WorkPackageService(cast(Any, uow))
+
+    result = await service.revise_draft(
+        package_id=package.id,
+        expected_status_generation=3,
+        plan=_revise_plan(),
+        created_by=PlanRevisionCreatedBy.USER,
+        actor_type="user",
+        horizon_enabled=True,
+    )
+
+    assert result.package_id == package.id
+    uow.work_packages.add_revision.assert_called_once()

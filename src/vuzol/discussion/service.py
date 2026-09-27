@@ -83,6 +83,11 @@ class WorkPackageService:
         actor_type: str,
         planner_profile: str | None = None,
         prompt_version: str | None = None,
+        goal: str | None = None,
+        exit_criteria: list[dict[str, object]] | None = None,
+        lifetime_budget: dict[str, object] | None = None,
+        deadline: datetime | None = None,
+        owner: str | None = None,
     ) -> RevisionResult:
         discussion = await self._uow.discussions.get_session(session_id, for_update=True)
         if discussion.project_id != project_id:
@@ -102,6 +107,17 @@ class WorkPackageService:
             status=WorkPackageStatus.DRAFT,
             title=plan.title.strip(),
         )
+        if goal is not None and goal.strip():
+            package.goal = goal.strip()
+            package.goal_revision = 1
+        if exit_criteria is not None:
+            package.exit_criteria = exit_criteria
+        if lifetime_budget is not None:
+            package.lifetime_budget = lifetime_budget
+        if deadline is not None:
+            package.deadline = deadline
+        if owner is not None:
+            package.owner = owner
         package_id = await self._uow.work_packages.add_package(package)
         await self._event(
             package_id,
@@ -144,6 +160,8 @@ class WorkPackageService:
         actor_type: str,
         planner_profile: str | None = None,
         prompt_version: str | None = None,
+        goal: str | None = None,
+        horizon_enabled: bool = False,
         _allow_stopped: bool = False,
     ) -> RevisionResult:
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
@@ -153,6 +171,15 @@ class WorkPackageService:
         previous = await self._uow.work_packages.get_head_revision(package)
         if previous is None:
             raise DomainError("revision_not_found")
+        if horizon_enabled and is_horizon(package.goal, package.exit_criteria):
+            if goal is not None and goal.strip() and goal.strip() != (package.goal or "").strip():
+                # A product-goal change is a user choice, not a silent replan.
+                raise DomainError("goal_change_requires_choice")
+            if package.cursor_ordinal is not None:
+                await self._require_future_only_revision(package, previous, plan)
+        elif horizon_enabled and goal is not None and goal.strip():
+            package.goal = goal.strip()
+            package.goal_revision = (package.goal_revision or 0) + 1
         previous.state = PlanRevisionState.SUPERSEDED
         package.approved_revision_id = None
         package.status = WorkPackageStatus.DRAFT
@@ -177,6 +204,40 @@ class WorkPackageService:
             payload={"package_id": str(package_id), "revision_number": previous.revision_number},
         )
         return result
+
+    async def _require_future_only_revision(
+        self, package: WorkPackage, previous: PlanRevision, plan: PlanDraft
+    ) -> None:
+        """Rolling revisions may only change future items.
+
+        Every already-passed ordinal (below the cursor) must keep its stable
+        identity and content; rewriting history is a revision conflict.
+        """
+
+        assert self._uow.session is not None
+        assert package.cursor_ordinal is not None
+        item_ids = await self._uow.work_packages.resolve_item_identities(package.id, plan.items)
+        prev_items = (
+            await self._uow.session.scalars(
+                select(PlanRevisionItem)
+                .where(PlanRevisionItem.plan_revision_id == previous.id)
+                .order_by(PlanRevisionItem.ordinal)
+            )
+        ).all()
+        for prev in prev_items:
+            if prev.ordinal >= package.cursor_ordinal:
+                continue
+            index = prev.ordinal - 1
+            if index >= len(plan.items) or item_ids[index] != prev.item_id:
+                raise DomainError("revision_conflict")
+            draft = plan.items[index]
+            if (
+                draft.summary.strip() != prev.summary
+                or draft.goal.strip() != prev.goal
+                or draft.expected_outcome.strip() != prev.expected_outcome
+                or list(draft.completion_criteria) != list(prev.completion_criteria)
+            ):
+                raise DomainError("revision_conflict")
 
     async def restart_plan(
         self,

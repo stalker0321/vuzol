@@ -613,6 +613,7 @@ class WorkPackageService:
         expected_session_generation: int,
         replacement: PlanDraft,
         user_id: int,
+        horizon_enabled: bool = False,
     ) -> RevisionResult:
         edit = await self._uow.work_packages.get_edit_session(edit_session_id, for_update=True)
         if edit.opened_by_user_id != user_id:
@@ -636,6 +637,7 @@ class WorkPackageService:
             plan=replacement,
             created_by=PlanRevisionCreatedBy.USER,
             actor_type="user",
+            horizon_enabled=horizon_enabled,
         )
         await self._event(
             edit.id,

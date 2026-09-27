@@ -40,6 +40,7 @@ vuzol-static-publisher = "vuzol.ops.static_publish:main"
 vuzol-static-publisher-worker = "vuzol.cli.static_publisher_worker:main"
 vuzol-telegram-dogfood = "vuzol.cli.telegram_dogfood:main"
 vuzol-production-deploy = "vuzol.cli.production_deploy:main"
+vuzol-task = "vuzol.cli.task:main"
 
 [dependency-groups]
 dev = [

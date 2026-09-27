@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.finalization import TRUSTED_GATE_COMMANDS
+from vuzol.projects.installations import CapabilityPinMismatch
 from vuzol.projects.procedures import ProcedureRegistry
 from vuzol.projects.receipts import GateResult, ProcedureReceipt
 from vuzol.storage.models import Artifact
@@ -122,8 +123,13 @@ async def run_procedure(
     environment: Mapping[str, tuple[str, str | None]],
     gate_runner: GateRunner,
     created_at: str,
+    pinned_environment_hash: str | None = None,
 ) -> ProcedureRun:
-    """Execute stages A→B→C. Raises ProcedureRunFailed (with receipt) on failure."""
+    """Execute stages A→B→C. Raises ProcedureRunFailed (with receipt) on failure.
+
+    When the caller passes the pinned environment hash, stage A fails closed
+    with CapabilityPinMismatch before any gate runs on drift.
+    """
 
     descriptor = registry.lookup(ref)
     if descriptor is None:
@@ -145,6 +151,19 @@ async def run_procedure(
                 created_at=created_at,
             ),
         )
+    current_hash = _environment_hash(environment)
+    if pinned_environment_hash is not None and pinned_environment_hash != current_hash:
+        raise ProcedureRunFailed(
+            "run_pin_mismatch",
+            f"environment changed under pinned run {ref}",
+            receipt=ProcedureReceipt(
+                procedure_ref=descriptor.ref,
+                descriptor_hash=descriptor.descriptor_hash,
+                environment_hash=current_hash,
+                gates=(),
+                created_at=created_at,
+            ),
+        ) from CapabilityPinMismatch(f"pinned {pinned_environment_hash} != current {current_hash}")
     outcomes: list[GateOutcome] = []
     for command_id in gates:
         if command_id not in TRUSTED_GATE_COMMANDS:

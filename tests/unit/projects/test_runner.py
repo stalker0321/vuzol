@@ -113,3 +113,48 @@ async def test_unpromoted_procedure_does_not_run() -> None:
             created_at="2026-09-27T10:00:00Z",
         )
     assert failure.value.code == "procedure_not_promoted"
+
+
+@pytest.mark.anyio
+async def test_changed_toolchain_under_pinned_run_fails_closed_before_gates() -> None:
+    from vuzol.projects.installations import CapabilityPinMismatch
+
+    gates = _FakeGates({"make lint": True})
+    with pytest.raises(ProcedureRunFailed) as failure:
+        await run_procedure(
+            _registry(),
+            "repo.quality@1",
+            gates=("make lint",),
+            environment=_environment(),
+            gate_runner=gates,
+            created_at="2026-09-27T10:00:00Z",
+            pinned_environment_hash="0" * 64,
+        )
+    assert failure.value.code == "run_pin_mismatch"
+    assert isinstance(failure.value.__cause__, CapabilityPinMismatch)
+    assert gates.calls == []
+    assert failure.value.receipt is not None
+
+
+@pytest.mark.anyio
+async def test_matching_pin_allows_run() -> None:
+    import hashlib
+    import json
+
+    current = hashlib.sha256(
+        json.dumps(
+            {"git": "a" * 64, "python-runtime": "b" * 64},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    run = await run_procedure(
+        _registry(),
+        "repo.quality@1",
+        gates=("make lint",),
+        environment=_environment(),
+        gate_runner=_FakeGates({"make lint": True}),
+        created_at="2026-09-27T10:00:00Z",
+        pinned_environment_hash=current,
+    )
+    assert run.receipt.environment_hash == current

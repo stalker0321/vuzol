@@ -609,7 +609,7 @@ async def test_independent_reviewer_adapter_missing() -> None:
 
 
 @pytest.mark.anyio
-async def test_independent_reviewer_rejects_oversized_bundle() -> None:
+async def test_independent_reviewer_partitions_many_files_instead_of_rejecting() -> None:
     profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
     registries = MagicMock()
     registries.profiles.items.return_value = (profile,)
@@ -629,27 +629,29 @@ async def test_independent_reviewer_rejects_oversized_bundle() -> None:
     adapters = MagicMock()
     adapters.get.return_value = adapter
     reviewer = _reviewer(registries, adapters)
-    with pytest.raises(IndependentReviewError, match="maximum is 80"):
-        await reviewer.review(
-            task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
-            risk=RiskLevel.HIGH,
-            inspection=GitInspection(
-                head="b" * 40,
-                branch="task",
-                changed_files=tuple(f"f{i}.py" for i in range(100)),
-                diff=b"+safe\n",
-            ),
-            base_commit="a" * 40,
-            result_commit="b" * 40,
-            diff_hash=None,
-            gates=[{"exit_code": 0}],
-            mechanical_findings=(),
-            request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
-            timeout_seconds=30,
-            cancellation=CancellationContext(),
-            lease=_lease(),
-        )
-    adapter.execute.assert_not_awaited()
+    verdict = await reviewer.review(
+        task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
+        risk=RiskLevel.HIGH,
+        inspection=GitInspection(
+            head="b" * 40,
+            branch="task",
+            changed_files=tuple(f"f{i}.py" for i in range(100)),
+            diff=b"+safe\n",
+        ),
+        base_commit="a" * 40,
+        result_commit="b" * 40,
+        diff_hash=None,
+        gates=[{"exit_code": 0}],
+        mechanical_findings=(),
+        request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
+        timeout_seconds=30,
+        cancellation=CancellationContext(),
+        lease=_lease(),
+    )
+    # 100 files flow through 2 bounded partitions + cross-partition check.
+    assert verdict.allows_progress
+    assert verdict.partition_count == 2
+    assert adapter.execute.await_count == 3
     with pytest.raises(IndependentReviewError, match="maximum is 120000"):
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]

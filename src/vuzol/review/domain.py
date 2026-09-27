@@ -41,6 +41,10 @@ class ReviewVerdict(FrozenModel):
     changed_files: tuple[str, ...] = ()
     findings: tuple[ReviewFinding, ...] = ()
     summary: str = Field(min_length=1, max_length=2_000)
+    # WP07 additive provenance (approval only reads the fields above).
+    policy_revision: str = Field(default="review-policy.v1", max_length=100)
+    partition_count: int = Field(default=0, ge=0)
+    unknown_usage: bool = False
 
     @property
     def allows_progress(self) -> bool:

@@ -244,7 +244,7 @@ class ResultReviewHandler:
                     "high or privileged risk requires an independent model reviewer, "
                     "but none is configured on this worker"
                 )
-            return await self._independent.review(
+            verdict = await self._independent.review(
                 task=bound_task,
                 risk=risk,
                 inspection=inspection,
@@ -258,6 +258,12 @@ class ResultReviewHandler:
                 cancellation=cancellation,
                 lease=request.lease,
             )
+            # The result must not mutate mid-review: a changed hash
+            # invalidates the verdict (fail-closed, never PASS).
+            remeasured = await self._git.inspect(path, base_commit)
+            if remeasured.head != inspection.head or remeasured.diff_hash != inspection.diff_hash:
+                raise ValueError("retained result mutated during independent review")
+            return verdict
 
         if warnings:
             return ReviewVerdict(

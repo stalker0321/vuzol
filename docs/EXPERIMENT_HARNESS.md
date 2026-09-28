@@ -45,9 +45,18 @@ pricing compared by revision before any cash comparison.
 - `c_success = total cost / verified successes`; 0 successes → `None` +
   `c_success_undefined`, never 0;
 - paired deltas (a−b) by pair, aggregated per family; cluster bootstrap CI
-  over families with fixed seed; deadline overrun censors claimed success;
-- `compare_arms` returns `inconclusive: true` (never victory) on thin
-  evidence: small paired_n, undefined C_success, pricing drift, CI spanning 0;
+  over tasks (all pairs of one task form one cluster, EXPERIMENTS.md §4)
+  with fixed seed; deadline overrun censors claimed success;
+- `compare_arms` takes the declared `metric` (`arm_a` is the candidate,
+  `arm_b` the control) and gates on its uncertainty: success_rate needs a
+  success-delta CI strictly above 0; c_success needs a cost-ratio
+  (C_a/C_b) CI strictly below 1.0 with censored/failed costs kept in the
+  numerator; latency needs a duration-delta CI strictly below 0 over
+  completed pairs with zero censored pairs (censored durations are lower
+  bounds, not measurements). Other metrics gate on success
+  non-inferiority; an unknown metric forces inconclusive (fail-closed).
+  Returns `inconclusive: true` (never victory) on thin evidence: small
+  paired_n, undefined C_success, pricing drift, or a metric gate missed;
 - `HYPOTHESES` H1–H9 mirror report §29 (arms + metric + EX-link);
   `analyze_hypothesis` runs only the preregistered comparison;
 - `classify_telemetry_outcome` maps harness `ReviewOutcome` to analysis
@@ -97,11 +106,14 @@ success_metric: c_success
 ## 8. Experimental report template
 
 `build_report` output (`experiment-analysis.v1`): per-arm `n`,
-success/autonomous rates, measured vs unknown cost, `c_success` or
-`undefined`; per-hypothesis comparison with paired deltas, cluster CI,
-pricing check and `inconclusive` + reasons. A report claiming victory with
-`inconclusive: true`, mixed pricing revisions, or unverified successes is
-invalid.
+success/autonomous rates, mean/completed/censored durations, measured vs
+unknown cost, `c_success` or `undefined`; per-hypothesis comparison with
+paired deltas, success/cost/latency CIs, pricing check and `inconclusive` +
+reasons. `inconclusive: false` only licenses reporting the measured effect
+with its uncertainty — never an architectural victory claim (that needs the
+preregistered margins: quality non-inferiority, cost reduction, latency
+target). A report claiming victory with `inconclusive: true`, mixed pricing
+revisions, or unverified successes is invalid.
 
 ## 9. Boundaries
 

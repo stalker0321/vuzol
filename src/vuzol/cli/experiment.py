@@ -5,6 +5,7 @@ import asyncio
 import csv
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import get_runtime_configuration
+from vuzol.experiments.analysis import build_report, trial_record_from_json
+from vuzol.experiments.arms import ExperimentArm, plan_cohort
+from vuzol.experiments.corpus import load_corpus_manifest
 from vuzol.experiments.domain import ExperimentTelemetry
+from vuzol.experiments.export import joint_export
 from vuzol.experiments.service import TrialSeedRequest, seed_trial
 from vuzol.experiments.telemetry import (
     INVOCATION_ROLES,
@@ -44,6 +49,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     export.add_argument("experiment_id")
     export.add_argument("--json", type=Path, required=True)
     export.add_argument("--csv", type=Path, required=True)
+    plan = subparsers.add_parser("plan")
+    plan.add_argument("corpus", type=Path)
+    plan.add_argument("--arms", nargs="+", default=["current", "strong_solo", "hybrid"])
+    plan.add_argument("--seeds", nargs="+", type=int, default=[1])
+    plan.add_argument("--shuffle-seed", type=int, default=0)
+    plan.add_argument("--smoke-only", action="store_true")
+    plan.add_argument("--json", type=Path, required=True)
+    analyze = subparsers.add_parser("analyze")
+    analyze.add_argument("trials", type=Path)
+    analyze.add_argument("--ledger", type=Path, default=None)
+    analyze.add_argument("--hypotheses", nargs="+", default=["H1"])
+    analyze.add_argument("--bootstrap-reps", type=int, default=2000)
+    analyze.add_argument("--bootstrap-seed", type=int, default=0)
+    analyze.add_argument("--json", type=Path, required=True)
     return parser.parse_args(argv)
 
 
@@ -85,6 +104,69 @@ async def _run(args: argparse.Namespace) -> None:
             args.json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             _write_csv(args.csv, trials)
             _print_json({"json": str(args.json), "csv": str(args.csv), "trials": len(trials)})
+        elif args.command == "plan":
+            corpus = load_corpus_manifest(args.corpus)
+            arms = tuple(ExperimentArm(value) for value in args.arms)
+            planned = plan_cohort(
+                corpus,
+                arms,
+                tuple(args.seeds),
+                shuffle_seed=args.shuffle_seed,
+                only_smoke=args.smoke_only,
+            )
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "experiment-run-plan.v1",
+                        "corpus_revision": corpus.corpus_revision,
+                        "corpus_hash": corpus.content_hash,
+                        "shuffle_seed": args.shuffle_seed,
+                        "runs": [
+                            {
+                                "pair_id": run.pair_id,
+                                "corpus_task_id": run.corpus_task_id,
+                                "family": run.family,
+                                "arm": run.arm.value,
+                                "seed": run.seed,
+                                "order_index": run.order_index,
+                            }
+                            for run in planned
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            _print_json({"json": str(args.json), "runs": len(planned)})
+        elif args.command == "analyze":
+            raw = json.loads(args.trials.read_text())
+            records = tuple(trial_record_from_json(item) for item in raw["records"])
+            report = build_report(
+                records,
+                hypothesis_ids=tuple(args.hypotheses),
+                bootstrap_reps=args.bootstrap_reps,
+                bootstrap_seed=args.bootstrap_seed,
+            )
+            analysis_payload: dict[str, Any] = dict(report)
+            if args.ledger is not None:
+                ledger_raw = json.loads(args.ledger.read_text())
+                analysis_payload = joint_export(
+                    analysis_payload,
+                    tuple(
+                        (row["purpose"], Decimal(row["cost_units"]), row["invocations"])
+                        for row in ledger_raw["by_purpose"]
+                    ),
+                    (
+                        Decimal(ledger_raw["retry"]["cost_units"]),
+                        ledger_raw["retry"]["invocations"],
+                    ),
+                    experiment_id=ledger_raw.get("experiment_id", "ledger"),
+                )
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(json.dumps(analysis_payload, indent=2, sort_keys=True) + "\n")
+            _print_json({"json": str(args.json), "records": len(records)})
     finally:
         await engine.dispose()
 

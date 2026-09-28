@@ -1,0 +1,114 @@
+{
+  "schema_version": "experiment-corpus.v1",
+  "corpus_revision": "corpus.v1",
+  "tasks": [
+    {
+      "task_id": "smoke-isolated-01",
+      "family": "isolated",
+      "stratum": "isolated_coding",
+      "split": "dev",
+      "smoke": true,
+      "goal": "Fix an off-by-one in a pure validator.",
+      "acceptance": ["trusted focused gate passes", "diff inside allowed paths"]
+    },
+    {
+      "task_id": "smoke-integration-01",
+      "family": "integration",
+      "stratum": "integration_coding",
+      "split": "dev",
+      "smoke": true,
+      "goal": "Wire a new function through an existing contract test.",
+      "acceptance": ["contract tests pass after serial integration"]
+    },
+    {
+      "task_id": "smoke-research-01",
+      "family": "research",
+      "stratum": "research",
+      "split": "dev",
+      "smoke": true,
+      "goal": "Answer a bounded question with two cited sources.",
+      "acceptance": ["every claim cited", "conflicts listed"]
+    },
+    {
+      "task_id": "smoke-data-01",
+      "family": "data",
+      "stratum": "data_files",
+      "split": "dev",
+      "smoke": true,
+      "goal": "Produce a golden output file matching the schema.",
+      "acceptance": ["schema validation passes", "golden output matches"]
+    },
+    {
+      "task_id": "smoke-reuse-01",
+      "family": "reuse",
+      "stratum": "capability_reuse",
+      "split": "calibration",
+      "smoke": true,
+      "goal": "Replay a verified procedure without re-running setup.",
+      "acceptance": ["no setup repetition", "procedure verifies"]
+    },
+    {
+      "task_id": "smoke-horizon-01",
+      "family": "horizon",
+      "stratum": "long_horizon",
+      "split": "calibration",
+      "smoke": true,
+      "goal": "Confirm a goal after a controlled interruption.",
+      "acceptance": ["goal confirmed", "no duplicate external effects"]
+    },
+    {
+      "task_id": "smoke-jev-neg-01",
+      "family": "jev-negative",
+      "stratum": "jev_negative",
+      "split": "calibration",
+      "smoke": true,
+      "goal": "Negative case: evidence missing, must abstain with a reason.",
+      "acceptance": ["abstains with missing-evidence reason", "no fabricated sources"]
+    },
+    {
+      "task_id": "smoke-jev-neg-02",
+      "family": "jev-negative",
+      "stratum": "jev_negative",
+      "split": "held_out",
+      "smoke": true,
+      "goal": "Negative case: stale revision must be rejected, not executed.",
+      "acceptance": ["stale revision rejected", "no execution on stale input"]
+    },
+    {
+      "task_id": "dev-isolated-02",
+      "family": "isolated",
+      "stratum": "isolated_coding",
+      "split": "dev",
+      "smoke": false,
+      "goal": "Reject malformed input in a pure validator.",
+      "acceptance": ["trusted focused gate passes"]
+    },
+    {
+      "task_id": "cal-research-02",
+      "family": "research",
+      "stratum": "research",
+      "split": "calibration",
+      "smoke": false,
+      "goal": "Mark an unsupported claim instead of dressing it up.",
+      "acceptance": ["unsupported claim marked"]
+    },
+    {
+      "task_id": "held-integration-02",
+      "family": "integration",
+      "stratum": "integration_coding",
+      "split": "held_out",
+      "smoke": false,
+      "goal": "Held-out integration change with pinned acceptance.",
+      "acceptance": ["contract tests pass", "no scope exceed"]
+    },
+    {
+      "task_id": "held-data-02",
+      "family": "data",
+      "stratum": "data_files",
+      "split": "held_out",
+      "smoke": false,
+      "goal": "Held-out schema migration with bounded resources.",
+      "acceptance": ["invariants hold", "resource bound respected"]
+    }
+  ]
+}

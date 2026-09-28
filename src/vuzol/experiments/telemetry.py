@@ -57,10 +57,12 @@ def aggregate_trials(trials: Sequence[ExperimentTelemetry]) -> dict[str, Any]:
     outcomes = Counter(trial.final_outcome.value for trial in trials)
     invocations = tuple(invocation for trial in trials for invocation in trial.invocations)
     usage_by_role = aggregate_usage_by_role(invocations)
-    provider_input = sum(invocation.usage.input_tokens or 0 for invocation in invocations)
-    provider_output = sum(invocation.usage.output_tokens or 0 for invocation in invocations)
-    total_context = sum(trial.total_context_bytes for trial in trials)
-    repeated_context = sum(trial.repeated_context_bytes for trial in trials)
+    measured_input = _measured_total(invocations, "input_tokens")
+    measured_output = _measured_total(invocations, "output_tokens")
+    unavailable = sum(
+        int(role_usage["unavailable_invocation_count"] or 0)
+        for role_usage in usage_by_role.values()
+    )
     false_accepts = sum(
         trial.shadow_would_accept and not trial.shadow_decision_correct for trial in trials
     )
@@ -70,17 +72,19 @@ def aggregate_trials(trials: Sequence[ExperimentTelemetry]) -> dict[str, Any]:
     return {
         "task_count": len(trials),
         "outcomes": dict(outcomes),
-        "provider_input_tokens": provider_input,
-        "provider_output_tokens": provider_output,
+        # Measured totals stay None when nothing was measured (never silent 0);
+        # unavailable invocations are counted explicitly next to them.
+        "provider_input_tokens": measured_input,
+        "provider_output_tokens": measured_output,
+        "provider_input_tokens_complete": unavailable == 0,
+        "provider_output_tokens_complete": unavailable == 0,
         "provider_cached_input_tokens": _measured_total(invocations, "cached_input_tokens"),
         "provider_reasoning_tokens": _measured_total(invocations, "reasoning_tokens"),
-        "provider_usage_unavailable_invocations": sum(
-            role_usage["unavailable_invocation_count"] for role_usage in usage_by_role.values()
-        ),
+        "provider_usage_unavailable_invocations": unavailable,
         "usage_by_role": usage_by_role,
-        "context_bytes": total_context,
-        "repeated_context_bytes": repeated_context,
-        "repeated_context_ratio": repeated_context / total_context if total_context else 0.0,
+        "context_bytes": sum(trial.total_context_bytes for trial in trials),
+        "repeated_context_bytes": sum(trial.repeated_context_bytes for trial in trials),
+        "repeated_context_ratio": _repeated_ratio(trials),
         "shadow_false_accepts": false_accepts,
         "shadow_false_rejects": false_rejects,
         "accepted_first_pass": outcomes[ReviewOutcome.ACCEPTED_FIRST_PASS.value],
@@ -115,3 +119,9 @@ def _measured_total(invocations: Sequence[InvocationTelemetry], field: str) -> i
         if (value := getattr(invocation.usage, field)) is not None
     )
     return sum(measured) if measured else None
+
+
+def _repeated_ratio(trials: Sequence[ExperimentTelemetry]) -> float:
+    total_context = sum(trial.total_context_bytes for trial in trials)
+    repeated_context = sum(trial.repeated_context_bytes for trial in trials)
+    return repeated_context / total_context if total_context else 0.0

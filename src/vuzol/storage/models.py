@@ -1406,9 +1406,49 @@ class CapabilityRunPin(IdentityMixin, TimestampMixin, Base):
     )
 
 
+class Node(IdentityMixin, TimestampMixin, Base):
+    """Second-node registry row: one control plane, local + one remote (WP12).
+
+    Onboarding inserts a row; revocation flips status (never deletes, so the
+    audit trail survives). ``credential_ref`` is an alias for operator-staged
+    credentials — never a value.
+    """
+
+    __tablename__ = "nodes"
+    __table_args__ = (UniqueConstraint("node_id", name="uq_node_node_id"),)
+
+    node_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    trust_class: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="offline")
+    protocol_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    credential_ref: Mapped[str | None] = mapped_column(String(100))
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detail: Mapped[str | None] = mapped_column(String(500))
+
+
+class NodeSlot(IdentityMixin, TimestampMixin, Base):
+    """Exclusive device slot lease on one node (WP12).
+
+    Claim/release mirror the step-claim fencing pattern: one advisory lock,
+    single-row claim, generation fencing so a stale holder can never release
+    or reuse a slot taken over by a newer generation.
+    """
+
+    __tablename__ = "node_slots"
+    __table_args__ = (UniqueConstraint("node_id", "slot_name", name="uq_node_slot"),)
+
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("nodes.node_id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    slot_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    claimed_by: Mapped[str | None] = mapped_column(String(200))
+    claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class UsageRecord(IdentityMixin, Base):
     __tablename__ = "usage_records"
-
     provider: Mapped[str] = mapped_column(String(100), nullable=False)
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     model: Mapped[str] = mapped_column(String(200), nullable=False)

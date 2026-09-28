@@ -35,6 +35,10 @@ BUILTIN_SECRET_PATTERNS = (
 )
 
 
+class ArtifactHashMismatch(ArtifactError):
+    """Bytes read back do not match the recorded content hash."""
+
+
 class ArtifactStore:
     def __init__(
         self,
@@ -82,6 +86,18 @@ class ArtifactStore:
         if not destination.is_file():
             raise ArtifactError("artifact bytes are missing")
         return destination.read_bytes()
+
+    def read_verified(self, content_uri: str, expected_hash: str) -> bytes:
+        """Read back with hash verification (transfer receipt path).
+
+        A transfer that arrives corrupted is rejected instead of persisted
+        under a mismatched hash.
+        """
+
+        content = self.read(content_uri)
+        if hashlib.sha256(content).hexdigest() != expected_hash:
+            raise ArtifactHashMismatch("artifact bytes do not match the recorded hash")
+        return content
 
     async def persist(
         self,

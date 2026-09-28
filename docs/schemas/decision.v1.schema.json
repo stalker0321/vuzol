@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "decision.v1",
+  "description": "Shadow repair-triage decision (WP11). Finite choices plus abstain; read-only shadow record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "decision_kind",
+    "state_revision",
+    "choice",
+    "evidence_refs",
+    "reason_code",
+    "abstain",
+    "input_fingerprint"
+  ],
+  "properties": {
+    "schema": {"const": "decision.v1"},
+    "decision_kind": {"const": "repair_triage"},
+    "state_revision": {"type": "integer", "minimum": 0},
+    "choice": {"enum": ["retry", "repair", "wait", "attention"]},
+    "evidence_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^artifact:[a-z0-9_-]{1,60}:sha256:[0-9a-f]{64}$"}
+    },
+    "reason_code": {
+      "enum": [
+        "known_local_failure",
+        "transient_retryable",
+        "backpressure_wait",
+        "unknown_failure",
+        "ood_input",
+        "stale_state",
+        "invalid_output",
+        "missing_evidence",
+        "oscillation_guard",
+        "deadline_exceeded",
+        "cap_exhausted"
+      ]
+    },
+    "abstain": {"type": "boolean"},
+    "input_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

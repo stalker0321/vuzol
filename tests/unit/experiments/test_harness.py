@@ -414,3 +414,152 @@ async def test_cli_plan_and_analyze(
     assert report["records"] == 24
     assert json.loads(capsys.readouterr().out)["records"] == 24
     assert engine.dispose.await_count == 2
+
+
+# --- REDO: declared metric gates the verdict; clusters are tasks ---
+
+
+def _paired_cohort(
+    *,
+    pairs: int,
+    cost_a: str,
+    cost_b: str,
+    duration_a_ms: int = 10000,
+    duration_b_ms: int = 10000,
+    status_a: str = "verified_success",
+    status_b: str = "verified_success",
+    families: tuple[str, ...] = ("isolated",),
+) -> tuple[TrialRecord, ...]:
+    records: list[TrialRecord] = []
+    for index in range(pairs):
+        family = families[index % len(families)]
+        task_id = f"t{index}"
+        pair_id = f"{task_id}:seed-1"
+        records.append(
+            _record(
+                pair_id=pair_id,
+                task_id=task_id,
+                family=family,
+                arm="hybrid",
+                status=status_a,
+                verified=status_a == "verified_success",
+                cost=Decimal(cost_a),
+                duration_ms=duration_a_ms,
+            )
+        )
+        records.append(
+            _record(
+                pair_id=pair_id,
+                task_id=task_id,
+                family=family,
+                arm="strong_solo",
+                status=status_b,
+                verified=status_b == "verified_success",
+                cost=Decimal(cost_b),
+                duration_ms=duration_b_ms,
+            )
+        )
+    return tuple(records)
+
+
+def test_cost_hypothesis_with_wrong_direction_is_inconclusive() -> None:
+    # Review evidence #1: hybrid C=1.0 vs solo C=0.6 must not read "conclusive".
+    records = _paired_cohort(pairs=12, cost_a="0.100", cost_b="0.060")
+    comparison = compare_arms(
+        records, "hybrid", "strong_solo", metric="c_success", bootstrap_reps=50
+    )
+    assert comparison["metric"] == "c_success"
+    assert comparison["cost_ratio_ci"]["undefined"] is False
+    assert comparison["cost_ratio_ci"]["hi"] is not None
+    assert comparison["cost_ratio_ci"]["hi"] >= 1.0
+    assert comparison["inconclusive"] is True
+    assert any("cheaper" in reason for reason in comparison["inconclusive_reasons"])
+
+
+def test_cost_hypothesis_can_conclude_when_cheaper() -> None:
+    records = _paired_cohort(pairs=8, cost_a="0.050", cost_b="0.100")
+    comparison = compare_arms(
+        records, "hybrid", "strong_solo", metric="c_success", bootstrap_reps=50
+    )
+    assert comparison["cost_ratio_ci"]["hi"] is not None
+    assert comparison["cost_ratio_ci"]["hi"] < 1.0
+    assert comparison["inconclusive"] is False
+
+
+def test_latency_hypothesis_gates_on_completed_pairs_only() -> None:
+    records = _paired_cohort(
+        pairs=8, cost_a="0.010", cost_b="0.010", duration_a_ms=5000, duration_b_ms=10000
+    )
+    comparison = compare_arms(records, "hybrid", "strong_solo", metric="latency", bootstrap_reps=50)
+    assert comparison["latency"]["completed_pairs"] == 8
+    assert comparison["latency"]["censored_pairs"] == 0
+    assert comparison["inconclusive"] is False
+
+    censored = _paired_cohort(
+        pairs=8, cost_a="0.010", cost_b="0.010", duration_a_ms=5000, duration_b_ms=10000
+    )
+    victim = TrialRecord(
+        pair_id="t0:seed-1",
+        task_id="t0",
+        family="isolated",
+        arm="strong_solo",
+        status="verified_success",
+        verified=True,
+        cost=Decimal("0.010"),
+        pricing_revision="trial-v1",
+        duration_ms=61_000,
+        deadline_ms=60_000,
+    )
+    mixed = tuple(item for item in censored if item.task_id != "t0" or item.arm != "strong_solo")
+    mixed += (victim,)
+    gated = compare_arms(mixed, "hybrid", "strong_solo", metric="latency", bootstrap_reps=50)
+    assert gated["latency"]["censored_pairs"] == 1
+    assert gated["inconclusive"] is True
+    assert any("censored" in reason for reason in gated["inconclusive_reasons"])
+
+
+def test_unknown_metric_forces_inconclusive() -> None:
+    records = _paired_cohort(pairs=8, cost_a="0.010", cost_b="0.010")
+    comparison = compare_arms(records, "hybrid", "strong_solo", metric="vibes")
+    assert comparison["inconclusive"] is True
+    assert any("unknown declared metric" in reason for reason in comparison["inconclusive_reasons"])
+
+
+def test_bootstrap_clusters_are_tasks_not_families() -> None:
+    from vuzol.experiments.analysis import _ordered_pairs, _pair_clusters
+
+    records = tuple(
+        _record(
+            pair_id=f"t{task}:seed-{seed}",
+            task_id=f"t{task}",
+            family="shared-family",
+            arm=arm,
+            cost=Decimal("0.010"),
+        )
+        for task in range(3)
+        for seed in (1, 2)
+        for arm in ("hybrid", "strong_solo")
+    )
+    deltas = paired_deltas(records, "hybrid", "strong_solo")
+    assert deltas["paired_n"] == 6
+    clusters = _pair_clusters(records, "hybrid", deltas)
+    assert sorted(clusters) == ["t0", "t0", "t1", "t1", "t2", "t2"]
+    assert [pair for pair in _ordered_pairs(records, deltas)] == sorted(
+        pair for pair in _ordered_pairs(records, deltas)
+    )
+
+
+def test_hypothesis_result_carries_declared_metric() -> None:
+    records = _smoke_records()
+    result = analyze_hypothesis(records, "H6", bootstrap_reps=50)
+    assert result["metric"] == "latency"
+    assert result["comparison"]["metric"] == "latency"
+    assert "latency" in result["comparison"]
+    assert "cost_ratio_ci" in result["comparison"]
+
+
+def test_arm_summary_reports_durations_and_censoring() -> None:
+    records = _smoke_records()
+    hybrid = summarize_arm(tuple(item for item in records if item.arm == "hybrid"))
+    assert hybrid["completed_n"] + hybrid["censored_n"] == hybrid["n"]
+    assert hybrid["mean_duration_ms"] > 0.0

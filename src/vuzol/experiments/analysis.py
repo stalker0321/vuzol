@@ -7,7 +7,8 @@ records; money uses Decimal. Rules (EXPERIMENTS.md §4, baseline.md §2):
 - successes=0 → cost-to-success is undefined (None + flag), never 0;
 - proposer self-score is never ground truth: only ``verified`` successes
   count (independent Git/holdout verification happens outside this module);
-- paired deltas aggregate by task family; cluster bootstrap over families;
+- paired deltas aggregate by task family; cluster bootstrap over tasks
+  (all pairs of one task form one cluster);
 - inconclusive (not victory) when uncertainty forbids a conclusion.
 """
 
@@ -127,6 +128,9 @@ class ArmSummary(TypedDict):
     unknown_cost_records: int
     c_success: str | None
     c_success_undefined: bool
+    mean_duration_ms: float
+    completed_n: int
+    censored_n: int
 
 
 class PairedDeltas(TypedDict):
@@ -145,6 +149,7 @@ class CiResult(TypedDict):
     hi: float | None
     reps: int
     undefined: bool
+    undefined_reps: int
 
 
 class PricingCheck(TypedDict):
@@ -152,11 +157,20 @@ class PricingCheck(TypedDict):
     revisions: list[str]
 
 
+class LatencyCheck(TypedDict):
+    ci: CiResult
+    completed_pairs: int
+    censored_pairs: int
+
+
 class ArmComparison(TypedDict):
+    metric: str
     arm_a: ArmSummary
     arm_b: ArmSummary
     deltas: PairedDeltas
     success_delta_ci: CiResult
+    cost_ratio_ci: CiResult
+    latency: LatencyCheck
     pricing: PricingCheck
     inconclusive: bool
     inconclusive_reasons: list[str]
@@ -186,6 +200,11 @@ def summarize_arm(records: tuple[TrialRecord, ...]) -> ArmSummary:
     autonomous = sum(1 for item in records if is_autonomous_success(item))
     measured_cost = sum((item.cost for item in records if item.cost is not None), Decimal("0"))
     unknown_cost = sum(1 for item in records if item.cost is None or item.cost_unknown)
+    censored = sum(1 for item in records if item.effective_status() == STATUS_CENSORED)
+    completed = [item for item in records if item.effective_status() != STATUS_CENSORED]
+    mean_duration = (
+        sum(item.duration_ms for item in completed) / len(completed) if completed else 0.0
+    )
     if successes:
         c_success: Decimal | None = (measured_cost / successes).quantize(Decimal("0.000001"))
         c_undefined = False
@@ -202,6 +221,9 @@ def summarize_arm(records: tuple[TrialRecord, ...]) -> ArmSummary:
         "unknown_cost_records": unknown_cost,
         "c_success": str(c_success) if c_success is not None else None,
         "c_success_undefined": c_undefined,
+        "mean_duration_ms": mean_duration,
+        "completed_n": len(completed),
+        "censored_n": censored,
     }
 
 
@@ -252,7 +274,7 @@ def cluster_bootstrap_ci(
         raise ValueError("values and clusters must align")
     unique = sorted(set(clusters))
     if not unique or not values:
-        return {"lo": None, "hi": None, "reps": 0, "undefined": True}
+        return {"lo": None, "hi": None, "reps": 0, "undefined": True, "undefined_reps": 0}
     rng = random.Random(seed)  # noqa: S311 - deterministic bootstrap, not security
     index_by_cluster: dict[str, list[int]] = {}
     for position, cluster in enumerate(clusters):
@@ -267,7 +289,130 @@ def cluster_bootstrap_ci(
     means.sort()
     lo = means[max(0, math.ceil(0.025 * reps) - 1)]
     hi = means[min(len(means) - 1, math.floor(0.975 * reps) - 1)]
-    return {"lo": lo, "hi": hi, "reps": reps, "undefined": False}
+    return {"lo": lo, "hi": hi, "reps": reps, "undefined": False, "undefined_reps": 0}
+
+
+def cost_ratio_ci(
+    records: tuple[TrialRecord, ...],
+    arm_a: str,
+    arm_b: str,
+    *,
+    reps: int = 2000,
+    seed: int = 0,
+) -> CiResult:
+    """Cluster (task-level) bootstrap CI for C_success(a) / C_success(b).
+
+    Censored/failed runs stay in the cost numerator via the same measured
+    sums as ``summarize_arm``. Resamples with too few successes on either
+    side are undefined and counted; a majority-undefined bootstrap, or a CI
+    that does not sit strictly below 1.0, keeps the verdict inconclusive.
+    """
+
+    pairs = _paired_records(records, arm_a, arm_b)
+    tasks = sorted({task for task, _, _ in pairs})
+    if not tasks:
+        return {"lo": None, "hi": None, "reps": 0, "undefined": True, "undefined_reps": 0}
+    pairs_by_task: dict[str, list[tuple[TrialRecord, TrialRecord]]] = {}
+    for task, _, members in pairs:
+        pairs_by_task.setdefault(task, []).append(members)
+    rng = random.Random(seed)  # noqa: S311 - deterministic bootstrap, not security
+    ratios: list[float] = []
+    undefined_reps = 0
+    for _ in range(reps):
+        cost_a = Decimal("0")
+        succ_a = 0
+        cost_b = Decimal("0")
+        succ_b = 0
+        for _ in tasks:
+            chosen = tasks[rng.randrange(len(tasks))]
+            for first, second in pairs_by_task[chosen]:
+                if first.cost is not None:
+                    cost_a += first.cost
+                if second.cost is not None:
+                    cost_b += second.cost
+                succ_a += int(is_success(first))
+                succ_b += int(is_success(second))
+        if not succ_a or not succ_b:
+            undefined_reps += 1
+            continue
+        ratios.append(float((cost_a / succ_a) / (cost_b / succ_b)))
+    if undefined_reps > reps // 2 or not ratios:
+        return {
+            "lo": None,
+            "hi": None,
+            "reps": reps,
+            "undefined": True,
+            "undefined_reps": undefined_reps,
+        }
+    ratios.sort()
+    lo = ratios[max(0, math.ceil(0.025 * len(ratios)) - 1)]
+    hi = ratios[min(len(ratios) - 1, math.floor(0.975 * len(ratios)) - 1)]
+    return {
+        "lo": lo,
+        "hi": hi,
+        "reps": reps,
+        "undefined": False,
+        "undefined_reps": undefined_reps,
+    }
+
+
+def latency_check(
+    records: tuple[TrialRecord, ...],
+    arm_a: str,
+    arm_b: str,
+    *,
+    reps: int = 2000,
+    seed: int = 0,
+) -> LatencyCheck:
+    """Latency gate over completed pairs only; censored pairs force inconclusive.
+
+    Censored durations are lower bounds, not measurements — claiming a
+    latency win while censored pairs exist would cherry-pick, so their
+    presence is reported and gated fail-closed in ``compare_arms``.
+    """
+
+    pairs = _paired_records(records, arm_a, arm_b)
+    completed = [
+        (first, second)
+        for _, _, (first, second) in pairs
+        if first.effective_status() != STATUS_CENSORED
+        and second.effective_status() != STATUS_CENSORED
+    ]
+    censored_pairs = len(pairs) - len(completed)
+    if not completed:
+        return {
+            "ci": {
+                "lo": None,
+                "hi": None,
+                "reps": 0,
+                "undefined": True,
+                "undefined_reps": 0,
+            },
+            "completed_pairs": 0,
+            "censored_pairs": censored_pairs,
+        }
+    values = tuple(float(first.duration_ms - second.duration_ms) for first, second in completed)
+    clusters = tuple(first.task_id for first, _ in completed)
+    return {
+        "ci": cluster_bootstrap_ci(values, clusters, reps=reps, seed=seed),
+        "completed_pairs": len(completed),
+        "censored_pairs": censored_pairs,
+    }
+
+
+def _paired_records(
+    records: tuple[TrialRecord, ...], arm_a: str, arm_b: str
+) -> list[tuple[str, str, tuple[TrialRecord, TrialRecord]]]:
+    by_pair: dict[str, dict[str, TrialRecord]] = {}
+    for item in records:
+        if item.arm in (arm_a, arm_b):
+            by_pair.setdefault(item.pair_id, {})[item.arm] = item
+    rows = [
+        (by_pair[pair][arm_a].task_id, pair, (by_pair[pair][arm_a], by_pair[pair][arm_b]))
+        for pair in by_pair
+        if len(by_pair[pair]) == 2
+    ]
+    return sorted(rows, key=lambda row: (row[0], row[1]))
 
 
 def check_pricing_consistency(records: tuple[TrialRecord, ...]) -> PricingCheck:
@@ -280,11 +425,21 @@ def compare_arms(
     arm_a: str,
     arm_b: str,
     *,
+    metric: str = "success_rate",
     bootstrap_reps: int = 2000,
     bootstrap_seed: int = 0,
     min_paired_n: int = 8,
 ) -> ArmComparison:
-    """Compare two arms; inconclusive (never victory) when evidence is thin."""
+    """Compare two arms; inconclusive (never victory) when evidence is thin.
+
+    Convention: ``arm_a`` is the candidate, ``arm_b`` the control. The
+    declared ``metric`` drives its own uncertainty gate: success_rate needs a
+    success-delta CI strictly above 0; c_success needs a cost-ratio CI
+    strictly below 1.0; latency needs a duration-delta CI strictly below 0
+    over completed pairs with zero censored pairs. Other metrics gate on
+    success non-inferiority (CI not strictly below 0); an unknown metric
+    forces inconclusive (fail-closed).
+    """
 
     arms = {item.arm for item in records}
     reasons: list[str] = []
@@ -304,29 +459,61 @@ def compare_arms(
     if not pricing["consistent"]:
         reasons.append(f"pricing revisions differ: {pricing['revisions']}")
     success_values = tuple(float(value) for value in deltas["success_deltas"])
-    clusters = _pair_families(records, arm_a, deltas)
+    clusters = _pair_clusters(records, arm_a, deltas)
     ci = cluster_bootstrap_ci(success_values, clusters, reps=bootstrap_reps, seed=bootstrap_seed)
-    if not ci["undefined"] and ci["lo"] is not None and ci["hi"] is not None:
-        if float(ci["lo"]) <= 0.0 <= float(ci["hi"]):
-            reasons.append("success-delta CI includes 0")
+    if ci["undefined"] or ci["lo"] is None or ci["hi"] is None:
+        reasons.append("success-delta CI undefined")
+    elif metric == "success_rate":
+        if not ci["lo"] > 0.0:
+            reasons.append("success-delta CI does not show arm_a ahead")
     else:
-        reasons.append("CI undefined")
+        if ci["hi"] < 0.0:
+            reasons.append("success-delta CI shows arm_a worse (quality gate)")
+    cost_ci = cost_ratio_ci(records, arm_a, arm_b, reps=bootstrap_reps, seed=bootstrap_seed)
+    latency = latency_check(records, arm_a, arm_b, reps=bootstrap_reps, seed=bootstrap_seed)
+    if metric == "success_rate":
+        pass
+    elif metric == "c_success":
+        if cost_ci["undefined"] or cost_ci["lo"] is None or cost_ci["hi"] is None:
+            reasons.append("cost-ratio CI undefined")
+        elif cost_ci["hi"] >= 1.0:
+            reasons.append("cost-ratio CI does not show arm_a cheaper")
+    elif metric == "latency":
+        latency_ci = latency["ci"]
+        if latency["censored_pairs"]:
+            reasons.append(f"{latency['censored_pairs']} censored pair(s) excluded from latency")
+        if latency_ci["undefined"] or latency_ci["lo"] is None or latency_ci["hi"] is None:
+            reasons.append("latency CI undefined")
+        elif latency_ci["hi"] >= 0.0:
+            reasons.append("latency CI does not show arm_a faster")
+    else:
+        reasons.append(f"unknown declared metric: {metric}")
     return {
+        "metric": metric,
         "arm_a": summary_a,
         "arm_b": summary_b,
         "deltas": deltas,
         "success_delta_ci": ci,
+        "cost_ratio_ci": cost_ci,
+        "latency": latency,
         "pricing": pricing,
         "inconclusive": bool(reasons),
         "inconclusive_reasons": reasons,
     }
 
 
-def _pair_families(
+def _pair_clusters(
     records: tuple[TrialRecord, ...], arm: str, deltas: PairedDeltas
 ) -> tuple[str, ...]:
-    family_by_pair = {item.pair_id: item.family for item in records if item.arm == arm}
-    return tuple(family_by_pair[pair] for pair in _ordered_pairs(records, deltas))
+    """Cluster key per ordered pair: task_id (EXPERIMENTS.md §4).
+
+    All pairs of one task — across seeds — form one resampling cluster.
+    Paired deltas still aggregate by task family; only the bootstrap unit
+    is the task.
+    """
+
+    task_by_pair = {item.pair_id: item.task_id for item in records if item.arm == arm}
+    return tuple(task_by_pair[pair] for pair in _ordered_pairs(records, deltas))
 
 
 def _ordered_pairs(records: tuple[TrialRecord, ...], deltas: PairedDeltas) -> list[str]:
@@ -352,7 +539,12 @@ def analyze_hypothesis(
         raise ValueError(f"unknown hypothesis: {hypothesis_id}")
     arm_a, arm_b = hypothesis["arms"].split(",")
     comparison = compare_arms(
-        records, arm_a, arm_b, bootstrap_reps=bootstrap_reps, bootstrap_seed=bootstrap_seed
+        records,
+        arm_a,
+        arm_b,
+        metric=hypothesis["metric"],
+        bootstrap_reps=bootstrap_reps,
+        bootstrap_seed=bootstrap_seed,
     )
     return {
         "hypothesis_id": hypothesis_id,

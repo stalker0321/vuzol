@@ -503,6 +503,18 @@ class IndependentModelReviewer:
 
         per_file = split_diff_by_file(inspection.diff)
         single_blob = set(per_file.keys()) == {"__full__"}
+        if not single_blob:
+            missing = [
+                path
+                for partition in manifest.partitions
+                for path in partition.files
+                if path not in per_file
+            ]
+            if missing:
+                raise IndependentReviewError(
+                    "partitioned review has no diff content for required files: "
+                    + ", ".join(missing[:5])
+                )
         verdicts: list[ReviewVerdict] = []
         unknown_usage = False
         per_partition_timeout = min(float(timeout_seconds), 600.0) / (len(manifest.partitions) + 1)
@@ -510,7 +522,7 @@ class IndependentModelReviewer:
             if single_blob:
                 blob = per_file["__full__"]
             else:
-                blob = b"".join(per_file.get(path, b"") for path in partition.files)
+                blob = b"".join(per_file[path] for path in partition.files)
             added = tuple(path for path in partition.files if path in inspection.added_files)
             sliced = GitInspection(
                 head=inspection.head,

@@ -37,6 +37,14 @@ Builder: `src/vuzol/review/partitions.py::build_manifest`.
   "split the change").
 - Invariants enforced fail-closed by `validate_manifest`: coverage (union ==
   changed files), no overlap, deterministic order and ids (`p00`, `p01`, …).
+- Header normalization: `split_diff_by_file` parses both plain
+  (`a/X b/X`) and git-quoted (`"a/..." "b/..."`, `core.quotePath=true`)
+  headers, decoding octal escapes to the same `utf-8/surrogateescape` form
+  as the `--name-only -z` file list; an unparseable header raises.
+- Content coverage: every listed file must own a non-empty slice of the
+  actual diff — a file with no delivered content raises
+  `IndependentReviewError` (BLOCKED) instead of an empty slice passing
+  silently.
 - Inventory: `generated_inventory` + `lockfile_inventory` list every
   generated/lockfile path; per-partition `generated_files`/`lockfile_files`.
 - Honesty: `diff_truncated` per partition and `truncated` overall replace the

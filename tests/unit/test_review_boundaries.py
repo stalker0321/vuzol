@@ -274,7 +274,7 @@ def test_manifest_coverage_overlap_determinism_and_inventory() -> None:
 
 def test_manifest_splits_large_diff_with_honest_flag() -> None:
     files = ("src/a.py", "src/b.py")
-    big = b"x" * 70_000
+    big = b"x" * 70_000 + b"\n"
     diff = _file_diff("src/a.py", big) + _file_diff("src/b.py", big)
     inspection = GitInspection(head="b" * 40, branch="task", changed_files=files, diff=diff)
     manifest = build_manifest(
@@ -928,3 +928,91 @@ async def test_review_cost_export_splits_known_and_unknown() -> None:
     assert export["unknown_invocations"] == 1
     assert export["unknown_is_floor_not_zero"] is True
     assert session.execute.await_count == 3
+
+
+# --- Git-quoted non-ASCII paths (REDO blocking-1) ---
+
+
+def _c_quote_path(path: str) -> bytes:
+    """Mimic git `core.quotePath=true`: quote every byte outside printable ASCII."""
+
+    raw = path.encode("utf-8")
+    out = bytearray()
+    for byte in raw:
+        if 0x20 <= byte <= 0x7E and byte not in (0x22, 0x5C):
+            out.append(byte)
+        else:
+            out.extend(f"\\{byte:03o}".encode("ascii"))
+    return bytes(out)
+
+
+def _quoted_file_diff(path: str, marker: bytes) -> bytes:
+    quoted = _c_quote_path(path)
+    header = b'diff --git "a/' + quoted + b'" "b/' + quoted + b'"\n'
+    body = (
+        b"new file mode 100644\n"
+        b"index 0000000..e69de29\n"
+        b"--- /dev/null\n+++ b/" + quoted + b"\n@@ -0,0 +1 @@\n+" + marker + b"\n"
+    )
+    return header + body
+
+
+def test_split_parses_quoted_non_ascii_and_spaced_paths() -> None:
+    diff = _quoted_file_diff("café_проект.py", b"content") + _file_diff("my file.py")
+    parts = split_diff_by_file(diff)
+    assert set(parts) == {"café_проект.py", "my file.py"}
+    assert b"content" in parts["café_проект.py"]
+    assert b"content" not in parts["my file.py"]
+
+
+def test_missing_diff_slice_fails_closed() -> None:
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="task",
+        changed_files=("a.py", "b.py"),
+        diff=_file_diff("a.py"),
+    )
+    with pytest.raises(IndependentReviewError, match=r"no diff content.*b\.py"):
+        build_manifest(
+            inspection,
+            RiskLevel.HIGH,
+            base_commit="a" * 40,
+            result_commit="b" * 40,
+            max_files_per_partition=80,
+            max_chars_per_partition=120_000,
+        )
+
+
+@pytest.mark.anyio
+async def test_quoted_unicode_path_content_reaches_partition_review() -> None:
+    marker = b"UNICODE_BOUNDARY_MARKER_025"
+    unicode_path = "café_проект.py"
+    others = tuple(f"src/f{i:03d}.py" for i in range(81))
+    files = (unicode_path, *others)
+    diff = _quoted_file_diff(unicode_path, marker) + b"".join(_file_diff(path) for path in others)
+    inspection = GitInspection(head="b" * 40, branch="task", changed_files=files, diff=diff)
+    assert len(files) == 82
+    registries, adapters = _registries_and_adapter(_pass_result())
+    reviewer = _reviewer(registries, adapters)
+    verdict = await reviewer.review(
+        task=_task(),  # type: ignore[arg-type]
+        risk=RiskLevel.HIGH,
+        inspection=inspection,
+        base_commit="a" * 40,
+        result_commit="b" * 40,
+        diff_hash=None,
+        gates=[{"exit_code": 0}],
+        mechanical_findings=(),
+        request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
+        timeout_seconds=120,
+        cancellation=CancellationContext(),
+        lease=_lease(),
+    )
+    assert verdict.allows_progress
+    assert verdict.partition_count == 2
+    delivered = [
+        "".join(item.content for item in call.args[0].context)
+        for call in adapters.get.return_value.execute.await_args_list
+    ]
+    assert any(marker.decode() in bundle for bundle in delivered)
+    assert any(unicode_path in bundle for bundle in delivered)

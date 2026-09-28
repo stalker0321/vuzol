@@ -75,7 +75,7 @@ def test_corpus_loads_versioned_with_smoke8_and_splits() -> None:
     manifest = load_corpus_manifest(FIXTURES / "corpus.v1.json")
     assert manifest.schema_version == "experiment-corpus.v1"
     assert manifest.corpus_revision == "corpus.v1"
-    assert len(manifest.tasks) == 12
+    assert len(manifest.tasks) == 40
     assert len(manifest.smoke_tasks()) == 8
     assert manifest.split_tasks(CorpusSplit.HELD_OUT)
     assert manifest.split_tasks(CorpusSplit.DEV)

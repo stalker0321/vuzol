@@ -55,7 +55,10 @@ from vuzol.interpretation.ports import (
     TranscriptionUnavailable,
 )
 from vuzol.observability import get_logger
-from vuzol.providers.budgets import record_intake_usage
+from vuzol.providers.budgets import (
+    accounting_for_profile,
+    estimate_reservation,
+)
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.attempts import snapshot_task_spec
 from vuzol.storage.leasing import (
@@ -70,6 +73,7 @@ from vuzol.storage.models import (
     ClarificationDecision,
     ConversationTurn,
     EditSession,
+    Event,
     Interpretation,
     PlanRevision,
     PlanRevisionItem,
@@ -261,6 +265,11 @@ async def regenerate_project_names(
     raise InterpreterUnavailable("all_interpreters_unavailable")
 
 
+def _tokens_or_one(usage: NormalizedUsage | None, field: str) -> int:
+    value = getattr(usage, field, None) if usage is not None else None
+    return value if isinstance(value, int) else 1
+
+
 class InterpretationPipeline:
     def __init__(
         self,
@@ -287,13 +296,20 @@ class InterpretationPipeline:
         self._logger = get_logger(__name__)
 
     def _attempt_observer(
-        self, *, task_id: uuid.UUID | None, purpose: str = "intake"
+        self,
+        *,
+        task_id: uuid.UUID | None,
+        purpose: str = "intake",
+        intake_id: uuid.UUID | None = None,
     ) -> InterpreterAttemptObserver:
         """Record every interpreter/transcriber attempt in the shared ledger.
 
-        Successful calls carry measured tokens; failed attempts are recorded with
-        a conservative unknown floor so retries are visible without inventing a
-        fake zero cost.
+        D3 step-less path (lead Q1/Q3): owner + reserve + settlement, no fake
+        Step. Successful calls carry measured tokens; failed attempts are
+        recorded with a conservative unknown floor so retries are visible
+        without inventing a fake zero cost. An accounting failure is logged
+        AND persisted as an Event row (dossier pp.3 — never logging-only);
+        the caller is never broken by it.
         """
 
         async def observe(
@@ -320,17 +336,50 @@ class InterpretationPipeline:
                     output_tokens=output_tokens,
                     duration_ms=duration_ms or 0,
                 )
+            invocation_id = uuid.uuid4()
             try:
                 async with self._factory.begin() as session:
-                    await record_intake_usage(
+                    from vuzol.providers.budgets import (
+                        reserve_invocation_budget,
+                        resolve_horizon_scope,
+                        settle_invocation_budget,
+                    )
+
+                    horizon = await resolve_horizon_scope(
+                        session, task_id=task_id, intake_id=intake_id
+                    )
+                    estimate = estimate_reservation(
+                        profile,
+                        input_tokens=min(
+                            _tokens_or_one(usage, "input_tokens"),
+                            self._runtime.settings.limits.provider_call_input_tokens,
+                        ),
+                        output_tokens=min(
+                            _tokens_or_one(usage, "output_tokens"),
+                            profile.output_limit or 1,
+                        ),
+                    )
+                    reservation = await reserve_invocation_budget(
                         session,
+                        invocation_id=invocation_id,
+                        profile=profile,
+                        estimate=estimate,
+                        limits=self._runtime.settings.limits,
+                        accounting=accounting_for_profile(
+                            profile,
+                            purpose=purpose,
+                            attempt_kind=attempt_kind,
+                            horizon_id=horizon,
+                        ),
+                        task_id=task_id,
+                    )
+                    await settle_invocation_budget(
+                        session,
+                        reservation=reservation,
                         profile=profile,
                         usage=usage,
-                        purpose=purpose,
-                        task_id=task_id,
                         provider_request_id=provider_request_id,
                         outcome=outcome,
-                        attempt_kind=attempt_kind,
                     )
             except Exception as error:
                 self._logger.error(
@@ -342,6 +391,28 @@ class InterpretationPipeline:
                         "error_type": type(error).__name__,
                     },
                 )
+                try:
+                    async with self._factory.begin() as session:
+                        session.add(
+                            Event(
+                                entity_type="budget_accounting",
+                                entity_id=invocation_id,
+                                event_type="budget.accounting_failed",
+                                actor_type="system",
+                                payload={
+                                    "profile_id": profile_id,
+                                    "purpose": purpose,
+                                    "attempt_kind": attempt_kind,
+                                    "outcome": outcome,
+                                    "error_type": type(error).__name__,
+                                },
+                            )
+                        )
+                except Exception:
+                    self._logger.error(
+                        "interpretation.accounting_event_failed",
+                        extra={"profile_id": profile_id},
+                    )
 
         return observe
 
@@ -483,7 +554,7 @@ class InterpretationPipeline:
             self._discussion_interpreter,
             self._discussion_fallbacks,
             request,
-            on_attempt=self._attempt_observer(task_id=intake.task_id),
+            on_attempt=self._attempt_observer(task_id=intake.task_id, intake_id=intake.id),
         )
         if (
             result.interaction_mode is InteractionMode.PLAN_REQUEST
@@ -503,7 +574,7 @@ class InterpretationPipeline:
                     self._discussion_interpreter,
                     self._discussion_fallbacks,
                     request,
-                    on_attempt=self._attempt_observer(task_id=intake.task_id),
+                    on_attempt=self._attempt_observer(task_id=intake.task_id, intake_id=intake.id),
                 )
         self._logger.info(
             "Discussion interpretation completed",

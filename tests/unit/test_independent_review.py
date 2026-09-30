@@ -315,7 +315,9 @@ async def test_database_review_accounting_reserves_reconciles_and_releases(
     monkeypatch.setattr(independent_module, "reconcile_usage", reconcile)
     monkeypatch.setattr(independent_module, "release_reservation", release)
     factory = MagicMock()
-    factory.begin.return_value = AsyncContext(MagicMock())
+    review_session = MagicMock()
+    review_session.scalar = AsyncMock(return_value=None)
+    factory.begin.return_value = AsyncContext(review_session)
     accounting = DatabaseReviewAccounting(factory, HardLimits())
 
     reservation = await accounting.reserve(request=request, profile=profile)
@@ -348,7 +350,9 @@ async def test_database_review_accounting_reserves_reconciles_and_releases(
     assert reservation.id == reservation_id
     reserve.assert_awaited_once()
     assert reserve.await_args is not None
-    assert reserve.await_args.kwargs["enforce_task_token_limits"] is False
+    # D3 Q4: deductible allowance replaces the bypass flag.
+    assert reserve.await_args.kwargs["review_allowance"] is True
+    assert reserve.await_args.kwargs["accounting"].purpose == "review"
     assert reconcile.await_count == 2
     release.assert_awaited_once()
     reserve.side_effect = BudgetExceeded("limit")

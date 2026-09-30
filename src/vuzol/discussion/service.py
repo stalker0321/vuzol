@@ -1442,6 +1442,9 @@ class WorkPackageService:
                     suggested_risk=item.suggested_risk,
                     needs_approval=item.needs_approval,
                     estimated_complexity=item.estimated_complexity,
+                    # D3 W2 (lead Q5): pin the D1 unified item contract
+                    # hash at revision creation for materializer reads.
+                    item_contract_version=item_contract_hash_of(item),
                 )
             )
         package.title = plan.title.strip()

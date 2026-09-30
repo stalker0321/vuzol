@@ -86,10 +86,26 @@ validates hashes.
 
 `ProviderStepHandler._persist_input_bindings` runs after a successful
 `research_execute`: it persists the result as a `research_result` artifact
-(`research-provider-result.v1` legacy provider text, without a verified label),
-finds the downstream `synthesize` step via its
+(`research-provider-result.v1` legacy provider text, without a verified label;
+D3 source-backed reports persist as `research-result.v1` plus separate raw
+artifacts), finds downstream steps of the pair-declared consumer types via
 `dependency_metadata.predecessor_ordinals`, and records one required, resolved
-`InputBinding`. It is idempotent per `(consumer_step_id, slot)`.
+`InputBinding` per pair. It is idempotent per `(consumer_step_id, slot)`.
+
+## D3 pairs, manifest persist, scope/access/freshness (W5)
+
+- Declared pairs (`context/bindings.py`): Research→Synthesis (auto),
+  Scout→Planner and Task→Task (explicit APIs). Consumers validate the slot
+  schema and, where defined, the bytes (source reports, scout packets)
+  before any provider spend; tampered schemas block.
+- The manifest of exactly what an invocation received persists as a
+  `context_manifest` artifact (hashes, excluded, truncation omissions,
+  resolver policy) — the previous `[1]`-discard is gone.
+- Missing scope owner fails closed (required raises `missing_scope`,
+  optional drops to `excluded`); `access_scope` is read
+  (`private`/`project` require scope match, `public` skips it, unknown
+  values refuse); freshness anchors on the oldest credible timestamp
+  (`source_retrieved_at`, lead Q7) — repacks carrying it never rejuvenate.
 
 ## Migration / backfill
 

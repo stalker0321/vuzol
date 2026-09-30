@@ -31,7 +31,7 @@ Capability selection comes from the WP03 registry:
 `descriptor_for_capability("web_research")` → `web-research` (ACTION,
 read_only); unmapped capabilities have no selection.
 
-## 3. Claim/source report + synthesis binding + D0 guard
+## 3. Claim/source report + synthesis binding + D0 guard + D3 source-backed
 
 `src/vuzol/research/synthesize.py`: `sources_from_retrieved` lifts transport
 sources (hash/scope/retriever/freshness), `bind_report` builds + validates,
@@ -52,6 +52,24 @@ application/json)` + `InputBinding(slot=predecessor_result,
 schema=research-provider-result.v1 for legacy provider text,
 schema=research-result.v1 for verified source reports, required, hash-pinned)` → `resolve_context`
 (hash-drift / foreign-scope / freshness enforced, fail-closed).
+
+## 3b. Source-backed research (D3 W1)
+
+`research/source_backed.py` connects `research_execute` to the retrieval
+adapter when a fetcher is configured (offline fixtures in CI/tests; the
+approved-HTTP adapter only when explicitly configured — live trials are
+forbidden): model-proposed source URIs are fetched, lifted, bound and
+persisted as a real `research-result.v1` report plus separate raw-source
+artifacts. Anything short of full success keeps the legacy text path (no
+verified label) — there are no partial verified reports.
+- Hash chain: raw-bytes sha == report hash (strict UTF-8 required, else
+  explicit refusal). Raw bytes live apart from the rendered report.
+- Citations are structural (`offset:start-end` byte ranges into the cited
+  raw source), validated against the raw length.
+- Schema validity (`validate_report`) is enforced; claim entailment is NOT
+  checked and is never presented as verified: `[verified]` means "cited by
+  a retrieved source", nothing more.
+- Without retrieval there is no verified research (fail-closed, unchanged).
 
 ## 4. Freshness policy
 

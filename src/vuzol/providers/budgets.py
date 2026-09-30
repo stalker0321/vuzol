@@ -11,9 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.config.models import ProviderProfileConfig
 from vuzol.config.revision import content_revision
 from vuzol.config.settings import HardLimits
+from vuzol.discussion.horizon import parse_budget
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import ProviderBudgetReservation, Step, Task, UsageRecord
+from vuzol.storage.models import (
+    MaterializationLink,
+    ProviderBudgetReservation,
+    Step,
+    Task,
+    UsageRecord,
+    WorkAttempt,
+    WorkPackage,
+)
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import (
     AttemptKind,
@@ -80,6 +89,10 @@ _STEP_PURPOSE = {
     "privileged_execute": "setup",
     "ensure_capabilities": "setup",
     "ensure_dependencies": "setup",
+    # D3: every routed step type is classified explicitly; the "coding"
+    # default below covers only legacy/unknown types, never new steps.
+    "acceptance": "review",
+    "scout": "scout",
 }
 
 
@@ -87,6 +100,123 @@ def purpose_for_step_type(step_type: str) -> str:
     """Map a provider step type to its accounting purpose."""
 
     return _STEP_PURPOSE.get(step_type, "coding")
+
+
+async def resolve_horizon_scope(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID | None = None,
+    intake_id: uuid.UUID | None = None,
+) -> uuid.UUID | None:
+    """Lifetime owner scope for one invocation (D3, lead Q1).
+
+    Materialized tasks resolve to their WorkPackage id — the same scope the
+    lifetime budget and ``_lifetime_spend`` account against. Pre-Task calls
+    scope to the intake row identity (project affinity lives on that row).
+    ``None`` means no lifetime owner (task caps still apply); it is never
+    fabricated.
+    """
+
+    if task_id is not None:
+        link = await session.scalar(
+            select(MaterializationLink).where(MaterializationLink.task_id == task_id)
+        )
+        if link is not None:
+            return link.work_package_id
+        return None
+    return intake_id
+
+
+async def _lifetime_totals(
+    session: AsyncSession, horizon_id: uuid.UUID
+) -> tuple[int, int, Decimal, Decimal, int]:
+    """Settled + outstanding spend for a lifetime owner, no epoch filter.
+
+    Canonical lifetime math (lead Q2, like ``_lifetime_spend``): retry, goal
+    revision and epoch changes never erase it. ``budget_epoch`` keeps
+    resetting only task/step caps (documented in ACCOUNTING_LEDGER).
+    """
+
+    usage = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(UsageRecord.input_tokens), 0),
+                func.coalesce(func.sum(UsageRecord.output_tokens), 0),
+                func.coalesce(func.sum(UsageRecord.cost_units), 0),
+                func.coalesce(func.sum(UsageRecord.quota_units), 0),
+                func.count(),
+            ).where(UsageRecord.horizon_id == horizon_id)
+        )
+    ).one()
+    reserved = (
+        await session.execute(
+            select(
+                func.coalesce(
+                    func.sum(ProviderBudgetReservation.reserved_input_tokens), 0
+                ),
+                func.coalesce(
+                    func.sum(ProviderBudgetReservation.reserved_output_tokens), 0
+                ),
+                func.coalesce(
+                    func.sum(ProviderBudgetReservation.reserved_cost_units), 0
+                ),
+                func.coalesce(
+                    func.sum(ProviderBudgetReservation.reserved_quota_units), 0
+                ),
+                func.count(),
+            ).where(
+                ProviderBudgetReservation.horizon_id == horizon_id,
+                ProviderBudgetReservation.status == BudgetReservationStatus.RESERVED,
+            )
+        )
+    ).one()
+    return (
+        int(usage[0]) + int(reserved[0]),
+        int(usage[1]) + int(reserved[1]),
+        Decimal(usage[2]) + Decimal(reserved[2]),
+        Decimal(usage[3]) + Decimal(reserved[3]),
+        int(usage[4]) + int(reserved[4]),
+    )
+
+
+async def _task_lifetime_calls(session: AsyncSession, task_id: uuid.UUID) -> int:
+    """Provider invocations for a task across all epochs (D3 counters)."""
+
+    usage_calls = (
+        await session.scalar(
+            select(func.count())
+            .select_from(UsageRecord)
+            .where(UsageRecord.task_id == task_id)
+        )
+    ) or 0
+    reserved_calls = (
+        await session.scalar(
+            select(func.count())
+            .select_from(ProviderBudgetReservation)
+            .where(
+                ProviderBudgetReservation.task_id == task_id,
+                ProviderBudgetReservation.status == BudgetReservationStatus.RESERVED,
+            )
+        )
+    ) or 0
+    return int(usage_calls) + int(reserved_calls)
+
+
+async def _task_review_allowance(
+    session: AsyncSession, task_id: uuid.UUID
+) -> tuple[int, int, Decimal]:
+    """Already-consumed review allowance for a task (D3 Q4, shared ledger)."""
+
+    row = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(ProviderBudgetReservation.allowance_input_tokens), 0),
+                func.coalesce(func.sum(ProviderBudgetReservation.allowance_output_tokens), 0),
+                func.coalesce(func.sum(ProviderBudgetReservation.allowance_cost_units), 0),
+            ).where(ProviderBudgetReservation.task_id == task_id)
+        )
+    ).one()
+    return int(row[0]), int(row[1]), Decimal(row[2])
 
 
 def attempt_kind_for_payload(payload: object, *, attempt_count: int = 1) -> str:
@@ -163,26 +293,44 @@ def account_usage(profile: ProviderProfileConfig, usage: NormalizedUsage) -> Nor
 async def reserve_budget(
     session: AsyncSession,
     *,
-    task_id: uuid.UUID,
-    run_id: uuid.UUID,
-    step_id: uuid.UUID,
+    task_id: uuid.UUID | None,
+    run_id: uuid.UUID | None,
+    step_id: uuid.UUID | None,
     profile_id: str,
     provider_attempt: int,
     estimate: ReservationEstimate,
     limits: HardLimits,
-    enforce_task_token_limits: bool = True,
+    review_allowance: bool = False,
     accounting: AccountingContext | None = None,
+    invocation_id: uuid.UUID | None = None,
 ) -> ProviderBudgetReservation:
     await session.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK_KEY)))
-    existing = await session.scalar(
-        select(ProviderBudgetReservation).where(
-            ProviderBudgetReservation.step_id == step_id,
-            ProviderBudgetReservation.provider_attempt == provider_attempt,
+    if step_id is None:
+        # Step-less idempotency keys on the invocation, never on NULL steps
+        # (NULL never equals NULL in the unique constraint).
+        if invocation_id is None:
+            raise ValueError("step-less reserve requires invocation_id")
+        existing = await session.scalar(
+            select(ProviderBudgetReservation).where(
+                ProviderBudgetReservation.invocation_id == invocation_id
+            )
         )
-    )
-    if existing is not None:
-        return existing
+        if existing is not None:
+            assert isinstance(existing, ProviderBudgetReservation)
+            return existing
+    else:
+        existing = await session.scalar(
+            select(ProviderBudgetReservation).where(
+                ProviderBudgetReservation.step_id == step_id,
+                ProviderBudgetReservation.provider_attempt == provider_attempt,
+            )
+        )
+        if existing is not None:
+            assert isinstance(existing, ProviderBudgetReservation)
+            return existing
 
+    if task_id is None:
+        raise LookupError("workflow budget reserve requires a task")
     task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
     if task is None:
         raise LookupError(f"unknown budget task: {task_id}")
@@ -202,22 +350,56 @@ async def reserve_budget(
         raise BudgetExceeded("step input-token limit exceeded")
     if step_usage[1] + step_reserved[1] + estimate.output_tokens > limits.step_output_tokens:
         raise BudgetExceeded("step output-token limit exceeded")
+    # D3 Q4: review calls are subject to task caps like everything else; the
+    # old bypass is gone. A deductible allowance pool per task
+    # (HardLimits.review_allowance_*) covers the overage part and is
+    # recorded on the reservation inside the shared ledger.
+    allowed_in = allowed_out = 0
+    allowed_cost = Decimal("0")
+    if review_allowance:
+        used_in, used_out, used_cost = await _task_review_allowance(session, task_id)
+        headroom_in = max(limits.review_allowance_input_tokens - used_in, 0)
+        headroom_out = max(limits.review_allowance_output_tokens - used_out, 0)
+        headroom_cost = max(
+            Decimal(str(limits.review_allowance_cost_units)) - used_cost, Decimal("0")
+        )
+        over_in = max(
+            task_usage[0] + task_reserved[0] + estimate.input_tokens
+            - limits.task_input_tokens,
+            0,
+        )
+        over_out = max(
+            task_usage[1] + task_reserved[1] + estimate.output_tokens
+            - limits.task_output_tokens,
+            0,
+        )
+        over_cost = max(
+            task_usage[2] + task_reserved[2] + estimate.cost_units
+            - Decimal(str(limits.task_cost_units)),
+            Decimal("0"),
+        )
+        allowed_in, allowed_out, allowed_cost = (
+            min(estimate.input_tokens, over_in, headroom_in),
+            min(estimate.output_tokens, over_out, headroom_out),
+            min(estimate.cost_units, over_cost, headroom_cost),
+        )
     if (
-        enforce_task_token_limits
-        and task_usage[0] + task_reserved[0] + estimate.input_tokens > limits.task_input_tokens
+        task_usage[0] + task_reserved[0] + estimate.input_tokens - allowed_in
+        > limits.task_input_tokens
     ):
         raise BudgetExceeded("task input-token limit exceeded")
     if (
-        enforce_task_token_limits
-        and task_usage[1] + task_reserved[1] + estimate.output_tokens > limits.task_output_tokens
+        task_usage[1] + task_reserved[1] + estimate.output_tokens - allowed_out
+        > limits.task_output_tokens
     ):
         raise BudgetExceeded("task output-token limit exceeded")
     if step_usage[2] + step_reserved[2] + estimate.cost_units > Decimal(
         str(limits.step_cost_units)
     ):
         raise BudgetExceeded("step cost limit exceeded")
-    if task_usage[2] + task_reserved[2] + estimate.cost_units > Decimal(
-        str(limits.task_cost_units)
+    if (
+        task_usage[2] + task_reserved[2] + estimate.cost_units - allowed_cost
+        > Decimal(str(limits.task_cost_units))
     ):
         raise BudgetExceeded("task cost limit exceeded")
     if daily_usage[2] + daily_reserved[2] + estimate.cost_units > Decimal(
@@ -228,11 +410,36 @@ async def reserve_budget(
         str(limits.daily_quota_units)
     ):
         raise BudgetExceeded("daily quota limit exceeded")
+    # D3 lifetime gate (lead Q1/Q2): settled + outstanding for the lifetime
+    # owner, no epoch filter, checked against the package lifetime budget.
+    horizon_id = accounting.horizon_id if accounting is not None else None
+    if horizon_id is not None:
+        await _enforce_lifetime_budget(
+            session,
+            horizon_id=horizon_id,
+            estimate=estimate,
+        )
+    # D3 admission counters (lead W4): enforced alongside caps, 0 = unlimited.
+    if limits.max_provider_calls > 0:
+        calls = await _task_lifetime_calls(session, task_id)
+        if calls + 1 > limits.max_provider_calls:
+            raise BudgetExceeded("task provider-call limit exceeded")
+    if limits.max_work_attempts > 0:
+        attempts = await session.scalar(
+            select(func.count())
+            .select_from(WorkAttempt)
+            .where(WorkAttempt.task_id == task_id)
+        ) or 0
+        if int(attempts) + 1 > limits.max_work_attempts:
+            raise BudgetExceeded("task work-attempt limit exceeded")
+    if limits.max_replans > 0 and task.budget_epoch >= limits.max_replans:
+        raise BudgetExceeded("task replan limit exceeded")
 
     reservation = ProviderBudgetReservation(
         task_id=task_id,
         run_id=run_id,
         step_id=step_id,
+        invocation_id=invocation_id,
         profile_id=profile_id,
         budget_epoch=budget_epoch,
         provider_attempt=provider_attempt,
@@ -243,13 +450,179 @@ async def reserve_budget(
         status=BudgetReservationStatus.RESERVED,
         purpose=accounting.purpose if accounting is not None else None,
         attempt_kind=accounting.attempt_kind if accounting is not None else None,
-        horizon_id=accounting.horizon_id if accounting is not None else None,
+        horizon_id=horizon_id,
         pricing_revision=accounting.pricing_revision if accounting is not None else None,
         currency=accounting.currency if accounting is not None else None,
+        allowance_input_tokens=allowed_in,
+        allowance_output_tokens=allowed_out,
+        allowance_cost_units=allowed_cost,
     )
     session.add(reservation)
     await session.flush()
     return reservation
+
+
+async def _enforce_lifetime_budget(
+    session: AsyncSession,
+    *,
+    horizon_id: uuid.UUID,
+    estimate: ReservationEstimate,
+) -> None:
+    """Admission-budget check for a lifetime owner (D3 W4, DELTA §D3).
+
+    Totals are canonical lifetime (settled + outstanding, no epoch filter).
+    Enforced against the package lifetime budget when the horizon scope is a
+    package; other scopes are totaled but uncapped (documented).
+    """
+
+
+    spent_cost: Decimal
+    spent_calls: int
+    _spent_in, _spent_out, spent_cost, _spent_quota, spent_calls = await _lifetime_totals(
+        session, horizon_id
+    )
+    package = await session.get(WorkPackage, horizon_id)
+    if package is None or package.lifetime_budget is None:
+        return
+    budget = parse_budget(package.lifetime_budget)
+    if budget is None:
+        return
+    if budget.max_cost is not None and spent_cost + estimate.cost_units > Decimal(
+        str(budget.max_cost)
+    ):
+        raise BudgetExceeded("lifetime owner cost budget exhausted")
+    if budget.max_attempts is not None and spent_calls >= budget.max_attempts:
+        raise BudgetExceeded("lifetime owner attempt budget exhausted")
+
+
+async def reserve_invocation_budget(
+    session: AsyncSession,
+    *,
+    invocation_id: uuid.UUID,
+    profile: ProviderProfileConfig,
+    estimate: ReservationEstimate,
+    limits: HardLimits,
+    accounting: AccountingContext,
+    task_id: uuid.UUID | None = None,
+    run_id: uuid.UUID | None = None,
+) -> ProviderBudgetReservation:
+    """Reserve a step-less invocation (D3, lead Q3): intake/planning/scout.
+
+    Same atomic lock and idempotency as workflow reserves, keyed by
+    ``invocation_id`` (partial unique) instead of ``(step_id, attempt)``.
+    No fake Step is created. Task/step caps apply only when a task is bound;
+    call, daily and lifetime-owner caps always apply.
+    """
+
+    await session.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK_KEY)))
+    existing = await session.scalar(
+        select(ProviderBudgetReservation).where(
+            ProviderBudgetReservation.invocation_id == invocation_id
+        )
+    )
+    if existing is not None:
+        return existing
+    if estimate.input_tokens > limits.provider_call_input_tokens:
+        raise BudgetExceeded("provider call input-token limit exceeded")
+    if estimate.output_tokens > limits.provider_call_output_tokens:
+        raise BudgetExceeded("provider call output-token limit exceeded")
+    daily_usage = await _daily_usage_totals(session)
+    daily_reserved = await _reserved_totals(session)
+    if daily_usage[2] + daily_reserved[2] + estimate.cost_units > Decimal(
+        str(limits.daily_cost_units)
+    ):
+        raise BudgetExceeded("daily cost limit exceeded")
+    if daily_usage[3] + daily_reserved[3] + estimate.quota_units > Decimal(
+        str(limits.daily_quota_units)
+    ):
+        raise BudgetExceeded("daily quota limit exceeded")
+    if task_id is not None:
+        task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
+        if task is None:
+            raise LookupError(f"unknown budget task: {task_id}")
+        budget_epoch = task.budget_epoch
+        task_usage = await _usage_totals(session, task_id=task_id, budget_epoch=budget_epoch)
+        task_reserved = await _reserved_totals(
+            session, task_id=task_id, budget_epoch=budget_epoch
+        )
+        if (
+            task_usage[0] + task_reserved[0] + estimate.input_tokens
+            > limits.task_input_tokens
+        ):
+            raise BudgetExceeded("task input-token limit exceeded")
+        if (
+            task_usage[1] + task_reserved[1] + estimate.output_tokens
+            > limits.task_output_tokens
+        ):
+            raise BudgetExceeded("task output-token limit exceeded")
+        if (
+            task_usage[2] + task_reserved[2] + estimate.cost_units
+            > Decimal(str(limits.task_cost_units))
+        ):
+            raise BudgetExceeded("task cost limit exceeded")
+    if accounting.horizon_id is not None:
+        await _enforce_lifetime_budget(
+            session,
+            horizon_id=accounting.horizon_id,
+            estimate=estimate,
+        )
+    reservation = ProviderBudgetReservation(
+        task_id=task_id,
+        run_id=run_id,
+        step_id=None,
+        invocation_id=invocation_id,
+        profile_id=profile.id,
+        budget_epoch=0,
+        provider_attempt=1,
+        reserved_input_tokens=estimate.input_tokens,
+        reserved_output_tokens=estimate.output_tokens,
+        reserved_cost_units=estimate.cost_units,
+        reserved_quota_units=estimate.quota_units,
+        status=BudgetReservationStatus.RESERVED,
+        purpose=accounting.purpose,
+        attempt_kind=accounting.attempt_kind,
+        horizon_id=accounting.horizon_id,
+        pricing_revision=accounting.pricing_revision,
+        currency=accounting.currency,
+    )
+    session.add(reservation)
+    await session.flush()
+    return reservation
+
+
+async def settle_invocation_budget(
+    session: AsyncSession,
+    *,
+    reservation: ProviderBudgetReservation,
+    profile: ProviderProfileConfig,
+    usage: NormalizedUsage | None,
+    provider_request_id: str | None,
+    outcome: str,
+    conservative: bool = False,
+) -> UsageRecord:
+    """Settle a step-less reservation with measured (or unknown-floor) usage.
+
+    Money-only like ``_settle_reservation``; no lease fencing (there is no
+    step). Unknown stays unknown (conservative floor + ``cost_known=false``).
+    """
+
+    if reservation.status is not BudgetReservationStatus.RESERVED:
+        raise ValueError(f"invocation reservation is not open: {reservation.id}")
+    accounted = account_usage(profile, usage) if usage is not None else None
+    record = _settle_reservation(
+        reservation,
+        provider=profile.provider,
+        model=profile.model,
+        usage=accounted,
+        provider_request_id=provider_request_id,
+        outcome=outcome,
+        conservative=conservative or accounted is None,
+        late_receipt=False,
+    )
+    record.invocation_id = reservation.invocation_id
+    session.add(record)
+    await session.flush()
+    return record
 
 
 async def reconcile_usage(
@@ -309,7 +682,11 @@ def _apply_accounting(
 ) -> None:
     reservation.purpose = accounting.purpose
     reservation.attempt_kind = accounting.attempt_kind
-    reservation.horizon_id = accounting.horizon_id
+    # D3 sticky owner: the reservation row is the persisted intent written at
+    # reserve time. A reconcile context without an explicit horizon inherits
+    # it instead of wiping it back to NULL.
+    if accounting.horizon_id is not None:
+        reservation.horizon_id = accounting.horizon_id
     reservation.pricing_revision = accounting.pricing_revision
     reservation.currency = accounting.currency
 
@@ -454,6 +831,7 @@ async def record_intake_usage(
     outcome: str = "succeeded",
     attempt_kind: str = AttemptKind.INITIAL.value,
     horizon_id: uuid.UUID | None = None,
+    invocation_id: uuid.UUID | None = None,
 ) -> UsageRecord:
     """Write one intake/review invocation that has no workflow reservation.
 
@@ -492,6 +870,7 @@ async def record_intake_usage(
         purpose=purpose,
         attempt_kind=attempt_kind,
         horizon_id=horizon_id,
+        invocation_id=invocation_id,
         pricing_revision=content_revision(profile),
         currency=DEFAULT_ACCOUNTING_CURRENCY,
         cost_known=cost_known,

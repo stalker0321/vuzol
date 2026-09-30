@@ -749,6 +749,17 @@ def _task_draft(project_id: str, item: PlanRevisionItem) -> TaskDraft:
         EstimatedComplexity.MEDIUM: SuggestedComplexity.MEDIUM,
         EstimatedComplexity.LARGE: SuggestedComplexity.LARGE,
     }[item.estimated_complexity]
+    work_kind = getattr(item, "work_kind", None)
+    if work_kind is None or work_kind == "coding":
+        return _coding_task_draft(project_id, item, complexity)
+    if work_kind in {"research", "scout"}:
+        return _readonly_task_draft(project_id, item, complexity, work_kind=work_kind)
+    raise DomainError("unsupported_work_kind")
+
+
+def _coding_task_draft(
+    project_id: str, item: PlanRevisionItem, complexity: SuggestedComplexity
+) -> TaskDraft:
     constraints = (
         f"Allowed scope: {item.allowed_scope}",
         *(f"Out of scope: {value}" for value in item.out_of_scope),
@@ -770,6 +781,52 @@ def _task_draft(project_id: str, item: PlanRevisionItem) -> TaskDraft:
         suggested_complexity=complexity,
         suggested_risk=item.suggested_risk,
         needs_planning=complexity is SuggestedComplexity.LARGE,
+        needs_clarification=False,
+        normalized_title=item.summary[:120],
+    )
+
+
+def _readonly_task_draft(
+    project_id: str, item: PlanRevisionItem, complexity: SuggestedComplexity, *, work_kind: str
+) -> TaskDraft:
+    """Read-only draft for research/scout items (D3 W2, lead Q5).
+
+    Never grants write caps: a research/scout item with a write effect
+    intent is an explicit refusal, not a silent downgrade to read-only.
+    Unknown capability names are refused the same way.
+    """
+
+    if item.effect_intent is not None and item.effect_intent != "read_only":
+        raise DomainError("work_kind_effect_mismatch")
+    capabilities = {Capability.REPOSITORY_READ}
+    if item.capability is not None:
+        try:
+            capability = Capability(item.capability)
+        except ValueError as error:
+            raise DomainError("unknown_capability") from error
+        if capability not in {Capability.REPOSITORY_READ, Capability.WEB_RESEARCH}:
+            raise DomainError("work_kind_capability_mismatch")
+        capabilities.add(capability)
+    constraints = (
+        f"Allowed scope: {item.allowed_scope}",
+        *(f"Out of scope: {value}" for value in item.out_of_scope),
+        *(f"Dependency: {value}" for value in item.dependencies),
+        *(f"Trusted check: {value}" for value in item.trusted_checks),
+        f"Work kind: {work_kind} (read-only)",
+    )
+    return TaskDraft(
+        action=TaskAction.CREATE_TASK,
+        task_type=TaskType.RESEARCH,
+        operation=TaskOperation.INSPECT,
+        project_id=project_id,
+        goal=item.goal,
+        task_summary=item.summary,
+        requested_outcomes=(item.expected_outcome, *tuple(item.completion_criteria)),
+        constraints=constraints,
+        required_capabilities=frozenset(capabilities),
+        suggested_complexity=complexity,
+        suggested_risk=item.suggested_risk,
+        needs_planning=False,
         needs_clarification=False,
         normalized_title=item.summary[:120],
     )

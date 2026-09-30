@@ -255,6 +255,16 @@ class HardLimits(BaseModel):
     task_duration_seconds: int = Field(default=7_200, ge=1)
     artifact_bytes: int = Field(default=100_000_000, ge=1)
     input_bytes: int = Field(default=25_000_000, ge=1)
+    # D3 admission counters (lead W4): enforced alongside caps, never instead
+    # of them. 0 means unlimited (documented opt-out, not "no calls").
+    max_work_attempts: int = Field(default=50, ge=0)
+    max_provider_calls: int = Field(default=500, ge=0)
+    max_replans: int = Field(default=10, ge=0)
+    # D3 review suballocation pool per task (lead Q4): deductible allowance
+    # inside the shared ledger. 0 disables the allowance (full caps apply).
+    review_allowance_input_tokens: int = Field(default=10_000, ge=0)
+    review_allowance_output_tokens: int = Field(default=10_000, ge=0)
+    review_allowance_cost_units: float = Field(default=1.0, ge=0)
 
     @model_validator(mode="after")
     def validate_planner_reasoning_budget(self) -> "HardLimits":

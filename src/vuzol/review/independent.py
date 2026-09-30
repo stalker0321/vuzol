@@ -30,6 +30,7 @@ from vuzol.providers.budgets import (
     record_late_receipt,
     release_reservation,
     reserve_budget,
+    resolve_horizon_scope,
 )
 from vuzol.providers.domain import (
     ContextItem,
@@ -183,11 +184,17 @@ class DatabaseReviewAccounting:
                     provider_attempt=request.provider_attempt,
                     estimate=estimate,
                     limits=self._limits,
-                    # Worker/repair calls must not consume the allowance needed
-                    # by the mandatory safety verdict. Review remains bounded by
-                    # its own call/step limits and by task/daily cost limits.
-                    enforce_task_token_limits=False,
-                    accounting=accounting_for_profile(profile, purpose="review"),
+                    # D3 Q4: no bypass — the review is subject to task caps
+                    # with a deductible allowance from the shared pool.
+                    review_allowance=True,
+                    accounting=accounting_for_profile(
+                        profile,
+                        purpose="review",
+                        # D3 lifetime owner (lead Q1), sticky through settle.
+                        horizon_id=await resolve_horizon_scope(
+                            session, task_id=request.task_id
+                        ),
+                    ),
                 )
             except BudgetExceeded as error:
                 raise IndependentReviewError(

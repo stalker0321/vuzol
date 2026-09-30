@@ -24,7 +24,17 @@ from vuzol.discussion.memory_writer import (
 )
 from vuzol.execution.git import LocalGit
 from vuzol.ops.retention import RetentionSweeper
-from vuzol.storage.models import Artifact, Event, MemoryUnit, Task, TransactionalOutbox
+from vuzol.storage.models import (
+    AcceptanceEvidence,
+    Artifact,
+    Event,
+    MemoryUnit,
+    Task,
+    TransactionalOutbox,
+    ValidationResult,
+    WorkPackage,
+    Worktree,
+)
 from vuzol.storage.types import (
     ArtifactStorageState,
     ConversationTurnRole,
@@ -33,6 +43,7 @@ from vuzol.storage.types import (
     InteractionMode,
     MemoryUnitStatus,
     TaskStatus,
+    WorktreeDeliveryState,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 
@@ -434,4 +445,191 @@ async def test_hypotheses_and_filters_in_recall(postgres_dsn: str) -> None:
         assert [row.unit_type for row in found] == ["observation"]
         assert await uow.memory_units.recall(RecallQuery(project_id="demo", query="sqlite")) == ()
         assert await uow.memory_units.recall(RecallQuery(project_id="other")) == ()
+    await engine.dispose()
+
+
+def _sweeper_for(factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> RetentionSweeper:
+    return RetentionSweeper(
+        factory,
+        worktree_root=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts",
+        repository_root=tmp_path / "repo",
+        retention=RetentionDefaults(
+            completed_worktree_days=3,
+            failed_worktree_days=14,
+            artifact_days=14,
+            sweep_batch_size=50,
+            sweep_lock_timeout_seconds=1.0,
+        ),
+        owner="test-memory",
+        git=LocalGit(),
+    )
+
+
+async def _expired_terminal_artifact(
+    factory: async_sessionmaker[AsyncSession], *, content_hash: str
+) -> Artifact:
+    task_record, _run_id, _step = await seed_task_run_step(factory)
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        task = await uow.session.get(Task, task_record.id)
+        assert task is not None
+        task.status = TaskStatus.COMPLETED
+        artifact = Artifact(
+            task_id=task_record.id,
+            run_id=None,
+            step_id=None,
+            artifact_type="notes",
+            content_uri=f"artifact:notes/{content_hash[:8]}",
+            size_bytes=3,
+            content_hash=content_hash,
+            media_type="text/plain",
+            sensitivity="internal",
+            visibility="private",
+            retention_until=datetime.now(UTC) - timedelta(days=1),
+            storage_state=ArtifactStorageState.AVAILABLE,
+        )
+        uow.session.add(artifact)
+        await uow.session.flush()
+        return artifact
+
+
+async def test_acceptance_evidence_pins_artifact_against_sweep(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    artifact = await _expired_terminal_artifact(factory, content_hash="e" * 64)
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        session_id = await uow.discussions.create_session(
+            project_id="demo", chat_id=-100, message_thread_id=7
+        )
+        package = WorkPackage(session_id=session_id, project_id="demo", title="Test package")
+        uow.session.add(package)
+        await uow.session.flush()
+        uow.session.add(
+            AcceptanceEvidence(
+                package_id=package.id,
+                evidence_hash="e" * 64,
+                evidence={"verdict": "pass"},
+                artifact_id=artifact.id,
+            )
+        )
+        await uow.session.flush()
+        reason = await _sweeper_for(factory, tmp_path)._artifact_skip_reason(uow.session, artifact)
+        assert reason is not None
+        assert reason[0] == "referenced_by_acceptance_evidence"
+    await engine.dispose()
+
+
+async def test_package_acceptance_pointer_pins_artifact_against_sweep(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    artifact = await _expired_terminal_artifact(factory, content_hash="f" * 64)
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        session_id = await uow.discussions.create_session(
+            project_id="demo", chat_id=-100, message_thread_id=7
+        )
+        package = WorkPackage(session_id=session_id, project_id="demo", title="Test package")
+        uow.session.add(package)
+        await uow.session.flush()
+        package.acceptance_artifact_id = artifact.id
+        await uow.session.flush()
+        reason = await _sweeper_for(factory, tmp_path)._artifact_skip_reason(uow.session, artifact)
+        assert reason is not None
+        assert reason[0] == "referenced_by_package_acceptance"
+    await engine.dispose()
+
+
+async def test_cleaned_worktree_diff_pins_artifact_against_sweep(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    artifact = await _expired_terminal_artifact(factory, content_hash="a" * 64)
+    task_record, run_id, _step = await seed_task_run_step(factory)
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        uow.session.add(
+            Worktree(
+                task_id=task_record.id,
+                run_id=run_id,
+                project_id="demo",
+                repository_identity_hash="b" * 64,
+                base_commit="b" * 40,
+                default_branch="main",
+                expected_target_head="b" * 40,
+                branch="vuzol/task-test",
+                path=str(tmp_path / "wt"),
+                owner="test",
+                retention_until=datetime.now(UTC) - timedelta(days=1),
+                delivery_state=WorktreeDeliveryState.CLEANED,
+                cleaned_at=datetime.now(UTC) - timedelta(hours=1),
+                patch_artifact_id=artifact.id,
+            )
+        )
+        await uow.session.flush()
+        reason = await _sweeper_for(factory, tmp_path)._artifact_skip_reason(uow.session, artifact)
+        assert reason is not None
+        assert reason[0] == "referenced_by_worktree_diff"
+    await engine.dispose()
+
+
+async def test_validation_result_pins_artifact_against_sweep(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    engine, factory = storage(postgres_dsn)
+    artifact = await _expired_terminal_artifact(factory, content_hash="c" * 64)
+    _task_record, _run_id, step = await seed_task_run_step(factory)
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        uow.session.add(
+            ValidationResult(
+                step_id=step.id,
+                validator_type="tests",
+                status="passed",
+                result={},
+                artifact_id=artifact.id,
+            )
+        )
+        await uow.session.flush()
+        reason = await _sweeper_for(factory, tmp_path)._artifact_skip_reason(uow.session, artifact)
+        assert reason is not None
+        assert reason[0] == "referenced_by_validation_result"
+    await engine.dispose()
+
+
+async def test_memory_writer_loop_drains_queue_with_dedup(postgres_dsn: str) -> None:
+    """Test-contour run of the consumer cycle: enqueue, drain, redeliver."""
+
+    engine, factory = storage(postgres_dsn)
+    session_id = await _session_id(factory)
+    await _accept(factory, session_id)
+    (job,) = await _pending_jobs(factory)
+
+    # Same bounded drain shape as vuzol.cli.memory_writer.run.
+    writer = _writer(factory)
+    drained = 0
+    for _ in range(10):
+        if not await writer.process_one():
+            break
+        drained += 1
+    assert drained == 1
+    assert await _pending_jobs(factory) == ()
+    rows = await _units(factory)
+    assert len(rows) == 1
+    assert rows[0].status is MemoryUnitStatus.VERIFIED
+
+    # Redelivery of the same job deduplicates on the extraction identity.
+    await _requeue(factory, job.id)
+    drained = 0
+    for _ in range(10):
+        if not await writer.process_one():
+            break
+        drained += 1
+    assert drained == 1
+    rerun = await _units(factory)
+    assert len(rerun) == 1
+    assert rerun[0].id == rows[0].id
     await engine.dispose()

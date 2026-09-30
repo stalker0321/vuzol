@@ -44,9 +44,16 @@ package revision and evidence or waiver explicitly.
 
 ## 4. Retention and redaction
 
-Artifacts referenced by any memory unit are pinned against the retention
-sweep (`referenced_by_memory_provenance`), alongside acceptance and effect
-provenance. Post-hoc hiding is tombstone/redaction, never deletion:
+Five skip-reasons pin live provenance against the retention sweep
+(`ops/retention._artifact_skip_reason`, after the runtime/worktree gates):
+`referenced_by_acceptance_evidence` (`AcceptanceEvidence.artifact_id`),
+`referenced_by_package_acceptance` (`WorkPackage.acceptance_artifact_id`),
+`referenced_by_worktree_diff` (`Worktree.patch_artifact_id` /
+`changed_files_artifact_id`, including cleaned worktrees — live ones are
+caught by the earlier `referenced_by_worktree` gate),
+`referenced_by_validation_result` (`ValidationResult.artifact_id`), and
+`referenced_by_memory_provenance` (`MemoryUnit.source_artifact_id`).
+Post-hoc hiding is tombstone/redaction, never deletion:
 unit text becomes `[tombstoned]` with a tombstone event ref (row and
 provenance survive); artifact redaction moves only `redaction_revision`
 plus an `artifact.redacted` event — content bytes and hashes are untouched,

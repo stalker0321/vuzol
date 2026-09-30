@@ -257,6 +257,17 @@ class AcceptedDecisionStatus(StrEnum):
     RETRACTED = "retracted"
 
 
+class MemoryUnitStatus(StrEnum):
+    """Derived-memory lifecycle (D5). Only observation/verified are recalled."""
+
+    HYPOTHESIS = "hypothesis"
+    OBSERVATION = "observation"
+    VERIFIED = "verified"
+    SUPERSEDED = "superseded"
+    RETRACTED = "retracted"
+    TOMBSTONED = "tombstoned"
+
+
 class WorkPackageStatus(StrEnum):
     DRAFT = "draft"
     APPROVED = "approved"

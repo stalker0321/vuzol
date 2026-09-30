@@ -9,6 +9,7 @@ from vuzol.storage.repositories import (
     DiscussionRepository,
     EventRepository,
     InboxRepository,
+    MemoryUnitRepository,
     ModelRepository,
     OutboxRepository,
     RunRepository,
@@ -32,6 +33,7 @@ class UnitOfWork:
         self.events: EventRepository
         self.inbox: InboxRepository
         self.outbox: OutboxRepository
+        self.memory_units: MemoryUnitRepository
         self.approvals: ApprovalRepository
         self.evidence: ModelRepository
         self.discussions: DiscussionRepository
@@ -50,6 +52,7 @@ class UnitOfWork:
         self.events = EventRepository(self.session)
         self.inbox = InboxRepository(self.session)
         self.outbox = OutboxRepository(self.session)
+        self.memory_units = MemoryUnitRepository(self.session)
         self.approvals = ApprovalRepository(self.session)
         self.evidence = ModelRepository(self.session)
         self.discussions = DiscussionRepository(self.session)

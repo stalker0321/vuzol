@@ -20,6 +20,7 @@ from vuzol.storage.repositories.evidence import (
     InputBindingRepository,
     ModelRepository,
 )
+from vuzol.storage.repositories.memory_units import MemoryUnitRepository
 from vuzol.storage.repositories.work_packages import WorkPackageRepository
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "EventRepository",
     "InboxRepository",
     "InputBindingRepository",
+    "MemoryUnitRepository",
     "ModelRepository",
     "OutboxRepository",
     "RunRepository",

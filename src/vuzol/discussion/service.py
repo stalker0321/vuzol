@@ -31,6 +31,7 @@ from vuzol.discussion.domain import (
     semantic_revision_hash,
 )
 from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled
+from vuzol.discussion.memory_writer import OUTCOME_OPERATION, enqueue_memory_extraction
 from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
     AcceptanceEvidence,
@@ -686,7 +687,7 @@ class WorkPackageService:
         package.last_failure_task_id = None
         package.version += 1
         await self._release_discussion(package)
-        await self._event(
+        trigger_event_id = await self._event(
             package.id,
             WorkPackageEvent.PACKAGE_ACCEPTED,
             "user",
@@ -698,6 +699,24 @@ class WorkPackageService:
                 "acceptance_waiver_id": None if waiver is None else str(waiver.id),
                 "accepted_by_user_id": user_id,
                 "status_generation": package.version,
+            },
+        )
+        # D5: outcome extraction is an async writer job in the same
+        # transaction — completion never waits for it (drill 11, P1).
+        await enqueue_memory_extraction(
+            self._uow,
+            trigger_event_id=trigger_event_id,
+            project_id=package.project_id,
+            session_id=package.session_id,
+            operation=OUTCOME_OPERATION,
+            entity_type="work_package",
+            entity_id=package.id,
+            payload={
+                "package_id": str(package.id),
+                "revision_number": revision.revision_number,
+                "accepted_by_user_id": user_id,
+                "artifact_id": None if artifact_id is None else str(artifact_id),
+                "waiver_id": None if waiver is None else str(waiver.id),
             },
         )
         await self._enqueue_plan_projection(package.id, package.version, "accepted")

@@ -35,7 +35,10 @@ from vuzol.interpretation.discussion import (
     PlanSnapshotItem,
     SemanticDiscussionInterpreter,
     enforce_discussion_policy,
+    explicit_task_interpretation,
+    is_explicit_fast_path,
     plan_draft_from_interpretation,
+    stamp_plan_provenance,
 )
 from vuzol.interpretation.domain import (
     InterpretationInput,
@@ -559,9 +562,7 @@ class InterpretationPipeline:
                 else ControlOverride(kind=ControlOverrideKind(item.payload["control_override"]))
             ),
         )
-        override = request.control_override
-        if override is not None and override.kind is ControlOverrideKind.EXPLICIT_TASK:
-            from vuzol.interpretation.discussion import explicit_task_interpretation
+        if is_explicit_fast_path(request):
             from vuzol.interpretation.explicit import explicit_task_body
 
             result = explicit_task_interpretation(
@@ -680,6 +681,18 @@ class InterpretationPipeline:
                 result.interaction_mode is InteractionMode.PLAN_REQUEST
                 and result.should_mutate_plan
             ):
+                # D4 REDO: stamp system-owned provenance with the persisted
+                # turn id and the base revision hash before application, so
+                # immutable_body markers are written by the system, not the
+                # model (which only ever sees nulled refs from enforce).
+                base_revision_hash: str | None = None
+                if request.plan_snapshot is not None:
+                    base_revision_hash = request.plan_snapshot.revision_hash
+                result = stamp_plan_provenance(
+                    result,
+                    source_turn_id=user_turn_id,
+                    source_spec_revision=base_revision_hash,
+                )
                 try:
                     await apply_plan_request_in_uow(
                         uow,
@@ -840,6 +853,19 @@ class InterpretationPipeline:
             known_project_ids=frozenset(
                 project.id for project in self._runtime.registries.projects.items()
             ),
+        )
+        # D4 W1/REDO: the closed decision triple is bound by policy above;
+        # fail closed if the binding ever diverges from eligibility.
+        assert policy.decision.policy_allowed == policy.automatic_execution_eligible
+        self._logger.info(
+            "Interpretation policy bound semantic decision",
+            extra={
+                "event": "interpretation.decision.bound",
+                "semantic_effect": policy.decision.effect.value,
+                "semantic_relation": policy.decision.relation.value,
+                "semantic_context": policy.decision.context.value,
+                "policy_allowed": policy.decision.policy_allowed,
+            },
         )
         async with self._factory.begin() as session:
             task = await session.get(Task, task_id, with_for_update=True)

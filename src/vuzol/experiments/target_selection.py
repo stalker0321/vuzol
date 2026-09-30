@@ -3,7 +3,8 @@
 Second decision kind, parallel to ``repair_triage`` — never a modification of
 it. The model chooses one opaque candidate ID from a deterministically
 selected set, or abstains. Same downstream runtime, same evidence/revision
-contract, shared budget, bounded single repair, no auto-promotion.
+contract, shared budget, bounded single repair, and no elevation by
+self-reported scores.
 
 Kind: ``target_selection``. Schema: ``decision.v2`` (new version, not an
 extension of ``decision.v1``).

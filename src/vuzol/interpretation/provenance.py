@@ -48,3 +48,50 @@ def coerce_legacy_plan_item(item: Mapping[str, Any]) -> dict[str, Any]:
     coerced.setdefault("source_turn_id", None)
     coerced.setdefault("source_spec_revision", None)
     return coerced
+
+
+def provenance_reference(task: object) -> str:
+    """Opaque worker/planner ref carrying the source turn link (D4 REDO).
+
+    Read by the provider-step path (handlers.py) alongside ``original_input``:
+    the text stays available and the turn identity travels in the reference.
+    No consumer parses it beyond carrying it through; legacy tasks without a
+    turn keep the previous ``task:{id}:original`` shape.
+    """
+
+    task_id = getattr(task, "id", None)
+    source_turn_id = getattr(task, "source_turn_id", None)
+    base = f"task:{task_id}:original"
+    if source_turn_id is None:
+        return base
+    return f"{base}:turn:{source_turn_id}"
+
+
+def extract_plan_item_source(
+    body: Mapping[str, Any], ordinal: int
+) -> tuple[uuid.UUID | None, str | None]:
+    """Read system-stamped provenance for one materialized item (D4 REDO).
+
+    Returns ``(source_turn_id, source_spec_revision)`` or ``(None, None)``
+    for legacy items without markers. Never raises: malformed refs fail
+    closed to unknown provenance instead of breaking materialization.
+    """
+
+    raw_items = body.get("items")
+    if not isinstance(raw_items, list):
+        return None, None
+    for raw in raw_items:
+        if not isinstance(raw, dict) or raw.get("ordinal") != ordinal:
+            continue
+        if raw.get("derived") is not True:
+            return None, None
+        ref = raw.get("source_turn_ref")
+        try:
+            turn_id = uuid.UUID(str(ref)) if ref is not None else None
+        except (ValueError, AttributeError, TypeError):
+            return None, None
+        spec_revision = raw.get("source_spec_revision")
+        if spec_revision is not None and not isinstance(spec_revision, str):
+            return None, None
+        return turn_id, spec_revision
+    return None, None

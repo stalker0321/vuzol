@@ -324,6 +324,13 @@ class WorkPackageSequencer:
             raise DomainError("failure_context_missing")
         draft = _task_draft(package.project_id, item)
         original = _original_text(item)
+        assert self._uow.session is not None
+        source_turn_id = await _resolve_materialization_source_turn(
+            self._uow.session,
+            session_id=package.session_id,
+            revision_body=getattr(revision, "immutable_body", {}),
+            ordinal=link.ordinal,
+        )
         task_record = await self._uow.tasks.create(
             user_id=user_id,
             chat_id=discussion.chat_id,
@@ -332,6 +339,7 @@ class WorkPackageSequencer:
             original_text=original,
             task_type=draft.task_type.value,
             task_draft=draft.model_dump(mode="json"),
+            source_turn_id=source_turn_id,
         )
         task = await self._uow.session.get(Task, task_record.id, with_for_update=True)
         assert task is not None
@@ -625,6 +633,16 @@ class WorkPackageSequencer:
             raise DomainError("approval_provenance_missing")
         draft = _task_draft(package.project_id, item)
         original = _original_text(item)
+        assert self._uow.session is not None
+        if ordinal is None:
+            source_turn_id = None
+        else:
+            source_turn_id = await _resolve_materialization_source_turn(
+                self._uow.session,
+                session_id=package.session_id,
+                revision_body=getattr(revision, "immutable_body", {}),
+                ordinal=ordinal,
+            )
         task_record = await self._uow.tasks.create(
             user_id=revision.approved_by_user_id,
             chat_id=discussion.chat_id,
@@ -633,6 +651,7 @@ class WorkPackageSequencer:
             original_text=original,
             task_type=draft.task_type.value,
             task_draft=draft.model_dump(mode="json"),
+            source_turn_id=source_turn_id,
         )
         task = await self._uow.session.get(Task, task_record.id, with_for_update=True)
         assert task is not None
@@ -741,6 +760,36 @@ class WorkPackageSequencer:
                 "task_id": str(task.id),
             },
         )
+
+
+async def _resolve_materialization_source_turn(
+    session: AsyncSession,
+    *,
+    session_id: uuid.UUID,
+    revision_body: object,
+    ordinal: int,
+) -> uuid.UUID | None:
+    """System-stamped turn for a materialized task (D4 REDO).
+
+    Reads the plan revision's ``immutable_body`` markers written at plan
+    application. Legacy bodies without markers, malformed refs, and turns
+    outside this discussion session fail closed to None — materialization
+    never breaks on provenance. This closes the D1 follow-up on turn
+    propagation for the package materialization path.
+    """
+
+    from vuzol.interpretation.provenance import extract_plan_item_source
+    from vuzol.storage.attempts import validate_source_turn
+
+    body = revision_body if isinstance(revision_body, dict) else {}
+    turn_id, _ = extract_plan_item_source(body, ordinal)
+    if turn_id is None:
+        return None
+    try:
+        await validate_source_turn(session, turn_id, session_id=session_id)
+    except ValueError:
+        return None
+    return turn_id
 
 
 def _task_draft(project_id: str, item: PlanRevisionItem) -> TaskDraft:

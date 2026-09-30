@@ -405,6 +405,16 @@ def _task_scope_text(task: Task) -> str:
         value = draft.get(key)
         if isinstance(value, (list, tuple)):
             values.extend(item for item in value if isinstance(item, str))
+    # D4 REDO: reviewer-visible provenance. Materialized tasks carry the
+    # system-stamped source turn; legacy tasks without refs are explicit.
+    source_turn_id = getattr(task, "source_turn_id", None)
+    spec_revision = getattr(task, "spec_revision", None)
+    if source_turn_id is not None:
+        values.append(f"[derived from turn {source_turn_id}]")
+        if isinstance(spec_revision, str) and spec_revision:
+            values.append(f"[spec revision {spec_revision}]")
+    else:
+        values.append("[provenance unknown]")
     return "\n".join(values)
 
 

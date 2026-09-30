@@ -99,6 +99,7 @@ def test_schema_rejects_invalid_and_repairs_once() -> None:
 def test_no_permission_promotion_or_probability_concepts() -> None:
     sources = [
         (ROOT / "src/vuzol/experiments/decision.py").read_text(),
+        (ROOT / "src/vuzol/experiments/target_selection.py").read_text(),
         (ROOT / "src/vuzol/experiments/shadow.py").read_text(),
     ]
     for source in sources:
@@ -247,7 +248,11 @@ def test_rules_transitions_pinned_and_shadow_imports_nothing_operational() -> No
         )
         is RecoveryAction.RETRY
     )
-    for module in ("vuzol.experiments.decision", "vuzol.experiments.shadow"):
+    for module in (
+        "vuzol.experiments.decision",
+        "vuzol.experiments.target_selection",
+        "vuzol.experiments.shadow",
+    ):
         source = (ROOT / ("src/" + module.replace(".", "/") + ".py")).read_text()
         assert "workflows.service" not in source
         assert "workflows.transitions" not in source

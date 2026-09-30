@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from vuzol.config import Capability, TopicKind
+from vuzol.interpretation.decisions import SemanticDecision, classify_decision
 from vuzol.interpretation.domain import (
     InterpretationInput,
     TaskAction,
@@ -74,6 +75,7 @@ class PolicyResult:
     draft: TaskDraft
     automatic_execution_eligible: bool
     reasons: tuple[str, ...]
+    decision: SemanticDecision
 
 
 def enforce_interpretation_policy(
@@ -249,4 +251,8 @@ def enforce_interpretation_policy(
         TaskAction.REJECT_STEP,
         TaskAction.GENERAL_CONVERSATION,
     }
-    return PolicyResult(tightened, eligible, tuple(reasons))
+    # D4 W1/REDO: bind the closed decision triple to the policy verdict. The
+    # hint itself grants nothing; policy_allowed mirrors eligibility so
+    # service code reads one bound value instead of a dead type.
+    decision = classify_decision(tightened).model_copy(update={"policy_allowed": eligible})
+    return PolicyResult(tightened, eligible, tuple(reasons), decision)

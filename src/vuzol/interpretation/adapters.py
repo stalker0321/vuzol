@@ -82,6 +82,26 @@ Gradle acceptance command plus an APK artifact pattern; never claim that approvi
 authorizes toolchain installation. Missing managed tools require a separate runtime approval."""
 
 
+def discussion_schema_for_model() -> dict[str, Any]:
+    """Discussion schema as sent to the model: plan-item provenance excluded.
+
+    ``derived``/``source_turn_ref``/``source_spec_revision`` are system-stamped
+    in ``enforce_discussion_policy`` and at plan application (D4 REDO, same
+    pattern as ``needs_planning`` for ``TaskDraft`` below): the model must not
+    see or set them, so a forged ``derived=false`` or invented ref can never
+    reach ``PlanRevision.immutable_body``.
+    """
+
+    schema = DiscussionInterpretation.model_json_schema()
+    item_schema = schema.get("$defs", {}).get("DiscussionPlanItem")
+    if isinstance(item_schema, dict):
+        properties = item_schema.get("properties")
+        if isinstance(properties, dict):
+            for key in ("derived", "source_turn_ref", "source_spec_revision"):
+                properties.pop(key, None)
+    return schema
+
+
 class OpenAICompatibleInterpreter:
     def __init__(
         self,
@@ -181,7 +201,7 @@ class OpenAICompatibleInterpreter:
         user_payload = {
             "prompt_version": DISCUSSION_PROMPT_VERSION,
             "input": request.model_dump(mode="json"),
-            "discussion_schema": DiscussionInterpretation.model_json_schema(),
+            "discussion_schema": discussion_schema_for_model(),
             "repair_error": repair_error,
         }
         payload = {

@@ -188,8 +188,8 @@ class ResultApplyHandler:
             if run is None:
                 raise LookupError("approved result run is missing")
             for field in ("configuration_revision", "policy_revision"):
-                expected = envelope.get(field)
-                if expected is not None and expected != getattr(run, field):
+                pinned_revision = envelope.get(field)
+                if pinned_revision is not None and pinned_revision != getattr(run, field):
                     raise ValueError(
                         f"approval envelope {field} drifted since approval"
                     )

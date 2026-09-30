@@ -88,9 +88,9 @@ def test_compiler_skips_disabled_planner() -> None:
         "produce_artifacts",
         "build_static",
         "publish_preview",
-        "approve_result",
-        # D2 L1: materialized acceptance gate before promotion.
+        # D2 L1 REDO: the acceptance gate runs BEFORE the per-item approval.
         "acceptance",
+        "approve_result",
         "publish_static",
         "finalize",
     ]

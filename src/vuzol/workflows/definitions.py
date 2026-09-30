@@ -310,14 +310,14 @@ def _coding_v4() -> WorkflowDefinition:
             )
             step = replace(step, predecessors=("ensure_dependencies",))
         if step.key == "approve_result":
-            steps.append(step)
-            # D2 L1: materialized acceptance gate before promotion. Runs
-            # after the per-item approval; intermediate items pass through,
-            # the last item of a pinned horizon package assembles evidence.
+            # D2 L1 (REDO: gate before promotion): the materialized
+            # acceptance gate runs BEFORE the per-item approval, so evidence
+            # exists before the applier can promote the last item.
+            # Chain: publish_preview → acceptance → approve_result → …
             steps.append(
                 _step(
                     "acceptance",
-                    "approve_result",
+                    "publish_preview",
                     step_type="acceptance",
                     queue=QueueClass.PRIVILEGED,
                     capabilities=frozenset({Capability.GIT}),
@@ -326,9 +326,7 @@ def _coding_v4() -> WorkflowDefinition:
                     attempts=2,
                 )
             )
-            continue
-        if step.key == "publish_static":
-            step = replace(step, predecessors=("acceptance",))
+            step = replace(step, predecessors=("publish_preview", "acceptance"))
         steps.append(step)
     return WorkflowDefinition(
         workflow_type="coding",

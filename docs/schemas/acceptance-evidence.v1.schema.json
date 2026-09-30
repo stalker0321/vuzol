@@ -63,7 +63,13 @@
     },
     "review_refs": {
       "type": "array",
-      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      "items": {
+        "type": "string",
+        "anyOf": [
+          { "pattern": "^[0-9a-f]{64}$" },
+          { "pattern": "^step-review:[0-9a-f-]{36}$" }
+        ]
+      }
     },
     "unresolved_caveats": {
       "type": "array",

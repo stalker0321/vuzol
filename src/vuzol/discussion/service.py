@@ -712,7 +712,9 @@ class WorkPackageService:
         waiver = await self._uow.session.get(AcceptanceWaiver, waiver_id)
         if waiver is None or waiver.package_id != package.id:
             raise DomainError("acceptance_waiver_unknown")
-        if waiver.integration_head != package.integration_head_commit:
+        # REDO-2: waivers authorize a promotion from the frozen base (the
+        # expected head the apply presents), matching the gate lookup.
+        if waiver.integration_head != package.integration_base_commit:
             raise DomainError("acceptance_waiver_stale")
         if not waiver.reason.strip() or waiver.principal_user_id == 0:
             raise DomainError("acceptance_waiver_invalid")
@@ -771,9 +773,65 @@ class WorkPackageService:
             )
         ):
             raise DomainError("acceptance_criteria_unmet")
-        if document.get("result_commit") != package.integration_head_commit:
-            raise DomainError("acceptance_head_mismatch")
+        # REDO-2: a real-target apply does not move integration_head (only
+        # integration-branch applies do), so the promoted result is proven
+        # through the CONSUMED approval envelope, not the head pointer.
+        await self._check_promotion_proof(package, document)
         await self._check_evidence_revisions(package, document)
+
+    async def _check_promotion_proof(
+        self, package: WorkPackage, document: dict[str, object]
+    ) -> None:
+        """Prove the evidenced result was actually promoted (REDO-2).
+
+        The last item's approval must be CONSUMED with an envelope whose
+        result_commit equals the evidence result — i.e. the applier really
+        promoted what the evidence authorizes. Otherwise
+        ``acceptance_promotion_unproven`` (fail-closed, never silent).
+        """
+
+        assert self._uow.session is not None
+        result_commit = document.get("result_commit")
+        if not isinstance(result_commit, str):
+            raise DomainError("acceptance_evidence_invalid")
+        links = (
+            await self._uow.session.scalars(
+                select(MaterializationLink).where(
+                    MaterializationLink.work_package_id == package.id
+                )
+            )
+        ).all()
+        if not links:
+            raise DomainError("acceptance_promotion_unproven")
+        last_task_id = max(links, key=lambda link: link.ordinal or 0).task_id
+        run_ids = (
+            await self._uow.session.scalars(
+                select(Run.id).where(Run.task_id == last_task_id)
+            )
+        ).all()
+        if not run_ids:
+            raise DomainError("acceptance_promotion_unproven")
+        approvals = (
+            await self._uow.session.scalars(
+                select(Approval)
+                .join(Step, Step.id == Approval.step_id)
+                .where(
+                    Step.run_id.in_(run_ids),
+                    Approval.status == ApprovalStatus.CONSUMED,
+                )
+            )
+        ).all()
+        for approval in approvals:
+            step = await self._uow.session.get(Step, approval.step_id)
+            if step is None or not isinstance(step.payload, dict):
+                continue
+            envelope = step.payload.get("action_envelope")
+            if (
+                isinstance(envelope, dict)
+                and envelope.get("result_commit") == result_commit
+            ):
+                return
+        raise DomainError("acceptance_promotion_unproven")
 
     async def _check_evidence_revisions(
         self, package: WorkPackage, document: dict[str, object]

@@ -6,11 +6,26 @@ Status: accepted (D2 writer, base 760323b D1-PASS). Implements DELTA §D2.
 
 - The final acceptance gate stands BEFORE promotion of the last item into
   the real target (E05 confirmed: a post-queue-end gate cannot protect the
-  target). The last item's apply into `integration_target_branch` requires
+  target). The materialized `acceptance` step (coding.v4, predecessor
+  `publish_preview`, `approve_result` after it) assembles evidence while the
+  last item is still running — prior items terminal, this item reviewed —
+  and `result_apply._load` re-checks it at apply time (race-proof). An
+  after-approval placement would deadlock: the apply would demand evidence
+  no step could yet have produced.
+- The last item's apply into `integration_target_branch` requires
   acceptance evidence (or a waiver); intermediate items keep auto-approving
-  into the integration branch. Enforced twice: the materialized `acceptance`
-  step (coding.v4, after `approve_result`) assembles evidence, and
-  `result_apply._load` re-checks it at apply time (race-proof).
+  into the integration branch. Enforced twice: the step assembles, the apply
+  verifies.
+- Head binding (REDO-2 choice): evidence records the **expected-target-head
+  contract**, i.e. the frozen `integration_base_commit` the coming promotion
+  presents — not the moving `integration_head_commit`. Justification: the
+  gate must verify the EXACT promotion the apply is about to perform
+  (`expected_target_head` → `result_commit`); matching the envelope claim
+  against the evidence pair keeps the gate self-contained on immutable
+  values instead of mutable package state that intermediates keep moving.
+  The promoted result itself is proven at `record_acceptance` through the
+  CONSUMED approval envelope (not the head pointer, which real-target
+  applies deliberately do not move).
 - Authority: accepted = package-level (`WorkPackage.accepted_at` + evidence
   artifact); applied = per-apply `Approval` (→ `CONSUMED`); per-step =
   `ReviewVerdict` (D1 history refs flow into evidence). Evidence references

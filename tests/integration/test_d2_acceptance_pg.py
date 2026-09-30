@@ -111,6 +111,61 @@ async def _horizon_package(
         return created.package_id, created.revision_id, session_id
 
 
+async def _prove_promotion(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    package_id: uuid.UUID,
+    result_commit: str = "b" * 40,
+) -> None:
+    """Record a CONSUMED approval envelope for the last item's result (proof)."""
+
+    from vuzol.storage.models import Approval as ApprovalRow
+    from vuzol.storage.types import ApprovalStatus as ApprovalStatusRow
+
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        links = (
+            await uow.session.scalars(
+                select(MaterializationLink).where(
+                    MaterializationLink.work_package_id == package_id
+                )
+            )
+        ).all()
+        last = max(links, key=lambda link: link.ordinal or 0)
+        run_id = await uow.runs.create(
+            task_id=last.task_id,
+            workflow_type="coding",
+            workflow_version="4",
+            budget_mode="balanced",
+            configuration_revision="c" * 64,
+            policy_revision="d" * 64,
+            status=RunStatus.COMPLETED,
+        )
+        step_record = await uow.steps.create(
+            run_id=run_id,
+            ordinal=3,
+            step_type="approval",
+            idempotency_class=IdempotencyClass.IDEMPOTENT,
+        )
+        db_step = await uow.session.get(Step, step_record.id, with_for_update=True)
+        assert db_step is not None
+        db_step.status = StepStatus.COMPLETED
+        envelope = {"result_commit": result_commit}
+        db_step.payload = {**db_step.payload, "action_envelope": envelope}
+        uow.session.add(
+            ApprovalRow(
+                step_id=db_step.id,
+                action_envelope_hash="dd" * 32,
+                requested_action="apply_result",
+                normalized_target="vuzol:main",
+                human_summary="apply",
+                token_hash=f"ee{uuid.uuid4().hex[:56]}",
+                status=ApprovalStatusRow.CONSUMED,
+                expires_at=datetime.now(UTC) + timedelta(days=1),
+            )
+        )
+
+
 async def _to_evaluating(factory: async_sessionmaker[AsyncSession], package_id: uuid.UUID) -> None:
     """Drive every materialized item terminal, then exhaust the queue."""
 
@@ -168,7 +223,11 @@ async def test_d2_goal_path_control_only(postgres_dsn: str) -> None:
 
 @pytest.mark.anyio
 async def test_d2_promotion_gate_blocks_without_evidence(postgres_dsn: str) -> None:
-    """pp.5 (drill 15): last apply to the real target requires evidence/waiver."""
+    """pp.5 (drill 15): last apply to the real target requires evidence/waiver.
+
+    REDO-2: head moved by intermediate applies (head != base); the gate
+    matches the frozen promotion base, never the moving head.
+    """
 
     _engine, factory = storage(postgres_dsn)
     try:
@@ -180,7 +239,7 @@ async def test_d2_promotion_gate_blocks_without_evidence(postgres_dsn: str) -> N
             package.integration_branch = "vuzol/package/x"
             package.integration_target_branch = "main"
             package.integration_base_commit = "a" * 40
-            package.integration_head_commit = "a" * 40
+            package.integration_head_commit = "c" * 40
             links = (
                 await uow.session.scalars(
                     select(MaterializationLink).where(
@@ -202,11 +261,11 @@ async def test_d2_promotion_gate_blocks_without_evidence(postgres_dsn: str) -> N
                 task_id=task_id,
                 envelope={
                     "target_branch": "vuzol/package/x",
-                    "expected_target_head": "a" * 40,
+                    "expected_target_head": "c" * 40,
                     "result_commit": "b" * 40,
                 },
             )
-            # ...as does a waiver for the head
+            # ...as does a waiver for the promotion base
             await record_waiver(
                 uow.session,
                 package_id=package_id,
@@ -703,7 +762,9 @@ async def test_d2_evidence_negatives_and_waiver_accept(
                 await _try_accept(artifact=foreign_artifact, waiver=None)
                 == "acceptance_evidence_foreign"
             )
-            # stale head evidence is rejected
+            # stale head evidence is rejected: no CONSUMED promotion proves
+            # that result, so the proof check (not a head pointer compare)
+            # fails closed
             await record_evidence(
                 uow.session,
                 package_id=package_id,
@@ -713,9 +774,9 @@ async def test_d2_evidence_negatives_and_waiver_accept(
             )
             assert (
                 await _try_accept(artifact=stale_artifact, waiver=None)
-                == "acceptance_head_mismatch"
+                == "acceptance_promotion_unproven"
             )
-            # valid evidence accepts
+            # valid evidence accepts (promotion proven via CONSUMED envelope)
             await record_evidence(
                 uow.session,
                 package_id=package_id,
@@ -723,6 +784,7 @@ async def test_d2_evidence_negatives_and_waiver_accept(
                 document=good_doc,
                 artifact_id=good_artifact,
             )
+            await _prove_promotion(factory, package_id=package_id)
             assert await _try_accept(artifact=good_artifact, waiver=None) == "accepted"
             fresh = await uow.session.get(WorkPackage, package_id)
             assert fresh is not None and fresh.status is WorkPackageStatus.COMPLETED
@@ -755,7 +817,7 @@ async def test_d2_waiver_accept_without_artifact(postgres_dsn: str) -> None:
             waiver = await record_waiver(
                 uow.session,
                 package_id=package_id,
-                integration_head="b" * 40,
+                integration_head="a" * 40,
                 principal_user_id=7,
                 reason="ship now, verify on prod",
             )
@@ -855,6 +917,7 @@ async def test_d2_accept_ingress_completes_package(postgres_dsn: str, tmp_path: 
             assert revision is not None
             generation = package.version
             content_hash = revision.content_hash
+        await _prove_promotion(factory, package_id=package_id)
         ingress = PackageControlIngress(
             factory,
             enabled=True,
@@ -1111,7 +1174,7 @@ async def test_d2_apply_head_drift_blocked_not_failed(postgres_dsn: str) -> None
 async def test_d2_acceptance_step_assembles_evidence(
     postgres_dsn: str, tmp_path: Path
 ) -> None:
-    """L1: last-item acceptance step assembles evidence; gate opens after."""
+    """REDO-1/2: pre-apply assembly binds the promotion base; gate opens after."""
 
     from vuzol.execution.artifacts import ArtifactStore
     from vuzol.storage.models import ReviewOutcomeHistory as HistoryRow
@@ -1122,15 +1185,34 @@ async def test_d2_acceptance_step_assembles_evidence(
     _engine, factory = storage(postgres_dsn)
     try:
         package_id, _revision_id, _sess = await _horizon_package(factory)
-        await _to_evaluating(factory, package_id)
+        # REDO-1 state: prior items terminal, last item RUNNING but reviewed
+        # (acceptance now precedes approve_result, not queue end).
         async with UnitOfWork(factory) as uow:
             assert uow.session is not None
             package = await uow.session.get(WorkPackage, package_id, with_for_update=True)
             assert package is not None
+            first_link = await uow.session.scalar(
+                select(MaterializationLink).where(
+                    MaterializationLink.work_package_id == package_id,
+                    MaterializationLink.ordinal == 1,
+                )
+            )
+            assert first_link is not None
+            first_task = await uow.session.get(Task, first_link.task_id, with_for_update=True)
+            assert first_task is not None
+            first_task.status = TaskStatus.COMPLETED
+            await WorkPackageSequencer(uow).observe_terminal(
+                task_id=first_link.task_id, horizon_enabled=True
+            )
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            package = await uow.session.get(WorkPackage, package_id, with_for_update=True)
+            assert package is not None
+            # REDO-2: head moved by intermediate applies, base frozen.
             package.integration_branch = "vuzol/package/x"
             package.integration_target_branch = "main"
             package.integration_base_commit = "a" * 40
-            package.integration_head_commit = "a" * 40
+            package.integration_head_commit = "c" * 40
             links = (
                 await uow.session.scalars(
                     select(MaterializationLink).where(
@@ -1139,37 +1221,37 @@ async def test_d2_acceptance_step_assembles_evidence(
                 )
             ).all()
             assert len(links) == 2
-            last = max(links, key=lambda link: link.ordinal or 0)
-            # review history for every item (D1 refs flow into evidence)
-            for link in links:
-                item_run = await uow.runs.create(
-                    task_id=link.task_id,
-                    workflow_type="coding",
-                    workflow_version="4",
-                    budget_mode="balanced",
-                    configuration_revision="c" * 64,
-                    policy_revision="d" * 64,
-                    status=RunStatus.COMPLETED,
+            first = next(link for link in links if link.ordinal == 1)
+            last = next(link for link in links if link.ordinal == 2)
+            # D1 review history for the terminal prior item
+            prior_run = await uow.runs.create(
+                task_id=first.task_id,
+                workflow_type="coding",
+                workflow_version="4",
+                budget_mode="balanced",
+                configuration_revision="c" * 64,
+                policy_revision="d" * 64,
+                status=RunStatus.COMPLETED,
+            )
+            prior_step = await uow.steps.create(
+                run_id=prior_run,
+                ordinal=1,
+                step_type="review",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+            )
+            uow.session.add(
+                HistoryRow(
+                    task_id=first.task_id,
+                    run_id=prior_run,
+                    step_id=prior_step.id,
+                    acceptance_key="aa" * 32,
+                    verdict="pass",
+                    review_kind="independent",
+                    risk="medium",
+                    policy_revision="review-policy.v1",
                 )
-                item_step = await uow.steps.create(
-                    run_id=item_run,
-                    ordinal=1,
-                    step_type="review",
-                    idempotency_class=IdempotencyClass.IDEMPOTENT,
-                )
-                uow.session.add(
-                    HistoryRow(
-                        task_id=link.task_id,
-                        run_id=item_run,
-                        step_id=item_step.id,
-                        acceptance_key="aa" * 32,
-                        verdict="pass",
-                        review_kind="independent",
-                        risk="medium",
-                        policy_revision="review-policy.v1",
-                    )
-                )
-            # acceptance run+step for the last item, fenced lease
+            )
+            # last item: RUNNING run, COMPLETED passing review, leased acceptance
             acc_run = await uow.runs.create(
                 task_id=last.task_id,
                 workflow_type="coding",
@@ -1179,6 +1261,16 @@ async def test_d2_acceptance_step_assembles_evidence(
                 policy_revision="d" * 64,
                 status=RunStatus.RUNNING,
             )
+            review_step = await uow.steps.create(
+                run_id=acc_run,
+                ordinal=5,
+                step_type="review",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+            )
+            db_review = await uow.session.get(Step, review_step.id, with_for_update=True)
+            assert db_review is not None
+            db_review.status = StepStatus.COMPLETED
+            db_review.result = {"verdict": "pass", "summary": "ok"}
             acc_step = await uow.steps.create(
                 run_id=acc_run,
                 ordinal=9,
@@ -1236,9 +1328,16 @@ async def test_d2_acceptance_step_assembles_evidence(
         outcome = await handler.execute(request, CancellationContext())
         assert outcome.kind.value == "succeeded"
         evidence_id = outcome.result["acceptance_evidence_id"]
-        # the promotion gate opens on the assembled evidence
         async with UnitOfWork(factory) as uow:
             assert uow.session is not None
+            row = await uow.session.get(AcceptanceEvidence, uuid.UUID(evidence_id))
+            assert row is not None
+            assert row.artifact_id is not None
+            # REDO-2: evidence binds the frozen promotion base, not the
+            # moved head, even though head != base after intermediates.
+            assert row.integration_base_head == "a" * 40
+            assert row.result_commit == "b" * 40
+            # the promotion gate opens on the assembled evidence…
             await promotion_gate(
                 uow.session,
                 task_id=last.task_id,
@@ -1248,9 +1347,17 @@ async def test_d2_acceptance_step_assembles_evidence(
                     "result_commit": "b" * 40,
                 },
             )
-            row = await uow.session.get(AcceptanceEvidence, uuid.UUID(evidence_id))
-            assert row is not None
-            assert row.artifact_id is not None
+            # …but not for a promotion the evidence does not authorize.
+            with pytest.raises(ValueError, match="final acceptance gate"):
+                await promotion_gate(
+                    uow.session,
+                    task_id=last.task_id,
+                    envelope={
+                        "target_branch": "main",
+                        "expected_target_head": "c" * 40,
+                        "result_commit": "b" * 40,
+                    },
+                )
     finally:
         await _engine.dispose()
 
@@ -1372,5 +1479,270 @@ async def test_d2_apply_revision_drift_blocked(postgres_dsn: str) -> None:
         assert outcome.kind is OutcomeKind.BLOCKED
         assert outcome.category == "approved_result_not_applied"
         assert "drifted" in (outcome.summary or "")
+    finally:
+        await _engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_d2_e2e_acceptance_then_promotion_apply(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    """REDO-1 e2e: acceptance assembles → last-item promotion apply succeeds."""
+
+    from types import SimpleNamespace as _NS
+    from unittest.mock import AsyncMock, MagicMock
+
+    from vuzol.config.models import DeliveryMode
+    from vuzol.execution.artifacts import ArtifactStore
+    from vuzol.execution.result_apply import ResultApplyHandler
+    from vuzol.storage.models import Approval as ApprovalRow
+    from vuzol.storage.models import ReviewOutcomeHistory as HistoryRow
+    from vuzol.storage.records import LeaseToken, StepRecord
+    from vuzol.storage.types import ApprovalStatus as ApprovalStatusRow
+    from vuzol.workflows.acceptance import AcceptanceGateHandler
+    from vuzol.workflows.domain import OutcomeKind
+    from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
+    from vuzol.workflows.result_approval import envelope_hash
+
+    _engine, factory = storage(postgres_dsn)
+    try:
+        package_id, _revision_id, _sess = await _horizon_package(factory)
+        # item1 terminal, item2 (last) running — pre-apply state
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            package = await uow.session.get(WorkPackage, package_id, with_for_update=True)
+            assert package is not None
+            first_link = await uow.session.scalar(
+                select(MaterializationLink).where(
+                    MaterializationLink.work_package_id == package_id,
+                    MaterializationLink.ordinal == 1,
+                )
+            )
+            assert first_link is not None
+            first_task = await uow.session.get(Task, first_link.task_id, with_for_update=True)
+            assert first_task is not None
+            first_task.status = TaskStatus.COMPLETED
+            await WorkPackageSequencer(uow).observe_terminal(
+                task_id=first_link.task_id, horizon_enabled=True
+            )
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            package = await uow.session.get(WorkPackage, package_id, with_for_update=True)
+            assert package is not None
+            package.integration_branch = "vuzol/package/x"
+            package.integration_target_branch = "main"
+            package.integration_base_commit = "a" * 40
+            package.integration_head_commit = "c" * 40
+            links = (
+                await uow.session.scalars(
+                    select(MaterializationLink).where(
+                        MaterializationLink.work_package_id == package_id
+                    )
+                )
+            ).all()
+            first = next(link for link in links if link.ordinal == 1)
+            last = next(link for link in links if link.ordinal == 2)
+            prior_run = await uow.runs.create(
+                task_id=first.task_id,
+                workflow_type="coding",
+                workflow_version="4",
+                budget_mode="balanced",
+                configuration_revision="c" * 64,
+                policy_revision="d" * 64,
+                status=RunStatus.COMPLETED,
+            )
+            prior_step = await uow.steps.create(
+                run_id=prior_run,
+                ordinal=1,
+                step_type="review",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+            )
+            uow.session.add(
+                HistoryRow(
+                    task_id=first.task_id,
+                    run_id=prior_run,
+                    step_id=prior_step.id,
+                    acceptance_key="aa" * 32,
+                    verdict="pass",
+                    review_kind="independent",
+                    risk="medium",
+                    policy_revision="review-policy.v1",
+                )
+            )
+            acc_run = await uow.runs.create(
+                task_id=last.task_id,
+                workflow_type="coding",
+                workflow_version="4",
+                budget_mode="balanced",
+                configuration_revision="c" * 64,
+                policy_revision="d" * 64,
+                status=RunStatus.RUNNING,
+            )
+            review_step = await uow.steps.create(
+                run_id=acc_run,
+                ordinal=5,
+                step_type="review",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+            )
+            db_review = await uow.session.get(Step, review_step.id, with_for_update=True)
+            assert db_review is not None
+            db_review.status = StepStatus.COMPLETED
+            db_review.result = {"verdict": "pass", "summary": "ok"}
+            acc_step = await uow.steps.create(
+                run_id=acc_run,
+                ordinal=9,
+                step_type="acceptance",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                status=StepStatus.LEASED,
+            )
+            db_step = await uow.session.get(Step, acc_step.id, with_for_update=True)
+            assert db_step is not None
+            db_step.lease_owner = "owner"
+            db_step.lease_generation = 1
+            uow.session.add(
+                Worktree(
+                    task_id=last.task_id,
+                    run_id=acc_run,
+                    project_id="vuzol",
+                    repository_identity_hash="r" * 64,
+                    base_commit="a" * 40,
+                    default_branch="main",
+                    expected_target_head="a" * 40,
+                    branch="wt-1",
+                    path=f"memory-wt-{uuid.uuid4()}",
+                    owner="test",
+                    delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
+                    result_commit="b" * 40,
+                    diff_hash="c" * 64,
+                    retention_until=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+            # approval step for the same run, leased, with a real-target envelope
+            approval_id = uuid.uuid4()
+            envelope: dict[str, object] = {
+                "schema_version": "result-approval.v1",
+                "requested_action": "apply_result",
+                "task_id": str(last.task_id),
+                "run_id": str(acc_run),
+                "configuration_revision": "c" * 64,
+                "policy_revision": "d" * 64,
+                "project_id": "vuzol",
+                "repository_identity_hash": "r" * 64,
+                "target_branch": "main",
+                "expected_target_head": "a" * 40,
+                "base_commit": "a" * 40,
+                "result_commit": "b" * 40,
+                "diff_hash": "c" * 64,
+            }
+            approval_step = await uow.steps.create(
+                run_id=acc_run,
+                ordinal=10,
+                step_type="approval",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+                status=StepStatus.LEASED,
+            )
+            db_approval_step = await uow.session.get(
+                Step, approval_step.id, with_for_update=True
+            )
+            assert db_approval_step is not None
+            db_approval_step.lease_owner = "owner"
+            db_approval_step.lease_generation = 1
+            envelope["step_id"] = str(db_approval_step.id)
+            db_approval_step.payload = {
+                "approval_id": str(approval_id),
+                "action_envelope": envelope,
+            }
+            uow.session.add(
+                ApprovalRow(
+                    id=approval_id,
+                    step_id=db_approval_step.id,
+                    action_envelope_hash=envelope_hash(envelope),
+                    requested_action="apply_result",
+                    normalized_target="vuzol:main",
+                    human_summary="apply",
+                    token_hash=f"ff{uuid.uuid4().hex[:56]}",
+                    status=ApprovalStatusRow.APPROVED,
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+            acc_lease = LeaseToken(
+                step=StepRecord(
+                    id=db_step.id,
+                    run_id=acc_run,
+                    status=StepStatus.LEASED,
+                    lease_generation=1,
+                    lease_owner="owner",
+                    lease_expires_at=None,
+                ),
+                owner="owner",
+                generation=1,
+            )
+            acc_request = StepExecutionRequest(
+                task_id=last.task_id,
+                run_id=acc_run,
+                step_id=db_step.id,
+                step_type="acceptance",
+                payload={},
+                timeout_seconds=120,
+                lease=acc_lease,
+            )
+            apply_lease = LeaseToken(
+                step=StepRecord(
+                    id=db_approval_step.id,
+                    run_id=acc_run,
+                    status=StepStatus.LEASED,
+                    lease_generation=1,
+                    lease_owner="owner",
+                    lease_expires_at=None,
+                ),
+                owner="owner",
+                generation=1,
+            )
+            apply_request = StepExecutionRequest(
+                task_id=last.task_id,
+                run_id=acc_run,
+                step_id=db_approval_step.id,
+                step_type="approval",
+                payload={},
+                timeout_seconds=120,
+                lease=apply_lease,
+            )
+        # 1) acceptance assembles evidence (would deadlock pre-REDO)
+        store = ArtifactStore(
+            tmp_path, max_bytes=5_000_000, retention_days=7, redaction_patterns=()
+        )
+        gate_outcome = await AcceptanceGateHandler(factory, artifacts=store).execute(
+            acc_request, CancellationContext()
+        )
+        assert gate_outcome.kind.value == "succeeded"
+        # 2) the promotion apply finds the gate open and settles
+        git = MagicMock()
+        git.repository_identity = AsyncMock(return_value=("r" * 64, None))
+        git.apply_result = AsyncMock(return_value=True)
+        project = _NS(
+            enabled=True,
+            default_branch="main",
+            repository_path="memory-repo",
+            git_delivery=_NS(
+                allowed_modes={DeliveryMode.APPLY},
+                approval_required={DeliveryMode.APPLY},
+            ),
+        )
+        registries = MagicMock()
+        registries.projects.get = MagicMock(return_value=project)
+        apply_outcome = await ResultApplyHandler(factory, registries, git).execute(
+            apply_request, CancellationContext()
+        )
+        assert apply_outcome.kind is OutcomeKind.SUCCEEDED
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            approval = await uow.session.get(ApprovalRow, approval_id)
+            assert approval is not None and approval.status is ApprovalStatus.CONSUMED
+            from vuzol.storage.models import Effect as EffectRow
+
+            effect = await uow.session.scalar(
+                select(EffectRow).where(EffectRow.step_id == db_approval_step.id)
+            )
+            assert effect is not None and effect.status == "settled"
     finally:
         await _engine.dispose()

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import Capability, RuntimeConfiguration
 from vuzol.discussion.memory import MemoryPack
 from vuzol.discussion.memory_service import DiscussionMemoryService
+from vuzol.storage.attempts import snapshot_task_spec, validate_source_turn
 from vuzol.storage.models import Interpretation, Step, Task
 from vuzol.storage.types import (
     ConversationTurnRole,
@@ -114,6 +115,9 @@ async def schedule_discussion_agent(
     """Create a hidden internal workflow that uses the project's pinned executor."""
 
     prompt = _discussion_prompt(project_id=project_id, memory_pack=memory_pack)
+    # D1 L2: promote the source turn to a typed, session-validated ref
+    # (fail-closed like accept_decision); the draft string stays as context.
+    await validate_source_turn(session, source_turn_id, session_id=session_id)
     task = Task(
         user_id=user_id,
         source_chat_id=chat_id,
@@ -122,6 +126,7 @@ async def schedule_discussion_agent(
         public_task_number=None,
         project_id=project_id,
         original_text=prompt,
+        source_turn_id=source_turn_id,
         task_draft={
             "discussion_agent_contract": DISCUSSION_AGENT_SCHEMA_VERSION,
             "discussion_session_id": str(session_id),
@@ -141,6 +146,8 @@ async def schedule_discussion_agent(
     )
     session.add(task)
     await session.flush()
+    # D1 L2: initial spec revision for the agent task.
+    await snapshot_task_spec(session, task, source_turn_id=source_turn_id)
     interpretation = Interpretation(
         task_id=task.id,
         original_input_hash=hashlib.sha256(prompt.encode()).hexdigest(),

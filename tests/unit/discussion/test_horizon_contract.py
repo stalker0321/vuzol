@@ -868,6 +868,15 @@ async def test_future_only_rolling_revision_passes() -> None:
                 goal="Goal 1",
                 expected_outcome="Outcome 1",
                 completion_criteria=["Check 1"],
+                # D1 unified contract: an unchanged past item must match
+                # the full field set, not just the 4 legacy guard fields.
+                allowed_scope="src/**",
+                out_of_scope=[],
+                dependencies=[],
+                trusted_checks=[],
+                suggested_risk="low",
+                needs_approval=False,
+                estimated_complexity="medium",
             )
         ]
     )

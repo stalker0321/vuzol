@@ -28,6 +28,7 @@ from vuzol.interpretation.domain import (
     TaskOperation,
     TaskType,
 )
+from vuzol.storage.attempts import snapshot_task_spec
 from vuzol.storage.models import Interpretation, Task
 from vuzol.storage.types import (
     IdempotencyClass,
@@ -200,6 +201,8 @@ async def seed_trial(
         **draft.model_dump(mode="json"),
         "step09a_capsule": capsule.model_dump(mode="json"),
     }
+    # D1 L2: version the spec separately from the mutating task_draft.
+    await snapshot_task_spec(session, task)
     run.selected_route = {
         "schema_version": "step09a-route.v1",
         "experiment_id": request.experiment_id,

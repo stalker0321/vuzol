@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config import RuntimeConfiguration
 from vuzol.interpretation.domain import ProjectNameOption, TaskDraft
+from vuzol.storage.attempts import snapshot_task_spec
 from vuzol.storage.models import (
     ProjectNamingRequest,
     ProjectProvisioning,
@@ -161,6 +162,8 @@ class ProjectNamingController:
             }
         ).model_dump(mode="json")
         task.project_id = option.project_id
+        # D1 L2: version the spec separately from the mutating task_draft.
+        await snapshot_task_spec(session, task)
         await transition_task(
             session,
             task,

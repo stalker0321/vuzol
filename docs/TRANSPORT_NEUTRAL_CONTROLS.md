@@ -15,10 +15,18 @@ transports differ only in how the principal is established, never in the
 transition applied (parity-tested: real consumer path vs service path).
 - Mutating commands take `expected_task_version`: a stale control never
   applies (`ValueError: stale task version` → existing dead-letter path).
-  `None` preserves the legacy unchecked path.
+  `None` preserves the legacy unchecked path. The opt-in is explicit on every
+  transport (`controls.py`, `dispatch.py`, `cli/task.py --expected-version`
+  default None): making CAS mandatory needs a transport-migration decision
+  (D1 documents, does not silently change).
 - Retrying a consumed command is fail-closed: the version moved, so the
   retry is stale — exactly one transition per command (parity-tested via
   `task.pause_effective` event count).
+- D1 receipts: task commands record `payload.outcome` on the
+  `TelegramControlAction`; duplicate telegram delivery returns the prior
+  outcome (`IngressResult.outcome`) instead of "unknown" (package-controls
+  parity). A duplicate without `expected_task_version` lands in `_noop`
+  with no receipt (pinned by test).
 - `inspect` is strictly read-only: no row locks, no writes, no outbox rows
   (row-count tested).
 

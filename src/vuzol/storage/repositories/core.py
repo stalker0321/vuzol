@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.storage.attempts import snapshot_task_spec
 from vuzol.storage.errors import EntityNotFound
 from vuzol.storage.models import Event, Run, Step, Task, TopicTaskCounter
 from vuzol.storage.records import StepRecord, TaskRecord
@@ -92,6 +93,9 @@ class TaskRepository:
         )
         self._session.add(task)
         await self._session.flush()
+        # D1 L2: record the initial spec revision at creation; later
+        # mutations snapshot new revisions without rewriting this one.
+        await snapshot_task_spec(self._session, task)
         return task_record(task)
 
     async def get(self, task_id: uuid.UUID, *, for_update: bool = False) -> Task:

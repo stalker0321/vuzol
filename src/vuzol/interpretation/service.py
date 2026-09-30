@@ -57,6 +57,7 @@ from vuzol.interpretation.ports import (
 from vuzol.observability import get_logger
 from vuzol.providers.budgets import record_intake_usage
 from vuzol.providers.domain import NormalizedUsage
+from vuzol.storage.attempts import snapshot_task_spec
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
@@ -801,6 +802,8 @@ class InterpretationPipeline:
                 else TaskStatus.INTERPRETED
             )
             task.version += 1
+            # D1 L2: version the spec separately from the mutating task_draft.
+            await snapshot_task_spec(session, task)
             enqueue_interpreter_trace(
                 session,
                 task=task,
@@ -909,6 +912,8 @@ class InterpretationPipeline:
             task.prompt_version = result.prompt_version
             task.draft_schema_version = result.schema_version
             task.version += 1
+            # D1 L2: version the spec separately from the mutating task_draft.
+            await snapshot_task_spec(session, task)
             session.add(
                 TransactionalOutbox(
                     destination="telegram",

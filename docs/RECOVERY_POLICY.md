@@ -50,7 +50,7 @@ evaluated in order; the default is fail-closed `attention`:
 | transient outcome and step is safely retryable | `retry` |
 | anything else | `attention` |
 
-`takeover` is a modelled action with no producer yet (`docs/contracts/ADR-A01.md` keeps the label);
+`takeover` is a modelled action with no producer yet (`docs/contracts/ADR-A01.md` keeps the label); D1 reserves the `takeover` value in `WorkAttempt.attempt_kind` with the same gap (no production writer — see `docs/decisions/ADR-0012-d1-identity-revisions.md` §1);
 `wait` is produced for backpressure. There is no Jev and no new scheduler.
 
 ## Bounds are policy (invariant 48)

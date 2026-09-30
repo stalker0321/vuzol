@@ -2,6 +2,7 @@
 
 import uuid
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -95,3 +96,6 @@ class IngressResult(TelegramModel):
     intake_id: uuid.UUID | None = None
     action_id: uuid.UUID | None = None
     reason: str | None = None
+    # D1 L5: prior command outcome, returned on duplicate delivery so the
+    # caller gets the same receipt instead of "unknown".
+    outcome: dict[str, Any] | None = None

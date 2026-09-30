@@ -81,6 +81,7 @@ def enforce_interpretation_policy(
     draft: TaskDraft,
     *,
     known_project_ids: frozenset[str],
+    allowed_candidate_ids: frozenset[str] = frozenset(),
 ) -> PolicyResult:
     reasons: list[str] = []
     updates: dict[str, object] = {}
@@ -235,6 +236,13 @@ def enforce_interpretation_policy(
             reasons.append("unsupported_task_binding")
     if draft.action in {TaskAction.APPROVE_STEP, TaskAction.REJECT_STEP}:
         reasons.append("natural_language_control_never_consumes_approval")
+    target = draft.target_candidate_id
+    if target is not None and target not in allowed_candidate_ids:
+        updates.update(
+            needs_clarification=True,
+            clarification_question="Which candidate target should this use?",
+        )
+        reasons.append("stale_or_unknown_candidate")
     tightened = draft.model_copy(update=updates)
     eligible = not tightened.needs_clarification and tightened.action not in {
         TaskAction.APPROVE_STEP,

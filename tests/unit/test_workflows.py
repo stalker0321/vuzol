@@ -74,7 +74,6 @@ def test_compiler_skips_disabled_planner() -> None:
     with_optional = compile_workflow(
         draft(planning=True, risk=RiskLevel.HIGH), interpretation_id=interpretation_id
     )
-
     assert without_optional.steps[0].status is StepStatus.COMPLETED
     assert [step.key for step in without_optional.steps] == [
         "interpret",
@@ -98,7 +97,9 @@ def test_compiler_skips_disabled_planner() -> None:
     assert approve.step_type == "approval"
     assert approve.payload == {"requested_action": "apply_result"}
     assert without_optional.steps[1].predecessor_ordinals == (0,)
-    assert "plan" not in [step.key for step in with_optional.steps]
+    # D4: compiler reads draft.needs_planning; the dead plan step is reachable.
+    assert "plan" not in [step.key for step in without_optional.steps]
+    assert "plan" in [step.key for step in with_optional.steps]
     assert "review" in [step.key for step in with_optional.steps]
 
 
@@ -118,8 +119,10 @@ def test_architecture_workflow_uses_read_only_agent_without_delivery_gates() -> 
     )
 
     assert workflow.workflow_type == "architecture"
+    # D4: planning=True makes the optional plan step reachable.
     assert [step.step_type for step in workflow.steps] == [
         "interpret",
+        "plan",
         "prepare_context",
         "prepare_worktree",
         "execute_agent",

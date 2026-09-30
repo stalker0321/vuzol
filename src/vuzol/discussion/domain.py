@@ -190,6 +190,9 @@ class PlanItemDraft:
     suggested_risk: RiskLevel = RiskLevel.LOW
     needs_approval: bool = False
     estimated_complexity: EstimatedComplexity = EstimatedComplexity.MEDIUM
+    derived: bool = True
+    source_turn_ref: str | None = None
+    source_spec_revision: str | None = None
 
     def __post_init__(self) -> None:
         if not self.summary.strip() or len(self.summary) > 240:
@@ -228,6 +231,42 @@ class PlanDraft:
         item_ids = [item.item_id for item in self.items if item.item_id is not None]
         if len(item_ids) != len(set(item_ids)):
             raise DomainError("invalid_plan", "item_id values must be unique")
+        validate_plan_dependencies(self.items)
+
+
+def validate_plan_dependencies(items: tuple[PlanItemDraft, ...]) -> None:
+    """Deterministically reject bad plan dependency graphs (D4 W6/W7).
+
+    Unknown dependency targets and cycles fail closed. Execution order stays
+    ordinal-based; this only validates the declared graph.
+    """
+
+    known = {item.local_id for item in items if item.local_id is not None}
+    for item in items:
+        for dependency in item.dependencies:
+            if dependency not in known:
+                raise DomainError("invalid_plan", f"unknown plan dependency: {dependency}")
+    edges: dict[str, tuple[str, ...]] = {
+        item.local_id: tuple(item.dependencies)
+        for item in items
+        if item.local_id is not None
+    }
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str) -> None:
+        if node in visited:
+            return
+        if node in visiting:
+            raise DomainError("invalid_plan", f"cyclic plan dependency: {node}")
+        visiting.add(node)
+        for edge in edges.get(node, ()):
+            visit(edge)
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in edges:
+        visit(node)
 
 
 def canonical_plan_body(plan: PlanDraft, item_ids: tuple[uuid.UUID, ...]) -> dict[str, Any]:
@@ -251,6 +290,9 @@ def canonical_plan_body(plan: PlanDraft, item_ids: tuple[uuid.UUID, ...]) -> dic
                 "suggested_risk": item.suggested_risk.value,
                 "needs_approval": item.needs_approval,
                 "estimated_complexity": item.estimated_complexity.value,
+                "derived": item.derived,
+                "source_turn_ref": item.source_turn_ref,
+                "source_spec_revision": item.source_spec_revision,
             }
             for ordinal, (item, item_id) in enumerate(zip(plan.items, item_ids, strict=True), 1)
         ],
@@ -396,7 +438,18 @@ def semantic_revision_hash(body: dict[str, Any]) -> str:
     projected = {
         "title": str(body.get("title", "")).strip(),
         "items": [
-            {key: value for key, value in item.items() if key not in {"item_id", "ordinal"}}
+            {
+                key: value
+                for key, value in item.items()
+                if key
+                not in {
+                    "item_id",
+                    "ordinal",
+                    "derived",
+                    "source_turn_ref",
+                    "source_spec_revision",
+                }
+            }
             for item in raw_items
             if isinstance(item, dict)
         ],

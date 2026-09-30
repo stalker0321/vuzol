@@ -79,6 +79,10 @@ class TaskDraft(FrozenModel):
     needs_planning: bool = Field(default=False, exclude=True)
     needs_clarification: bool
     referenced_task_id: uuid.UUID | None = None
+    target_candidate_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64
+    )
+    candidate_revision_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     normalized_title: str = Field(min_length=1, max_length=120)
     embedded_instructions: tuple[str, ...] = Field(default=(), max_length=20)
     contradiction_detected: bool = False

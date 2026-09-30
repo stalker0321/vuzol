@@ -137,6 +137,43 @@ def test_recall_query_is_bounded() -> None:
     assert EXTRACTOR_VERSION == "memory-extractor.v1"
 
 
+def test_memory_destination_claimed_only_by_memory_writer() -> None:
+    """No other consumer may claim memory_extract (fenced destinations)."""
+
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3] / "src" / "vuzol"
+    claimants = sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*.py")
+        if any(
+            "allowed_destinations" in line
+            and ("memory_extract" in line or "MEMORY_DESTINATION" in line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    )
+    assert claimants == ["discussion/memory_writer.py"]
+
+
+def test_memory_writer_cli_wiring() -> None:
+    """Standalone CLI exists, is registered, and owns the consumer loop."""
+
+    import inspect
+    from pathlib import Path
+
+    from vuzol.cli import memory_writer
+    from vuzol.discussion.memory_writer import MemoryWriterService
+
+    assert callable(memory_writer.main)
+    assert callable(memory_writer.run)
+    parameters = inspect.signature(MemoryWriterService.__init__).parameters
+    assert parameters["lease_seconds"].default == 60
+    pyproject = (Path(__file__).resolve().parents[3] / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'vuzol-memory-writer = "vuzol.cli.memory_writer:main"' in pyproject
+
+
 def test_completion_paths_do_not_read_memory_units() -> None:
     """Writer delay cannot block completion: completion never queries units."""
 

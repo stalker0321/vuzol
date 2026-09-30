@@ -28,7 +28,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.models import (
-    Approval,
     ConversationTurn,
     MaterializationLink,
     PlanRevisionItem,
@@ -247,18 +246,16 @@ async def bind_task_source(
     await session.flush()
 
 
-def review_acceptance_key(
-    verdict: dict[str, Any], *, approval_hash: str | None = None
-) -> str:
-    """Acceptance key for a review outcome (lead Q11).
+def review_acceptance_key(verdict: dict[str, Any]) -> str:
+    """Acceptance key for a review outcome (lead consent on T048 REDO).
 
-    Reuses ``Approval.action_envelope_hash`` when an approval exists for the
-    step; pre-approval outcomes use a content hash of the verdict — equally
-    content-addressed, never a surrogate.
+    Always the verdict content hash (dossier L3 candidate), unique within
+    ``(run_id, step_id)``. Q11-as-decided (``Approval.action_envelope_hash``)
+    is deliberately NOT implemented here: a BLOCKED review precedes approval
+    creation, so no approval exists for the verdict's step at record time and
+    the lookup branch would be dead in production. See ADR-0012 §3.
     """
 
-    if approval_hash:
-        return approval_hash
     return hashlib.sha256(
         f"{REVIEW_OUTCOME_KEY_SCHEMA}:{_canonical_json(verdict)}".encode()
     ).hexdigest()
@@ -272,25 +269,24 @@ async def record_review_outcome(
     step_id: uuid.UUID,
     verdict: dict[str, Any],
 ) -> ReviewOutcomeHistory:
-    """Persist a review verdict to history (idempotent on the acceptance key).
+    """Persist a review verdict to history (idempotent on identical content).
 
     Separate from the mutable ``Step.result``: BLOCKED verdicts that never
     reach ``Step.result`` are retained here with findings/diff/policy.
+    Uniqueness is ``(run_id, step_id, acceptance_key)`` — an identical
+    re-commit returns the existing row, but a second BLOCKED verdict with
+    different content is always recorded, never swallowed.
     """
 
     if not isinstance(verdict, dict):
         raise ValueError("review verdict payload is missing")
-    approval_hash: str | None = None
-    approval_id: uuid.UUID | None = None
-    approval = await session.scalar(
-        select(Approval).where(Approval.step_id == step_id).order_by(Approval.created_at.desc())
-    )
-    if approval is not None:
-        approval_hash = approval.action_envelope_hash
-        approval_id = approval.id
-    key = review_acceptance_key(verdict, approval_hash=approval_hash)
+    key = review_acceptance_key(verdict)
     existing = await session.scalar(
-        select(ReviewOutcomeHistory).where(ReviewOutcomeHistory.acceptance_key == key)
+        select(ReviewOutcomeHistory).where(
+            ReviewOutcomeHistory.run_id == run_id,
+            ReviewOutcomeHistory.step_id == step_id,
+            ReviewOutcomeHistory.acceptance_key == key,
+        )
     )
     if existing is not None:
         return existing
@@ -300,7 +296,6 @@ async def record_review_outcome(
         run_id=run_id,
         step_id=step_id,
         acceptance_key=key,
-        approval_id=approval_id,
         verdict=str(verdict.get("verdict", "blocked")),
         review_kind=verdict.get("review_kind"),
         risk=verdict.get("risk"),

@@ -115,7 +115,6 @@ def upgrade() -> None:
         sa.Column("run_id", UUID(as_uuid=True), nullable=False),
         sa.Column("step_id", UUID(as_uuid=True), nullable=False),
         sa.Column("acceptance_key", sa.String(length=64), nullable=False),
-        sa.Column("approval_id", UUID(as_uuid=True), nullable=True),
         sa.Column("verdict", sa.String(length=30), nullable=False),
         sa.Column("review_kind", sa.String(length=30), nullable=True),
         sa.Column("risk", sa.String(length=20), nullable=True),
@@ -130,9 +129,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["task_id"], ["tasks.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["step_id"], ["steps.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["approval_id"], ["approvals.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("acceptance_key", name="uq_review_outcome_acceptance_key"),
+        sa.UniqueConstraint(
+            "run_id",
+            "step_id",
+            "acceptance_key",
+            name="uq_review_outcome_run_step_key",
+        ),
     )
     op.create_index("ix_review_outcome_history_task_id", "review_outcome_history", ["task_id"])
     op.create_index("ix_review_outcome_history_run_id", "review_outcome_history", ["run_id"])

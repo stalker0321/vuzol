@@ -1,4 +1,4 @@
-"""Bounded scout capability mode (D3 W3).
+"""Bounded scout capability mode (D3 W3, REDO-1 repo probes).
 
 A scout is an explicitly bounded evidence-gathering run: question, scope,
 declared probes, deadline, max calls and stop condition up front; a typed
@@ -7,16 +7,21 @@ immutable packet (complete/partial/failed) out. Packets persist as typed
 observed revision/time travel inside the packet JSON. Packet-created/partial
 moments emit ``Event`` rows instead.
 
-Execution shape in D3: ``fetch`` probes over the retrieval seam (offline
-fixtures in CI/tests, approved-HTTP only when explicitly configured — live
-trials are forbidden). Repository-execution probe kinds are reserved:
-requesting one is an explicit refusal, not a silent downgrade. The
-sandbox/egress policy union for repo probes is a documented follow-up.
+Probe kinds (closed set): ``fetch`` reads through the retrieval seam
+(offline fixtures in CI/tests, approved-HTTP only when explicitly configured
+— live trials are forbidden); ``repo`` executes read-only repository
+operations (``read_file``, ``git_log``) under worktree containment
+(``trusted_root`` boundary, fixed command shapes, no network, no writes, no
+installs — effect class always read-only). A docker-backed executor can
+replace the local one through the ``RepoProbeExecutor`` seam (follow-up);
+the sandbox/egress policy union for mutating ops stays deferred per brief.
 
 Every scout call reserves and settles through the shared ledger (W4) —
 no owner/reserve/settlement, no probes — so concurrent scouts share the
 same capacity gate as everything else. Retry re-runs only missing probes
-and supersedes the binding (documented refresh, not a fork).
+and supersedes the binding (documented refresh). A partial packet with
+missing required probes fails closed at the consumer boundary (facts stay
+persisted, the dependent decision is refused).
 """
 
 from __future__ import annotations
@@ -46,7 +51,13 @@ from vuzol.storage.models import Event, InputBinding, Step
 
 SCOUT_PACKET_SCHEMA = "scout-packet.v1"
 SCOUT_SLOT = "scout_packet"
-SCOUT_PROBE_KINDS = frozenset({"fetch"})
+# D3 REDO-1: fetch probes read through the retrieval seam; repo probes
+# execute read-only repository operations under worktree containment.
+# Closed kinds — anything else is an explicit refusal.
+SCOUT_PROBE_KINDS = frozenset({"fetch", "repo"})
+REPO_PROBE_OPS = frozenset({"read_file", "git_log"})
+REPO_PROBE_MAX_BYTES = 65_536
+REPO_PROBE_GIT_LINES = 20
 SCOUT_STOP_CONDITIONS = frozenset({"all_required", "any_success"})
 SCOUT_STATUSES = frozenset({"complete", "partial", "failed"})
 
@@ -55,6 +66,20 @@ class FetchProbe(Protocol):
     """Retrieval seam: fetch one probe URI at a logical time."""
 
     def __call__(self, uri: str, *, now: str) -> RetrievedSource: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RepoProbeResult:
+    observation: str
+    evidence_hash: str
+
+
+class RepoProbeExecutor(Protocol):
+    """Repository probe seam: run one closed read-only op in a worktree."""
+
+    async def run(
+        self, *, op: str, path: str, root: str, max_bytes: int
+    ) -> RepoProbeResult: ...
 
 
 class ScoutError(RuntimeError):
@@ -69,8 +94,11 @@ class ScoutError(RuntimeError):
 class ScoutProbe:
     name: str
     kind: str
-    uri: str
+    uri: str = ""
     required: bool = True
+    # Repo-probe fields (kind == "repo" only): closed op + repo-relative path.
+    op: str | None = None
+    path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +116,10 @@ class ScoutFact:
     probe: str
     observation: str
     source_hash: str
+    # Effect-policy class of the probe execution (D3 REDO-1): repo and fetch
+    # probes are read-only by construction (no writes, no network beyond the
+    # retrieval seam, no installs — procedure approval unbypassable).
+    effect_class: str = "read_only"
 
 
 @dataclass(slots=True)
@@ -147,8 +179,14 @@ def validate_request(request: ScoutRequest) -> tuple[str, ...]:
             errors.append("scout_probe_name_missing")
         if probe.kind not in SCOUT_PROBE_KINDS:
             errors.append("scout_probe_unsupported")
-        if not probe.uri.strip():
-            errors.append("scout_probe_uri_missing")
+        elif probe.kind == "fetch":
+            if not probe.uri.strip():
+                errors.append("scout_probe_uri_missing")
+        elif probe.kind == "repo":
+            if probe.op not in REPO_PROBE_OPS:
+                errors.append("scout_repo_op_unsupported")
+            if not (probe.path or "").strip():
+                errors.append("scout_repo_path_missing")
     if request.max_calls < 1:
         errors.append("scout_max_calls_invalid")
     if request.stop_condition not in SCOUT_STOP_CONDITIONS:
@@ -174,6 +212,7 @@ def packet_to_json(packet: ScoutPacket) -> bytes:
                     "probe": fact.probe,
                     "observation": fact.observation,
                     "source_hash": fact.source_hash,
+                    "effect_class": fact.effect_class,
                 }
                 for fact in packet.facts
             ],
@@ -222,6 +261,74 @@ def _observation(retrieved: RetrievedSource, *, limit: int = 4000) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
+class LocalRepoProbeExecutor:
+    """Default repo executor: read-only ops under worktree containment.
+
+    No subprocess with caller-controlled input beyond a fixed ``git log``
+    argv, no network, no writes, no installs — effect class is always
+    read-only, so procedure/capability approval cannot be bypassed through
+    it. A docker-backed executor can replace it through the seam (follow-up).
+    """
+
+    def __init__(self, *, timeout_seconds: float = 10.0) -> None:
+        self._timeout_seconds = timeout_seconds
+
+    async def run(
+        self, *, op: str, path: str, root: str, max_bytes: int
+    ) -> RepoProbeResult:
+        import asyncio as _asyncio
+        from pathlib import Path as _Path
+
+        from vuzol.execution.paths import contained, trusted_root
+
+        if op not in REPO_PROBE_OPS:
+            raise ScoutError("scout_repo_op_unsupported", op)
+        try:
+            anchor = trusted_root(_Path(root), create=False)
+        except Exception as error:
+            raise ScoutError("scout_repo_root_unavailable", root) from error
+        try:
+            target = contained(anchor, anchor / (path or "."))
+        except Exception as error:
+            raise ScoutError("scout_repo_path_escape", path) from error
+        if op == "read_file":
+            try:
+                raw = target.read_bytes()[:max_bytes]
+            except OSError as error:
+                raise ScoutError("scout_repo_read_failed", path) from error
+            text = raw.decode("utf-8", errors="replace")
+        else:
+            try:
+                process = await _asyncio.create_subprocess_exec(
+                    "git",
+                    "-C",
+                    str(anchor),
+                    "log",
+                    "--format=%H %s",
+                    "-n",
+                    str(REPO_PROBE_GIT_LINES),
+                    "--",
+                    str(target.relative_to(anchor)),
+                    stdout=_asyncio.subprocess.PIPE,
+                    stderr=_asyncio.subprocess.PIPE,
+                )
+                out, _err = await _asyncio.wait_for(
+                    process.communicate(), timeout=self._timeout_seconds
+                )
+            except (TimeoutError, OSError) as error:
+                raise ScoutError("scout_repo_git_failed", path) from error
+            if process.returncode != 0:
+                raise ScoutError("scout_repo_git_failed", path)
+            raw = out
+            text = raw.decode("utf-8", errors="replace")
+        if not text.strip():
+            raise ScoutError("scout_repo_empty", path)
+        return RepoProbeResult(
+            observation=text[:4000],
+            evidence_hash=hashlib.sha256(raw).hexdigest(),
+        )
+
+
 async def run_scout(
     session: AsyncSession,
     *,
@@ -235,6 +342,8 @@ async def run_scout(
     consumer_step_id: uuid.UUID | None = None,
     project_id: str | None = None,
     now: str | None = None,
+    repo_executor: RepoProbeExecutor | None = None,
+    repo_root: str | None = None,
 ) -> ScoutPacket:
     """Execute a bounded scout: reserve → probe → persist → settle.
 
@@ -274,6 +383,7 @@ async def run_scout(
     calls = 0
     done_required = 0
     fetch_now = now or datetime.now(UTC).isoformat()
+    executor = repo_executor or LocalRepoProbeExecutor()
     try:
         for probe in request.probes:
             if calls >= request.max_calls:
@@ -281,7 +391,33 @@ async def run_scout(
                 continue
             calls += 1
             try:
-                retrieved = fetch(probe.uri, now=fetch_now)
+                if probe.kind == "repo":
+                    if repo_root is None:
+                        raise ScoutError("scout_repo_root_missing", probe.name)
+                    outcome = await executor.run(
+                        op=probe.op or "",
+                        path=probe.path or ".",
+                        root=repo_root,
+                        max_bytes=REPO_PROBE_MAX_BYTES,
+                    )
+                    observation, source_hash = outcome.observation, outcome.evidence_hash
+                    fetched_bytes += len(observation.encode())
+                else:
+                    retrieved = fetch(probe.uri, now=fetch_now)
+                    observation, source_hash = (
+                        _observation(retrieved),
+                        retrieved.content_hash,
+                    )
+                    fetched_bytes += len(retrieved.content)
+            except ScoutError:
+                unresolved.append(probe.name)
+                await _emit_packet_event(
+                    session,
+                    request_hash(request),
+                    status="partial",
+                    probe=probe.name,
+                )
+                continue
             except Exception:
                 unresolved.append(probe.name)
                 await _emit_packet_event(
@@ -291,15 +427,14 @@ async def run_scout(
                     probe=probe.name,
                 )
                 continue
-            fetched_bytes += len(retrieved.content)
             facts.append(
                 ScoutFact(
                     probe=probe.name,
-                    observation=_observation(retrieved),
-                    source_hash=retrieved.content_hash,
+                    observation=observation,
+                    source_hash=source_hash,
                 )
             )
-            evidence_hashes.append(retrieved.content_hash)
+            evidence_hashes.append(source_hash)
             if probe.required:
                 done_required += 1
         if not facts:
@@ -376,6 +511,8 @@ async def retry_scout(
     consumer_step_id: uuid.UUID | None = None,
     project_id: str | None = None,
     now: str | None = None,
+    repo_executor: RepoProbeExecutor | None = None,
+    repo_root: str | None = None,
 ) -> ScoutPacket:
     """Retry only the missing probes of a partial packet (drill 14).
 
@@ -409,6 +546,8 @@ async def retry_scout(
         consumer_step_id=None,
         project_id=project_id,
         now=now,
+        repo_executor=repo_executor,
+        repo_root=repo_root,
     )
     merged_facts = list(packet.facts)
     seen = {fact.probe for fact in merged_facts}

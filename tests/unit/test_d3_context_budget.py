@@ -269,3 +269,85 @@ def test_d3_pair_schema_mismatch_blocks() -> None:
         assert error.category == "pair_schema_mismatch"
     else:
         raise AssertionError("expected pair refusal")
+
+
+def test_d3_repo_probe_read_file_contained() -> None:
+    """REDO-1: repo read_file probe executes read-only under containment."""
+
+    import asyncio
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from vuzol.scout import LocalRepoProbeExecutor, ScoutError
+
+    with TemporaryDirectory() as root:
+        target = Path(root) / "notes.md"
+        target.write_text("hello scout")
+        outcome = asyncio.run(
+            LocalRepoProbeExecutor().run(
+                op="read_file", path="notes.md", root=root, max_bytes=65536
+            )
+        )
+        assert "hello scout" in outcome.observation
+        try:
+            asyncio.run(
+                LocalRepoProbeExecutor().run(
+                    op="read_file", path="../escape.md", root=root, max_bytes=65536
+                )
+            )
+        except ScoutError as error:
+            assert error.code == "scout_repo_path_escape"
+        else:
+            raise AssertionError("expected escape refusal")
+        try:
+            asyncio.run(
+                LocalRepoProbeExecutor().run(
+                    op="exec", path="notes.md", root=root, max_bytes=65536
+                )
+            )
+        except ScoutError as error:
+            assert error.code == "scout_repo_op_unsupported"
+        else:
+            raise AssertionError("expected op refusal")
+
+
+def test_d3_consumer_blocks_incomplete_scout_packet() -> None:
+    """REDO-1: partial packet with missing required probes blocks the consumer."""
+
+    import json
+
+    from vuzol.context.bindings import validate_binding_content
+    from vuzol.context.resolver import BindingError
+
+    def _packet(*, done: int, total: int) -> bytes:
+        return json.dumps(
+            {
+                "schema": "scout-packet.v1",
+                "packet_id": "p",
+                "request_hash": "r",
+                "status": "partial",
+                "facts": [{"probe": "p1", "source_hash": "aa" * 32}],
+                "observed_revision": "bb" * 32,
+                "observed_at": "2026-09-30T00:00:00Z",
+                "scope": "vuzol",
+                "required_total": total,
+                "required_done": done,
+            }
+        ).encode()
+
+    # facts stay valid bytes, but the dependent decision is refused
+    try:
+        validate_binding_content(
+            schema_name="scout-packet",
+            schema_version="scout-packet.v1",
+            content=_packet(done=1, total=2),
+        )
+    except BindingError as error:
+        assert error.category == "scout_packet_incomplete"
+    else:
+        raise AssertionError("expected incomplete refusal")
+    validate_binding_content(
+        schema_name="scout-packet",
+        schema_version="scout-packet.v1",
+        content=_packet(done=2, total=2),
+    )

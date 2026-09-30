@@ -110,6 +110,25 @@ def validate_binding_content(*, schema_name: str, schema_version: str, content: 
                 "scout_packet_schema_mismatch",
                 f"scout packet bytes failed validation: {errors[0]}",
             )
+        # D3 REDO-1: a partial packet with missing required probes blocks
+        # the dependent decision (facts stay persisted in the artifact).
+        import json as _json
+
+        try:
+            packet = _json.loads(content.decode("utf-8"))
+        except Exception as error:
+            raise BindingError("scout_packet_schema_mismatch", str(error)) from error
+        if (
+            isinstance(packet, dict)
+            and isinstance(packet.get("required_total"), int)
+            and packet["required_total"] > 0
+            and isinstance(packet.get("required_done"), int)
+            and packet["required_done"] < packet["required_total"]
+        ):
+            raise BindingError(
+                "scout_packet_incomplete",
+                "scout packet is missing required probes",
+            )
 
 
 def validate_resolved_bindings(resolved: object) -> None:

@@ -61,6 +61,7 @@ class TaskRepository:
         thread_id: int | None = None,
         project_id: str | None = None,
         ingress_source: str | None = None,
+        source_turn_id: uuid.UUID | None = None,
     ) -> TaskRecord:
         topic_task_number: int | None = None
         public_task_number: int | None = None
@@ -90,11 +91,15 @@ class TaskRepository:
             task_type=task_type,
             task_draft=dict(task_draft or {}),
             status=TaskStatus.RECEIVED,
+            source_turn_id=source_turn_id,
         )
         self._session.add(task)
         await self._session.flush()
         # D1 L2: record the initial spec revision at creation; later
         # mutations snapshot new revisions without rewriting this one.
+        # D4 REDO: the creation-time source turn (e.g. package
+        # materialization) flows into the initial spec revision via the
+        # task.source_turn_id fallback in snapshot_task_spec.
         await snapshot_task_spec(self._session, task)
         return task_record(task)
 

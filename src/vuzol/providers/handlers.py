@@ -39,6 +39,7 @@ from vuzol.execution.finalization import (
 )
 from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.worktrees import WorktreeService
+from vuzol.interpretation.provenance import provenance_reference
 from vuzol.observability import get_logger
 from vuzol.projects.executor_preference import apply_profile_overrides
 from vuzol.providers.budgets import (
@@ -1311,7 +1312,7 @@ class ProviderStepHandler:
                     required_capabilities=frozenset(
                         Capability(value) for value in step.required_capabilities
                     ),
-                    original_input_reference=f"task:{task.id}:original",
+                    original_input_reference=provenance_reference(task),
                     original_input=task.original_text,
                     task_draft=task.task_draft,
                     context=context,

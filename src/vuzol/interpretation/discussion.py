@@ -481,6 +481,31 @@ def enforce_discussion_policy(
         InteractionMode.ITEM_EDIT: "item_edit",
         InteractionMode.TASK_REQUEST: "task_request",
     }
+    # D4 REDO: provenance is system-stamped, never model-supplied. The model
+    # schema (adapters.discussion_schema_for_model) hides these fields; here
+    # any model-supplied values are discarded — derived is forced True and
+    # source refs are nulled until plan application stamps the real turn id
+    # and base revision (stamp_plan_provenance). Same pattern as
+    # needs_planning for TaskDraft.
+    if result.plan_request is not None:
+        result = result.model_copy(
+            update={
+                "plan_request": result.plan_request.model_copy(
+                    update={
+                        "items": tuple(
+                            item.model_copy(
+                                update={
+                                    "derived": True,
+                                    "source_turn_ref": None,
+                                    "source_spec_revision": None,
+                                }
+                            )
+                            for item in result.plan_request.items
+                        )
+                    }
+                )
+            }
+        )
     seen_candidates = set()
     for item in result.decision_candidates:
         stable = item.stable_id
@@ -527,6 +552,54 @@ def resolve_discussion_candidate(
         if candidate.stable_id == candidate_id:
             return candidate
     raise ValueError(f"unknown discussion candidate: {candidate_id}")
+
+
+def is_explicit_fast_path(request: DiscussionInterpretRequest) -> bool:
+    """True when the deterministic explicit-task path applies (D4 W3).
+
+    The service branch on this helper must not await any interpreter: the
+    explicit command is classified without a provider call.
+    """
+
+    return (
+        request.control_override is not None
+        and request.control_override.kind is ControlOverrideKind.EXPLICIT_TASK
+    )
+
+
+def stamp_plan_provenance(
+    result: DiscussionInterpretation,
+    *,
+    source_turn_id: uuid.UUID,
+    source_spec_revision: str | None,
+) -> DiscussionInterpretation:
+    """Stamp system-owned provenance on plan items (D4 REDO).
+
+    Called at plan application with the persisted user turn id and the base
+    spec/revision hash. Model-supplied values were already discarded by
+    ``enforce_discussion_policy``; only the system writes real refs.
+    """
+
+    if result.plan_request is None:
+        return result
+    return result.model_copy(
+        update={
+            "plan_request": result.plan_request.model_copy(
+                update={
+                    "items": tuple(
+                        item.model_copy(
+                            update={
+                                "derived": True,
+                                "source_turn_ref": str(source_turn_id),
+                                "source_spec_revision": source_spec_revision,
+                            }
+                        )
+                        for item in result.plan_request.items
+                    )
+                }
+            )
+        }
+    )
 
 
 def plan_draft_from_interpretation(result: DiscussionInterpretation) -> PlanDraft:

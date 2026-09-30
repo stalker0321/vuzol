@@ -643,14 +643,25 @@ def _acceptance_service(
         return_value=SimpleNamespace(id=revision_id, revision_number=1, content_hash="ab" * 32)
     )
     discussion = SimpleNamespace(active_work_package_id=package.id)
+    # D2 promotion proof chain (last link → run → CONSUMED approval whose
+    # envelope result matches the evidence result "b"*40).
+    proof_link = SimpleNamespace(ordinal=1, task_id=uuid.uuid4())
+    proof_run_id = uuid.uuid4()
+    proof_step_id = uuid.uuid4()
+    proof_step = SimpleNamespace(
+        payload={"action_envelope": {"result_commit": "b" * 40}}
+    )
+    proof_approval = SimpleNamespace(step_id=proof_step_id)
     gets: list[object] = []
     if artifact_id is not None:
         gets.append(SimpleNamespace(id=artifact_id, task_id=None))
+    gets.append(proof_step)
     gets.append(discussion)
     uow.session = MagicMock()
     uow.session.get = AsyncMock(side_effect=gets)
     # D2 evidence row for the artifact (valid for this package/revision).
     package.integration_head_commit = "b" * 40
+    package.integration_base_commit = "a" * 40
     evidence_doc = {
         "schema": "acceptance-evidence.v1",
         "package_id": str(package.id),
@@ -677,9 +688,19 @@ def _acceptance_service(
             evidence=evidence_doc,
         )
     )
+    links_result = MagicMock()
+    links_result.all = MagicMock(return_value=[proof_link])
+    runs_result = MagicMock()
+    runs_result.all = MagicMock(return_value=[proof_run_id])
+    approvals_result = MagicMock()
+    approvals_result.all = MagicMock(return_value=[proof_approval])
     empty = MagicMock()
     empty.all = MagicMock(return_value=[])
-    uow.session.scalars = AsyncMock(return_value=empty)
+    # Call order: _check_promotion_proof links/runs/approvals, then
+    # _check_evidence_revisions links (empty → skip).
+    uow.session.scalars = AsyncMock(
+        side_effect=[links_result, runs_result, approvals_result, empty]
+    )
     uow.session.flush = AsyncMock()
     uow.events.append = AsyncMock()
     uow.outbox.enqueue = AsyncMock()

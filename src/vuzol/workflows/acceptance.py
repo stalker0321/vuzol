@@ -87,8 +87,19 @@ def validate_evidence(doc: object) -> tuple[str, ...]:
     if not isinstance(review_refs, list) or not review_refs:
         return ("evidence_review_refs_missing",)
     for ref in review_refs:
-        if not isinstance(ref, str) or len(ref) != 64:
+        if not isinstance(ref, str):
             return ("evidence_review_ref_malformed",)
+        # D1 history acceptance keys (64-hex) or retained step verdict refs
+        # ("step-review:<uuid>") — both resolve to a stored review verdict.
+        if len(ref) == 64:
+            continue
+        if ref.startswith("step-review:"):
+            try:
+                uuid.UUID(ref.split(":", 1)[1])
+            except ValueError:
+                return ("evidence_review_ref_malformed",)
+            continue
+        return ("evidence_review_ref_malformed",)
     return ()
 
 
@@ -320,15 +331,24 @@ async def record_corrective_signal(
     return decision
 
 
-class AcceptanceGateHandler:
-    """Materialized acceptance step (coding.v4, after ``approve_result``).
+def _verdict_allows_progress(result: object) -> bool:
+    """The retained review verdict lets the item promote (pass flavors only)."""
 
-    Per item workflow: intermediate items and non-horizon/legacy packages
-    pass through. For the LAST item of a pinned horizon package the handler
-    assembles AcceptanceEvidence (criteria, deterministic gates, D1 review
-    refs, unresolved caveats/effects), persists it as an artifact + evidence
-    row, and succeeds — or BLOCKED fail-closed when criteria cannot be met.
-    Idempotent: existing evidence for the same revision+heads is reused.
+    if not isinstance(result, dict):
+        return False
+    return result.get("verdict") in {"pass", "pass_with_warnings"}
+
+
+class AcceptanceGateHandler:
+    """Materialized acceptance step (coding.v4, before ``approve_result``).
+
+    Runs in every item workflow after ``publish_preview``: intermediate items
+    and non-horizon/legacy packages pass through. For the LAST item of a
+    pinned horizon package the handler assembles AcceptanceEvidence — prior
+    items terminal, this item reviewed — and persists it, so the coming
+    promotion apply finds the gate open. BLOCKED fail-closed when criteria
+    cannot be met. Idempotent: existing evidence for the same
+    revision+promotion-base is reused.
     """
 
     def __init__(
@@ -446,17 +466,32 @@ class AcceptanceGateHandler:
             )
         ).all()
         task_ids = [item.task_id for item in links]
-        states = (
-            (
-                await session.scalars(
-                    select(Task.status).where(Task.id.in_(task_ids))
+        # REDO-1 order (acceptance BEFORE approve_result): the last item is
+        # still running when its acceptance step executes. Prior items must
+        # be terminal; the current item must already be reviewed (its review
+        # step COMPLETED with a passing verdict) — otherwise the gate cannot
+        # vouch for the scope it is about to promote.
+        current_review_refs: list[str] = []
+        for item in links:
+            if item.task_id == task.id:
+                review = await session.scalar(
+                    select(Step).where(
+                        Step.run_id == run.id,
+                        Step.step_type == "review",
+                        Step.status == StepStatus.COMPLETED,
+                    )
                 )
-            ).all()
-            if task_ids
-            else []
-        )
-        if any(status is not TaskStatus.COMPLETED for status in states):
-            raise ValueError("acceptance blocked: package items are not all complete")
+                if review is None or not _verdict_allows_progress(review.result):
+                    raise ValueError(
+                        "acceptance blocked: last item is not reviewed"
+                    )
+                current_review_refs.append(f"step-review:{review.id}")
+                continue
+            other = await session.get(Task, item.task_id)
+            if other is None or other.status is not TaskStatus.COMPLETED:
+                raise ValueError(
+                    "acceptance blocked: package items are not all complete"
+                )
         # Review refs: every D1 history verdict for this package's steps.
         step_ids: list[uuid.UUID] = []
         for item_task_id in task_ids:
@@ -482,7 +517,9 @@ class AcceptanceGateHandler:
             if step_ids
             else []
         )
-        review_refs = sorted({row.acceptance_key for row in history})
+        review_refs = sorted(
+            {row.acceptance_key for row in history} | set(current_review_refs)
+        )
         if not review_refs:
             raise ValueError("acceptance blocked: no review verdicts retained")
         test_results = await self._collect_gates(session, task_ids)
@@ -512,7 +549,11 @@ class AcceptanceGateHandler:
             }
         )
         worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
-        base_head = package.integration_head_commit
+        # REDO-2 (Option A): evidence binds the promotion the coming apply
+        # will present — the frozen promotion base (expected_target_head
+        # contract), not the moving integration head. The gate matches the
+        # envelope claim against this pair without reading mutable state.
+        base_head = package.integration_base_commit
         result_commit = worktree.result_commit if worktree is not None else None
         if not isinstance(base_head, str) or not isinstance(result_commit, str):
             raise ValueError("acceptance blocked: integration heads are missing")

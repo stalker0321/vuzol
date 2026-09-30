@@ -89,6 +89,8 @@ def test_compiler_skips_disabled_planner() -> None:
         "build_static",
         "publish_preview",
         "approve_result",
+        # D2 L1: materialized acceptance gate before promotion.
+        "acceptance",
         "publish_static",
         "finalize",
     ]

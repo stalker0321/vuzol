@@ -309,6 +309,26 @@ def _coding_v4() -> WorkflowDefinition:
                 )
             )
             step = replace(step, predecessors=("ensure_dependencies",))
+        if step.key == "approve_result":
+            steps.append(step)
+            # D2 L1: materialized acceptance gate before promotion. Runs
+            # after the per-item approval; intermediate items pass through,
+            # the last item of a pinned horizon package assembles evidence.
+            steps.append(
+                _step(
+                    "acceptance",
+                    "approve_result",
+                    step_type="acceptance",
+                    queue=QueueClass.PRIVILEGED,
+                    capabilities=frozenset({Capability.GIT}),
+                    idempotency=IdempotencyClass.IDEMPOTENT,
+                    timeout=120,
+                    attempts=2,
+                )
+            )
+            continue
+        if step.key == "publish_static":
+            step = replace(step, predecessors=("acceptance",))
         steps.append(step)
     return WorkflowDefinition(
         workflow_type="coding",

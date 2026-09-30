@@ -60,6 +60,30 @@ services:
     init: true
     restart: unless-stopped
 
+  # D2 Q5 dev parity: the applier runs the privileged approval/apply chain
+  # plus effect-reconciliation at startup. Compose file only — no change to
+  # the running TG contour (enable explicitly, same as telegram/interpreter
+  # profiles below).
+  applier:
+    profiles: [applier]
+    build: .
+    command: ["vuzol-applier"]
+    user: "${VUZOL_RUNTIME_UID:-1000}:10001"
+    environment:
+      VUZOL_ENVIRONMENT: development
+      VUZOL_SERVICE_NAME: vuzol
+      VUZOL_REGISTRY_FILE: /app/config/registries.toml
+      VUZOL_DATABASE_DSN_REFERENCE: env:VUZOL_DATABASE_DSN
+      VUZOL_DATABASE_DSN: ${VUZOL_DATABASE_DSN:-postgresql+psycopg://vuzol:vuzol-local-only@postgres:5432/vuzol} # pragma: allowlist secret
+      VUZOL_OPENAI_EXECUTOR_API_KEY: ${VUZOL_OPENAI_EXECUTOR_API_KEY:-}
+    volumes:
+      - ${VUZOL_REGISTRY_FILE_HOST:-./config/registries.example.toml}:/app/config/registries.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+
   telegram-ingress:
     profiles: [telegram]
     image: vuzol:local

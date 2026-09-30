@@ -645,10 +645,42 @@ def _acceptance_service(
     discussion = SimpleNamespace(active_work_package_id=package.id)
     gets: list[object] = []
     if artifact_id is not None:
-        gets.append(SimpleNamespace(id=artifact_id))
+        gets.append(SimpleNamespace(id=artifact_id, task_id=None))
     gets.append(discussion)
     uow.session = MagicMock()
     uow.session.get = AsyncMock(side_effect=gets)
+    # D2 evidence row for the artifact (valid for this package/revision).
+    package.integration_head_commit = "b" * 40
+    evidence_doc = {
+        "schema": "acceptance-evidence.v1",
+        "package_id": str(package.id),
+        "plan_revision_id": str(revision_id),
+        "plan_content_hash": "ab" * 32,
+        "goal": package.goal or "ship it",
+        "goal_revision": 1,
+        "spec_revision": None,
+        "configuration_revision": "c" * 64,
+        "policy_revision": "d" * 64,
+        "integration_base_head": "a" * 40,
+        "result_commit": "b" * 40,
+        "criteria": [{"criterion_id": "done", "satisfied": True}],
+        "test_results": [],
+        "review_refs": ["aa" * 32],
+        "unresolved_caveats": [],
+        "unresolved_effects": [],
+        "created_at": "2026-09-30T00:00:00+00:00",
+    }
+    uow.session.scalar = AsyncMock(
+        return_value=SimpleNamespace(
+            package_id=package.id,
+            artifact_id=artifact_id,
+            evidence=evidence_doc,
+        )
+    )
+    empty = MagicMock()
+    empty.all = MagicMock(return_value=[])
+    uow.session.scalars = AsyncMock(return_value=empty)
+    uow.session.flush = AsyncMock()
     uow.events.append = AsyncMock()
     uow.outbox.enqueue = AsyncMock()
     return WorkPackageService(cast(Any, uow)), uow

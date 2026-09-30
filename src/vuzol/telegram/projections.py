@@ -177,6 +177,7 @@ _STEP_TYPE_LABELS = {
     "produce_artifacts": "Подготовка артефактов",
     "build_static": "Сборка сайта",
     "approval": "Решение / апрув",
+    "acceptance": "Приёмка",
     "publish_static": "Публикация прототипа",
     "publish_preview": "Публикация preview",
     "execute_agent": "Агент",

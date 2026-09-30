@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vuzol.local/schemas/acceptance-evidence.v1.json",
+  "title": "Acceptance evidence v1",
+  "description": "Package-level acceptance evidence (D2): goal/plan/spec revisions, integration heads, criterion outcomes, deterministic test results, review refs, unresolved caveats/effects. Frozen for D3/D5 reuse.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "package_id",
+    "plan_revision_id",
+    "plan_content_hash",
+    "goal",
+    "goal_revision",
+    "spec_revision",
+    "configuration_revision",
+    "policy_revision",
+    "integration_base_head",
+    "result_commit",
+    "criteria",
+    "test_results",
+    "review_refs",
+    "unresolved_caveats",
+    "unresolved_effects",
+    "created_at"
+  ],
+  "properties": {
+    "schema": { "const": "acceptance-evidence.v1" },
+    "package_id": { "type": "string", "format": "uuid" },
+    "plan_revision_id": { "type": "string", "format": "uuid" },
+    "plan_content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "goal": { "type": "string", "minLength": 1 },
+    "goal_revision": { "type": ["integer", "null"], "minimum": 1 },
+    "spec_revision": { "type": ["string", "null"], "maxLength": 64 },
+    "configuration_revision": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "policy_revision": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "integration_base_head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "result_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion_id", "satisfied"],
+        "properties": {
+          "criterion_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "satisfied": { "type": "boolean" },
+          "evidence_ref": { "type": ["string", "null"], "maxLength": 500 }
+        }
+      }
+    },
+    "test_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "exit_code"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "exit_code": { "type": "integer" }
+        }
+      }
+    },
+    "review_refs": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "unresolved_caveats": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+    },
+    "unresolved_effects": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 255 }
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

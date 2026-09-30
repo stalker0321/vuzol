@@ -182,6 +182,16 @@ async def decide_result(
     verified_envelope(step, approval)
     run = await session.scalar(select(Run).where(Run.id == step.run_id).with_for_update())
     assert run is not None
+    # D2 L4 correction barrier: the envelope pins the revisions it was
+    # requested under; drift between request and decision fails closed
+    # (inv.35 — any material change invalidates the approval). Legacy
+    # envelopes without the fields pass through (Q4 compat).
+    envelope = step.payload.get("action_envelope")
+    if isinstance(envelope, dict):
+        for field in ("configuration_revision", "policy_revision"):
+            expected = envelope.get(field)
+            if expected is not None and expected != getattr(run, field):
+                raise ValueError(f"approval envelope {field} drifted since request")
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
     assert task is not None
     approval.deciding_user_id = deciding_user_id
@@ -266,6 +276,18 @@ async def decide_result(
             session, task, TaskStatus.CANCELLED, actor_type="user", actor_id=actor_id
         )
         event_type = f"{installation_event}.rejected" if installation_action else "result.rejected"
+        # D2 L6: a rejected final approval leaves a durable corrective trace
+        # instead of silent cancellation.
+        from vuzol.workflows.acceptance import record_corrective_signal
+
+        await record_corrective_signal(
+            session,
+            scope="final_reject",
+            reason="final_reject",
+            task_id=task.id,
+            run_id=run.id,
+            step_id=step.id,
+        )
     else:
         raise ValueError(f"unsupported result decision: {decision}")
     session.add(

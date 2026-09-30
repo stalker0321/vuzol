@@ -13,8 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config.models import AgentRuntimeContract, Capability, ProviderProfileConfig
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.context.resolver import (
-    RESEARCH_RESULT_SCHEMA,
-    RESEARCH_RESULT_SCHEMA_VERSION,
     BindingError,
     estimate_tokens,
     pack_context,
@@ -69,6 +67,13 @@ from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.providers.result_schema import result_schema_for_step
 from vuzol.providers.routing import PROVIDER_STEP_ROLES
+from vuzol.research.report import (
+    RESEARCH_PROVIDER_RESULT_SCHEMA,
+    RESEARCH_PROVIDER_RESULT_SCHEMA_VERSION,
+    RESEARCH_RESULT_SCHEMA,
+    RESEARCH_RESULT_SCHEMA_VERSION,
+    validate_source_report_bytes,
+)
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import (
     InputBinding,
@@ -961,8 +966,8 @@ class ProviderStepHandler:
                     producer_step_id=step.id,
                     artifact_id=artifact.id,
                     slot="predecessor_result",
-                    schema_name=RESEARCH_RESULT_SCHEMA,
-                    schema_version=RESEARCH_RESULT_SCHEMA_VERSION,
+                    schema_name=RESEARCH_PROVIDER_RESULT_SCHEMA,
+                    schema_version=RESEARCH_PROVIDER_RESULT_SCHEMA_VERSION,
                     content_hash=artifact.content_hash,
                     scope_project_id=task.project_id,
                     access_scope="private",
@@ -1050,6 +1055,10 @@ class ProviderStepHandler:
             elif step.step_type == "synthesize":
                 # Vertical slice: a research result bound to this step is packed
                 # into the synthesis input. No binding rows => legacy behavior.
+                # Legacy provider-text bindings (research-provider-result.v1)
+                # are read without a verified label. Bindings that claim the
+                # source-report contract (research-result.v1) are validated
+                # against their bytes fail-closed before any provider spend.
                 resolved = await resolve_context(
                     session,
                     self._artifacts,
@@ -1057,6 +1066,7 @@ class ProviderStepHandler:
                     project_id=task.project_id,
                 )
                 if not resolved.is_empty:
+                    _require_source_report_shape(resolved)
                     context = pack_context(resolved, role="summarizer")[1]
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
@@ -1109,7 +1119,8 @@ def _research_result_bytes(result: ProviderResult) -> bytes:
     if result.status is not ProviderResultStatus.SUCCEEDED:
         return b""
     payload = {
-        "schema_version": RESEARCH_RESULT_SCHEMA_VERSION,
+        "schema": RESEARCH_PROVIDER_RESULT_SCHEMA_VERSION,
+        "schema_version": RESEARCH_PROVIDER_RESULT_SCHEMA_VERSION,
         "text": result.text,
         "structured_output": result.structured_output,
         "finish_reason": result.finish_reason,
@@ -1118,6 +1129,38 @@ def _research_result_bytes(result: ProviderResult) -> bytes:
     return json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode()
+
+
+def _require_source_report_shape(resolved: object) -> None:
+    """Fail closed on source-report shape mismatch before provider spend.
+
+    Legacy ``research-provider-result.v1`` bindings pass through (no verified
+    label). Bindings claiming ``research-result(.v1)`` must carry valid
+    source-report bytes; otherwise raise ``BindingError`` (handled as a
+    pre-provider failure, reservation released, provider never called).
+    """
+
+    bindings = getattr(resolved, "bindings", ())
+    for binding in bindings:
+        name = getattr(binding, "schema_name", "")
+        version = getattr(binding, "schema_version", "")
+        is_source_claim = (
+            name == RESEARCH_RESULT_SCHEMA or version == RESEARCH_RESULT_SCHEMA_VERSION
+        )
+        is_legacy = (
+            name == RESEARCH_PROVIDER_RESULT_SCHEMA
+            or version == RESEARCH_PROVIDER_RESULT_SCHEMA_VERSION
+        )
+        if is_legacy and not is_source_claim:
+            continue
+        if not is_source_claim:
+            continue
+        errors = validate_source_report_bytes(getattr(binding, "content", b""))
+        if errors:
+            raise BindingError(
+                "source_report_schema_mismatch",
+                f"source report bytes failed validation: {errors[0]}",
+            )
 
 
 async def _consumer_steps(

@@ -128,6 +128,8 @@ async def test_exhausted_queue_enters_evaluating_behind_flag() -> None:
 
 @pytest.mark.anyio
 async def test_exhausted_queue_completes_when_flag_off() -> None:
+    # Pre-D0 row (execution_contract_version NULL): legacy compatibility —
+    # unpinned packages keep the old flag-off COMPLETED path.
     sequencer, _ = _sequencer()
     package = _running_package(goal="ship the horizon")
     revision = SimpleNamespace(id=uuid.uuid4())
@@ -137,6 +139,24 @@ async def test_exhausted_queue_completes_when_flag_off() -> None:
     assert result.completed is True
     assert package.status is WorkPackageStatus.COMPLETED
     assert package.horizon_phase is None
+
+
+@pytest.mark.anyio
+async def test_pinned_horizon_survives_flag_off() -> None:
+    # D0 pinned semantics: admission pinned enabled; flag off must not
+    # downgrade the materialized workflow to legacy COMPLETED.
+    from vuzol.discussion.horizon import HORIZON_CONTRACT_ENABLED
+
+    sequencer, _ = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    package.execution_contract_version = HORIZON_CONTRACT_ENABLED
+    revision = SimpleNamespace(id=uuid.uuid4())
+
+    result = await sequencer._materialize_current(package, revision, horizon_enabled=False)  # type: ignore[arg-type]
+
+    assert result.completed is False
+    assert package.status is WorkPackageStatus.RUNNING
+    assert package.horizon_phase == "evaluating"
 
 
 def test_ingress_horizon_wiring_defaults_off() -> None:
@@ -241,6 +261,7 @@ async def test_needs_approval_item_waits_behind_flag() -> None:
 
 @pytest.mark.anyio
 async def test_needs_approval_item_materializes_when_flag_off() -> None:
+    # Pre-D0 row (NULL): legacy compatibility — unpinned flag-off materializes.
     sequencer, uow = _sequencer()
     package = _running_package(goal="ship the horizon")
     revision = SimpleNamespace(id=uuid.uuid4(), approved_by_user_id=42)
@@ -261,6 +282,25 @@ async def test_needs_approval_item_materializes_when_flag_off() -> None:
     assert result.completed is False
     assert result.task_id == task_id
     assert package.horizon_phase is None
+
+
+@pytest.mark.anyio
+async def test_pinned_approval_gate_survives_flag_off() -> None:
+    # D0 pinned semantics: pinned enabled package keeps the approval gate
+    # even when the live flag is off.
+    from vuzol.discussion.horizon import HORIZON_CONTRACT_ENABLED
+
+    sequencer, uow = _sequencer()
+    package = _running_package(goal="ship the horizon")
+    package.execution_contract_version = HORIZON_CONTRACT_ENABLED
+    revision = SimpleNamespace(id=uuid.uuid4())
+    uow.session.scalar = AsyncMock(side_effect=[_approval_item(), None, _approval_item(), None])
+
+    result = await sequencer._materialize_current(package, revision, horizon_enabled=False)  # type: ignore[arg-type]
+
+    assert result.completed is False
+    assert result.task_id is None
+    assert package.horizon_phase == "waiting_approval"
 
 
 def _waiting_package() -> tuple[WorkPackage, uuid.UUID]:

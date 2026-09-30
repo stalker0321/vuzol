@@ -13,9 +13,17 @@ Implemented in `src/vuzol/review/policy.py` (`REVIEW_POLICY_REVISION`).
 | Level | Meaning | When |
 |---|---|---|
 | L0 | mechanical only | LOW risk, docs-only |
-| L1 | mechanical + focused patterns; may be operator-disabled (escalates to L2, never down) | LOW risk, code |
+| L1 | mechanical + focused patterns (D0: no operator switch; `l1_enabled` param is test/escalation only, disable escalates to L2) | LOW risk, code |
 | L2 | bounded model review per partition | MEDIUM, LOW generated/lockfile |
 | L3 | per-partition model review + cross-partition assessment | HIGH/PRIVILEGED, privileged paths |
+
+D0 wiring: `ResultReviewHandler._review` resolves the policy level from measured
+risk + changed files (`resolve_review_plan`) and calls the independent reviewer
+for L2/L3 (MEDIUM → L2 → reviewer). Policy errors fail closed to BLOCKED
+(`independent_review_required`). `select_reviewer_profile` receives the policy
+level + budget/role eligibility; PLANNER fallback is explicit with a log,
+EXECUTOR is never eligible. `should_skip_rereview` is not used by dispatch
+(documented unused, pure helper).
 
 `level_for(risk, file_class)` never returns below the risk minimum:
 PRIVILEGED → L3, HIGH → ≥L2, MEDIUM → L2. The overall plan is the max over

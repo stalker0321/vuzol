@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vuzol.local/schemas/permission-envelope.v1.json",
+  "title": "PermissionEnvelope v1",
+  "description": "Immutable, human/policy-issued authority envelope for a horizon. Owner = issuer (human principal or policy), never the model. Capability availability does not grant permission. Material changes require a new envelope and a new hash. This contract carries credential REFERENCES only; credential VALUES are forbidden.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "envelope_id",
+    "envelope_hash",
+    "horizon_id",
+    "principal",
+    "issuer",
+    "valid_from",
+    "actions",
+    "resource_limits",
+    "revocation_version",
+    "created_at"
+  ],
+  "properties": {
+    "schema": { "const": "permission-envelope.v1" },
+    "envelope_id": { "type": "string", "format": "uuid" },
+    "envelope_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 over the canonical envelope. Any material change produces a new hash and invalidates the prior approval binding (invariant 35)."
+    },
+    "horizon_id": { "type": "string", "format": "uuid" },
+    "principal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principal_id", "principal_kind"],
+      "properties": {
+        "principal_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "principal_kind": { "enum": ["human", "service", "system"] }
+      }
+    },
+    "issuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer_id", "issued_at"],
+      "properties": {
+        "issuer_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "issued_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "valid_from": { "type": "string", "format": "date-time" },
+    "valid_until": { "type": ["string", "null"], "format": "date-time" },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action_id", "effect_class", "requires_human_approval"],
+        "properties": {
+          "action_id": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "target_scope": { "type": ["string", "null"], "maxLength": 300 },
+          "effect_class": {
+            "enum": [
+              "read_only",
+              "isolated_mutation",
+              "external_mutation",
+              "irreversible_external",
+              "host_privileged"
+            ]
+          },
+          "resource_limits": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "max_cost": { "type": ["number", "null"], "minimum": 0 },
+              "max_attempts": { "type": ["integer", "null"], "minimum": 1 },
+              "max_concurrency": { "type": ["integer", "null"], "minimum": 1 }
+            }
+          },
+          "requires_human_approval": {
+            "type": "boolean",
+            "description": "Per ADR-A03, currently-true approval requirements (install, final apply, host-privileged) stay true."
+          }
+        }
+      }
+    },
+    "allowed_targets": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "type": "string", "maxLength": 300 }
+    },
+    "resource_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "pricing_revision"],
+      "properties": {
+        "max_cost": { "type": ["number", "null"], "minimum": 0 },
+        "currency": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "pricing_revision": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "max_attempts": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "secret_refs": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alias", "reference"],
+        "properties": {
+          "alias": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Secret reference/handle only. A credential VALUE is forbidden in this contract."
+          },
+          "backend": { "type": ["string", "null"], "maxLength": 50 }
+        }
+      }
+    },
+    "revocation_version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic. Revocation blocks new effects; in-flight effects are reconciled first."
+    },
+    "approval_binding": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "plan_approval_required": { "type": "boolean" },
+        "final_apply_approval_required": { "type": "boolean" },
+        "install_approval_required": {
+          "type": "boolean",
+          "description": "Invariant 36: every toolchain/dependency installation keeps its own source- and hash-bound approval."
+        }
+      }
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

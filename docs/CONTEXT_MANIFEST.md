@@ -16,7 +16,7 @@ exactly as before.
   `ArtifactStore` (`content_hash` = sha256, `content_uri` = `artifact:<path>`).
 
 The versioned JSON contract remains
-`tasks/T001/schemas/input-binding.schema.json` (InputBinding v1). The DB row is
+`docs/schemas/input-binding.v1.schema.json` (InputBinding v1, frozen copy of WP00). The DB row is
 the implementation; `consumer.item_id` maps to `consumer_step_id` and
 `scope.project_id` to `scope_project_id`.
 
@@ -27,7 +27,7 @@ received: `role`, one `ContextEntry` per resolved binding (`binding_id`, `slot`,
 `source`, `reference`, `content_hash`, `schema_name`, `schema_version`,
 `byte_count`, `estimated_tokens`, `truncated`, `freshness`), plus `excluded`
 slots and an `incomplete` flag. It is derived provenance; PostgreSQL owns the
-binding rows and the artifact store owns bytes (ADR-A01).
+binding rows and the artifact store owns bytes (`docs/contracts/ADR-A01.md`).
 
 ## Resolution and fail-closed rules
 
@@ -86,7 +86,8 @@ validates hashes.
 
 `ProviderStepHandler._persist_input_bindings` runs after a successful
 `research_execute`: it persists the result as a `research_result` artifact
-(`research-result.v1`), finds the downstream `synthesize` step via its
+(`research-provider-result.v1` legacy provider text, without a verified label),
+finds the downstream `synthesize` step via its
 `dependency_metadata.predecessor_ordinals`, and records one required, resolved
 `InputBinding`. It is idempotent per `(consumer_step_id, slot)`.
 

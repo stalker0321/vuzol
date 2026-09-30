@@ -1,0 +1,50 @@
+{
+  "schema": "research-result.v1",
+  "research_id": "11111111-2222-4333-8444-555555555555",
+  "question": "Which adapter backs WP06 retrieval in CI?",
+  "sources": [
+    {
+      "source_id": "adapter-doc",
+      "uri": "fixture://research/adapter.md",
+      "retriever": "local-docs-fixture",
+      "retrieved_at": "2026-09-27T10:00:00Z",
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": "vuzol",
+      "freshness_class": "fresh",
+      "quote": "CI uses frozen fixtures; live web is manual-only."
+    },
+    {
+      "source_id": "rival-note",
+      "uri": "fixture://research/rival.md",
+      "retriever": "local-docs-fixture",
+      "retrieved_at": "2026-09-27T10:05:00Z",
+      "content_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "scope": "vuzol",
+      "freshness_class": "stale",
+      "quote": "An older note claims live search in CI."
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "c1",
+      "statement": "CI retrieval is fixture-based.",
+      "support": "supported",
+      "citations": [{ "source_id": "adapter-doc", "position": "para 2" }]
+    },
+    {
+      "claim_id": "c2",
+      "statement": "CI policy on live web is disputed between sources.",
+      "support": "conflicting",
+      "citations": [
+        { "source_id": "adapter-doc", "position": "para 3" },
+        { "source_id": "rival-note", "position": "para 1" }
+      ]
+    },
+    {
+      "claim_id": "c3",
+      "statement": "Latency of the approved adapter is unknown.",
+      "support": "unsupported"
+    }
+  ],
+  "created_at": "2026-09-27T10:10:00Z"
+}

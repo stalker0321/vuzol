@@ -21,9 +21,12 @@ from vuzol.discussion.horizon import (
     HorizonBudgetState,
     budget_state,
     deadline_exceeded,
+    horizon_enabled,
     is_horizon,
     needs_approval_gate,
     parse_budget,
+    pinned_contract_for,
+    pinned_horizon_enabled,
 )
 from vuzol.interpretation.domain import (
     TASK_DRAFT_SCHEMA_VERSION,
@@ -123,6 +126,9 @@ class WorkPackageSequencer:
         package.last_failure_task_id = None
         package.version += 1
         package.start_generation = package.version
+        # D0 admission: pin the executable contract at start; active runs read
+        # the pinned value, so a later flag-off never downgrades them.
+        package.execution_contract_version = pinned_contract_for(bool(horizon_enabled))
         await self._uow.events.append(
             entity_type="work_package",
             entity_id=package.id,
@@ -509,6 +515,10 @@ class WorkPackageSequencer:
 
         assert isinstance(package, WorkPackage)
         assert self._uow.session is not None
+        # D0 pinned semantics: an active package reads its pinned contract.
+        # Pre-D0 rows (NULL) fall back to the passed admission flag.
+        if getattr(package, "execution_contract_version", None) is not None:
+            horizon_enabled = pinned_horizon_enabled(package, fallback=bool(horizon_enabled))
         ordinal = package.cursor_ordinal
         if ordinal is None:
             raise DomainError("cursor_missing")
@@ -817,7 +827,7 @@ class WorkPackageSequenceConsumer:
                     raise ValueError("invalid_sequence_item")
                 await WorkPackageSequencer(uow).observe_terminal(
                     task_id=item.linked_entity_id,
-                    horizon_enabled=self._settings.horizon.enabled,
+                    horizon_enabled=horizon_enabled(self._settings),
                 )
                 await complete_outbox_item(uow.session, token)
         except (DomainError, ValueError) as error:

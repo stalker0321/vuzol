@@ -204,7 +204,9 @@ async def test_review_passes_after_clean_validate(tmp_path: Path) -> None:
         dependency_metadata={"predecessor_ordinals": [5]},
     )
     run = SimpleNamespace(task_id=task_id)
-    task = SimpleNamespace(risk=RiskLevel.LOW, task_draft={"suggested_risk": "medium"})
+    # D0 floors: MEDIUM → L2 → independent reviewer. This mechanical-pass
+    # fixture stays L0 (LOW risk, docs-only) so it exercises the L0 path.
+    task = SimpleNamespace(risk=RiskLevel.LOW, task_draft={"suggested_risk": "low"})
     worktree = SimpleNamespace(
         path=str(worktree_path),
         delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
@@ -224,7 +226,7 @@ async def test_review_passes_after_clean_validate(tmp_path: Path) -> None:
         return_value=GitInspection(
             head=result,
             branch="task-branch",
-            changed_files=("index.html",),
+            changed_files=("docs/guide.md",),
             diff=b"+hello\n",
         )
     )

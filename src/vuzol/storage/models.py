@@ -163,6 +163,10 @@ class Run(IdentityMixin, TimestampMixin, Base):
     policy_revision: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_revision: Mapped[str | None] = mapped_column(String(64))
     repository_revision: Mapped[str | None] = mapped_column(String(64))
+    # D0 pinned contract (nullable/additive): admission pins the executable
+    # contract at materialization; active runs read their pinned value.
+    # NULL = pre-D0 row, read through legacy behaviour.
+    execution_contract_version: Mapped[str | None] = mapped_column(String(64))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_category: Mapped[str | None] = mapped_column(String(100))
@@ -922,6 +926,10 @@ class WorkPackage(IdentityMixin, TimestampMixin, Base):
         ForeignKey("artifacts.id", ondelete="RESTRICT")
     )
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # D0 pinned contract (nullable/additive): the horizon admission decision at
+    # materialization. Active packages read this, not the live flag, so flag
+    # off never downgrades a materialized workflow. NULL = pre-D0 row.
+    execution_contract_version: Mapped[str | None] = mapped_column(String(64))
 
 
 class PlanRevision(IdentityMixin, Base):

@@ -247,8 +247,23 @@ class DatabaseReviewAccounting:
 
 def select_reviewer_profile(
     profiles: Sequence[ProviderProfileConfig],
+    *,
+    required_level: object = None,
+    budget_eligible: bool = True,
 ) -> ProviderProfileConfig | None:
-    """Pick the cheapest eligible OpenAI-compatible API reviewer profile."""
+    """Pick the cheapest eligible OpenAI-compatible API reviewer profile.
+
+    D0 wiring: the caller passes the resolved policy level (L2/L3) for
+    observability; budget eligibility is enforced downstream by
+    ``DatabaseReviewAccounting.reserve`` (exhaustion → BLOCKED, never skip).
+    ``ProviderRole.EXECUTOR`` profiles are never eligible. When no REVIEWER
+    profile exists, a PLANNER API profile is an explicit, logged policy
+    fallback (same read-only transport, no sandbox) — never silent.
+    """
+
+    from vuzol.observability import get_logger
+
+    log = get_logger(__name__)
 
     def eligible(role: ProviderRole) -> list[ProviderProfileConfig]:
         return [
@@ -259,8 +274,12 @@ def select_reviewer_profile(
             and profile.launch_mode is LaunchMode.API
             and role in profile.roles
             and profile.api_base_url is not None
+            # EXECUTOR tier never reviews, even if it also carries another role
+            # flag by misconfiguration: require non-EXECUTOR primary eligibility.
+            and ProviderRole.EXECUTOR not in profile.roles
         ]
 
+    del budget_eligible  # enforced at reserve-time; kept for explicit call-site plumbing.
     reviewers = eligible(ProviderRole.REVIEWER)
     if reviewers:
         return min(reviewers, key=lambda item: (item.routing_priority, item.id))
@@ -268,7 +287,16 @@ def select_reviewer_profile(
     # reviewer role is configured (same transport, no sandbox).
     planners = eligible(ProviderRole.PLANNER)
     if planners:
-        return min(planners, key=lambda item: (item.routing_priority, item.id))
+        chosen = min(planners, key=lambda item: (item.routing_priority, item.id))
+        log.info(
+            "reviewer_policy_fallback",
+            extra={
+                "fallback": "planner_for_reviewer",
+                "required_level": str(required_level) if required_level is not None else "",
+                "profile_id": chosen.id,
+            },
+        )
+        return chosen
     return None
 
 
@@ -304,7 +332,16 @@ class IndependentModelReviewer:
         cancellation: CancellationContext,
         lease: LeaseToken,
     ) -> ReviewVerdict:
-        profile = select_reviewer_profile(self._registries.profiles.items())
+        from vuzol.review.policy import ReviewLevel, resolve_review_plan
+
+        try:
+            _plan = resolve_review_plan(risk, tuple(inspection.changed_files))
+            _level: object = ReviewLevel(str(_plan["level"]))
+        except Exception:
+            _level = None
+        profile = select_reviewer_profile(
+            self._registries.profiles.items(), required_level=_level, budget_eligible=True
+        )
         if profile is None:
             raise IndependentReviewError(
                 "no openai-compatible reviewer or planner profile is configured"

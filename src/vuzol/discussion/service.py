@@ -33,6 +33,9 @@ from vuzol.discussion.domain import (
 from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled
 from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
+    AcceptanceEvidence,
+    AcceptanceWaiver,
+    Approval,
     Artifact,
     EditSession,
     MaterializationLink,
@@ -46,6 +49,7 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.types import (
     USER_TERMINAL_TASK_STATUSES,
+    ApprovalStatus,
     EditSessionStatus,
     EstimatedComplexity,
     PlanRevisionCreatedBy,
@@ -217,6 +221,10 @@ class WorkPackageService:
         # D1 intent pointer: the current revision's content hash becomes the
         # fence value for the next correction/replan.
         package.intent_revision = result.content_hash
+        # D2 L4 correction barrier: a new revision supersedes the plan that
+        # pending approvals were requested under — expire them via the
+        # existing TTL mechanism instead of letting stale envelopes decide.
+        await self._expire_pending_approvals(package.id)
         await self._close_open_edits(package_id, actor_type="system")
         await self._uow.work_packages.clear_open_detail(package_id=package_id)
         await self._detail_event(package_id, None, None, None, None, True)
@@ -228,6 +236,114 @@ class WorkPackageService:
             payload={"package_id": str(package_id), "revision_number": previous.revision_number},
         )
         return result
+
+    async def set_package_goal(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        goal: str | None,
+        exit_criteria: list[dict[str, object]] | None,
+        user_id: int,
+    ) -> int:
+        """Set the horizon goal/criteria through the control layer (D2 UI path).
+
+        Same generation CAS as every other control; criteria entries must
+        carry ``criterion_id`` (fail-closed, never silent). Setting a goal on
+        an APPROVED package returns it to DRAFT (re-approval required).
+        """
+
+        from vuzol.discussion.domain import PackageControlAction as _Action
+
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_generation(package.version, expected_status_generation)
+        control_transition_target(package.status, _Action.SET_GOAL)
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if package.head_revision_id != revision.id:
+            raise DomainError("stale_revision")
+        if goal is not None:
+            if not goal.strip():
+                raise DomainError("goal_missing")
+            package.goal = goal.strip()
+            package.goal_revision = (package.goal_revision or 0) + 1
+        if exit_criteria is not None:
+            for entry in exit_criteria:
+                if not isinstance(entry, dict) or not isinstance(
+                    entry.get("criterion_id"), str
+                ):
+                    raise DomainError("criterion_malformed")
+            package.exit_criteria = [dict(entry) for entry in exit_criteria]
+        previous_state = package.status
+        package.status = WorkPackageStatus.DRAFT
+        package.approved_revision_id = None
+        package.version += 1
+        await self._event(
+            package.id,
+            WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
+            "user",
+            previous_state=previous_state.value,
+            new_state=WorkPackageStatus.DRAFT.value,
+            payload={
+                "goal_set_by_user_id": user_id,
+                "goal_revision": package.goal_revision,
+                "status_generation": package.version,
+            },
+        )
+        return package.version
+
+    async def _expire_pending_approvals(self, package_id: uuid.UUID) -> int:
+        """Expire PENDING approvals requested under a superseded plan (D2 L4).
+
+        Uses the existing TTL mechanism (``decide_result`` already rejects
+        expired approvals): expiry is set to now, rows are kept for audit.
+        Returns the number of expired approvals.
+        """
+
+        assert self._uow.session is not None
+        task_ids = (
+            await self._uow.session.scalars(
+                select(MaterializationLink.task_id).where(
+                    MaterializationLink.work_package_id == package_id
+                )
+            )
+        ).all()
+        if not task_ids:
+            return 0
+        run_ids = (
+            await self._uow.session.scalars(select(Run.id).where(Run.task_id.in_(task_ids)))
+        ).all()
+        if not run_ids:
+            return 0
+        step_ids = (
+            await self._uow.session.scalars(select(Step.id).where(Step.run_id.in_(run_ids)))
+        ).all()
+        if not step_ids:
+            return 0
+        pending = (
+            await self._uow.session.scalars(
+                select(Approval).where(
+                    Approval.step_id.in_(step_ids),
+                    Approval.status == ApprovalStatus.PENDING,
+                )
+            )
+        ).all()
+        now = datetime.now(UTC)
+        for approval in pending:
+            approval.expires_at = now
+        if pending:
+            await self._event(
+                package_id,
+                WorkPackageEvent.REVISION_SUPERSEDED,
+                "system",
+                entity_type="work_package",
+                payload={
+                    "expired_pending_approvals": len(pending),
+                    "reason": "plan_revision_superseded",
+                },
+            )
+        return len(pending)
 
     async def _require_future_only_revision(
         self, package: WorkPackage, previous: PlanRevision, plan: PlanDraft
@@ -377,6 +493,9 @@ class WorkPackageService:
         package.preview_url = None
         package.status = WorkPackageStatus.APPROVED
         package.version += 1
+        # D2 L4 correction barrier: approving a (re)planned revision expires
+        # pending approvals requested under older plans.
+        await self._expire_pending_approvals(package.id)
         await self._event(
             revision.id,
             WorkPackageEvent.REVISION_APPROVED,
@@ -484,13 +603,18 @@ class WorkPackageService:
         artifact_id: uuid.UUID | None,
         user_id: int,
         horizon_enabled: bool = False,
+        waiver_id: uuid.UUID | None = None,
     ) -> int:
         """Record the acceptance verdict for an evaluating horizon package.
 
         Accept closes the horizon (``COMPLETED`` with retained evidence);
-        reject keeps it ``RUNNING``/``evaluating`` for bounded corrective
-        work through the existing retry/skip controls.
+        reject keeps it ``RUNNING``/``evaluating`` and records a durable
+        corrective signal for bounded follow-up work.
         """
+
+        from vuzol.workflows.acceptance import (
+            record_corrective_signal,
+        )
 
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         require_generation(package.version, expected_status_generation)
@@ -526,13 +650,34 @@ class WorkPackageService:
                     "status_generation": package.version,
                 },
             )
-            return package.version
-        if artifact_id is not None:
+            # D2 L6: a reject never leaves the package hanging in evaluating
+            # without a durable corrective trace.
             assert self._uow.session is not None
+            await record_corrective_signal(
+                self._uow.session,
+                scope="acceptance_rejected",
+                reason="acceptance_rejected",
+                package_id=package.id,
+            )
+            return package.version
+        assert self._uow.session is not None
+        if waiver_id is not None:
+            waiver = await self._resolve_waiver(waiver_id, package)
+        else:
+            waiver = None
+        if waiver is None:
+            # accepted=True requires evidence (E06-probe is impossible):
+            # the artifact must exist and carry a valid evidence document
+            # for THIS package and revision.
+            if artifact_id is None:
+                raise DomainError("acceptance_evidence_missing")
             artifact = await self._uow.session.get(Artifact, artifact_id)
             if artifact is None:
                 raise DomainError("artifact_missing")
-        package.acceptance_artifact_id = artifact_id
+            await self._check_evidence_artifact(package, revision, artifact)
+            package.acceptance_artifact_id = artifact_id
+        else:
+            package.acceptance_artifact_id = None
         package.accepted_at = datetime.now(UTC)
         package.horizon_phase = None
         package.status = WorkPackageStatus.COMPLETED
@@ -550,12 +695,110 @@ class WorkPackageService:
             payload={
                 "revision_id": str(revision.id),
                 "acceptance_artifact_id": None if artifact_id is None else str(artifact_id),
+                "acceptance_waiver_id": None if waiver is None else str(waiver.id),
                 "accepted_by_user_id": user_id,
                 "status_generation": package.version,
             },
         )
         await self._enqueue_plan_projection(package.id, package.version, "accepted")
         return package.version
+
+    async def _resolve_waiver(
+        self, waiver_id: uuid.UUID, package: WorkPackage
+    ) -> AcceptanceWaiver:
+        """Validate a waiver for THIS package and its current head (D2 L3)."""
+
+        assert self._uow.session is not None
+        waiver = await self._uow.session.get(AcceptanceWaiver, waiver_id)
+        if waiver is None or waiver.package_id != package.id:
+            raise DomainError("acceptance_waiver_unknown")
+        if waiver.integration_head != package.integration_head_commit:
+            raise DomainError("acceptance_waiver_stale")
+        if not waiver.reason.strip() or waiver.principal_user_id == 0:
+            raise DomainError("acceptance_waiver_invalid")
+        return waiver
+
+    async def _check_evidence_artifact(
+        self, package: WorkPackage, revision: PlanRevision, artifact: Artifact
+    ) -> None:
+        """Validate an evidence artifact for THIS package/revision (D2 L2/L3).
+
+        Fail-closed: missing/foreign artifact, schema mismatch, criteria gaps,
+        plan drift and head mismatch all raise instead of completing.
+        """
+
+        from vuzol.workflows.acceptance import find_evidence, validate_evidence
+
+        assert self._uow.session is not None
+        # Foreign scope: the artifact must belong to this package's project.
+        artifact_task_id = getattr(artifact, "task_id", None)
+        if artifact_task_id is not None:
+            owner = await self._uow.session.get(Task, artifact_task_id)
+            if owner is None or owner.project_id != package.project_id:
+                raise DomainError("acceptance_evidence_foreign")
+        evidence = await find_evidence(
+            self._uow.session, package_id=package.id, plan_revision_id=None
+        )
+        candidate = None
+        if evidence is not None and evidence.artifact_id == artifact.id:
+            candidate = evidence
+        else:
+            rows = (
+                await self._uow.session.scalars(
+                    select(AcceptanceEvidence).where(
+                        AcceptanceEvidence.artifact_id == artifact.id
+                    )
+                )
+            ).all()
+            candidate = next(
+                (row for row in rows if row.package_id == package.id), None
+            )
+        if candidate is None:
+            raise DomainError("acceptance_evidence_unknown")
+        errors = validate_evidence(candidate.evidence)
+        if errors:
+            raise DomainError("acceptance_evidence_invalid")
+        document = candidate.evidence
+        if document.get("plan_content_hash") != revision.content_hash:
+            raise DomainError("acceptance_evidence_stale_revision")
+        criteria = document.get("criteria")
+        if (
+            not isinstance(criteria, list)
+            or not criteria
+            or any(
+                not isinstance(entry, dict) or entry.get("satisfied") is not True
+                for entry in criteria
+            )
+        ):
+            raise DomainError("acceptance_criteria_unmet")
+        if document.get("result_commit") != package.integration_head_commit:
+            raise DomainError("acceptance_head_mismatch")
+        await self._check_evidence_revisions(package, document)
+
+    async def _check_evidence_revisions(
+        self, package: WorkPackage, document: dict[str, object]
+    ) -> None:
+        """The evidence revisions must match the last item run (no drift)."""
+
+        assert self._uow.session is not None
+        links = (
+            await self._uow.session.scalars(
+                select(MaterializationLink).where(
+                    MaterializationLink.work_package_id == package.id
+                )
+            )
+        ).all()
+        if not links:
+            return
+        last = max(links, key=lambda link: link.ordinal or 0)
+        run = await self._uow.session.scalar(
+            select(Run).where(Run.task_id == last.task_id)
+        )
+        if run is None:
+            return
+        for field in ("configuration_revision", "policy_revision"):
+            if document.get(field) != getattr(run, field):
+                raise DomainError("acceptance_evidence_stale_revision")
 
     async def _release_discussion(self, package: WorkPackage) -> None:
         session = self._uow.session

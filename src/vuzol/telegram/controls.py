@@ -49,6 +49,8 @@ _MUTATING_PACKAGE_KINDS = {
     WorkPackageCallbackKind.STOP_PACKAGE: PackageControlAction.STOP_PACKAGE,
     WorkPackageCallbackKind.FINISH_PACKAGE: PackageControlAction.FINISH_PACKAGE,
     WorkPackageCallbackKind.RESTART_PACKAGE: PackageControlAction.RESTART_PACKAGE,
+    WorkPackageCallbackKind.ACCEPT_PACKAGE: PackageControlAction.ACCEPT_PACKAGE,
+    WorkPackageCallbackKind.REJECT_PACKAGE: PackageControlAction.REJECT_PACKAGE,
 }
 
 

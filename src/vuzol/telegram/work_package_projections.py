@@ -280,6 +280,11 @@ async def build_work_package_plan_card(
         WorkPackageStatus.STOPPED: "Stopped",
         WorkPackageStatus.DISCARDED: "Cancelled",
     }[package.status]
+    if package.goal:
+        # D2 L5: horizon packages render through the frozen status mapping,
+        # so evaluating/accepted/succeeded stay distinct for the operator.
+        # Legacy packages without a goal keep the map above (Q4 compat).
+        status = await _horizon_display_status(session, package, status)
     released = (
         package.status in {WorkPackageStatus.COMPLETED, WorkPackageStatus.DISCARDED}
         and discussion.active_work_package_id != package.id
@@ -600,12 +605,27 @@ async def build_work_package_plan_card(
         )
         controls.append(("Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision)))
     elif not _status_card and package.status is WorkPackageStatus.RUNNING:
-        controls.append(
-            (
-                "Остановить",
-                _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision),
+        if package.horizon_phase == "evaluating":
+            # D2 ACCEPT UI: the package waits for the acceptance decision.
+            controls.append(
+                (
+                    "Принять результат",
+                    _callback(WorkPackageCallbackKind.ACCEPT_PACKAGE, package, revision),
+                )
             )
-        )
+            controls.append(
+                (
+                    "Отклонить",
+                    _callback(WorkPackageCallbackKind.REJECT_PACKAGE, package, revision),
+                )
+            )
+        else:
+            controls.append(
+                (
+                    "Остановить",
+                    _callback(WorkPackageCallbackKind.STOP_PACKAGE, package, revision),
+                )
+            )
         controls.append(
             ("Завершить", _callback(WorkPackageCallbackKind.FINISH_PACKAGE, package, revision))
         )
@@ -732,6 +752,59 @@ async def _work_package_token_totals(
         )
     ).one()
     return int(row[0]), int(row[1]), int(row[2])
+
+
+async def _horizon_display_status(
+    session: AsyncSession, package: WorkPackage, fallback: str
+) -> str:
+    """Horizon-aware card status via the frozen mapping (D2 L5, Q2 authority).
+
+    Revives ``horizon_status`` as the display source of truth for packages
+    with a goal: ``evaluating`` while acceptance is pending, ``succeeded``
+    once accepted. A COMPLETED horizon package with unsettled effects shows
+    "Accepted" (verdict recorded, receipts pending) instead of "Done".
+    """
+
+    from vuzol.discussion.horizon import horizon_status
+    from vuzol.execution.effect import _ACTIVE_STATUSES
+    from vuzol.storage.models import Effect
+
+    code = horizon_status(
+        package.status, package.horizon_phase, package.accepted_at is not None
+    )
+    if code == "evaluating":
+        return "Evaluating"
+    if code in {"waiting_approval", "waiting_resource", "waiting_input"}:
+        return "Waiting"
+    if code == "succeeded":
+        task_ids = (
+            await session.scalars(
+                select(MaterializationLink.task_id).where(
+                    MaterializationLink.work_package_id == package.id
+                )
+            )
+        ).all()
+        if task_ids:
+            run_ids = (
+                await session.scalars(select(Run.id).where(Run.task_id.in_(task_ids)))
+            ).all()
+            if run_ids:
+                step_ids = (
+                    await session.scalars(select(Step.id).where(Step.run_id.in_(run_ids)))
+                ).all()
+                if step_ids:
+                    pending = await session.scalar(
+                        select(Effect.id).where(
+                            Effect.step_id.in_(step_ids),
+                            Effect.status.in_(_ACTIVE_STATUSES),
+                        )
+                    )
+                    if pending is not None:
+                        return "Accepted"
+        return "Done"
+    if code in {"draft", "ready", "running", "paused", "failed", "cancelled"}:
+        return fallback
+    return fallback
 
 
 async def _package_retry_available(session: AsyncSession, package: WorkPackage) -> bool:

@@ -538,6 +538,27 @@ async def finalize_if_complete(session: AsyncSession, run: Run) -> bool:
         return False
     if run.status is not RunStatus.RUNNING:
         return False
+    # D2 L5 (verdict vs effect): success is declared only after receipts —
+    # an unsettled effect holds completion instead of silently succeeding.
+    # Flush first: an intent recorded earlier in this transaction must be
+    # visible to the check (sessions may run without autoflush).
+    from vuzol.execution.effect import _ACTIVE_STATUSES
+    from vuzol.storage.models import Effect
+
+    await session.flush()
+    step_ids = [step.id for step in steps if getattr(step, "id", None) is not None]
+    if not step_ids:
+        await transition_run(session, run, RunStatus.COMPLETED, actor_type="workflow_manager")
+        run.ended_at = func.now()
+        return True
+    unsettled = await session.scalar(
+        select(Effect.id).where(
+            Effect.step_id.in_(step_ids),
+            Effect.status.in_(_ACTIVE_STATUSES),
+        )
+    )
+    if unsettled is not None:
+        return False
     await transition_run(session, run, RunStatus.COMPLETED, actor_type="workflow_manager")
     run.ended_at = func.now()
     return True
@@ -732,6 +753,19 @@ def _emit_recovery_event(
 async def _block_for_attention(session: AsyncSession, run: Run, step: Step) -> None:
     await transition_step(session, step, StepStatus.BLOCKED, actor_type="worker")
     await transition_run(session, run, RunStatus.BLOCKED, actor_type="worker")
+    # D2 L6: blocking without a durable corrective trace is forbidden — the
+    # Event + projection row below is the job record; bounded repair already
+    # ran (or was inapplicable) before this call.
+    from vuzol.workflows.acceptance import record_corrective_signal
+
+    await record_corrective_signal(
+        session,
+        scope="blocked_attention",
+        reason="blocked_attention",
+        task_id=run.task_id,
+        run_id=run.id,
+        step_id=step.id,
+    )
 
 
 async def _steps_for_run(

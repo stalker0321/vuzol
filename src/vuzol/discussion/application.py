@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import Field
@@ -56,6 +57,10 @@ class AuthoritativeControlCommand(FrozenModel):
     item_ordinal: int | None = Field(default=None, ge=1, le=20)
     source: PackageControlSource
     external_idempotency_key: str = Field(min_length=1, max_length=255)
+    # D2 SET_GOAL payload (control layer, not an external channel): only the
+    # goal text travels here; criteria/budget ride the draft/create path.
+    goal: str | None = Field(default=None, max_length=2000)
+    exit_criteria: list[dict[str, object]] | None = None
 
 
 class PackageControlResult(FrozenModel):
@@ -173,6 +178,11 @@ async def apply_plan_request_in_uow(
     plan: PlanDraft | None = None,
     intent: PlanRequestIntent | None = None,
     horizon_enabled: bool = False,
+    goal: str | None = None,
+    exit_criteria: list[dict[str, object]] | None = None,
+    lifetime_budget: dict[str, object] | None = None,
+    deadline: datetime | None = None,
+    owner: str | None = None,
 ) -> RevisionResult:
     """Materialize an already policy-fenced plan in the caller's transaction."""
 
@@ -190,6 +200,13 @@ async def apply_plan_request_in_uow(
             actor_type="planner_model",
             planner_profile=planner_profile,
             prompt_version=result.prompt_version,
+            # D2 goal path: the interpreter may supply goal/criteria/budget;
+            # otherwise the package stays non-horizon until SET_GOAL.
+            goal=goal,
+            exit_criteria=exit_criteria,
+            lifetime_budget=lifetime_budget,
+            deadline=deadline,
+            owner=owner,
         )
         await enqueue_plan_projection(uow, revision_result)
         return revision_result
@@ -448,6 +465,58 @@ class PackageControlIngress:
                 generation = sequence.status_generation
                 revision_id = restarted_revision.id
                 code = PackageControlResultCode.APPLIED
+            elif command.action is PackageControlAction.ACCEPT_PACKAGE:
+                # D2 ACCEPT UI: production caller for record_acceptance. The
+                # latest evidence for the current head is resolved here; a
+                # missing evidence row fails closed (no silent accept).
+                from vuzol.workflows.acceptance import find_evidence
+
+                accept_package = await uow.work_packages.get_package(command.package_id)
+                accept_evidence = await find_evidence(
+                    uow.session,
+                    package_id=command.package_id,
+                    integration_base_head=None,
+                    result_commit=accept_package.integration_head_commit,
+                )
+                if accept_evidence is None or accept_evidence.artifact_id is None:
+                    raise DomainError("acceptance_evidence_missing")
+                generation = await service.record_acceptance(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    accepted=True,
+                    artifact_id=accept_evidence.artifact_id,
+                    user_id=command.user_id,
+                    horizon_enabled=self._horizon_enabled,
+                )
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
+            elif command.action is PackageControlAction.REJECT_PACKAGE:
+                generation = await service.record_acceptance(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    accepted=False,
+                    artifact_id=None,
+                    user_id=command.user_id,
+                    horizon_enabled=self._horizon_enabled,
+                )
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
+            elif command.action is PackageControlAction.SET_GOAL:
+                generation = await service.set_package_goal(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                    goal=command.goal,
+                    exit_criteria=command.exit_criteria,
+                    user_id=command.user_id,
+                )
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
             elif command.action is PackageControlAction.REQUEST_REPLAN:
                 generation = await service.request_replan(
                     package_id=command.package_id,

@@ -1955,3 +1955,67 @@ class ReviewOutcomeHistory(IdentityMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class AcceptanceEvidence(IdentityMixin, Base):
+    """Package-level acceptance evidence (D2, DELTA §D2).
+
+    One row per distinct evidence document for a package; unique within
+    ``(package_id, evidence_hash)`` (content-addressed, never a surrogate —
+    same pattern as D1 outcome history). Assembled by the acceptance step
+    before promotion of the last item and referenced by ``record_acceptance``.
+    """
+
+    __tablename__ = "acceptance_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_id",
+            "evidence_hash",
+            name="uq_acceptance_evidence_package_hash",
+        ),
+    )
+
+    package_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    plan_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("plan_revisions.id", ondelete="RESTRICT")
+    )
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    integration_base_head: Mapped[str | None] = mapped_column(String(64))
+    result_commit: Mapped[str | None] = mapped_column(String(64))
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT")
+    )
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class AcceptanceWaiver(IdentityMixin, Base):
+    """Manual promotion waiver: separate type with principal/reason (D2 L3).
+
+    An explicit owner decision allowing promotion without full evidence.
+    Unique per ``(package_id, integration_head)`` — a duplicate waiver for
+    the same head returns the existing decision instead of forking it.
+    """
+
+    __tablename__ = "acceptance_waivers"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_id",
+            "integration_head",
+            name="uq_acceptance_waiver_package_head",
+        ),
+    )
+
+    package_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("work_packages.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    integration_head: Mapped[str] = mapped_column(String(64), nullable=False)
+    principal_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

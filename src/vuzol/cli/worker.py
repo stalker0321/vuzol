@@ -29,6 +29,7 @@ from vuzol.review import ResultReviewHandler
 from vuzol.review.independent import DatabaseReviewAccounting, IndependentModelReviewer
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
+from vuzol.workflows.acceptance import AcceptanceGateHandler
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.dispatch import WorkflowDispatcher
 from vuzol.workflows.recovery import recover_expired_steps
@@ -149,6 +150,21 @@ async def run() -> None:
                 LocalGit(),
                 worktree_root=settings.worktree_root,
                 independent_reviewer=independent_reviewer,
+            ),
+            # D2 L1: materialized acceptance gate (pass-through off the
+            # horizon path; evidence assembly for the last pinned item).
+            # Artifact persistence is required on that path; without a store
+            # the gate fails closed instead of silently passing.
+            "acceptance": AcceptanceGateHandler(
+                factory,
+                artifacts=ArtifactStore(
+                    settings.artifact_root,
+                    max_bytes=settings.limits.artifact_bytes,
+                    retention_days=settings.retention.artifact_days,
+                    redaction_patterns=settings.redaction_patterns,
+                )
+                if routable_profiles
+                else None,
             ),
         }
         internal_worker = WorkflowWorker(

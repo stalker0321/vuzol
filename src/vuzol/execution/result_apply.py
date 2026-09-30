@@ -28,6 +28,7 @@ from vuzol.storage.models import (
     Approval,
     Effect,
     MaterializationLink,
+    Run,
     Step,
     WorkPackage,
     Worktree,
@@ -180,6 +181,24 @@ class ResultApplyHandler:
             }
             if any(envelope[key] != value for key, value in expected.items()):
                 raise ValueError("retained result changed after approval was requested")
+            # D2 L4 correction barrier: the envelope pins the revisions it
+            # was approved under; drift fails closed (inv.35, literally).
+            # Legacy envelopes without the fields pass through (Q4 compat).
+            run = await session.get(Run, request.run_id)
+            if run is None:
+                raise LookupError("approved result run is missing")
+            for field in ("configuration_revision", "policy_revision"):
+                expected = envelope.get(field)
+                if expected is not None and expected != getattr(run, field):
+                    raise ValueError(
+                        f"approval envelope {field} drifted since approval"
+                    )
+            # D2 Q1 final gate: promotion of the last item into the real
+            # target requires acceptance evidence (or a waiver). Intermediate
+            # applies and legacy packages pass through unchanged.
+            from vuzol.workflows.acceptance import promotion_gate
+
+            await promotion_gate(session, task_id=request.task_id, envelope=envelope)
             return approval_id, envelope, worktree
 
     async def _record_intent(

@@ -57,6 +57,9 @@ class PackageControlAction(StrEnum):
     RESTART_PACKAGE = "restart_package"
     REQUEST_REPLAN = "request_replan"
     APPROVE_ITEM = "approve_item"
+    ACCEPT_PACKAGE = "accept_package"
+    REJECT_PACKAGE = "reject_package"
+    SET_GOAL = "set_goal"
 
 
 class DomainError(RuntimeError):
@@ -514,6 +517,21 @@ def control_transition_target(
         PackageControlAction.APPROVE_ITEM: (
             frozenset({WorkPackageStatus.RUNNING}),
             WorkPackageStatus.RUNNING,
+        ),
+        # D2 acceptance UI: accept/reject decide on a RUNNING evaluating
+        # package (record_acceptance owns the terminal transition itself);
+        # SET_GOAL only retargets mutable drafts.
+        PackageControlAction.ACCEPT_PACKAGE: (
+            frozenset({WorkPackageStatus.RUNNING}),
+            WorkPackageStatus.RUNNING,
+        ),
+        PackageControlAction.REJECT_PACKAGE: (
+            frozenset({WorkPackageStatus.RUNNING}),
+            WorkPackageStatus.RUNNING,
+        ),
+        PackageControlAction.SET_GOAL: (
+            frozenset({WorkPackageStatus.DRAFT, WorkPackageStatus.APPROVED}),
+            WorkPackageStatus.DRAFT,
         ),
     }
     sources, target = allowed[action]

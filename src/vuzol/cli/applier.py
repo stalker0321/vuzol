@@ -7,6 +7,7 @@ import socket
 from contextlib import suppress
 
 from vuzol.config import Capability, get_runtime_configuration
+from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.effect_reconciliation import EffectReconciler
 from vuzol.execution.git import LocalGit
 from vuzol.execution.result_apply import ResultApplyHandler
@@ -18,6 +19,7 @@ from vuzol.projects.capability_provisioning import (
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
+from vuzol.workflows.acceptance import AcceptanceGateHandler
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.worker import WorkflowWorker
 
@@ -75,11 +77,24 @@ async def run() -> None:
             factory,
             OfflineCapabilityInstaller(settings.capability_provisioning),
         )
+        acceptance_handler = AcceptanceGateHandler(
+            factory,
+            artifacts=ArtifactStore(
+                settings.artifact_root,
+                max_bytes=settings.limits.artifact_bytes,
+                retention_days=settings.retention.artifact_days,
+                redaction_patterns=settings.redaction_patterns,
+            ),
+        )
         worker = WorkflowWorker(
             settings,
             factory,
             owner=f"{owner}:apply",
-            handlers={"approval": handler, "ensure_capabilities": capability_handler},
+            handlers={
+                "approval": handler,
+                "ensure_capabilities": capability_handler,
+                "acceptance": acceptance_handler,
+            },
             capabilities=frozenset({Capability.GIT, Capability.HOST_ADMIN}),
             queue_classes=frozenset({QueueClass.PRIVILEGED}),
         )

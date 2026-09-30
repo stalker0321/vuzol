@@ -126,7 +126,12 @@ async def test_finalize_completes_running_run(monkeypatch: pytest.MonkeyPatch) -
     )
     transition = AsyncMock()
     monkeypatch.setattr("vuzol.workflows.service.transition_run", transition)
+    # D2 L5: finalize flushes before the unsettled-effect check; no effects
+    # here, so completion proceeds.
+    session = MagicMock()
+    session.flush = AsyncMock()
+    session.scalar = AsyncMock(return_value=None)
 
-    assert await finalize_if_complete(cast(Any, MagicMock()), cast(Any, run))
+    assert await finalize_if_complete(session, cast(Any, run))
     transition.assert_awaited_once()
     assert run.ended_at is not None

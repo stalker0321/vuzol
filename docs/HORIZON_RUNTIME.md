@@ -73,27 +73,36 @@ Changing it is a contract change:
   (an unaccepted completion is not success)
 - `PAUSED` → `paused`; `STOPPED` → `failed`; anything else → `cancelled`
 
-## 4. Opt-in flag / pinned admission (D0)
+## 4. Opt-in flag / pinned admission (D0, single statement)
 
-- Enable: `VUZOL_HORIZON__ENABLED=true` (or config). Default off: the legacy
-  lifecycle is the only executable path for new admissions; all new parameters
-  default `False` through `PackageControlIngress`, `WorkPackageSequencer`, and
-  the telegram composition boundary (read via `discussion/horizon.py:horizon_enabled`).
+- **Flag off = legacy COMPLETED; flag on = acceptance required.** With the
+  flag off (default) the legacy lifecycle is the only executable path for new
+  admissions and an exhausted queue completes (`COMPLETED`) without
+  acceptance. With the flag on (and horizon data: goal or exit criteria), an
+  exhausted queue enters `evaluating`, never success, and `COMPLETED`
+  requires `record_acceptance` (or a waiver). All parameters default `False`
+  through `PackageControlIngress`, `WorkPackageSequencer`, and the telegram
+  composition boundary (read via `discussion/horizon.py:horizon_enabled`).
 - Pinned contract (D0): `WorkPackage.execution_contract_version` +
   `Run.execution_contract_version` (nullable/additive, migration `d0c0n7r4c7v1`).
   `sequencer.start` pins `horizon-v1:enabled|disabled` on first start only
   (NULL → pin from admission flag); restart/resume never re-pins. Active
   packages read the pinned value (`pinned_horizon_enabled`): `approve_waiting_item`,
   RESTART `horizon_resume` + `restart_plan` horizon branch, `_materialize_current` /
-  `materialize_running` / `observe_terminal`. A pinned-enabled package therefore
-  passes APPROVE_ITEM and keeps its `waiting_approval`/`evaluating` gates with
+  `materialize_running` / `observe_terminal`, plus D2 `revise_draft` guard,
+  `record_acceptance` gate and the promotion gate. A pinned-enabled package
+  therefore keeps its `waiting_approval`/`evaluating`/acceptance gates with
   the live flag off. Pre-D0 rows (NULL) fall back to the passed flag for
   compatibility. Old serialized drafts/workflows/approvals remain readable.
-- Rollback: set the flag off for new admissions. Already-running horizon
-  packages keep their persisted state and evidence; they continue/pause
-  explicitly via the existing stop/replan controls, never silent
-  legacy-COMPLETED. `Run.workflow_version` is recorded at materialization and
-  documented as written-not-branched (not used for contract selection in D0).
+- D2 acceptance (flag on): package-level acceptance (`accepted_at` + evidence
+  artifact, Q2 authority) is recorded via the ACCEPT UI or control layer;
+  the last item's promotion into the real target requires evidence or a
+  waiver (Q1 gate in `result_apply`); intermediate items keep auto-approving
+  into the integration branch. Rollback (flag off for new admissions) never
+  deletes evidence and never downgrades materialized packages: they
+  continue/pause explicitly via the existing stop/replan controls, never
+  silent legacy-COMPLETED. `Run.workflow_version` is recorded at
+  materialization and documented as written-not-branched.
 - Rollback never deletes evidence: approvals, artifacts, attempts, and event
   rows are append-only; the migration downgrade is schema-only and is not
   part of the flag rollback.

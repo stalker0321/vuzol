@@ -10,18 +10,19 @@ deterministic tests. Live trials stay on the existing `seed_trial` path
 `src/vuzol/experiments/corpus.py`. Strata mirror EXPERIMENTS.md §2
 (isolated/integration/research/data/reuse/horizon + Jev negative set);
 splits dev/calibration/held-out; smoke-8 for harness repair. Fixture:
-`tests/fixtures/experiments/corpus.v1.json` (12 tasks, 8 smoke, hash-pinned
+`tests/fixtures/experiments/corpus.v1.json` (40 tasks, 8 smoke, hash-pinned
 via `content_hash`). Loader: `load_corpus_manifest`.
 
 ## 2. Arms with distinct documented execution paths
 
-`src/vuzol/experiments/arms.py` (`ExperimentArm`: current/strong_solo/hybrid):
+`src/vuzol/experiments/arms.py` (`ExperimentArm`: current/strong_solo/hybrid/candidate_delta):
 
 | Arm | Steps | Budget |
 |---|---|---|
 | current | interpret → prepare → execute → approval | strong |
 | strong_solo | interpret → prepare → execute (single owner, no approval step) | efficient |
 | hybrid | interpret → prepare → execute → review → approval | balanced |
+| candidate_delta | interpret → prepare → execute → review → approval → record_evidence (full D-stack) | balanced |
 
 `describe_execution_path(arm)` records steps/roles/budget mode;
 `plan_cohort` pairs every corpus task × seed across arms (`pair_id =

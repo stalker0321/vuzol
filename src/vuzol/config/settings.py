@@ -363,6 +363,10 @@ class WorkflowSettings(BaseModel):
     max_task_repairs: int = Field(default=6, ge=1, le=50)
     max_backpressure_waits: int = Field(default=5, ge=1, le=50)
     recovery_deadline_seconds: int = Field(default=3_600, ge=60, le=86_400)
+    # D6 Q2 kill switch: when True, the workflow dispatcher defers (never
+    # dead-letters) new dispatches. In-flight uncertain effects keep flowing
+    # to reconciliation; unfinished runs are never marked completed by it.
+    dispatch_freeze: bool = Field(default=False)
 
     @model_validator(mode="after")
     def validate_timing(self) -> "WorkflowSettings":

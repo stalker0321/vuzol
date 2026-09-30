@@ -84,6 +84,28 @@ services:
     init: true
     restart: unless-stopped
 
+  # D6: the memory writer runs the derived-memory extraction loop over the
+  # memory_extract outbox destination. Compose file only — no change to the
+  # running TG contour (enable explicitly via the memory profile).
+  memory-writer:
+    profiles: [memory]
+    build: .
+    command: ["vuzol-memory-writer"]
+    user: "${VUZOL_RUNTIME_UID:-1000}:10001"
+    environment:
+      VUZOL_ENVIRONMENT: development
+      VUZOL_SERVICE_NAME: vuzol
+      VUZOL_REGISTRY_FILE: /app/config/registries.toml
+      VUZOL_DATABASE_DSN_REFERENCE: env:VUZOL_DATABASE_DSN
+      VUZOL_DATABASE_DSN: ${VUZOL_DATABASE_DSN:-postgresql+psycopg://vuzol:vuzol-local-only@postgres:5432/vuzol} # pragma: allowlist secret
+    volumes:
+      - ${VUZOL_REGISTRY_FILE_HOST:-./config/registries.example.toml}:/app/config/registries.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+
   telegram-ingress:
     profiles: [telegram]
     image: vuzol:local

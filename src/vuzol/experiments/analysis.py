@@ -18,7 +18,7 @@ import math
 import random
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TypedDict, cast
+from typing import Any, TypedDict, cast
 
 ANALYSIS_SCHEMA = "experiment-analysis.v1"
 
@@ -99,6 +99,10 @@ class TrialRecord:
     pricing_revision: str | None = None
     duration_ms: int = 0
     deadline_ms: int | None = None
+    # D6: user intervention and escaped-defect categories flow into analysis
+    # (rates, not gates) so measurement never drops them silently.
+    human_intervention: bool = False
+    defect_categories: tuple[str, ...] = ()
 
     def effective_status(self) -> str:
         if (
@@ -190,6 +194,35 @@ class AnalysisReport(TypedDict):
     denominator_note: str
     arms: dict[str, ArmSummary]
     hypotheses: list[HypothesisResult]
+
+
+def intervention_rates(records: tuple[TrialRecord, ...]) -> dict[str, dict[str, Any]]:
+    """Per-arm user-intervention and escaped-defect rates (D6 measurement).
+
+    Rates only, never gates: failed/censored/aborted records stay in the
+    denominator via summarize_arm; this reports what needed a human and what
+    escaped as defects alongside success and cost.
+    """
+
+    arms = sorted({item.arm for item in records})
+    result: dict[str, dict[str, Any]] = {}
+    for arm in arms:
+        members = tuple(item for item in records if item.arm == arm)
+        defects: dict[str, int] = {}
+        for item in members:
+            for category in item.defect_categories:
+                defects[category] = defects.get(category, 0) + 1
+        result[arm] = {
+            'n': len(members),
+            'interventions': sum(1 for item in members if item.human_intervention),
+            'intervention_rate': (
+                sum(1 for item in members if item.human_intervention) / len(members)
+                if members
+                else 0.0
+            ),
+            'defects': defects,
+        }
+    return result
 
 
 def summarize_arm(records: tuple[TrialRecord, ...]) -> ArmSummary:
@@ -585,6 +618,12 @@ def trial_record_from_json(data: dict[str, object]) -> TrialRecord:
     if status not in {STATUS_SUCCESS, STATUS_FAILED, STATUS_ABORTED, STATUS_CENSORED}:
         raise ValueError(f"unknown trial status for analysis: {status}")
     deadline = data.get("deadline_ms")
+    raw_defects = data.get("defect_categories", ())
+    defects = (
+        tuple(str(item) for item in raw_defects)
+        if isinstance(raw_defects, (list, tuple))
+        else ()
+    )
     return TrialRecord(
         pair_id=str(data["pair_id"]),
         task_id=str(data["task_id"]),
@@ -600,6 +639,8 @@ def trial_record_from_json(data: dict[str, object]) -> TrialRecord:
         ),
         duration_ms=cast(int, data.get("duration_ms", 0)),
         deadline_ms=cast(int, deadline) if deadline is not None else None,
+        human_intervention=bool(data.get("human_intervention", False)),
+        defect_categories=defects,
     )
 
 

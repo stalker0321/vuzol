@@ -98,11 +98,13 @@ def test_corpus_rejects_duplicate_task_ids() -> None:
 
 
 def test_three_arms_have_distinct_documented_execution_paths() -> None:
+    # D6 Q4: four arms (A current, B efficient strong solo, hybrid, C candidate
+    # delta full D-stack); budget modes stay closed at three (C is balanced).
     traces = {arm: describe_execution_path(arm) for arm in ExperimentArm}
     step_traces = {
         arm: tuple(step["step_type"] for step in trace["steps"]) for arm, trace in traces.items()
     }
-    assert len(set(step_traces.values())) == 3
+    assert len(set(step_traces.values())) == 4
     assert step_traces[ExperimentArm.STRONG_SOLO] == (
         "interpret",
         "prepare_worktree",
@@ -112,7 +114,8 @@ def test_three_arms_have_distinct_documented_execution_paths() -> None:
     assert "approval" in step_traces[ExperimentArm.CURRENT]
     assert "approval" not in step_traces[ExperimentArm.STRONG_SOLO]
     workflow_types = {trace["workflow_type"] for trace in traces.values()}
-    assert len(workflow_types) == 3
+    assert len(workflow_types) == 4
+    assert "adaptive_worker_trial_delta" in workflow_types
     budget_modes = {trace["budget_mode"] for trace in traces.values()}
     assert budget_modes == {"strong", "efficient", "balanced"}
 
@@ -120,12 +123,14 @@ def test_three_arms_have_distinct_documented_execution_paths() -> None:
 def test_cohort_pairs_task_ids_across_arms() -> None:
     manifest = load_corpus_manifest(FIXTURES / "corpus.v1.json")
     planned = plan_cohort(manifest, tuple(ExperimentArm), (1, 2), shuffle_seed=7, only_smoke=True)
-    assert len(planned) == 8 * 2 * 3
+    assert len(planned) == 8 * 2 * 4
     by_pair: dict[str, set[str]] = {}
     for run in planned:
         by_pair.setdefault(run.pair_id, set()).add(run.arm.value)
         assert run.pair_id == f"{run.corpus_task_id}:seed-{run.seed}"
-    assert all(arms == {"current", "strong_solo", "hybrid"} for arms in by_pair.values())
+    assert all(
+        arms == {"current", "strong_solo", "hybrid", "candidate_delta"} for arms in by_pair.values()
+    )
 
 
 def test_cohort_order_is_randomized_but_reproducible() -> None:

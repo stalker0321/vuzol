@@ -51,7 +51,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     export.add_argument("--csv", type=Path, required=True)
     plan = subparsers.add_parser("plan")
     plan.add_argument("corpus", type=Path)
-    plan.add_argument("--arms", nargs="+", default=["current", "strong_solo", "hybrid"])
+    # D6 Q4 matched arms: A current base, B efficient strong solo, C candidate delta.
+    plan.add_argument("--arms", nargs="+", default=["current", "strong_solo", "candidate_delta"])
     plan.add_argument("--seeds", nargs="+", type=int, default=[1])
     plan.add_argument("--shuffle-seed", type=int, default=0)
     plan.add_argument("--smoke-only", action="store_true")
@@ -142,7 +143,10 @@ async def _run(args: argparse.Namespace) -> None:
             _print_json({"json": str(args.json), "runs": len(planned)})
         elif args.command == "analyze":
             raw = json.loads(args.trials.read_text())
-            records = tuple(trial_record_from_json(item) for item in raw["records"])
+            # D6: accept both export shapes — current exports write "trials",
+            # older captures use "records". Same parser either way.
+            items = raw.get("records", raw.get("trials", ()))
+            records = tuple(trial_record_from_json(item) for item in items)
             report = build_report(
                 records,
                 hypothesis_ids=tuple(args.hypotheses),

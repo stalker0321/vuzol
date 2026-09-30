@@ -8,7 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
 from vuzol.interpretation.domain import TaskAction, TaskDraft, TaskType
-from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, dead_letter_outbox_item
+from vuzol.storage.leasing import (
+    claim_outbox_item,
+    complete_outbox_item,
+    dead_letter_outbox_item,
+    defer_outbox_item,
+)
 from vuzol.storage.models import (
     Interpretation,
     MaterializationLink,
@@ -78,6 +83,16 @@ class WorkflowDispatcher:
             )
         if token is None:
             return False
+        if self._runtime.settings.workflow.dispatch_freeze:
+            # D6 Q2 kill switch: block new dispatches without losing them.
+            # The item is deferred (not dead-lettered); in-flight uncertain
+            # effects keep flowing to reconciliation and unfinished runs are
+            # never touched here, so they cannot become completed by this path.
+            async with self._factory.begin() as session:
+                await defer_outbox_item(
+                    session, token, delay_seconds=60, reason="dispatch_frozen"
+                )
+            return True
         try:
             async with self._factory.begin() as session:
                 await self._dispatch(session, token)

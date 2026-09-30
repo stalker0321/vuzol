@@ -37,6 +37,7 @@ from vuzol.storage.models import (
     Approval,
     Artifact,
     Event,
+    MemoryUnit,
     Run,
     Step,
     SupervisedProcess,
@@ -1431,6 +1432,18 @@ class RetentionSweeper:
             )
             if live_worktree is not None:
                 return "referenced_by_worktree", {"worktree_id": str(live_worktree)}
+        # D5: memory/effect/acceptance provenance pins (ARCHITECTURE_REVIEW
+        # checklist): an artifact referenced by any memory unit survives the
+        # sweep regardless of status — refs are evidence, tombstones/redaction
+        # hide text without deleting rows.
+        memory_refs = await session.scalar(
+            select(MemoryUnit.id)
+            .where(MemoryUnit.source_artifact_id == artifact.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        if memory_refs is not None:
+            return "referenced_by_memory_provenance", {"memory_unit_id": str(memory_refs)}
         return None
 
     def _artifact_path(self, artifact: Artifact) -> Path:

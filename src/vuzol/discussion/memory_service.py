@@ -18,6 +18,11 @@ from vuzol.discussion.memory import (
     ensure_memory_safe,
     validate_decision,
 )
+from vuzol.discussion.memory_writer import (
+    DECISION_OPERATION,
+    RETRACT_OPERATION,
+    enqueue_memory_extraction,
+)
 from vuzol.storage.models import AcceptedDecision
 from vuzol.storage.types import (
     AcceptedDecisionStatus,
@@ -177,7 +182,7 @@ class DiscussionMemoryService:
         source_turn_id: uuid.UUID | None = None,
     ) -> uuid.UUID:
         normalized_key, normalized_statement = validate_decision(key, statement)
-        await self._uow.discussions.get_session(session_id, for_update=True)
+        session = await self._uow.discussions.get_session(session_id, for_update=True)
         existing = await self._uow.discussions.active_decision(
             session_id=session_id, key=normalized_key, for_update=True
         )
@@ -201,7 +206,7 @@ class DiscussionMemoryService:
             )
         except ValueError as error:
             raise DomainError("decision_source_mismatch") from error
-        await self._decision_event(
+        trigger_event_id = await self._decision_event(
             session_id=session_id,
             decision_id=decision_id,
             event=DiscussionEvent.DECISION_ACCEPTED,
@@ -211,6 +216,16 @@ class DiscussionMemoryService:
                 "source_turn_id": _uuid_text(source_turn_id),
                 "acceptance_source": acceptance_source.value,
             },
+        )
+        await enqueue_memory_extraction(
+            self._uow,
+            trigger_event_id=trigger_event_id,
+            project_id=session.project_id,
+            session_id=session_id,
+            operation=DECISION_OPERATION,
+            entity_type="accepted_decision",
+            entity_id=decision_id,
+            payload={"decision_id": str(decision_id), "source_event_id": str(trigger_event_id)},
         )
         return decision_id
 
@@ -225,7 +240,7 @@ class DiscussionMemoryService:
         source_turn_id: uuid.UUID | None = None,
     ) -> uuid.UUID:
         normalized_key, normalized_statement = validate_decision(key, statement)
-        await self._uow.discussions.get_session(session_id, for_update=True)
+        session = await self._uow.discussions.get_session(session_id, for_update=True)
         existing = await self._uow.discussions.active_decision(
             session_id=session_id, key=normalized_key, for_update=True
         )
@@ -255,7 +270,7 @@ class DiscussionMemoryService:
                 "acceptance_source": acceptance_source.value,
             },
         )
-        await self._decision_event(
+        trigger_event_id = await self._decision_event(
             session_id=session_id,
             decision_id=replacement_id,
             event=DiscussionEvent.DECISION_ACCEPTED,
@@ -264,6 +279,19 @@ class DiscussionMemoryService:
                 "key": normalized_key,
                 "supersedes_id": str(existing.id),
                 "acceptance_source": acceptance_source.value,
+            },
+        )
+        await enqueue_memory_extraction(
+            self._uow,
+            trigger_event_id=trigger_event_id,
+            project_id=session.project_id,
+            session_id=session_id,
+            operation=DECISION_OPERATION,
+            entity_type="accepted_decision",
+            entity_id=replacement_id,
+            payload={
+                "decision_id": str(replacement_id),
+                "source_event_id": str(trigger_event_id),
             },
         )
         return replacement_id
@@ -276,7 +304,7 @@ class DiscussionMemoryService:
         retracted_by_user_id: int,
         acceptance_source: ExplicitDecisionSource,
     ) -> None:
-        await self._uow.discussions.get_session(session_id, for_update=True)
+        discussion = await self._uow.discussions.get_session(session_id, for_update=True)
         try:
             decision = await self._uow.discussions.get_decision(decision_id, for_update=True)
         except LookupError as error:
@@ -288,12 +316,22 @@ class DiscussionMemoryService:
         if decision.status is not AcceptedDecisionStatus.ACTIVE:
             raise DomainError("decision_not_active")
         await self._uow.discussions.set_decision_status(decision, AcceptedDecisionStatus.RETRACTED)
-        await self._decision_event(
+        trigger_event_id = await self._decision_event(
             session_id=session_id,
             decision_id=decision.id,
             event=DiscussionEvent.DECISION_RETRACTED,
             user_id=retracted_by_user_id,
             payload={"key": decision.key, "acceptance_source": acceptance_source.value},
+        )
+        await enqueue_memory_extraction(
+            self._uow,
+            trigger_event_id=trigger_event_id,
+            project_id=discussion.project_id,
+            session_id=session_id,
+            operation=RETRACT_OPERATION,
+            entity_type="accepted_decision",
+            entity_id=decision.id,
+            payload={"decision_id": str(decision.id)},
         )
 
     @staticmethod
@@ -315,8 +353,8 @@ class DiscussionMemoryService:
         event: DiscussionEvent,
         user_id: int,
         payload: dict[str, object],
-    ) -> None:
-        await self._uow.events.append(
+    ) -> uuid.UUID:
+        return await self._uow.events.append(
             entity_type="discussion_session",
             entity_id=session_id,
             event_type=event.value,

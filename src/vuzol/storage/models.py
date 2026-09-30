@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -21,7 +22,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from vuzol.storage.base import Base
@@ -42,6 +43,7 @@ from vuzol.storage.types import (
     InboxStatus,
     IntakeStatus,
     InteractionMode,
+    MemoryUnitStatus,
     PlanRevisionCreatedBy,
     PlanRevisionState,
     ProcessOutcome,
@@ -831,6 +833,97 @@ class AcceptedDecision(IdentityMixin, TimestampMixin, Base):
         nullable=False,
         default=AcceptedDecisionStatus.ACTIVE,
     )
+
+
+class MemoryUnit(IdentityMixin, TimestampMixin, Base):
+    """Derived memory unit (D5, DELTA §D5).
+
+    Templates-first store for accepted decisions and verified outcomes plus
+    explicitly recorded hypotheses/observations. Only scenarios NOT covered
+    by AcceptedDecision rows and ConversationSummary get their own units;
+    existing decisions are referenced (source_decision_id), never copied as
+    a second authoritative string. Async writer output only — never written
+    on the task/plan completion path. Legacy: no rows (table is new in D5).
+    """
+
+    __tablename__ = "memory_units"
+    __table_args__ = (
+        CheckConstraint(
+            "unit_type IN ('decision_template', 'outcome_template', 'observation', 'lesson')",
+            name="memory_unit_type_bounded",
+        ),
+        CheckConstraint(
+            "char_length(text) BETWEEN 1 AND 4000", name="memory_unit_text_bounded"
+        ),
+        CheckConstraint(
+            "char_length(extraction_identity) BETWEEN 1 AND 255",
+            name="memory_unit_extraction_identity_bounded",
+        ),
+        UniqueConstraint(
+            "extraction_identity", name="uq_memory_unit_extraction_identity"
+        ),
+        Index("ix_memory_units_project_type_status", "project_id", "unit_type", "status"),
+        Index(
+            "ix_memory_units_chain",
+            "project_id",
+            "session_id",
+            "unit_type",
+            "source_key",
+        ),
+        Index("ix_memory_units_source_artifact", "source_artifact_id"),
+        Index(
+            "ix_memory_units_text_search",
+            "text_search",
+            postgresql_using="gin",
+        ),
+    )
+
+    project_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("project_discussion_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    unit_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[MemoryUnitStatus] = mapped_column(
+        enum_type(MemoryUnitStatus, "memory_unit_status"),
+        nullable=False,
+        default=MemoryUnitStatus.HYPOTHESIS,
+    )
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    text_search: Mapped[str] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('simple', text)", persisted=True)
+    )
+    trigger_event_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    extractor_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("events.id", ondelete="RESTRICT")
+    )
+    source_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("accepted_decisions.id", ondelete="RESTRICT"), index=True
+    )
+    source_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT")
+    )
+    source_acceptance_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("acceptance_evidence.id", ondelete="RESTRICT")
+    )
+    source_turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="RESTRICT")
+    )
+    source_summary_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_key: Mapped[str | None] = mapped_column(String(64))
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # NOTE: func.now(), not text("now()"): the `text` column above shadows the
+    # sqlalchemy.text() helper inside this class namespace.
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("memory_units.id", ondelete="RESTRICT")
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    extraction_identity: Mapped[str] = mapped_column(String(255), nullable=False)
+    tombstone_event_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    redaction_revision: Mapped[str | None] = mapped_column(String(64))
 
 
 class WorkPackage(IdentityMixin, TimestampMixin, Base):

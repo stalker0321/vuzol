@@ -214,6 +214,11 @@ async def commit_step_outcome(
     assert run is not None
     if run.status in {RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.COMPLETED}:
         raise LeaseLost(f"parent run is terminal: {run.id}")
+    if run.status is RunStatus.PAUSED:
+        # D1 correction fencing (lead Q9: soft pause + intent fence): a live
+        # lease does not authorize a commit while the run is paused. The
+        # lease itself is not revoked (soft pause); the commit path is.
+        raise LeaseLost(f"parent run is paused: {run.id}")
     if outcome.kind is OutcomeKind.SUCCEEDED:
         await transition_step(session, step, StepStatus.COMPLETED, actor_type="worker")
         step.result = outcome.result
@@ -247,6 +252,19 @@ async def commit_step_outcome(
     elif outcome.kind is OutcomeKind.NEEDS_APPROVAL:
         await transition_step(session, step, StepStatus.WAITING_APPROVAL, actor_type="worker")
     elif outcome.kind is OutcomeKind.BLOCKED or outcome.unknown_effects:
+        # D1 L3: a BLOCKED verdict is retained in review/outcome history
+        # (separate from the mutable Step.result, which this branch
+        # deliberately does not write). History is evidence retention only.
+        if isinstance(outcome.result, dict) and outcome.result.get("verdict"):
+            from vuzol.storage.attempts import record_review_outcome
+
+            await record_review_outcome(
+                session,
+                task_id=run.task_id,
+                run_id=run.id,
+                step_id=step.id,
+                verdict=outcome.result,
+            )
         if not await _schedule_bounded_repair(session, run, step, outcome, policy):
             await _block_for_attention(session, run, step)
             step.unknown_effects = outcome.unknown_effects

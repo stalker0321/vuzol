@@ -1,7 +1,11 @@
 """Persisted workflow control semantics."""
 
+from __future__ import annotations
+
 import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,8 +38,21 @@ from vuzol.workflows.service import (
 )
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
+if TYPE_CHECKING:
+    from vuzol.workflows.application import TaskCommandResult
+
 RUN_TERMINAL = {RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.COMPLETED}
 STEP_TERMINAL = {StepStatus.FAILED, StepStatus.CANCELLED, StepStatus.COMPLETED}
+
+
+def _command_outcome(result: TaskCommandResult) -> dict[str, object]:
+    """JSON-safe receipt for a task command result (D1 L5)."""
+
+    payload = asdict(result)
+    return {
+        key: (str(value) if isinstance(value, uuid.UUID) else value)
+        for key, value in payload.items()
+    }
 
 
 class WorkflowControlConsumer:
@@ -103,36 +120,46 @@ class WorkflowControlConsumer:
             return
         if action.task_id is None:
             raise ValueError("workflow control requires a task target")
+        # D1 L5: task commands record the apply receipt on the action so a
+        # duplicate delivery can return the same outcome (package-controls
+        # parity: discussion/application _duplicate_result).
         if action.action_kind == "pause":
-            await apply_task_command(
+            result = await apply_task_command(
                 session,
                 task_id=action.task_id,
                 command="pause",
                 principal=Principal(action.requested_by_user_id, "telegram"),
             )
-        elif action.action_kind == "resume":
-            await apply_task_command(
+            action.payload = {**action.payload, "outcome": _command_outcome(result)}
+            return
+        if action.action_kind == "resume":
+            result = await apply_task_command(
                 session,
                 task_id=action.task_id,
                 command="resume",
                 principal=Principal(action.requested_by_user_id, "telegram"),
             )
-        elif action.action_kind == "cancel":
-            await apply_task_command(
+            action.payload = {**action.payload, "outcome": _command_outcome(result)}
+            return
+        if action.action_kind == "cancel":
+            result = await apply_task_command(
                 session,
                 task_id=action.task_id,
                 command="cancel",
                 principal=Principal(action.requested_by_user_id, "telegram"),
             )
-        elif action.action_kind == "start":
-            await apply_task_command(
+            action.payload = {**action.payload, "outcome": _command_outcome(result)}
+            return
+        if action.action_kind == "start":
+            result = await apply_task_command(
                 session,
                 task_id=action.task_id,
                 command="start",
                 principal=Principal(action.requested_by_user_id, "telegram"),
             )
-        else:
-            raise ValueError(f"unsupported workflow control: {action.action_kind}")
+            action.payload = {**action.payload, "outcome": _command_outcome(result)}
+            return
+        raise ValueError(f"unsupported workflow control: {action.action_kind}")
 
 
 async def decide_result(
@@ -181,6 +208,41 @@ async def decide_result(
     elif decision == "redo":
         if installation_action:
             raise ValueError("installation approval does not support redo")
+        # D1 L6: REDO opens a new work attempt of the same logical item and
+        # links the superseded candidate/review — it never erases them.
+        prior_candidate_hash: str | None = None
+        prior_review_summary: str | None = None
+        if isinstance(step.result, dict):
+            import hashlib as _hashlib
+            import json as _json
+
+            prior_candidate_hash = _hashlib.sha256(
+                _json.dumps(step.result, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            summary = step.result.get("summary") or step.result.get("implementation_summary")
+            if isinstance(summary, str) and summary.strip():
+                prior_review_summary = summary.strip()[:2000]
+        from vuzol.storage.attempts import (
+            latest_attempt,
+            record_work_attempt,
+            resolve_stable_item,
+        )
+
+        previous = await latest_attempt(session, step.id)
+        await record_work_attempt(
+            session,
+            task_id=task.id,
+            run_id=run.id,
+            step_id=step.id,
+            attempt_kind="retry",
+            purpose="coding",
+            parent_attempt_id=previous.id if previous is not None else None,
+            stable_item_id=await resolve_stable_item(session, task.id),
+            intent_revision=task.spec_revision,
+            outcome="cancelled",
+            prior_candidate_hash=prior_candidate_hash,
+            prior_review_summary=prior_review_summary,
+        )
         approval.status = ApprovalStatus.REJECTED
         await transition_step(
             session, step, StepStatus.CANCELLED, actor_type="user", actor_id=actor_id

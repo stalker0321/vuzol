@@ -127,6 +127,13 @@ class Task(IdentityMixin, TimestampMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     budget_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # D1 identity (additive, nullable): typed ref to the source discussion
+    # turn/goal (cf. AcceptedDecision.source_turn_id) + current spec/intent
+    # revision pointer. NULL = legacy/unknown provenance, never backfilled.
+    source_turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="RESTRICT"), index=True
+    )
+    spec_revision: Mapped[str | None] = mapped_column(String(64))
 
 
 class TopicTaskCounter(IdentityMixin, Base):
@@ -928,8 +935,12 @@ class WorkPackage(IdentityMixin, TimestampMixin, Base):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # D0 pinned contract (nullable/additive): the horizon admission decision at
     # materialization. Active packages read this, not the live flag, so flag
-    # off never downgrades a materialized workflow. NULL = pre-D0 row.
+    # off never downgrades an already materialized workflow. NULL = pre-D0 row.
     execution_contract_version: Mapped[str | None] = mapped_column(String(64))
+    # D1 intent fence (additive, nullable): current intent revision pointer.
+    # revise_draft may require the caller to present the expected revision
+    # (stale intent → revision_conflict). NULL = legacy, fence opt-in.
+    intent_revision: Mapped[str | None] = mapped_column(String(64))
 
 
 class PlanRevision(IdentityMixin, Base):
@@ -1797,5 +1808,144 @@ class SubscriptionLimitSnapshotRow(Base):
         JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
     )
     observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class WorkAttempt(IdentityMixin, Base):
+    """Append-only work lineage row (D1, ADR-A01.3 attempt.v1).
+
+    Wraps Task/Run/Step without replacing them: ``attempt_no`` is work
+    lineage monotonic within ``step_id`` (never conflated with
+    ``lease_generation`` or ``provider_attempt``). A closed attempt
+    (``closed_at`` set) is never mutated — repair/retry/takeover creates a
+    NEW row with ``parent_attempt_id``. No backfill: legacy executions simply
+    have no rows (NULL/unknown, never fabricated).
+    """
+
+    __tablename__ = "work_attempts"
+    __table_args__ = (
+        UniqueConstraint("step_id", "attempt_no", name="uq_work_attempt_step_number"),
+        CheckConstraint("attempt_no >= 1", name="work_attempt_number_positive"),
+    )
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    step_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    plan_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("plan_revisions.id", ondelete="RESTRICT")
+    )
+    item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # Logical item identity across retries: WorkItemDraft.id for materialized
+    # package items, else the task's own id. tasks.id / MaterializationLink
+    # SQL links are never rewritten by this table.
+    stable_item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    horizon_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("work_attempts.id", ondelete="RESTRICT")
+    )
+    attempt_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(30), nullable=False)
+    executor_profile_id: Mapped[str | None] = mapped_column(String(100))
+    executor_model: Mapped[str | None] = mapped_column(String(200))
+    node_id: Mapped[str | None] = mapped_column(String(100))
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input_bindings: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
+    input_hash: Mapped[str | None] = mapped_column(String(64))
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    usage_ref: Mapped[str | None] = mapped_column(String(100))
+    cost_known: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    failure_category: Mapped[str | None] = mapped_column(String(100))
+    failure_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    # REDO lineage: hash of the superseded candidate + review summary ref.
+    prior_candidate_hash: Mapped[str | None] = mapped_column(String(64))
+    prior_review_summary: Mapped[str | None] = mapped_column(Text)
+    intent_revision: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TaskSpecRevision(IdentityMixin, Base):
+    """Versioned TaskSpec snapshots (D1 L2).
+
+    The spec lives separately from the mutating ``task_draft``: every
+    mutation point snapshots the new draft here first; ``Task.spec_revision``
+    points at the current row. Append-only, never backfilled.
+    """
+
+    __tablename__ = "task_spec_revisions"
+    __table_args__ = (
+        UniqueConstraint("task_id", "spec_revision", name="uq_task_spec_task_revision"),
+    )
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    spec_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversation_turns.id", ondelete="RESTRICT")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class ReviewOutcomeHistory(IdentityMixin, Base):
+    """Review/outcome history separate from the mutable ``Step.result`` (D1 L3).
+
+    Unique acceptance key reuses ``Approval.action_envelope_hash`` when an
+    approval exists for the step (lead Q11); pre-approval review outcomes
+    (e.g. BLOCKED reviews, which precede approval creation) are keyed by a
+    content hash of the verdict — equally content-addressed, never a
+    surrogate. History is evidence retention only: it is never read as proof
+    of a past review (a changed hash requires a fresh review).
+    """
+
+    __tablename__ = "review_outcome_history"
+    __table_args__ = (
+        UniqueConstraint("acceptance_key", name="uq_review_outcome_acceptance_key"),
+    )
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    step_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    acceptance_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("approvals.id", ondelete="RESTRICT")
+    )
+    verdict: Mapped[str] = mapped_column(String(30), nullable=False)
+    review_kind: Mapped[str | None] = mapped_column(String(30))
+    risk: Mapped[str | None] = mapped_column(String(20))
+    base_commit: Mapped[str | None] = mapped_column(String(64))
+    result_commit: Mapped[str | None] = mapped_column(String(64))
+    diff_hash: Mapped[str | None] = mapped_column(String(64))
+    findings: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
+    summary: Mapped[str | None] = mapped_column(Text)
+    policy_revision: Mapped[str | None] = mapped_column(String(64))
+    partition_count: Mapped[int | None] = mapped_column(Integer)
+    unknown_usage: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

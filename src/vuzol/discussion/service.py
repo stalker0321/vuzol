@@ -22,6 +22,7 @@ from vuzol.discussion.domain import (
     canonical_plan_body,
     canonical_plan_hash,
     control_transition_target,
+    item_contract_hash_of,
     plan_outline_hash,
     require_generation,
     require_mutable,
@@ -134,6 +135,7 @@ class WorkPackageService:
             planner_profile=planner_profile,
             prompt_version=prompt_version,
         )
+        package.intent_revision = result.content_hash
         discussion.active_work_package_id = package_id
         return result
 
@@ -162,22 +164,41 @@ class WorkPackageService:
         prompt_version: str | None = None,
         goal: str | None = None,
         horizon_enabled: bool = False,
+        expected_intent_revision: str | None = None,
         _allow_stopped: bool = False,
     ) -> RevisionResult:
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         if not (_allow_stopped and package.status is WorkPackageStatus.STOPPED):
             require_mutable(package.status)
         require_generation(package.version, expected_status_generation)
+        # D1 correction/replan fence (opt-in): a caller that presents the
+        # expected intent revision is rejected on stale intent instead of
+        # silently replanning over a newer revision.
+        if (
+            expected_intent_revision is not None
+            and package.intent_revision is not None
+            and package.intent_revision != expected_intent_revision
+        ):
+            raise DomainError("stale_intent_revision")
         previous = await self._uow.work_packages.get_head_revision(package)
         if previous is None:
             raise DomainError("revision_not_found")
-        if horizon_enabled and is_horizon(package.goal, package.exit_criteria):
+        # D1 pinned guard (lead decision): the history guard reads the pinned
+        # contract, not the live flag. Pre-D0 rows (NULL) fall back to the
+        # passed admission flag for compatibility.
+        if getattr(package, "execution_contract_version", None) is not None:
+            horizon_effective = pinned_horizon_enabled(
+                package, fallback=bool(horizon_enabled)
+            )
+        else:
+            horizon_effective = bool(horizon_enabled)
+        if horizon_effective and is_horizon(package.goal, package.exit_criteria):
             if goal is not None and goal.strip() and goal.strip() != (package.goal or "").strip():
                 # A product-goal change is a user choice, not a silent replan.
                 raise DomainError("goal_change_requires_choice")
             if package.cursor_ordinal is not None:
                 await self._require_future_only_revision(package, previous, plan)
-        elif horizon_enabled and goal is not None and goal.strip():
+        elif horizon_effective and goal is not None and goal.strip():
             package.goal = goal.strip()
             package.goal_revision = (package.goal_revision or 0) + 1
         previous.state = PlanRevisionState.SUPERSEDED
@@ -193,6 +214,9 @@ class WorkPackageService:
             prompt_version=prompt_version,
             parent=previous,
         )
+        # D1 intent pointer: the current revision's content hash becomes the
+        # fence value for the next correction/replan.
+        package.intent_revision = result.content_hash
         await self._close_open_edits(package_id, actor_type="system")
         await self._uow.work_packages.clear_open_detail(package_id=package_id)
         await self._detail_event(package_id, None, None, None, None, True)
@@ -231,12 +255,10 @@ class WorkPackageService:
             if index >= len(plan.items) or item_ids[index] != prev.item_id:
                 raise DomainError("revision_conflict")
             draft = plan.items[index]
-            if (
-                draft.summary.strip() != prev.summary
-                or draft.goal.strip() != prev.goal
-                or draft.expected_outcome.strip() != prev.expected_outcome
-                or list(draft.completion_criteria) != list(prev.completion_criteria)
-            ):
+            # D1 unified contract: the same field set + hash as carry-forward
+            # (_same_plan_item). A scope/dependency/approval rewrite of a
+            # passed item is a revision conflict, never an unchanged prefix.
+            if item_contract_hash_of(draft) != item_contract_hash_of(prev):
                 raise DomainError("revision_conflict")
 
     async def restart_plan(
@@ -474,7 +496,16 @@ class WorkPackageService:
         require_generation(package.version, expected_status_generation)
         if package.status is not WorkPackageStatus.RUNNING:
             raise DomainError("invalid_transition")
-        if not (horizon_enabled and is_horizon(package.goal, package.exit_criteria)):
+        # D1 pinned gate (lead decision, T045 r2 follow-up): acceptance of an
+        # active package reads the pinned contract, not the live flag.
+        # Pre-D0 rows (NULL) fall back to the passed flag for compatibility.
+        if getattr(package, "execution_contract_version", None) is not None:
+            acceptance_effective = pinned_horizon_enabled(
+                package, fallback=bool(horizon_enabled)
+            )
+        else:
+            acceptance_effective = bool(horizon_enabled)
+        if not (acceptance_effective and is_horizon(package.goal, package.exit_criteria)):
             raise DomainError("horizon_not_enabled")
         if package.horizon_phase != "evaluating":
             raise DomainError("not_evaluating")

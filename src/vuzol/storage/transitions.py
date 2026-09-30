@@ -1,4 +1,13 @@
-"""Atomic state transition and audit-event service."""
+"""Atomic state transition and audit-event service.
+
+D1 note (lead Q8, documented dead path — do NOT delete/merge in D1): this
+module's ``TASK_TRANSITIONS`` is narrower than and differs from the
+production table in ``vuzol.workflows.transitions``. Production imports only
+``workflows.transitions`` (0 ``from vuzol.storage.transitions import`` in
+``src/``); the sole consumer of this module is
+``tests/integration/storage/test_transactions.py``. Kept as-is for
+compatibility; unifying the two tables needs a lead/ADR decision.
+"""
 
 import uuid
 

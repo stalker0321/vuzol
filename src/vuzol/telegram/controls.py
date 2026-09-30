@@ -1,6 +1,7 @@
 """Persisted idempotent Telegram callback handling."""
 
 import hashlib
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -181,6 +182,7 @@ class TelegramControlService:
                     payload={},
                 )
                 action_id, action_created = await uow.telegram_actions.queue_once(action)
+                prior_outcome: dict[str, Any] | None = None
                 if action_created:
                     await uow.outbox.enqueue(
                         destination="workflow_control",
@@ -190,6 +192,15 @@ class TelegramControlService:
                         idempotency_key=f"telegram:control:{update.callback_query_id}",
                         payload=update.model_dump(mode="json"),
                     )
+                else:
+                    # D1 L5: duplicate delivery returns the prior receipt
+                    # instead of "unknown" (same outcome as the first apply).
+                    assert uow.session is not None
+                    prior_action = await uow.session.get(TelegramControlAction, action_id)
+                    if prior_action is not None and isinstance(prior_action.payload, dict):
+                        stored = prior_action.payload.get("outcome")
+                        if isinstance(stored, dict):
+                            prior_outcome = stored
                 await uow.inbox.mark_processed(
                     inbox_id,
                     entity_type="telegram_control_action",
@@ -206,6 +217,7 @@ class TelegramControlService:
         return IngressResult(
             status=IngressStatus.CREATED if action_created else IngressStatus.DUPLICATE,
             action_id=action_id,
+            outcome=prior_outcome,
         )
 
     async def _accept_work_package(self, update: WorkPackageControlUpdate) -> IngressResult:

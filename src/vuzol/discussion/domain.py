@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -288,6 +289,71 @@ def canonical_environment_delta(delta: EnvironmentDeltaDraft) -> dict[str, Any]:
 def canonical_plan_hash(body: dict[str, Any]) -> str:
     encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+# D1 unified item contract fields: the single field set compared by BOTH the
+# carry-forward check (sequencer._same_plan_item) and the history guard
+# (service._require_future_only_revision). Scope/dependencies/approval fields
+# are part of the contract — a rewrite of a passed item never passes as an
+# unchanged prefix.
+ITEM_CONTRACT_FIELDS = (
+    "summary",
+    "goal",
+    "expected_outcome",
+    "completion_criteria",
+    "allowed_scope",
+    "out_of_scope",
+    "dependencies",
+    "trusted_checks",
+    "suggested_risk",
+    "needs_approval",
+    "estimated_complexity",
+)
+
+
+def item_contract_hash(item: Mapping[str, Any]) -> str:
+    """Single committed hash for one plan item's contract (D1 L4)."""
+
+    body = {field: item.get(field) for field in ITEM_CONTRACT_FIELDS}
+    return canonical_plan_hash(body)
+
+
+def _contract_scalar(value: object) -> object:
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        return [entry.strip() if isinstance(entry, str) else entry for entry in value]
+    if value is None:
+        return None
+    return str(value)
+
+
+def item_contract_dict(item: object) -> dict[str, Any]:
+    """Project a plan item (draft, ORM row, or mapping) onto contract fields.
+
+    Both the carry-forward check and the history guard project through this
+    single function, so they agree by construction (D1 guard-vs-carry-forward
+    parity). Strings are stripped, enums unwrap to values, sequences become
+    lists — identically on both sides.
+    """
+
+    projected: dict[str, Any] = {}
+    for field in ITEM_CONTRACT_FIELDS:
+        raw = item.get(field) if isinstance(item, Mapping) else getattr(item, field, None)
+        projected[field] = _contract_scalar(raw)
+    return projected
+
+
+def item_contract_hash_of(item: object) -> str:
+    """Hash any plan-item shape via the unified projection."""
+
+    if isinstance(item, Mapping):
+        return item_contract_hash(item)
+    return item_contract_hash(item_contract_dict(item))
 
 
 def semantic_plan_hash(plan: PlanDraft) -> str:

@@ -77,20 +77,11 @@ class SequenceResult:
 
 
 def _same_plan_item(left: PlanRevisionItem, right: PlanRevisionItem) -> bool:
-    fields = (
-        "summary",
-        "goal",
-        "expected_outcome",
-        "completion_criteria",
-        "allowed_scope",
-        "out_of_scope",
-        "dependencies",
-        "trusted_checks",
-        "suggested_risk",
-        "needs_approval",
-        "estimated_complexity",
-    )
-    return all(getattr(left, field) == getattr(right, field) for field in fields)
+    """Carry-forward equality via the unified D1 item contract hash."""
+
+    from vuzol.discussion.domain import item_contract_hash_of
+
+    return item_contract_hash_of(left) == item_contract_hash_of(right)
 
 
 class WorkPackageSequencer:

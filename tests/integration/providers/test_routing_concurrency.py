@@ -205,9 +205,13 @@ def test_new_budget_epoch_resets_task_and_step_token_caps(
                 provider_attempt=1,
                 estimate=estimate,
                 limits=settings.limits,
-                enforce_task_token_limits=False,
+                # D3 Q4: deductible allowance replaces the bypass flag.
+                review_allowance=True,
             )
-        assert review_reservation.budget_epoch == 0
+            assert review_reservation.budget_epoch == 0
+            assert review_reservation.allowance_input_tokens == 1
+            # output caps were never exhausted here: nothing deducted
+            assert review_reservation.allowance_output_tokens == 0
         async with factory.begin() as session:
             task = await session.get(Task, task_id)
             assert task is not None

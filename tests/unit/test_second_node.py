@@ -122,7 +122,7 @@ def test_migration_chain_has_single_head() -> None:
     config.set_main_option("script_location", "alembic")
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["d2b4c8d1e5a6"]
+    assert heads == ["d3c1a8f2e4b7"]
     seen: set[str] = set()
     revision: str | None = heads[0]
     while revision is not None:

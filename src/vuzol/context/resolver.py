@@ -109,19 +109,31 @@ async def _resolve_one(
         raise BindingError("artifact_missing", f"artifact for binding {binding.id} is missing")
     if artifact.content_hash != binding.content_hash:
         raise BindingError("hash_mismatch", f"binding {binding.id} content hash drifted")
-    if (
-        binding.scope_project_id is not None
-        and project_id is not None
-        and binding.scope_project_id != project_id
-    ):
-        raise BindingError("foreign_scope", f"binding {binding.id} belongs to another scope")
-    artifact_task = (
-        await session.get(Task, artifact.task_id)
-        if artifact.task_id is not None and project_id is not None
-        else None
-    )
-    if artifact_task is not None and artifact_task.project_id != project_id:
-        raise BindingError("foreign_scope", "artifact project does not match consumer")
+    # D3 W5: access_scope is actually read on the consumer boundary. Unknown
+    # values fail closed; "public" skips project checks below (hash and
+    # freshness still apply); "private"/"project" require scope match.
+    access = binding.access_scope or "private"
+    if access not in {"private", "project", "public"}:
+        raise BindingError(
+            "invalid_access_scope", f"binding {binding.id} has unknown access"
+        )
+    if access != "public":
+        # Missing scope is fail-closed (a silent pass when either side was
+        # None hid missing owners). Required bindings raise here; optional
+        # ones are dropped into ``excluded`` by the caller below.
+        if binding.scope_project_id is None or project_id is None:
+            raise BindingError("missing_scope", f"binding {binding.id} has no scope owner")
+        if binding.scope_project_id != project_id:
+            raise BindingError(
+                "foreign_scope", f"binding {binding.id} belongs to another scope"
+            )
+        artifact_task = (
+            await session.get(Task, artifact.task_id)
+            if artifact.task_id is not None
+            else None
+        )
+        if artifact_task is not None and artifact_task.project_id != project_id:
+            raise BindingError("foreign_scope", "artifact project does not match consumer")
     if artifacts is None:
         raise BindingError("artifact_store_unavailable", "artifact bytes cannot be read")
     try:
@@ -130,9 +142,19 @@ async def _resolve_one(
         raise BindingError("artifact_missing", str(error)) from error
     if hashlib.sha256(content).hexdigest() != binding.content_hash:
         raise BindingError("hash_mismatch", f"binding {binding.id} bytes do not match its hash")
+    # D3 freshness anchor (lead Q7): the oldest credible timestamp wins, so
+    # a repack carrying the propagated source time never rejuvenates. A
+    # repack without one falls back to its own creation time (producers
+    # must propagate; the resolver cannot invent provenance).
+    anchor_candidates = [
+        moment
+        for moment in (binding.source_retrieved_at, artifact.created_at)
+        if moment is not None
+    ]
+    anchor = min(anchor_candidates) if anchor_candidates else None
     freshness = "fresh"
-    if binding.freshness_max_age_seconds is not None and artifact.created_at is not None:
-        age = (datetime.now(UTC) - artifact.created_at).total_seconds()
+    if binding.freshness_max_age_seconds is not None and anchor is not None:
+        age = (datetime.now(UTC) - anchor).total_seconds()
         if age > binding.freshness_max_age_seconds:
             if binding.required:
                 raise BindingError("expired", f"binding {binding.id} is expired")

@@ -12,6 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import AgentRuntimeContract, Capability, ProviderProfileConfig
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.context.bindings import (
+    RESEARCH_SLOT,
+    find_pairs_for_producer,
+    validate_resolved_bindings,
+)
+from vuzol.context.models import ContextManifest
 from vuzol.context.resolver import (
     BindingError,
     estimate_tokens,
@@ -72,7 +78,14 @@ from vuzol.research.report import (
     RESEARCH_PROVIDER_RESULT_SCHEMA_VERSION,
     RESEARCH_RESULT_SCHEMA,
     RESEARCH_RESULT_SCHEMA_VERSION,
-    validate_source_report_bytes,
+)
+from vuzol.research.retrieval import utc_now_iso
+from vuzol.research.source_backed import (
+    SOURCE_FRESHNESS_MAX_AGE_SECONDS,
+    RawSourceBlob,
+    SourceBackedError,
+    SourceFetcher,
+    assemble_source_report,
 )
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import (
@@ -103,6 +116,8 @@ class ProviderStepHandler:
         worktree_access: WorktreeAccessManager | None = None,
         agent_certificates: AgentCertificateStore | None = None,
         redaction_patterns: tuple[str, ...] = (),
+        research_fetcher: SourceFetcher | None = None,
+        research_retriever: str = "approved-http",
     ) -> None:
         self._factory = factory
         self._registries = registries
@@ -113,6 +128,10 @@ class ProviderStepHandler:
         self._worktree_access = worktree_access
         self._agent_certificates = agent_certificates
         self._redaction_patterns = redaction_patterns
+        # D3 W1: retrieval fetcher for source-backed research. None means
+        # legacy provider-text only (prod default: live trials forbidden).
+        self._research_fetcher = research_fetcher
+        self._research_retriever = research_retriever
         self._commit_messages = DatabaseCommitMessageResolver(factory)
 
     def _accounting(
@@ -927,15 +946,43 @@ class ProviderStepHandler:
     ) -> None:
         """Bind a research result to its synthesize consumer (new path only)."""
 
+        pairs = find_pairs_for_producer(request.step_type)
         if request.step_type != "research_execute" or self._artifacts is None:
             return
-        content = _research_result_bytes(result)
-        if not content:
+        if not any(pair.slot == RESEARCH_SLOT for pair in pairs):
             return
         step = await session.get(Step, request.step_id)
         task = await session.get(Task, request.task_id)
         if step is None or task is None:
             return
+        # D3 W1: source-backed report first (verified research); anything
+        # short of full success keeps the legacy provider-text path below.
+        if self._research_fetcher is not None and result.status is ProviderResultStatus.SUCCEEDED:
+            assembled: tuple[bytes, tuple[RawSourceBlob, ...], str] | None = None
+            try:
+                assembled = assemble_source_report(
+                    structured_output=result.structured_output,
+                    task_question=task.original_text,
+                    scope=task.project_id or "vuzol",
+                    created_at=utc_now_iso(),
+                    fetch=self._research_fetcher,
+                    retriever=self._research_retriever,
+                )
+            except SourceBackedError:
+                assembled = None
+            if assembled is not None:
+                report_bytes, blobs, anchor = assembled
+                await self._persist_source_report(
+                    session,
+                    step=step,
+                    task=task,
+                    run_id=request.run_id,
+                    content=report_bytes,
+                    blobs=blobs,
+                    retrieved_anchor=anchor,
+                )
+                return
+        content = _research_result_bytes(result)
         artifact = await self._artifacts.persist(
             session,
             task_id=task.id,
@@ -948,8 +995,16 @@ class ProviderStepHandler:
             visibility="private",
         )
         token_estimate = estimate_tokens(content)
+        consumer_types = frozenset(
+            consumer
+            for pair in find_pairs_for_producer(request.step_type)
+            for consumer in pair.consumers
+        )
         consumers = await _consumer_steps(
-            session, run_id=request.run_id, producer_ordinal=step.ordinal
+            session,
+            run_id=request.run_id,
+            producer_ordinal=step.ordinal,
+            consumer_types=consumer_types or frozenset({"synthesize"}),
         )
         bindings = InputBindingRepository(session)
         for consumer in consumers:
@@ -979,6 +1034,143 @@ class ProviderStepHandler:
             # Manifest-first estimate: the consumer reservation can size the
             # predecessor context before its bytes are resolved in _build_request.
             consumer.payload = {**consumer.payload, "context_estimate_tokens": token_estimate}
+
+    async def _persist_source_report(
+        self,
+        session: AsyncSession,
+        *,
+        step: Step,
+        task: Task,
+        run_id: uuid.UUID,
+        content: bytes,
+        blobs: tuple[RawSourceBlob, ...],
+        retrieved_anchor: str,
+    ) -> None:
+        """Persist a verified source report: raw bytes separate from rendered.
+
+        Raw source bytes live in their own artifacts (sha-pinned); the report
+        artifact carries ``research-result.v1`` with per-source content hashes.
+        The binding anchors freshness on the oldest retrieval (lead Q7) with
+        a max age, so repacks never rejuvenate.
+        """
+
+        assert self._artifacts is not None
+        for blob in blobs:
+            await self._artifacts.persist(
+                session,
+                task_id=task.id,
+                run_id=run_id,
+                step_id=step.id,
+                artifact_type="research_source",
+                content=blob.content,
+                media_type="application/octet-stream",
+                sensitivity="internal",
+                visibility="private",
+            )
+        artifact = await self._artifacts.persist(
+            session,
+            task_id=task.id,
+            run_id=run_id,
+            step_id=step.id,
+            artifact_type="research_result",
+            content=content,
+            media_type="application/json",
+            sensitivity="internal",
+            visibility="private",
+        )
+        try:
+            from datetime import datetime
+
+            retrieved_at = datetime.fromisoformat(retrieved_anchor.replace("Z", "+00:00"))
+        except ValueError:
+            retrieved_at = None
+        token_estimate = estimate_tokens(content)
+        # Research pair consumers (declared in context.bindings).
+        consumer_types = frozenset(
+            consumer
+            for pair in find_pairs_for_producer("research_execute")
+            for consumer in pair.consumers
+        )
+        consumers = await _consumer_steps(
+            session,
+            run_id=run_id,
+            producer_ordinal=step.ordinal,
+            consumer_types=consumer_types or frozenset({"synthesize"}),
+        )
+        bindings = InputBindingRepository(session)
+        for consumer in consumers:
+            existing = [
+                row
+                for row in await bindings.for_consumer(consumer.id)
+                if row.slot == "predecessor_result"
+            ]
+            if existing:
+                continue
+            await bindings.add(
+                InputBinding(
+                    consumer_step_id=consumer.id,
+                    producer_step_id=step.id,
+                    artifact_id=artifact.id,
+                    slot="predecessor_result",
+                    schema_name=RESEARCH_RESULT_SCHEMA,
+                    schema_version=RESEARCH_RESULT_SCHEMA_VERSION,
+                    content_hash=artifact.content_hash,
+                    scope_project_id=task.project_id,
+                    access_scope="private",
+                    required=True,
+                    status="resolved",
+                    resolved_at=func.now(),
+                    freshness_max_age_seconds=SOURCE_FRESHNESS_MAX_AGE_SECONDS,
+                    source_retrieved_at=retrieved_at,
+                )
+            )
+            consumer.payload = {**consumer.payload, "context_estimate_tokens": token_estimate}
+
+    async def _persist_manifest(
+        self,
+        session: AsyncSession,
+        *,
+        step: Step,
+        task: Task,
+        run_id: uuid.UUID,
+        manifest: ContextManifest,
+        role: str,
+    ) -> None:
+        """Persist the manifest of exactly what this invocation received (D3 W5).
+
+        Derived provenance in the existing artifact store (no new truth
+        table): source hashes, excluded slots, truncation omissions and the
+        resolver policy that produced them. Skipped without a store.
+        """
+
+        if self._artifacts is None:
+            return
+        omitted = list(manifest.excluded) + [
+            f"{entry.slot}:truncated" for entry in manifest.entries if entry.truncated
+        ]
+        content = json.dumps(
+            {
+                "schema": "context-manifest-record.v1",
+                "manifest": manifest.model_dump(mode="json"),
+                "policy": "context-resolver.v1",
+                "role": role,
+                "omissions": omitted,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        await self._artifacts.persist(
+            session,
+            task_id=task.id,
+            run_id=run_id,
+            step_id=step.id,
+            artifact_type="context_manifest",
+            content=content,
+            media_type="application/json",
+            sensitivity="internal",
+            visibility="private",
+        )
 
     async def _build_request(
         self, request: StepExecutionRequest
@@ -1067,7 +1259,37 @@ class ProviderStepHandler:
                 )
                 if not resolved.is_empty:
                     _require_source_report_shape(resolved)
-                    context = pack_context(resolved, role="summarizer")[1]
+                    manifest, items = pack_context(resolved, role="summarizer")
+                    await self._persist_manifest(
+                        session,
+                        step=step,
+                        task=task,
+                        run_id=run.id,
+                        manifest=manifest,
+                        role="summarizer",
+                    )
+                    context = items
+            elif step.step_type == "plan":
+                # D3 W5: Scout→Planner and Task→Task pairs feed the planner.
+                # No binding rows => legacy behavior (empty context).
+                resolved = await resolve_context(
+                    session,
+                    self._artifacts,
+                    consumer_step_id=step.id,
+                    project_id=task.project_id,
+                )
+                if not resolved.is_empty:
+                    _require_source_report_shape(resolved)
+                    manifest, items = pack_context(resolved, role="planner")
+                    await self._persist_manifest(
+                        session,
+                        step=step,
+                        task=task,
+                        run_id=run.id,
+                        manifest=manifest,
+                        role="planner",
+                    )
+                    context = items
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
@@ -1129,49 +1351,30 @@ def _research_result_bytes(result: ProviderResult) -> bytes:
     return json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode()
-
-
 def _require_source_report_shape(resolved: object) -> None:
     """Fail closed on source-report shape mismatch before provider spend.
 
     Legacy ``research-provider-result.v1`` bindings pass through (no verified
-    label). Bindings claiming ``research-result(.v1)`` must carry valid
-    source-report bytes; otherwise raise ``BindingError`` (handled as a
-    pre-provider failure, reservation released, provider never called).
+    label). Kept as the D0-named entry point; delegates to the D3 pair
+    validator in ``context.bindings`` (same categories, wider pair coverage).
     """
 
-    bindings = getattr(resolved, "bindings", ())
-    for binding in bindings:
-        name = getattr(binding, "schema_name", "")
-        version = getattr(binding, "schema_version", "")
-        is_source_claim = (
-            name == RESEARCH_RESULT_SCHEMA or version == RESEARCH_RESULT_SCHEMA_VERSION
-        )
-        is_legacy = (
-            name == RESEARCH_PROVIDER_RESULT_SCHEMA
-            or version == RESEARCH_PROVIDER_RESULT_SCHEMA_VERSION
-        )
-        if is_legacy and not is_source_claim:
-            continue
-        if not is_source_claim:
-            continue
-        errors = validate_source_report_bytes(getattr(binding, "content", b""))
-        if errors:
-            raise BindingError(
-                "source_report_schema_mismatch",
-                f"source report bytes failed validation: {errors[0]}",
-            )
+    validate_resolved_bindings(resolved)
 
 
 async def _consumer_steps(
-    session: AsyncSession, *, run_id: uuid.UUID, producer_ordinal: int
+    session: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    producer_ordinal: int,
+    consumer_types: frozenset[str] = frozenset({"synthesize"}),
 ) -> tuple[Step, ...]:
     """Return downstream steps that declare ``producer_ordinal`` as a predecessor."""
 
     steps = (await session.scalars(select(Step).where(Step.run_id == run_id))).all()
     consumers: list[Step] = []
     for candidate in steps:
-        if candidate.step_type != "synthesize":
+        if candidate.step_type not in consumer_types:
             continue
         metadata = (
             candidate.dependency_metadata
@@ -1182,7 +1385,6 @@ async def _consumer_steps(
         if isinstance(predecessors, list) and producer_ordinal in predecessors:
             consumers.append(candidate)
     return tuple(consumers)
-
 
 def repair_context_item(step: Step) -> ContextItem | None:
     """Expose only bounded, system-produced repair evidence to a coding worker."""

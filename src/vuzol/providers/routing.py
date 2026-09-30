@@ -34,6 +34,7 @@ from vuzol.providers.budgets import (
     estimate_reservation,
     purpose_for_step_type,
     reserve_budget,
+    resolve_horizon_scope,
 )
 from vuzol.providers.domain import EffectiveProfileState
 from vuzol.providers.fallback_policy import should_fallback_provider
@@ -335,6 +336,12 @@ async def claim_routed_step(
                         profile,
                         purpose=purpose_for_step_type(step.step_type),
                         attempt_kind=attempt_kind_for_step(step),
+                        # D3 lifetime owner (lead Q1): materialized tasks
+                        # scope to their package; the row carries it and
+                        # settle inherits it (sticky, no per-call plumbing).
+                        horizon_id=await resolve_horizon_scope(
+                            session, task_id=task.id
+                        ),
                     ),
                 )
             except BudgetExceeded:

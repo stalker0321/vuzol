@@ -1108,6 +1108,13 @@ class PlanRevisionItem(IdentityMixin, Base):
         default=EstimatedComplexity.MEDIUM,
         server_default=EstimatedComplexity.MEDIUM.value,
     )
+    # D3 materializer (additive, nullable): work kind from a closed set,
+    # capability, effect intent + item contract version. Legacy NULL rows
+    # keep the previous coding mapping (lead Q5).
+    work_kind: Mapped[str | None] = mapped_column(String(30))
+    capability: Mapped[str | None] = mapped_column(String(100))
+    effect_intent: Mapped[str | None] = mapped_column(String(30))
+    item_contract_version: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -1312,6 +1319,10 @@ class InputBinding(IdentityMixin, Base):
         String(20), nullable=False, default="pending", server_default="pending"
     )
     freshness_max_age_seconds: Mapped[int | None] = mapped_column(Integer)
+    # D3 freshness anchor (lead Q7): source retrieval time carried on the
+    # binding. The resolver anchors on the oldest credible timestamp, so a
+    # repack without a propagated anchor falls back to artifact creation.
+    source_retrieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -1484,6 +1495,9 @@ class UsageRecord(IdentityMixin, Base):
     reservation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("provider_budget_reservations.id", ondelete="RESTRICT"), unique=True
     )
+    # D3 step-less invocation identity (lead Q3): links usage written without
+    # a workflow reservation back to its reserve.
+    invocation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     outcome: Mapped[str] = mapped_column(String(100), nullable=False)
     # Additive accounting provenance (WP01). Legacy rows are backfilled with
     # pricing_revision='legacy' and cost_known=false; purpose/attempt_kind/currency
@@ -1622,17 +1636,26 @@ class ProviderBudgetReservation(IdentityMixin, Base):
         CheckConstraint("budget_epoch >= 0", name="provider_budget_reservations_epoch_nonnegative"),
         Index("ix_provider_budget_reservations_task_epoch", "task_id", "budget_epoch"),
         Index("ix_provider_budget_reservations_status", "status"),
+        Index(
+            "uq_budget_invocation",
+            "invocation_id",
+            unique=True,
+            postgresql_where=text("invocation_id IS NOT NULL"),
+        ),
     )
 
-    task_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), index=True
     )
-    run_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), index=True
     )
-    step_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
+    step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), index=True
     )
+    # D3 step-less invocation identity (lead Q3): nullable additive ref, no
+    # fake Step. Unique while present (partial index above).
+    invocation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     budget_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     provider_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -1647,6 +1670,18 @@ class ProviderBudgetReservation(IdentityMixin, Base):
     reserved_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
     reserved_cost_units: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     reserved_quota_units: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    # D3 review suballocation (lead Q4): deductible allowance recorded on the
+    # reservation inside the shared ledger — no second ledger. Task-cap
+    # checks deduct previously consumed allowance instead of bypassing caps.
+    allowance_input_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    allowance_output_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    allowance_cost_units: Mapped[Decimal] = mapped_column(
+        Numeric(20, 6), nullable=False, default=Decimal("0"), server_default="0"
+    )
     reconciled_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
     reconciled_output_tokens: Mapped[int | None] = mapped_column(BigInteger)
     reconciled_cost_units: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))

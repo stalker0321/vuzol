@@ -43,6 +43,25 @@ binding it to a real horizon is WP08.
   of `input_tokens`, so cached usage cannot be double-charged.
 - Lifetime budget: usage rows are never reset by a new `budget_epoch`. Epochs
   only reset the task/step **caps**; the ledger total is cumulative.
+- Canonical lifetime (D3, lead Q2): settled usage + outstanding reservations
+  for a lifetime owner (`horizon_id`), **no epoch filter** (same canon as
+  `_lifetime_spend`). Retry, goal revision and epoch bumps never erase it.
+  The package lifetime budget (`max_cost`/`max_attempts`) is enforced at
+  reserve time against these totals.
+- Lifetime owner (D3, lead Q1): materialized tasks scope to their package;
+  pre-Task calls scope to the intake row. The reservation row carries the
+  owner; settle inherits it (sticky) — reconcile contexts never wipe it.
+- Review suballocation (D3, lead Q4): no bypass; a deductible allowance pool
+  per task (`HardLimits.review_allowance_*`) covers the overage part and is
+  recorded on the reservation in the shared ledger. No second ledger.
+- Admission counters (D3): `max_work_attempts`/`max_provider_calls`/
+  `max_replans` enforced alongside caps (`0` = unlimited, documented).
+  Task/step caps still reset on epoch by design.
+- Step-less calls (D3, lead Q3): nullable task/run/step refs +
+  `invocation_id` (partial unique, idempotency key); reserve before spend
+  (scout) or reserve→settle around it (intake observer). No fake Step.
+  Accounting failures are logged AND persisted as `budget.accounting_failed`
+  events — never logging-only.
 
 ## Money vs business state
 

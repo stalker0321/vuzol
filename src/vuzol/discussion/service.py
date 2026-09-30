@@ -29,7 +29,7 @@ from vuzol.discussion.domain import (
     semantic_plan_hash,
     semantic_revision_hash,
 )
-from vuzol.discussion.horizon import is_horizon
+from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled
 from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
     Artifact,
@@ -877,7 +877,14 @@ class WorkPackageService:
         control_transition_target(package.status, PackageControlAction.APPROVE_ITEM)
         if package.running_revision_id != revision.id:
             raise DomainError("stale_revision")
-        if not (horizon_enabled and is_horizon(package.goal, package.exit_criteria)):
+        # D0 pinned semantics: an active package reads its pinned contract.
+        # Pre-D0 rows (execution_contract_version NULL) fall back to the
+        # passed admission flag for compatibility.
+        if getattr(package, "execution_contract_version", None) is not None:
+            horizon_effective = pinned_horizon_enabled(package, fallback=bool(horizon_enabled))
+        else:
+            horizon_effective = bool(horizon_enabled)
+        if not (horizon_effective and is_horizon(package.goal, package.exit_criteria)):
             raise DomainError("horizon_not_enabled")
         if package.horizon_phase != "waiting_approval" or package.cursor_ordinal != ordinal:
             raise DomainError("item_not_waiting_approval")

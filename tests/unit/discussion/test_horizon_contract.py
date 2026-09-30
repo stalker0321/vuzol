@@ -303,6 +303,92 @@ async def test_pinned_approval_gate_survives_flag_off() -> None:
     assert package.horizon_phase == "waiting_approval"
 
 
+@pytest.mark.anyio
+async def test_pinned_approve_item_passes_with_flag_off() -> None:
+    # REDO-1(a): flag off + pinned-enabled → APPROVE_ITEM passes (no deadlock).
+    from vuzol.discussion.horizon import HORIZON_CONTRACT_ENABLED
+
+    package, revision_id = _waiting_package()
+    package.execution_contract_version = HORIZON_CONTRACT_ENABLED
+    item_pk = uuid.uuid4()
+    uow = MagicMock()
+    uow.work_packages.get_package = AsyncMock(return_value=package)
+    uow.work_packages.get_fenced_revision = AsyncMock(
+        return_value=SimpleNamespace(id=revision_id, revision_number=1, content_hash="ab" * 32)
+    )
+    uow.work_packages.resolve_fenced_item = AsyncMock(return_value=(revision_id, item_pk))
+    uow.session = MagicMock()
+    uow.session.get = AsyncMock(return_value=SimpleNamespace(needs_approval=True))
+    uow.events.append = AsyncMock()
+    service = WorkPackageService(cast(Any, uow))
+
+    generation = await service.approve_waiting_item(
+        package_id=package.id,
+        revision_number=1,
+        h8="ab" * 8,
+        expected_status_generation=5,
+        ordinal=1,
+        user_id=7,
+        horizon_enabled=False,
+    )
+
+    assert generation == 6
+    assert package.horizon_phase == "item_approved:1"
+
+
+@pytest.mark.anyio
+async def test_restart_keeps_existing_pin_with_flag_off() -> None:
+    # REDO-1(b): start never re-pins — a pinned-enabled package restarted
+    # with the live flag off keeps horizon-v1:enabled.
+    from vuzol.discussion.horizon import HORIZON_CONTRACT_ENABLED
+    from vuzol.storage.types import PlanRevisionState
+
+    package_id = uuid.uuid4()
+    revision_id = uuid.uuid4()
+    package = WorkPackage(
+        session_id=uuid.uuid4(),
+        project_id="test",
+        status=WorkPackageStatus.APPROVED,
+        title="horizon package",
+    )
+    package.id = package_id
+    package.goal = "ship the horizon"
+    package.exit_criteria = None
+    package.version = 4
+    package.head_revision_id = revision_id
+    package.approved_revision_id = revision_id
+    package.execution_contract_version = HORIZON_CONTRACT_ENABLED
+    revision = SimpleNamespace(
+        id=revision_id,
+        revision_number=1,
+        content_hash="ab" * 32,
+        state=PlanRevisionState.APPROVED,
+    )
+    uow = MagicMock()
+    uow.work_packages.get_package = AsyncMock(return_value=package)
+    uow.work_packages.get_fenced_revision = AsyncMock(return_value=revision)
+    uow.session = MagicMock()
+    uow.session.scalar = AsyncMock(return_value=None)
+    uow.session.scalars = AsyncMock(
+        return_value=SimpleNamespace(all=MagicMock(return_value=[]))
+    )
+    uow.events.append = AsyncMock()
+    uow.outbox.enqueue = AsyncMock()
+    sequencer = WorkPackageSequencer(cast(Any, uow))
+
+    result = await sequencer.start(
+        package_id=package_id,
+        revision_number=1,
+        h8="ab" * 8,
+        expected_status_generation=4,
+        user_id=7,
+        horizon_enabled=False,
+    )
+
+    assert package.execution_contract_version == HORIZON_CONTRACT_ENABLED
+    assert result.completed is False
+
+
 def _waiting_package() -> tuple[WorkPackage, uuid.UUID]:
     revision_id = uuid.uuid4()
     package = WorkPackage(

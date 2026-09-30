@@ -120,6 +120,15 @@ class DiscussionContextChanged(RuntimeError):
     """The model answered against memory superseded by another committed turn."""
 
 
+# D4 W4: generative recovery is bounded and shares one contract. Primary and
+# fallback results validate against the same TaskDraft schema, carry the same
+# evidence (original input hash + transcript) and draw from the same attempt
+# budget: exactly one schema-repair plus at most one fallback interpreter.
+# Exhaustion routes to clarification/attention, never to execute.
+RECOVERY_MAX_REPAIRS = 1
+RECOVERY_MAX_FALLBACKS = 1
+
+
 async def interpret_with_recovery(
     primary: SemanticInterpreter,
     fallbacks: Sequence[SemanticInterpreter],
@@ -165,7 +174,7 @@ async def interpret_with_recovery(
             await observe(primary, None, attempt_kind="repair", outcome="repair_failed")
     except InterpreterUnavailable:
         await observe(primary, None, attempt_kind="initial", outcome="unavailable")
-    for fallback in fallbacks:
+    for fallback in fallbacks[:RECOVERY_MAX_FALLBACKS]:
         try:
             result = await fallback.interpret(request)
             await observe(fallback, result, attempt_kind="retry", outcome="succeeded")
@@ -550,12 +559,21 @@ class InterpretationPipeline:
                 else ControlOverride(kind=ControlOverrideKind(item.payload["control_override"]))
             ),
         )
-        result = await interpret_discussion_with_recovery(
-            self._discussion_interpreter,
-            self._discussion_fallbacks,
-            request,
-            on_attempt=self._attempt_observer(task_id=intake.task_id, intake_id=intake.id),
-        )
+        override = request.control_override
+        if override is not None and override.kind is ControlOverrideKind.EXPLICIT_TASK:
+            from vuzol.interpretation.discussion import explicit_task_interpretation
+            from vuzol.interpretation.explicit import explicit_task_body
+
+            result = explicit_task_interpretation(
+                request, body=explicit_task_body(request.original_input)
+            )
+        else:
+            result = await interpret_discussion_with_recovery(
+                self._discussion_interpreter,
+                self._discussion_fallbacks,
+                request,
+                on_attempt=self._attempt_observer(task_id=intake.task_id, intake_id=intake.id),
+            )
         if (
             result.interaction_mode is InteractionMode.PLAN_REQUEST
             and result.plan_request is not None

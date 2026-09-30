@@ -85,6 +85,24 @@ class ControlOverrideKind(StrEnum):
 class DecisionCandidate(FrozenModel):
     key: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
     statement: str = Field(min_length=1, max_length=500)
+    candidate_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64
+    )
+    revision_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    source_turn_ref: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_stable_identity(self) -> DecisionCandidate:
+        resolved = self.candidate_id or self.key
+        if self.candidate_id is not None and self.candidate_id != self.key:
+            raise ValueError("candidate_id must equal key for stable identity")
+        if resolved != self.key:
+            raise ValueError("candidate_id must equal key for stable identity")
+        return self
+
+    @property
+    def stable_id(self) -> str:
+        return self.candidate_id or self.key
 
 
 class DiscussionPlanItem(FrozenModel):
@@ -100,6 +118,9 @@ class DiscussionPlanItem(FrozenModel):
     suggested_risk: RiskLevel
     needs_approval: bool
     estimated_complexity: SuggestedComplexity
+    derived: bool = True
+    source_turn_ref: str | None = Field(default=None, max_length=64)
+    source_spec_revision: str | None = Field(default=None, max_length=64)
 
 
 class EnvironmentComponentProposal(FrozenModel):
@@ -460,6 +481,12 @@ def enforce_discussion_policy(
         InteractionMode.ITEM_EDIT: "item_edit",
         InteractionMode.TASK_REQUEST: "task_request",
     }
+    seen_candidates = set()
+    for item in result.decision_candidates:
+        stable = item.stable_id
+        if stable in seen_candidates:
+            raise ValueError(f"duplicate discussion candidate: {stable}")
+        seen_candidates.add(stable)
     result = result.model_copy(
         update={
             field: None
@@ -468,6 +495,38 @@ def enforce_discussion_policy(
         }
     )
     return DiscussionInterpretation.model_validate(result.model_dump(mode="python"))
+
+
+def explicit_task_interpretation(
+    request: DiscussionInterpretRequest, *, body: str
+) -> DiscussionInterpretation:
+    """Deterministic TASK_REQUEST for explicit user task commands (D4 W3).
+
+    No model call, no new authority: confirm-first still applies
+    (``should_create_task`` stays False; P8 owns materialization).
+    """
+
+    text = body.strip()[:4_000] or request.original_input.strip()[:4_000]
+    summary = " ".join(text.split())[:240] or "Explicit task request"
+    return DiscussionInterpretation(
+        interaction_mode=InteractionMode.TASK_REQUEST,
+        confidence=1.0,
+        should_create_task=False,
+        should_mutate_plan=False,
+        user_visible_summary="Explicit task command; deterministic fast path, no classifier.",
+        task_request=TaskRequestPayload(summary=summary, goal=text),
+    )
+
+
+def resolve_discussion_candidate(
+    result: DiscussionInterpretation, candidate_id: str
+) -> DecisionCandidate:
+    """Resolve a stable candidate ID or fail closed (D4 W5)."""
+
+    for candidate in result.decision_candidates:
+        if candidate.stable_id == candidate_id:
+            return candidate
+    raise ValueError(f"unknown discussion candidate: {candidate_id}")
 
 
 def plan_draft_from_interpretation(result: DiscussionInterpretation) -> PlanDraft:
@@ -492,6 +551,9 @@ def plan_draft_from_interpretation(result: DiscussionInterpretation) -> PlanDraf
                 suggested_risk=item.suggested_risk,
                 needs_approval=item.needs_approval,
                 estimated_complexity=EstimatedComplexity(item.estimated_complexity.value),
+                derived=item.derived,
+                source_turn_ref=item.source_turn_ref,
+                source_spec_revision=item.source_spec_revision,
             )
             for item in request.items
         ),
@@ -526,7 +588,6 @@ def plan_draft_from_interpretation(result: DiscussionInterpretation) -> PlanDraf
 
 class DiscussionInterpretationService:
     """Model boundary that returns advisory/draft data and never applies controls."""
-
     def __init__(self, interpreter: SemanticDiscussionInterpreter) -> None:
         self._interpreter = interpreter
 

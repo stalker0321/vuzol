@@ -500,13 +500,26 @@ class TelegramIngressService:
         """Persist default-off discussion intake without materializing a Task."""
 
         assert topic.project_id is not None
+        from vuzol.interpretation.discussion import ControlOverrideKind
+        from vuzol.interpretation.explicit import is_explicit_task_command
+
+        explicit_override: ControlOverrideKind | None = None
+        if is_explicit_task_command(update.text):
+            # D4 W3: EXPLICIT_TASK arms only on explicit user task commands.
+            # Direct-task create (discussion disabled) and pre-model slash
+            # commands already bypass the slow LLM without an override.
+            explicit_override = ControlOverrideKind.EXPLICIT_TASK
         control_override = (
-            None
-            if self._continue_discussion_overrides is None
-            else await self._continue_discussion_overrides.consume(
-                chat_id=update.chat_id,
-                thread_id=update.message_thread_id,
-                user_id=update.user_id,
+            explicit_override
+            if explicit_override is not None
+            else (
+                None
+                if self._continue_discussion_overrides is None
+                else await self._continue_discussion_overrides.consume(
+                    chat_id=update.chat_id,
+                    thread_id=update.message_thread_id,
+                    user_id=update.user_id,
+                )
             )
         )
         async with UnitOfWork(self._session_factory) as uow:

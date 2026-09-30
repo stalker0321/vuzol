@@ -19,15 +19,33 @@ via `content_hash`). Loader: `load_corpus_manifest`.
 
 | Arm | Steps | Budget |
 |---|---|---|
-| current | interpret → prepare → execute → approval | strong |
-| strong_solo | interpret → prepare → execute (single owner, no approval step) | efficient |
+| current (A) | interpret → prepare → execute → approval | strong |
+| strong_solo (B) | interpret → prepare → execute (single owner, no approval step) | efficient |
 | hybrid | interpret → prepare → execute → review → approval | balanced |
-| candidate_delta | interpret → prepare → execute → review → approval → record_evidence (full D-stack) | balanced |
+| candidate_delta (C) | interpret → prepare → execute → review → approval → record_evidence (full D-stack) | balanced |
 
-`describe_execution_path(arm)` records steps/roles/budget mode;
+`describe_execution_path(arm)` records steps/roles/budget mode/capabilities;
 `plan_cohort` pairs every corpus task × seed across arms (`pair_id =
 <task>:seed-<n>`) and randomizes order with an explicit recorded
 `shuffle_seed` (reproducible; order stored per run).
+
+## 2a. Arm divergences (D6 Q4): aligned vs documented
+
+Matched arms A/B/C share: pricing revision, deadline cap, verified-required
+acceptance, trusted checks, and — since D6 REDO — prepare capabilities
+(`GIT` + `FILESYSTEM_WRITE` on every arm) and execute capabilities
+(`CODE_EDIT` + `PROJECT_SHELL` on A/B/C). What still differs, by definition:
+
+| Dimension | current (A) | strong_solo (B) | hybrid | candidate_delta (C) |
+|---|---|---|---|---|
+| Steps | interpret, prepare, execute, approval | interpret, prepare, execute | + review | + review, + record_evidence |
+| Budget mode | strong | efficient | balanced | balanced |
+| Approval topology | human approval step | none (bounded owner loop = solo identity) | approval after review | approval after review (same as A) |
+| Execute grants | production set | production set | none (procedure sketch) | production set |
+
+Hybrid execute carries no grants (unchanged sketch; not part of the Q4
+matched set). Comparing an arm with an approval step against one without it
+as "model difference" is forbidden — A/C comparisons are approval-to-approval.
 
 ## 3. Frozen policy snapshot `experiment-policy-snapshot.v1`
 

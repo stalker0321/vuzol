@@ -5,7 +5,7 @@ a label alone is not a topology (EXPERIMENTS.md §7):
 
 - current: fixed compiled workflow with a human approval step (arm A);
 - strong_solo: one bounded owner loop, no separate approval step (arm B,
-  efficient spend by definition — the documented divergence);
+  efficient spend by definition);
 - hybrid: deterministic procedure with risk-based review before approval;
 - candidate_delta: full D-stack trial (arm C) — production capabilities,
   risk-based review, human approval (same approval topology as A, so A/C
@@ -103,7 +103,7 @@ def materialize_arm_workflow(
                     step_type="execute_code",
                     predecessor_ordinals=(1,),
                     queue_class=QueueClass.HEAVY,
-                    capabilities=frozenset(),
+                    capabilities=frozenset({Capability.CODE_EDIT, Capability.PROJECT_SHELL}),
                     retry_class=RetryClass.NEVER,
                     idempotency_class=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
                     timeout_seconds=timeout,
@@ -253,6 +253,8 @@ def _interpret_step() -> MaterializedStep:
 
 
 def _prepare_step(timeout: int) -> MaterializedStep:
+    # D6 Q4: prepare carries production capabilities on every arm — a trial
+    # that cannot fetch code cannot measure execution.
     del timeout
     return MaterializedStep(
         ordinal=1,
@@ -260,7 +262,7 @@ def _prepare_step(timeout: int) -> MaterializedStep:
         step_type="prepare_worktree",
         predecessor_ordinals=(0,),
         queue_class=QueueClass.HEAVY,
-        capabilities=frozenset(),
+        capabilities=frozenset({Capability.GIT, Capability.FILESYSTEM_WRITE}),
         retry_class=RetryClass.NEVER,
         idempotency_class=IdempotencyClass.ISOLATED_RETRYABLE,
         timeout_seconds=600,
@@ -273,6 +275,7 @@ class PathStep(TypedDict):
     ordinal: int
     key: str
     step_type: str
+    capabilities: list[str]
 
 
 class ExecutionPath(TypedDict):
@@ -292,7 +295,12 @@ def describe_execution_path(arm: ExperimentArm) -> ExecutionPath:
         "workflow_type": workflow.workflow_type,
         "budget_mode": _ARM_BUDGET_MODES[arm],
         "steps": [
-            {"ordinal": step.ordinal, "key": step.key, "step_type": step.step_type}
+            {
+                "ordinal": step.ordinal,
+                "key": step.key,
+                "step_type": step.step_type,
+                "capabilities": sorted(str(value) for value in step.capabilities),
+            }
             for step in workflow.steps
         ],
     }

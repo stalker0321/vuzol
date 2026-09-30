@@ -120,6 +120,29 @@ def test_three_arms_have_distinct_documented_execution_paths() -> None:
     assert budget_modes == {"strong", "efficient", "balanced"}
 
 
+def test_q4_arms_share_prepare_and_execute_capabilities() -> None:
+    """D6 Q4 REDO: prepare GIT+WRITE everywhere; A/B/C execute production set."""
+
+    traces = {arm: describe_execution_path(arm) for arm in ExperimentArm}
+    for arm, trace in traces.items():
+        by_key = {step["key"]: step for step in trace["steps"]}
+        assert set(by_key["prepare_worktree"]["capabilities"]) == {
+            "filesystem_write",
+            "git",
+        }, arm
+        assert "capabilities" in by_key["execute_code"]
+    for arm in (
+        ExperimentArm.CURRENT,
+        ExperimentArm.STRONG_SOLO,
+        ExperimentArm.CANDIDATE_DELTA,
+    ):
+        by_key = {step["key"]: step for step in traces[arm]["steps"]}
+        assert set(by_key["execute_code"]["capabilities"]) == {
+            "code_edit",
+            "project_shell",
+        }, arm
+
+
 def test_cohort_pairs_task_ids_across_arms() -> None:
     manifest = load_corpus_manifest(FIXTURES / "corpus.v1.json")
     planned = plan_cohort(manifest, tuple(ExperimentArm), (1, 2), shuffle_seed=7, only_smoke=True)

@@ -12,6 +12,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -35,9 +36,10 @@ from vuzol.providers.budgets import (
     usage_totals_by_purpose,
 )
 from vuzol.providers.domain import NormalizedUsage
-from vuzol.storage.leasing import claim_step
+from vuzol.storage.leasing import claim_step, start_step
 from vuzol.storage.models import (
     Approval,
+    Effect,
     Run,
     Step,
     Task,
@@ -54,6 +56,7 @@ from vuzol.storage.types import (
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.workflows.controls import decide_result
+from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.worker import CompleteHandler, WorkflowWorker
 
 from ._test_runtime_helpers import (
@@ -193,10 +196,61 @@ def test_research_plan_reaches_verified_goal(postgres_dsn: str) -> None:
     asyncio.run(scenario())
 
 
-def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> None:
+def _git(cwd: Path, *args: str) -> str:
+    import subprocess as _subprocess
+
+    out = _subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def _provision_repository(root: Path) -> tuple[Path, str]:
+    repository = root / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "test@example.com")
+    _git(repository, "config", "user.name", "Test")
+    (repository / "value.txt").write_text("base\n")
+    _git(repository, "add", "value.txt")
+    _git(repository, "commit", "-m", "base")
+    return repository, _git(repository, "rev-parse", "HEAD")
+
+
+def test_coding_plan_survives_worker_crash_and_applies(postgres_dsn: str, tmp_path: Path) -> None:
+    """Delivery criterion: goal -> candidate -> approval -> effects -> verified goal.
+
+    Coding multi-task plan on PostgreSQL with a real worker crash (expired
+    lease + recovery), a real approval, and the real ResultApplyHandler
+    applying to a temporary git repository: Effect intent -> apply ->
+    receipt/settlement and Approval CONSUMED are recorded, then the run
+    completes with reproducible cost attribution.
+    """
+
+    repository, base = _provision_repository(tmp_path)
+
     async def scenario() -> None:
+        from vuzol.config import DeliveryMode, GitDeliveryPolicy
+        from vuzol.config.loader import build_bundle
+        from vuzol.config.models import (
+            ProjectConfig,
+            RegistryDocument,
+            SandboxProfileConfig,
+        )
+        from vuzol.execution.effect import apply_operation_key
+        from vuzol.execution.git import LocalGit
+        from vuzol.execution.result_apply import ResultApplyHandler
+        from vuzol.storage.records import LeaseToken, StepRecord
+        from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
         engine, factory = storage(postgres_dsn)
+        git = LocalGit()
+        result_wt = tmp_path / "result"
+        await git.add_worktree(repository, result_wt, "result", base)
+        (result_wt / "value.txt").write_text("approved\n")
+        await git.stage_paths(result_wt, ("value.txt",))
+        result_commit = await git.create_commit(result_wt, "approved result")
+        inspection = await git.inspect(result_wt, base)
+        identity, _remote = await git.repository_identity(repository)
+
         task_id, interpretation_id = await seed_interpreted(factory, _coding_draft())
         await _dispatch(factory, task_id, interpretation_id)
 
@@ -215,8 +269,6 @@ def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> No
             doomed = await session.get(Step, token.step.id)
             assert doomed is not None
             crashed_key = doomed.step_type
-            doomed = await session.get(Step, token.step.id)
-            assert doomed is not None
             doomed.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
         async with factory.begin() as session:
             recovered = await recover_expired_steps(session, batch_size=10)
@@ -238,8 +290,8 @@ def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> No
                 if validate is not None and not isinstance(manifest, dict):
                     validate.result = {
                         "structured_output": {
-                            "result_commit": RESULT_COMMIT,
-                            "base_commit": BASE_COMMIT,
+                            "result_commit": result_commit,
+                            "base_commit": base,
                             "gates": [{"exit_code": 0}],
                         }
                     }
@@ -257,9 +309,9 @@ def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> No
                 if review is not None and not isinstance(review_manifest, dict):
                     review.result = {
                         "structured_output": {
-                            "base_commit": BASE_COMMIT,
-                            "result_commit": RESULT_COMMIT,
-                            "diff_hash": DIFF_HASH,
+                            "base_commit": base,
+                            "result_commit": result_commit,
+                            "diff_hash": inspection.diff_hash,
                             "verdict": "pass",
                             "findings": [],
                         }
@@ -277,7 +329,7 @@ def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> No
                 ):
                     build.result = {
                         "status": "built",
-                        "source_commit": RESULT_COMMIT,
+                        "source_commit": result_commit,
                         "artifact_hash": "d" * 64,
                     }
                 produced = await session.scalar(
@@ -294,7 +346,7 @@ def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> No
                 ):
                     produced.result = {
                         "status": "produced",
-                        "source_commit": RESULT_COMMIT,
+                        "source_commit": result_commit,
                         "artifacts": [
                             {
                                 "artifact_id": str(uuid.uuid4()),
@@ -311,16 +363,16 @@ def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> No
                             task_id=task_id,
                             run_id=run.id,
                             project_id="vuzol",
-                            repository_identity_hash="r" * 64,
-                            base_commit=BASE_COMMIT,
+                            repository_identity_hash=identity,
+                            base_commit=base,
                             default_branch="main",
-                            expected_target_head=BASE_COMMIT,
-                            branch="wt-1",
-                            path=f"memory-wt-{uuid.uuid4()}",
+                            expected_target_head=base,
+                            branch="result",
+                            path=str(result_wt),
                             owner="test",
                             delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
-                            result_commit=RESULT_COMMIT,
-                            diff_hash=DIFF_HASH,
+                            result_commit=result_commit,
+                            diff_hash=inspection.diff_hash,
                             retention_until=datetime.now(UTC) + timedelta(days=1),
                         )
                     )
@@ -338,14 +390,41 @@ def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> No
             assert approval is not None
             record = await session.scalar(select(Approval).where(Approval.step_id == approval.id))
             assert record is not None and record.status is ApprovalStatus.PENDING
+            approval_id = record.id
             await decide_result(session, record.id, decision="approve", deciding_user_id=1)
-        # The applier chain (ResultApplyHandler, not run here) executes the
-        # approved step through the standard claim/start/commit path, which
-        # activates its successors; emulate that boundary.
-        from vuzol.storage.leasing import start_step
-        from vuzol.workflows.domain import OutcomeKind, StepOutcome
-        from vuzol.workflows.service import commit_step_outcome
 
+        # Real applier: claim the approved step and run ResultApplyHandler
+        # against the temporary repository (no emulation).
+        # Test-contour registry root: the temp repository must resolve
+        # inside it (ProjectRegistry normalizes against repository_root).
+        settings = Settings(environment="test").model_copy(update={"repository_root": tmp_path})
+        registries = build_bundle(
+            RegistryDocument(
+                projects=(
+                    ProjectConfig(
+                        id="vuzol",
+                        display_name="Vuzol",
+                        repository_path=repository,
+                        default_branch="main",
+                        allowed_capabilities=frozenset(Capability),
+                        sandbox_profile="test-sandbox",
+                        git_delivery=GitDeliveryPolicy(
+                            allowed_modes=frozenset({DeliveryMode.RETAIN, DeliveryMode.APPLY}),
+                            approval_required=frozenset({DeliveryMode.APPLY}),
+                        ),
+                    ),
+                ),
+                topics=(),
+                sandboxes=(
+                    SandboxProfileConfig(
+                        id="test-sandbox",
+                        image=f"example/sandbox@sha256:{'0' * 64}",
+                    ),
+                ),
+            ),
+            settings,
+        )
+        handler = ResultApplyHandler(factory, registries, git)
         async with factory.begin() as session:
             token = await claim_step(
                 session,
@@ -356,9 +435,63 @@ def test_coding_plan_survives_worker_crash_and_approves(postgres_dsn: str) -> No
             )
             assert token is not None
             await start_step(session, token)
-            await commit_step_outcome(
-                session, token, StepOutcome(kind=OutcomeKind.SUCCEEDED, result={})
+            lease_token = token
+        request = StepExecutionRequest(
+            task_id=task_id,
+            run_id=lease_token.step.run_id,
+            step_id=lease_token.step.id,
+            step_type="approval",
+            payload={},
+            timeout_seconds=120,
+            lease=LeaseToken(
+                step=StepRecord(
+                    id=lease_token.step.id,
+                    run_id=lease_token.step.run_id,
+                    status=StepStatus.RUNNING,
+                    lease_generation=lease_token.generation,
+                    lease_owner="applier",
+                    lease_expires_at=None,
+                ),
+                owner="applier",
+                generation=lease_token.generation,
+            ),
+        )
+        outcome = await handler.execute(request, CancellationContext())
+        assert outcome.kind is OutcomeKind.SUCCEEDED
+        assert outcome.result["delivery_state"] == "applied"
+        # The worker commits the applier outcome, activating successors.
+        from vuzol.workflows.service import commit_step_outcome as _commit
+
+        async with factory.begin() as session:
+            await _commit(session, token, outcome)
+
+        # Effect intent -> apply -> receipt/settlement, Approval CONSUMED.
+        async with factory.begin() as session:
+            effect = await session.scalar(
+                select(Effect).where(
+                    Effect.operation_key
+                    == apply_operation_key(
+                        approval_id=approval_id,
+                        result_commit=result_commit,
+                        target_branch="main",
+                    )
+                )
             )
+            assert effect is not None
+            assert effect.status == "settled"
+            assert effect.receipt_status == "applied"
+            assert effect.receipt_external_ref == f"refs/heads/main@{result_commit}"
+            final_approval = await session.get(Approval, approval_id)
+            assert final_approval is not None
+            assert final_approval.status is ApprovalStatus.CONSUMED
+            worktree = await session.scalar(
+                select(Worktree).where(Worktree.run_id == effect.run_id)
+            )
+            assert worktree is not None
+            assert worktree.delivery_state is WorktreeDeliveryState.APPLIED
+            assert worktree.delivered_ref == "refs/heads/main"
+        assert _git(repository, "rev-parse", "main") == result_commit
+
         assert await _drain(factory, CODING_HANDLERS) >= 1
         async with factory() as session:
             task = await session.get(Task, task_id)

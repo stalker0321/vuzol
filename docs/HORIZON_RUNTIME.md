@@ -81,11 +81,14 @@ Changing it is a contract change:
   the telegram composition boundary (read via `discussion/horizon.py:horizon_enabled`).
 - Pinned contract (D0): `WorkPackage.execution_contract_version` +
   `Run.execution_contract_version` (nullable/additive, migration `d0c0n7r4c7v1`).
-  `sequencer.start` pins `horizon-v1:enabled|disabled` at admission; active
-  packages read the pinned value (`pinned_horizon_enabled`), so flag off never
-  downgrades an already materialized workflow. Pre-D0 rows (NULL) fall back to
-  the passed flag for compatibility. Old serialized drafts/workflows/approvals
-  remain readable.
+  `sequencer.start` pins `horizon-v1:enabled|disabled` on first start only
+  (NULL → pin from admission flag); restart/resume never re-pins. Active
+  packages read the pinned value (`pinned_horizon_enabled`): `approve_waiting_item`,
+  RESTART `horizon_resume` + `restart_plan` horizon branch, `_materialize_current` /
+  `materialize_running` / `observe_terminal`. A pinned-enabled package therefore
+  passes APPROVE_ITEM and keeps its `waiting_approval`/`evaluating` gates with
+  the live flag off. Pre-D0 rows (NULL) fall back to the passed flag for
+  compatibility. Old serialized drafts/workflows/approvals remain readable.
 - Rollback: set the flag off for new admissions. Already-running horizon
   packages keep their persisted state and evidence; they continue/pause
   explicitly via the existing stop/replan controls, never silent

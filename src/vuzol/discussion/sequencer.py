@@ -126,9 +126,11 @@ class WorkPackageSequencer:
         package.last_failure_task_id = None
         package.version += 1
         package.start_generation = package.version
-        # D0 admission: pin the executable contract at start; active runs read
-        # the pinned value, so a later flag-off never downgrades them.
-        package.execution_contract_version = pinned_contract_for(bool(horizon_enabled))
+        # D0 admission: pin the executable contract on first start only.
+        # Restart/resume of an already pinned package must never silently
+        # re-pin (no downgrade of active workflows to legacy).
+        if getattr(package, "execution_contract_version", None) is None:
+            package.execution_contract_version = pinned_contract_for(bool(horizon_enabled))
         await self._uow.events.append(
             entity_type="work_package",
             entity_id=package.id,

@@ -51,12 +51,22 @@ Status: accepted (D0 writer, base 9be9054). Implements DELTA §D0.
   (migration `d0c0n7r4c7v1`, no renames). `Run` pins `execution-contract.v1`
   at materialization; old rows (NULL) stay readable.
 - Flag `horizon.enabled` gates admission of new plans only. `sequencer.start`
-  pins `horizon-v1:enabled|disabled` at admission; active packages read the
-  pinned value (`pinned_horizon_enabled`), so flag off never downgrades a
-  materialized workflow (no silent legacy-COMPLETED). Pre-D0 NULL rows fall
-  back to the passed flag for compatibility.
-- `horizon_enabled(settings)` is the single flag reader, wired at
-  `sequencer.py`, `interpretation/service.py`, `telegram/controls.py`.
+  pins `horizon-v1:enabled|disabled` on first start only (pin NULL → pin from
+  the passed admission flag); restart/resume never re-pins an already pinned
+  package, so flag off never downgrades a materialized workflow (no silent
+  legacy-COMPLETED, no silent re-pin to disabled). Pre-D0 NULL rows fall back
+  to the passed flag for compatibility.
+- Active-package transitions read the pinned contract, not the live flag:
+  `approve_waiting_item` (`discussion/service.py`) gates on the pinned value;
+  RESTART `horizon_resume` (`discussion/application.py`) and the `restart_plan`
+  horizon branch follow the pinned resume decision; `_materialize_current` /
+  `materialize_running` / `observe_terminal` (`discussion/sequencer.py`) read
+  the pinned value. Hence a pinned-enabled package passes APPROVE_ITEM and
+  keeps its approval gate with the live flag off.
+- `horizon_enabled(settings)` is the single flag reader for admission (new
+  plans) at the composition/ingress boundaries (`sequencer.py` outbox,
+  `interpretation/service.py`, `telegram/controls.py`, `PackageControlIngress`
+  defaults); active-package transitions read `package.execution_contract_version`.
 - `Run.workflow_version` is documented as written-not-branched in D0.
 - Stale completion, late receipts, correction fencing, duplicate delivery —
   D1/D2 scope, recorded as follow-ups.

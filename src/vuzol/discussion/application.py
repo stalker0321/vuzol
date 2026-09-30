@@ -14,7 +14,7 @@ from vuzol.discussion.domain import (
     PlanDraft,
     canonical_plan_body,
 )
-from vuzol.discussion.horizon import is_horizon
+from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled
 from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.interpretation.discussion import (
@@ -404,7 +404,16 @@ class PackageControlIngress:
                 revision_id = None
             elif command.action is PackageControlAction.RESTART_PACKAGE:
                 resume_package = await uow.work_packages.get_package(command.package_id)
-                horizon_resume = self._horizon_enabled and is_horizon(
+                # D0 pinned semantics: restart is a transition of the active
+                # package, not a re-admission — read the pinned contract when
+                # present; only pre-D0 rows (NULL) use the live flag.
+                if getattr(resume_package, "execution_contract_version", None) is not None:
+                    _resume_flag = pinned_horizon_enabled(
+                        resume_package, fallback=bool(self._horizon_enabled)
+                    )
+                else:
+                    _resume_flag = bool(self._horizon_enabled)
+                horizon_resume = _resume_flag and is_horizon(
                     resume_package.goal, resume_package.exit_criteria
                 )
                 restart = await service.restart_plan(

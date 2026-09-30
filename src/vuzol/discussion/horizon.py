@@ -140,3 +140,26 @@ def horizon_enabled(settings: object) -> bool:
 
     flag = getattr(settings, "horizon", None)
     return bool(getattr(flag, "enabled", False))
+
+
+# D0 pinned execution contract (admission, not silent downgrade).
+EXECUTION_CONTRACT_VERSION = "execution-contract.v1"
+HORIZON_CONTRACT_ENABLED = "horizon-v1:enabled"
+HORIZON_CONTRACT_DISABLED = "horizon-v1:disabled"
+
+
+def pinned_contract_for(horizon_flag_enabled: bool) -> str:
+    """Pin the admission decision at materialization time."""
+
+    return HORIZON_CONTRACT_ENABLED if horizon_flag_enabled else HORIZON_CONTRACT_DISABLED
+
+
+def pinned_horizon_enabled(package: object, *, fallback: bool = False) -> bool:
+    """Read the active package's pinned contract (None = pre-D0 row → fallback)."""
+
+    pinned = getattr(package, "execution_contract_version", None)
+    if pinned == HORIZON_CONTRACT_ENABLED:
+        return True
+    if pinned == HORIZON_CONTRACT_DISABLED:
+        return False
+    return fallback

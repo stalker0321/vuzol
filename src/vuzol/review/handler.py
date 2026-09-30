@@ -23,6 +23,11 @@ from vuzol.review.domain import (
     ReviewVerdictKind,
 )
 from vuzol.review.independent import IndependentReviewError
+from vuzol.review.policy import (
+    ReviewLevel,
+    requires_independent,
+    resolve_review_plan,
+)
 from vuzol.storage.models import Run, Step, Task, Worktree
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import RiskLevel, StepStatus, WorktreeDeliveryState
@@ -237,8 +242,8 @@ class ResultReviewHandler:
                 summary=f"Mechanical review blocked: {blockers[0].classification}.",
             )
 
-        requires_independent = risk in {RiskLevel.HIGH, RiskLevel.PRIVILEGED}
-        if requires_independent:
+        requires_independent_level = _requires_independent_for(risk, inspection.changed_files)
+        if requires_independent_level:
             if self._independent is None:
                 raise IndependentReviewError(
                     "high or privileged risk requires an independent model reviewer, "
@@ -455,6 +460,22 @@ def runtime_risk(current: RiskLevel, inspection: GitInspection) -> RiskLevel:
     elif len(inspection.changed_files) > 5 or len(inspection.diff) > 4_000:
         measured = RiskLevel.MEDIUM
     return max((current, measured), key=lambda value: _RISK_ORDER[value])
+
+
+def _requires_independent_for(risk: RiskLevel, changed_files: tuple[str, ...]) -> bool:
+    """Decide the independent call from the policy level, not raw risk.
+
+    D0 wiring: measured risk + changed files resolve to L0-L3; L2/L3 require
+    an independent model call. Policy errors fail closed via
+    ``IndependentReviewError`` → BLOCKED (``independent_review_required``).
+    """
+
+    try:
+        plan = resolve_review_plan(risk, tuple(changed_files))
+        level = ReviewLevel(str(plan["level"]))
+    except Exception as error:
+        raise IndependentReviewError(f"review policy failed closed: {error}") from error
+    return requires_independent(level)
 
 
 def _blocked_category(verdict: ReviewVerdict) -> str:

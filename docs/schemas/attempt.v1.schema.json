@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vuzol.local/schemas/attempt.v1.json",
+  "title": "Attempt v1",
+  "description": "Immutable, append-only record of one concrete execution of a step. Owner = runtime. A retry/repair/takeover creates a NEW attempt with its own identity and lineage; a closed attempt is never mutated. Lease generation is a fence, attempt_no is work lineage, provider_attempt is provider retry count; they are not interchangeable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "attempt_id",
+    "horizon_id",
+    "task_id",
+    "run_id",
+    "step_id",
+    "attempt_no",
+    "attempt_kind",
+    "purpose",
+    "executor",
+    "lease",
+    "input_bindings",
+    "outcome",
+    "owner",
+    "created_at"
+  ],
+  "properties": {
+    "schema": { "const": "attempt.v1" },
+    "attempt_id": { "type": "string", "format": "uuid" },
+    "horizon_id": { "type": ["string", "null"], "format": "uuid" },
+    "plan_revision_id": { "type": ["string", "null"], "format": "uuid" },
+    "item_id": { "type": ["string", "null"], "format": "uuid" },
+    "task_id": { "type": "string", "format": "uuid" },
+    "run_id": { "type": "string", "format": "uuid" },
+    "step_id": { "type": "string", "format": "uuid" },
+    "step_ordinal": { "type": ["integer", "null"], "minimum": 1 },
+    "attempt_no": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic within (step_id). Identity of the attempt lineage row."
+    },
+    "parent_attempt_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Lineage for repair/retry/takeover. Null for the initial attempt."
+    },
+    "attempt_kind": { "enum": ["initial", "repair", "retry", "takeover"] },
+    "purpose": {
+      "enum": ["intake", "planning", "coding", "review", "research", "setup"],
+      "description": "Orthogonal to attempt_kind; exactly one purpose per attempt."
+    },
+    "executor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id"],
+      "properties": {
+        "profile_id": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "model": { "type": ["string", "null"], "maxLength": 200 },
+        "node_id": { "type": ["string", "null"], "maxLength": 100 },
+        "environment_revision": { "type": ["string", "null"], "maxLength": 100 },
+        "adapter_version": { "type": ["string", "null"], "maxLength": 100 }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "generation"],
+      "properties": {
+        "owner": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fencing token at the time of the attempt."
+        }
+      }
+    },
+    "input_bindings": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "type": "string", "format": "uuid" },
+      "description": "InputBinding ids consumed by this attempt. Exact bytes are pinned by content_hash inside each binding."
+    },
+    "input_hash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "output_hash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "usage_ref": {
+      "type": ["string", "null"],
+      "description": "Reference to the accounting rows for this attempt. Cost provenance is owned by ADR-A02; no monetary value is embedded here."
+    },
+    "cost_known": {
+      "type": "boolean",
+      "description": "False means usage/cost is unknown and must be reserved conservatively, never treated as zero."
+    },
+    "outcome": {
+      "enum": ["running", "succeeded", "failed", "cancelled", "blocked", "uncertain"]
+    },
+    "failure_category": { "type": ["string", "null"], "maxLength": 100 },
+    "failure_fingerprint": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Normalized fingerprint over failure/evidence/environment/strategy to suppress identical repairs."
+    },
+    "owner": { "const": "runtime" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "closed_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

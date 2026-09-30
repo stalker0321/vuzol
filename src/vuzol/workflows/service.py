@@ -74,6 +74,7 @@ async def materialize_run(
         configuration_revision=configuration_revision,
         policy_revision=policy_revision,
         prompt_revision=prompt_revision,
+        execution_contract_version="execution-contract.v1",
     )
     session.add(run)
     await session.flush()

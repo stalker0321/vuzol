@@ -482,7 +482,9 @@ class HorizonSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # Default off: the legacy WorkPackage lifecycle stays the only executable
-    # path. Rollback is flag off; pinned runs continue/pause explicitly.
+    # path for new admissions. The flag gates admission of new horizon plans;
+    # active packages read their pinned `execution_contract_version` (D0), so
+    # flag off never downgrades an already materialized workflow.
     enabled: bool = False
 
 

@@ -6,7 +6,7 @@ synthesis binding. Without retrieval there is no verified research.
 
 ## 1. research-result.v1
 
-Contract: `tasks/T020/schemas/research-result.v1.schema.json` (+ example).
+Contract: `docs/schemas/research-result.v1.schema.json` (+ `docs/schemas/research-result.v1.example.json`, frozen WP00/WP06 copies).
 Payload shape:
 
 - `sources[]`: `source_id`, `uri`, `retriever` (`approved-http` |
@@ -31,16 +31,26 @@ Capability selection comes from the WP03 registry:
 `descriptor_for_capability("web_research")` → `web-research` (ACTION,
 read_only); unmapped capabilities have no selection.
 
-## 3. Claim/source report + synthesis binding
+## 3. Claim/source report + synthesis binding + D0 guard
 
 `src/vuzol/research/synthesize.py`: `sources_from_retrieved` lifts transport
 sources (hash/scope/retriever/freshness), `bind_report` builds + validates,
 `build_synthesis_context` renders the explicit block with `[verified]` /
 `[unsupported]` / `[conflicting]` markers, per-citation hashes and `(stale)`
 flags. Invalid reports never produce a block (`SynthesisError`).
+D0 split: the provider-step text wrapper is `research-provider-result.v1`
+(`src/vuzol/providers/handlers.py:_research_result_bytes`), read by legacy
+readers without a verified label; `research-result.v1` is reserved for
+`sources[]/claims[]`. The synthesize consumer validates claimed
+source-report bytes fail-closed (`research/report.py:validate_source_report_bytes`
+via `jsonschema.Draft202012Validator` + `validate_report`) before any provider
+spend — mismatched schema/shape raises `BindingError(source_report_schema_mismatch)`
+as a pre-provider failure (reservation released). Retrieval is not connected to
+`research_execute` in D0 (D3 scope): only the contract + fail-closed consumer.
 Persistence reuses the WP02 path unchanged: `Artifact(research_result,
 application/json)` + `InputBinding(slot=predecessor_result,
-schema=research-result.v1, required, hash-pinned)` → `resolve_context`
+schema=research-provider-result.v1 for legacy provider text,
+schema=research-result.v1 for verified source reports, required, hash-pinned)` → `resolve_context`
 (hash-drift / foreign-scope / freshness enforced, fail-closed).
 
 ## 4. Freshness policy

@@ -2,7 +2,7 @@
 
 Status: implemented additively on the existing `usage_records` and
 `provider_budget_reservations` tables. No table was renamed and no existing
-column was changed. Contracts: ADR-A01, ADR-A02.
+column was changed. Contracts: `docs/contracts/ADR-A01.md`, `docs/contracts/ADR-A02.md`.
 
 ## Records
 
@@ -24,7 +24,7 @@ column was changed. Contracts: ADR-A01, ADR-A02.
 All are nullable/additive. `horizon_id` is a stable nullable scope reference;
 binding it to a real horizon is WP08.
 
-## Semantics (ADR-A02)
+## Semantics (`docs/contracts/ADR-A02.md`)
 
 - `purpose` ∈ `intake | planning | coding | review | research | setup`.
 - `attempt_kind` ∈ `initial | repair | retry | takeover`.
@@ -34,7 +34,7 @@ binding it to a real horizon is WP08.
   purpose total.
 - `pricing_revision` is the content revision of the provider profile config
   (`content_revision(profile)`) that priced the call. `currency` is `USD`.
-  A full pricing registry (TOML vs SQL) is deferred (ADR-A02 open question);
+  A full pricing registry (TOML vs SQL) is deferred (`docs/contracts/ADR-A02.md` open question);
   tariff values still come from the current config.
 - `cost_known = false` means the amount is a conservative floor
   (`reserved_cost_units` / `minimum_unknown_usage_cost`), **not** a measured

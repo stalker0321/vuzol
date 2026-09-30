@@ -18,6 +18,7 @@ from vuzol.discussion.agent import (
 )
 from vuzol.discussion.application import apply_plan_request_in_uow
 from vuzol.discussion.domain import DomainError
+from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.discussion import (
@@ -596,7 +597,7 @@ class InterpretationPipeline:
                         request=request,
                         result=result,
                         planner_profile=getattr(self._discussion_interpreter, "profile_id", None),
-                        horizon_enabled=self._runtime.settings.horizon.enabled,
+                        horizon_enabled=horizon_enabled(self._runtime.settings),
                     )
                 except DomainError as error:
                     raise PermanentPipelineError(f"discussion_plan_{error}") from error

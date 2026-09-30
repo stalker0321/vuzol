@@ -12,6 +12,7 @@ from vuzol.discussion.application import (
     PackageControlSource,
 )
 from vuzol.discussion.domain import DomainError, PackageControlAction
+from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.discussion import ControlOverrideKind
 from vuzol.projects.executor_preference import ExecutorPreferenceError
@@ -239,7 +240,7 @@ class TelegramControlService:
                     self._session_factory,
                     enabled=True,
                     authorized_user_ids=frozenset(self._runtime.settings.allowed_user_ids),
-                    horizon_enabled=self._runtime.settings.horizon.enabled,
+                    horizon_enabled=horizon_enabled(self._runtime.settings),
                 ).apply(
                     AuthoritativeControlCommand(
                         action=action,

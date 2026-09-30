@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vuzol.local/schemas/effect.v1.json",
+  "title": "Effect v1",
+  "description": "Durable intent and reconciliation record for one external/mutating operation. Owner = applier (effectful adapter) under a runtime transition. The stable operation_key is created BEFORE launch. Uncertain effects are never blindly retried. Targets are logical references; credential VALUES never appear in this contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "effect_id",
+    "operation_key",
+    "effect_class",
+    "target",
+    "idempotency",
+    "authorization",
+    "intent",
+    "status"
+  ],
+  "properties": {
+    "schema": { "const": "effect.v1" },
+    "effect_id": { "type": "string", "format": "uuid" },
+    "operation_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Stable, globally unique key. Retry of the same effect reuses it; a new business effect gets a new key."
+    },
+    "horizon_id": { "type": ["string", "null"], "format": "uuid" },
+    "attempt_id": { "type": ["string", "null"], "format": "uuid" },
+    "step_id": { "type": "string", "format": "uuid" },
+    "effect_class": {
+      "enum": [
+        "read_only",
+        "isolated_mutation",
+        "external_mutation",
+        "irreversible_external",
+        "host_privileged"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference"],
+      "properties": {
+        "kind": {
+          "enum": ["git_ref", "filesystem_path", "provider_api", "resource", "host_operation"]
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "Logical target reference (e.g. branch name, artifact id). Never a credential value."
+        }
+      }
+    },
+    "idempotency": {
+      "enum": ["idempotent", "non_idempotent", "reconcilable", "unknown"],
+      "description": "unknown => block or reconcile; never blind retry."
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["permission_envelope_hash"],
+      "properties": {
+        "permission_envelope_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "approval_id": { "type": ["string", "null"], "format": "uuid" },
+        "approval_envelope_hash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["created_at", "payload_hash", "lease_generation"],
+      "properties": {
+        "created_at": { "type": "string", "format": "date-time" },
+        "payload_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "lease_generation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "launch": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["started_at", "generation"],
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "dispatch_token": { "type": ["string", "null"], "maxLength": 255 },
+        "generation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "receipt": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["status", "observed_at"],
+      "properties": {
+        "status": { "enum": ["applied", "completed", "failed", "rejected", "unknown"] },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "external_receipt_ref": { "type": ["string", "null"], "maxLength": 500 },
+        "output_hash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "reconcile": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["not_started", "pending", "confirmed", "denied", "uncertain"] },
+        "reconciled_at": { "type": ["string", "null"], "format": "date-time" },
+        "method": {
+          "type": ["string", "null"],
+          "maxLength": 100,
+          "description": "e.g. query_operation_key, read_git_ref, external_status_endpoint"
+        }
+      }
+    },
+    "credential_refs": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alias", "reference"],
+        "properties": {
+          "alias": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Reference/handle only. A credential VALUE is forbidden in this contract."
+          }
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "intent_recorded",
+        "dispatched",
+        "observed",
+        "uncertain",
+        "settled",
+        "failed",
+        "cancelled"
+      ]
+    }
+  }
+}

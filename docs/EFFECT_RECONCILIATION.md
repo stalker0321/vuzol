@@ -2,7 +2,7 @@
 
 Status: implemented for the single existing effect adapter — the trusted local
 Git CAS apply (`ResultApplyHandler` / `LocalGit.apply_result`). The contract is
-the frozen `tasks/T001/schemas/effect.schema.json` (`effect.v1`). No deployment or
+the frozen `docs/schemas/effect.v1.schema.json` (`effect.v1`, immutable WP00 copy). No deployment or
 rollback engine, no new scheduler, and `ProxyStartupReconciler` semantics are
 untouched.
 
@@ -34,7 +34,7 @@ observation data lives in `context` (`project_id`, `worktree_id`, `target_branch
 Operation key: `apply:<approval_id>:<result_commit>:<target_branch>` — created
 before launch and reused on every retry.
 
-## Order of operations (ADR-A01)
+## Order of operations (`docs/contracts/ADR-A01.md`)
 
 1. `_load` validates the approval/envelope/worktree binding and the lease; the
    policy gates and `_assert_current_lease` run.

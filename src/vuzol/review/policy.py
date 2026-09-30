@@ -1,4 +1,4 @@
-"""Versioned L0/L1/L2/L3 review policy (WP07).
+"""Versioned L0/L1/L2/L3 review policy (WP07, wired in D0).
 
 Risk only escalates, never downgrades: the policy adds depth on top of the
 existing high-risk gates in ``review/handler.py``.  It never removes the
@@ -7,11 +7,18 @@ mandatory independent review for HIGH/PRIVILEGED results.
 Levels:
 
 - L0 — mechanical only. LOW risk, docs-only or tiny changes.
-- L1 — mechanical + focused pattern review. May be disabled by the operator
-  (``l1_enabled=False``); disabled L1 escalates to L2, never down to L0.
+- L1 — mechanical + focused pattern review. D0 has no operator switch for
+  ``l1_enabled``; the parameter exists only as an explicit escalation path
+  (disabled L1 escalates to L2, never down to L0). No promise of an operator
+  setting is made.
 - L2 — bounded model review per partition (default for MEDIUM and up).
 - L3 — bounded model review per partition + cross-partition assessment
   (HIGH/PRIVILEGED and large diffs).
+
+Coverage (D0 ADR): L2 and L3 require an independent model call; L0 and L1
+are mechanical only. MEDIUM maps to L2, so a medium handler invokes the
+required reviewer. ``should_skip_rereview`` is documented as unused by the
+dispatch path (kept as a pure helper with unit coverage).
 
 Jev is not a dependency of review and must stay unconnected.
 """
@@ -160,6 +167,10 @@ def should_skip_rereview(
 
     Any change of base/result/diff hash or of the policy revision requires a
     fresh review. A changed hash invalidates the previous verdict.
+
+    D0 note: the dispatch path does not call this helper; every review step
+    performs a fresh review. It is kept as a pure, unit-tested predicate for
+    future admission use.
     """
 
     return (
@@ -168,3 +179,9 @@ def should_skip_rereview(
         and previous_result_commit == result_commit
         and (previous_diff_hash or "") == (diff_hash or "")
     )
+
+
+def requires_independent(level: ReviewLevel) -> bool:
+    """D0 coverage floor: L2/L3 require an independent model call."""
+
+    return level in {ReviewLevel.L2, ReviewLevel.L3}

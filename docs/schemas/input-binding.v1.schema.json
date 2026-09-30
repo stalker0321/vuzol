@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vuzol.local/schemas/input-binding.v1.json",
+  "title": "InputBinding v1",
+  "description": "Explicit, hash-pinned binding of a predecessor artifact into a consumer item/step. Owner = runtime (compiler records the intended binding; runtime resolves it). Immutable once recorded. content_hash pins exact bytes; schema version pins shape. A missing/wrong-hash/foreign-scope/expired required binding stops the consumer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "binding_id",
+    "consumer",
+    "artifact_id",
+    "content_hash",
+    "schema_name",
+    "schema_version",
+    "scope",
+    "required",
+    "freshness",
+    "created_at"
+  ],
+  "properties": {
+    "schema": { "const": "input-binding.v1" },
+    "binding_id": { "type": "string", "format": "uuid" },
+    "consumer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item_id"],
+      "properties": {
+        "horizon_id": { "type": ["string", "null"], "format": "uuid" },
+        "item_id": { "type": "string", "format": "uuid" },
+        "step_id": { "type": ["string", "null"], "format": "uuid" },
+        "slot": {
+          "type": ["string", "null"],
+          "maxLength": 100,
+          "description": "Named input slot in the consumer contract, e.g. predecessor_result."
+        }
+      }
+    },
+    "artifact_id": { "type": "string", "format": "uuid" },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of the exact artifact bytes. Binds a specific content identity, not a mutable location."
+    },
+    "schema_name": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "schema_version": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "access_scope"],
+      "properties": {
+        "project_id": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "access_scope": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
+    "required": { "type": "boolean" },
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "published_at": { "type": ["string", "null"], "format": "date-time" },
+        "max_age_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "status": { "enum": ["fresh", "stale", "expired", "unknown"] },
+        "note": {
+          "type": ["string", "null"],
+          "maxLength": 200,
+          "description": "Stale is visible to the consumer; it is not silently refreshed."
+        }
+      }
+    },
+    "resolved_from": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "producer_attempt_id": { "type": ["string", "null"], "format": "uuid" },
+        "producer_step_id": { "type": ["string", "null"], "format": "uuid" }
+      },
+      "description": "Optional provenance of the producing attempt."
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

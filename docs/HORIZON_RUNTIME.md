@@ -1,4 +1,4 @@
-# Horizon v1 runtime over WorkPackage (WP08, ADR-A01.5)
+# Horizon v1 runtime over WorkPackage (WP08, `docs/contracts/ADR-A01.md` §A01.5 horizon)
 
 Horizon is an opt-in contract layered on `WorkPackage`. A package without a
 goal keeps the legacy lifecycle byte-for-byte. Behaviour is gated by
@@ -64,7 +64,7 @@ Standard `WorkPackage` states apply. Horizon adds transient phases recorded in
 ## 3. Frozen status mapping
 
 `HORIZON_STATUS_MAPPING` (`src/vuzol/discussion/horizon.py:19`) is the frozen
-`WorkPackageStatus` (+phase, +accepted) ↔ ADR-A01.5 `horizon.status` contract.
+`WorkPackageStatus` (+phase, +accepted) ↔ `docs/contracts/ADR-A01.md` §A01.5 `horizon.status` contract.
 Changing it is a contract change:
 
 - `DRAFT` → `draft`; `APPROVED` → `ready`; `RUNNING` → `running`
@@ -73,16 +73,24 @@ Changing it is a contract change:
   (an unaccepted completion is not success)
 - `PAUSED` → `paused`; `STOPPED` → `failed`; anything else → `cancelled`
 
-## 4. Opt-in flag / rollback guide
+## 4. Opt-in flag / pinned admission (D0)
 
 - Enable: `VUZOL_HORIZON__ENABLED=true` (or config). Default off: the legacy
-  lifecycle is the only executable path; all new parameters default `False`
-  through `PackageControlIngress`, `WorkPackageSequencer`, and the telegram
-  composition boundary.
-- Rollback: set the flag off. Already-running horizon packages keep their
-  persisted state and evidence; guarded branches stop triggering, legacy
-  transitions apply. Pinned runs continue or are paused explicitly via the
-  existing stop/replan controls.
+  lifecycle is the only executable path for new admissions; all new parameters
+  default `False` through `PackageControlIngress`, `WorkPackageSequencer`, and
+  the telegram composition boundary (read via `discussion/horizon.py:horizon_enabled`).
+- Pinned contract (D0): `WorkPackage.execution_contract_version` +
+  `Run.execution_contract_version` (nullable/additive, migration `d0c0n7r4c7v1`).
+  `sequencer.start` pins `horizon-v1:enabled|disabled` at admission; active
+  packages read the pinned value (`pinned_horizon_enabled`), so flag off never
+  downgrades an already materialized workflow. Pre-D0 rows (NULL) fall back to
+  the passed flag for compatibility. Old serialized drafts/workflows/approvals
+  remain readable.
+- Rollback: set the flag off for new admissions. Already-running horizon
+  packages keep their persisted state and evidence; they continue/pause
+  explicitly via the existing stop/replan controls, never silent
+  legacy-COMPLETED. `Run.workflow_version` is recorded at materialization and
+  documented as written-not-branched (not used for contract selection in D0).
 - Rollback never deletes evidence: approvals, artifacts, attempts, and event
   rows are append-only; the migration downgrade is schema-only and is not
   part of the flag rollback.

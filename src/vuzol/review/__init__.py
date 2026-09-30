@@ -28,6 +28,7 @@ from vuzol.review.policy import (
     ReviewLevel,
     classify_file,
     level_for,
+    requires_independent,
     resolve_review_plan,
     should_skip_rereview,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "effective_risk",
     "level_for",
     "mechanical_findings",
+    "requires_independent",
     "resolve_review_plan",
     "review_cost_export",
     "select_reviewer_profile",

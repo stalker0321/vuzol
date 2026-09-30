@@ -1,7 +1,7 @@
 # Capability registry, installations and local node (WP03)
 
 Status: implemented additively. Three distinct facts stay separate
-(ADR-A01): **descriptor** (what the capability means), **installation** (where
+(`docs/contracts/ADR-A01.md`): **descriptor** (what the capability means), **installation** (where
 it is verifiably available) and **permission grant** (`Capability` enum /
 `ProjectConfig.allowed_capabilities`). Discovery never installs and never grants
 permissions; the installer remains the backend.
@@ -105,7 +105,7 @@ scope.)
 2. If it is a managed toolchain, add its source to
    `source_catalog.v1.json` (hash/size/executables) so the existing
    `OfflineCapabilityInstaller` can install it under the current source/hash
-   bound approval (ADR-A03). No new installer.
+   bound approval (`docs/contracts/ADR-A03.md`). No new installer.
 3. After install, probe it with `probe_toolchain` (confined roots) and record it
    with `record_installation`; stale/failed then excludes it from preflight.
 4. Do not add a permission; grant `Capability`/`allowed_capabilities` through

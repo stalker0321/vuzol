@@ -1907,17 +1907,26 @@ class TaskSpecRevision(IdentityMixin, Base):
 class ReviewOutcomeHistory(IdentityMixin, Base):
     """Review/outcome history separate from the mutable ``Step.result`` (D1 L3).
 
-    Unique acceptance key reuses ``Approval.action_envelope_hash`` when an
-    approval exists for the step (lead Q11); pre-approval review outcomes
-    (e.g. BLOCKED reviews, which precede approval creation) are keyed by a
-    content hash of the verdict — equally content-addressed, never a
-    surrogate. History is evidence retention only: it is never read as proof
-    of a past review (a changed hash requires a fresh review).
+    Acceptance key (lead consent on T048 REDO, dossier L3 candidate): the
+    verdict content hash, unique within ``(run_id, step_id)`` — never a
+    global unique, so a second BLOCKED verdict with different content is
+    always recorded and never swallowed. Q11-as-decided
+    (``Approval.action_envelope_hash``) is NOT implemented: a BLOCKED review
+    precedes approval creation in the workflow
+    (``definitions.py:93-127``), so no approval exists for the verdict's
+    step at record time — the branch would be unreachable in production.
+    History is evidence retention only: it is never read as proof of a past
+    review (a changed hash still requires a fresh review).
     """
 
     __tablename__ = "review_outcome_history"
     __table_args__ = (
-        UniqueConstraint("acceptance_key", name="uq_review_outcome_acceptance_key"),
+        UniqueConstraint(
+            "run_id",
+            "step_id",
+            "acceptance_key",
+            name="uq_review_outcome_run_step_key",
+        ),
     )
 
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -1930,9 +1939,6 @@ class ReviewOutcomeHistory(IdentityMixin, Base):
         ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     acceptance_key: Mapped[str] = mapped_column(String(64), nullable=False)
-    approval_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("approvals.id", ondelete="RESTRICT")
-    )
     verdict: Mapped[str] = mapped_column(String(30), nullable=False)
     review_kind: Mapped[str | None] = mapped_column(String(30))
     risk: Mapped[str | None] = mapped_column(String(20))

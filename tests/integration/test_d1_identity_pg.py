@@ -15,6 +15,7 @@ from tests.integration.storage.helpers import seed_task_run_step, storage
 from vuzol.storage.attempts import (
     close_work_attempt,
     latest_attempt,
+    record_review_outcome,
     record_work_attempt,
     resolve_stable_item,
     snapshot_task_spec,
@@ -105,7 +106,7 @@ async def test_d1_blocked_verdict_reaches_history(postgres_dsn: str) -> None:
 
     _engine, factory = storage(postgres_dsn)
     try:
-        _task_record, _run_id, step, token = await _leased_step(factory)
+        task_record, run_id, step, token = await _leased_step(factory)
         outcome = StepOutcome(
             kind=OutcomeKind.BLOCKED,
             result=_verdict(),
@@ -130,6 +131,27 @@ async def test_d1_blocked_verdict_reaches_history(postgres_dsn: str) -> None:
             fresh = await uow.session.get(Step, step.id)
             assert fresh is not None
             assert fresh.result is None or "verdict" not in (fresh.result or {})
+            # REDO condition 1: a second BLOCKED with different content is
+            # recorded, never swallowed by the first row's key
+            other = dict(_verdict())
+            other["summary"] = "Independent review blocked: another defect."
+            second = await record_review_outcome(
+                uow.session,
+                task_id=task_record.id,
+                run_id=run_id,
+                step_id=step.id,
+                verdict=other,
+            )
+            assert second.id != row.id
+            # ...while an identical re-commit is idempotent (safe retries)
+            same = await record_review_outcome(
+                uow.session,
+                task_id=task_record.id,
+                run_id=run_id,
+                step_id=step.id,
+                verdict=_verdict(),
+            )
+            assert same.id == row.id
     finally:
         await _engine.dispose()
 

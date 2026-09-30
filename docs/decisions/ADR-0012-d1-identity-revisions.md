@@ -38,11 +38,21 @@ Status: accepted (D1 writer, base 7f651d9 D0-PASS). Implements DELTA §D1.
 ## 3. Review/outcome history + acceptance key
 
 - History table `review_outcome_history`, separate from mutable `Step.result`.
-  Unique acceptance key reuses `Approval.action_envelope_hash` when an
-  approval exists for the step (lead Q11); pre-approval outcomes (BLOCKED
-  reviews precede approval creation) use a content hash of the verdict —
-  equally content-addressed, never a surrogate. Minimal fix in the BLOCKED
-  branch of `commit_step_outcome` only; the success path is untouched.
+  Acceptance key (lead consent on T048 REDO, dossier L3 candidate): the
+  verdict content hash, unique within `(run_id, step_id)`
+  (`uq_review_outcome_run_step_key`) — never a global unique, so a second
+  BLOCKED verdict with different content is always recorded, never swallowed;
+  an identical re-commit returns the existing row (safe retries).
+- Q11-as-decided (`Approval.action_envelope_hash`) is explicitly NOT
+  implemented, with lead consent: a BLOCKED review precedes approval creation
+  in the workflow (`definitions.py:93–127` — `approve_result` has
+  predecessors `publish_preview ← build_static ← review`), so no approval
+  exists for the verdict's step at record time and an approval-hash branch
+  would be dead in production. The dead branch was removed, not left as
+  "done Q11". If a future flow records outcomes where an approval exists,
+  D2 may revisit the key — as a new decision, not a silent change.
+- Minimal fix in the BLOCKED branch of `commit_step_outcome` only; the
+  success path is untouched.
 - History is evidence retention: it is never read as proof of a past review
   (a changed hash still requires a fresh review).
 

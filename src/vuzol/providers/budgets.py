@@ -16,7 +16,9 @@ from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import (
     MaterializationLink,
+    PlanRevision,
     ProviderBudgetReservation,
+    Run,
     Step,
     Task,
     UsageRecord,
@@ -118,13 +120,59 @@ async def resolve_horizon_scope(
     """
 
     if task_id is not None:
-        link = await session.scalar(
-            select(MaterializationLink).where(MaterializationLink.task_id == task_id)
-        )
-        if link is not None:
-            return link.work_package_id
+        package_id = await resolve_package_id(session, task_id)
+        if package_id is not None:
+            return package_id
         return None
     return intake_id
+
+
+async def resolve_package_id(
+    session: AsyncSession, task_id: uuid.UUID
+) -> uuid.UUID | None:
+    """Owning package of a materialized task, if any (D3 counters/fences)."""
+
+    link = await session.scalar(
+        select(MaterializationLink).where(MaterializationLink.task_id == task_id)
+    )
+    return link.work_package_id if link is not None else None
+
+
+async def _lifetime_task_count(session: AsyncSession, horizon_id: uuid.UUID) -> int:
+    """Tasks plus attempt rows for a lifetime owner (REDO-3 unit).
+
+    Same unit as ``_lifetime_spend``/``budget_state`` (task-set size), plus
+    the finer-grained WorkAttempt rows the lead decision names. Epochs,
+    retries and revisions never shrink it.
+    """
+
+    usage_tasks = (
+        await session.scalars(
+            select(UsageRecord.task_id).where(
+                UsageRecord.horizon_id == horizon_id,
+                UsageRecord.task_id.is_not(None),
+            )
+        )
+    ).all()
+    reserved_tasks = (
+        await session.scalars(
+            select(ProviderBudgetReservation.task_id).where(
+                ProviderBudgetReservation.horizon_id == horizon_id,
+                ProviderBudgetReservation.task_id.is_not(None),
+            )
+        )
+    ).all()
+    tasks = {task_id for task_id in (*usage_tasks, *reserved_tasks)}
+    attempts = 0
+    if tasks:
+        attempts = (
+            await session.scalar(
+                select(func.count())
+                .select_from(WorkAttempt)
+                .where(WorkAttempt.task_id.in_(tasks))
+            )
+        ) or 0
+    return len(tasks) + int(attempts)
 
 
 async def _lifetime_totals(
@@ -419,21 +467,42 @@ async def reserve_budget(
             horizon_id=horizon_id,
             estimate=estimate,
         )
-    # D3 admission counters (lead W4): enforced alongside caps, 0 = unlimited.
+    # D3 admission counters (lead W4 + REDO-4): enforced alongside caps,
+    # 0 = unlimited. Units are documented in ACCOUNTING_LEDGER/ADR-0014.
     if limits.max_provider_calls > 0:
         calls = await _task_lifetime_calls(session, task_id)
-        if calls + 1 > limits.max_provider_calls:
+        if calls >= limits.max_provider_calls:
             raise BudgetExceeded("task provider-call limit exceeded")
     if limits.max_work_attempts > 0:
-        attempts = await session.scalar(
-            select(func.count())
-            .select_from(WorkAttempt)
-            .where(WorkAttempt.task_id == task_id)
+        attempt_rows = (
+            await session.scalar(
+                select(func.count())
+                .select_from(WorkAttempt)
+                .where(WorkAttempt.task_id == task_id)
+            )
         ) or 0
-        if int(attempts) + 1 > limits.max_work_attempts:
+        step_attempts = (
+            await session.scalar(
+                select(func.coalesce(func.sum(Step.attempt_count), 0))
+                .select_from(Step)
+                .join(Run, Run.id == Step.run_id)
+                .where(Run.task_id == task_id)
+            )
+        ) or 0
+        if int(attempt_rows) + int(step_attempts) >= limits.max_work_attempts:
             raise BudgetExceeded("task work-attempt limit exceeded")
-    if limits.max_replans > 0 and task.budget_epoch >= limits.max_replans:
-        raise BudgetExceeded("task replan limit exceeded")
+    if limits.max_replans > 0:
+        package_id = await resolve_package_id(session, task_id)
+        if package_id is not None:
+            revisions = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PlanRevision)
+                    .where(PlanRevision.work_package_id == package_id)
+                )
+            ) or 0
+            if int(revisions) >= limits.max_replans:
+                raise BudgetExceeded("package replan limit exceeded")
 
     reservation = ProviderBudgetReservation(
         task_id=task_id,
@@ -475,10 +544,7 @@ async def _enforce_lifetime_budget(
     package; other scopes are totaled but uncapped (documented).
     """
 
-
-    spent_cost: Decimal
-    spent_calls: int
-    _spent_in, _spent_out, spent_cost, _spent_quota, spent_calls = await _lifetime_totals(
+    _spent_in, _spent_out, spent_cost, _spent_quota, _spent_calls = await _lifetime_totals(
         session, horizon_id
     )
     package = await session.get(WorkPackage, horizon_id)
@@ -491,8 +557,12 @@ async def _enforce_lifetime_budget(
         str(budget.max_cost)
     ):
         raise BudgetExceeded("lifetime owner cost budget exhausted")
-    if budget.max_attempts is not None and spent_calls >= budget.max_attempts:
-        raise BudgetExceeded("lifetime owner attempt budget exhausted")
+    # REDO-3 (lead decision): the attempt gate counts in _lifetime_spend
+    # units — tasks plus attempt rows for the owner — never provider calls.
+    if budget.max_attempts is not None:
+        units = await _lifetime_task_count(session, horizon_id)
+        if units >= budget.max_attempts:
+            raise BudgetExceeded("lifetime owner attempt budget exhausted")
 
 
 async def reserve_invocation_budget(

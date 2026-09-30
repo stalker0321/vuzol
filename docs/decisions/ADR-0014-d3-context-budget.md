@@ -12,14 +12,17 @@ straight into the usage row. `WorkPackage.owner` keeps its actor meaning —
 it is not redefined. Settle inherits the owner from the reservation row
 (sticky); reconcile contexts never wipe it back to NULL.
 
-## 2. One lifetime math (Q2)
+## 2. One lifetime math (Q2, REDO-3 unit)
 
 Canonical lifetime = settled + outstanding, no epoch filter (like
 `_lifetime_spend`). `budget_epoch` keeps resetting only task and step caps
 (`test_routing_concurrency.py:137` stays green by design). Retry, goal
 revision and epoch changes never erase lifetime; the package lifetime
 budget (`max_cost`/`max_attempts`) is enforced at reserve time against the
-canonical totals.
+canonical totals. The `max_attempts` gate counts in `_lifetime_spend` units
+— distinct tasks plus WorkAttempt rows for the owner — never provider
+calls (a package with `max_attempts: N` admits work while fewer than N
+task/attempt units exist, exactly like the sequencer gate).
 
 ## 3. Step-less reserve (Q3)
 
@@ -28,8 +31,9 @@ Nullable additive refs (`task_id`/`run_id`/`step_id` may be NULL) plus
 Idempotency keys on the invocation, never on NULL steps. No fake Step,
 ever. Intake/planning/scout calls reserve before (scout) or around
 (intake observer: reserve→settle in one transaction) their spend; an
-accounting failure there is logged AND persisted as a `budgeting_failed`
-event — never logging-only — without breaking the caller.
+accounting failure there is logged AND persisted as a
+`budget.accounting_failed` event — never logging-only — without breaking
+the caller.
 
 ## 4. Review suballocation (Q4)
 
@@ -49,14 +53,22 @@ capabilities and read-only/write conflicts fail closed before any Task
 exists. Research/scout items select the read-only `research.v1` workflow
 without write caps.
 
-## 6. ScoutPacket (Q6)
+## 6. ScoutPacket (Q6, REDO-1 repo probes + consumer gate)
 
 Typed immutable Artifact bytes plus InputBinding; observed revision (content
 defined) and time travel inside the packet JSON. No new truth table.
 Partial packets persist on probe failure with `packet_partial` events;
 retry re-runs only missing probes and supersedes the binding (documented
-refresh). Repository-execution probe kinds are explicitly refused; the
-sandbox/egress policy union is a follow-up.
+refresh). Facts are preserved even when the dependent decision is refused:
+a partial packet with missing required probes fails closed at the consumer
+boundary (`scout_packet_incomplete`), never silently consumed.
+Repository probes (`read_file`, `git_log`) execute read-only under worktree
+containment (existing `trusted_root` boundary, fixed command shapes, no
+network/writes/installs — effect class always read-only, so procedure and
+capability approval cannot be bypassed through them). A docker-backed
+executor can replace the local one through the `RepoProbeExecutor` seam
+(follow-up); the sandbox/egress policy union for mutating ops stays
+deferred per brief.
 
 ## 7. Freshness anchor (Q7)
 
@@ -65,3 +77,21 @@ time; the resolver anchors on the oldest credible timestamp
 (`min(retrieved_at, created_at)`), so a repack carrying the propagated
 anchor never rejuvenates. Producers must propagate; the resolver cannot
 invent provenance (documented limitation, fails toward the artifact time).
+
+## 8. Admission counters (REDO-4 units, defaults, calibration)
+
+Units, enforced alongside caps (`0` = unlimited, documented opt-out):
+- `max_provider_calls`: provider invocations (settled usage + outstanding
+  reservations) per task, all epochs. Fires at `calls >= max`.
+- `max_work_attempts`: `WorkAttempt` rows of the task **plus**
+  `Step.attempt_count` summed over the task's runs. Fires at `total >= max`.
+  (Counts REDO/repair lineage, not just the lease counter.)
+- `max_replans`: `PlanRevision` rows of the task's package. Fires at
+  `revisions >= max`. (Counts replans, not `budget_epoch` explicit retries.)
+- Defaults `50/500/10`: guardrail ceilings, not calibrated targets. Pilot
+  telemetry shows single-digit attempts and unit-to-tens calls per task and
+  rare human-driven replans; the defaults sit roughly an order of magnitude
+  above observed maxima so no legitimate flow trips them, while runaway
+  loops (retry storms, replan loops) hit a ceiling. The numbers are
+  admittedly arbitrary — follow-up: calibrate from pilot cohort telemetry
+  (task-level p99 attempts/calls, package-level revision counts) and tighten.

@@ -43,6 +43,7 @@ from vuzol.storage.models import (
     InputBinding,
     Step,
     Task,
+    UsageRecord,
 )
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
@@ -697,6 +698,418 @@ async def test_d3_provider_call_counter_blocks_independently(
                     task_id=task_id,
                     run_id=run_id,
                     step_id=second.id,
+                    profile_id="api",
+                    provider_attempt=1,
+                    estimate=estimate,
+                    limits=settings.limits,
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_d3_accounting_failure_event_not_silent(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    """REDO-2: accounting failure writes an Event and never breaks the call."""
+
+    from unittest.mock import patch
+
+    from vuzol.interpretation.service import InterpretationPipeline
+    from vuzol.providers.budgets import BudgetExceeded
+
+    engine, factory = storage(postgres_dsn)
+    settings, _registries = bundle(tmp_path, profile("api"))
+    try:
+        runtime = MagicMock()
+        runtime.settings = settings
+        runtime.registries.profiles.get = MagicMock(return_value=profile("api"))
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=MagicMock(),
+            owner="test",
+        )
+        observe = pipeline._attempt_observer(
+            task_id=None, purpose="intake", intake_id=uuid.uuid4()
+        )
+        with patch(
+            "vuzol.providers.budgets.reserve_invocation_budget",
+            side_effect=BudgetExceeded("daily quota exhausted"),
+        ):
+            # must not raise: the caller contract survives accounting failure
+            await observe(
+                profile_id="api",
+                model="model",
+                attempt_kind="initial",
+                outcome="succeeded",
+                input_tokens=10,
+                output_tokens=5,
+                duration_ms=3,
+                provider_request_id="req-1",
+            )
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            events = (
+                await uow.session.scalars(
+                    select(Event).where(
+                        Event.event_type == "budget.accounting_failed"
+                    )
+                )
+            ).all()
+            assert len(events) == 1
+            assert events[0].payload["error_type"] == "BudgetExceeded"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_d3_intake_owner_in_usage_horizon(postgres_dsn: str, tmp_path: Path) -> None:
+    """REDO-2/Q1: pre-Task intake scope lands straight in usage.horizon_id."""
+
+    from vuzol.interpretation.service import InterpretationPipeline
+
+    engine, factory = storage(postgres_dsn)
+    settings, _registries = bundle(tmp_path, profile("api"))
+    try:
+        runtime = MagicMock()
+        runtime.settings = settings
+        runtime.registries.profiles.get = MagicMock(return_value=profile("api"))
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=MagicMock(),
+            owner="test",
+        )
+        intake_id = uuid.uuid4()
+        observe = pipeline._attempt_observer(
+            task_id=None, purpose="intake", intake_id=intake_id
+        )
+        await observe(
+            profile_id="api",
+            model="model",
+            attempt_kind="initial",
+            outcome="succeeded",
+            input_tokens=10,
+            output_tokens=5,
+            duration_ms=3,
+            provider_request_id="req-2",
+        )
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            rows = (
+                await uow.session.scalars(
+                    select(UsageRecord).where(
+                        UsageRecord.provider_request_id == "req-2",
+                    )
+                )
+            ).all()
+            assert len(rows) == 1
+            assert rows[0].horizon_id == intake_id
+            assert rows[0].reservation_id is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_d3_item_retry_new_task_keeps_lifetime(postgres_dsn: str) -> None:
+    """REDO-2: an item-retry Task joins the same lifetime; epoch hides nothing."""
+
+    from vuzol.providers.budgets import _lifetime_totals as _lt
+
+    engine, factory = storage(postgres_dsn)
+    try:
+        horizon = uuid.uuid4()
+        task_a, _run_a, _step_a = await seed_provider_step(factory)
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            first = await uow.session.scalar(
+                select(UsageRecord).where(UsageRecord.task_id == task_a)
+            )
+            assert first is None
+            uow.session.add(
+                UsageRecord(
+                    provider="openai-compatible",
+                    profile_id="api",
+                    model="model",
+                    task_id=task_a,
+                    run_id=None,
+                    step_id=None,
+                    input_tokens=100,
+                    output_tokens=10,
+                    duration_ms=1,
+                    provider_request_id=None,
+                    reservation_id=None,
+                    outcome="succeeded",
+                    purpose="coding",
+                    attempt_kind="initial",
+                    horizon_id=horizon,
+                    pricing_revision="p",
+                    currency="USD",
+                    cost_known=True,
+                )
+            )
+        # item-retry materializes a NEW task (epoch 0); same horizon scope
+        task_b, _run_b, _step_b = await seed_provider_step(factory)
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            task = await uow.session.get(Task, task_b)
+            assert task is not None
+            assert task.budget_epoch == 0
+            uow.session.add(
+                UsageRecord(
+                    provider="openai-compatible",
+                    profile_id="api",
+                    model="model",
+                    task_id=task_b,
+                    run_id=None,
+                    step_id=None,
+                    input_tokens=50,
+                    output_tokens=5,
+                    duration_ms=1,
+                    provider_request_id=None,
+                    reservation_id=None,
+                    outcome="succeeded",
+                    purpose="coding",
+                    attempt_kind="retry",
+                    horizon_id=horizon,
+                    pricing_revision="p",
+                    currency="USD",
+                    cost_known=True,
+                )
+            )
+        # epoch bump on the new task changes nothing about lifetime
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            task = await uow.session.get(Task, task_b, with_for_update=True)
+            assert task is not None
+            task.budget_epoch += 1
+        async with factory.begin() as session:
+            totals = await _lt(session, horizon)
+            assert totals[0] == 150
+            assert totals[1] == 15
+            assert totals[4] == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_d3_lifetime_attempt_unit_links_both_gates(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    """REDO-3: sequencer-gate within ⟺ admission-gate within on the same data."""
+
+    from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+    from vuzol.discussion.horizon import budget_state, parse_budget
+    from vuzol.storage.types import PlanRevisionCreatedBy
+
+    engine, factory = storage(postgres_dsn)
+    settings, _registries = bundle(tmp_path, profile("api"))
+    try:
+        budget = parse_budget({"max_cost": 100.0, "max_attempts": 2})
+        assert budget is not None
+        async with UnitOfWork(factory) as uow:
+            session_id = await uow.discussions.create_session(
+                project_id="vuzol", chat_id=-100, message_thread_id=10
+            )
+            created = await WorkPackageService(uow).create_draft(
+                session_id=session_id,
+                project_id="vuzol",
+                plan=PlanDraft(
+                    title="t",
+                    items=(
+                        PlanItemDraft(
+                            summary="s",
+                            goal="g",
+                            expected_outcome="o",
+                            completion_criteria=("c",),
+                            allowed_scope="src/**",
+                        ),
+                    ),
+                ),
+                created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+                actor_type="planner_model",
+                lifetime_budget={"max_cost": 100.0, "max_attempts": 2},
+            )
+            horizon = created.package_id
+        task_a, run_a, step_a = await seed_provider_step(factory)
+        estimate = estimate_reservation(profile("api"), input_tokens=1, output_tokens=1)
+        async with factory.begin() as session:
+            await reserve_budget(
+                session,
+                task_id=task_a,
+                run_id=run_a,
+                step_id=step_a,
+                profile_id="api",
+                provider_attempt=1,
+                estimate=estimate,
+                limits=settings.limits,
+                accounting=accounting_for_profile(
+                    profile("api"), purpose="coding", horizon_id=horizon
+                ),
+            )
+        # one task spent: sequencer unit says within, admission agrees
+        assert (
+            budget_state(budget, spent_cost=0.01, spent_attempts=1).value == "within"
+        )
+        task_b, run_b, step_b = await seed_provider_step(factory)
+        async with factory.begin() as session:
+            await reserve_budget(
+                session,
+                task_id=task_b,
+                run_id=run_b,
+                step_id=step_b,
+                profile_id="api",
+                provider_attempt=1,
+                estimate=estimate,
+                limits=settings.limits,
+                accounting=accounting_for_profile(
+                    profile("api"), purpose="coding", horizon_id=horizon
+                ),
+            )
+        # two tasks spent: sequencer unit says exhausted, admission agrees
+        assert (
+            budget_state(budget, spent_cost=0.02, spent_attempts=2).value == "exhausted"
+        )
+        task_c, run_c, step_c = await seed_provider_step(factory)
+        with pytest.raises(BudgetExceeded, match="lifetime owner attempt"):
+            async with factory.begin() as session:
+                await reserve_budget(
+                    session,
+                    task_id=task_c,
+                    run_id=run_c,
+                    step_id=step_c,
+                    profile_id="api",
+                    provider_attempt=1,
+                    estimate=estimate,
+                    limits=settings.limits,
+                    accounting=accounting_for_profile(
+                        profile("api"), purpose="coding", horizon_id=horizon
+                    ),
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_d3_work_attempt_counter_fires(postgres_dsn: str, tmp_path: Path) -> None:
+    """REDO-4: max_work_attempts counts attempt rows plus step attempts."""
+
+    from vuzol.storage.models import WorkAttempt
+
+    engine, factory = storage(postgres_dsn)
+    settings, _registries = bundle(tmp_path, profile("api"))
+    settings = settings.model_copy(
+        update={"limits": settings.limits.model_copy(update={"max_work_attempts": 1})}
+    )
+    try:
+        task_id, run_id, step = await seed_provider_step(factory)
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            uow.session.add(
+                WorkAttempt(
+                    task_id=task_id,
+                    run_id=run_id,
+                    step_id=step,
+                    attempt_no=1,
+                    attempt_kind="initial",
+                    purpose="coding",
+                    lease_generation=0,
+                    outcome="running",
+                )
+            )
+        estimate = estimate_reservation(profile("api"), input_tokens=1, output_tokens=1)
+        with pytest.raises(BudgetExceeded, match="work-attempt limit"):
+            async with factory.begin() as session:
+                await reserve_budget(
+                    session,
+                    task_id=task_id,
+                    run_id=run_id,
+                    step_id=step,
+                    profile_id="api",
+                    provider_attempt=2,
+                    estimate=estimate,
+                    limits=settings.limits,
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_d3_replan_counter_fires_on_package_revisions(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    """REDO-4: max_replans counts plan revisions of the task's package."""
+
+    from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+    from vuzol.storage.types import PlanRevisionCreatedBy
+
+    engine, factory = storage(postgres_dsn)
+    settings, _registries = bundle(tmp_path, profile("api"))
+    settings = settings.model_copy(
+        update={"limits": settings.limits.model_copy(update={"max_replans": 1})}
+    )
+    try:
+        task_id, run_id, step = await seed_provider_step(factory)
+        async with UnitOfWork(factory) as uow:
+            session_id = await uow.discussions.create_session(
+                project_id="vuzol", chat_id=-100, message_thread_id=10
+            )
+            created = await WorkPackageService(uow).create_draft(
+                session_id=session_id,
+                project_id="vuzol",
+                plan=PlanDraft(
+                    title="t",
+                    items=(
+                        PlanItemDraft(
+                            summary="s",
+                            goal="g",
+                            expected_outcome="o",
+                            completion_criteria=("c",),
+                            allowed_scope="src/**",
+                        ),
+                    ),
+                ),
+                created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
+                actor_type="planner_model",
+            )
+            package_id = created.package_id
+            link_task = task_id
+            # bind the seeded task to the package as its materialized item
+            from vuzol.storage.models import (
+                MaterializationLink,
+                PlanRevision,
+                PlanRevisionItem,
+            )
+
+            assert uow.session is not None
+            revision = await uow.session.get(PlanRevision, created.revision_id)
+            assert revision is not None
+            item = await uow.session.scalar(
+                select(PlanRevisionItem).where(
+                    PlanRevisionItem.plan_revision_id == revision.id
+                )
+            )
+            assert item is not None
+            uow.session.add(
+                MaterializationLink(
+                    work_package_id=package_id,
+                    plan_revision_id=revision.id,
+                    plan_revision_item_id=item.id,
+                    work_item_draft_id=item.item_id,
+                    ordinal=1,
+                    task_id=link_task,
+                )
+            )
+        estimate = estimate_reservation(profile("api"), input_tokens=1, output_tokens=1)
+        # one revision exists and max_replans=1: no further spend admitted
+        with pytest.raises(BudgetExceeded, match="replan limit"):
+            async with factory.begin() as session:
+                await reserve_budget(
+                    session,
+                    task_id=task_id,
+                    run_id=run_id,
+                    step_id=step,
                     profile_id="api",
                     provider_attempt=1,
                     estimate=estimate,

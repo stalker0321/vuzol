@@ -47,7 +47,9 @@ binding it to a real horizon is WP08.
   for a lifetime owner (`horizon_id`), **no epoch filter** (same canon as
   `_lifetime_spend`). Retry, goal revision and epoch bumps never erase it.
   The package lifetime budget (`max_cost`/`max_attempts`) is enforced at
-  reserve time against these totals.
+  reserve time against these totals. The `max_attempts` unit is tasks plus
+  attempt rows for the owner (REDO-3) — identical to the sequencer gate,
+  never provider calls.
 - Lifetime owner (D3, lead Q1): materialized tasks scope to their package;
   pre-Task calls scope to the intake row. The reservation row carries the
   owner; settle inherits it (sticky) — reconcile contexts never wipe it.
@@ -56,7 +58,11 @@ binding it to a real horizon is WP08.
   recorded on the reservation in the shared ledger. No second ledger.
 - Admission counters (D3): `max_work_attempts`/`max_provider_calls`/
   `max_replans` enforced alongside caps (`0` = unlimited, documented).
-  Task/step caps still reset on epoch by design.
+  Units (REDO-4): provider invocations per task all epochs; work-attempt
+  rows of the task plus summed `Step.attempt_count`; plan revisions of the
+  task's package. Defaults `50/500/10` are guardrail ceilings roughly an
+  order above observed pilot maxima — admittedly arbitrary, see ADR-0014 §8;
+  follow-up calibrates them from cohort telemetry.
 - Step-less calls (D3, lead Q3): nullable task/run/step refs +
   `invocation_id` (partial unique, idempotency key); reserve before spend
   (scout) or reserve→settle around it (intake observer). No fake Step.

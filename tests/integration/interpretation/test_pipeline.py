@@ -8,6 +8,7 @@ from sqlalchemy import func, select, update
 
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
+from vuzol.config import Capability
 from vuzol.discussion.agent import DeliverDiscussionReplyHandler
 from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
@@ -60,6 +61,7 @@ from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import AttachmentKind, MessageUpdate, TelegramAttachment
 from vuzol.telegram.ingress import TelegramIngressService
 from vuzol.telegram.projections import FakeTelegramClient, build_project_status_dashboard
+from vuzol.workflows.dispatch import WorkflowDispatcher
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
 pytestmark = pytest.mark.postgresql
@@ -121,6 +123,28 @@ def interpreted_result(
                 "Which environment should be inspected?" if needs_clarification else None
             ),
             normalized_title="Inspect project",
+        ),
+        profile_id="fake-interpreter",
+        model="fake-model",
+        duration_ms=2,
+    )
+
+
+def general_result() -> InterpretationResult:
+    return InterpretationResult(
+        draft=TaskDraft(
+            action=TaskAction.GENERAL_CONVERSATION,
+            task_type=TaskType.GENERAL,
+            operation=TaskOperation.EXPLAIN,
+            project_id="vuzol",
+            goal="Explain the quoted request",
+            task_summary="Explain the quoted request",
+            required_capabilities=frozenset(),
+            suggested_complexity=SuggestedComplexity.SMALL,
+            suggested_risk=RiskLevel.LOW,
+            needs_planning=False,
+            needs_clarification=False,
+            normalized_title="Explain request",
         ),
         profile_id="fake-interpreter",
         model="fake-model",
@@ -1076,6 +1100,55 @@ def test_project_name_regeneration_replaces_options_and_queues_new_card(
             assert persisted_naming.status is ProjectNamingStatus.PENDING
             assert persisted_naming.last_error_category == "provider_unavailable"
             assert fallback_card is not None and fallback_card.payload["revision"] == 3
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_quoted_or_negated_command_never_materializes_code_edit(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        runtime = telegram_runtime(tmp_path)
+        accepted = await TelegramIngressService(runtime, factory).accept_message(
+            text_update(110).model_copy(
+                update={"text": ("Ничего не меняй. Объясни, почему команда «удали» опасна.")}
+            )
+        )
+        assert accepted.task_id is not None
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=FakeInterpreter([general_result()]),
+            owner="interpreter-j0",
+        )
+        assert await pipeline.process_one()
+        async with factory() as session:
+            task = await session.get(Task, accepted.task_id)
+            assert task is not None
+            assert task.task_draft["task_type"] == "general"
+            persisted_capabilities = set(task.task_draft["required_capabilities"])
+            assert Capability.CODE_EDIT.value not in persisted_capabilities
+            assert Capability.FILESYSTEM_WRITE.value not in persisted_capabilities
+
+        dispatcher = WorkflowDispatcher(runtime, factory, owner="dispatch-j0")
+        assert await dispatcher.process_one()
+        forbidden = {
+            Capability.CODE_EDIT.value,
+            Capability.FILESYSTEM_WRITE.value,
+            Capability.GIT.value,
+        }
+        async with factory() as session:
+            run = await session.scalar(select(Run).where(Run.task_id == accepted.task_id))
+            assert run is not None
+            steps = (await session.scalars(select(Step).where(Step.run_id == run.id))).all()
+            assert steps
+            for step in steps:
+                assert not forbidden.intersection(step.required_capabilities)
+            step_types = {step.step_type for step in steps}
+            assert "execute_code" not in step_types
+            assert "prepare_worktree" not in step_types
         await engine.dispose()
 
     asyncio.run(scenario())

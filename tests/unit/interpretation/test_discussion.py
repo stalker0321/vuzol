@@ -63,6 +63,24 @@ def test_all_free_text_modes_create_zero_tasks() -> None:
     )
 
 
+def test_quoted_and_negated_commands_stay_confirm_first() -> None:
+    for text in (
+        "Ничего не меняй. Объясни, почему команда «удали» опасна.",
+        "Не выполняй «добавь поле», только объясни смысл просьбы.",  # noqa: RUF001
+    ):
+        result = enforce_discussion_policy(
+            request(original_input=text),
+            envelope(
+                interaction_mode="task_request",
+                should_create_task=True,
+                task_request={"summary": "Изменить код", "goal": "Добавить поле"},
+            ),
+        )
+
+        assert not result.should_create_task
+        assert result.task_request is not None
+
+
 def test_low_confidence_prefers_discussion_and_strips_action_payloads() -> None:
     candidate = envelope(
         interaction_mode="task_request",

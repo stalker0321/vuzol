@@ -1,5 +1,6 @@
 """Deterministic safety checks that can only tighten interpreter suggestions."""
 
+import re
 from dataclasses import dataclass
 
 from vuzol.config import Capability, TopicKind
@@ -69,6 +70,35 @@ _IMPLEMENTATION_MARKERS = (
     "create the app",
 )
 
+# J0: markers are matched as directed intent only when they are neither quoted
+# nor negated. Arbitrary natural language with quotes/scope/negation belongs to
+# the semantic producer; policy must not widen intent from a substring.
+_QUOTED_SEGMENT = re.compile(
+    "\u00ab[^\u00bb]*\u00bb|\u201c[^\u201d]*\u201d|\u201e[^\u201c]*\u201c"
+    '|\u2018[^\u2019]*\u2019|\u2039[^\u203a]*\u203a|"[^"]*"',
+)
+_NEGATION_CUE = re.compile(r"\b(?:не|ничего|нельзя|никогда|no|not|never)\b|n't")
+_CLAUSE_BOUNDARY = re.compile(r"[.!?;\n,]+")
+
+
+def _has_directed_marker(text: str, markers: tuple[str, ...]) -> bool:
+    """Return True if ``text`` holds a marker that is neither quoted nor negated.
+
+    ``text`` must already be casefolded. A marker counts as directed intent only
+    when it appears outside any quoted segment and is not governed by a negation
+    cue in the same clause (e.g. "не удалить", "не добавляй").
+    """
+
+    plain = _QUOTED_SEGMENT.sub(" ", text)
+    for marker in markers:
+        start = 0
+        while (index := plain.find(marker, start)) != -1:
+            clause = _CLAUSE_BOUNDARY.split(plain[:index])[-1]
+            if _NEGATION_CUE.search(clause) is None:
+                return True
+            start = index + len(marker)
+    return False
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyResult:
@@ -89,7 +119,10 @@ def enforce_interpretation_policy(
     updates: dict[str, object] = {}
     risk = draft.suggested_risk
     normalized_input = request.original_input.casefold()
-    implementation_intent = any(marker in normalized_input for marker in _IMPLEMENTATION_MARKERS)
+    design_intent = _has_directed_marker(normalized_input, _DESIGN_DISCUSSION_MARKERS)
+    implementation_intent = (
+        _has_directed_marker(normalized_input, _IMPLEMENTATION_MARKERS) and not design_intent
+    )
     read_only_request = not draft.required_capabilities & {
         Capability.CODE_EDIT,
         Capability.FILESYSTEM_WRITE,
@@ -99,10 +132,7 @@ def enforce_interpretation_policy(
         or (
             draft.task_type is TaskType.CODING
             and read_only_request
-            and (
-                draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN}
-                or any(marker in normalized_input for marker in _DESIGN_DISCUSSION_MARKERS)
-            )
+            and (draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN} or design_intent)
         )
     )
     if request.topic_kind is TopicKind.INBOX:

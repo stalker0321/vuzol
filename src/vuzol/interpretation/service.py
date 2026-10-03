@@ -46,8 +46,10 @@ from vuzol.interpretation.domain import (
     ProjectSummary,
     TaskAction,
     TaskContext,
+    TaskDraft,
     TranscriptionInput,
 )
+from vuzol.interpretation.planning import PLANNING_TIER_EVENT, resolve_planning_tier
 from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.ports import (
     AttachmentDownloader,
@@ -919,6 +921,8 @@ class InterpretationPipeline:
             task.version += 1
             # D1 L2: version the spec separately from the mutating task_draft.
             await snapshot_task_spec(session, task)
+            # J4: the planning tier is code-owned and bound to the spec revision.
+            await _record_planning_tier(session, task, policy.draft)
             enqueue_interpreter_trace(
                 session,
                 task=task,
@@ -1249,6 +1253,37 @@ def _discussion_reply_text(result: DiscussionInterpretation) -> str:
     if not result.clarification_question:
         return summary
     return f"{summary}\n\n{unwrap_agent_reply(result.clarification_question)}"
+
+
+async def _record_planning_tier(session: AsyncSession, task: Task, draft: TaskDraft) -> None:
+    """Persist the code-owned planning tier bound to the task spec revision.
+
+    Idempotent: a re-tick of the same spec revision reuses the existing event
+    instead of writing a second verdict. The model never supplies this value.
+    """
+
+    if task.spec_revision is None:
+        return
+    existing = await session.scalar(
+        select(Event).where(
+            Event.entity_type == "task",
+            Event.entity_id == task.id,
+            Event.event_type == PLANNING_TIER_EVENT,
+            Event.payload["spec_revision"].as_string() == task.spec_revision,
+        )
+    )
+    if existing is not None:
+        return
+    decision = resolve_planning_tier(draft, required_gaps=draft.missing_information)
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type=PLANNING_TIER_EVENT,
+            actor_type="system",
+            payload=decision.event_payload(spec_revision=task.spec_revision),
+        )
+    )
 
 
 async def _enqueue_interpretation(

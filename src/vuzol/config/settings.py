@@ -523,6 +523,11 @@ class Settings(BaseSettings):
     registry_overlay_file: Path | None = None
     project_template_id: str = Field(default="vuzol", pattern=r"^[a-z][a-z0-9_-]*$")
     project_discussion_enabled: bool = False
+    # J5 canary: at most one Jev decision kind in a small deterministic cohort.
+    # Empty means disabled (the default); the kill switch freezes kinds.
+    jev_enabled_kinds: tuple[str, ...] = ()
+    jev_canary_percent: int = Field(default=0, ge=0, le=100)
+    jev_kill_switch_kinds: tuple[str, ...] = ()
     database_dsn_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
     telegram_bot_token_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
     allowed_user_ids: tuple[int, ...] = ()

@@ -8,6 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
 from vuzol.interpretation.domain import TaskAction, TaskDraft, TaskType
+from vuzol.interpretation.planning import (
+    PLANNING_TIER_EVENT,
+    PlanningTier,
+    budget_mode_for_tier,
+)
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
@@ -15,6 +20,7 @@ from vuzol.storage.leasing import (
     defer_outbox_item,
 )
 from vuzol.storage.models import (
+    Event,
     Interpretation,
     MaterializationLink,
     ProjectNamingRequest,
@@ -130,10 +136,12 @@ class WorkflowDispatcher:
             TaskAction.GENERAL_CONVERSATION,
         }:
             configured = await self._configured_workflow(session, task, draft)
+            tier = await self._planning_tier(session, task)
             workflow = compile_workflow(
                 draft,
                 interpretation_id=interpretation.id,
                 configured_workflow=configured,
+                planning_tier=tier,
             )
             package_owned = (
                 await session.scalar(
@@ -152,6 +160,7 @@ class WorkflowDispatcher:
                 policy_revision=POLICY_REVISION,
                 prompt_revision=interpretation.prompt_version,
                 automatic_start=automatic_start,
+                budget_mode=budget_mode_for_tier(tier) if tier is not None else "balanced",
             )
             # Also repairs a run materialized by an older dispatcher before package
             # start provenance was recognized.
@@ -252,6 +261,32 @@ class WorkflowDispatcher:
                 payload={"role": "project_name_options", "revision": naming.revision},
             )
         )
+
+    async def _planning_tier(self, session: AsyncSession, task: Task) -> PlanningTier | None:
+        """Read the code-owned tier bound to the current task spec revision."""
+
+        if task.spec_revision is None:
+            return None
+        row = await session.scalar(
+            select(Event)
+            .where(
+                Event.entity_type == "task",
+                Event.entity_id == task.id,
+                Event.event_type == PLANNING_TIER_EVENT,
+                Event.payload["spec_revision"].as_string() == task.spec_revision,
+            )
+            .order_by(Event.created_at.desc(), Event.id.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        raw_tier = row.payload.get("tier")
+        if not isinstance(raw_tier, str):
+            return None
+        try:
+            return PlanningTier(raw_tier)
+        except ValueError:
+            return None
 
     async def _configured_workflow(
         self, session: AsyncSession, task: Task, draft: TaskDraft

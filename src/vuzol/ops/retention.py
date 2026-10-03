@@ -26,7 +26,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -224,6 +224,31 @@ def effective_worktree_retention_until(
         failed_floor = task_updated_at + timedelta(days=max(failed_days, completed_days))
         return max(retention_until, failed_floor)
     return None
+
+
+async def pin_artifacts_for_audit(
+    session: AsyncSession,
+    *,
+    artifact_ids: tuple[uuid.UUID, ...],
+    retention_days: int,
+    now: datetime | None = None,
+) -> int:
+    """Extend ``retention_until`` for decision input/evidence artifacts (J1).
+
+    Only moves the deadline forward; never shortens an existing pin. Returns the
+    number of artifacts actually extended. No new table/migration: the pin uses
+    the existing ``Artifact.retention_until`` column the sweeper already reads.
+    """
+
+    if not artifact_ids:
+        return 0
+    until = (now or datetime.now(UTC)) + timedelta(days=retention_days)
+    result = await session.execute(
+        update(Artifact)
+        .where(Artifact.id.in_(artifact_ids), Artifact.retention_until < until)
+        .values(retention_until=until)
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 class RetentionSweeper:

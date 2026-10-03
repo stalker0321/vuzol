@@ -252,13 +252,15 @@ def parse_decision_output(
         isinstance(item, str) for item in support_refs
     ):
         raise DecisionBindingError("invalid_output", "support_refs must be a list of strings")
+    # Support refs must belong to the binding for both statuses: an abstain with
+    # a forged support ref is still a forged ref, never evidence.
+    if any(ref not in binding.ref_ids for ref in support_refs):
+        raise DecisionBindingError("forged_ref", "support ref is not in the binding")
     if status is DecisionStatus.DECIDED:
         if not isinstance(target_ref, str) or target_ref not in binding.ref_ids:
             raise DecisionBindingError("forged_ref", "decided target is not in the binding")
         if not support_refs:
             raise DecisionBindingError("missing_evidence", "decided output needs support refs")
-        if any(ref not in binding.ref_ids for ref in support_refs):
-            raise DecisionBindingError("forged_ref", "support ref is not in the binding")
         if raw.get("reason") not in (None, ""):
             raise DecisionBindingError("invalid_output", "decided output must not carry a reason")
         return DecisionOutput(

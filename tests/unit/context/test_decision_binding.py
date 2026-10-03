@@ -183,6 +183,15 @@ def test_decided_valid_output_and_abstain_rules() -> None:
         )
 
 
+def test_abstain_rejects_forged_support_ref() -> None:
+    with pytest.raises(DecisionBindingError) as error:
+        parse_decision_output(
+            _output(status="abstain", support_refs=["ghost:ref"], reason="x"),
+            binding=_binding(),
+        )
+    assert error.value.category == "forged_ref"
+
+
 def test_snapshot_accepts_current_state() -> None:
     assert_applicable(_binding(), _snapshot())
 

@@ -78,6 +78,7 @@ class IntakeReasonCode(StrEnum):
     OOD_INPUT = "ood_input"
     STALE_STATE = "stale_state"
     INVALID_OUTPUT = "invalid_output"
+    PROVIDER_FAILURE = "provider_failure"
     SOURCE_CHANGED = "source_changed"
     MISSING_EVIDENCE = "missing_evidence"
     EXPLICIT_COMMAND = "explicit_command"
@@ -223,16 +224,17 @@ def parse_intake_output(
     fingerprint = data.get("input_fingerprint")
     if not isinstance(fingerprint, str) or not _SHA256.match(fingerprint):
         raise IntakeDecisionInvalid("input_fingerprint must be a sha256 hex digest")
+    # Effect membership is checked for both statuses: an abstain carrying an
+    # effect outside the allowed set is still a forged effect.
+    if effect not in allowed_effects:
+        raise IntakeDecisionInvalid(f"effect not allowed: {effect.value}")
     if abstain:
         if reason_code is IntakeReasonCode.CLEAR_MATCH:
             raise IntakeDecisionInvalid("abstain requires a non-clear reason code")
         if target_id is not None:
             raise IntakeDecisionInvalid("abstain carries no target")
-    else:
-        if effect not in allowed_effects:
-            raise IntakeDecisionInvalid(f"effect not allowed: {effect.value}")
-        if not support_refs:
-            raise IntakeDecisionInvalid("decided output needs support refs")
+    elif not support_refs:
+        raise IntakeDecisionInvalid("decided output needs support refs")
     return IntakeDecision(
         decision_kind=INTAKE_KIND,
         state_revision=state_revision,
@@ -444,6 +446,16 @@ async def run_intake_shadow(
     calls += 1
     try:
         raw = await provider_call(prompt)
+    except Exception:
+        decision = intake_abstain_decision(
+            state_revision=expected_state_revision,
+            input_fingerprint=context_digest,
+            prompt_digest=prompt_digest,
+            reason_code=IntakeReasonCode.PROVIDER_FAILURE,
+            coverage=context.coverage,
+        )
+        return await record(decision=decision, reason_code=IntakeReasonCode.PROVIDER_FAILURE)
+    try:
         decision = parse_intake_output(
             raw,
             allowed_effects=allowed_effects,
@@ -473,7 +485,22 @@ async def run_intake_shadow(
         extra_calls += 1
         target_resolution_ran = True
         target_prompt = compose_prompt(PromptKind.TARGET_RESOLUTION)
-        await run_target_resolution(target_prompt)
+        try:
+            await run_target_resolution(target_prompt)
+        except Exception:
+            failure = intake_abstain_decision(
+                state_revision=expected_state_revision,
+                input_fingerprint=context_digest,
+                prompt_digest=prompt_digest,
+                reason_code=IntakeReasonCode.PROVIDER_FAILURE,
+                coverage=context.coverage,
+            )
+            return await record(
+                decision=failure,
+                reason_code=IntakeReasonCode.PROVIDER_FAILURE,
+                extra_calls=extra_calls,
+                target_resolution_ran=target_resolution_ran,
+            )
     return await record(
         decision=decision,
         reason_code=reason_code,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -159,8 +160,80 @@ def test_evaluate_seed_corpus_meets_pre_registered_thresholds() -> None:
     assert len(report.per_family) == len(DecisionFamily)
     assert report.overall.false_execute == 0
     assert report.thresholds_met is True
+    assert 0.0 <= report.overall.target_accuracy <= 1.0
     assert report.overall.target_accuracy >= DEFAULT_THRESHOLDS.min_target_accuracy
     assert report.overall.coverage >= DEFAULT_THRESHOLDS.min_decided_coverage
+    # The seed corpus records no cost/latency data: those thresholds stay
+    # honestly unevaluated and are not claimed as met.
+    assert set(report.unevaluated) == {"max_cost_per_decision", "max_p95_latency_ms"}
+    assert report.fully_evaluated is False
+
+
+def test_cost_and_latency_thresholds_are_evaluated_when_provided() -> None:
+    corpus = _corpus()
+    traces = {
+        item.opportunity_id: replay_intake(item, item.recorded_response or {})
+        for item in corpus.opportunities
+    }
+    within = evaluate_traces(
+        corpus,
+        traces,
+        cost_per_decision=Decimal("0.001"),
+        p95_latency_ms=100,
+    )
+    assert within.failures == ()
+    assert within.unevaluated == ()
+    assert within.fully_evaluated is True
+
+    over = evaluate_traces(
+        corpus,
+        traces,
+        cost_per_decision=Decimal("1.0"),
+        p95_latency_ms=999_999,
+    )
+    assert "max_cost_per_decision" in over.failures
+    assert "max_p95_latency_ms" in over.failures
+    assert over.thresholds_met is False
+
+
+def test_abstain_correctness_does_not_inflate_target_accuracy() -> None:
+    corpus = DecisionCorpus(
+        corpus_revision="abstain-only",
+        opportunities=(
+            DecisionOpportunity(
+                opportunity_id="abstain-one",
+                group_id="abstain-one",
+                family=DecisionFamily.COMPOUND,
+                split=DecisionSplit.DEV,
+                current_turn="two independent requests",
+                snapshot_ref="snapshot:abstain",
+                allowed_refs=("turn:current",),
+                label=DecisionLabel(effect=None, abstain_allowed=True),
+                recorded_response={
+                    "schema": "decision.v3",
+                    "decision_kind": "intake",
+                    "state_revision": 0,
+                    "effect": "respond",
+                    "relation": "none",
+                    "target_id": None,
+                    "support_refs": [],
+                    "coverage": "complete",
+                    "abstain": True,
+                    "reason_code": "compound_intent",
+                    "input_fingerprint": "a" * 64,
+                },
+            ),
+        ),
+    )
+    traces = {
+        item.opportunity_id: replay_intake(item, item.recorded_response or {})
+        for item in corpus.opportunities
+    }
+    report = evaluate_traces(corpus, traces)
+    assert report.overall.decided == 0
+    assert report.overall.correct == 0
+    assert report.overall.abstain_correct == 1
+    assert report.overall.target_accuracy == 0.0
 
 
 def test_applied_outside_cohort_fails_thresholds() -> None:

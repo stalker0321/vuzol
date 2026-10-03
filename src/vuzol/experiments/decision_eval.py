@@ -43,6 +43,7 @@ class FamilyMetrics:
     correct: int
     false_execute: int
     unauthorized: int
+    abstain_correct: int = 0
 
     @property
     def coverage(self) -> float:
@@ -50,6 +51,8 @@ class FamilyMetrics:
 
     @property
     def target_accuracy(self) -> float:
+        """Accuracy among decided outputs only; always in [0, 1]."""
+
         return self.correct / self.decided if self.decided else 0.0
 
     @property
@@ -63,21 +66,32 @@ class EvalReport:
     overall: FamilyMetrics
     thresholds: EvalThresholds
     failures: tuple[str, ...]
+    unevaluated: tuple[str, ...] = ()
 
     @property
     def thresholds_met(self) -> bool:
+        """True when every *evaluated* threshold passed."""
+
         return not self.failures
 
+    @property
+    def fully_evaluated(self) -> bool:
+        """False when a declared threshold had no data to evaluate."""
 
-def _metrics(
-    family: str,
-    items: Sequence[tuple[bool, bool, bool, bool]],
-) -> FamilyMetrics:
+        return not self.unevaluated
+
+
+# One row per opportunity: (decided, correct, false_execute, unauthorized, abstain_correct).
+_Row = tuple[bool, bool, bool, bool, bool]
+
+
+def _metrics(family: str, items: Sequence[_Row]) -> FamilyMetrics:
     total = len(items)
-    decided = sum(1 for is_decided, _, _, _ in items if is_decided)
-    correct = sum(1 for _, is_correct, _, _ in items if is_correct)
-    false_execute = sum(1 for is_decided, _, is_false, _ in items if is_decided and is_false)
-    unauthorized = sum(1 for _, _, _, is_unauthorized in items if is_unauthorized)
+    decided = sum(1 for row in items if row[0])
+    correct = sum(1 for row in items if row[1])
+    false_execute = sum(1 for row in items if row[0] and row[2])
+    unauthorized = sum(1 for row in items if row[3])
+    abstain_correct = sum(1 for row in items if row[4])
     return FamilyMetrics(
         family=family,
         total=total,
@@ -85,6 +99,7 @@ def _metrics(
         correct=correct,
         false_execute=false_execute,
         unauthorized=unauthorized,
+        abstain_correct=abstain_correct,
     )
 
 
@@ -94,18 +109,29 @@ def evaluate_traces(
     *,
     admissions: Mapping[str, bool] | None = None,
     thresholds: EvalThresholds = DEFAULT_THRESHOLDS,
+    cost_per_decision: Decimal | None = None,
+    p95_latency_ms: int | None = None,
 ) -> EvalReport:
-    """Per-family metrics from replay traces against pre-registered thresholds."""
+    """Per-family metrics from replay traces against pre-registered thresholds.
+
+    ``cost_per_decision`` and ``p95_latency_ms`` are optional: when supplied
+    they are evaluated against the thresholds; when absent they are reported as
+    ``unevaluated`` and never counted as met.
+    """
 
     admissions = admissions or {}
-    rows: dict[DecisionFamily, list[tuple[bool, bool, bool, bool]]] = {}
+    rows: dict[DecisionFamily, list[_Row]] = {}
     for opportunity in corpus.opportunities:
         trace = traces.get(opportunity.opportunity_id)
         decided = trace is not None and trace.route_hint is not None
         expected_effect = opportunity.label.effect
         if expected_effect is None:
-            is_correct = not decided
+            # Abstain is a correct selective outcome, but it is not a target
+            # decision: it must never inflate target_accuracy.
+            is_correct = False
+            abstain_correct = not decided
         else:
+            abstain_correct = False
             is_correct = (
                 decided
                 and trace is not None
@@ -127,7 +153,13 @@ def evaluate_traces(
             and not admissions.get(opportunity.opportunity_id, False)
         )
         rows.setdefault(opportunity.family, []).append(
-            (bool(decided), bool(is_correct), bool(is_false_execute), is_unauthorized)
+            (
+                bool(decided),
+                bool(is_correct),
+                bool(is_false_execute),
+                is_unauthorized,
+                bool(abstain_correct),
+            )
         )
 
     per_family = tuple(_metrics(family.value, rows[family]) for family in corpus.families())
@@ -135,6 +167,7 @@ def evaluate_traces(
     overall = _metrics("overall", all_items)
     unauthorized_total = sum(metric.unauthorized for metric in per_family)
     failures: list[str] = []
+    unevaluated: list[str] = []
     if overall.target_accuracy < thresholds.min_target_accuracy:
         failures.append("target_accuracy")
     if overall.false_execute_rate > thresholds.max_false_execute_rate:
@@ -143,11 +176,20 @@ def evaluate_traces(
         failures.append("unauthorized_transitions")
     if overall.coverage < thresholds.min_decided_coverage:
         failures.append("decided_coverage")
+    if cost_per_decision is None:
+        unevaluated.append("max_cost_per_decision")
+    elif cost_per_decision > thresholds.max_cost_per_decision:
+        failures.append("max_cost_per_decision")
+    if p95_latency_ms is None:
+        unevaluated.append("max_p95_latency_ms")
+    elif p95_latency_ms > thresholds.max_p95_latency_ms:
+        failures.append("max_p95_latency_ms")
     return EvalReport(
         per_family=per_family,
         overall=overall,
         thresholds=thresholds,
         failures=tuple(failures),
+        unevaluated=tuple(unevaluated),
     )
 
 

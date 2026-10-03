@@ -175,6 +175,19 @@ class WorkPackageRepository:
         )
         return edit_session_ids
 
+    async def open_edit_sessions(self, *, package_id: uuid.UUID) -> tuple[EditSession, ...]:
+        """Open edit sessions for a package, oldest first (J2 projection read)."""
+
+        rows = await self._session.scalars(
+            select(EditSession)
+            .where(
+                EditSession.package_id == package_id,
+                EditSession.status == EditSessionStatus.OPEN,
+            )
+            .order_by(EditSession.created_at, EditSession.id)
+        )
+        return tuple(rows.all())
+
     async def active_package_id(self, *, session_id: uuid.UUID) -> uuid.UUID | None:
         return cast(
             uuid.UUID | None,

@@ -139,6 +139,135 @@ def test_imperative_modification_is_never_read_only_architecture() -> None:
     )
 
 
+def test_quoted_implementation_marker_is_not_reclassified_as_coding() -> None:
+    quoted = request().model_copy(
+        update={
+            "original_input": "Ничего не меняй. Объясни, почему команда «удали» опасна.",
+            "topic_kind": TopicKind.PROJECT,
+            "mapped_project_id": "vuzol",
+        }
+    )
+    policy = enforce_interpretation_policy(
+        quoted,
+        draft(
+            action=TaskAction.GENERAL_CONVERSATION,
+            task_type=TaskType.GENERAL,
+            operation=TaskOperation.EXPLAIN,
+            required_capabilities=frozenset(),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.task_type is not TaskType.CODING
+    assert Capability.CODE_EDIT not in policy.draft.required_capabilities
+    assert not policy.automatic_execution_eligible
+    assert "explicit_implementation_reclassified_as_coding" not in policy.reasons
+
+
+def test_negated_quoted_marker_is_not_reclassified_as_coding() -> None:
+    negated = request().model_copy(
+        update={
+            "original_input": (
+                "Не выполняй «добавь поле», только объясни смысл просьбы."  # noqa: RUF001
+            ),
+            "topic_kind": TopicKind.PROJECT,
+            "mapped_project_id": "vuzol",
+        }
+    )
+    policy = enforce_interpretation_policy(
+        negated,
+        draft(
+            action=TaskAction.GENERAL_CONVERSATION,
+            task_type=TaskType.GENERAL,
+            operation=TaskOperation.EXPLAIN,
+            required_capabilities=frozenset(),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.task_type is not TaskType.CODING
+    assert Capability.CODE_EDIT not in policy.draft.required_capabilities
+    assert not policy.automatic_execution_eligible
+    assert "explicit_implementation_reclassified_as_coding" not in policy.reasons
+
+
+def test_negated_infinitive_marker_is_not_reclassified_as_coding() -> None:
+    contextual = request().model_copy(
+        update={
+            "original_input": (
+                "Не надо удалить этот файл, просто объясни, зачем он нужен."  # noqa: RUF001
+            ),
+            "topic_kind": TopicKind.PROJECT,
+            "mapped_project_id": "vuzol",
+        }
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(
+            action=TaskAction.GENERAL_CONVERSATION,
+            task_type=TaskType.GENERAL,
+            operation=TaskOperation.EXPLAIN,
+            required_capabilities=frozenset(),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.task_type is not TaskType.CODING
+    assert Capability.CODE_EDIT not in policy.draft.required_capabilities
+    assert "explicit_implementation_reclassified_as_coding" not in policy.reasons
+
+
+def test_positive_clause_after_negated_clause_is_still_directed() -> None:
+    contextual = request().model_copy(
+        update={
+            "original_input": (
+                "Не удали README, исправь тесты."  # noqa: RUF001
+            ),
+            "topic_kind": TopicKind.PROJECT,
+            "mapped_project_id": "vuzol",
+        }
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(
+            task_type=TaskType.ARCHITECTURE,
+            operation=TaskOperation.INSPECT,
+            required_capabilities=frozenset({Capability.REPOSITORY_READ}),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.task_type is TaskType.CODING
+    assert policy.draft.required_capabilities == frozenset(
+        {Capability.REPOSITORY_READ, Capability.CODE_EDIT}
+    )
+    assert "explicit_implementation_reclassified_as_coding" in policy.reasons
+
+
+def test_design_question_with_implementation_substring_stays_read_only() -> None:
+    contextual = request().model_copy(
+        update={
+            "original_input": "Как лучше удалить устаревшее поле из схемы?",
+            "topic_kind": TopicKind.PROJECT,
+            "mapped_project_id": "vuzol",
+        }
+    )
+    policy = enforce_interpretation_policy(
+        contextual,
+        draft(
+            task_type=TaskType.CODING,
+            operation=TaskOperation.INSPECT,
+            required_capabilities=frozenset({Capability.REPOSITORY_READ}),
+        ),
+        known_project_ids=frozenset({"vuzol"}),
+    )
+
+    assert policy.draft.task_type is TaskType.ARCHITECTURE
+    assert policy.draft.required_capabilities == frozenset({Capability.REPOSITORY_READ})
+    assert "read_only_design_reclassified_as_architecture" in policy.reasons
+    assert "explicit_implementation_reclassified_as_coding" not in policy.reasons
+
+
 def test_restore_imperative_is_never_read_only_architecture() -> None:
     contextual = request().model_copy(
         update={

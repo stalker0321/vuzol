@@ -93,6 +93,15 @@ def _entry() -> RecentWorkEntry:
     )
 
 
+def _candidate() -> TargetCandidateProjection:
+    return TargetCandidateProjection(
+        candidate_id="task-one",
+        statement="Task one",
+        source_ref="task:00000000-0000-0000-0000-000000000001",
+        revision_hash=_HASH,
+    )
+
+
 def test_parser_rejects_unknown_keys_and_forged_refs() -> None:
     with pytest.raises(IntakeDecisionInvalid):
         parse_intake_output(
@@ -119,6 +128,21 @@ def test_parser_rejects_unknown_keys_and_forged_refs() -> None:
         parse_intake_output(
             _valid_output(abstain=True, target_id="turn:abc"),
             allowed_effects=tuple(IntakeEffect),
+            allowed_refs=frozenset({"turn:abc"}),
+            prompt_digest=_HASH,
+        )
+
+
+def test_abstain_rejects_effect_outside_allowed() -> None:
+    with pytest.raises(IntakeDecisionInvalid):
+        parse_intake_output(
+            _valid_output(
+                abstain=True,
+                effect="execute_request",
+                target_id=None,
+                reason_code="injection_detected",
+            ),
+            allowed_effects=(IntakeEffect.RESPOND,),
             allowed_refs=frozenset({"turn:abc"}),
             prompt_digest=_HASH,
         )
@@ -228,6 +252,53 @@ def test_schema_error_falls_back_with_provenance_preserved() -> None:
     asyncio.run(scenario())
 
 
+def test_provider_failure_falls_back_with_provenance_preserved() -> None:
+    async def provider(prompt: str) -> dict[str, Any]:
+        raise RuntimeError("provider down")
+
+    async def scenario() -> None:
+        session, fake = _session()
+        run = await run_intake_shadow(
+            session,
+            context=_context(entries=(_entry(),)),
+            correlation_id="c-provider-down",
+            provider_call=provider,
+        )
+        assert run.provider_calls == 1
+        assert run.reason_code is IntakeReasonCode.PROVIDER_FAILURE
+        assert run.decision is not None and run.decision.abstain is True
+        assert run.prompt_hash == run.decision.prompt_hash
+        assert len(run.decision.input_fingerprint) == 64
+        assert len(fake.added) == 1
+
+    asyncio.run(scenario())
+
+
+def test_target_resolution_provider_failure_is_visible() -> None:
+    async def provider(prompt: str) -> dict[str, Any]:
+        return _valid_output()
+
+    async def target(prompt: str) -> dict[str, Any]:
+        raise RuntimeError("target provider down")
+
+    async def scenario() -> None:
+        session, fake = _session()
+        run = await run_intake_shadow(
+            session,
+            context=_context(entries=(_entry(),), candidates=(_candidate(),)),
+            correlation_id="c-target-down",
+            provider_call=provider,
+            allowed_refs=frozenset({"turn:abc"}),
+            run_target_resolution=target,
+        )
+        assert run.provider_calls == 2
+        assert run.target_resolution_ran is True
+        assert run.reason_code is IntakeReasonCode.PROVIDER_FAILURE
+        assert len(fake.added) == 1
+
+    asyncio.run(scenario())
+
+
 def test_valid_run_maps_route_and_runs_target_resolution_once() -> None:
     target_calls: list[str] = []
 
@@ -238,18 +309,11 @@ def test_valid_run_maps_route_and_runs_target_resolution_once() -> None:
         target_calls.append(prompt)
         return {}
 
-    candidate = TargetCandidateProjection(
-        candidate_id="task-one",
-        statement="Task one",
-        source_ref="task:00000000-0000-0000-0000-000000000001",
-        revision_hash=_HASH,
-    )
-
     async def scenario() -> None:
         session, _ = _session()
         run = await run_intake_shadow(
             session,
-            context=_context(entries=(_entry(),), candidates=(candidate,)),
+            context=_context(entries=(_entry(),), candidates=(_candidate(),)),
             correlation_id="c-valid",
             provider_call=provider,
             allowed_refs=frozenset({"turn:abc"}),

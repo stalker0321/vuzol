@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import func, select
+
 from tests.integration.providers._test_routing_helpers import (
     NormalizedUsage,
     bundle,
@@ -15,7 +16,6 @@ from tests.integration.providers._test_routing_helpers import (
     profile,
     storage,
 )
-
 from vuzol.context.assembler import (
     AssembledContext,
     PendingInteractionSet,

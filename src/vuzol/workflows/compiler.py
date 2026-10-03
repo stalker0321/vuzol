@@ -3,6 +3,7 @@
 import uuid
 
 from vuzol.interpretation.domain import TaskDraft, TaskType
+from vuzol.interpretation.planning import PlanningTier, tier_needs_planning
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.definitions import WORKFLOW_REGISTRY
 from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow, WorkflowDefinitionError
@@ -22,14 +23,22 @@ def compile_workflow(
     *,
     interpretation_id: uuid.UUID,
     configured_workflow: str | None = None,
+    planning_tier: PlanningTier | None = None,
 ) -> MaterializedWorkflow:
     stable_id = configured_workflow or TASK_WORKFLOWS[draft.task_type]
     definition = WORKFLOW_REGISTRY.get(stable_id)
     if definition is None or draft.task_type.value not in definition.task_types:
         raise WorkflowDefinitionError(f"incompatible workflow: {stable_id}")
 
+    # J4: the persisted, code-owned tier is authoritative when supplied; the
+    # in-memory boolean stays the fallback for callers without a tier.
+    needs_planning = (
+        tier_needs_planning(planning_tier)
+        if planning_tier is not None
+        else bool(draft.needs_planning)
+    )
     flags = {
-        "needs_planning": bool(draft.needs_planning),
+        "needs_planning": needs_planning,
         # Coding results always receive a cheap mechanical review. The review
         # step re-evaluates risk from the measured diff and only invokes an
         # independent model when the runtime facts require it.

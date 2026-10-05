@@ -597,6 +597,23 @@ def test_grok_execution_boundary_accepts_only_canonical_runtime() -> None:
         _provider_state_runtime("unknown")
 
 
+def test_pi_execution_boundary_accepts_only_canonical_runtime() -> None:
+    from vuzol.execution.codex import _provider_state_runtime, _require_provider_command
+    from vuzol.providers.pi import canonical_pi_argv
+
+    write = canonical_pi_argv("kimi-k3")
+    read_only = canonical_pi_argv("kimi-k3", read_only=True)
+    _require_provider_command(write, "pi", "kimi-k3")
+    _require_provider_command(read_only, "pi", "kimi-k3")
+    target, environment = _provider_state_runtime("pi")
+    assert target == Path("/pi-home")
+    assert environment["PI_CODING_AGENT_DIR"] == "/pi-home"
+    with pytest.raises(ValueError, match="non-canonical"):
+        _require_provider_command(("pi", "-p"), "pi", "kimi-k3")
+    with pytest.raises(ValueError, match="non-canonical"):
+        _require_provider_command(canonical_pi_argv("other-model"), "pi", "kimi-k3")
+
+
 @pytest.mark.anyio
 async def test_executor_chain_short_circuits_between_workers() -> None:
     from vuzol.cli.executor import ExecutorChain

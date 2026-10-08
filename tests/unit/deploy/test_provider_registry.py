@@ -93,7 +93,7 @@ def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
     profiles = {
         profile["id"]: profile
         for profile in registry["profiles"]
-        if profile.get("provider") in {"codex", "grok", "kimi"}
+        if profile.get("provider") in {"codex", "grok", "kimi", "pi"}
     }
 
     assert set(profiles) == {
@@ -101,6 +101,7 @@ def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
         "grok-subscription-a",
         "grok-subscription-b",
         "tokenrouter-kimi-a",
+        "pi-opencode-go-a",
     }
     for profile in profiles.values():
         assert profile["launch_mode"] == "cli"
@@ -118,6 +119,7 @@ def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
         "grok-subscription-a",
         "grok-subscription-b",
         "tokenrouter-kimi-a",
+        "pi-opencode-go-a",
     }:
         contract = profiles[profile_id]["agent_runtime_contract"]
         assert contract["working_directory"] == "/workspace"

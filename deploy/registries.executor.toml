@@ -69,6 +69,7 @@ destinations = [
   { url = "https://cli-chat-proxy.grok.com", purpose = "Grok subscription inference" },
   { url = "https://auth.x.ai", purpose = "Grok subscription authentication" },
   { url = "https://api.tokenrouter.com", purpose = "TokenRouter Kimi inference" },
+  { url = "https://opencode.ai", purpose = "Pi opencode-go inference" },
 ]
 
 [[profiles]]
@@ -288,6 +289,49 @@ supports_local_checks = true
 enabled = true
 destinations = [
   { url = "https://api.tokenrouter.com", purpose = "TokenRouter Kimi inference" },
+]
+
+# Pi coding agent (@earendil-works/pi-coding-agent 1.0.3) over opencode-go.
+# Prepared now; keep disabled until the owner rebuilds the sandbox image with
+# the package and re-pins the digest in [[sandboxes]].
+[[profiles]]
+id = "pi-opencode-go-a"
+provider = "pi"
+model = "kimi-k3"
+launch_mode = "cli"
+credential_required = false
+capabilities = ["repository_read", "code_edit", "git", "project_shell"]
+concurrency_limit = 1
+context_limit = 262144
+cost_class = "balanced"
+roles = ["executor"]
+routing_priority = 240
+supported_task_types = ["coding"]
+fallback_profile_ids = []
+sandbox_required = true
+runtime_identity = "vuzol-pi-a"
+state_directory = "/var/lib/vuzol-provider-state/pi-opencode-go-a"
+enabled = false
+
+[profiles.agent_runtime_contract]
+cli_version = "1.0.3"
+edit_mechanism = "shell_backed_repository_tools"
+working_directory = "/workspace"
+writable_roots = ["/workspace"]
+protected_roots = ["/workspace/.git"]
+structured_output_source = "final_agent_message_json"
+inner_sandbox_mode = "provider_managed"
+supports_read = true
+supports_search = true
+supports_edit = true
+supports_git = false
+supports_network = false
+supports_local_checks = true
+
+[profiles.runtime_network]
+enabled = true
+destinations = [
+  { url = "https://opencode.ai", purpose = "Pi opencode-go inference" },
 ]
 
 # Prepared for NVIDIA-hosted GLM-5.2. Keep disabled until a key is installed and

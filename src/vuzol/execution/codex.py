@@ -57,6 +57,7 @@ from vuzol.providers.grok import (
     summarize_grok_events,
 )
 from vuzol.providers.kimi import canonical_kimi_argv
+from vuzol.providers.pi import canonical_pi_argv
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.models import ProjectDependencySource, Step, SupervisedProcess, Worktree
 from vuzol.storage.types import ProcessOutcome, ProcessStatus, StepStatus, TerminationStage
@@ -965,6 +966,11 @@ def _require_provider_command(
             canonical_kimi_argv(model, reasoning_effort=effort or "low"),
             canonical_kimi_argv(model, reasoning_effort=effort or "low", read_only=True),
         }
+    elif provider == "pi":
+        expected = {
+            canonical_pi_argv(model),
+            canonical_pi_argv(model, read_only=True),
+        }
     else:
         expected = None
     if expected is None or argv not in expected:
@@ -984,6 +990,11 @@ def _provider_state_runtime(provider: str) -> tuple[Path, dict[str, str]]:
             "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
             "KIMI_CODE_HOME": "/kimi-home",
         }
+    if provider == "pi":
+        return Path("/pi-home"), {
+            "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
+            "PI_CODING_AGENT_DIR": "/pi-home",
+        }
     raise ValueError("sandbox rejected an unsupported CLI provider")
 
 
@@ -996,7 +1007,7 @@ def _diagnostic_argv(value: object) -> tuple[str, ...]:
 def _diagnostic_provider(argv: tuple[str, ...]) -> str:
     if not argv:
         return "unknown"
-    if argv[0] in {"codex", "grok"}:
+    if argv[0] in {"codex", "grok", "pi"}:
         return argv[0]
     if argv[0] == "sh" and len(argv) > 2 and "kimi --model" in argv[2]:
         return "kimi"

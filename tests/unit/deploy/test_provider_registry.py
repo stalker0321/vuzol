@@ -102,6 +102,8 @@ def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
         "grok-subscription-b",
         "tokenrouter-kimi-a",
         "pi-opencode-go-a",
+        "pi-opencode-go-b",
+        "pi-opencode-go-c",
     }
     for profile in profiles.values():
         assert profile["launch_mode"] == "cli"
@@ -120,6 +122,8 @@ def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
         "grok-subscription-b",
         "tokenrouter-kimi-a",
         "pi-opencode-go-a",
+        "pi-opencode-go-b",
+        "pi-opencode-go-c",
     }:
         contract = profiles[profile_id]["agent_runtime_contract"]
         assert contract["working_directory"] == "/workspace"
@@ -130,3 +134,28 @@ def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
         assert contract["supports_edit"] is True
         assert contract["supports_git"] is False
         assert contract["supports_network"] is False
+
+
+def test_pi_opencode_accounts_are_isolated_per_state_directory() -> None:
+    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
+    profiles = {
+        profile["id"]: profile
+        for profile in registry["profiles"]
+        if profile.get("provider") == "pi"
+    }
+
+    assert set(profiles) == {
+        "pi-opencode-go-a",
+        "pi-opencode-go-b",
+        "pi-opencode-go-c",
+    }
+    for profile in profiles.values():
+        assert profile["model"] == "kimi-k3"
+        assert profile["roles"] == ["executor"]
+        assert profile["fallback_profile_ids"] == []
+        assert profile["enabled"] is False
+
+    # One opencode account maps to exactly one directory and one runtime identity,
+    # with no default account and no cross-account fallback.
+    assert len({profile["state_directory"] for profile in profiles.values()}) == len(profiles)
+    assert len({profile["runtime_identity"] for profile in profiles.values()}) == len(profiles)

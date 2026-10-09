@@ -1,4 +1,8 @@
-"""The sandbox image must pin the Pi package and provide /pi-home (T083)."""
+"""The sandbox image must pin the Pi package and provide /pi-home (T083).
+
+Account-bound pi profiles moved to the untracked local overlay (T085); the
+tracked registry only keeps provider facts such as the opencode.ai egress.
+"""
 
 from __future__ import annotations
 
@@ -16,11 +20,9 @@ def test_sandbox_dockerfile_pins_pi_package_and_home() -> None:
     assert "node:22-bookworm-slim" in dockerfile
 
 
-def test_executor_registry_declares_disabled_pi_profile() -> None:
+def test_executor_registry_excludes_account_bound_profiles() -> None:
     registry = (ROOT / "deploy/registries.executor.toml").read_text(encoding="utf-8")
-    assert 'provider = "pi"' in registry
-    assert 'state_directory = "/var/lib/vuzol-provider-state/pi-opencode-go-a"' in registry
+    assert 'provider = "pi"' not in registry
+    assert "state_directory" not in registry
+    # The provider egress fact stays in the tracked project network policy.
     assert '{ url = "https://opencode.ai", purpose = "Pi opencode-go inference" }' in registry
-    # Prepared but inactive until the owner rebuilds the image with the package.
-    pi_block = registry.split('provider = "pi"', 1)[1].split("[[profiles]]", 1)[0]
-    assert "enabled = false" in pi_block

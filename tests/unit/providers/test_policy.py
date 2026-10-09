@@ -94,18 +94,18 @@ def test_policy_honors_only_eligible_explicit_profile_and_fallback() -> None:
 
 
 def test_policy_project_pin_fence_excludes_cross_family_on_initial_claim() -> None:
-    primary = profile("codex-subscription-prod", routing_priority=200)
+    primary = profile("codex-a", routing_priority=200)
     other = profile("grok-subscription-a", routing_priority=210)
     states = {item.id: EffectiveProfileState() for item in (primary, other)}
     decision = select_profile(
         routing_request(
-            trusted_profile_id="codex-subscription-prod",
-            restrict_to_profile_ids=frozenset({"codex-subscription-prod"}),
+            trusted_profile_id="codex-a",
+            restrict_to_profile_ids=frozenset({"codex-a"}),
         ),
         (primary, other),
         states,
     )
-    assert decision.selected_profile_id == "codex-subscription-prod"
+    assert decision.selected_profile_id == "codex-a"
     assert decision.alternatives == ()
     reasons = {item.profile_id: item.reasons for item in decision.evaluations}
     assert ExclusionReason.PROJECT_PIN in reasons["grok-subscription-a"]

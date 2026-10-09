@@ -62,7 +62,7 @@ def test_collect_codex_from_auth_and_http(tmp_path: Path, monkeypatch: pytest.Mo
         json.dumps({"tokens": {"access_token": "tok", "account_id": "acc"}}),
         encoding="utf-8",
     )
-    profile = _cli_profile("codex-subscription-prod", "codex", state)
+    profile = _cli_profile("codex-a", "codex", state)
 
     def fake_http(url: str, *, headers: dict[str, str]) -> dict[str, object]:
         assert "Bearer tok" in headers["Authorization"]
@@ -666,7 +666,7 @@ def test_s1c_codex_unchanged_under_snapshot_mode(
         json.dumps({"tokens": {"access_token": "tok", "account_id": "acc"}}),
         encoding="utf-8",
     )
-    profile = _cli_profile("codex-subscription-prod", "codex", state)
+    profile = _cli_profile("codex-a", "codex", state)
 
     def fake_http(url: str, *, headers: dict[str, str]) -> dict[str, object]:
         return {

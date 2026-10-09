@@ -33,7 +33,7 @@ def test_status_dashboard_kind_helper() -> None:
 @pytest.mark.anyio
 async def test_dashboard_includes_updated_timestamp() -> None:
     snap = SubscriptionLimitSnapshot(
-        profile_id="codex-subscription-prod",
+        profile_id="codex-a",
         company="OpenAI",
         plan_label="Plus",
         five_hour=LimitWindow(None, None, available=False),
@@ -51,7 +51,7 @@ async def test_dashboard_includes_updated_timestamp() -> None:
 
     # Naive timestamps are treated as UTC.
     naive = SubscriptionLimitSnapshot(
-        profile_id="codex-subscription-prod",
+        profile_id="codex-a",
         company="OpenAI",
         plan_label="Plus",
         five_hour=LimitWindow(None, None, available=False),

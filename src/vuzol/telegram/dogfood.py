@@ -111,7 +111,7 @@ class TelegramDogfoodIngressService:
         request = TrialSeedRequest(
             experiment_id=identity,
             task_id=identity,
-            worker_profile="codex-subscription-prod",
+            worker_profile="codex-a",
             project_id=project.id,
             base_commit=base,
             goal=command.goal,

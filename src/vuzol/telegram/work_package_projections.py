@@ -729,7 +729,7 @@ def _route_provider_label(route: object) -> str | None:
         return "Sol"
     if "grok" in lowered:
         return "Grok"
-    if "kimi" in lowered:
+    if "kimi" in lowered or "tokenrouter" in lowered:
         return "Kimi"
     if "codex" in lowered or "openai" in lowered:
         return "Codex"
@@ -769,9 +769,7 @@ async def _horizon_display_status(
     from vuzol.execution.effect import _ACTIVE_STATUSES
     from vuzol.storage.models import Effect
 
-    code = horizon_status(
-        package.status, package.horizon_phase, package.accepted_at is not None
-    )
+    code = horizon_status(package.status, package.horizon_phase, package.accepted_at is not None)
     if code == "evaluating":
         return "Evaluating"
     if code in {"waiting_approval", "waiting_resource", "waiting_input"}:
@@ -785,9 +783,7 @@ async def _horizon_display_status(
             )
         ).all()
         if task_ids:
-            run_ids = (
-                await session.scalars(select(Run.id).where(Run.task_id.in_(task_ids)))
-            ).all()
+            run_ids = (await session.scalars(select(Run.id).where(Run.task_id.in_(task_ids)))).all()
             if run_ids:
                 step_ids = (
                     await session.scalars(select(Step.id).where(Step.run_id.in_(run_ids)))

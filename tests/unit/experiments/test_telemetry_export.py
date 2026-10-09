@@ -94,7 +94,7 @@ def test_provider_usage_aggregates_by_role_without_fabricating_missing_values() 
         ),
         InvocationTelemetry(
             role="reviewer",
-            profile_id="codex-subscription-prod",
+            profile_id="codex-a",
             model="codex",
             context=ContextManifest(role="reviewer"),
             usage=ReportedUsage(input_tokens=7, output_tokens=3, reasoning_tokens=2),

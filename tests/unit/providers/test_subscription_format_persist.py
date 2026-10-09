@@ -39,7 +39,7 @@ def test_progress_bar_fills_used_portion() -> None:
 
 def test_format_subscription_limits_html() -> None:
     snap = SubscriptionLimitSnapshot(
-        profile_id="codex-subscription-prod",
+        profile_id="codex-a",
         company="OpenAI",
         plan_label="Plus",
         five_hour=LimitWindow(
@@ -365,7 +365,7 @@ async def test_persist_and_load_subscription_limits() -> None:
     )
 
     snap = SubscriptionLimitSnapshot(
-        profile_id="codex-subscription-prod",
+        profile_id="codex-a",
         company="OpenAI",
         plan_label="Plus",
         five_hour=LimitWindow(remaining_percent=40, reset_at=None, available=True),
@@ -402,14 +402,14 @@ async def test_persist_and_load_subscription_limits() -> None:
     session.flush = AsyncMock()
 
     await persist_subscription_limits(session, (snap, failed))
-    assert set(stored) == {"codex-subscription-prod", "grok-subscription-a"}
-    codex_row = stored["codex-subscription-prod"]
+    assert set(stored) == {"codex-a", "grok-subscription-a"}
+    codex_row = stored["codex-a"]
     assert codex_row.company == "OpenAI"
     assert codex_row.weekly_remaining_percent == 70
 
     # Second persist updates the existing ORM row in place.
     snap2 = SubscriptionLimitSnapshot(
-        profile_id="codex-subscription-prod",
+        profile_id="codex-a",
         company="OpenAI",
         plan_label="Pro",
         five_hour=LimitWindow(remaining_percent=None, reset_at=None, available=False),
@@ -430,8 +430,8 @@ async def test_persist_and_load_subscription_limits() -> None:
     loaded = await load_subscription_limits(session)
     assert len(loaded) == 2
     by_id = {item.profile_id: item for item in loaded}
-    assert by_id["codex-subscription-prod"].plan_label == "Pro"
-    assert by_id["codex-subscription-prod"].weekly.remaining_percent == 55
+    assert by_id["codex-a"].plan_label == "Pro"
+    assert by_id["codex-a"].weekly.remaining_percent == 55
     assert by_id["grok-subscription-a"].ok is False
     assert by_id["grok-subscription-a"].detail == "PermissionError"
     assert by_id["grok-subscription-a"].five_hour.available is False
@@ -449,7 +449,7 @@ async def test_persist_and_load_subscription_limits() -> None:
     try:
         out = await refresh_and_store_subscription_limits(session, ())
         assert len(out) == 1
-        assert out[0].profile_id == "codex-subscription-prod"
+        assert out[0].profile_id == "codex-a"
     finally:
         limits_mod.collect_subscription_limits = original
 
@@ -463,7 +463,7 @@ async def test_dashboard_loads_limits_from_db_not_filesystem() -> None:
     from vuzol.telegram.projections import build_project_status_dashboard
 
     snap = SubscriptionLimitSnapshot(
-        profile_id="codex-subscription-prod",
+        profile_id="codex-a",
         company="OpenAI",
         plan_label="Plus",
         five_hour=LimitWindow(remaining_percent=80, reset_at=None, available=True),

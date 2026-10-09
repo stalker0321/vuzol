@@ -131,7 +131,7 @@ python3 -m http.server
 @pytest.mark.anyio
 async def test_worker_label_uses_execution_model_not_planner() -> None:
     step = SimpleNamespace(
-        executor_profile_id="codex-subscription-prod",
+        executor_profile_id="codex-a",
         result={"model": "gpt-5.6-sol"},
     )
     session = MagicMock()
@@ -433,7 +433,7 @@ async def test_build_and_enqueue_history_report() -> None:
     )
     run = SimpleNamespace(id=uuid4(), created_at=datetime(2026, 7, 16, 10, 0, tzinfo=UTC))
     worker_step = SimpleNamespace(
-        executor_profile_id="codex-subscription-prod",
+        executor_profile_id="codex-a",
         result={"model": "gpt-5.6-sol"},
     )
 

@@ -280,7 +280,7 @@ async def test_provider_handler_grants_acl_for_regular_coding_task() -> None:
     )
     provider_request = MagicMock(task_draft={})
     handler._build_request = AsyncMock(  # type: ignore[method-assign]
-        return_value=(provider_request, "codex-subscription-prod", uuid.uuid4(), "revision")
+        return_value=(provider_request, "codex-a", uuid.uuid4(), "revision")
     )
     handler._grant_worktree_access = AsyncMock(return_value=access)  # type: ignore[method-assign]
     handler._execute_built = AsyncMock(  # type: ignore[method-assign]

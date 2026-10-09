@@ -343,7 +343,7 @@ async def test_project_model_controller_auto_and_effort_and_grok(
     profiles = (
         ProviderProfileConfig.model_validate(
             {
-                "id": "codex-subscription-prod",
+                "id": "codex-a",
                 "provider": "codex",
                 "model": "gpt-5.6-sol",
                 "model_reasoning_effort": "medium",
@@ -746,7 +746,7 @@ async def test_enqueue_worker_picker_creates_outbox() -> None:
     projects = ProjectRegistry((project,), repository_root=Path("/tmp"))  # noqa: S108
     profile = ProviderProfileConfig.model_validate(
         {
-            "id": "codex-subscription-prod",
+            "id": "codex-a",
             "provider": "codex",
             "model": "gpt-5.6-sol",
             "launch_mode": LaunchMode.CLI,

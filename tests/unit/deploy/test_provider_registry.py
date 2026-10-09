@@ -1,13 +1,24 @@
-"""Static checks for the reviewed production provider registry."""
+"""Static checks for the reviewed production provider registry.
+
+Account-bound CLI profiles (codex/grok/kimi/pi accounts) deliberately live in
+the untracked local overlay now, so this file only pins the provider facts that
+stay in the tracked registry. Overlay contents are checked by the local
+``verify-account-profiles.py`` script outside the repository, not here.
+"""
 
 import tomllib
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def _registry() -> dict[str, Any]:
+    return tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
+
+
 def test_production_sandbox_uses_minimal_tooling_image() -> None:
-    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
+    registry = _registry()
 
     assert registry["sandboxes"][0]["id"] == "project-default"
     assert registry["sandboxes"][0]["image"] == (
@@ -15,32 +26,17 @@ def test_production_sandbox_uses_minimal_tooling_image() -> None:
     )
 
 
-def test_production_grok_profiles_use_current_model_id() -> None:
-    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
-    grok_profiles = {
-        profile["id"]: profile
-        for profile in registry["profiles"]
-        if profile.get("provider") == "grok"
-    }
+def test_tracked_registry_carries_no_account_bound_profiles() -> None:
+    profiles = _registry()["profiles"]
 
-    assert set(grok_profiles) == {"grok-subscription-a", "grok-subscription-b"}
-    assert {profile["model"] for profile in grok_profiles.values()} == {"grok-4.5"}
-
-
-def test_production_kimi_profile_is_pinned_to_free_model() -> None:
-    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
-    profiles = [profile for profile in registry["profiles"] if profile.get("provider") == "kimi"]
-
-    assert len(profiles) == 1
-    assert profiles[0]["id"] == "tokenrouter-kimi-a"
-    assert profiles[0]["model"] == "moonshotai/kimi-k3-free"
+    account_bound = [profile["id"] for profile in profiles if "state_directory" in profile]
+    assert account_bound == []
 
 
 def test_production_planner_uses_deepseek_via_deepinfra_with_router_fallbacks() -> None:
-    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
     profile = next(
         profile
-        for profile in registry["profiles"]
+        for profile in _registry()["profiles"]
         if profile["id"] == "openrouter-deepseek-planner-prod"
     )
 
@@ -58,10 +54,9 @@ def test_production_planner_uses_deepseek_via_deepinfra_with_router_fallbacks() 
 
 
 def test_production_reviewer_uses_mimo_via_openrouter_with_low_effort() -> None:
-    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
     profile = next(
         profile
-        for profile in registry["profiles"]
+        for profile in _registry()["profiles"]
         if profile["id"] == "openrouter-mimo-reviewer-prod"
     )
 
@@ -78,84 +73,12 @@ def test_production_reviewer_uses_mimo_via_openrouter_with_low_effort() -> None:
 
 
 def test_nvidia_glm_worker_profile_is_prepared_but_not_routable_without_agent_transport() -> None:
-    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
-    profile = next(profile for profile in registry["profiles"] if profile["id"] == "nvidia-glm-5-2")
+    profile = next(
+        profile for profile in _registry()["profiles"] if profile["id"] == "nvidia-glm-5-2"
+    )
 
     assert profile["model"] == "z-ai/glm-5.2"
     assert profile["api_base_url"] == "https://integrate.api.nvidia.com/v1"
     assert profile["credential_reference"] == "env:VUZOL_NVIDIA_API_KEY"
     assert profile["roles"] == ["executor"]
     assert profile["enabled"] is False
-
-
-def test_production_cli_workers_share_one_provider_neutral_contract() -> None:
-    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
-    profiles = {
-        profile["id"]: profile
-        for profile in registry["profiles"]
-        if profile.get("provider") in {"codex", "grok", "kimi", "pi"}
-    }
-
-    assert set(profiles) == {
-        "codex-subscription-prod",
-        "grok-subscription-a",
-        "grok-subscription-b",
-        "tokenrouter-kimi-a",
-        "pi-opencode-go-a",
-        "pi-opencode-go-b",
-        "pi-opencode-go-c",
-    }
-    for profile in profiles.values():
-        assert profile["launch_mode"] == "cli"
-        assert profile["sandbox_required"] is True
-        assert "executor" in profile["roles"]
-        assert set(profile["capabilities"]) >= {
-            "repository_read",
-            "code_edit",
-            "git",
-            "project_shell",
-        }
-
-    for profile_id in {
-        "codex-subscription-prod",
-        "grok-subscription-a",
-        "grok-subscription-b",
-        "tokenrouter-kimi-a",
-        "pi-opencode-go-a",
-        "pi-opencode-go-b",
-        "pi-opencode-go-c",
-    }:
-        contract = profiles[profile_id]["agent_runtime_contract"]
-        assert contract["working_directory"] == "/workspace"
-        assert contract["writable_roots"] == ["/workspace"]
-        assert contract["protected_roots"] == ["/workspace/.git"]
-        assert contract["supports_read"] is True
-        assert contract["supports_search"] is True
-        assert contract["supports_edit"] is True
-        assert contract["supports_git"] is False
-        assert contract["supports_network"] is False
-
-
-def test_pi_opencode_accounts_are_isolated_per_state_directory() -> None:
-    registry = tomllib.loads((ROOT / "deploy/registries.executor.toml").read_text())
-    profiles = {
-        profile["id"]: profile
-        for profile in registry["profiles"]
-        if profile.get("provider") == "pi"
-    }
-
-    assert set(profiles) == {
-        "pi-opencode-go-a",
-        "pi-opencode-go-b",
-        "pi-opencode-go-c",
-    }
-    for profile in profiles.values():
-        assert profile["model"] == "kimi-k3"
-        assert profile["roles"] == ["executor"]
-        assert profile["fallback_profile_ids"] == []
-        assert profile["enabled"] is False
-
-    # One opencode account maps to exactly one directory and one runtime identity,
-    # with no default account and no cross-account fallback.
-    assert len({profile["state_directory"] for profile in profiles.values()}) == len(profiles)
-    assert len({profile["runtime_identity"] for profile in profiles.values()}) == len(profiles)

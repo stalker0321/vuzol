@@ -301,7 +301,7 @@ Implement the bounded task described here.
 
 The first line is the complete allowed-file scope; one to ten contained repository-relative paths
 are accepted. The remaining lines are the goal. Vuzol fixes the worker profile to
-`codex-subscription-prod`, uses the current managed project revision, runs every trusted repository
+`codex-a` (a local overlay account profile), uses the current managed project revision, runs every trusted repository
 gate, permits no automatic LLM repair, retains the result, and requests the exact-result Telegram
 decision described above. An approved result may advance only the local managed branch; it is never
 pushed or deployed. Ordinary messages and non-project topics do not enter this coding path.

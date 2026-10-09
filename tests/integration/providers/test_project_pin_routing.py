@@ -45,7 +45,7 @@ def test_project_pin_fence_blocks_cross_family_when_primary_unhealthy(
         (tmp_path / "codex-state").mkdir()
         (tmp_path / "grok-state").mkdir()
         codex = profile(
-            "codex-subscription-prod",
+            "codex-a",
             provider="codex",
             model="gpt-5.6-sol",
             model_reasoning_effort="medium",
@@ -168,7 +168,7 @@ def test_project_pin_fence_idempotently_blocks_already_quota_exhausted_task(
         (tmp_path / "codex-state").mkdir()
         (tmp_path / "grok-state").mkdir()
         codex = profile(
-            "codex-subscription-prod",
+            "codex-a",
             provider="codex",
             model="gpt-5.6-sol",
             model_reasoning_effort="medium",
@@ -481,7 +481,7 @@ def test_project_pin_trusted_payload_carries_codex_overrides(
         engine, factory = storage(postgres_dsn)
         (tmp_path / "codex-state").mkdir()
         codex = profile(
-            "codex-subscription-prod",
+            "codex-a",
             provider="codex",
             model="gpt-5.6-sol",
             model_reasoning_effort="medium",
@@ -548,7 +548,7 @@ def test_project_pin_trusted_payload_carries_codex_overrides(
             step = await session.get(Step, step_id)
             assert token is not None and token.step.id == step_id
             assert step is not None
-            assert step.executor_profile_id == "codex-subscription-prod"
+            assert step.executor_profile_id == "codex-a"
             assert step.payload.get("executor_model_override") == "gpt-5.6-terra"
             assert step.payload.get("executor_reasoning_effort") == "xhigh"
             assert step.payload.get("executor_worker_key") == "terra"
@@ -557,11 +557,11 @@ def test_project_pin_trusted_payload_carries_codex_overrides(
             )
             assert decision is not None
             assert decision.inputs.get("project_pin_worker") == "terra"
-            assert decision.inputs.get("trusted_profile_id") == "codex-subscription-prod"
+            assert decision.inputs.get("trusted_profile_id") == "codex-a"
             assert decision.inputs.get("preference_revision") == 4
             assert decision.inputs.get("model_override") == "gpt-5.6-terra"
             assert decision.inputs.get("reasoning_effort") == "xhigh"
-            assert "codex-subscription-prod" in decision.inputs.get("restrict_to_profile_ids", [])
+            assert "codex-a" in decision.inputs.get("restrict_to_profile_ids", [])
         await engine.dispose()
 
     asyncio.run(scenario())
@@ -575,7 +575,7 @@ def test_project_pin_does_not_affect_research_execute(postgres_dsn: str, tmp_pat
         engine, factory = storage(postgres_dsn)
         (tmp_path / "codex-state").mkdir()
         codex = profile(
-            "codex-subscription-prod",
+            "codex-a",
             provider="codex",
             model="gpt-5.6-sol",
             api_base_url=None,
@@ -895,7 +895,7 @@ def test_concurrent_preference_first_create_and_cas(postgres_dsn: str, tmp_path:
 
         (tmp_path / "codex-state").mkdir()
         codex = profile(
-            "codex-subscription-prod",
+            "codex-a",
             provider="codex",
             model="gpt-5.6-sol",
             api_base_url=None,

@@ -37,7 +37,7 @@ from vuzol.projects.executor_preference import (
 
 def _codex_profile(**changes: object) -> ProviderProfileConfig:
     values: dict[str, object] = {
-        "id": "codex-subscription-prod",
+        "id": "codex-a",
         "provider": "codex",
         "model": "gpt-5.6-sol",
         "model_reasoning_effort": "medium",
@@ -59,7 +59,7 @@ def _codex_profile(**changes: object) -> ProviderProfileConfig:
         "fallback_profile_ids": ("grok-subscription-a",),
         "sandbox_required": True,
         "runtime_identity": "vuzol-executor",
-        "state_directory": Path("/var/lib/vuzol-provider-state/codex-subscription-prod"),
+        "state_directory": Path("/var/lib/vuzol-provider-state/codex-a"),
         "enabled": True,
     }
     values.update(changes)
@@ -172,7 +172,7 @@ def test_resolve_route_pin_for_sol_and_grok() -> None:
         bundle,
     )
     assert sol is not None
-    assert sol.trusted_profile_id == "codex-subscription-prod"
+    assert sol.trusted_profile_id == "codex-a"
     assert sol.model_override == "gpt-5.6-sol"
     assert sol.reasoning_effort == "high"
 
@@ -250,7 +250,7 @@ def test_same_family_fallbacks_drop_cross_provider_edges() -> None:
         same_family_fallback_ids(
             bundle,
             worker_key=ExecutorWorkerKey.SOL,
-            primary_profile_id="codex-subscription-prod",
+            primary_profile_id="codex-a",
         )
         == ()
     )

@@ -114,10 +114,10 @@ def test_model_label_is_friendly() -> None:
     assert model_label_for_profile(None) == "ещё не назначен"
     assert (
         model_label_for_profile(
-            "codex-subscription-prod",
-            profile_models={"codex-subscription-prod": "gpt-5.6-sol"},
-            profile_efforts={"codex-subscription-prod": "medium"},
-            profile_providers={"codex-subscription-prod": "codex"},
+            "codex-a",
+            profile_models={"codex-a": "gpt-5.6-sol"},
+            profile_efforts={"codex-a": "medium"},
+            profile_providers={"codex-a": "codex"},
         )
         == "Codex Sol · medium"
     )
@@ -180,9 +180,9 @@ def test_model_label_uses_registry_model() -> None:
     # Explicit step model overrides a generic registry token.
     assert (
         model_label_for_profile(
-            "codex-subscription-prod",
-            profile_models={"codex-subscription-prod": "codex"},
-            profile_efforts={"codex-subscription-prod": "medium"},
+            "codex-a",
+            profile_models={"codex-a": "codex"},
+            profile_efforts={"codex-a": "medium"},
             model="gpt-5.6-sol",
         )
         == "Codex Sol · medium"

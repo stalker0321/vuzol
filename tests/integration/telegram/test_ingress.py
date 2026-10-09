@@ -640,7 +640,7 @@ def test_explicit_sol_command_seeds_durable_worker_trial_once(
         runtime = telegram_runtime(tmp_path)
         initialize_repository(runtime.settings.repository_root / "vuzol")
         profile = ProviderProfileConfig(
-            id="codex-subscription-prod",
+            id="codex-a",
             provider="codex",
             model="codex",
             launch_mode=LaunchMode.CLI,

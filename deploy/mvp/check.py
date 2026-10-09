@@ -180,13 +180,14 @@ def _require_provider_profiles(document: dict[str, object]) -> None:
     profiles = document.get("profiles")
     if not isinstance(profiles, list):
         raise MvpCheckError("registry has no provider profile list")
-    matches = [
-        item
-        for item in profiles
-        if isinstance(item, dict) and item.get("id") == "codex-subscription-prod"
+    # Account-bound CLI profiles (codex/grok/kimi/pi accounts) live only in the
+    # untracked local overlay, so they are outside the MVP readiness check by
+    # construction. The tracked registry must carry none of them.
+    account_bound = [
+        item.get("id") for item in profiles if isinstance(item, dict) and "state_directory" in item
     ]
-    if len(matches) != 1 or matches[0].get("enabled") is not True:
-        raise MvpCheckError("codex-subscription-prod is not uniquely enabled")
+    if account_bound:
+        raise MvpCheckError(f"tracked registry contains account profiles: {account_bound}")
     planners = [
         item
         for item in profiles

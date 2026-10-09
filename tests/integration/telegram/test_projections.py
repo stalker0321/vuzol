@@ -158,7 +158,7 @@ def test_completed_agent_result_is_rendered_in_project_topic(postgres_dsn: str) 
             stored_step = await uow.session.get(Step, step.id)
             assert stored_task is not None and stored_step is not None
             stored_task.status = TaskStatus.COMPLETED
-            stored_step.executor_profile_id = "codex-subscription-prod"
+            stored_step.executor_profile_id = "codex-a"
             stored_step.result = {
                 "model": "gpt-5.6-sol",
                 "text": ("Use <ports> and adapters.\n\nPlan:\n- Rewrite the service next."),
@@ -425,7 +425,7 @@ def test_terminal_history_report_shows_worker_preview_and_token_totals(postgres_
             stored_agent = await uow.session.get(Step, agent_step.id)
             stored_publish = await uow.session.get(Step, publish_step.id)
             assert stored_agent is not None and stored_publish is not None
-            stored_agent.executor_profile_id = "codex-subscription-prod"
+            stored_agent.executor_profile_id = "codex-a"
             stored_agent.result = {"model": "gpt-5.6-sol", "text": "Docs published"}
             stored_publish.result = {
                 "status": "published",
@@ -434,7 +434,7 @@ def test_terminal_history_report_shows_worker_preview_and_token_totals(postgres_
             uow.session.add(
                 UsageRecord(
                     provider="codex",
-                    profile_id="codex-subscription-prod",
+                    profile_id="codex-a",
                     model="gpt-5.6-sol",
                     task_id=task.id,
                     run_id=run_id,
@@ -892,7 +892,7 @@ def test_dashboard_resolves_executors_pins_and_subscription_limits(postgres_dsn:
             stored_good.result = {"model": "qwen3-max"}
 
         snapshot = SubscriptionLimitSnapshot(
-            profile_id="codex-subscription-prod",
+            profile_id="codex-a",
             company="OpenAI",
             plan_label="Pro",
             five_hour=LimitWindow(

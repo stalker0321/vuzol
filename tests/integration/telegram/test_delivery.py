@@ -786,7 +786,7 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
                     step_type="execute_code",
                     queue_class=QueueClass.HEAVY,
                     status=StepStatus.RUNNING,
-                    executor_profile_id="codex-subscription-prod",
+                    executor_profile_id="codex-a",
                     required_capabilities=[],
                     retry_class=RetryClass.NEVER,
                     idempotency_class=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,

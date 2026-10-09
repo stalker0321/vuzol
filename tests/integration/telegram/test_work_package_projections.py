@@ -34,7 +34,7 @@ pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
 def test_compact_worker_labels_and_token_formatting() -> None:
     assert _route_provider_label({"trusted_profile_id": "grok-subscription-a"}) == "Grok"
-    assert _route_provider_label({"profile_id": "tokenrouter-kimi-a"}) == "Kimi"
+    assert _route_provider_label({"profile_id": "tokenrouter-a"}) == "Kimi"
     assert _route_provider_label({"executor": "openai-codex-a"}) == "Codex"
     assert _route_provider_label({"executor": "local-worker"}) == "local-worker"
     assert _route_provider_label(None) is None

@@ -230,7 +230,7 @@ def telemetry(**updates: object) -> ExperimentTelemetry:
         "predicted_strategy": ExecutionStrategy.REVIEWED,
         "actual_strategy": ExecutionStrategy.REVIEWED,
         "worker_profile": "grok-subscription-a",
-        "reviewer_profile": "codex-subscription-prod",
+        "reviewer_profile": "codex-a",
         "base_commit": "a" * 40,
         "result_commit": "b" * 40,
         "allowed_paths": ("src/example.py",),

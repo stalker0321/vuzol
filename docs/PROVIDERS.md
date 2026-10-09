@@ -61,6 +61,28 @@ see [Configuration](CONFIGURATION.md)) and resolves role budgets from process se
 checked-in files pin production registry facts and must change together with any registry edit:
 `deploy/mvp/check.py` and `tests/unit/deploy/test_provider_registry.py`.
 
+### Account profiles live only in the local overlay
+
+Account-bound CLI profiles — one profile per logged-in codex/grok/kimi/opencode
+account — are local facts and never belong in the tracked registry. The tracked
+`deploy/registries.executor.toml` carries only provider facts without an account
+binding: the planner and reviewer API profiles, prepared API workers, sandboxes,
+projects, and topics. Every account profile moves to the untracked overlay
+selected by `VUZOL_REGISTRY_OVERLAY_FILE`; the production loader appends it to
+the tracked registry before validation. One account maps to exactly one state
+directory and one profile: there is no default account and no cross-account
+fallback.
+
+The current local overlay is `/var/lib/vuzol/registry/account-profiles.toml`.
+Because it holds host-specific `state_directory` values, it is checked by a
+local script outside the repository (`verify-account-profiles.py` next to the
+overlay), not by a checked-in unit test. The naming standard is `codex-a/b/c`, `opencode-a/b/c`, and
+`tokenrouter-a`, with a model suffix only when a key is bound to a single model
+(`tokenrouter-a-<model>`); `grok-subscription-a/b` and `pi-opencode-go-a/b/c`
+already comply. `deploy/mvp/check.py` enforces that the tracked registry carries
+no account-bound profile, so account profiles stay outside the MVP readiness
+check by construction.
+
 ### Role-scoped profiles
 
 One account should not carry one limit for every role. A profile may declare
@@ -157,13 +179,14 @@ worker journal alone.
 The worker can execute safe, model-only OpenAI-compatible steps such as simple answers, planning,
 research synthesis, and summarization. Automatic workflow start remains disabled by default.
 
-The production executor registry (`deploy/registries.executor.toml`) currently routes:
+The production executor registry (`deploy/registries.executor.toml`) plus the local account overlay
+currently routes:
 
 | Role | Profile | Model | Credential | Output bound |
 | --- | --- | --- | --- | --- |
 | planner | `openrouter-deepseek-planner-prod` | DeepSeek via OpenRouter | `VUZOL_OPENROUTER_PLANNER_API_KEY` | `HardLimits.planner_output_tokens` (default 3,000, reasoning 1,800) under the profile `output_limit` of 8,000 |
 | reviewer | `openrouter-mimo-reviewer-prod` | Xiaomi MiMo-V2.5 via OpenRouter, reasoning effort `low` | `VUZOL_OPENROUTER_REVIEWER_API_KEY` | derives its window from its own profile `output_limit` (8,000) |
-| executor | `codex-subscription-prod`, `grok-subscription-a/b`, `tokenrouter-kimi-a` | subscription agent CLIs | subscription auth (no API keys) | sandbox-bound |
+| executor | account profiles (`codex-a`, `grok-subscription-a/b`, `tokenrouter-a`, `pi-opencode-go-a/b/c`) from the local overlay | subscription agent CLIs | subscription auth (no API keys) | sandbox-bound |
 | interpreter / transcriber | configured in the interpreter registry, not this mirror | DeepSeek-based interpretation; OpenAI transcription API | their own credential references | their own profile limits |
 
 Planning runs on the dedicated DeepSeek API profile with the planner budget from `HardLimits`;
@@ -191,7 +214,7 @@ Git facts, runs trusted gates in a separate pinned validation image, and creates
 only after verification succeeds.
 
 Production user intake exposes only the explicit bounded `/sol` Telegram path documented in
-`TELEGRAM.md`. It fixes the profile to `codex-subscription-prod`, accepts one to ten contained
+`TELEGRAM.md`. It fixes the profile to `codex-a` (local overlay), accepts one to ten contained
 repository-relative paths, permits no model repair, and retains rather than integrates the result.
 Grok execution and multi-worker modes remain experimental evidence, not an automatically trusted
 production route. Merge, push, deployment, privileged execution, and automatic trust promotion

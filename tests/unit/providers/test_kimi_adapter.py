@@ -56,7 +56,7 @@ class ResultTransport(Transport):
 
 def profile() -> ProviderProfileConfig:
     return ProviderProfileConfig(
-        id="tokenrouter-kimi-a",
+        id="tokenrouter-a",
         provider="kimi",
         model=KIMI_MODEL,
         launch_mode=LaunchMode.CLI,

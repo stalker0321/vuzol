@@ -46,6 +46,19 @@ responses through the interpreter profile.
 
 ### Where profiles live
 
+The production `jev-intake-prod` profile uses the native OpenRouter Decisions API,
+pinned to `typesafe/jev-1.13`. Its credential is the scoped reference
+`file:jev-openrouter.key`; keep the local 0600 file under `VUZOL_SECRET_FILE_ROOT`
+and mount it read-only only into `vuzol-interpreter`. Set
+`VUZOL_INTERPRETATION__PROFILE_ID=jev-intake-prod`, enable the `intake` kind and
+set the operator-selected cohort via `VUZOL_JEV_ENABLED_KINDS` /
+`VUZOL_JEV_CANARY_PERCENT`. Optional `VUZOL_INTERPRETATION__STRUCTURE_PROFILE_ID`
+selects a generative planner for detailed plan payloads; it does not classify
+messages in place of Jev. `VUZOL_INTERPRETATION__MANUAL_PROJECT_CREATION=true`
+uses manual topic creation without invoking the provisioner.
+
+See [ADR-0023](decisions/ADR-0023-live-jev-intake.md) for rollout and authority boundaries.
+
 There is no single registry file. Each runtime loads its own registry document plus the shared
 append-only project overlay:
 

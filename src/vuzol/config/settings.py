@@ -321,6 +321,8 @@ class InterpretationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    structure_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    manual_project_creation: bool = False
     fallback_profile_ids: tuple[str, ...] = ()
     transcription_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=60)

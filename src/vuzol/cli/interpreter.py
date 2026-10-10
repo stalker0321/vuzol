@@ -13,11 +13,13 @@ from vuzol.config import (
     ScopedSecretResolver,
     get_runtime_configuration,
 )
+from vuzol.experiments.canary import canary_policy_from_settings
 from vuzol.interpretation.adapters import (
     OpenAICompatibleInterpreter,
     OpenAICompatibleTranscriber,
 )
 from vuzol.interpretation.evaluation import require_eligible_report
+from vuzol.interpretation.jev import JevDecisionsInterpreter
 from vuzol.interpretation.service import InterpretationPipeline
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
@@ -91,12 +93,46 @@ async def run() -> None:
         secret_file_root=settings.secret_file_root,
     )
 
-    interpreter = build_profile_interpreter(
-        runtime.registries,
-        resolver,
-        profile_id=primary_profile.id,
-        timeout_seconds=config.provider_timeout_seconds,
-    )
+    interpreter: JevDecisionsInterpreter | OpenAICompatibleInterpreter
+    if primary_profile.provider == "jev":
+        if primary_profile.credential_reference is None:
+            raise ValueError("Jev profile requires a credential reference")
+        if fallback_ids:
+            raise ValueError("Jev intake must not fall back to another classifier")
+        canary = canary_policy_from_settings(settings)
+        if canary is None:
+            raise ValueError("Jev intake is not enabled")
+        structurer = None
+        if config.structure_profile_id is not None:
+            structurer = build_profile_interpreter(
+                runtime.registries,
+                resolver,
+                profile_id=config.structure_profile_id,
+                timeout_seconds=config.provider_timeout_seconds,
+            )
+        interpreter = JevDecisionsInterpreter(
+            credential=resolver.get(
+                primary_profile.credential_reference, f"profile:{primary_profile.id}"
+            ),
+            profile_id=primary_profile.id,
+            model=primary_profile.model,
+            timeout_seconds=config.provider_timeout_seconds,
+            admitted=lambda opportunity: (
+                canary.admit(
+                    decision_kind="intake",
+                    opportunity_id=opportunity,
+                ).allowed
+            ),
+            structurer=structurer,
+            manual_project_creation=config.manual_project_creation,
+        )
+    else:
+        interpreter = build_profile_interpreter(
+            runtime.registries,
+            resolver,
+            profile_id=primary_profile.id,
+            timeout_seconds=config.provider_timeout_seconds,
+        )
     fallbacks = tuple(
         build_profile_interpreter(
             runtime.registries,

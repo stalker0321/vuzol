@@ -33,6 +33,17 @@ def test_tracked_registry_carries_no_account_bound_profiles() -> None:
     assert account_bound == []
 
 
+def test_jev_intake_is_pinned_to_native_decisions_and_a_secret_reference() -> None:
+    profile = next(p for p in _registry()["profiles"] if p["id"] == "jev-intake-prod")
+    assert profile["provider"] == "jev"
+    assert profile["model"] == "typesafe/jev-1.13"
+    assert profile["api_base_url"] == "https://openrouter.ai/api/alpha/decisions"
+    assert profile["credential_reference"] == "file:jev-openrouter.key"
+    assert profile["roles"] == ["interpreter"]
+    assert profile["capabilities"] == []
+    assert profile["fallback_profile_ids"] == []
+
+
 def test_production_planner_uses_deepseek_via_deepinfra_with_router_fallbacks() -> None:
     profile = next(
         profile

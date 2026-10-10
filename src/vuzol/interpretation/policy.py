@@ -114,6 +114,7 @@ def enforce_interpretation_policy(
     *,
     known_project_ids: frozenset[str],
     allowed_candidate_ids: frozenset[str] = frozenset(),
+    semantic_effect: str | None = None,
 ) -> PolicyResult:
     reasons: list[str] = []
     updates: dict[str, object] = {}
@@ -121,7 +122,9 @@ def enforce_interpretation_policy(
     normalized_input = request.original_input.casefold()
     design_intent = _has_directed_marker(normalized_input, _DESIGN_DISCUSSION_MARKERS)
     implementation_intent = (
-        _has_directed_marker(normalized_input, _IMPLEMENTATION_MARKERS) and not design_intent
+        _has_directed_marker(normalized_input, _IMPLEMENTATION_MARKERS)
+        and not design_intent
+        and semantic_effect in {None, "execute_request"}
     )
     read_only_request = not draft.required_capabilities & {
         Capability.CODE_EDIT,

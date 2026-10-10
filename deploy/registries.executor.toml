@@ -75,6 +75,28 @@ destinations = [
 # Provider facts without an account binding stay here. Account-bound CLI
 # profiles live only in the untracked local overlay (see docs/PROVIDERS.md).
 [[profiles]]
+id = "jev-intake-prod"
+provider = "jev"
+model = "typesafe/jev-1.13"
+api_base_url = "https://openrouter.ai/api/alpha/decisions"
+launch_mode = "api"
+credential_reference = "file:jev-openrouter.key"
+credential_required = true
+capabilities = []
+concurrency_limit = 1
+context_limit = 32000
+output_limit = 512
+cost_class = "cheap"
+roles = ["interpreter"]
+supported_task_types = ["architecture", "coding", "research", "infrastructure", "file_processing", "general"]
+fallback_profile_ids = []
+sandbox_required = false
+input_cost_units_per_million = 0.042
+output_cost_units_per_million = 0
+minimum_unknown_usage_cost = 0.001
+enabled = true
+
+[[profiles]]
 id = "openrouter-deepseek-planner-prod"
 provider = "openai-compatible"
 model = "deepseek/deepseek-v4-flash-0731"

@@ -20,6 +20,8 @@ MIRROR = Path("/srv/vuzol/repositories/vuzol")
 SOCKET = Path("/run/user/994/docker.sock")
 PROXY_RUNTIME = Path("/var/lib/vuzol-proxy-runtime")
 INTERPRETER_CONTAINER = "vuzol-interpreter-1"
+# Jev's file credential is mounted only into the interpretation process;
+# registry parity checks compare the reference, never read the credential.
 GATES = ("format-check", "lint", "type-check", "security", "test")
 VALIDATION_ENVIRONMENT = {
     "CI": "1",

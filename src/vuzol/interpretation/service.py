@@ -49,6 +49,7 @@ from vuzol.interpretation.domain import (
     TaskDraft,
     TranscriptionInput,
 )
+from vuzol.interpretation.jev import JevDecisionsInterpreter
 from vuzol.interpretation.planning import PLANNING_TIER_EVENT, resolve_planning_tier
 from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.ports import (
@@ -134,6 +135,22 @@ RECOVERY_MAX_REPAIRS = 1
 RECOVERY_MAX_FALLBACKS = 1
 
 
+def _record_jev_receipt(
+    session: AsyncSession, interpreter: JevDecisionsInterpreter, intake_id: uuid.UUID
+) -> None:
+    if interpreter.receipt is not None:
+        session.add(
+            Event(
+                entity_type="telegram_intake",
+                entity_id=intake_id,
+                event_type="jev.intake_decided",
+                actor_type="jev_intake",
+                actor_id=interpreter.profile_id,
+                payload=interpreter.receipt,
+            )
+        )
+
+
 async def interpret_with_recovery(
     primary: SemanticInterpreter,
     fallbacks: Sequence[SemanticInterpreter],
@@ -149,6 +166,10 @@ async def interpret_with_recovery(
         outcome: str,
     ) -> None:
         if on_attempt is None:
+            return
+        if isinstance(interpreter, JevDecisionsInterpreter):
+            for attempt in interpreter.drain_attempts():
+                await on_attempt(attempt_kind=attempt_kind, **attempt)
             return
         await on_attempt(
             profile_id=(
@@ -204,20 +225,28 @@ async def interpret_discussion_with_recovery(
             result = enforce_discussion_policy(request, candidate)
         except (InvalidInterpreterOutput, InterpreterUnavailable):
             if on_attempt is not None:
+                if isinstance(interpreter, JevDecisionsInterpreter):
+                    for attempt in interpreter.drain_attempts():
+                        await on_attempt(attempt_kind=attempt_kind, **attempt)
+                else:
+                    await on_attempt(
+                        profile_id=getattr(interpreter, "profile_id", None),
+                        model=getattr(interpreter, "model", None),
+                        attempt_kind=attempt_kind,
+                        outcome="failed",
+                    )
+            continue
+        if on_attempt is not None:
+            if isinstance(interpreter, JevDecisionsInterpreter):
+                for attempt in interpreter.drain_attempts():
+                    await on_attempt(attempt_kind=attempt_kind, **attempt)
+            else:
                 await on_attempt(
                     profile_id=getattr(interpreter, "profile_id", None),
                     model=getattr(interpreter, "model", None),
                     attempt_kind=attempt_kind,
-                    outcome="failed",
+                    outcome="succeeded",
                 )
-            continue
-        if on_attempt is not None:
-            await on_attempt(
-                profile_id=getattr(interpreter, "profile_id", None),
-                model=getattr(interpreter, "model", None),
-                attempt_kind=attempt_kind,
-                outcome="succeeded",
-            )
         return result
     raise InterpreterUnavailable("all_discussion_interpreters_unavailable")
 
@@ -621,6 +650,10 @@ class InterpretationPipeline:
                 raise DiscussionContextChanged
             memory = DiscussionMemoryService(uow)
             assert uow.session is not None
+            if not is_explicit_fast_path(request) and isinstance(
+                self._discussion_interpreter, JevDecisionsInterpreter
+            ):
+                _record_jev_receipt(uow.session, self._discussion_interpreter, intake.id)
             existing_user_turn = await uow.session.scalar(
                 select(ConversationTurn).where(ConversationTurn.intake_message_id == intake.id)
             )
@@ -843,6 +876,12 @@ class InterpretationPipeline:
                 raise PermanentPipelineError("interpretable_task_missing")
             request = await self._build_input(session, intake, item)
             task_id = intake.task_id
+            source_task = await session.get(Task, task_id)
+            if source_task is None:
+                raise PermanentPipelineError("task_missing")
+            if source_task.status in USER_TERMINAL_TASK_STATUSES:
+                raise PermanentPipelineError("interpretable_task_terminal")
+            expected_task_version = source_task.version
         result = await interpret_with_recovery(
             self._interpreter,
             self._fallbacks,
@@ -854,6 +893,12 @@ class InterpretationPipeline:
             result.draft,
             known_project_ids=frozenset(
                 project.id for project in self._runtime.registries.projects.items()
+            ),
+            semantic_effect=(
+                self._interpreter.receipt.get("effect")
+                if isinstance(self._interpreter, JevDecisionsInterpreter)
+                and self._interpreter.receipt is not None
+                else None
             ),
         )
         # D4 W1/REDO: the closed decision triple is bound by policy above;
@@ -873,6 +918,10 @@ class InterpretationPipeline:
             task = await session.get(Task, task_id, with_for_update=True)
             if task is None:
                 raise PermanentPipelineError("task_missing")
+            if task.version != expected_task_version:
+                raise DiscussionContextChanged
+            if isinstance(self._interpreter, JevDecisionsInterpreter):
+                _record_jev_receipt(session, self._interpreter, intake.id)
             interpretation = Interpretation(
                 task_id=task.id,
                 original_input_hash=hashlib.sha256(request.original_input.encode()).hexdigest(),

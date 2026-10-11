@@ -20,6 +20,7 @@ from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from vuzol.config.models import Capability, ProviderProfileConfig
 from vuzol.observability import get_logger
 from vuzol.providers.domain import (
+    WHOLE_TURN_POLICY,
     EffectiveProfileState,
     NormalizedUsage,
     ProviderErrorCategory,
@@ -124,9 +125,10 @@ class PiCliAdapter:
             "task_draft": request.task_draft,
             "context": [item.model_dump(mode="json") for item in request.context],
             "output_schema": request.output_json_schema,
-            "execution_policy": "Inspect only; do not modify files."
-            if read_only
-            else "Implement the requested changes and run relevant tests.",
+            "execution_policy": (
+                ("Inspect only; do not modify files. " if read_only else "Run relevant tests. ")
+                + WHOLE_TURN_POLICY
+            ),
         }
         invocation = CodexInvocation(
             argv=canonical_pi_argv(profile.model, read_only=read_only),

@@ -116,6 +116,18 @@ def enforce_interpretation_policy(
     allowed_candidate_ids: frozenset[str] = frozenset(),
     semantic_effect: str | None = None,
 ) -> PolicyResult:
+    if semantic_effect == "mixed":
+        # A mixed receipt is never permission to dispatch just the draft's one action.
+        tightened = draft.model_copy(
+            update={
+                "needs_clarification": True,
+                "clarification_question": draft.clarification_question
+                or "Текущий маршрут не может сохранить весь запрос. Уточни действия и их цели.",
+                "required_capabilities": frozenset(),
+            }
+        )
+        decision = classify_decision(tightened).model_copy(update={"policy_allowed": False})
+        return PolicyResult(tightened, False, ("mixed_turn_requires_clarification",), decision)
     reasons: list[str] = []
     updates: dict[str, object] = {}
     risk = draft.suggested_risk

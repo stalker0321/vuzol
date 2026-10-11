@@ -337,10 +337,30 @@ class WorkerEditReport(FrozenModel):
     attempt: int = Field(default=1, ge=1, le=3)
     claimed_complete: bool
     implementation_summary: str = Field(min_length=1, max_length=2_000)
+    no_change_reason: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2_000,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Explain the requested condition and observed evidence when it did not hold and "
+            "the whole request was successfully completed without changes. Otherwise null."
+        ),
+    )
     agent_checks: tuple[AgentCheckResult, ...] = Field(default=(), max_length=12)
     limitations: tuple[str, ...] = Field(default=(), max_length=30)
     failure_classification: str | None = Field(default=None, max_length=200)
     usage: ReportedUsage | None = None
+
+    @model_validator(mode="after")
+    def validate_no_change_outcome(self) -> Self:
+        if self.no_change_reason is not None and (
+            not self.no_change_reason.strip()
+            or not self.claimed_complete
+            or self.failure_classification is not None
+        ):
+            raise ValueError("no-change outcome requires a complete, explained, non-failed report")
+        return self
 
 
 class WorkerResultManifest(FrozenModel):
@@ -353,6 +373,9 @@ class WorkerResultManifest(FrozenModel):
     branch: str
     changed_files: tuple[str, ...]
     claimed_complete: bool
+    no_change_reason: str | None = Field(
+        default=None, min_length=1, max_length=2_000, exclude_if=lambda value: value is None
+    )
     agent_checks: tuple[AgentCheckResult, ...] = Field(default=(), max_length=12)
     gates: tuple[GateResult, ...]
     total_worker_duration_ms: int = Field(ge=0)

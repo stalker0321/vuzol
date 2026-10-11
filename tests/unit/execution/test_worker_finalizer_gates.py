@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from pydantic import ValidationError
+
 from ._execution_helpers import (
     SYSTEM_GIT_CONFIG,
     Any,
     AsyncMock,
     CancellationContext,
     CapturedOutput,
+    CodexProcessResult,
     GateEvidence,
     GateRun,
     LocalGit,
@@ -156,6 +159,128 @@ async def test_worker_finalizer_rejects_empty_or_out_of_scope_before_gates(
     assert captured.value.category == expected_category
     gates.run.assert_not_awaited()
     assert _git(repository, "rev-parse", "HEAD").strip() == base
+
+
+@pytest.mark.anyio
+async def test_conditional_no_change_succeeds_with_gates_and_without_a_commit(
+    tmp_path: Path,
+) -> None:
+    repository, base, branch = _finalizer_repository(tmp_path)
+    runner, envelopes, runtime = _sandbox_gate_runner()
+    access = MagicMock()
+    access.revoke = AsyncMock()
+    report = WorkerEditReport.model_validate(
+        {
+            **_edit_report().model_dump(),
+            "claimed_complete": True,
+            "implementation_summary": "Tests passed; the requested condition did not hold.",
+            "no_change_reason": "Change VALUE only if zero; inspected VALUE = 1, so no edits.",
+        }
+    )
+    result = await WorkerFinalizer(LocalGit(), gate_runner=runner).finalize(
+        worktree=repository,
+        capsule=_finalizer_capsule(base, branch).model_copy(
+            update={"goal": "Change VALUE only if it is zero; otherwise report without editing."}
+        ),
+        edit_report=report,
+        worker_profile="grok-a",
+        provider_usage=_normalized_usage(),
+        provider_attempt=1,
+        gate_context=_gate_context(),
+        cancellation=CancellationContext(),
+        access=access,
+    )
+    assert result.manifest.claimed_complete
+    assert result.manifest.changed_files == ()
+    assert result.manifest.result_commit == base
+    assert result.manifest.no_change_reason == report.no_change_reason
+    assert result.evidence.verification is not None and result.evidence.verification.passed
+    assert _git(repository, "rev-list", "--count", f"{base}..HEAD").strip() == "0"
+    assert _git(repository, "status", "--short") == ""
+    assert len(result.manifest.gates) == 4
+    assert all(gate.exit_code == 0 for gate in result.manifest.gates)
+    envelopes.build_canonicalizer.assert_not_awaited()
+    assert runtime.run.await_count == 4
+    access.revoke.assert_awaited_once()
+    # A retained no-op is a valid approved result even when the base is a root commit.
+    assert not await LocalGit().apply_result(
+        repository,
+        repository,
+        target_branch=branch,
+        expected_head=base,
+        result_commit=base,
+    )
+    assert not await LocalGit().apply_result(
+        repository,
+        repository,
+        target_branch=branch,
+        expected_head=base,
+        result_commit=base,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad", ["edits", "failed_gate", "gate_mutation"])
+async def test_explained_no_change_cannot_bypass_git_or_gates(tmp_path: Path, bad: str) -> None:
+    repository, base, branch = _finalizer_repository(tmp_path)
+    report = WorkerEditReport.model_validate(
+        {
+            **_edit_report().model_dump(),
+            "claimed_complete": True,
+            "no_change_reason": "Condition did not hold: VALUE = 1.",
+        }
+    )
+    if bad == "edits":
+        (repository / "src" / "example.py").write_text("VALUE = 2\n")
+    runner, _envelopes, runtime = _sandbox_gate_runner()
+    if bad == "failed_gate":
+        runtime.run.return_value = CodexProcessResult(2, "gate failed", "", 2)
+    if bad == "gate_mutation":
+
+        async def mutate(envelope: Any, cancellation: Any) -> Any:
+            (repository / "src" / "example.py").write_text("VALUE = 2\n")
+            return runtime.run.return_value
+
+        runtime.run.side_effect = mutate
+    with pytest.raises(WorkerFinalizationError) as error:
+        await WorkerFinalizer(LocalGit(), gate_runner=runner).finalize(
+            worktree=repository,
+            capsule=_finalizer_capsule(base, branch),
+            edit_report=report,
+            worker_profile="grok-a",
+            provider_usage=_normalized_usage(),
+            provider_attempt=1,
+            gate_context=_gate_context(),
+            cancellation=CancellationContext(),
+        )
+    assert (
+        error.value.category
+        == {
+            "edits": "worker_no_change_mismatch",
+            "failed_gate": "worker_gate_failed",
+            "gate_mutation": "worker_gate_mutated_worktree",
+        }[bad]
+    )
+    assert _git(repository, "rev-parse", "HEAD").strip() == base
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"no_change_reason": "   ", "claimed_complete": True},
+        {"no_change_reason": "Condition false", "claimed_complete": False},
+        {
+            "no_change_reason": "Condition false",
+            "claimed_complete": True,
+            "failure_classification": "failed",
+        },
+    ],
+)
+def test_no_change_report_requires_explicit_complete_non_failed_explanation(
+    changes: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError, match="no-change outcome"):
+        WorkerEditReport.model_validate({**_edit_report().model_dump(), **changes})
 
 
 @pytest.mark.anyio

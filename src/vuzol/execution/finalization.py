@@ -356,7 +356,9 @@ class WorkerFinalizer:
                 await self._git.require_no_remotes(worktree)
             except GitError as error:
                 self._fail("worker_git_isolation", str(error), evidence)
-            if not inspection.changed_files:
+            if edit_report.no_change_reason is not None and inspection.changed_files:
+                self._fail("worker_no_change_mismatch", "no-change report contains edits", evidence)
+            if not inspection.changed_files and edit_report.no_change_reason is None:
                 self._fail("worker_empty_change", "implementation produced no changes", evidence)
             if not all(
                 path_is_allowed(path, capsule.allowed_paths) for path in inspection.changed_files
@@ -444,18 +446,20 @@ class WorkerFinalizer:
                 gate_runs,
             )
         try:
-            await self._git.stage_paths(worktree, inspection.changed_files)
-            result_commit = await self._git.create_commit(
-                worktree,
-                commit_message or f"worker({capsule.task_id}): finalize implementation",
-            )
-            if await self._git.commit_parent(worktree, result_commit) != capsule.base_commit:
-                self._fail(
-                    "worker_commit_ancestry",
-                    "result commit is not a direct child of base",
-                    evidence,
-                    gate_runs,
+            result_commit = capsule.base_commit
+            if inspection.changed_files:
+                await self._git.stage_paths(worktree, inspection.changed_files)
+                result_commit = await self._git.create_commit(
+                    worktree,
+                    commit_message or f"worker({capsule.task_id}): finalize implementation",
                 )
+                if await self._git.commit_parent(worktree, result_commit) != capsule.base_commit:
+                    self._fail(
+                        "worker_commit_ancestry",
+                        "result commit is not a direct child of base",
+                        evidence,
+                        gate_runs,
+                    )
             await self._git.require_clean_worktree(worktree)
             await self._git.require_no_remotes(worktree)
             finalized = await self._git.inspect(worktree, capsule.base_commit)
@@ -473,6 +477,7 @@ class WorkerFinalizer:
             branch=finalized.branch,
             changed_files=finalized.changed_files,
             claimed_complete=True,
+            no_change_reason=edit_report.no_change_reason,
             agent_checks=edit_report.agent_checks,
             gates=tuple(
                 GateResult(

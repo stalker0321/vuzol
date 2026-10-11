@@ -42,6 +42,23 @@ class _UnreliableTreeMatch(LocalGit):
         return matches
 
 
+class _DifferentOwnerGit(LocalGit):
+    """Exercise Git's real ownership guard without requiring privileged tests."""
+
+    async def _run_allowed(
+        self,
+        cwd: Path,
+        allowed_returncodes: set[int],
+        *args: str,
+        extra_environment: dict[str, str] | None = None,
+    ) -> bytes:
+        environment = dict(extra_environment or {})
+        environment["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+        return await super()._run_allowed(
+            cwd, allowed_returncodes, *args, extra_environment=environment
+        )
+
+
 def _repository(tmp_path: Path, *, detach: bool = False) -> tuple[Path, str]:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -284,6 +301,36 @@ async def test_add_worktree_cleans_up_after_failed_fetch(tmp_path: Path) -> None
     with pytest.raises(GitError, match="Git operation failed: fetch"):
         await LocalGit().add_worktree(repository, worktree, "result", "0" * 40)
     assert not worktree.exists()
+
+
+@pytest.mark.anyio
+async def test_add_worktree_trusts_only_exact_source_in_upload_pack(tmp_path: Path) -> None:
+    # Spaces, quotes and shell substitutions must remain literal in upload-pack.
+    parent = tmp_path / "source ' $(touch INJECTED) ; literal"
+    parent.mkdir()
+    repository, base = _repository(parent)
+    unrelated, _ = _repository(tmp_path)
+    git = _DifferentOwnerGit()
+
+    # Scoped outer-command trust does not transfer to Git's local upload-pack.
+    with pytest.raises(GitError, match="dubious ownership"):
+        await git._run(tmp_path, "ls-remote", str(repository), "HEAD")
+    await git.require_clean_source(repository)
+    worktree = tmp_path / "isolated-copy"
+    await git.add_worktree(repository, worktree, "result", base)
+    assert await git.resolve_commit(worktree, "HEAD") == base
+    assert (worktree / "value.txt").read_text() == "base\n"
+    assert _git(worktree, "rev-parse", "--is-shallow-repository").strip() == "true"
+    assert _git(worktree, "remote").strip() == ""
+    config = (worktree / ".git/config").read_text()
+    assert "safe.directory" not in config
+    assert "uploadpack" not in config
+    assert str(repository) not in config
+    assert not (worktree / "INJECTED").exists()
+    assert not (tmp_path / "INJECTED").exists()
+    with pytest.raises(GitError, match="dubious ownership"):
+        await git._run(worktree, "ls-remote", str(unrelated), "HEAD")
+    await git.require_clean_source(repository)
 
 
 @pytest.mark.anyio

@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import os
+import shlex
 import shutil
 from pathlib import Path, PurePosixPath
 
@@ -169,6 +170,22 @@ class LocalGit:
         # Fetch exactly the recorded base at depth one into a standalone repository.
         # The provider sees only its own branch, current tree, and one shallow base
         # commit. No source path or remote remains in its Git configuration.
+        # Local file transport clears the caller's protected Git configuration
+        # before starting upload-pack. The source can legitimately belong to a
+        # different host user, so trust only this already-resolved source and
+        # its actual Git directory in that child, never in global configuration.
+        source_git_dir = (
+            (await self._run(repository, "rev-parse", "--absolute-git-dir")).decode().strip()
+        )
+        trusted_source = (
+            *SYSTEM_GIT_CONFIG,
+            f"safe.directory={repository}",
+            f"safe.directory={source_git_dir}",
+        )
+        source_configuration = tuple(value for item in trusted_source for value in ("-c", item))
+        # Git interprets upload-pack as a command; quote every controlled token
+        # so shell-significant repository path characters remain literal data.
+        upload_pack = shlex.join(("/usr/bin/git", *source_configuration, "upload-pack"))
         path.mkdir()  # noqa: ASYNC240 - bounded local Git preparation
         try:
             await self._run(path, "init", "--initial-branch", branch)
@@ -177,6 +194,7 @@ class LocalGit:
                 "fetch",
                 "--depth=1",
                 "--no-tags",
+                f"--upload-pack={upload_pack}",
                 str(repository),
                 base_commit,
             )

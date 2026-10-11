@@ -40,6 +40,7 @@ from vuzol.config.secrets import ScopedSecretResolver, SecretResolutionError
 from vuzol.config.settings import (
     BackupSettings,
     CapabilityProvisioningSettings,
+    ChatSettings,
     ConcurrencyLimits,
     DatabaseSettings,
     DependencyProvisioningSettings,
@@ -63,6 +64,7 @@ __all__ = [
     "BudgetMode",
     "Capability",
     "CapabilityProvisioningSettings",
+    "ChatSettings",
     "CommandDefinition",
     "ConcurrencyLimits",
     "ConfigurationBundle",

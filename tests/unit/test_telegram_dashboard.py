@@ -220,6 +220,7 @@ async def test_task_status_projection_enqueues_project_card_and_dashboard(
 
     task = SimpleNamespace(
         id=uuid.uuid4(),
+        task_type="general",
         version=4,
         source_chat_id=-100,
         source_thread_id=10,

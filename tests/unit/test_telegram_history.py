@@ -329,6 +329,7 @@ async def test_build_report_requires_completed_task() -> None:
         return_value=SimpleNamespace(
             id=uuid4(),
             status=TaskStatus.EXECUTING,
+            task_type="general",
             source_chat_id=-100,
         )
     )
@@ -353,6 +354,7 @@ async def test_failed_task_history_reports_stage_and_reason() -> None:
     task = SimpleNamespace(
         id=task_id,
         status=TaskStatus.FAILED,
+        task_type="general",
         source_chat_id=-100,
         project_id="vuzol",
         public_task_number=730005,
@@ -400,6 +402,7 @@ async def test_build_and_enqueue_history_report() -> None:
     task = SimpleNamespace(
         id=task_id,
         status=TaskStatus.COMPLETED,
+        task_type="general",
         source_chat_id=-1003950752781,
         project_id="bill-buddy",
         public_task_number=730004,

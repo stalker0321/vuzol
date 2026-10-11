@@ -14,6 +14,7 @@ from vuzol.config.models import (
     ProviderRole,
 )
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.config.revision import content_revision
 from vuzol.config.settings import Settings
 from vuzol.ops.disk_pressure import (
     FreeSpaceProbe,
@@ -204,8 +205,48 @@ async def claim_routed_step(
         pin_family_ids: frozenset[str] | None = None
         pin_preference_revision: int | None = None
         pin_worker_key: str | None = None
+        chat_profile_id = None
+        if run.selected_route.get("schema_version") == "discussion-chat-route.v1":
+            value = run.selected_route.get("trusted_profile_id")
+            if (
+                task.task_type != "discussion_agent_internal"
+                or run.workflow_type != "discussion_agent"
+                or step.step_type != "execute_agent"
+                or required != frozenset({Capability.REPOSITORY_READ})
+                or not isinstance(value, str)
+                or not value
+            ):
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="chat_route_invalid",
+                    quota=False,
+                )
+                continue
+            chat_profile_id = value
+            responder = next((p for p in profiles if p.id == value), None)
+            if responder is None or run.selected_route.get("profile_revision") != content_revision(
+                responder
+            ):
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="chat_profile_changed",
+                    quota=False,
+                )
+                continue
+            pin_family_ids = frozenset({value})
+            # An exact responder never uses project /model or any profile fallback.
+            failed_profile_id = None
+            allowed_fallbacks = ()
         # Pins apply only to CLI coding/agent sandboxes — never API/research executors.
-        pin_eligible_step = step.step_type in {"execute_code", "execute_agent"}
+        pin_eligible_step = (
+            step.step_type in {"execute_code", "execute_agent"} and chat_profile_id is None
+        )
         if pin_eligible_step and task.project_id is not None:
             preference = await load_preference(session, task.project_id)
             pin_preference_revision = preference.revision
@@ -282,7 +323,7 @@ async def claim_routed_step(
                 else:
                     # Initial claim: prefer trusted, allow same-family only if explicit edges exist.
                     allowed_fallbacks = same_family
-        trusted_profile_id = (
+        trusted_profile_id = chat_profile_id or (
             project_pin.trusted_profile_id if project_pin is not None else _trusted_profile_id(run)
         )
         policy_request = RoutingRequest(
@@ -339,9 +380,7 @@ async def claim_routed_step(
                         # D3 lifetime owner (lead Q1): materialized tasks
                         # scope to their package; the row carries it and
                         # settle inherits it (sticky, no per-call plumbing).
-                        horizon_id=await resolve_horizon_scope(
-                            session, task_id=task.id
-                        ),
+                        horizon_id=await resolve_horizon_scope(session, task_id=task.id),
                     ),
                 )
             except BudgetExceeded:
@@ -354,6 +393,14 @@ async def claim_routed_step(
             preference_revision=pin_preference_revision,
             worker_key=pin_worker_key,
         )
+        if chat_profile_id is not None:
+            pin_decision_inputs = dict(pin_decision_inputs or {})
+            pin_decision_inputs.update(
+                {
+                    "chat_profile_id": chat_profile_id,
+                    "chat_profile_revision": run.selected_route["profile_revision"],
+                }
+            )
         if selected is None or reservation is None:
             exhausted = bool(ordered) or _quota_exhausted(decision)
             await _persist_decision(
@@ -588,8 +635,7 @@ async def _block_route(
             actor_type="routing_policy",
             payload={"category": category},
         )
-    if task.task_type != "discussion_agent_internal":
-        await enqueue_terminal_task_projections(session, task, run)
+    await enqueue_terminal_task_projections(session, task, run)
 
 
 def _estimated_input_tokens(task: Task, step: Step, run: Run) -> int:

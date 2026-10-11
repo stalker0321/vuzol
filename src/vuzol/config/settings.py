@@ -504,6 +504,21 @@ class HorizonSettings(BaseModel):
     enabled: bool = False
 
 
+class ChatSettings(BaseModel):
+    """Opt-in read-only conversation, independent of project executor preferences."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+
+    @model_validator(mode="after")
+    def require_responder(self) -> "ChatSettings":
+        if self.enabled and self.profile_id is None:
+            raise ValueError("chat.enabled requires an explicit chat.profile_id")
+        return self
+
+
 class Settings(BaseSettings):
     """Process settings loaded at the composition boundary."""
 
@@ -525,6 +540,7 @@ class Settings(BaseSettings):
     registry_overlay_file: Path | None = None
     project_template_id: str = Field(default="vuzol", pattern=r"^[a-z][a-z0-9_-]*$")
     project_discussion_enabled: bool = False
+    chat: ChatSettings = ChatSettings()
     # J5 canary: at most one Jev decision kind in a small deterministic cohort.
     # Empty means disabled (the default); the kill switch freezes kinds.
     jev_enabled_kinds: tuple[str, ...] = ()

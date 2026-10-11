@@ -296,7 +296,8 @@ async def commit_step_outcome(
     if target is not task.status:
         await transition_task(session, task, target, actor_type="workflow_manager")
         if task.task_type == "discussion_agent_internal":
-            pass
+            if target in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.QUOTA_EXHAUSTED}:
+                await enqueue_terminal_task_projections(session, task, run)
         elif target is TaskStatus.WAITING_APPROVAL:
             # The project-topic card is the canonical decision surface. The global
             # project dashboard remains the cross-project attention inbox.

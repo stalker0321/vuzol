@@ -188,7 +188,11 @@ async def prepare_delivery(
             html=build_help_card(topic_kind),
             message_role=HELP_CARD_ROLE,
         )
-    if item.payload.get("role") in {"project_import_prompt", "project_source_confirmation"}:
+    if item.payload.get("role") in {
+        "project_import_prompt",
+        "project_source_confirmation",
+        "chat_notice",
+    }:
         try:
             chat_id = int(item.payload["chat_id"])
             thread_id = int(item.payload["message_thread_id"])
@@ -346,6 +350,9 @@ async def prepare_delivery(
         thread_id = task.source_thread_id
     else:
         raise PermanentDeliveryError("unsupported_telegram_operation")
+    projection_task = await session.get(Task, task_id) if task_id is not None else None
+    if projection_task is not None and projection_task.task_type == "discussion_agent_internal":
+        return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
     if role == "semantic_clarification":
         assert intake is not None
         raw_id = item.payload.get("interpretation_id")

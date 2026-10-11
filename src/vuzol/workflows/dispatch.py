@@ -95,9 +95,7 @@ class WorkflowDispatcher:
             # effects keep flowing to reconciliation and unfinished runs are
             # never touched here, so they cannot become completed by this path.
             async with self._factory.begin() as session:
-                await defer_outbox_item(
-                    session, token, delay_seconds=60, reason="dispatch_frozen"
-                )
+                await defer_outbox_item(session, token, delay_seconds=60, reason="dispatch_frozen")
             return True
         try:
             async with self._factory.begin() as session:
@@ -151,7 +149,7 @@ class WorkflowDispatcher:
             )
             automatic_start = (
                 self._runtime.settings.interpretation.automatic_execution_enabled or package_owned
-            )
+            ) and task.ingress_source != "chat_work"
             run = await materialize_run(
                 session,
                 task_id=task.id,

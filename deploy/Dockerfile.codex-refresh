@@ -1,0 +1,14 @@
+# Local deployment refresh: verify the base tag's image ID before building
+# (8ad1d2da7c2de35b6cc810728f19488068544f20a8151eea009ba005e8ee5b57).
+# Docker save/load does not retain a registry RepoDigest usable by BuildKit.
+# Other CLIs, safe-chain and identities stay in the inherited layers. The
+# produced image must be pinned by its measured digest before activation.
+FROM vuzol-sandbox:local
+
+USER root
+ARG CODEX_VERSION=0.161.0
+RUN /usr/local/bin/npm install --global "@openai/codex@${CODEX_VERSION}" \
+    && /usr/local/bin/npm cache clean --force
+
+USER 10001:10001
+WORKDIR /workspace

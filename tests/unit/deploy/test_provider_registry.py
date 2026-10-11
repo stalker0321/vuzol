@@ -22,7 +22,7 @@ def test_production_sandbox_uses_minimal_tooling_image() -> None:
 
     assert registry["sandboxes"][0]["id"] == "project-default"
     assert registry["sandboxes"][0]["image"] == (
-        "vuzol-sandbox@sha256:8ad1d2da7c2de35b6cc810728f19488068544f20a8151eea009ba005e8ee5b57"
+        "vuzol-sandbox@sha256:e75a5358bf1f4a5a67de29bdb33de4721321161bbf58abeedda6ee9856150d15"
     )
 
 

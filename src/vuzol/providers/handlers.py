@@ -39,6 +39,7 @@ from vuzol.execution.finalization import (
 )
 from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.worktrees import WorktreeService
+from vuzol.interpretation.domain import TaskAction, TaskDraft
 from vuzol.interpretation.provenance import provenance_reference
 from vuzol.observability import get_logger
 from vuzol.projects.executor_preference import apply_profile_overrides
@@ -91,6 +92,7 @@ from vuzol.research.source_backed import (
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import (
     InputBinding,
+    Interpretation,
     ProviderBudgetReservation,
     Run,
     Step,
@@ -479,9 +481,7 @@ class ProviderStepHandler:
                         profile,
                         configuration_revision=configuration_revision,
                     )
-                    await self._persist_input_bindings(
-                        session, request=request, result=result
-                    )
+                    await self._persist_input_bindings(session, request=request, result=result)
                 finalization_result = (
                     finalized
                     if finalized is not None
@@ -1291,6 +1291,41 @@ class ProviderStepHandler:
                         role="planner",
                     )
                     context = items
+            original_input = task.transcript or task.original_text
+            original_reference = provenance_reference(task)
+            continuation_id = step.payload.get("continuation_interpretation_id")
+            if continuation_id is not None:
+                if not isinstance(continuation_id, str):
+                    raise LookupError("continuation interpretation reference is invalid")
+                interpretation = await session.get(Interpretation, uuid.UUID(continuation_id))
+                carrier = (
+                    await session.get(Task, interpretation.task_id)
+                    if interpretation is not None
+                    else None
+                )
+                if interpretation is None or carrier is None:
+                    raise LookupError("continuation source turn is missing")
+                continuation = TaskDraft.model_validate(interpretation.task_draft)
+                current_turn = carrier.transcript or carrier.original_text
+                if (
+                    continuation.action is not TaskAction.CONTINUE_TASK
+                    or continuation.referenced_task_id != task.id
+                    or carrier.parent_task_id != task.id
+                    or hashlib.sha256(current_turn.encode()).hexdigest()
+                    != interpretation.original_input_hash
+                ):
+                    raise LookupError("continuation source turn does not match the bound task")
+                context = (
+                    *context,
+                    ContextItem(
+                        source="task",
+                        reference=original_reference,
+                        content=original_input,
+                        content_hash=hashlib.sha256(original_input.encode()).hexdigest(),
+                    ),
+                )
+                original_input = current_turn
+                original_reference = provenance_reference(carrier)
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
@@ -1312,8 +1347,8 @@ class ProviderStepHandler:
                     required_capabilities=frozenset(
                         Capability(value) for value in step.required_capabilities
                     ),
-                    original_input_reference=provenance_reference(task),
-                    original_input=task.original_text,
+                    original_input_reference=original_reference,
+                    original_input=original_input,
                     task_draft=task.task_draft,
                     context=context,
                     system_policy_revision=run.policy_revision,
@@ -1349,9 +1384,9 @@ def _research_result_bytes(result: ProviderResult) -> bytes:
         "finish_reason": result.finish_reason,
         "provider_request_id": result.provider_request_id,
     }
-    return json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode()
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
 def _require_source_report_shape(resolved: object) -> None:
     """Fail closed on source-report shape mismatch before provider spend.
 
@@ -1378,14 +1413,13 @@ async def _consumer_steps(
         if candidate.step_type not in consumer_types:
             continue
         metadata = (
-            candidate.dependency_metadata
-            if isinstance(candidate.dependency_metadata, dict)
-            else {}
+            candidate.dependency_metadata if isinstance(candidate.dependency_metadata, dict) else {}
         )
         predecessors = metadata.get("predecessor_ordinals", [])
         if isinstance(predecessors, list) and producer_ordinal in predecessors:
             consumers.append(candidate)
     return tuple(consumers)
+
 
 def repair_context_item(step: Step) -> ContextItem | None:
     """Expose only bounded, system-produced repair evidence to a coding worker."""

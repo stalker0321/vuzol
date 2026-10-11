@@ -56,6 +56,7 @@ class IntakeEffect(StrEnum):
     CONTROL_REQUEST = "control_request"
     STATUS = "status"
     CAPTURE = "capture"
+    MIXED = "mixed"
 
 
 class IntakeRelation(StrEnum):
@@ -93,7 +94,7 @@ class IntakeDecision:
     decision_kind: str
     state_revision: int
     effect: IntakeEffect
-    relation: IntakeRelation
+    relation: IntakeRelation | None
     target_id: str | None
     support_refs: tuple[str, ...]
     coverage: Coverage
@@ -109,7 +110,7 @@ class IntakeDecision:
             "decision_kind": self.decision_kind,
             "state_revision": self.state_revision,
             "effect": self.effect.value,
-            "relation": self.relation.value,
+            "relation": self.relation.value if self.relation is not None else None,
             "target_id": self.target_id,
             "support_refs": list(self.support_refs),
             "coverage": self.coverage.value,
@@ -188,12 +189,15 @@ def parse_intake_output(
     except ValueError:
         raise IntakeDecisionInvalid(f"unsupported effect: {raw_effect!r}") from None
     raw_relation = data.get("relation")
-    if not isinstance(raw_relation, str):
-        raise IntakeDecisionInvalid(f"unsupported relation: {raw_relation!r}")
-    try:
-        relation = IntakeRelation(raw_relation)
-    except ValueError:
-        raise IntakeDecisionInvalid(f"unsupported relation: {raw_relation!r}") from None
+    if raw_relation is None and "relation" in data and effect is IntakeEffect.MIXED:
+        relation = None
+    else:
+        if not isinstance(raw_relation, str):
+            raise IntakeDecisionInvalid(f"unsupported relation: {raw_relation!r}")
+        try:
+            relation = IntakeRelation(raw_relation)
+        except ValueError:
+            raise IntakeDecisionInvalid(f"unsupported relation: {raw_relation!r}") from None
     target_id = data.get("target_id")
     if target_id is not None and (not isinstance(target_id, str) or target_id not in allowed_refs):
         raise IntakeDecisionInvalid("target_id is not an allowed supplied reference")

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -29,10 +30,12 @@ pytestmark = pytest.mark.postgresql
 
 
 @pytest.mark.parametrize("cancel_during_call", [False, True])
+@pytest.mark.parametrize("effect", ["execute_request", "mixed"])
 def test_queued_intake_is_consumed_with_receipt_and_usage(
     postgres_dsn: str,
     tmp_path: Path,
     cancel_during_call: bool,
+    effect: str,
 ) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
@@ -62,6 +65,13 @@ def test_queued_intake_is_consumed_with_receipt_and_usage(
         runtime = RuntimeConfiguration(
             settings=original.settings, registries=build_bundle(document, original.settings)
         )
+        raw = (
+            "Останови прогон и переделай поиск; пока не запускай новый."
+            if effect == "mixed"
+            else "Проверь поиск: "
+            + "контекст " * 500
+            + "если сломан, исправь только поиск; иначе не меняй."
+        )
         accepted = await TelegramIngressService(runtime, factory).accept_message(
             MessageUpdate(
                 bot_id="main",
@@ -70,19 +80,22 @@ def test_queued_intake_is_consumed_with_receipt_and_usage(
                 message_thread_id=10,
                 message_id=301,
                 user_id=42,
-                text="Добавь поиск книг",
+                text=raw,
             )
         )
         assert accepted.task_id is not None
 
-        async def handler(_request: httpx.Request) -> httpx.Response:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert json.loads(request.content)["state"]["current_turn"] == raw
             if cancel_during_call:
                 async with factory.begin() as session:
                     task = await session.get(Task, accepted.task_id)
                     assert task is not None
                     task.status = TaskStatus.CANCELLED
                     task.version += 1
-            return httpx.Response(200, json=response())
+            return httpx.Response(
+                200, json=response(effect, "null" if effect == "mixed" else "new")
+            )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = JevDecisionsInterpreter(
@@ -97,8 +110,11 @@ def test_queued_intake_is_consumed_with_receipt_and_usage(
             task = await session.get(Task, accepted.task_id)
             assert task is not None
             assert task.status is (
-                TaskStatus.CANCELLED if cancel_during_call else TaskStatus.INTERPRETED
+                TaskStatus.CANCELLED
+                if cancel_during_call
+                else (TaskStatus.AWAITING_USER if effect == "mixed" else TaskStatus.INTERPRETED)
             )
+            assert task.original_text == raw
             receipts = await session.scalar(
                 select(func.count())
                 .select_from(Event)
@@ -115,7 +131,13 @@ def test_queued_intake_is_consumed_with_receipt_and_usage(
                         TransactionalOutbox.destination == "workflow_dispatch"
                     )
                 )
-                assert dispatch is not None
+                assert (dispatch is None) is (effect == "mixed")
+                receipt = await session.scalar(
+                    select(Event).where(Event.event_type == "jev.intake_decided")
+                )
+                assert receipt is not None
+                assert receipt.payload["effect"] == effect
+                assert receipt.payload["relation"] == (None if effect == "mixed" else "new")
         await engine.dispose()
 
     asyncio.run(scenario())

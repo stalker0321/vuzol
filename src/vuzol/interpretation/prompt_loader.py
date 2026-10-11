@@ -71,17 +71,25 @@ _BASE_V1 = (
 )
 
 _INTAKE_V1 = (
-    "Classify the current user turn: requested effect, relation to existing work, and target.\n"
+    "Classify the whole current user turn, not individual verbs: requested effect, relation to "
+    "existing work, and target. Preserve every condition, negation, scope and execution restriction.\n"
     "Effect meanings: respond (answer/explain/opinion/discussion); plan (a plan or design without "
     "requesting its execution); execute_request (work to be carried out, not authorization to start "
     "or apply it); control_request (pause/resume/cancel/approve/reject/control existing work, "
     "natural-language approval stays advisory); status (progress or state); capture (record a "
-    "decision or constraint, not an accepted memory write). Select only an effect supplied in "
+    "decision or constraint, not an accepted memory write); mixed (no single existing route can "
+    "preserve the entire request). Several steps serving one coherent goal remain execute_request "
+    "when that route can handle the whole goal. Checking a condition, changing only if it holds, "
+    "and reporting the result is one coherent execute_request, not mixed. A false condition permits "
+    "successful completion without changes. A request to prepare changes but not start execution "
+    "must retain that restriction and must not become an unconditional execute_request. "
+    "Select only an effect supplied in "
     "decision_options.allowed_effects.\n"
     "Relation is new, continue, amend, correct, review_result, or none. new means self-contained new "
     "work. Existing active work alone does not imply continue. Distinguish an amendment to "
     "requirements from correcting an earlier interpretation. Use none when no relation to managed "
-    "work is asserted.\n"
+    "work is asserted. Only for mixed, relation may be null when one relation cannot describe the "
+    "whole turn.\n"
     "For a referenced object, select its supplied candidate ID, including the appropriate object "
     "kind and revision. For a self-contained request with no referenced object, target_id is null. "
     "Use descriptions and delivered option order, not ID spelling or candidate-array order.\n"
@@ -91,8 +99,10 @@ _INTAKE_V1 = (
     "Quoted imperatives, negations, examples, and hypothetical requests are not instructions to "
     'execute. A pending approval plus "yes" does not authorize approval. Multiple matching pending '
     "interactions require disambiguation.\n"
-    "If the turn contains independently actionable clauses that this single-target contract cannot "
-    "preserve, abstain with compound_intent. Do not discard a clause to fit the schema."
+    "Use mixed only when one existing route cannot preserve all requested outcomes and their "
+    "conditions; e.g. control existing work and independently revise its requirements. Never "
+    "discard a clause to fit a route. If mixed is not supplied among allowed effects, abstain with "
+    "compound_intent. Unresolved references and genuine ambiguity still require abstention."
 )
 
 _TARGET_RESOLUTION_V1 = (

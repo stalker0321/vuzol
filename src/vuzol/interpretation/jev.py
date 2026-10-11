@@ -49,7 +49,7 @@ from vuzol.interpretation.prompt_loader import PromptKind, compose_prompt
 from vuzol.storage.types import InteractionMode, RiskLevel
 
 JEV_MODEL = "typesafe/jev-1.13"
-JEV_PROMPT_VERSION = "jev-intake-native-v1"
+JEV_PROMPT_VERSION = "jev-intake-native-v2"
 JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 _EFFECTS = {
     "respond": "Answer, explain, discuss or give an opinion without implementing changes.",
@@ -58,7 +58,8 @@ _EFFECTS = {
     "control_request": "Approve, reject, start, pause, resume or cancel existing work.",
     "status": "Ask about progress, current state or results.",
     "capture": "State a requirement or decision for discussion; do not execute it.",
-    "abstain": "Ambiguous, conflicting or independently actionable compound intentions.",
+    "mixed": "No single existing route can preserve the whole turn; do not handle only a part.",
+    "abstain": "Ambiguous, conflicting intentions or unresolved references.",
 }
 _RELATIONS = {
     "new": "Self-contained new work, not a reference to an existing object.",
@@ -67,6 +68,7 @@ _RELATIONS = {
     "correct": "Correct a previous interpretation.",
     "review_result": "Discuss or inspect a specific previous result.",
     "none": "No relation to managed work is asserted.",
+    "null": "Only for mixed: no single relation describes the whole turn.",
 }
 _TASK_TYPES = {
     "coding": "Implement or modify repository files.",
@@ -136,7 +138,7 @@ class JevDecisionsInterpreter:
         if not self._admitted(fingerprint):
             raise InterpreterUnavailable("jev_intake_not_admitted")
         questions = {
-            "effect": _choice("What effect does the current turn request?", _EFFECTS),
+            "effect": _choice("What effect does the whole current turn request?", _EFFECTS),
             "relation": _choice("What relation to existing work is asserted?", _RELATIONS),
             "target": _choice("Which supplied object does the turn reference?", targets),
             "task_type": _choice("What kind of work does the turn request?", _TASK_TYPES),
@@ -194,6 +196,8 @@ class JevDecisionsInterpreter:
             if not self._admitted(fingerprint):
                 raise InterpreterUnavailable("jev_intake_disabled_while_in_flight")
             target = selected["target"]
+            if selected["relation"] == "null" and selected["effect"] != "mixed":
+                raise InvalidInterpreterOutput("jev_null_relation_requires_mixed")
             abstain = selected["effect"] == "abstain" or target == "unresolved"
             # Continuation must have a known target; a reference cannot become new work.
             if selected["relation"] == "continue" and target == "no_target":
@@ -204,7 +208,11 @@ class JevDecisionsInterpreter:
                     "decision_kind": "intake",
                     "state_revision": 0,
                     "effect": "respond" if abstain else selected["effect"],
-                    "relation": selected["relation"],
+                    "relation": (
+                        ("none" if abstain else None)
+                        if selected["relation"] == "null"
+                        else selected["relation"]
+                    ),
                     "target_id": None if abstain or target == "no_target" else target,
                     "support_refs": ["current_turn"],
                     "coverage": Coverage.PARTIAL.value,
@@ -249,11 +257,20 @@ class JevDecisionsInterpreter:
             targets,
         )
         text = request.original_input.strip()
-        needs_clarification = decision.abstain or decision.effect is IntakeEffect.CONTROL_REQUEST
+        mixed = decision.effect is IntakeEffect.MIXED
+        needs_clarification = (
+            decision.abstain or mixed or decision.effect is IntakeEffect.CONTROL_REQUEST
+        )
         question = "Уточни, к какой задаче относится запрос и что нужно сделать."
         if decision.effect is IntakeEffect.CONTROL_REQUEST:
             question = "Для управления задачей используй кнопки её карточки."
-        if request.topic_kind is TopicKind.INBOX and not self._manual_projects:
+        if mixed:
+            question = (
+                "Запрос содержит несколько действий, которые текущий маршрут не может выполнить "
+                "целиком. Ничего не запущено. Уточни порядок и цели действий; управление прогоном "
+                "доступно кнопками карточки."
+            )
+        if request.topic_kind is TopicKind.INBOX and not self._manual_projects and not mixed:
             if self._structurer is None:
                 raise InterpreterUnavailable("jev_project_name_structurer_not_configured")
             started = time.monotonic()
@@ -278,7 +295,7 @@ class JevDecisionsInterpreter:
             finally:
                 structure_attempt["duration_ms"] = int((time.monotonic() - started) * 1000)
                 self._attempts.append(structure_attempt)
-        if request.topic_kind is TopicKind.INBOX:
+        if request.topic_kind is TopicKind.INBOX and not mixed:
             # The owner currently uses manual topic creation. Do not fabricate names or
             # invoke the unconfigured privileged project provisioner.
             needs_clarification = True
@@ -289,12 +306,17 @@ class JevDecisionsInterpreter:
             IntakeEffect.STATUS,
             IntakeEffect.CAPTURE,
             IntakeEffect.CONTROL_REQUEST,
+            IntakeEffect.MIXED,
         }:
             task_type = TaskType.GENERAL
         action = TaskAction.GENERAL_CONVERSATION
         if decision.effect in {IntakeEffect.EXECUTE_REQUEST, IntakeEffect.PLAN}:
             action = TaskAction.CREATE_TASK
-        if decision.relation is IntakeRelation.CONTINUE and decision.target_id is not None:
+        if (
+            decision.effect is IntakeEffect.EXECUTE_REQUEST
+            and decision.relation is IntakeRelation.CONTINUE
+            and decision.target_id is not None
+        ):
             action = TaskAction.CONTINUE_TASK
         if request.topic_kind is TopicKind.INBOX:
             action = TaskAction.CREATE_PROJECT
@@ -353,6 +375,19 @@ class JevDecisionsInterpreter:
             "should_mutate_plan": False,
             "user_visible_summary": "Запрос классифицирован Jev.",
         }
+        # Existing downstream modes cannot preserve a mixed turn as one action.
+        # Do not invoke the structurer, apply a control override or create partial work.
+        if decision.effect is IntakeEffect.MIXED:
+            return DiscussionInterpretation(
+                **common,
+                interaction_mode=InteractionMode.QUERY_REFUSE,
+                refusal_code=RefusalCode.CLARIFY_REQUIRED,
+                clarification_question=(
+                    "Текущий маршрут не может обработать все действия запроса целиком. "
+                    "Ничего не запущено. Уточни порядок и цели действий; управление прогоном "
+                    "доступно кнопками карточки."
+                ),
+            )
         if decision.abstain:
             return DiscussionInterpretation(
                 **common,
@@ -413,10 +448,22 @@ class JevDecisionsInterpreter:
                 self._attempts.append(attempt)
         if decision.effect is IntakeEffect.EXECUTE_REQUEST:
             text = request.original_input.strip()
+            if len(text) > 4000:
+                # This downstream payload has no separate raw-turn field. Never
+                # truncate a trailing condition into an unconditional task request.
+                return DiscussionInterpretation(
+                    **common,
+                    interaction_mode=InteractionMode.QUERY_REFUSE,
+                    refusal_code=RefusalCode.CLARIFY_REQUIRED,
+                    clarification_question=(
+                        "Запрос длиннее допустимого описания задачи. Ничего не запущено. "
+                        "Сократи запрос, сохранив все условия и ограничения."
+                    ),
+                )
             return DiscussionInterpretation(
                 **common,
                 interaction_mode=InteractionMode.TASK_REQUEST,
-                task_request=TaskRequestPayload(summary=_bounded_line(text, 240), goal=text[:4000]),
+                task_request=TaskRequestPayload(summary=_bounded_line(text, 240), goal=text),
             )
         return DiscussionInterpretation(
             **common,

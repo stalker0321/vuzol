@@ -8,6 +8,7 @@ from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 
 from vuzol.config.models import Capability, ProviderProfileConfig
 from vuzol.providers.domain import (
+    WHOLE_TURN_POLICY,
     EffectiveProfileState,
     NormalizedUsage,
     ProviderErrorCategory,
@@ -124,6 +125,7 @@ class CodexCliAdapter:
             "task_draft": request.task_draft,
             "context": [item.model_dump(mode="json") for item in request.context],
             "output_schema": request.output_json_schema,
+            "execution_policy": WHOLE_TURN_POLICY,
         }
         invocation = CodexInvocation(
             argv=canonical_codex_argv(

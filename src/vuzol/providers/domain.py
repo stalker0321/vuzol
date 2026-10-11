@@ -10,6 +10,17 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from vuzol.config.models import Capability, ProviderRole
 
+WHOLE_TURN_POLICY = (
+    "Preserve the entire original_input, not just task_draft.goal or its summary. "
+    "Respect all user conditions, negations, scope limits and instructions not to start. "
+    "Never silently execute only part of a request. If the whole request cannot be handled "
+    "within this role and its permissions, report the limitation instead of partial execution. "
+    "For conditional changes, check the condition first. If it does not hold, successful "
+    "completion without changes is valid: explain the condition and observed evidence; "
+    "use no_change_reason when the requested edit-report schema supports it. "
+    "Do not manufacture changes or commits merely to produce a diff."
+)
+
 
 class FrozenProviderModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)

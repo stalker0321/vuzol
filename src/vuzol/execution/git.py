@@ -359,6 +359,18 @@ class LocalGit:
 
         await self.require_clean_worktree(worktree)
         await self.require_no_remotes(worktree)
+        if result_commit == expected_head:
+            # Explained conditional no-op: retain the base, never manufacture a commit
+            # or advance/reset the target. Works for a root commit as well.
+            if await self.resolve_commit(worktree, "HEAD") != result_commit:
+                raise GitError("no-change worktree differs from the approved base")
+            await self.require_clean_source(repository)
+            if (
+                await self.resolve_commit(repository, f"refs/heads/{target_branch}")
+                != expected_head
+            ):
+                raise GitError("target branch changed after the result was produced")
+            return False
         result_parent = await self.commit_parent(worktree, result_commit)
         if (
             result_parent != expected_head

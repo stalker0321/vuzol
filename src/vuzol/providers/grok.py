@@ -11,6 +11,7 @@ from typing import Any
 
 from vuzol.config.models import Capability, ProviderProfileConfig
 from vuzol.providers.domain import (
+    WHOLE_TURN_POLICY,
     EffectiveProfileState,
     NormalizedUsage,
     ProviderErrorCategory,
@@ -124,6 +125,7 @@ class GrokCliAdapter:
                 "context": [item.model_dump(mode="json") for item in request.context],
                 "output_schema": request.output_json_schema,
                 "execution_policy": {
+                    "whole_turn": WHOLE_TURN_POLICY,
                     "shell_invocation": _shell_contract_instruction(request),
                     "file_edits": (
                         "File edits are forbidden; inspect the repository and return analysis only."

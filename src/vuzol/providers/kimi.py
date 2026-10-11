@@ -8,6 +8,7 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 from vuzol.config.models import Capability, ProviderProfileConfig
 from vuzol.providers.domain import (
+    WHOLE_TURN_POLICY,
     EffectiveProfileState,
     NormalizedUsage,
     ProviderErrorCategory,
@@ -92,9 +93,14 @@ class KimiCliAdapter:
                 "task_draft": request.task_draft,
                 "context": [item.model_dump(mode="json") for item in request.context],
                 "output_schema": request.output_json_schema,
-                "execution_policy": "Inspect only; do not modify files."
-                if Capability.CODE_EDIT not in request.required_capabilities
-                else "Implement the requested changes and run relevant tests.",
+                "execution_policy": (
+                    (
+                        "Inspect only; do not modify files. "
+                        if Capability.CODE_EDIT not in request.required_capabilities
+                        else "Run relevant tests. "
+                    )
+                    + WHOLE_TURN_POLICY
+                ),
             },
             ensure_ascii=False,
         )

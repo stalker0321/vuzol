@@ -79,6 +79,33 @@ async def _produce_result(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("bad", ["target_drift", "result_drift", "dirty_target"])
+async def test_no_change_apply_keeps_existing_safety_guards(tmp_path: Path, bad: str) -> None:
+    repository, base = _repository(tmp_path)
+    worktree = tmp_path / "worktree"
+    git = LocalGit()
+    await git.add_worktree(repository, worktree, "result", base)
+    if bad == "dirty_target":
+        (repository / "value.txt").write_text("dirty\n")
+    elif bad == "target_drift":
+        (repository / "value.txt").write_text("new\n")
+        await git.stage_paths(repository, ("value.txt",))
+        await git.create_commit(repository, "new target")
+    else:
+        (worktree / "value.txt").write_text("new\n")
+        await git.stage_paths(worktree, ("value.txt",))
+        await git.create_commit(worktree, "new result")
+    with pytest.raises(GitError):
+        await git.apply_result(
+            repository,
+            worktree,
+            target_branch="main",
+            expected_head=base,
+            result_commit=base,
+        )
+
+
+@pytest.mark.anyio
 async def test_initialize_rejects_file_at_project_path(tmp_path: Path) -> None:
     obstacle = tmp_path / "notes"
     obstacle.write_text("not a directory\n")

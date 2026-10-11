@@ -7,7 +7,13 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from vuzol.config.models import RegistryDocument, SandboxNetworkMode
+from vuzol.config.models import (
+    Capability,
+    LaunchMode,
+    ProviderRole,
+    RegistryDocument,
+    SandboxNetworkMode,
+)
 from vuzol.config.registries import (
     ConfigurationBundle,
     ProfileRegistry,
@@ -161,6 +167,19 @@ def build_bundle(
                             "must match its sandbox"
                         )
         topics = TopicRegistry(document.topics, projects=projects)
+        if settings.chat.enabled:
+            assert settings.chat.profile_id is not None
+            responder = profiles.get(settings.chat.profile_id)
+            if (
+                not responder.enabled
+                or responder.provider not in {"codex", "pi", "grok", "kimi"}
+                or responder.launch_mode is not LaunchMode.CLI
+                or not responder.sandbox_required
+                or ProviderRole.EXECUTOR not in responder.roles
+                or "architecture" not in responder.supported_task_types
+                or Capability.REPOSITORY_READ not in responder.capabilities
+            ):
+                raise RegistryError("chat.profile_id must be an enabled sandboxed CLI responder")
         resolver = ScopedSecretResolver(
             access_policy=_secret_access_policy(document, settings),
             secret_file_root=settings.secret_file_root,

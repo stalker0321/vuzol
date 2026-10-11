@@ -137,12 +137,12 @@ class TelegramIngressService:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 
         if (
-            settings.project_discussion_enabled
+            (settings.project_discussion_enabled or settings.chat.enabled)
             and topic.kind is TopicKind.PROJECT
             and topic.project_id is not None
             and update.text is not None
             and not update.attachments
-            and not await self._reply_targets_task(update)
+            and (settings.chat.enabled or not await self._reply_targets_task(update))
         ):
             return await self._accept_discussion_message(update, topic)
 
@@ -589,18 +589,20 @@ class TelegramIngressService:
                     "chat_id": update.chat_id,
                     "message_thread_id": update.message_thread_id,
                     "user_id": update.user_id,
+                    "reply_to_message_id": update.reply_to_message_id,
                     "control_override": (
                         None if control_override is None else control_override.value
                     ),
                 },
             )
-            await enqueue_project_topic_status(
-                uow.session,
-                chat_id=update.chat_id,
-                thread_id=update.message_thread_id,
-                project_id=topic.project_id,
-                revision=update.message_id,
-            )
+            if not self._runtime.settings.chat.enabled:
+                await enqueue_project_topic_status(
+                    uow.session,
+                    chat_id=update.chat_id,
+                    thread_id=update.message_thread_id,
+                    project_id=topic.project_id,
+                    revision=update.message_id,
+                )
         return IngressResult(status=IngressStatus.HANDLED, intake_id=intake_id)
 
     async def _handle_help_command(

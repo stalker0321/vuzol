@@ -1,6 +1,7 @@
 """Durable fenced orchestration for attachment transcription and semantic interpretation."""
 
 import hashlib
+import json
 import os
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -21,6 +22,7 @@ from vuzol.discussion.domain import DomainError
 from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.discussion.service import WorkPackageService
+from vuzol.experiments.intake_shadow import IntakeEffect
 from vuzol.interpretation.discussion import (
     DISCUSSION_CLASSIFY_DESTINATION,
     DISCUSSION_REPLY_DESTINATION,
@@ -84,8 +86,11 @@ from vuzol.storage.models import (
     PlanRevision,
     PlanRevisionItem,
     ProjectNamingRequest,
+    Run,
+    Step,
     Task,
     TelegramIntakeMessage,
+    TelegramMessageLink,
     TopicMapping,
     TransactionalOutbox,
     WorkItemDraft,
@@ -105,6 +110,7 @@ from vuzol.storage.types import (
     TaskStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
+from vuzol.telegram.projections import enqueue_chat_notice
 from vuzol.telegram.tracing import enqueue_interpreter_trace
 
 INTERPRETATION_DESTINATIONS = frozenset(
@@ -501,7 +507,319 @@ class InterpretationPipeline:
             await self._dead_letter(token, error.category)
         return True
 
+    async def _process_chat(self, token: OutboxLeaseToken) -> None:
+        """One Jev intake, then either a hidden RO answer or ordinary approved work."""
+
+        if not isinstance(self._interpreter, JevDecisionsInterpreter):
+            raise InterpreterUnavailable("chat_requires_jev_intake")
+        async with self._factory() as session:
+            item = await session.get(TransactionalOutbox, token.item_id)
+            assert item is not None
+            intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
+            if intake is None or intake.affinity_kind != "discussion" or not intake.original_text:
+                raise PermanentPipelineError("chat_intake_invalid")
+            session_id = _required_uuid(item.payload, "discussion_session_id")
+            project_id = _required_string(item.payload, "project_id")
+            if (
+                project_id not in {p.id for p in self._runtime.registries.projects.items()}
+                or _required_int(item.payload, "chat_id") != intake.chat_id
+                or _required_int(item.payload, "message_thread_id") != intake.message_thread_id
+                or _required_int(item.payload, "user_id") != intake.user_id
+            ):
+                raise PermanentPipelineError("chat_context_mismatch")
+            unfinished = await session.scalar(
+                select(TransactionalOutbox.id)
+                .join(
+                    TelegramIntakeMessage,
+                    TelegramIntakeMessage.id == TransactionalOutbox.linked_entity_id,
+                )
+                .where(
+                    TransactionalOutbox.destination == DISCUSSION_CLASSIFY_DESTINATION,
+                    TransactionalOutbox.id != item.id,
+                    TransactionalOutbox.status.in_(
+                        [DeliveryStatus.PENDING, DeliveryStatus.LEASED, DeliveryStatus.AMBIGUOUS]
+                    ),
+                    TelegramIntakeMessage.chat_id == intake.chat_id,
+                    TelegramIntakeMessage.message_thread_id == intake.message_thread_id,
+                    TelegramIntakeMessage.message_id < intake.message_id,
+                )
+                .limit(1)
+            )
+            active = await session.scalar(
+                select(Task.id)
+                .where(
+                    Task.task_type == DISCUSSION_INTERNAL_TASK_TYPE,
+                    Task.task_draft["discussion_session_id"].as_string() == str(session_id),
+                    Task.status.not_in((*USER_TERMINAL_TASK_STATUSES, TaskStatus.QUOTA_EXHAUSTED)),
+                )
+                .limit(1)
+            )
+            if unfinished is not None or active is not None:
+                raise DiscussionContextChanged
+            scope = (
+                Task.project_id == project_id,
+                Task.user_id == intake.user_id,
+                Task.source_chat_id == intake.chat_id,
+                Task.source_thread_id == intake.message_thread_id,
+                Task.task_type != DISCUSSION_INTERNAL_TASK_TYPE,
+            )
+            tasks = tuple(
+                (
+                    await session.scalars(
+                        select(Task).where(*scope).order_by(Task.created_at.desc()).limit(20)
+                    )
+                ).all()
+            )
+            reply_task = None
+            reply_message_id = item.payload.get("reply_to_message_id")
+            if isinstance(reply_message_id, int):
+                reply_task = await session.scalar(
+                    select(Task)
+                    .join(TelegramMessageLink, TelegramMessageLink.task_id == Task.id)
+                    .where(
+                        *scope,
+                        TelegramMessageLink.chat_id == intake.chat_id,
+                        TelegramMessageLink.message_id == reply_message_id,
+                    )
+                )
+            if reply_task is not None and reply_task not in tasks:
+                tasks = (reply_task, *tasks[:19])
+            context_lines = []
+            for task in tasks:
+                context_lines.append(
+                    f"Task {task.id}, number {task.public_task_number}, "
+                    f"status {task.status.value}: {task.original_text[:1000]}"
+                )
+                outputs = tuple(
+                    (
+                        await session.scalars(
+                            select(Step)
+                            .join(Run, Run.id == Step.run_id)
+                            .where(
+                                Run.task_id == task.id,
+                                Step.result.is_not(None),
+                                Step.step_type.in_(
+                                    [
+                                        "execute_model",
+                                        "execute_agent",
+                                        "execute_code",
+                                        "format_result",
+                                    ]
+                                ),
+                            )
+                            .order_by(Step.created_at.desc())
+                            .limit(1)
+                        )
+                    ).all()
+                )
+                for step in outputs:
+                    context_lines.append("Recorded result (bounded): " + str(step.result)[:2000])
+            raw = intake.original_text
+            request = InterpretationInput(
+                original_input=raw,
+                topic_kind=TopicKind.PROJECT,
+                mapped_project_id=project_id,
+                reply_linked_task=TaskContext(
+                    task_id=reply_task.id, title=reply_task.original_text[:120]
+                )
+                if reply_task is not None
+                else None,
+                active_tasks=tuple(
+                    TaskContext(task_id=t.id, title=t.original_text[:120]) for t in tasks
+                ),
+                project_summaries=tuple(self._project_summaries()),
+                capability_vocabulary=frozenset(Capability),
+            )
+        async with UnitOfWork(self._factory) as uow:
+            discussion = await uow.discussions.get_session(session_id)
+            if (discussion.project_id, discussion.chat_id, discussion.message_thread_id) != (
+                project_id,
+                intake.chat_id,
+                intake.message_thread_id,
+            ):
+                raise PermanentPipelineError("chat_session_mismatch")
+            expected_version = discussion.version
+            prior = await DiscussionMemoryService(uow).load_context(session_id=session_id)
+            request = request.model_copy(
+                update={
+                    "discussion_context": json.dumps(
+                        {
+                            "summary": prior.summary.body if prior.summary is not None else None,
+                            "accepted_decisions": [d.statement for d in prior.decisions],
+                            "turns": [
+                                {"role": t.role.value, "content": t.content} for t in prior.turns
+                            ],
+                            "bounded": prior.raw_turns_truncated,
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            )
+        # No generative repair/fallback here: Jev classifies the complete turn once.
+        try:
+            result = await self._interpreter.interpret(request)
+        except InvalidInterpreterOutput:
+            raise InterpreterUnavailable("chat_invalid_jev_output") from None
+        finally:
+            observer = self._attempt_observer(task_id=None, intake_id=intake.id)
+            for attempt in self._interpreter.drain_attempts():
+                await observer(attempt_kind="initial", **attempt)
+        receipt = self._interpreter.receipt
+        if receipt is None:
+            raise PermanentPipelineError("chat_receipt_missing")
+        effect = IntakeEffect(receipt["effect"])
+        work = effect is IntakeEffect.EXECUTE_REQUEST and not receipt["abstain"]
+        policy = (
+            enforce_interpretation_policy(
+                request,
+                result.draft,
+                known_project_ids=frozenset(
+                    p.id for p in self._runtime.registries.projects.items()
+                ),
+                semantic_effect=effect.value,
+            )
+            if work
+            and not result.draft.needs_clarification
+            and result.draft.action is not TaskAction.CONTINUE_TASK
+            else None
+        )
+        mode = (
+            InteractionMode.TASK_REQUEST
+            if work
+            else (
+                InteractionMode.QUERY_ONLY
+                if effect is IntakeEffect.STATUS
+                else InteractionMode.DISCUSSION
+            )
+        )
+        async with UnitOfWork(self._factory) as uow:
+            discussion = await uow.discussions.get_session(session_id, for_update=True)
+            if discussion.version != expected_version:
+                raise DiscussionContextChanged
+            assert uow.session is not None
+            session = uow.session
+            memory = DiscussionMemoryService(uow)
+            user_turn_id, _ = await memory.append_turn(
+                session_id=session_id,
+                role=ConversationTurnRole.USER,
+                source=ConversationTurnSource.TELEGRAM_USER,
+                content=raw,
+                classifier_mode=mode,
+                classifier_prompt_version=result.prompt_version,
+                should_create_task=policy is not None and not policy.draft.needs_clarification,
+                intake_message_id=intake.id,
+            )
+            _record_jev_receipt(session, self._interpreter, intake.id)
+            current_intake = await session.get(
+                TelegramIntakeMessage, intake.id, with_for_update=True
+            )
+            assert current_intake is not None
+            if (
+                result.draft.needs_clarification
+                or effect
+                in {
+                    IntakeEffect.MIXED,
+                    IntakeEffect.CONTROL_REQUEST,
+                }
+                or result.draft.action is TaskAction.CONTINUE_TASK
+            ):
+                await enqueue_chat_notice(
+                    session,
+                    chat_id=intake.chat_id,
+                    thread_id=intake.message_thread_id,
+                    key=f"chat:clarify:{intake.id}",
+                    text=result.draft.clarification_question
+                    or "Продолжение существующей задачи — её кнопками. Ничего не запущено.",
+                )
+            elif work:
+                assert policy is not None
+                if policy.draft.needs_clarification:
+                    await enqueue_chat_notice(
+                        session,
+                        chat_id=intake.chat_id,
+                        thread_id=intake.message_thread_id,
+                        key=f"chat:clarify:{intake.id}",
+                        text=policy.draft.clarification_question
+                        or "Уточни запрос; ничего не запущено.",
+                    )
+                else:
+                    created = await uow.tasks.create(
+                        user_id=intake.user_id,
+                        chat_id=intake.chat_id,
+                        thread_id=intake.message_thread_id,
+                        project_id=project_id,
+                        original_text=raw,
+                        task_type=policy.draft.task_type.value,
+                        task_draft=policy.draft.model_dump(mode="json"),
+                        ingress_source="chat_work",
+                        source_turn_id=user_turn_id,
+                    )
+                    loaded_task = await session.get(Task, created.id)
+                    assert loaded_task is not None
+                    task = loaded_task
+                    task.status = TaskStatus.INTERPRETED
+                    task.risk = policy.draft.suggested_risk
+                    task.interpreter_profile = result.profile_id
+                    task.prompt_version = result.prompt_version
+                    task.draft_schema_version = result.schema_version
+                    interpretation = Interpretation(
+                        task_id=task.id,
+                        original_input_hash=hashlib.sha256(raw.encode()).hexdigest(),
+                        transcript=None,
+                        task_draft=dict(task.task_draft),
+                        profile_id=result.profile_id,
+                        model=result.model,
+                        prompt_version=result.prompt_version,
+                        schema_version=result.schema_version,
+                    )
+                    session.add(interpretation)
+                    await session.flush()
+                    await snapshot_task_spec(session, task, source_turn_id=user_turn_id)
+                    await _record_planning_tier(session, task, policy.draft)
+                    current_intake.task_id = task.id
+                    current_intake.affinity_kind = "new_task"
+                    session.add(
+                        TelegramMessageLink(
+                            chat_id=intake.chat_id,
+                            message_thread_id=intake.message_thread_id,
+                            message_id=intake.message_id,
+                            task_id=task.id,
+                            message_role="source_request",
+                        )
+                    )
+                    session.add(
+                        TransactionalOutbox(
+                            destination="workflow_dispatch",
+                            operation_type="dispatch_interpretation",
+                            linked_entity_type="interpretation",
+                            linked_entity_id=interpretation.id,
+                            idempotency_key=f"workflow:dispatch:{interpretation.id}",
+                            payload={"task_id": str(task.id)},
+                        )
+                    )
+            else:
+                await schedule_discussion_agent(
+                    session,
+                    runtime=self._runtime,
+                    session_id=session_id,
+                    source_turn_id=user_turn_id,
+                    project_id=project_id,
+                    chat_id=intake.chat_id,
+                    thread_id=intake.message_thread_id,
+                    user_id=intake.user_id,
+                    interaction_mode=mode,
+                    classifier_confidence=1.0,
+                    memory_pack=await memory.load_context(session_id=session_id),
+                    current_turn=raw,
+                    task_context="\n".join(context_lines),
+                )
+            current_intake.status = IntakeStatus.COMPLETED
+            await complete_outbox_item(session, token)
+
     async def _process_discussion(self, token: OutboxLeaseToken) -> None:
+        if self._runtime.settings.chat.enabled:
+            await self._process_chat(token)
+            return
         if not self._runtime.settings.project_discussion_enabled:
             raise PermanentPipelineError("project_discussion_disabled")
         if self._discussion_interpreter is None:
@@ -1180,6 +1498,24 @@ class InterpretationPipeline:
     async def _dead_letter(self, token: OutboxLeaseToken, category: str) -> None:
         async with self._factory.begin() as session:
             item = await session.get(TransactionalOutbox, token.item_id)
+            if (
+                self._runtime.settings.chat.enabled
+                and item is not None
+                and item.destination == DISCUSSION_CLASSIFY_DESTINATION
+            ):
+                intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
+                if intake is not None:
+                    await enqueue_chat_notice(
+                        session,
+                        chat_id=intake.chat_id,
+                        thread_id=intake.message_thread_id,
+                        key=f"chat:intake-failed:{intake.id}",
+                        text=(
+                            "Не удалось разобрать сообщение. "  # noqa: RUF001
+                            "Ничего не запущено; попробуй ещё раз."
+                        ),
+                    )
+                    intake.status = IntakeStatus.NEEDS_CLARIFICATION
             if item is not None and item.linked_entity_type == "project_naming":
                 naming = await session.get(
                     ProjectNamingRequest,

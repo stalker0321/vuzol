@@ -599,7 +599,11 @@ async def build_task_history_report(
     """
 
     task = await session.get(Task, task_id)
-    if task is None or task.status not in USER_REPORTABLE_TASK_STATUSES:
+    if (
+        task is None
+        or task.task_type == "discussion_agent_internal"
+        or task.status not in USER_REPORTABLE_TASK_STATUSES
+    ):
         return None
     if expected_status is not None and task.status is not expected_status:
         return None
@@ -1379,6 +1383,40 @@ async def enqueue_project_status_dashboard(session: AsyncSession, chat_id: int) 
     )
 
 
+async def enqueue_chat_notice(
+    session: AsyncSession,
+    *,
+    chat_id: int | None,
+    thread_id: int | None,
+    key: str,
+    text: str,
+) -> None:
+    """Plain durable notice, with neither task affiliation nor control buttons."""
+
+    if not chat_id or thread_id is None:
+        return
+    if await session.scalar(
+        select(TransactionalOutbox.id).where(TransactionalOutbox.idempotency_key == key)
+    ):
+        return
+    session.add(
+        TransactionalOutbox(
+            destination="telegram",
+            operation_type="send_message",
+            linked_entity_type="chat_notice",
+            linked_entity_id=uuid.uuid4(),
+            idempotency_key=key,
+            payload={
+                "role": "chat_notice",
+                "chat_id": chat_id,
+                "message_thread_id": thread_id,
+                "html": telegram_html(text),
+            },
+        )
+    )
+    await session.flush()
+
+
 async def enqueue_task_status_projection(
     session: AsyncSession,
     task: Task,
@@ -1388,6 +1426,8 @@ async def enqueue_task_status_projection(
 ) -> None:
     """Refresh a task's project-topic card and the global active dashboard."""
 
+    if task.task_type == "discussion_agent_internal":
+        return
     if task.source_chat_id is None or task.source_chat_id == 0:
         # Explicit: tasks without a chat (CLI/API ingress) have no Telegram
         # surface; 0 is rejected explicitly, never a silent sentinel.
@@ -1457,6 +1497,16 @@ async def enqueue_terminal_task_projections(
 ) -> None:
     """Publish every terminal side effect, including package sequencing."""
 
+    if task.task_type == "discussion_agent_internal":
+        if task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.QUOTA_EXHAUSTED}:
+            await enqueue_chat_notice(
+                session,
+                chat_id=task.source_chat_id,
+                thread_id=task.source_thread_id,
+                key=f"chat:reply-failed:{task.id}",
+                text="Не удалось получить ответ собеседника. Ничего не изменено; попробуй ещё раз.",
+            )
+        return
     await enqueue_task_status_projection(session, task, run)
     await enqueue_task_history_report(session, task.id)
     link = await session.scalar(

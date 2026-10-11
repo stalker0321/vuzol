@@ -147,6 +147,9 @@ class InterpretationInput(FrozenModel):
     capability_vocabulary: frozenset[Capability]
     source_is_voice: bool = False
     transcription_uncertain: bool = False
+    discussion_context: str | None = Field(
+        default=None, max_length=100_000, exclude_if=lambda value: value is None
+    )
 
 
 class InterpretationResult(FrozenModel):

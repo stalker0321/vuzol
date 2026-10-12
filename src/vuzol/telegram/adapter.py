@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import SecretStr
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, EndPointNotFound, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -26,6 +26,7 @@ from vuzol.telegram.domain import (
     TelegramAttachment,
     WorkPackageControlUpdate,
 )
+from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
 from vuzol.telegram.workspace import (
     TopicCreationOutcomeUnknown,
     TopicPinUnsupported,
@@ -70,6 +71,44 @@ def resolve_bot_token(
 class PythonTelegramClient:
     def __init__(self, bot: Bot) -> None:
         self._bot = bot
+
+    async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int:
+        try:
+            result = await self._bot.do_api_request(
+                "sendRichMessage",
+                api_kwargs={
+                    "chat_id": chat_id,
+                    "message_thread_id": thread_id,
+                    "rich_message": {"html": html},
+                },
+            )
+        except (BadRequest, EndPointNotFound):
+            raise RichMessageRejected("rich message rejected before creation") from None
+        message_id = result.get("message_id") if isinstance(result, dict) else None
+        if type(message_id) is not int or message_id <= 0:
+            raise LostTelegramResponse("rich send returned no confirmed message ID")
+        return message_id
+
+    async def edit_rich_message(self, *, chat_id: int, message_id: int, html: str) -> None:
+        try:
+            result = await self._bot.do_api_request(
+                "editMessageText",
+                api_kwargs={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "rich_message": {"html": html},
+                },
+            )
+        except BadRequest as error:
+            if "message is not modified" in str(error).lower().replace("_", " "):
+                return
+            raise RichMessageRejected("rich edit rejected before application") from None
+        except EndPointNotFound:
+            raise RichMessageRejected("rich edit endpoint unavailable") from None
+        if result is not True and (
+            not isinstance(result, dict) or result.get("message_id") != message_id
+        ):
+            raise LostTelegramResponse("rich edit returned no confirmation")
 
     async def send_message(
         self,

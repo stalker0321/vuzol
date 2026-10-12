@@ -1832,6 +1832,10 @@ async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> Stat
 
 
 class TelegramClient(Protocol):
+    async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int: ...
+
+    async def edit_rich_message(self, *, chat_id: int, message_id: int, html: str) -> None: ...
+
     async def send_message(
         self,
         *,
@@ -1865,6 +1869,10 @@ class LostTelegramResponse(RuntimeError):
     """Telegram may have accepted a send, but no message ID was received."""
 
 
+class RichMessageRejected(RuntimeError):
+    """Known Telegram rejection before creation: ordinary fallback is safe."""
+
+
 @dataclass(slots=True)
 class FakeTelegramClient:
     fail: Exception | None = None
@@ -1873,9 +1881,24 @@ class FakeTelegramClient:
     edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
     deleted: list[tuple[int, int]] = field(default_factory=list, init=False)
     pinned: list[tuple[int, int]] = field(default_factory=list, init=False)
+    rich_sent: list[tuple[int, int | None, str]] = field(default_factory=list, init=False)
+    rich_edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
     sent_keyboards: list[tuple[tuple[tuple[str, str], ...], ...]] = field(
         default_factory=list, init=False
     )
+
+    async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int:
+        if self.fail:
+            raise self.fail
+        self.rich_sent.append((chat_id, thread_id, html))
+        message_id = self.next_message_id
+        self.next_message_id += 1
+        return message_id
+
+    async def edit_rich_message(self, *, chat_id: int, message_id: int, html: str) -> None:
+        if self.fail:
+            raise self.fail
+        self.rich_edited.append((chat_id, message_id, html))
 
     async def send_message(
         self,

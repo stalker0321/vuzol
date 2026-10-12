@@ -11,6 +11,72 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 _MARKDOWN = MarkdownIt("commonmark")
+_RICH_MARKDOWN = MarkdownIt("commonmark").enable(["table", "strikethrough"])
+_RICH_BLOCK_TAGS = frozenset(
+    {
+        "p",
+        "blockquote",
+        "ul",
+        "ol",
+        "li",
+        "table",
+        "tr",
+        "th",
+        "td",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    }
+)
+
+
+def telegram_rich_html(markdown: str) -> str | None:
+    """Safe text-only rich post; excessive structure falls back to ordinary parts.
+
+    Never pass model HTML, remote media or interactive buttons to Telegram.
+    Raw HTML and image syntax are escaped/represented as text, as in our
+    ordinary renderer. The transport's limits are not reply-schema limits.
+    """
+    output: list[str] = []
+    blocks = 0
+    for token in _RICH_MARKDOWN.parse(markdown):
+        if token.level >= 16:
+            return None
+        if token.type == "inline":
+            output.append(_render_inline(token.children or []))
+        elif token.nesting and token.tag in _RICH_BLOCK_TAGS:
+            if token.nesting == 1:
+                blocks += 1
+                attribute = ""
+                if token.tag == "ol" and token.attrGet("start") is not None:
+                    attribute = f' start="{int(str(token.attrGet("start")))}"'
+                if token.tag in {"th", "td"}:
+                    alignment = str(token.attrGet("style") or "").removeprefix("text-align:")
+                    if alignment in {"left", "center", "right"}:
+                        attribute = f' align="{alignment}"'
+                output.append(f"<{token.tag}{attribute}>")
+            else:
+                output.append(f"</{token.tag}>")
+        elif token.type in {"fence", "code_block"}:
+            blocks += 1
+            language = token.info.strip().split(maxsplit=1)[0] if token.info.strip() else ""
+            attribute = f' class="language-{html.escape(language, quote=True)}"' if language else ""
+            output.append(f"<pre><code{attribute}>{html.escape(token.content)}</code></pre>")
+        elif token.type == "hr":
+            blocks += 1
+            output.append("<hr/>")
+        elif token.type == "html_block":
+            blocks += 1
+            output.append(f"<p>{html.escape(token.content)}</p>")
+        if blocks > 500:
+            return None
+    rendered = "".join(output)
+    # A conservative wire bound also leaves room for tags/escaped entities.
+    # Bigger replies still use the complete durable ordinary-message path.
+    return rendered if rendered and len(rendered) <= 32_768 else None
 
 
 def telegram_markdown_parts(markdown: str, *, limit: int = 4096) -> tuple[tuple[str, str], ...]:

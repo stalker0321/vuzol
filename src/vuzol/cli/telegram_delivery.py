@@ -57,6 +57,7 @@ async def run() -> None:
                     delivery.orchestration_trace_always_include_anomalies
                 ),
                 dogfood_settings=settings.telegram_dogfood,
+                rich_messages=settings.chat.rich_messages,
             )
             await run_delivery_loop(
                 service,

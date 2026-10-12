@@ -26,6 +26,21 @@ from ._test_providers_helpers import (
 
 
 @pytest.mark.anyio
+async def test_codex_discussion_reply_over_4000_keeps_real_usage(tmp_path: Path) -> None:
+    from vuzol.discussion.agent import DiscussionAgentReply
+
+    payload = {"reply": "я" * 4337}
+    transport = StaticCodexTransport(codex_jsonl(json.dumps(payload)), duration_ms=73)
+    result = await CodexCliAdapter(transport).execute(
+        codex_request(schema=DiscussionAgentReply.model_json_schema()),
+        codex_profile(tmp_path),
+        CancellationContext(),
+    )
+    assert result.structured_output == payload
+    assert result.usage.input_tokens == 143 and result.usage.output_tokens == 17
+
+
+@pytest.mark.anyio
 async def test_codex_adapter_uses_isolated_identity_without_auth_copy(tmp_path: Path) -> None:
     transport = FakeCodexTransport()
     configured = profile(

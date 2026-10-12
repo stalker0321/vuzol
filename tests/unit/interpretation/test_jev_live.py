@@ -243,7 +243,6 @@ def test_chat_read_only_references_do_not_require_managed_task(effect, relation,
 @pytest.mark.parametrize(
     "effect,relation,target,reason",
     [
-        ("execute_request", "continue", "conversation_context", "ambiguous_target"),
         ("execute_request", "amend", "no_target", "ambiguous_target"),
         ("control_request", "continue", "conversation_context", "ambiguous_target"),
         ("abstain", "continue", "conversation_context", "ambiguous_intent"),
@@ -269,6 +268,40 @@ def test_chat_reference_cannot_bypass_operational_or_intent_uncertainty(
             assert result.draft.needs_clarification
             assert adapter.receipt["selected_choices"]["effect"] == effect
             assert adapter.receipt["clarification_reason"] == reason
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("relation", ["new", "continue", "amend", "correct", "review_result"])
+def test_explicit_work_from_discussion_creates_task_not_managed_continuation(relation):
+    async def scenario():
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(
+                200, json=response("execute_request", relation, "conversation_context")
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = JevDecisionsInterpreter(
+                credential=SecretStr("test-key"),
+                profile_id="jev",
+                admitted=lambda _: True,
+                client=client,
+            )
+            result = await adapter.interpret(
+                intake(
+                    "Окей, начинай делать сайт по обсуждению; только локально, без деплоя.",
+                    conversational_context=True,
+                )
+            )
+            assert not result.draft.needs_clarification
+            assert result.draft.action is TaskAction.CREATE_TASK
+            assert result.draft.referenced_task_id is None
+            assert adapter.receipt["selected_choices"]["relation"] == relation
+            assert adapter.receipt["target_id"] is None
+            assert len(calls) == 1
 
     asyncio.run(scenario())
 

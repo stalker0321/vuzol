@@ -160,6 +160,22 @@ class WorkflowDispatcher:
                 automatic_start=automatic_start,
                 budget_mode=budget_mode_for_tier(tier) if tier is not None else "balanced",
             )
+            from vuzol.discussion.work_context import load_work_context
+
+            if await load_work_context(session, task):
+                run_pin = run.selected_route.get("chat_work_spec_revision")
+                if run_pin is not None and run_pin != task.spec_revision:
+                    raise WorkflowDispatchError("chat work spec revision changed")
+                run.selected_route = {
+                    **run.selected_route,
+                    "chat_work_spec_revision": task.spec_revision,
+                }
+                steps = await session.scalars(select(Step).where(Step.run_id == run.id))
+                for step in steps:
+                    pinned = step.payload.get("chat_work_spec_revision")
+                    if pinned is not None and pinned != task.spec_revision:
+                        raise WorkflowDispatchError("chat work spec revision changed")
+                    step.payload = {**step.payload, "chat_work_spec_revision": task.spec_revision}
             # Also repairs a run materialized by an older dispatcher before package
             # start provenance was recognized.
             if automatic_start and run.status is RunStatus.CREATED:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 
 from vuzol.execution.domain import GitInspection
 from vuzol.execution.git import GitError
+from vuzol.providers.domain import ContextItem
 from vuzol.review.domain import ReviewVerdictKind
 from vuzol.review.handler import (
     ResultReviewHandler,
@@ -305,7 +307,12 @@ async def test_review_blocks_high_risk_without_independent_reviewer(tmp_path: Pa
 
 
 @pytest.mark.anyio
-async def test_review_escalates_sensitive_diff_to_independent_reviewer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("context_case", ["legacy", "frozen", "corrupt"])
+async def test_review_escalates_sensitive_diff_to_independent_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    context_case: str,
+) -> None:
     from vuzol.review.domain import ReviewVerdict
 
     worktree_path = tmp_path / "wt"
@@ -339,6 +346,22 @@ async def test_review_escalates_sensitive_diff_to_independent_reviewer(tmp_path:
         task_draft={"goal": "Harden auth", "suggested_risk": "low"},
         original_text="x",
     )
+    context: tuple[ContextItem, ...] = ()
+    if context_case != "legacy":
+        task.ingress_source = "chat_work"
+        text = "Selected semantic prototype; only local testing; no deployment."
+        context = (
+            ContextItem(
+                source="chat_work_context",
+                reference="spec:part-1-of-1",
+                content=text,
+                content_hash=hashlib.sha256(text.encode()).hexdigest(),
+            ),
+        )
+        loader = AsyncMock(return_value=context)
+        if context_case == "corrupt":
+            loader.side_effect = ValueError("chat work context source mismatch")
+        monkeypatch.setattr("vuzol.discussion.work_context.load_work_context", loader)
     session = MagicMock()
     session.get = AsyncMock(side_effect=[step, SimpleNamespace(task_id=task_id), task])
     session.scalar = AsyncMock(
@@ -384,10 +407,17 @@ async def test_review_escalates_sensitive_diff_to_independent_reviewer(tmp_path:
         factory, git, worktree_root=tmp_path, independent_reviewer=independent
     )
     outcome = await handler.execute(_request(task_id, run_id, lease), CancellationContext())
+    if context_case == "corrupt":
+        assert outcome.kind is OutcomeKind.BLOCKED
+        assert outcome.category == "review_failed"
+        independent.review.assert_not_awaited()
+        return
     assert outcome.kind is OutcomeKind.SUCCEEDED
     assert outcome.result["review_kind"] == "independent"
     independent.review.assert_awaited_once()
     assert independent.review.await_args.kwargs["risk"] is RiskLevel.HIGH
+    if context_case == "frozen":
+        assert independent.review.await_args.kwargs["work_context"] == context
 
 
 @pytest.mark.anyio

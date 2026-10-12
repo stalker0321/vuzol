@@ -184,6 +184,7 @@ async def snapshot_task_spec(
     task: Task,
     *,
     source_turn_id: uuid.UUID | None = None,
+    chat_work_context: dict[str, Any] | None = None,
 ) -> str:
     """Persist the current draft as a new spec revision (if changed).
 
@@ -192,6 +193,20 @@ async def snapshot_task_spec(
     """
 
     spec = dict(task.task_draft) if isinstance(task.task_draft, dict) else {}
+    # Runtime-owned discussion evidence lives in the immutable spec, not in the
+    # model-authored TaskDraft. Corrections/retries must retain that evidence.
+    if chat_work_context is None and task.spec_revision is not None:
+        previous = await session.scalar(
+            select(TaskSpecRevision).where(
+                TaskSpecRevision.task_id == task.id,
+                TaskSpecRevision.spec_revision == task.spec_revision,
+            )
+        )
+        if previous is None or spec_revision_for(previous.spec) != previous.spec_revision:
+            raise ValueError("task spec source is missing or corrupt")
+        chat_work_context = previous.spec.get("chat_work_context")
+    if chat_work_context is not None:
+        spec["chat_work_context"] = chat_work_context
     revision = spec_revision_for(spec)
     existing = await session.scalar(
         select(TaskSpecRevision).where(

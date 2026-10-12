@@ -24,6 +24,7 @@ from vuzol.discussion.domain import DomainError
 from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.discussion.service import WorkPackageService
+from vuzol.discussion.work_context import freeze_work_context
 from vuzol.experiments.intake_shadow import IntakeEffect
 from vuzol.interpretation.chat_documents import (
     DocumentsPending,
@@ -671,6 +672,15 @@ class InterpretationPipeline:
                 chat_context=True,
                 query=raw,
             )
+            # Preserve legacy read-only chat behavior, but unpublished assistant
+            # drafts may never become an implementation specification.
+            work_prior = prior
+            if not self._runtime.settings.chat.memory_enabled:
+                work_prior = await DiscussionMemoryService(uow).load_context(
+                    session_id=session_id,
+                    chat_context=True,
+                    delivered_only=True,
+                )
             request = request.model_copy(
                 update={
                     "discussion_context": json.dumps(
@@ -781,8 +791,36 @@ class InterpretationPipeline:
                 TelegramIntakeMessage, intake.id, with_for_update=True
             )
             assert current_intake is not None
+            work_context = None
+            context_failure = None
             if (
-                result.draft.needs_clarification
+                work
+                and not result.draft.needs_clarification
+                and receipt.get("selected_choices", {}).get("target") == "conversation_context"
+            ):
+                try:
+                    work_context = await freeze_work_context(
+                        session,
+                        prior=work_prior,
+                        source_turn_id=user_turn_id,
+                        project_id=project_id,
+                        current_document_text_chars=sum(
+                            len(d["text"]) for d in prepared["documents"]
+                        ),
+                    )
+                except ChatContextError as error:
+                    context_failure = (
+                        "В этом обсуждении пока нет контекста для реализации. "  # noqa: RUF001
+                        "Уточни, что нужно сделать; ничего не запущено."
+                        if error.category == "chat_work_context_missing"
+                        else context_failure_text(error.category)
+                    )
+                    source_turn = await session.get(ConversationTurn, user_turn_id)
+                    assert source_turn is not None
+                    source_turn.should_create_task = False
+            if (
+                context_failure is not None
+                or result.draft.needs_clarification
                 or effect
                 in {
                     IntakeEffect.MIXED,
@@ -795,7 +833,8 @@ class InterpretationPipeline:
                     chat_id=intake.chat_id,
                     thread_id=intake.message_thread_id,
                     key=f"chat:clarify:{intake.id}",
-                    text=result.draft.clarification_question
+                    text=context_failure
+                    or result.draft.clarification_question
                     or "Продолжение существующей задачи — её кнопками. Ничего не запущено.",
                 )
             elif work:
@@ -831,6 +870,14 @@ class InterpretationPipeline:
                         user_turn_id,
                         retention_days=self._runtime.settings.retention.voice_days,
                     )
+                    if work_context is not None:
+                        for historical_source in work_context.sources:
+                            await attach_document_artifacts(
+                                session,
+                                task,
+                                historical_source.id,
+                                retention_days=self._runtime.settings.retention.voice_days,
+                            )
                     task.risk = policy.draft.suggested_risk
                     task.interpreter_profile = result.profile_id
                     task.prompt_version = result.prompt_version
@@ -847,7 +894,14 @@ class InterpretationPipeline:
                     )
                     session.add(interpretation)
                     await session.flush()
-                    await snapshot_task_spec(session, task, source_turn_id=user_turn_id)
+                    await snapshot_task_spec(
+                        session,
+                        task,
+                        source_turn_id=user_turn_id,
+                        chat_work_context=work_context.model_dump(mode="json")
+                        if work_context is not None
+                        else None,
+                    )
                     await _record_planning_tier(session, task, policy.draft)
                     current_intake.task_id = task.id
                     current_intake.affinity_kind = "new_task"

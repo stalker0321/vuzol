@@ -15,6 +15,7 @@ from tests.unit.test_telegram_reply_chunks import visible
 from vuzol.config import ScopedSecretResolver
 from vuzol.discussion.agent import DeliverDiscussionReplyHandler, schedule_discussion_agent
 from vuzol.discussion.memory import MemoryPack
+from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.worktrees import WorktreeService
@@ -49,8 +50,9 @@ pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
 
 @pytest.mark.parametrize("rich_messages", [False, True])
+@pytest.mark.parametrize("long_history", [False, True])
 async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage(
-    postgres_dsn, tmp_path, rich_messages
+    postgres_dsn, tmp_path, rich_messages, long_history
 ):
     engine, factory = storage(postgres_dsn)
     runtime = chat_runtime(tmp_path)
@@ -101,11 +103,29 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
                 chat_id=-100,
                 message_thread_id=10,
             )
+            if long_history:
+                # Ordinary accumulated exchanges, not duplicate failed retries.
+                for index in range(6):
+                    for role in (ConversationTurnRole.USER, ConversationTurnRole.ASSISTANT):
+                        await uow.discussions.append_turn(
+                            session_id=session_id,
+                            role=role,
+                            source=(
+                                ConversationTurnSource.TELEGRAM_USER
+                                if role is ConversationTurnRole.USER
+                                else ConversationTurnSource.MODEL
+                            ),
+                            content=f"Exchange {index}, {role.value}: " + "контекст " * 167,
+                            classifier_mode=InteractionMode.DISCUSSION,
+                        )
+            current = "Обсудим, ничего не запускай."
+            if long_history:
+                current = "Текущий запрос. " + "детали " * 450 + current
             source_id, _ = await uow.discussions.append_turn(
                 session_id=session_id,
                 role=ConversationTurnRole.USER,
                 source=ConversationTurnSource.TELEGRAM_USER,
-                content="Обсудим, ничего не запускай.",
+                content=current,
                 classifier_mode=InteractionMode.DISCUSSION,
             )
             task_id = await schedule_discussion_agent(
@@ -119,8 +139,17 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
                 user_id=42,
                 interaction_mode=InteractionMode.DISCUSSION,
                 classifier_confidence=1,
-                memory_pack=MemoryPack(session_id, None, (), (), False, False, False),
+                memory_pack=(
+                    await DiscussionMemoryService(uow).load_context(session_id=session_id)
+                    if long_history
+                    else MemoryPack(session_id, None, (), (), False, False, False)
+                ),
+                current_turn=current if long_history else None,
             )
+            scheduled = await uow.session.get(Task, task_id)
+            assert scheduled is not None
+            if long_history:
+                assert 20_000 < len(scheduled.original_text) <= 40_000
             await synchronize_profiles(
                 uow.session, registries.profiles.items(), configuration_revision=registries.revision
             )
@@ -153,6 +182,12 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
             },
         )
         assert await provider.process_one()
+        assert len(transport.invocations) == 1
+        envelope = json.loads(transport.invocations[0].stdin)
+        if long_history:
+            assert current in envelope["original_input"]
+            assert "Exchange 0, user:" in envelope["original_input"]
+            assert "Exchange 5, assistant:" in envelope["original_input"]
         async with factory() as session:
             execute = await session.scalar(select(Step).where(Step.step_type == "execute_agent"))
             assert execute.status is StepStatus.COMPLETED
@@ -204,6 +239,7 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
                     )
                 )
             ).all()
-            assert len(turns) == 1 and turns[0].content == text
+            assert len(turns) == (7 if long_history else 1)
+            assert sum(turn.content == text for turn in turns) == 1
     finally:
         await engine.dispose()

@@ -33,16 +33,23 @@ async def test_short_markdown_stays_ordinary_even_with_rich_capability(postgres_
         await engine.dispose()
 
 
-async def test_short_table_selects_rich_but_literal_table_tag_does_not(postgres_dsn):
+@pytest.mark.parametrize(
+    ("text", "expect_rich"),
+    [
+        ("| Имя | Значение |\n|---|---|\n| Sol | high |", True),
+        ("`<table>` — просто код, не таблица.", False),
+    ],
+)
+async def test_short_table_selects_rich_but_literal_table_tag_does_not(
+    postgres_dsn, text, expect_rich
+):
     engine, factory = storage(postgres_dsn)
     client = FakeTelegramClient()
     try:
-        await seed_reply(factory, "| Имя | Значение |\n|---|---|\n| Sol | high |")
+        await seed_reply(factory, text)
         assert await service(factory, client, rich_messages=True).deliver_one()
-        assert len(client.rich_sent) == 1 and not client.sent
-        await seed_reply(factory, "`<table>` — просто код, не таблица.")
-        assert await service(factory, client, rich_messages=True).deliver_one()
-        assert len(client.rich_sent) == 1 and len(client.sent) == 1
+        assert len(client.rich_sent) == int(expect_rich)
+        assert len(client.sent) == int(not expect_rich)
     finally:
         await engine.dispose()
 

@@ -28,6 +28,7 @@ from vuzol.storage.models import (
     TelegramIntakeMessage,
     TelegramMessageLink,
     TopicMapping,
+    TransactionalOutbox,
 )
 from vuzol.storage.types import IntakeStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -76,10 +77,31 @@ class TelegramIngressService:
         settings = self._runtime.settings
         try:
             authorize(settings, chat_id=update.chat_id, user_id=update.user_id)
-            validate_message(settings, update)
             topic = self._runtime.registries.topics.resolve(
                 update.chat_id, update.message_thread_id
             )
+            try:
+                validate_message(
+                    settings,
+                    update,
+                    chat_documents=settings.chat.enabled and topic.kind is TopicKind.PROJECT,
+                )
+            except TelegramPolicyError:
+                if (
+                    settings.chat.enabled
+                    and topic.kind is TopicKind.PROJECT
+                    and topic.project_id is not None
+                    and topic.enabled
+                    and topic.accepts_new_tasks
+                    and update.attachments
+                    and all(a.kind.value == "document" for a in update.attachments)
+                ):
+                    # Keep failed album members too: never process a caption or
+                    # a valid subset when another member was rejected.
+                    return await self._accept_discussion_message(
+                        update, topic, validation_error=True
+                    )
+                raise
             if (
                 update.text is not None
                 and update.text.split(maxsplit=1)[0].split("@")[0] == "/secret"
@@ -140,8 +162,14 @@ class TelegramIngressService:
             (settings.project_discussion_enabled or settings.chat.enabled)
             and topic.kind is TopicKind.PROJECT
             and topic.project_id is not None
-            and update.text is not None
-            and not update.attachments
+            and (
+                (update.text is not None and not update.attachments)
+                or (
+                    settings.chat.enabled
+                    and update.attachments
+                    and all(a.kind.value == "document" for a in update.attachments)
+                )
+            )
             and (settings.chat.enabled or not await self._reply_targets_task(update))
         ):
             return await self._accept_discussion_message(update, topic)
@@ -495,7 +523,7 @@ class TelegramIngressService:
             )
 
     async def _accept_discussion_message(
-        self, update: MessageUpdate, topic: TopicConfig
+        self, update: MessageUpdate, topic: TopicConfig, *, validation_error: bool = False
     ) -> IngressResult:
         """Persist default-off discussion intake without materializing a Task."""
 
@@ -550,6 +578,39 @@ class TelegramIngressService:
                     )
                 )
             )
+            if update.media_group_id is not None and update.attachments:
+                sealed = await uow.session.scalar(
+                    select(TransactionalOutbox.id)
+                    .join(
+                        TelegramIntakeMessage,
+                        TelegramIntakeMessage.id == TransactionalOutbox.linked_entity_id,
+                    )
+                    .where(
+                        TransactionalOutbox.destination == DISCUSSION_CLASSIFY_DESTINATION,
+                        TransactionalOutbox.payload["media_group_id"].as_string()
+                        == update.media_group_id,
+                        TransactionalOutbox.payload["documents_started"].as_boolean().is_(True),
+                        TelegramIntakeMessage.chat_id == update.chat_id,
+                        TelegramIntakeMessage.message_thread_id == update.message_thread_id,
+                        TelegramIntakeMessage.user_id == update.user_id,
+                    )
+                    .limit(1)
+                )
+                if sealed is not None:
+                    from vuzol.telegram.projections import enqueue_chat_notice
+
+                    await enqueue_chat_notice(
+                        uow.session,
+                        chat_id=update.chat_id,
+                        thread_id=update.message_thread_id,
+                        key=f"chat:late-document:{update.chat_id}:{update.message_id}",
+                        text="Файл пришёл после начала обработки набора и не включён в ответ. "
+                        "Перешли весь набор документов вместе с подписью ещё раз.",  # noqa: RUF001
+                    )
+                    await uow.inbox.mark_processed(
+                        inbox_id, entity_type="telegram_inbox", entity_id=inbox_id
+                    )
+                    return IngressResult(status=IngressStatus.HANDLED, reason="late_document")
             session_id = await uow.discussions.active_session_id(
                 chat_id=update.chat_id,
                 message_thread_id=update.message_thread_id,
@@ -568,7 +629,7 @@ class TelegramIngressService:
                 user_id=update.user_id,
                 task_id=None,
                 original_text=update.text,
-                attachments=[],
+                attachments=[a.model_dump(mode="json") for a in update.attachments],
                 affinity_kind="discussion",
                 ambiguous_task_ids=[],
                 status=IntakeStatus.AWAITING_INTERPRETATION,
@@ -592,6 +653,14 @@ class TelegramIngressService:
                     "reply_to_message_id": update.reply_to_message_id,
                     "control_override": (
                         None if control_override is None else control_override.value
+                    ),
+                    **(
+                        {
+                            "media_group_id": update.media_group_id,
+                            "document_validation_error": validation_error,
+                        }
+                        if update.attachments
+                        else {}
                     ),
                 },
             )

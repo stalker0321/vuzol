@@ -1,5 +1,6 @@
 """Durable fenced orchestration for attachment transcription and semantic interpretation."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -23,6 +24,12 @@ from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.discussion.service import WorkPackageService
 from vuzol.experiments.intake_shadow import IntakeEffect
+from vuzol.interpretation.chat_documents import (
+    DocumentsPending,
+    attach_document_artifacts,
+    document_failure_text,
+    prepare_chat_documents,
+)
 from vuzol.interpretation.discussion import (
     DISCUSSION_CLASSIFY_DESTINATION,
     DISCUSSION_REPLY_DESTINATION,
@@ -42,6 +49,7 @@ from vuzol.interpretation.discussion import (
     plan_draft_from_interpretation,
     stamp_plan_provenance,
 )
+from vuzol.interpretation.documents import DocumentError
 from vuzol.interpretation.domain import (
     InterpretationInput,
     InterpretationResult,
@@ -499,8 +507,10 @@ class InterpretationPipeline:
                 raise PermanentPipelineError("unsupported_pipeline_destination")
         except (InterpreterUnavailable, TranscriptionUnavailable):
             await self._retry_or_dead_letter(token, attempt_count, "provider_unavailable")
-        except DiscussionContextChanged:
+        except (DiscussionContextChanged, DocumentsPending):
             await self._defer_discussion(token)
+        except DocumentError as error:
+            await self._dead_letter(token, error.category)
         except OSError:
             await self._retry_or_dead_letter(token, attempt_count, "artifact_storage_unavailable")
         except PermanentPipelineError as error:
@@ -512,11 +522,24 @@ class InterpretationPipeline:
 
         if not isinstance(self._interpreter, JevDecisionsInterpreter):
             raise InterpreterUnavailable("chat_requires_jev_intake")
+        try:
+            # Leave headroom for classification/persistence inside the existing
+            # outbox lease; a large set cannot occupy it indefinitely.
+            async with asyncio.timeout(
+                min(120, self._runtime.settings.interpretation.lease_seconds / 2)
+            ):
+                prepared = await prepare_chat_documents(
+                    self._factory, self._runtime, token, self._downloader, self._persist_attachment
+                )
+        except TimeoutError:
+            raise DocumentError("document_parser_limit") from None
+        if prepared is None:
+            return
         async with self._factory() as session:
             item = await session.get(TransactionalOutbox, token.item_id)
             assert item is not None
             intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
-            if intake is None or intake.affinity_kind != "discussion" or not intake.original_text:
+            if intake is None or intake.affinity_kind != "discussion" or not prepared["turn"]:
                 raise PermanentPipelineError("chat_intake_invalid")
             session_id = _required_uuid(item.payload, "discussion_session_id")
             project_id = _required_string(item.payload, "project_id")
@@ -614,9 +637,10 @@ class InterpretationPipeline:
                 )
                 for step in outputs:
                     context_lines.append("Recorded result (bounded): " + str(step.result)[:2000])
-            raw = intake.original_text
+            raw = str(prepared["turn"])
+            caption = str(prepared["caption"] or "Прикладываю документы для контекста.")
             request = InterpretationInput(
-                original_input=raw,
+                original_input=caption,
                 topic_kind=TopicKind.PROJECT,
                 mapped_project_id=project_id,
                 reply_linked_task=TaskContext(
@@ -648,6 +672,20 @@ class InterpretationPipeline:
                 update={
                     "discussion_context": json.dumps(
                         {
+                            **(
+                                {
+                                    "attached_documents": [
+                                        {
+                                            k: v
+                                            for k, v in d.items()
+                                            if k not in {"content_uri", "bytes"}
+                                        }
+                                        for d in prepared["documents"]
+                                    ]
+                                }
+                                if prepared["documents"]
+                                else {}
+                            ),
                             "summary": prior.summary.body if prior.summary is not None else None,
                             "accepted_decisions": [d.statement for d in prior.decisions],
                             "turns": [
@@ -676,7 +714,11 @@ class InterpretationPipeline:
         if receipt is None:
             raise PermanentPipelineError("chat_receipt_missing")
         effect = IntakeEffect(receipt["effect"])
-        work = effect is IntakeEffect.EXECUTE_REQUEST and not receipt["abstain"]
+        work = (
+            effect is IntakeEffect.EXECUTE_REQUEST
+            and not receipt["abstain"]
+            and bool(str(prepared["caption"] or "").strip())
+        )
         policy = (
             enforce_interpretation_policy(
                 request,
@@ -766,6 +808,12 @@ class InterpretationPipeline:
                     assert loaded_task is not None
                     task = loaded_task
                     task.status = TaskStatus.INTERPRETED
+                    await attach_document_artifacts(
+                        session,
+                        task,
+                        user_turn_id,
+                        retention_days=self._runtime.settings.retention.voice_days,
+                    )
                     task.risk = policy.draft.suggested_risk
                     task.interpreter_profile = result.profile_id
                     task.prompt_version = result.prompt_version
@@ -1194,6 +1242,7 @@ class InterpretationPipeline:
         target = root / f"{item_id}-{digest}.bin"
         temporary = target.with_suffix(".tmp")
         temporary.write_bytes(content)
+        temporary.chmod(0o600)
         os.replace(temporary, target)
         return str(target)
 
@@ -1523,8 +1572,12 @@ class InterpretationPipeline:
                         thread_id=intake.message_thread_id,
                         key=f"chat:intake-failed:{intake.id}",
                         text=(
-                            "Не удалось разобрать сообщение. "  # noqa: RUF001
-                            "Ничего не запущено; попробуй ещё раз."
+                            document_failure_text(category)
+                            if intake.attachments
+                            else (
+                                "Не удалось разобрать сообщение. "  # noqa: RUF001
+                                "Ничего не запущено; попробуй ещё раз."
+                            )
                         ),
                     )
                     intake.status = IntakeStatus.NEEDS_CLARIFICATION

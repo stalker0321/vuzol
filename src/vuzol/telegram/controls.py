@@ -16,6 +16,7 @@ from vuzol.discussion.domain import DomainError, PackageControlAction
 from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.discussion import ControlOverrideKind
+from vuzol.interpretation.documents import DocumentError
 from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.naming import ProjectNamingControlError, ProjectNamingController
 from vuzol.security.secret_ingress import cancel_request
@@ -223,6 +224,7 @@ class TelegramControlService:
             ProjectNamingControlError,
             ExecutorPreferenceError,
             TelegramPolicyError,
+            DocumentError,
         ) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 

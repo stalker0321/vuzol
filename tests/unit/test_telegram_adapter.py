@@ -196,6 +196,7 @@ def test_message_update_collects_document_and_voice() -> None:
                 "from": {"id": 9, "is_bot": False, "first_name": "User"},
                 "chat": {"id": -100, "type": "supergroup"},
                 "caption": "files",
+                "media_group_id": "document-album",
                 "document": {
                     "file_id": "doc",
                     "file_unique_id": "doc-u",
@@ -216,6 +217,7 @@ def test_message_update_collects_document_and_voice() -> None:
     converted = message_update(update, "main")
     assert isinstance(converted, MessageUpdate)
     assert converted.text == "files"
+    assert converted.media_group_id == "document-album"
     assert [item.file_id for item in converted.attachments] == ["doc", "voice"]
 
 

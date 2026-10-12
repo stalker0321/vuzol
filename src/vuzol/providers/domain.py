@@ -79,7 +79,10 @@ class ProviderRequest(FrozenProviderModel):
     role: ProviderRole
     required_capabilities: frozenset[Capability] = frozenset()
     original_input_reference: str | None = Field(default=None, max_length=500)
-    original_input: str | None = Field(default=None, max_length=20_000)
+    # Application payload guard, not a model context-window limit. Discussion
+    # requests currently include their prompt pack here; token budgets still
+    # apply independently to the complete provider request.
+    original_input: str | None = Field(default=None, max_length=40_000)
     task_draft: dict[str, Any] = Field(default_factory=dict)
     context: tuple[ContextItem, ...] = Field(default=(), max_length=50)
     output_schema_name: str | None = Field(default=None, max_length=100)

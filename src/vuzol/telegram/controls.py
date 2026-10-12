@@ -12,6 +12,7 @@ from vuzol.discussion.application import (
     PackageControlIngress,
     PackageControlSource,
 )
+from vuzol.discussion.context_budget import ChatContextError
 from vuzol.discussion.domain import DomainError, PackageControlAction
 from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.service import WorkPackageService
@@ -225,6 +226,7 @@ class TelegramControlService:
             ExecutorPreferenceError,
             TelegramPolicyError,
             DocumentError,
+            ChatContextError,
         ) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 

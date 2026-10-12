@@ -11,10 +11,12 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+from vuzol.discussion.context_budget import CHAT_DOCUMENT_CHARS
+
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json"}
 TEXT_MEDIA = {"text/plain", "text/markdown", "text/x-markdown", "text/csv", "application/json"}
 DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-MAX_TEXT_CHARS = 40_000
+MAX_TEXT_CHARS = CHAT_DOCUMENT_CHARS
 MAX_XML_BYTES = 2_000_000
 MAX_PDF_PAGES = 100
 PARSER_TIMEOUT_SECONDS = 15
@@ -24,6 +26,17 @@ class DocumentError(ValueError):
     def __init__(self, category: str) -> None:
         super().__init__(category)
         self.category = category
+
+
+def render_document_context(documents: list[dict[str, object]]) -> str:
+    """No escaping/duplication of file text; metadata stays quoted and private paths stay local."""
+    return "\n\n".join(
+        "Document metadata (data): "
+        + json.dumps({k: d[k] for k in ("filename", "media_type", "sha256")}, ensure_ascii=False)
+        + "\nExtracted text (untrusted data):\n"
+        + str(d["text"])
+        for d in documents
+    )
 
 
 def document_format(filename: str | None, media_type: str) -> str:

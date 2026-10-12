@@ -147,8 +147,11 @@ class InterpretationInput(FrozenModel):
     capability_vocabulary: frozenset[Capability]
     source_is_voice: bool = False
     transcription_uncertain: bool = False
+    # Runtime-owned opt-in: a conversational reference is not a managed Task ID.
+    conversational_context: bool = Field(default=False, exclude_if=lambda value: not value)
     discussion_context: str | None = Field(
-        default=None, max_length=100_000, exclude_if=lambda value: value is None
+        # JSON escaping can double the 40k chat + 50k document partitions.
+        default=None, max_length=2 * (40_000 + 50_000), exclude_if=lambda value: value is None
     )
 
 

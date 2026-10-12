@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from vuzol.config.models import Capability, ProviderRole
+from vuzol.discussion.context_budget import CHAT_DOCUMENT_CHARS, CHAT_INPUT_CHARS, CHAT_TEXT_CHARS
 
 WHOLE_TURN_POLICY = (
     "Preserve the entire original_input, not just task_draft.goal or its summary. "
@@ -82,7 +83,9 @@ class ProviderRequest(FrozenProviderModel):
     # Application payload guard, not a model context-window limit. Discussion
     # requests currently include their prompt pack here; token budgets still
     # apply independently to the complete provider request.
-    original_input: str | None = Field(default=None, max_length=40_000)
+    original_input: str | None = Field(default=None, max_length=CHAT_INPUT_CHARS)
+    # Runtime-measured file text; requests without files retain the 40k guard.
+    document_text_chars: int = Field(default=0, ge=0, le=CHAT_DOCUMENT_CHARS)
     task_draft: dict[str, Any] = Field(default_factory=dict)
     context: tuple[ContextItem, ...] = Field(default=(), max_length=50)
     output_schema_name: str | None = Field(default=None, max_length=100)
@@ -101,6 +104,13 @@ class ProviderRequest(FrozenProviderModel):
 
     @model_validator(mode="after")
     def validate_reasoning_budget(self) -> "ProviderRequest":
+        if self.document_text_chars > len(self.original_input or ""):
+            raise ValueError("document text count exceeds original_input")
+        if (
+            self.original_input is not None
+            and len(self.original_input) - self.document_text_chars > CHAT_TEXT_CHARS
+        ):
+            raise ValueError("non-chat original_input exceeds 40000 characters")
         if (
             self.reasoning_max_tokens is not None
             and self.reasoning_max_tokens > self.max_output_tokens

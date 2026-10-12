@@ -239,7 +239,7 @@ def test_one_bad_member_prevents_processing_caption_or_valid_subset(postgres_dsn
             "unsupported": b"anything",
             "malformed": b"not a pdf",
             "encrypted": pdf_bytes(encrypted=True),
-            "oversized": b"x" * 40_001,
+            "oversized": b"x" * 50_001,
             "download": RuntimeError("private provider failure"),
         }
         ingress = TelegramIngressService(runtime, factory)
@@ -431,7 +431,10 @@ def test_two_attachments_in_one_turn_preserve_both_files(postgres_dsn, tmp_path)
     asyncio.run(scenario())
 
 
-def test_document_context_overflow_is_visible_and_creates_no_hidden_run(postgres_dsn, tmp_path):
+@pytest.mark.parametrize("text", ["x" * 50_000, "я\n" * 25_000])
+def test_document_partition_accepts_50k_without_using_chat_history_budget(
+    postgres_dsn, tmp_path, text
+):
     async def scenario():
         engine, factory = storage(postgres_dsn)
         runtime = chat_runtime(tmp_path)
@@ -451,19 +454,61 @@ def test_document_context_overflow_is_visible_and_creates_no_hidden_run(postgres
                     admitted=lambda _: True,
                     client=client,
                 ),
-                downloader=Downloader({"one": b"x" * 39_000}),
+                downloader=Downloader({"one": text.encode()}),
             )
             assert await pipeline.process_one()
         async with factory() as session:
-            assert await session.scalar(select(func.count()).select_from(Task)) == 0
-            assert await session.scalar(select(func.count()).select_from(Run)) == 0
-            notice = (
-                await session.scalars(
-                    select(TransactionalOutbox).where(TransactionalOutbox.destination == "telegram")
-                )
-            ).one()
-            assert "40 000" in notice.payload["html"]
-            assert "Подпись без документов" in notice.payload["html"]
+            task = (await session.scalars(select(Task))).one()
+            assert 50_000 < len(task.original_text) < 90_000
+            assert task.original_text.count(text) == 1
+            assert task.task_draft["document_text_chars"] == 50_000
+            assert task.public_task_number is None
         await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_document_50k_limit_applies_to_the_whole_set_not_each_file(postgres_dsn, tmp_path):
+    async def scenario():
+        engine, factory = storage(postgres_dsn)
+        runtime = chat_runtime(tmp_path)
+        try:
+            await TelegramIngressService(runtime, factory).accept_message(
+                document_message(
+                    attachments=(attachment(), attachment("second.txt", "text/plain", "two")),
+                )
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda _: pytest.fail("An oversized set must not reach Jev")
+                )
+            ) as client:
+                pipeline = InterpretationPipeline(
+                    runtime,
+                    factory,
+                    owner="whole-doc-cap",
+                    interpreter=JevDecisionsInterpreter(
+                        credential=SecretStr("test-key"),
+                        profile_id="jev-chat",
+                        admitted=lambda _: True,
+                        client=client,
+                    ),
+                    downloader=Downloader({"one": b"a" * 25_000, "two": b"b" * 25_001}),
+                )
+                assert await pipeline.process_one()
+            async with factory() as session:
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
+                assert await session.scalar(select(func.count()).select_from(ConversationTurn)) == 0
+                notice = (
+                    await session.scalars(
+                        select(TransactionalOutbox).where(
+                            TransactionalOutbox.destination == "telegram",
+                        )
+                    )
+                ).one()
+                assert "50 000" in notice.payload["html"]
+                assert "Подпись без документов" in notice.payload["html"]
+        finally:
+            await engine.dispose()
 
     asyncio.run(scenario())

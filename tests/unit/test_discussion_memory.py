@@ -1,13 +1,16 @@
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
 from vuzol.discussion import DomainError, MemoryLimits
+from vuzol.discussion.context_budget import ChatContextError
 from vuzol.discussion.memory import (
     DecisionView,
     MemorySummary,
     MemoryTurn,
+    build_chat_memory_pack,
     build_memory_pack,
     ensure_memory_safe,
     validate_decision,
@@ -108,3 +111,62 @@ def test_memory_validation_rejects_bad_limits_secrets_and_decisions() -> None:
     with pytest.raises(DomainError) as too_long:
         validate_decision("long", "x" * 501)
     assert too_long.value.code == "invalid_decision"
+
+
+def test_chat_document_budget_does_not_evict_uncovered_critique():
+    critique = turn(1, "Моя критика. Пока не запускай. " + "к" * 3800)
+    files = replace(
+        turn(2, "canonical raw files"),
+        caption="Вот два референса",
+        document_context="r" * 50_000,
+        document_text_chars=50_000,
+    )
+    followup = turn(3, "Мы продолжаем обсуждение, задачи ещё нет.")
+    packed = build_chat_memory_pack(
+        session_id=uuid.uuid4(),
+        turns=(critique, files, followup),
+        summary=None,
+        decisions=(),
+        limits=MemoryLimits(),
+    )
+    assert packed.turns == (critique, files, followup) and not packed.raw_turns_truncated
+
+
+def test_chat_packing_never_drops_uncovered_text_or_uses_last_n():
+    turns = tuple(turn(i + 1, "короткая реплика") for i in range(50))
+    pack = build_chat_memory_pack(
+        session_id=uuid.uuid4(), turns=turns, summary=None, decisions=(), limits=MemoryLimits()
+    )
+    assert pack.turns == turns
+    with pytest.raises(ChatContextError):
+        build_chat_memory_pack(
+            session_id=uuid.uuid4(),
+            turns=(turn(1, "x" * 40_001),),
+            summary=None,
+            decisions=(),
+            limits=MemoryLimits(),
+        )
+
+
+def test_chat_compaction_only_removes_summary_covered_turns():
+    summary = MemorySummary(
+        1, "Initial proposal summarized", 2, ConversationSummaryGenerator.MODEL, "a" * 64
+    )
+    old = turn(1, "x" * 38_000)
+    correction = turn(2, "Не меняй архитектуру. " + "я" * 4000)  # noqa: RUF001
+    packed = build_chat_memory_pack(
+        session_id=uuid.uuid4(),
+        turns=(old, correction),
+        summary=summary,
+        decisions=(),
+        limits=MemoryLimits(),
+    )
+    assert packed.turns == (correction,) and packed.raw_turns_truncated
+    with pytest.raises(ChatContextError):
+        build_chat_memory_pack(
+            session_id=uuid.uuid4(),
+            turns=(correction, turn(3, "x" * 38_000)),
+            summary=summary,
+            decisions=(),
+            limits=MemoryLimits(),
+        )

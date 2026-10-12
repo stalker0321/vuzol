@@ -52,8 +52,16 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
         "chat_delivery_retry": "Повторяю доставку готового ответа.",
         "chat_reply_retry": "Пробую ответить ещё раз.",
         "document_context_too_large": (
-            "Документы и история превышают лимит контекста 40 000 символов. "
+            "Не удалось вместить полный запрос с документами. "  # noqa: RUF001
             "Пришли нужные разделы меньшим файлом."
+        ),
+        "chat_context_too_large": (
+            "Полный запрос не помещается: 40k для переписки, отдельно 50k для документов. "
+            "История сохранена, ничего не обрезалось. Уточни более узкий вопрос."
+        ),
+        "chat_context_source_mismatch": (
+            "Не удалось подтвердить полный контекст документов. История сохранена; "  # noqa: RUF001
+            "ничего не запущено."
         ),
     }
     if result is not None and result.reason in chat_messages:

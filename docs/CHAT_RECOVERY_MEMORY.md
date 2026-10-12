@@ -58,6 +58,12 @@ delayed candidates cannot overwrite a newer revision. Coverage keeps the existin
 exclusive-boundary storage semantics. A pending/partial/ambiguous assistant
 response is excluded from opt-in conversation history.
 
+T103 supersedes the last20/24k raw packing for opt-in chat: all uncovered turns
+are kept whole, file texts have their own50k partition, and only summary-covered
+overlap may be removed. The ordinary compiled-prompt partition remains40k;
+true overflow is explicit. Legacy readers keep their previous bounds. See
+`docs/CHAT_INTENT_CONTEXT.md` for precise admission/compatibility rules.
+
 The existing standalone `vuzol-memory-writer` still exclusively consumes
 `memory_extract`: explicit accepted decisions/package outcomes → derived templates.
 It is NOT a chat summarizer; merely starting it does not connect recall. The chat

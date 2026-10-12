@@ -22,9 +22,16 @@ call, keyword-only router or generative classification fallback is added.
   text, source turn and Jev receipt remain bound. `chat_work` admissions require
   manual Start even if legacy automatic execution is enabled. Work execution,
   review, exact-result approval and apply are otherwise unchanged.
-- mixed / control / abstain / unresolved: plain clarification; no partial Task,
+- mixed / control / ambiguous effect: plain clarification; no partial Task,
   agent invocation, control or plan mutation. Continuing existing work also
   directs the user to existing controls rather than implicitly resuming it.
+- T103: conversational continuation/review/amendment is independent of managed
+  Task bindings. Confirmed read-only effects may use the existing responder even
+  with a missing reference, asking a focused question if evidence is insufficient.
+  Unresolved **operational** targets remain closed; no ambiguous act is converted
+  into a read-only fallback merely because canonical abstain effect is respond.
+  Original native choices/typed uncertainty remain in the receipt. Full detail
+  and separate document/context bounds: `docs/CHAT_INTENT_CONTEXT.md`.
 
 ## Independent responder
 

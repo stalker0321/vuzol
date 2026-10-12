@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from vuzol.discussion.context_budget import CHAT_DOCUMENT_CHARS, CHAT_TEXT_CHARS, ChatContextError
 from vuzol.discussion.domain import DomainError
 from vuzol.storage.types import ConversationSummaryGenerator, ConversationTurnRole
 
@@ -59,6 +60,15 @@ class MemoryTurn:
     role: ConversationTurnRole
     content: str
     created_at: datetime
+    # Set only from the durable prepared-document snapshot, never inferred from
+    # a user-controlled marker in ordinary text. Canonical content stays intact.
+    caption: str | None = None
+    document_context: str | None = None
+    document_text_chars: int = 0
+
+    @property
+    def chat_text(self) -> str:
+        return (self.caption or "") if self.document_context is not None else self.content
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +108,7 @@ class MemoryPack:
     summary_truncated: bool
     decisions_truncated: bool
     recalled: tuple[RecalledMemory, ...] = ()
+    uncovered_history_complete: bool = False
 
 
 def ensure_memory_safe(text: str) -> str:
@@ -109,6 +120,44 @@ def ensure_memory_safe(text: str) -> str:
             "sensitive_memory", "summary and decision memory must not contain secrets"
         )
     return normalized
+
+
+def build_chat_memory_pack(
+    *,
+    session_id: uuid.UUID,
+    turns: tuple[MemoryTurn, ...],
+    summary: MemorySummary | None,
+    decisions: tuple[DecisionView, ...],
+    limits: MemoryLimits,
+) -> MemoryPack:
+    """Only summary-covered turns are disposable; no slicing or arbitrary last-N cutoff."""
+    boundary = summary.covered_through_turn_ordinal if summary is not None else 1
+    selected = list(turns)
+
+    def oversized() -> bool:
+        return (
+            sum(len(t.chat_text) for t in selected) > CHAT_TEXT_CHARS
+            or sum(t.document_text_chars for t in selected) > CHAT_DOCUMENT_CHARS
+        )
+
+    while oversized() and selected and selected[0].ordinal < boundary:
+        selected.pop(0)
+    if oversized():
+        raise ChatContextError("chat_context_too_large")
+    if summary is not None and len(summary.body) > limits.max_summary_chars:
+        raise ChatContextError("chat_context_too_large")
+    if len(decisions) > limits.max_decisions:
+        raise ChatContextError("chat_context_too_large")
+    return MemoryPack(
+        session_id=session_id,
+        summary=summary,
+        decisions=decisions,
+        turns=tuple(selected),
+        raw_turns_truncated=len(selected) != len(turns),
+        summary_truncated=False,
+        decisions_truncated=False,
+        uncovered_history_complete=True,
+    )
 
 
 def validate_decision(key: str, statement: str) -> tuple[str, str]:

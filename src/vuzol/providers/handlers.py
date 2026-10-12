@@ -91,6 +91,7 @@ from vuzol.research.source_backed import (
 )
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import (
+    ConversationTurn,
     InputBinding,
     Interpretation,
     ProviderBudgetReservation,
@@ -98,6 +99,7 @@ from vuzol.storage.models import (
     Step,
     SupervisedProcess,
     Task,
+    TransactionalOutbox,
     Worktree,
 )
 from vuzol.storage.repositories import InputBindingRepository
@@ -1292,6 +1294,7 @@ class ProviderStepHandler:
                     )
                     context = items
             original_input = task.transcript or task.original_text
+            input_task = task
             original_reference = provenance_reference(task)
             continuation_id = step.payload.get("continuation_interpretation_id")
             if continuation_id is not None:
@@ -1326,6 +1329,26 @@ class ProviderStepHandler:
                 )
                 original_input = current_turn
                 original_reference = provenance_reference(carrier)
+                input_task = carrier
+            document_text_chars = 0
+            if input_task.task_type == "discussion_agent_internal":
+                document_text_chars = int(input_task.task_draft.get("document_text_chars", 0))
+            elif input_task.ingress_source == "chat_work" and input_task.source_turn_id is not None:
+                source = await session.get(ConversationTurn, input_task.source_turn_id)
+                if source is not None and source.intake_message_id is not None:
+                    if source.content != original_input.strip():
+                        raise LookupError("document source turn does not match original input")
+                    intake = await session.scalar(
+                        select(TransactionalOutbox).where(
+                            TransactionalOutbox.destination == "discussion_classify",
+                            TransactionalOutbox.linked_entity_id == source.intake_message_id,
+                        )
+                    )
+                    prepared = intake.payload.get("prepared_documents") if intake else None
+                    if isinstance(prepared, dict):
+                        document_text_chars = sum(
+                            len(d["text"]) for d in prepared.get("documents", [])
+                        )
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
                 step.step_type, task.task_draft
             )
@@ -1349,6 +1372,7 @@ class ProviderStepHandler:
                     ),
                     original_input_reference=original_reference,
                     original_input=original_input,
+                    document_text_chars=document_text_chars,
                     task_draft=task.task_draft,
                     context=context,
                     system_policy_revision=run.policy_revision,

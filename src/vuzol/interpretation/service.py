@@ -19,6 +19,7 @@ from vuzol.discussion.agent import (
     unwrap_agent_reply,
 )
 from vuzol.discussion.application import apply_plan_request_in_uow
+from vuzol.discussion.context_budget import ChatContextError, context_failure_text
 from vuzol.discussion.domain import DomainError
 from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.memory_service import DiscussionMemoryService
@@ -509,7 +510,7 @@ class InterpretationPipeline:
             await self._retry_or_dead_letter(token, attempt_count, "provider_unavailable")
         except (DiscussionContextChanged, DocumentsPending):
             await self._defer_discussion(token)
-        except DocumentError as error:
+        except (DocumentError, ChatContextError) as error:
             await self._dead_letter(token, error.category)
         except OSError:
             await self._retry_or_dead_letter(token, attempt_count, "artifact_storage_unavailable")
@@ -641,6 +642,7 @@ class InterpretationPipeline:
             caption = str(prepared["caption"] or "Прикладываю документы для контекста.")
             request = InterpretationInput(
                 original_input=caption,
+                conversational_context=True,
                 topic_kind=TopicKind.PROJECT,
                 mapped_project_id=project_id,
                 reply_linked_task=TaskContext(
@@ -666,6 +668,7 @@ class InterpretationPipeline:
             prior = await DiscussionMemoryService(uow).load_context(
                 session_id=session_id,
                 chat_memory=self._runtime.settings.chat.memory_enabled,
+                chat_context=True,
                 query=raw,
             )
             request = request.model_copy(
@@ -689,7 +692,12 @@ class InterpretationPipeline:
                             "summary": prior.summary.body if prior.summary is not None else None,
                             "accepted_decisions": [d.statement for d in prior.decisions],
                             "turns": [
-                                {"role": t.role.value, "content": t.content} for t in prior.turns
+                                {
+                                    "role": t.role.value,
+                                    "content": t.chat_text,
+                                    "document_context": t.document_context,
+                                }
+                                for t in prior.turns
                             ],
                             "bounded": prior.raw_turns_truncated,
                             "recalled_memory": [
@@ -714,6 +722,15 @@ class InterpretationPipeline:
         if receipt is None:
             raise PermanentPipelineError("chat_receipt_missing")
         effect = IntakeEffect(receipt["effect"])
+        if (
+            receipt.get("selected_choices", {}).get("target") == "unresolved"
+            and not receipt["abstain"]
+        ):
+            context_lines.append(
+                "The referenced object could not be bound. This is a read-only reply: "
+                "use only supplied conversation/document/task evidence, never invent the object "
+                "or its state. If necessary ask a focused question about the missing reference."
+            )
         work = (
             effect is IntakeEffect.EXECUTE_REQUEST
             and not receipt["abstain"]
@@ -868,6 +885,7 @@ class InterpretationPipeline:
                     memory_pack=await memory.load_context(
                         session_id=session_id,
                         chat_memory=self._runtime.settings.chat.memory_enabled,
+                        chat_context=True,
                         query=raw,
                     ),
                     current_turn=raw,
@@ -1572,7 +1590,9 @@ class InterpretationPipeline:
                         thread_id=intake.message_thread_id,
                         key=f"chat:intake-failed:{intake.id}",
                         text=(
-                            document_failure_text(category)
+                            context_failure_text(category)
+                            if category.startswith("chat_context_")
+                            else document_failure_text(category)
                             if intake.attachments
                             else (
                                 "Не удалось разобрать сообщение. "  # noqa: RUF001

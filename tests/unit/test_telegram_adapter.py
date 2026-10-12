@@ -85,6 +85,13 @@ def test_callback_answer_explains_discussion_mode_and_rejections() -> None:
     ) == ("Напишите следующим сообщением, что изменить в оставшейся части плана.", False)
 
 
+@pytest.mark.parametrize("reason", ["chat_context_too_large", "chat_context_source_mismatch"])
+def test_context_retry_failure_explains_problem_without_task_card(reason):
+    text, alert = _callback_answer(IngressResult(status=IngressStatus.REJECTED, reason=reason))
+    assert alert and "История сохранена" in text
+    assert "карточк" not in text and len(text) <= 200
+
+
 def test_python_telegram_client_delegates_send_and_edit() -> None:
     async def scenario() -> None:
         bot = AsyncMock()

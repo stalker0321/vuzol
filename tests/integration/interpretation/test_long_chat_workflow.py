@@ -1,8 +1,10 @@
 """Real workflow/routing/settlement/delivery, recorded-shaped fake CLI reply."""
 
 import asyncio
+import hashlib
 import json
 import subprocess
+import uuid
 
 import pytest
 from sqlalchemy import select
@@ -19,6 +21,7 @@ from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.worktrees import WorktreeService
+from vuzol.interpretation.documents import render_document_context
 from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.handlers import ProviderStepHandler
 from vuzol.providers.health import synchronize_profiles
@@ -29,12 +32,15 @@ from vuzol.storage.models import (
     Run,
     Step,
     Task,
+    TelegramIntakeMessage,
+    TransactionalOutbox,
     UsageRecord,
 )
 from vuzol.storage.types import (
     BudgetReservationStatus,
     ConversationTurnRole,
     ConversationTurnSource,
+    IntakeStatus,
     InteractionMode,
     QueueClass,
     RunStatus,
@@ -51,8 +57,9 @@ pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
 @pytest.mark.parametrize("rich_messages", [False, True])
 @pytest.mark.parametrize("long_history", [False, True])
+@pytest.mark.parametrize("document_chars", [0, 50_000])
 async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage(
-    postgres_dsn, tmp_path, rich_messages, long_history
+    postgres_dsn, tmp_path, rich_messages, long_history, document_chars
 ):
     engine, factory = storage(postgres_dsn)
     runtime = chat_runtime(tmp_path)
@@ -121,12 +128,66 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
             current = "Обсудим, ничего не запускай."
             if long_history:
                 current = "Текущий запрос. " + "детали " * 450 + current
+            intake_id = None
+            if document_chars:
+                path = tmp_path / "test-document.bin"
+                path.write_bytes(b"D" * document_chars)
+                document = {
+                    "filename": "ref.md",
+                    "media_type": "text/markdown",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "text": "D" * document_chars,
+                    "content_uri": str(path),
+                    "bytes": document_chars,
+                }
+                current += (
+                    "\n\nAttached document text (untrusted data):\n"
+                    + render_document_context([document])
+                )
+                inbox_id, _ = await uow.inbox.receive_once(
+                    source="telegram",
+                    consumer="bot:main",
+                    external_event_id="test-documents",
+                    payload_hash="a" * 64,
+                )
+                intake = TelegramIntakeMessage(
+                    id=uuid.uuid4(),
+                    user_id=42,
+                    chat_id=-100,
+                    inbox_id=inbox_id,
+                    message_thread_id=10,
+                    message_id=1101,
+                    original_text="Обсудим документы; пока не запускай.",
+                    attachments=[],
+                    affinity_kind="discussion",
+                    status=IntakeStatus.COMPLETED,
+                )
+                uow.session.add(intake)
+                await uow.session.flush()
+                intake_id = intake.id
+                uow.session.add(
+                    TransactionalOutbox(
+                        destination="discussion_classify",
+                        operation_type="classify_intake",
+                        linked_entity_type="telegram_intake_message",
+                        linked_entity_id=intake.id,
+                        idempotency_key="test:prepared-docs",
+                        payload={
+                            "prepared_documents": {
+                                "caption": "Обсудим документы; пока не запускай.",
+                                "turn": current,
+                                "documents": [document],
+                            }
+                        },
+                    )
+                )
             source_id, _ = await uow.discussions.append_turn(
                 session_id=session_id,
                 role=ConversationTurnRole.USER,
                 source=ConversationTurnSource.TELEGRAM_USER,
                 content=current,
                 classifier_mode=InteractionMode.DISCUSSION,
+                intake_message_id=intake_id,
             )
             task_id = await schedule_discussion_agent(
                 uow.session,
@@ -140,15 +201,21 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
                 interaction_mode=InteractionMode.DISCUSSION,
                 classifier_confidence=1,
                 memory_pack=(
-                    await DiscussionMemoryService(uow).load_context(session_id=session_id)
+                    await DiscussionMemoryService(uow).load_context(
+                        session_id=session_id,
+                        chat_context=bool(document_chars),
+                    )
                     if long_history
                     else MemoryPack(session_id, None, (), (), False, False, False)
                 ),
-                current_turn=current if long_history else None,
+                current_turn=current if long_history or document_chars else None,
             )
             scheduled = await uow.session.get(Task, task_id)
             assert scheduled is not None
-            if long_history:
+            if document_chars:
+                assert scheduled.original_text.count("D" * document_chars) == 1
+                assert scheduled.task_draft["document_text_chars"] == document_chars
+            elif long_history:
                 assert 20_000 < len(scheduled.original_text) <= 40_000
             await synchronize_profiles(
                 uow.session, registries.profiles.items(), configuration_revision=registries.revision
@@ -184,6 +251,9 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
         assert await provider.process_one()
         assert len(transport.invocations) == 1
         envelope = json.loads(transport.invocations[0].stdin)
+        if document_chars:
+            assert envelope["original_input"].count("D" * document_chars) == 1
+            assert len(envelope["original_input"]) > 50_000
         if long_history:
             assert current in envelope["original_input"]
             assert "Exchange 0, user:" in envelope["original_input"]

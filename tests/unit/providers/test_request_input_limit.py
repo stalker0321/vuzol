@@ -23,7 +23,7 @@ def test_provider_input_up_to_40k_survives_validation_and_serialization(length: 
     assert restored.max_output_tokens == data["max_output_tokens"]
     assert (
         ProviderRequest.model_json_schema()["properties"]["original_input"]["anyOf"][0]["maxLength"]
-        == 40_000
+        == 90_000
     )
 
 
@@ -35,12 +35,37 @@ def test_provider_input_over_40k_is_rejected_not_truncated() -> None:
         ProviderRequest.model_validate(data)
 
     error = caught.value.errors(include_input=False)[0]
-    assert error["loc"] == ("original_input",)
-    assert error["type"] == "string_too_long"
-    assert error["ctx"] == {"max_length": 40_000}
+    assert error["type"] == "value_error"
+    assert "40000" in error["msg"]
+
+
+@pytest.mark.parametrize("length", [40_001, 50_000, 90_000])
+def test_document_partition_is_additive_and_token_guards_unchanged(length):
+    data = provider_request().model_dump()
+    data.update(original_input="я" * length, document_text_chars=min(length, 50_000))
+    parsed = ProviderRequest.model_validate(data)
+    assert parsed.original_input == data["original_input"]
+    assert parsed.max_input_tokens == data["max_input_tokens"]
+    assert parsed.max_output_tokens == data["max_output_tokens"]
+    assert ProviderRequest.model_validate_json(parsed.model_dump_json()) == parsed
+
+
+@pytest.mark.parametrize("length,documents", [(90_001, 50_000), (80_001, 40_000), (90_000, 50_001)])
+def test_document_partition_does_not_relax_other_input_guards(length, documents):
+    data = provider_request().model_dump()
+    data.update(original_input="я" * length, document_text_chars=documents)
+    with pytest.raises(ValidationError):
+        ProviderRequest.model_validate(data)
 
 
 def test_provider_input_can_still_be_reference_only() -> None:
     data = provider_request().model_dump()
     data["original_input"] = None
     assert ProviderRequest.model_validate(data).original_input is None
+
+
+def test_document_measurement_cannot_exceed_included_input():
+    data = provider_request().model_dump()
+    data.update(original_input="short", document_text_chars=50_000)
+    with pytest.raises(ValidationError, match="document text count"):
+        ProviderRequest.model_validate(data)

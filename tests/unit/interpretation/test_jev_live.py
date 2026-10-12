@@ -204,6 +204,75 @@ def test_known_task_reference_stays_bound() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("effect", ["respond", "plan", "status", "capture"])
+@pytest.mark.parametrize("relation", ["continue", "amend", "correct", "review_result"])
+@pytest.mark.parametrize("target", ["conversation_context", "no_target", "unresolved"])
+def test_chat_read_only_references_do_not_require_managed_task(effect, relation, target):
+    async def scenario():
+        calls = []
+
+        def handler(request):
+            calls.append(json.loads(request.content))
+            assert "conversation_context" in calls[0]["questions"]["target"]["criteria"]
+            return httpx.Response(200, json=response(effect, relation, target))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = JevDecisionsInterpreter(
+                credential=SecretStr("test-key"),
+                profile_id="jev",
+                admitted=lambda _: True,
+                client=client,
+            )
+            result = await adapter.interpret(
+                intake(
+                    "Задачи ещё нет. Пересмотри предложение по референсам; пока не запускай.",
+                    conversational_context=True,
+                )
+            )
+            assert not result.draft.needs_clarification
+            assert result.draft.action is not TaskAction.CONTINUE_TASK
+            assert not result.draft.required_capabilities - {Capability.REPOSITORY_READ}
+            assert adapter.receipt["effect"] == effect and not adapter.receipt["abstain"]
+            assert adapter.receipt["target_id"] is None
+            assert adapter.receipt["selected_choices"]["target"] == target
+            assert len(calls) == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "effect,relation,target,reason",
+    [
+        ("execute_request", "continue", "conversation_context", "ambiguous_target"),
+        ("execute_request", "amend", "no_target", "ambiguous_target"),
+        ("control_request", "continue", "conversation_context", "ambiguous_target"),
+        ("abstain", "continue", "conversation_context", "ambiguous_intent"),
+        ("mixed", "null", "conversation_context", "ambiguous_target"),
+    ],
+)
+def test_chat_reference_cannot_bypass_operational_or_intent_uncertainty(
+    effect, relation, target, reason
+):
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, json=response(effect, relation, target))
+            )
+        ) as client:
+            adapter = JevDecisionsInterpreter(
+                credential=SecretStr("test-key"),
+                profile_id="jev",
+                admitted=lambda _: True,
+                client=client,
+            )
+            result = await adapter.interpret(intake(conversational_context=True))
+            assert result.draft.needs_clarification
+            assert adapter.receipt["selected_choices"]["effect"] == effect
+            assert adapter.receipt["clarification_reason"] == reason
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("bad", ["model", "answer", "choice"])
 def test_invalid_native_output_fails_closed_without_secret(bad: str) -> None:
     async def scenario() -> None:

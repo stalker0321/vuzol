@@ -329,6 +329,7 @@ async def retry_chat_turn(
         memory_pack=await DiscussionMemoryService(uow).load_context(
             session_id=source.session_id,
             chat_memory=runtime.settings.chat.memory_enabled,
+            chat_context=runtime.settings.chat.enabled,
             query=raw,
         ),
         current_turn=raw,

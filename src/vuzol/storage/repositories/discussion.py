@@ -189,8 +189,9 @@ class DiscussionRepository:
         *,
         session_id: uuid.UUID,
         start_ordinal: int,
-        newest_limit: int,
+        newest_limit: int | None,
         delivered_only: bool = False,
+        source_char_limit: int | None = None,
     ) -> tuple[ConversationTurn, ...]:
         visibility = []
         if delivered_only:
@@ -209,15 +210,24 @@ class DiscussionRepository:
                     ).exists(),
                 )
             )
+        conditions = (
+            ConversationTurn.session_id == session_id,
+            ConversationTurn.ordinal >= start_ordinal,
+            *visibility,
+        )
+        if source_char_limit is not None:
+            chars = await self._session.scalar(
+                select(
+                    func.coalesce(func.sum(func.char_length(ConversationTurn.content)), 0)
+                ).where(*conditions)
+            )
+            if chars is not None and chars > source_char_limit:
+                raise ValueError("discussion_context_source_limit")
         newest = tuple(
             (
                 await self._session.scalars(
                     select(ConversationTurn)
-                    .where(
-                        ConversationTurn.session_id == session_id,
-                        ConversationTurn.ordinal >= start_ordinal,
-                        *visibility,
-                    )
+                    .where(*conditions)
                     .order_by(ConversationTurn.ordinal.desc())
                     .limit(newest_limit)
                 )

@@ -55,10 +55,12 @@ preserves provenance, but no Task-bound Artifact exists until work/reply is
 materialized. Long-term GC of those intake-only snapshots is a follow-up to the
 existing outbox/file retention policy, not implemented as a new cleanup service.
 
-Extraction and the complete current turn use the existing40k provider boundary,
-not a new24k document cap. No prefix cutting: oversized text/combined turns or a
-reply prompt that cannot fit with history receive a plain error before hidden
-execution. Text extraction does not imply full fidelity of visual document content.
+T103 separates a50000-character extracted-text budget per message/album from
+the existing40000-character ordinary compiled-prompt budget. New file text is
+rendered verbatim, not JSON-escaped; existing prepared snapshots remain readable.
+No prefix cutting or unsummarized-history eviction: true overflow receives a
+plain error before hidden execution. Full policy: `docs/CHAT_INTENT_CONTEXT.md`.
+Text extraction does not imply full fidelity of visual document content.
 
 ## Activation/verification boundary
 

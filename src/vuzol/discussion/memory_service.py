@@ -6,6 +6,9 @@ import uuid
 from dataclasses import replace
 from decimal import Decimal
 
+from sqlalchemy import select
+
+from vuzol.discussion.context_budget import CHAT_INPUT_CHARS, ChatContextError
 from vuzol.discussion.domain import DomainError
 from vuzol.discussion.memory import (
     DecisionView,
@@ -16,6 +19,7 @@ from vuzol.discussion.memory import (
     MemorySummary,
     MemoryTurn,
     RecalledMemory,
+    build_chat_memory_pack,
     build_memory_pack,
     ensure_memory_safe,
     validate_decision,
@@ -26,7 +30,7 @@ from vuzol.discussion.memory_writer import (
     RETRACT_OPERATION,
     enqueue_memory_extraction,
 )
-from vuzol.storage.models import AcceptedDecision
+from vuzol.storage.models import AcceptedDecision, TransactionalOutbox
 from vuzol.storage.types import (
     AcceptedDecisionStatus,
     ConversationSummaryGenerator,
@@ -138,21 +142,52 @@ class DiscussionMemoryService:
         *,
         session_id: uuid.UUID,
         chat_memory: bool = False,
+        chat_context: bool = False,
         query: str | None = None,
     ) -> MemoryPack:
+        # Interpretation imports the discussion package; avoid an import cycle.
+        from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
+        from vuzol.interpretation.documents import render_document_context
+
         discussion = await self._uow.discussions.get_session(session_id)
         summary = await self._uow.discussions.latest_summary(session_id=session_id)
+        chat_mode = chat_memory or chat_context
         start_ordinal = 1 if summary is None else summary.covered_through_turn_ordinal
-        if chat_memory and summary is not None:
+        if chat_mode and summary is not None:
             # Keep a small verbatim tail alongside the rolling summary. The
             # coverage boundary is exclusive (the existing storage contract).
             start_ordinal = max(1, start_ordinal - 6)
-        turns = await self._uow.discussions.turns_from(
-            session_id=session_id,
-            start_ordinal=start_ordinal,
-            newest_limit=self._limits.max_raw_turns + 1,
-            delivered_only=chat_memory,
-        )
+        if chat_mode:
+            # Read ALL uncovered turns, not last-N. Bound source material before
+            # fetching it; legacy document JSON can escape each character twice.
+            boundary = summary.covered_through_turn_ordinal if summary else 1
+            try:
+                uncovered = await self._uow.discussions.turns_from(
+                    session_id=session_id,
+                    start_ordinal=boundary,
+                    newest_limit=None,
+                    delivered_only=chat_memory,
+                    source_char_limit=2 * CHAT_INPUT_CHARS,
+                )
+            except ValueError as error:
+                raise ChatContextError("chat_context_too_large") from error
+            overlap = (
+                await self._uow.discussions.turns_from(
+                    session_id=session_id,
+                    start_ordinal=start_ordinal,
+                    newest_limit=len(uncovered) + 6,
+                    delivered_only=chat_memory,
+                )
+                if summary
+                else ()
+            )
+            turns = (*[t for t in overlap if t.ordinal < boundary], *uncovered)
+        else:
+            turns = await self._uow.discussions.turns_from(
+                session_id=session_id,
+                start_ordinal=start_ordinal,
+                newest_limit=self._limits.max_raw_turns + 1,
+            )
         decisions = await self._uow.discussions.active_decisions(
             session_id=session_id,
             newest_limit=self._limits.max_decisions + 1,
@@ -168,31 +203,52 @@ class DiscussionMemoryService:
                 content_hash=summary.content_hash,
             )
         )
-        pack = build_memory_pack(
-            session_id=session_id,
-            turns=tuple(
+        prepared_by_intake = {}
+        if chat_mode and turns:
+            assert self._uow.session is not None
+            items = await self._uow.session.scalars(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == DISCUSSION_CLASSIFY_DESTINATION,
+                    TransactionalOutbox.linked_entity_id.in_(
+                        [t.intake_message_id for t in turns if t.intake_message_id is not None]
+                    ),
+                )
+            )
+            for item in items:
+                prepared = item.payload.get("prepared_documents")
+                if isinstance(prepared, dict) and prepared.get("documents"):
+                    prepared_by_intake[item.linked_entity_id] = prepared
+        views = []
+        for turn in turns:
+            prepared = (
+                prepared_by_intake.get(turn.intake_message_id) if turn.intake_message_id else None
+            )
+            if prepared is not None and str(prepared["turn"]).strip() != turn.content:
+                # A snapshot must describe this exact canonical source, not merely
+                # be attached to the same intake. Never miscount or substitute data.
+                raise ChatContextError("chat_context_source_mismatch")
+            views.append(
                 MemoryTurn(
                     id=turn.id,
                     ordinal=turn.ordinal,
                     role=turn.role,
                     content=turn.content,
                     created_at=turn.created_at,
+                    caption=prepared["caption"] if prepared else None,
+                    document_context=render_document_context(prepared["documents"])
+                    if prepared
+                    else None,
+                    document_text_chars=sum(len(d["text"]) for d in prepared["documents"])
+                    if prepared
+                    else 0,
                 )
-                for turn in turns
-            ),
+            )
+        pack = (build_chat_memory_pack if chat_mode else build_memory_pack)(
+            session_id=session_id,
+            turns=tuple(views),
             summary=summary_view,
             decisions=tuple(self._decision_view(decision) for decision in decisions),
-            limits=(
-                replace(
-                    self._limits,
-                    max_raw_chars=max(
-                        self._limits.max_raw_chars,
-                        len(turns[-1].content) if turns else 0,
-                    ),
-                )
-                if chat_memory
-                else self._limits
-            ),
+            limits=self._limits,
         )
         if not chat_memory:
             return pack

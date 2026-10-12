@@ -5,7 +5,7 @@ import uuid
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.models import (
@@ -13,12 +13,14 @@ from vuzol.storage.models import (
     ConversationSummary,
     ConversationTurn,
     ProjectDiscussionSession,
+    TransactionalOutbox,
 )
 from vuzol.storage.types import (
     AcceptedDecisionStatus,
     ConversationSummaryGenerator,
     ConversationTurnRole,
     ConversationTurnSource,
+    DeliveryStatus,
     DiscussionSessionStatus,
     InteractionMode,
 )
@@ -183,8 +185,30 @@ class DiscussionRepository:
         )
 
     async def turns_from(
-        self, *, session_id: uuid.UUID, start_ordinal: int, newest_limit: int
+        self,
+        *,
+        session_id: uuid.UUID,
+        start_ordinal: int,
+        newest_limit: int,
+        delivered_only: bool = False,
     ) -> tuple[ConversationTurn, ...]:
+        visibility = []
+        if delivered_only:
+            replies = select(TransactionalOutbox.id).where(
+                TransactionalOutbox.destination == "telegram",
+                TransactionalOutbox.linked_entity_type == "conversation_turn",
+                TransactionalOutbox.linked_entity_id == ConversationTurn.id,
+                TransactionalOutbox.payload["role"].as_string() == "discussion_reply",
+            )
+            visibility.append(
+                or_(
+                    ConversationTurn.role != ConversationTurnRole.ASSISTANT,
+                    replies.where(TransactionalOutbox.status == DeliveryStatus.DELIVERED).exists()
+                    & ~replies.where(
+                        TransactionalOutbox.status != DeliveryStatus.DELIVERED
+                    ).exists(),
+                )
+            )
         newest = tuple(
             (
                 await self._session.scalars(
@@ -192,6 +216,7 @@ class DiscussionRepository:
                     .where(
                         ConversationTurn.session_id == session_id,
                         ConversationTurn.ordinal >= start_ordinal,
+                        *visibility,
                     )
                     .order_by(ConversationTurn.ordinal.desc())
                     .limit(newest_limit)

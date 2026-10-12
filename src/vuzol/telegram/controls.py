@@ -103,6 +103,16 @@ class TelegramControlService:
                 )
                 if not update_created:
                     return IngressResult(status=IngressStatus.DUPLICATE)
+                if update.action_kind == "chat_retry":
+                    from vuzol.discussion.chat_recovery import retry_chat_turn
+
+                    result = await retry_chat_turn(uow, self._runtime, update)
+                    await uow.inbox.mark_processed(
+                        inbox_id,
+                        entity_type="task",
+                        entity_id=update.task_id,
+                    )
+                    return result
                 if naming_action:
                     assert uow.session is not None
                     outcome = await self._project_naming.apply(uow.session, update)

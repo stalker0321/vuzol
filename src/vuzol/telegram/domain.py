@@ -52,7 +52,7 @@ class ControlUpdate(TelegramModel):
             r"^(approve|redo|reject|start|pause|resume|cancel|retry|"
             r"project_name_select|project_name_regenerate|"
             r"project_model_select_auto|project_model_select_connection|"
-            r"project_model_select_worker|project_model_select_effort|secret_cancel)$"
+            r"project_model_select_worker|project_model_select_effort|secret_cancel|chat_retry)$"
         )
     )
     task_id: uuid.UUID | None = None

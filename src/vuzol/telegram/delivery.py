@@ -194,6 +194,23 @@ async def prepare_delivery(
             html=build_help_card(topic_kind),
             message_role=HELP_CARD_ROLE,
         )
+    if item.payload.get("role") == "chat_failure":
+        from vuzol.discussion.chat_recovery import failure_role
+
+        task = await session.get(Task, item.linked_entity_id)
+        if task is None or task.task_type != "discussion_agent_internal":
+            raise PermanentDeliveryError("chat_failure_target_invalid")
+        return PreparedDelivery(
+            DeliveryAction.SEND_DISCUSSION_REPLY,
+            chat_id=int(item.payload["chat_id"]),
+            thread_id=int(item.payload["message_thread_id"]),
+            html=str(item.payload["html"]),
+            task_id=task.id,
+            message_role=failure_role(task.id),
+            callback_buttons=((("Ещё раз", f"v1:chat_retry:{task.id}"),),)
+            if item.payload.get("retry_allowed")
+            else (),
+        )
     if item.payload.get("role") in {
         "project_import_prompt",
         "project_source_confirmation",
@@ -1430,7 +1447,7 @@ class TelegramDeliveryService:
                         chat_id=prepared.chat_id,
                         message_thread_id=prepared.thread_id,
                         message_id=confirmed_message_id,
-                        task_id=None,
+                        task_id=prepared.task_id,
                         message_role=prepared.message_role or DISCUSSION_REPLY_DESTINATION,
                     )
                 )
@@ -1491,6 +1508,11 @@ class TelegramDeliveryService:
                 and prepared.thread_id is not None
                 and not more_discussion_parts
             ):
+                from vuzol.discussion.chat_memory import publish_reply_summary
+
+                item = await session.get(TransactionalOutbox, token.item_id)
+                assert item is not None
+                await publish_reply_summary(session, item)
                 await enqueue_project_topic_idle(
                     session,
                     chat_id=prepared.chat_id,
@@ -1503,6 +1525,7 @@ class TelegramDeliveryService:
     async def _mark_ambiguous(self, token: OutboxLeaseToken) -> None:
         async with self._factory.begin() as session:
             await mark_outbox_ambiguous(session, token)
+            await _enqueue_delivery_failure(session, token.item_id, ambiguous=True)
 
     async def _handle_transient(
         self, token: OutboxLeaseToken, attempt_count: int, category: str
@@ -1533,6 +1556,33 @@ class TelegramDeliveryService:
     async def _dead_letter(self, token: OutboxLeaseToken, category: str) -> None:
         async with self._factory.begin() as session:
             await dead_letter_outbox_item(session, token, error_category=category[:100])
+            await _enqueue_delivery_failure(session, token.item_id)
+
+
+async def _enqueue_delivery_failure(
+    session: AsyncSession,
+    item_id: uuid.UUID,
+    *,
+    ambiguous: bool = False,
+) -> None:
+    from vuzol.discussion.chat_recovery import enqueue_chat_failure
+
+    item = await session.get(TransactionalOutbox, item_id)
+    if item is None or item.payload.get("role") != "discussion_reply":
+        return
+    try:
+        task_id = uuid.UUID(str(item.payload["worker_task_id"]))
+    except (KeyError, ValueError):
+        return
+    task = await session.get(Task, task_id)
+    if task is not None and task.task_type == "discussion_agent_internal":
+        await enqueue_chat_failure(
+            session,
+            task,
+            key=f"chat:delivery-failed:{item.id}:{item.lease_generation}",
+            delivery=True,
+            ambiguous=ambiguous,
+        )
 
 
 async def run_delivery_loop(

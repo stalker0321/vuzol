@@ -639,7 +639,11 @@ class InterpretationPipeline:
             ):
                 raise PermanentPipelineError("chat_session_mismatch")
             expected_version = discussion.version
-            prior = await DiscussionMemoryService(uow).load_context(session_id=session_id)
+            prior = await DiscussionMemoryService(uow).load_context(
+                session_id=session_id,
+                chat_memory=self._runtime.settings.chat.memory_enabled,
+                query=raw,
+            )
             request = request.model_copy(
                 update={
                     "discussion_context": json.dumps(
@@ -650,6 +654,10 @@ class InterpretationPipeline:
                                 {"role": t.role.value, "content": t.content} for t in prior.turns
                             ],
                             "bounded": prior.raw_turns_truncated,
+                            "recalled_memory": [
+                                {"id": str(m.id), "text": m.text, "status": m.status}
+                                for m in prior.recalled
+                            ],
                         },
                         ensure_ascii=False,
                     )
@@ -809,7 +817,11 @@ class InterpretationPipeline:
                     user_id=intake.user_id,
                     interaction_mode=mode,
                     classifier_confidence=1.0,
-                    memory_pack=await memory.load_context(session_id=session_id),
+                    memory_pack=await memory.load_context(
+                        session_id=session_id,
+                        chat_memory=self._runtime.settings.chat.memory_enabled,
+                        query=raw,
+                    ),
                     current_turn=raw,
                     task_context="\n".join(context_lines),
                 )

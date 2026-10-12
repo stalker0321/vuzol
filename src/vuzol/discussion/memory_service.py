@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 
 from vuzol.discussion.domain import DomainError
@@ -14,10 +15,12 @@ from vuzol.discussion.memory import (
     MemoryPack,
     MemorySummary,
     MemoryTurn,
+    RecalledMemory,
     build_memory_pack,
     ensure_memory_safe,
     validate_decision,
 )
+from vuzol.discussion.memory_units import RecallQuery
 from vuzol.discussion.memory_writer import (
     DECISION_OPERATION,
     RETRACT_OPERATION,
@@ -130,14 +133,25 @@ class DiscussionMemoryService:
         )
         return summary_id, revision
 
-    async def load_context(self, *, session_id: uuid.UUID) -> MemoryPack:
-        await self._uow.discussions.get_session(session_id)
+    async def load_context(
+        self,
+        *,
+        session_id: uuid.UUID,
+        chat_memory: bool = False,
+        query: str | None = None,
+    ) -> MemoryPack:
+        discussion = await self._uow.discussions.get_session(session_id)
         summary = await self._uow.discussions.latest_summary(session_id=session_id)
         start_ordinal = 1 if summary is None else summary.covered_through_turn_ordinal
+        if chat_memory and summary is not None:
+            # Keep a small verbatim tail alongside the rolling summary. The
+            # coverage boundary is exclusive (the existing storage contract).
+            start_ordinal = max(1, start_ordinal - 6)
         turns = await self._uow.discussions.turns_from(
             session_id=session_id,
             start_ordinal=start_ordinal,
             newest_limit=self._limits.max_raw_turns + 1,
+            delivered_only=chat_memory,
         )
         decisions = await self._uow.discussions.active_decisions(
             session_id=session_id,
@@ -154,7 +168,7 @@ class DiscussionMemoryService:
                 content_hash=summary.content_hash,
             )
         )
-        return build_memory_pack(
+        pack = build_memory_pack(
             session_id=session_id,
             turns=tuple(
                 MemoryTurn(
@@ -168,8 +182,40 @@ class DiscussionMemoryService:
             ),
             summary=summary_view,
             decisions=tuple(self._decision_view(decision) for decision in decisions),
-            limits=self._limits,
+            limits=(
+                replace(
+                    self._limits,
+                    max_raw_chars=max(
+                        self._limits.max_raw_chars,
+                        len(turns[-1].content) if turns else 0,
+                    ),
+                )
+                if chat_memory
+                else self._limits
+            ),
         )
+        if not chat_memory:
+            return pack
+        relevant = await self._uow.memory_units.recall(
+            RecallQuery(project_id=discussion.project_id, query=query, limit=5)
+        )
+        recent = await self._uow.memory_units.recall(
+            RecallQuery(project_id=discussion.project_id, limit=5)
+        )
+        recalled: list[RecalledMemory] = []
+        seen: set[uuid.UUID] = set()
+        chars = 0
+        for unit in (*relevant, *recent):
+            if unit.id in seen or chars + len(unit.text) > 6_000:
+                continue
+            try:
+                text = ensure_memory_safe(unit.text)
+            except DomainError:
+                continue
+            seen.add(unit.id)
+            chars += len(text)
+            recalled.append(RecalledMemory(unit.id, text, unit.unit_type, unit.status.value))
+        return replace(pack, recalled=tuple(recalled))
 
     async def accept_decision(
         self,

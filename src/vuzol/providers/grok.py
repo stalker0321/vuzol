@@ -254,11 +254,15 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
         from vuzol.discussion.agent import DiscussionAgentReply
 
         try:
-            return DiscussionAgentReply.model_validate_json(value).model_dump(mode="json")
+            return DiscussionAgentReply.model_validate_json(value).model_dump(
+                mode="json", exclude_none=True
+            )
         except ValidationError as error:
             plain_reply = value.strip()
             if plain_reply and not plain_reply.startswith(("{", "[")):
-                return DiscussionAgentReply(reply=plain_reply).model_dump(mode="json")
+                return DiscussionAgentReply(reply=plain_reply).model_dump(
+                    mode="json", exclude_none=True
+                )
             raise ValueError("invalid discussion agent reply") from error
     if request.output_schema_version not in {
         "step09a-worker-edit-report.v1",

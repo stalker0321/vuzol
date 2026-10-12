@@ -81,6 +81,14 @@ class DecisionView:
 
 
 @dataclass(frozen=True, slots=True)
+class RecalledMemory:
+    id: uuid.UUID
+    text: str
+    unit_type: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryPack:
     session_id: uuid.UUID
     summary: MemorySummary | None
@@ -89,6 +97,7 @@ class MemoryPack:
     raw_turns_truncated: bool
     summary_truncated: bool
     decisions_truncated: bool
+    recalled: tuple[RecalledMemory, ...] = ()
 
 
 def ensure_memory_safe(text: str) -> str:

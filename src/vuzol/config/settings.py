@@ -514,6 +514,7 @@ class ChatSettings(BaseModel):
     # Capability opt-in, not "every answer is a post": delivery chooses a
     # rich post only for a multi-part reply or rich-only structure (tables).
     rich_messages: bool = False
+    memory_enabled: bool = False
 
     @model_validator(mode="after")
     def require_responder(self) -> "ChatSettings":

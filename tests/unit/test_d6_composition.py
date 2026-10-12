@@ -268,6 +268,10 @@ def test_ast_no_call_diagnostic_with_pinned_allowlist() -> None:
         "execution/proxy_service.py",
         "execution/sandbox.py",
         "experiments/review.py",
+        # Fixed local document parser, stripped credential environment,
+        # CPU/address-space limits, wall timeout and cancellation kill+reap.
+        # No user program, shell, workspace mutation or provider invocation.
+        "interpretation/documents.py",
         "ops/backup/postgres_dump.py",
         "ops/backup/postgres_restore.py",
         "ops/production_deploy.py",

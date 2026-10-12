@@ -51,6 +51,10 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
         "chat_already_delivered": "Ответ уже доставлен.",
         "chat_delivery_retry": "Повторяю доставку готового ответа.",
         "chat_reply_retry": "Пробую ответить ещё раз.",
+        "document_context_too_large": (
+            "Документы и история превышают лимит контекста 40 000 символов. "
+            "Пришли нужные разделы меньшим файлом."
+        ),
     }
     if result is not None and result.reason in chat_messages:
         return chat_messages[result.reason], result.status is IngressStatus.REJECTED
@@ -280,6 +284,7 @@ def message_update(update: Update, bot_id: str) -> MessageUpdate | None:
             message.reply_to_message.message_id if message.reply_to_message is not None else None
         ),
         attachments=tuple(attachments),
+        media_group_id=message.media_group_id,
     )
 
 

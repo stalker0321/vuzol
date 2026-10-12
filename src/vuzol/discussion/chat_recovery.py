@@ -121,7 +121,7 @@ async def retry_chat_turn(
             update.user_id,
         ):
             raise TelegramPolicyError("chat_retry_unavailable")
-        if intake.original_text is not None:
+        if intake.original_text is not None and not intake.attachments:
             raw = intake.original_text
     discussion = await uow.discussions.get_session(source.session_id, for_update=True)
     if (

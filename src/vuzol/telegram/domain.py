@@ -37,6 +37,7 @@ class MessageUpdate(TelegramModel):
     text: str | None = None
     reply_to_message_id: int | None = None
     attachments: tuple[TelegramAttachment, ...] = ()
+    media_group_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class ControlUpdate(TelegramModel):

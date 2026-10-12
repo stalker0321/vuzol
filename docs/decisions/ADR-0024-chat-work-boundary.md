@@ -56,9 +56,11 @@ reply does not indefinitely serialize later turns behind itself.
 
 Default is off; the previous legacy and project-discussion paths remain readable
 and usable. Existing explicit slash/package controls keep their contracts.
-This package changes plain project text, including replies to task cards. Voice,
-attachments and non-project topics retain the old intake path; support for the
-new UX there requires a follow-up, not silent activation of a transcription API.
+T090 changed plain project text, including replies to task cards. T100 extends
+the same chat boundary to supported documents (see `docs/CHAT_DOCUMENTS.md`),
+including grouped uploads and explicit whole-set failure. T100 is prepared, not
+deployed. Voice and non-project topics retain the old intake path; no silent
+activation of a transcription/vision API. Ordinary photos remain unsupported.
 Already-created tasks are not replayed, auto-started, renumbered or cancelled.
 
 Activation requires `VUZOL_CHAT__ENABLED=true` and an explicit

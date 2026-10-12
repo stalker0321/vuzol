@@ -119,6 +119,7 @@ def service(
     trace_enabled: bool = True,
     trace_sample_percent: int = 100,
     trace_always_include_anomalies: bool = True,
+    rich_messages: bool = False,
 ) -> TelegramDeliveryService:
     return TelegramDeliveryService(
         factory,
@@ -131,6 +132,7 @@ def service(
         trace_enabled=trace_enabled,
         trace_sample_percent=trace_sample_percent,
         trace_always_include_anomalies=trace_always_include_anomalies,
+        rich_messages=rich_messages,
     )
 
 

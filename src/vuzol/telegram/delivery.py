@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -49,7 +49,7 @@ from vuzol.storage.models import (
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.repositories.delivery import OutboxRepository
 from vuzol.storage.types import ConversationTurnRole, ConversationTurnSource, TaskStatus
-from vuzol.telegram.formatting import telegram_markdown_parts
+from vuzol.telegram.formatting import telegram_markdown_parts, telegram_rich_html
 from vuzol.telegram.layout import (
     HELP_CARD_ROLE,
     HISTORY_TOPIC_KIND,
@@ -61,6 +61,7 @@ from vuzol.telegram.projections import (
     PROJECT_STATUS_DASHBOARD_ROLE,
     TASK_HISTORY_ROLE,
     LostTelegramResponse,
+    RichMessageRejected,
     TelegramClient,
     build_approval_card,
     build_project_status_dashboard,
@@ -133,6 +134,7 @@ class PreparedDelivery:
     project_id: str | None = None
     discussion_parts: tuple[tuple[str, str], ...] = ()
     discussion_part_index: int = 0
+    rich_html: str | None = None
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -156,6 +158,7 @@ async def prepare_delivery(
     trace_enabled: bool = True,
     trace_sample_percent: int = 100,
     trace_always_include_anomalies: bool = True,
+    rich_messages: bool = False,
 ) -> PreparedDelivery:
     if getattr(item, "destination", "telegram") == WORK_PACKAGE_PROJECTION_DESTINATION:
         return await _prepare_work_package_projection(session, item)
@@ -246,7 +249,7 @@ async def prepare_delivery(
             trace_always_include_anomalies=trace_always_include_anomalies,
         )
     if item.payload.get("role") == DISCUSSION_REPLY_DESTINATION:
-        return await _prepare_discussion_reply(session, item)
+        return await _prepare_discussion_reply(session, item, rich_messages=rich_messages)
     if item.payload.get("role") == DISCUSSION_THINKING_ROLE:
         return await _prepare_discussion_thinking(session, item)
     if item.linked_entity_type == "project_naming":
@@ -703,7 +706,7 @@ async def _resolve_status_dashboard_thread(
 
 
 async def _prepare_discussion_reply(
-    session: AsyncSession, item: TransactionalOutbox
+    session: AsyncSession, item: TransactionalOutbox, *, rich_messages: bool = False
 ) -> PreparedDelivery:
     if item.linked_entity_type != "conversation_turn":
         raise PermanentDeliveryError("invalid_discussion_reply_entity")
@@ -739,6 +742,11 @@ async def _prepare_discussion_reply(
     if part_index >= len(parts):
         raise PermanentDeliveryError("discussion_reply_part_invalid")
     html_body, fallback_body = parts[part_index]
+    rich_body = telegram_rich_html(turn.content) if rich_messages and part_index == 0 else None
+    if rich_body is not None and len(parts) == 1 and "<table>" not in rich_body:
+        # Ordinary Markdown formatting already works in short messages.
+        # Posts are useful for long replies or rich-only structure, not every turn.
+        rich_body = None
     source_turn_id = item.payload.get("source_turn_id")
     thinking_link = None
     if part_index == 0 and isinstance(source_turn_id, str):
@@ -767,6 +775,7 @@ async def _prepare_discussion_reply(
             project_id=discussion.project_id,
             discussion_parts=parts,
             discussion_part_index=part_index,
+            rich_html=rich_body,
         )
     return PreparedDelivery(
         DeliveryAction.SEND_DISCUSSION_REPLY,
@@ -778,6 +787,7 @@ async def _prepare_discussion_reply(
         project_id=discussion.project_id,
         discussion_parts=parts,
         discussion_part_index=part_index,
+        rich_html=rich_body,
     )
 
 
@@ -1144,6 +1154,7 @@ class TelegramDeliveryService:
         trace_sample_percent: int = 100,
         trace_always_include_anomalies: bool = True,
         dogfood_settings: TelegramDogfoodSettings | None = None,
+        rich_messages: bool = False,
     ) -> None:
         self._factory = session_factory
         self._client = client
@@ -1159,6 +1170,7 @@ class TelegramDeliveryService:
         self._trace_sample_percent = trace_sample_percent
         self._trace_always_include_anomalies = trace_always_include_anomalies
         self._dogfood_settings = dogfood_settings or TelegramDogfoodSettings()
+        self._rich_messages = rich_messages
         self._logger = get_logger(__name__)
 
     async def deliver_one(self) -> bool:
@@ -1185,6 +1197,7 @@ class TelegramDeliveryService:
                     trace_enabled=self._trace_enabled,
                     trace_sample_percent=self._trace_sample_percent,
                     trace_always_include_anomalies=self._trace_always_include_anomalies,
+                    rich_messages=self._rich_messages,
                 )
             if prepared.action == DeliveryAction.NOOP:
                 await self._complete(token, prepared, None)
@@ -1192,7 +1205,19 @@ class TelegramDeliveryService:
             if await self._consume_transient_dogfood_fault(prepared):
                 raise TimedOut("controlled dogfood Telegram failure before request")
             try:
-                confirmed_message_id = await self._call_telegram(prepared)
+                if prepared.rich_html is not None:
+                    try:
+                        confirmed_message_id = await self._call_rich_telegram(prepared)
+                    except RichMessageRejected:
+                        # Only a definite API rejection permits a new send path.
+                        # Timeouts/unknown IDs must not duplicate an accepted post.
+                        prepared = replace(prepared, rich_html=None)
+                        confirmed_message_id = await self._call_telegram(prepared)
+                    else:
+                        # The whole reply was delivered as one rich post/edit.
+                        prepared = replace(prepared, discussion_parts=())
+                else:
+                    confirmed_message_id = await self._call_telegram(prepared)
             except (TimedOut, NetworkError) as error:
                 if prepared.action in {
                     DeliveryAction.SEND_STATUS,
@@ -1252,6 +1277,22 @@ class TelegramDeliveryService:
                 )
                 is not None
             )
+
+    async def _call_rich_telegram(self, prepared: PreparedDelivery) -> int | None:
+        assert prepared.rich_html is not None
+        if prepared.action == DeliveryAction.EDIT_MESSAGE:
+            assert prepared.message_id is not None
+            await self._client.edit_rich_message(
+                chat_id=prepared.chat_id, message_id=prepared.message_id, html=prepared.rich_html
+            )
+            return None
+        assert prepared.action == DeliveryAction.SEND_DISCUSSION_REPLY
+        message_id = await self._client.send_rich_message(
+            chat_id=prepared.chat_id, thread_id=prepared.thread_id, html=prepared.rich_html
+        )
+        if type(message_id) is not int or message_id <= 0:
+            raise LostTelegramResponse("rich send returned no confirmed message ID")
+        return message_id
 
     async def _call_telegram(self, prepared: PreparedDelivery) -> int | None:
         if prepared.action in {

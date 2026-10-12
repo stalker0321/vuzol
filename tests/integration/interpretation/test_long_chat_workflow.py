@@ -48,11 +48,23 @@ from vuzol.workflows.worker import CompleteHandler, RoutedWorkflowWorker, Workfl
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
 
+@pytest.mark.parametrize("rich_messages", [False, True])
 async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage(
-    postgres_dsn, tmp_path
+    postgres_dsn, tmp_path, rich_messages
 ):
     engine, factory = storage(postgres_dsn)
     runtime = chat_runtime(tmp_path)
+    runtime = runtime.model_copy(
+        update={
+            "settings": runtime.settings.model_copy(
+                update={
+                    "chat": runtime.settings.chat.model_copy(
+                        update={"rich_messages": rich_messages}
+                    ),
+                }
+            ),
+        }
+    )
     settings, registries = runtime.settings, runtime.registries
     repository = registries.projects.get("vuzol").repository_path
     await asyncio.to_thread(
@@ -169,10 +181,17 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
         assert await common.process_one()
         assert await common.process_one()
         client = FakeTelegramClient()
-        for _ in telegram_markdown_parts(text):
-            assert await service(factory, client).deliver_one()
-        assert "".join(visible(m[2]) for m in client.sent) == visible(telegram_markdown_html(text))
-        assert len(client.sent) == 2
+        if rich_messages:
+            assert await service(factory, client, rich_messages=True).deliver_one()
+            assert len(client.rich_sent) == 1 and not client.sent
+            assert "я" * 4324 in client.rich_sent[0][2]
+        else:
+            for _ in telegram_markdown_parts(text):
+                assert await service(factory, client).deliver_one()
+            assert "".join(visible(m[2]) for m in client.sent) == visible(
+                telegram_markdown_html(text)
+            )
+            assert len(client.sent) == 2
         async with factory() as session:
             task = await session.get(Task, task_id)
             run = (await session.scalars(select(Run))).one()

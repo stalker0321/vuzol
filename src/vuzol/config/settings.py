@@ -511,6 +511,9 @@ class ChatSettings(BaseModel):
 
     enabled: bool = False
     profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    # Capability opt-in, not "every answer is a post": delivery chooses a
+    # rich post only for a multi-part reply or rich-only structure (tables).
+    rich_messages: bool = False
 
     @model_validator(mode="after")
     def require_responder(self) -> "ChatSettings":

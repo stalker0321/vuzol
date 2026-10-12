@@ -215,7 +215,7 @@ def test_grok_adapter_accepts_plain_discussion_reply() -> None:
     }
 
 
-def test_grok_adapter_bounds_plain_discussion_reply() -> None:
+def test_grok_adapter_preserves_long_plain_discussion_reply() -> None:
     from vuzol.providers.grok import _step09a_structured_output
 
     request = provider_request().model_copy(
@@ -223,8 +223,7 @@ def test_grok_adapter_bounds_plain_discussion_reply() -> None:
     )
     result = _step09a_structured_output(request, "слово " * 700)
     assert result is not None
-    assert len(str(result["reply"])) <= 4_000
-    assert str(result["reply"]).endswith("…")
+    assert result["reply"] == ("слово " * 700).strip()
 
 
 @pytest.mark.anyio

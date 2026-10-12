@@ -47,8 +47,9 @@ from vuzol.storage.models import (
     WorkPackage,
 )
 from vuzol.storage.records import OutboxLeaseToken
+from vuzol.storage.repositories.delivery import OutboxRepository
 from vuzol.storage.types import ConversationTurnRole, ConversationTurnSource, TaskStatus
-from vuzol.telegram.formatting import telegram_markdown_html
+from vuzol.telegram.formatting import telegram_markdown_parts
 from vuzol.telegram.layout import (
     HELP_CARD_ROLE,
     HISTORY_TOPIC_KIND,
@@ -130,6 +131,8 @@ class PreparedDelivery:
     control_status_generation: int | None = None
     pin_after_send: bool = False
     project_id: str | None = None
+    discussion_parts: tuple[tuple[str, str], ...] = ()
+    discussion_part_index: int = 0
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -714,9 +717,31 @@ async def _prepare_discussion_reply(
     discussion = await session.get(ProjectDiscussionSession, turn.session_id)
     if discussion is None or str(discussion.id) != item.payload.get("session_id"):
         raise PermanentDeliveryError("discussion_reply_session_mismatch")
+    part_index = item.payload.get("reply_part_index", 0)
+    if type(part_index) is not int or part_index < 0:
+        raise PermanentDeliveryError("discussion_reply_part_invalid")
+    stored_parts = item.payload.get("reply_parts")
+    if stored_parts is None:
+        parts = telegram_markdown_parts(turn.content)
+    else:
+        if (
+            not isinstance(stored_parts, list)
+            or not stored_parts
+            or any(
+                not isinstance(part, list)
+                or len(part) != 2
+                or not all(isinstance(value, str) for value in part)
+                for part in stored_parts
+            )
+        ):
+            raise PermanentDeliveryError("discussion_reply_part_invalid")
+        parts = tuple((str(part[0]), str(part[1])) for part in stored_parts)
+    if part_index >= len(parts):
+        raise PermanentDeliveryError("discussion_reply_part_invalid")
+    html_body, fallback_body = parts[part_index]
     source_turn_id = item.payload.get("source_turn_id")
     thinking_link = None
-    if isinstance(source_turn_id, str):
+    if part_index == 0 and isinstance(source_turn_id, str):
         try:
             thinking_role = _discussion_thinking_message_role(uuid.UUID(source_turn_id))
         except ValueError:
@@ -734,21 +759,25 @@ async def _prepare_discussion_reply(
             DeliveryAction.EDIT_MESSAGE,
             chat_id=discussion.chat_id,
             thread_id=discussion.message_thread_id,
-            html=telegram_markdown_html(turn.content),
-            fallback_html=telegram_html(turn.content),
+            html=html_body,
+            fallback_html=fallback_body,
             link_id=thinking_link.id,
             message_id=thinking_link.message_id,
             message_role=DISCUSSION_REPLY_DESTINATION,
             project_id=discussion.project_id,
+            discussion_parts=parts,
+            discussion_part_index=part_index,
         )
     return PreparedDelivery(
         DeliveryAction.SEND_DISCUSSION_REPLY,
         chat_id=discussion.chat_id,
         thread_id=discussion.message_thread_id,
-        html=telegram_markdown_html(turn.content),
-        fallback_html=telegram_html(turn.content),
+        html=html_body,
+        fallback_html=fallback_body,
         message_role=DISCUSSION_REPLY_DESTINATION,
         project_id=discussion.project_id,
+        discussion_parts=parts,
+        discussion_part_index=part_index,
     )
 
 
@@ -1269,15 +1298,28 @@ class TelegramDeliveryService:
             )
             return None
         assert prepared.message_id is not None
-        await self._client.edit_message(
-            chat_id=prepared.chat_id,
-            message_id=prepared.message_id,
-            html=prepared.html,
-            buttons=prepared.buttons,
-            task_id=prepared.task_id,
-            approval_id=prepared.approval_id,
-            callback_buttons=prepared.callback_buttons,
-        )
+        try:
+            await self._client.edit_message(
+                chat_id=prepared.chat_id,
+                message_id=prepared.message_id,
+                html=prepared.html,
+                buttons=prepared.buttons,
+                task_id=prepared.task_id,
+                approval_id=prepared.approval_id,
+                callback_buttons=prepared.callback_buttons,
+            )
+        except BadRequest:
+            if prepared.fallback_html is None:
+                raise
+            await self._client.edit_message(
+                chat_id=prepared.chat_id,
+                message_id=prepared.message_id,
+                html=prepared.fallback_html,
+                buttons=prepared.buttons,
+                task_id=prepared.task_id,
+                approval_id=prepared.approval_id,
+                callback_buttons=prepared.callback_buttons,
+            )
         return None
 
     async def _complete(
@@ -1381,10 +1423,32 @@ class TelegramDeliveryService:
                     link = await session.get(TelegramMessageLink, prepared.link_id)
                     if link is not None:
                         await session.delete(link)
+            more_discussion_parts = prepared.discussion_part_index + 1 < len(
+                prepared.discussion_parts
+            )
+            if more_discussion_parts:
+                item = await session.get(TransactionalOutbox, token.item_id)
+                assert item is not None
+                next_index = prepared.discussion_part_index + 1
+                # Next send becomes claimable ONLY after this confirmed part,
+                # in the same fenced transaction as complete_outbox_item.
+                await OutboxRepository(session).enqueue(
+                    destination=item.destination,
+                    operation_type="send_message",
+                    entity_type=item.linked_entity_type,
+                    entity_id=item.linked_entity_id,
+                    idempotency_key=f"discussion_reply:{item.linked_entity_id}:part:{next_index}",
+                    payload={
+                        **item.payload,
+                        "reply_part_index": next_index,
+                        "reply_parts": [list(part) for part in prepared.discussion_parts],
+                    },
+                )
             if (
                 prepared.message_role == DISCUSSION_REPLY_DESTINATION
                 and prepared.project_id is not None
                 and prepared.thread_id is not None
+                and not more_discussion_parts
             ):
                 await enqueue_project_topic_idle(
                     session,

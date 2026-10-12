@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from html.parser import HTMLParser
 from typing import cast
 from urllib.parse import urlparse
 
@@ -10,6 +11,101 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 _MARKDOWN = MarkdownIt("commonmark")
+
+
+def telegram_markdown_parts(markdown: str, *, limit: int = 4096) -> tuple[tuple[str, str], ...]:
+    """Losslessly split rendered text, keeping tags/entities valid in every part.
+
+    Count UTF-16 units conservatively, never raw HTML length. Each tuple holds
+    formatted HTML and an escaped plain-text fallback for that exact part.
+    """
+    if limit < 2:
+        raise ValueError("message limit must accommodate a Unicode code point")
+    splitter = _TelegramHtmlSplitter(limit)
+    splitter.feed(telegram_markdown_html(markdown))
+    splitter.close()
+    return splitter.finish()
+
+
+class _TelegramHtmlSplitter(HTMLParser):
+    """Only consumes the safe, balanced subset emitted by our renderer."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(convert_charrefs=False)
+        self.limit = limit
+        self.parts: list[tuple[str, str]] = []
+        self.tags: list[tuple[str, str]] = []
+        self.markup: list[str] = []
+        self.plain: list[str] = []
+        self.units = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        opening = self.get_starttag_text()
+        assert opening is not None
+        self.tags.append((tag, opening))
+        self.markup.append(opening)
+
+    def handle_endtag(self, tag: str) -> None:
+        assert self.tags and self.tags[-1][0] == tag
+        self.tags.pop()
+        self.markup.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        offset = 0
+        while offset < len(data):
+            available = self.limit - self.units
+            end = offset
+            units = 0
+            while end < len(data):
+                width = 2 if ord(data[end]) > 0xFFFF else 1
+                if units + width > available:
+                    break
+                units += width
+                end += 1
+            if end == offset:
+                self._flush()
+                continue
+            if end < len(data):
+                # Prefer a line/word boundary, retaining the delimiter itself.
+                boundary = max(data.rfind("\n", offset, end), data.rfind(" ", offset, end))
+                if boundary >= offset + (end - offset) // 2:
+                    end = boundary + 1
+            text = data[offset:end]
+            self.markup.append(html.escape(text, quote=False))
+            self.plain.append(text)
+            self.units += len(text.encode("utf-16-le")) // 2
+            offset = end
+            if offset < len(data):
+                self._flush()
+
+    def handle_entityref(self, name: str) -> None:
+        self._entity(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        self._entity(f"&#{name};")
+
+    def _entity(self, escaped: str) -> None:
+        decoded = html.unescape(escaped)
+        width = len(decoded.encode("utf-16-le")) // 2
+        if self.units + width > self.limit:
+            self._flush()
+        self.markup.append(escaped)
+        self.plain.append(decoded)
+        self.units += width
+
+    def _flush(self) -> None:
+        if not self.units:
+            return
+        closing = "".join(f"</{tag}>" for tag, _ in reversed(self.tags))
+        self.parts.append(("".join(self.markup) + closing, html.escape("".join(self.plain))))
+        self.markup = [opening for _, opening in self.tags]
+        self.plain = []
+        self.units = 0
+
+    def finish(self) -> tuple[tuple[str, str], ...]:
+        assert not self.tags
+        self._flush()
+        return tuple(self.parts) or (("", ""),)
 
 
 def telegram_markdown_html(markdown: str) -> str:

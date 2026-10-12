@@ -36,7 +36,6 @@ from vuzol.workflows.service import materialize_run
 DISCUSSION_INTERNAL_TASK_TYPE = "discussion_agent_internal"
 DISCUSSION_AGENT_SCHEMA_VERSION = "discussion-agent-reply.v1"
 DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v2"
-DISCUSSION_REPLY_MAX_CHARS = 4_000
 
 
 class DiscussionAgentReply(BaseModel):
@@ -44,7 +43,7 @@ class DiscussionAgentReply(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    reply: str = Field(min_length=1, max_length=DISCUSSION_REPLY_MAX_CHARS)
+    reply: str = Field(min_length=1)
 
 
 _REPLY_UNWRAP_DEPTH = 3
@@ -341,7 +340,8 @@ negation and scope limit in the current turn. Reply in the user's language and k
 but useful.
 Use lightweight Markdown suitable for Telegram: short bold headings, bullets, numbered lists,
 quotes, and code blocks when useful. Do not use Markdown tables; express comparisons as compact
-lists instead. Keep the complete final reply within {DISCUSSION_REPLY_MAX_CHARS} characters.
+lists instead. Long replies are delivered in multiple messages; do not truncate an answer
+just to fit one Telegram message.
 
 Output contract (violations are discarded): your final message must be exactly one JSON object
 of the form {{"reply": "<your answer>"}} and nothing else. Never write prose before or after the

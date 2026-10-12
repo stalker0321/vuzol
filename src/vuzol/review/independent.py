@@ -191,9 +191,7 @@ class DatabaseReviewAccounting:
                         profile,
                         purpose="review",
                         # D3 lifetime owner (lead Q1), sticky through settle.
-                        horizon_id=await resolve_horizon_scope(
-                            session, task_id=request.task_id
-                        ),
+                        horizon_id=await resolve_horizon_scope(session, task_id=request.task_id),
                     ),
                 )
             except BudgetExceeded as error:
@@ -338,6 +336,7 @@ class IndependentModelReviewer:
         timeout_seconds: float,
         cancellation: CancellationContext,
         lease: LeaseToken,
+        work_context: tuple[ContextItem, ...] = (),
     ) -> ReviewVerdict:
         from vuzol.review.policy import ReviewLevel, resolve_review_plan
 
@@ -394,6 +393,7 @@ class IndependentModelReviewer:
                 cancellation=cancellation,
                 lease=lease,
                 diff_truncated=manifest.partitions[0].diff_truncated,
+                work_context=work_context,
             )
             return verdict
         return await self._review_partitioned(
@@ -414,6 +414,7 @@ class IndependentModelReviewer:
             adapter=adapter,
             cancellation=cancellation,
             lease=lease,
+            work_context=work_context,
         )
 
     async def _review_single_partition(
@@ -437,6 +438,7 @@ class IndependentModelReviewer:
         cancellation: CancellationContext,
         lease: LeaseToken,
         diff_truncated: bool,
+        work_context: tuple[ContextItem, ...] = (),
     ) -> ReviewVerdict:
         if len(inspection.changed_files) > _MAX_FILES:
             raise IndependentReviewError(
@@ -467,6 +469,7 @@ class IndependentModelReviewer:
             provider_attempt=lease.generation,
             partition_id=partition_id,
             diff_truncated=diff_truncated,
+            work_context=work_context,
         )
         try:
             reservation = await self._accounting.reserve(request=provider_request, profile=profile)
@@ -542,6 +545,7 @@ class IndependentModelReviewer:
         adapter: ProviderAdapter,
         cancellation: CancellationContext,
         lease: LeaseToken,
+        work_context: tuple[ContextItem, ...] = (),
     ) -> ReviewVerdict:
         from vuzol.review.partitions import split_diff_by_file
 
@@ -594,6 +598,7 @@ class IndependentModelReviewer:
                 cancellation=cancellation,
                 lease=lease,
                 diff_truncated=partition.diff_truncated,
+                work_context=work_context,
             )
             unknown_usage = unknown_usage or verdict.unknown_usage
             verdicts.append(verdict)
@@ -616,6 +621,7 @@ class IndependentModelReviewer:
                 adapter=adapter,
                 cancellation=cancellation,
                 lease=lease,
+                work_context=work_context,
             )
             return aggregate_partition_verdicts(
                 verdicts=tuple(verdicts),
@@ -648,6 +654,7 @@ class IndependentModelReviewer:
         adapter: ProviderAdapter,
         cancellation: CancellationContext,
         lease: LeaseToken,
+        work_context: tuple[ContextItem, ...] = (),
     ) -> tuple[ReviewFinding, ...]:
         """Bounded cross-partition check for cross-file defects.
 
@@ -692,6 +699,7 @@ class IndependentModelReviewer:
             original_input="cross-partition review assessment",
             task_draft={"task_type": "coding", "review_mode": "cross-partition"},
             context=(
+                *work_context,
                 ContextItem(
                     source="review_cross_partition_summary",
                     reference="cross-partition:part-1-of-1",
@@ -718,6 +726,9 @@ class IndependentModelReviewer:
             reserved_quota_units=Decimal("0"),
             sandbox_reference=None,
         )
+        if work_context:
+            verify_chunk_receipts(work_context)
+            _require_work_context_budget(provider_request)
         try:
             reservation = await self._accounting.reserve(request=provider_request, profile=profile)
         except Exception as error:
@@ -821,6 +832,7 @@ def _build_request(
     provider_attempt: int = 1,
     partition_id: str | None = None,
     diff_truncated: bool = False,
+    work_context: tuple[ContextItem, ...] = (),
 ) -> ProviderRequest:
     files = inspection.changed_files
     diff_text = inspection.diff.decode("utf-8", "replace")
@@ -892,7 +904,8 @@ def _build_request(
             "suggested_risk": risk.value,
             "review_mode": "independent",
         },
-        context=tuple(
+        context=work_context
+        + tuple(
             ContextItem(
                 source="retained_result_review_bundle_chunk",
                 reference=(
@@ -923,8 +936,21 @@ def _build_request(
     )
     # Fail closed on construction bugs: the sent batch must itself verify
     # (complete, hash-pinned, no duplicates) before any budget is reserved.
-    verify_chunk_receipts(request.context)
+    verify_chunk_receipts(request.context[len(work_context) :])
+    if work_context:
+        verify_chunk_receipts(work_context)
+        _require_work_context_budget(request)
     return request
+
+
+def _require_work_context_budget(request: ProviderRequest) -> None:
+    characters = len(request.original_input or "") + sum(
+        len(item.content) for item in request.context
+    )
+    if (characters + 3) // 4 > request.max_input_tokens:
+        raise IndependentReviewError(
+            "complete discussion and review exceed the reviewer context budget"
+        )
 
 
 def _verdict_from_provider_result(

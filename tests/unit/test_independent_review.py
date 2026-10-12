@@ -17,6 +17,7 @@ from vuzol.config.settings import HardLimits
 from vuzol.execution.domain import GitInspection
 from vuzol.providers.budgets import BudgetExceeded
 from vuzol.providers.domain import (
+    ContextItem,
     NormalizedUsage,
     ProviderErrorCategory,
     ProviderRequest,
@@ -221,7 +222,10 @@ def test_large_review_bundle_is_complete_across_hashed_context_chunks() -> None:
     )
 
 
-def _build_request_for_profile(profile: ProviderProfileConfig) -> ProviderRequest:
+def _build_request_for_profile(
+    profile: ProviderProfileConfig,
+    work_context: tuple[ContextItem, ...] = (),
+) -> ProviderRequest:
     inspection = GitInspection(
         head="b" * 40,
         branch="task",
@@ -244,7 +248,32 @@ def _build_request_for_profile(profile: ProviderProfileConfig) -> ProviderReques
         profile=profile,
         policy_revision="test-policy.v1",
         provider_attempt=1,
+        work_context=work_context,
     )
+
+
+def _work_context():
+    chunks = ("Selected prototype; no registration. " + "x" * 19900, "Full file tail; no deploy.")
+    return tuple(
+        ContextItem(
+            source="chat_work_context",
+            reference=f"task:spec:part-{n}-of-2",
+            content=text,
+            content_hash=hashlib.sha256(text.encode()).hexdigest(),
+        )
+        for n, text in enumerate(chunks, 1)
+    )
+
+
+def test_review_preserves_frozen_spec_and_respects_full_context_budget():
+    context = _work_context()
+    profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
+    request = _build_request_for_profile(profile, context)
+    assert request.context[:2] == context
+    assert any(c.source == "retained_result_review_bundle_chunk" for c in request.context)
+    small = profile.model_copy(update={"context_limit": 1000})
+    with pytest.raises(IndependentReviewError, match="context budget"):
+        _build_request_for_profile(small, context)
 
 
 def test_build_request_uses_profile_role_limits() -> None:
@@ -613,7 +642,10 @@ async def test_independent_reviewer_adapter_missing() -> None:
 
 
 @pytest.mark.anyio
-async def test_independent_reviewer_partitions_many_files_instead_of_rejecting() -> None:
+@pytest.mark.parametrize("with_context", [False, True])
+async def test_independent_reviewer_partitions_many_files_instead_of_rejecting(
+    with_context,
+) -> None:
     profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
     registries = MagicMock()
     registries.profiles.items.return_value = (profile,)
@@ -633,6 +665,7 @@ async def test_independent_reviewer_partitions_many_files_instead_of_rejecting()
     adapters = MagicMock()
     adapters.get.return_value = adapter
     reviewer = _reviewer(registries, adapters)
+    context = _work_context() if with_context else ()
     verdict = await reviewer.review(
         task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
         risk=RiskLevel.HIGH,
@@ -651,11 +684,14 @@ async def test_independent_reviewer_partitions_many_files_instead_of_rejecting()
         timeout_seconds=30,
         cancellation=CancellationContext(),
         lease=_lease(),
+        work_context=context,
     )
     # 100 files flow through 2 bounded partitions + cross-partition check.
     assert verdict.allows_progress
     assert verdict.partition_count == 2
     assert adapter.execute.await_count == 3
+    if with_context:
+        assert all(call.args[0].context[:2] == context for call in adapter.execute.await_args_list)
     with pytest.raises(IndependentReviewError, match="maximum is 120000"):
         await reviewer.review(
             task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]

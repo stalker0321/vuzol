@@ -49,7 +49,7 @@ from vuzol.interpretation.prompt_loader import PromptKind, compose_prompt
 from vuzol.storage.types import InteractionMode, RiskLevel
 
 JEV_MODEL = "typesafe/jev-1.13"
-JEV_PROMPT_VERSION = "jev-intake-native-v4"
+JEV_PROMPT_VERSION = "jev-intake-native-v5"
 JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 _EFFECTS = {
     "respond": "Answer, explain, discuss or give an opinion without implementing changes.",
@@ -89,6 +89,10 @@ _NATIVE_RULES = (
     "Choose effect independently of target: referring to a previous answer, critique, proposal "
     "or document does not turn discussion into execution or require a managed Task. "
     "When conversational_context is enabled, use conversation_context for such references. "
+    "An explicit request to implement the discussed proposal is execute_request with "
+    "conversation_context even when its conversational relation is continue/amend/correct. "
+    "That creates new work from discussion, not continuation of a managed Task. "
+    "Only use a managed Task target for continuation/control of actual existing work. "
     "Discussing revised requirements or scales is respond/plan/capture unless implementation "
     "is explicitly requested. Do not infer continuation solely from active work. For a missing "
     "managed work reference select unresolved, not no_target. Natural language approval never "
@@ -216,8 +220,7 @@ class JevDecisionsInterpreter:
             intent_uncertain = selected["effect"] == "abstain"
             target_uncertain = target == "unresolved" and not (chat and read_only)
             if target == "conversation_context" and not (
-                read_only
-                or (selected["effect"] == "execute_request" and selected["relation"] == "new")
+                read_only or (chat and selected["effect"] == "execute_request")
             ):
                 target_uncertain = True
             # Only continuation of real work needs a managed binding. A read-only

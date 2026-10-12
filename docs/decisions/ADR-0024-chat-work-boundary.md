@@ -32,6 +32,12 @@ call, keyword-only router or generative classification fallback is added.
   into a read-only fallback merely because canonical abstain effect is respond.
   Original native choices/typed uncertainty remain in the receipt. Full detail
   and separate document/context bounds: `docs/CHAT_INTENT_CONTEXT.md`.
+- T105: explicit implementation sourced from `conversation_context` creates new
+  work regardless of its conversational relation. It is not a request to resume
+  an existing Task. Freeze the delivery-visible discussion and original reference
+  documents in the existing immutable TaskSpec revision; pass that same evidence
+  to planner, worker and independent review. Manual Start and result approval
+  remain mandatory. Details: `docs/CHAT_WORK_HANDOFF.md`.
 
 ## Independent responder
 

@@ -144,6 +144,7 @@ class DiscussionMemoryService:
         chat_memory: bool = False,
         chat_context: bool = False,
         query: str | None = None,
+        delivered_only: bool | None = None,
     ) -> MemoryPack:
         # Interpretation imports the discussion package; avoid an import cycle.
         from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
@@ -166,7 +167,7 @@ class DiscussionMemoryService:
                     session_id=session_id,
                     start_ordinal=boundary,
                     newest_limit=None,
-                    delivered_only=chat_memory,
+                    delivered_only=chat_memory if delivered_only is None else delivered_only,
                     source_char_limit=2 * CHAT_INPUT_CHARS,
                 )
             except ValueError as error:
@@ -176,7 +177,7 @@ class DiscussionMemoryService:
                     session_id=session_id,
                     start_ordinal=start_ordinal,
                     newest_limit=len(uncovered) + 6,
-                    delivered_only=chat_memory,
+                    delivered_only=chat_memory if delivered_only is None else delivered_only,
                 )
                 if summary
                 else ()

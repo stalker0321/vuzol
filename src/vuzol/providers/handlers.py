@@ -1293,6 +1293,17 @@ class ProviderStepHandler:
                         role="planner",
                     )
                     context = items
+            from vuzol.discussion.work_context import load_work_context
+
+            context = (
+                *context,
+                *await load_work_context(
+                    session,
+                    task,
+                    expected_revision=step.payload.get("chat_work_spec_revision")
+                    or run.selected_route.get("chat_work_spec_revision"),
+                ),
+            )
             original_input = task.transcript or task.original_text
             input_task = task
             original_reference = provenance_reference(task)

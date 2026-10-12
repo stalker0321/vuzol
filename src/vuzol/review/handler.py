@@ -16,6 +16,7 @@ from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.execution.scaffold import path_is_docs_only, path_is_executable_product
 from vuzol.experiments.review import scan_suspicious_patterns
+from vuzol.providers.domain import ContextItem
 from vuzol.review.domain import (
     FindingSeverity,
     ReviewFinding,
@@ -53,6 +54,7 @@ class IndependentReviewPort(Protocol):
         timeout_seconds: float,
         cancellation: CancellationContext,
         lease: LeaseToken,
+        work_context: tuple[ContextItem, ...] = (),
     ) -> ReviewVerdict: ...
 
 
@@ -212,6 +214,14 @@ class ResultReviewHandler:
             if structured.get("base_commit") != base_commit:
                 raise ValueError("validate base commit does not match retained worktree")
             bound_task = task
+            from vuzol.discussion.work_context import load_work_context
+
+            work_context: tuple[ContextItem, ...] = ()
+            spec_pin = getattr(step, "payload", {}).get("chat_work_spec_revision") or getattr(
+                run, "selected_route", {}
+            ).get("chat_work_spec_revision")
+            if getattr(task, "ingress_source", None) == "chat_work" or spec_pin is not None:
+                work_context = await load_work_context(session, task, expected_revision=spec_pin)
 
         await self._git.require_clean_worktree(path)
         await self._git.require_no_remotes(path)
@@ -262,6 +272,7 @@ class ResultReviewHandler:
                 timeout_seconds=request.timeout_seconds,
                 cancellation=cancellation,
                 lease=request.lease,
+                **({"work_context": work_context} if work_context else {}),
             )
             # The result must not mutate mid-review: a changed hash
             # invalidates the verdict (fail-closed, never PASS).

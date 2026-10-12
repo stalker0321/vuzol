@@ -171,7 +171,38 @@ async def claim_routed_step(
         routing_task_type = (
             "architecture" if task.task_type == "discussion_agent_internal" else task.task_type
         )
+        from vuzol.discussion.work_context import load_work_context
+
+        try:
+            work_context = await load_work_context(
+                session,
+                task,
+                expected_revision=step.payload.get("chat_work_spec_revision")
+                or run.selected_route.get("chat_work_spec_revision"),
+            )
+        except ValueError:
+            await _block_route(
+                session,
+                step=step,
+                run=run,
+                task=task,
+                category="chat_work_context_invalid",
+                quota=False,
+            )
+            continue
         estimated_input = _estimated_input_tokens(task, step, run)
+        estimated_input += (sum(len(item.content) for item in work_context) + 3) // 4
+        if work_context and estimated_input > settings.limits.provider_call_input_tokens:
+            await _block_route(
+                session,
+                step=step,
+                run=run,
+                task=task,
+                category="chat_work_context_budget_exceeded",
+                quota=False,
+                summary="Full discussion context exceeds the provider input budget.",
+            )
+            continue
         requested_output = (
             settings.limits.planner_output_tokens
             if role is ProviderRole.PLANNER

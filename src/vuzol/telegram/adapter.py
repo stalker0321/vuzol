@@ -41,6 +41,19 @@ StartupHandlerFn = Callable[[Bot], Awaitable[None]]
 
 
 def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
+    chat_messages = {
+        "chat_retry_stale": "Это старый запрос. Используй кнопку под последней ошибкой.",
+        "chat_retry_ambiguous": (
+            "Результат доставки неизвестен. Повтор заблокирован, чтобы не отправить дубль."
+        ),
+        "chat_retry_unavailable": "Повтор этого сообщения недоступен.",
+        "chat_retry_pending": "Попытка уже выполняется.",
+        "chat_already_delivered": "Ответ уже доставлен.",
+        "chat_delivery_retry": "Повторяю доставку готового ответа.",
+        "chat_reply_retry": "Пробую ответить ещё раз.",
+    }
+    if result is not None and result.reason in chat_messages:
+        return chat_messages[result.reason], result.status is IngressStatus.REJECTED
     if result is not None and result.status is IngressStatus.REJECTED:
         if result.reason == "item_not_safely_retryable":
             return "Повтор недоступен для текущего состояния задачи.", True
@@ -430,6 +443,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
         "resume",
         "cancel",
         "retry",
+        "chat_retry",
     }
     if len(parts) != 3 or parts[0] != "v1" or parts[1] not in allowed_actions:
         return None
@@ -447,6 +461,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
         user_id=user.id,
         message_thread_id=message_thread_id,
         action_kind=parts[1],
+        message_id=query.message.message_id if parts[1] == "chat_retry" else None,
         task_id=task_id,
         approval_id=approval_id,
     )

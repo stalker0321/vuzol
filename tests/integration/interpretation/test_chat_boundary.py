@@ -471,7 +471,8 @@ def test_responder_is_exact_independent_of_project_worker_and_never_falls_back(
                         )
                     )
                 ).one()
-                assert notice.payload["role"] == "chat_notice"
+                assert notice.payload["role"] == "chat_failure"
+                assert notice.payload["retry_allowed"] is True
             else:
                 assert token is not None
                 leased = await session.get(Step, token.step.id)

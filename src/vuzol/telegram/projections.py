@@ -1499,13 +1499,9 @@ async def enqueue_terminal_task_projections(
 
     if task.task_type == "discussion_agent_internal":
         if task.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.QUOTA_EXHAUSTED}:
-            await enqueue_chat_notice(
-                session,
-                chat_id=task.source_chat_id,
-                thread_id=task.source_thread_id,
-                key=f"chat:reply-failed:{task.id}",
-                text="Не удалось получить ответ собеседника. Ничего не изменено; попробуй ещё раз.",
-            )
+            from vuzol.discussion.chat_recovery import enqueue_chat_failure
+
+            await enqueue_chat_failure(session, task, key=f"chat:reply-failed:{task.id}")
         return
     await enqueue_task_status_projection(session, task, run)
     await enqueue_task_history_report(session, task.id)

@@ -7,6 +7,8 @@ EXPLICITLY_RETRYABLE_FAILURES = frozenset(
     {
         "authentication",
         "budget_exhausted",
+        "capability_setup_required",
+        "capability_provisioning_failed",
         "cancelled",
         "dependency_provisioning_failed",
         "independent_review_required",
@@ -19,13 +21,33 @@ EXPLICITLY_RETRYABLE_FAILURES = frozenset(
 
 
 def current_retry_target(steps: tuple[Step, ...]) -> Step | None:
-    """One blocked leaf, allowing only a mutually bound existing repair pair."""
+    """One blocked leaf, allowing only mutually bound repair/preflight pairs."""
     blocked = tuple(step for step in steps if step.status is StepStatus.BLOCKED)
     suspended: set[object] = set()
     for parent in blocked:
-        if parent.unknown_effects or parent.step_type not in {"validate", "review"}:
+        if parent.unknown_effects:
             continue
         parent_payload = parent.payload if isinstance(parent.payload, dict) else {}
+        if (
+            parent.step_type == "ensure_dependencies"
+            and parent.failure_category == "capability_preflight_required"
+        ):
+            for child in blocked:
+                child_payload = child.payload if isinstance(child.payload, dict) else {}
+                child_metadata = (
+                    child.dependency_metadata if isinstance(child.dependency_metadata, dict) else {}
+                )
+                if (
+                    child.step_type == "ensure_capabilities"
+                    and child.run_id == parent.run_id
+                    and child_payload.get("capability_for_step_id") == str(parent.id)
+                    and parent_payload.get("capability_preflight_step_id") == str(child.id)
+                    and child_metadata.get("template_key")
+                    == "ensure_capabilities_after_code"
+                ):
+                    suspended.add(parent.id)
+        if parent.step_type not in {"validate", "review"}:
+            continue
         for child in blocked:
             payload = child.payload if isinstance(child.payload, dict) else {}
             metadata = (

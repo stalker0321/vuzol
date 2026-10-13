@@ -600,6 +600,10 @@ async def test_dependency_build_enforces_run_pins(
         "vuzol.execution.dependency_build.enforce_run_pins",
         AsyncMock(side_effect=CapabilityPinMismatch("changed")),
     )
+    monkeypatch.setattr(
+        "vuzol.execution.dependency_build.verify_installed_capability",
+        AsyncMock(return_value=SimpleNamespace(version="test-1")),
+    )
 
     with pytest.raises(CapabilityPinMismatch):
         await builder.build(

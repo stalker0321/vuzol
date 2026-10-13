@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from vuzol.projects.toolchains import TOOLCHAIN_RECEIPT, ToolchainSpec
 
 from ._execution_helpers import (
@@ -34,8 +36,11 @@ from ._execution_helpers import (
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "legacy_provisioning", ("automatic", "approval_required", "external_setup")
+)
 async def test_codex_envelope_and_lifecycle_mocks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_provisioning: str
 ) -> None:
     """Test envelope factory and persisted process lifecycle."""
     worktree_root = tmp_path / "worktrees"
@@ -330,10 +335,12 @@ async def test_codex_envelope_and_lifecycle_mocks(
         "vuzol.execution.codex.current_environment",
         AsyncMock(
             return_value=MagicMock(
-                contract={"capabilities": {"android-sdk": {"provisioning": "automatic"}}}
+                contract={"capabilities": {"android-sdk": {"provisioning": legacy_provisioning}}}
             )
         ),
     )
+    inventory_probe = AsyncMock(return_value=SimpleNamespace(version="35.0-test"))
+    monkeypatch.setattr("vuzol.execution.codex.verify_installed_capability", inventory_probe)
     artifact_envelope = await envf.build_artifact(
         artifact_request,
         worktree_id=mock_wt.id,

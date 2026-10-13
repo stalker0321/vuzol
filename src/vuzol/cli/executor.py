@@ -36,6 +36,10 @@ from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_prof
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
+from vuzol.projects.capability_provisioning import (
+    CapabilityProvisioningHandler,
+    OfflineCapabilityInstaller,
+)
 from vuzol.projects.dependency_provisioning import DependencyProvisioningHandler
 from vuzol.providers.cli_readonly import ReadOnlyCliAdapter
 from vuzol.providers.codex import CodexCliAdapter
@@ -281,6 +285,12 @@ async def run() -> None:
             settings.dependency_provisioning,
             dependency_builder,
             worktree_root=settings.worktree_root,
+            capabilities=CapabilityProvisioningHandler(
+                factory,
+                OfflineCapabilityInstaller(settings.capability_provisioning),
+                registries=runtime.registries,
+                worktree_root=settings.worktree_root,
+            ),
         )
         worktree_handlers: dict[str, StepHandler] = {
             "prepare_worktree": worktree_handler,

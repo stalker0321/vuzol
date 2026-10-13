@@ -127,4 +127,8 @@ async def _recover_one(session: AsyncSession, step: Step) -> None:
         release=leased_only,
     )
     if terminal_outcome:
+        if step.step_type == "ensure_capabilities":
+            from vuzol.projects.capability_provisioning import abandon_capability_installation
+
+            await abandon_capability_installation(session, step.id, reason="leader_lease_expired")
         await enqueue_terminal_task_projections(session, task, run)

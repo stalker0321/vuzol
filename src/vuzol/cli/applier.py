@@ -51,6 +51,7 @@ def applier_handlers(
             factory,
             OfflineCapabilityInstaller(settings.capability_provisioning),
             registries=runtime.registries,
+            worktree_root=settings.worktree_root,
         ),
         "acceptance": AcceptanceGateHandler(
             factory,

@@ -15,8 +15,9 @@ The v1 contract has:
 
 - `components`: static sites, HTTP services, Android apps, CLIs, libraries, bots, MCP servers,
   workers, databases, or bounded custom components;
-- `capabilities`: named host or external requirements classified as `automatic`,
-  `approval_required`, or `external_setup`.
+- `capabilities`: named tool or external requirements. Historical `automatic`,
+  `approval_required`, and `external_setup` fields remain compatible, but known
+  tools only declare needs; node inventory and system policy decide installation.
 
 An environment delta can add/update components, remove components, and add requirements. Replanning
 can therefore replace Django with Flask or remove a preview component without rewriting history.
@@ -35,14 +36,18 @@ being reported as a model failure.
 Host checks cover Python and Git. Node, Go, Java and Gradle use managed toolchains when declared;
 Android and other tools still require a reviewed source entry or operator-staged bundle.
 
-## Separate toolchain installation approval
+## Shared node toolchains: inventory first, one installation approval
 
 `coding.v3` checks the approved environment before repository work begins. Approving a plan records
 the chosen stack, but does not authorize a host/toolchain mutation. If a declared capability is
-already present, execution continues without another prompt. If it is absent and a trusted source is
+already verified and healthy in the shared node inventory, execution continues without another
+prompt, independently of which project installed it. Stale receipts are re-verified; recorded
+failures, missing/changed receipts and root mismatch require attention. If it is absent and a trusted source is
 available, Vuzol creates a second immutable approval containing the capability key, exact archive
 SHA-256, byte size, environment revision/hash, source provider, and managed installation root.
-Rejecting this approval cancels the task without downloading or installing anything.
+The approval additionally binds the node. Concurrent projects share the pending installation rather
+than asking twice; verified installation is registered once for reuse. Rejecting this approval
+cancels its originating task and wakes shared waiters to attention without installing anything.
 
 Capability provisioning is default-off. Installation remains manifest-driven rather than hard-coded
 per stack. A root-trusted `<capability-key>.json` plus archive may be staged under the read-only
@@ -64,7 +69,13 @@ writes an immutable installation receipt, and atomically
 renames it under `/var/lib/vuzol/toolchains/<capability-key>`. Preflight and sandbox construction use
 that receipt rather than a Python registry. Artifact commands receive only the toolchains declared
 by the current project as a read-only `/toolchains` mount; their commands, `PATH` entries, and
-environment roots are derived from the receipt. Normal validation gates do not receive this mount.
+environment roots are derived from the receipt. Normal validation gates receive the same verified,
+read-only declared toolchains, with run version pins enforced before exposure.
+
+Explicit manifests and Node Makefile recipes are inspected again after code generation, so an empty
+initial README baseline cannot hide a new tool requirement. Newly missing tools go through an
+additional existing privileged `ensure_capabilities` step, then the same dependency step resumes.
+The executor does not gain shared installation write access, and no source-code repair is scheduled.
 
 Example manifest:
 
@@ -97,15 +108,15 @@ non-writable regular files in the bundle root. Test `inspect_bundle(<key>)` befo
 task. Replacing either file creates different approval evidence; an already approved request cannot
 silently install the replacement.
 
-## Separate package dependency approval
+## Automatic project-local dependencies
 
 `coding.v4` inspects dependency manifests after the agent has produced the proposed source and
 before validation. Python PEP 621 dependencies from `pyproject.toml` and Node dependencies from
 `package.json` are normalized, bounded and bound to the manifest and any existing lockfile hash.
-When the matching immutable environment is absent, Vuzol presents a separate approval naming the
-ecosystem, registry provider, direct-dependency count and manifest hash.
+When the matching immutable environment is absent, Vuzol builds it automatically within the
+project's isolated environment. There is no separate human dependency-installation approval.
 
-Approval permits only that exact request. Resolution runs as the sandbox UID in the project's
+The manifest/lockfile hashes bind that exact request. Resolution runs as the sandbox UID in the project's
 pinned validation image, with no direct network and an ephemeral controlled HTTPS proxy limited to
 the catalogue hosts. Python uses `uv` without project/editable/dev/source builds; Node uses the
 managed Node toolchain and npm with lifecycle scripts, audit and funding calls disabled. Existing
@@ -117,7 +128,8 @@ Successful environments live at
 are non-writable; only relative symbolic links resolving inside the environment are accepted.
 Receipts bind the manifest, input lockfile, registry and generated lockfile hashes. Validation,
 artifact production and later agent sessions mount a matching environment read-only. A new manifest
-hash creates a new environment and approval instead of mutating the old one.
+hash creates a new environment instead of mutating the old one. Legacy approved envelopes remain
+hash-bound and explicit rejections are respected; no historical consent is fabricated.
 
 Custom URLs and Git dependencies fail closed unless the user explicitly registers the exact source
 in that project's Telegram topic:
@@ -136,7 +148,7 @@ npm download-time digest enforcement can be guaranteed. Query strings, credentia
 private/IP destinations and mutable branch/tag pins are rejected.
 
 Once the manifest matches a registered source, its ID, URL and pin become part of the immutable
-dependency approval and environment key. The source host is added to the same ephemeral controlled
+dependency request and environment key. The source host is added to the same ephemeral controlled
 proxy allowlist. Python Git builds may execute the trusted source's build backend, but only inside
 the bounded dependency-builder sandbox with no host repository or credentials mounted. Revocation
 prevents new requests and future mounts whose manifest can no longer reproduce the same approved

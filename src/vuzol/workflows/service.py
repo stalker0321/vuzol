@@ -18,7 +18,14 @@ from vuzol.storage.models import (
     Worktree,
 )
 from vuzol.storage.records import LeaseToken
-from vuzol.storage.types import RunStatus, StepStatus, TaskStatus
+from vuzol.storage.types import (
+    IdempotencyClass,
+    QueueClass,
+    RetryClass,
+    RunStatus,
+    StepStatus,
+    TaskStatus,
+)
 from vuzol.telegram.projections import (
     enqueue_task_status_projection,
     enqueue_terminal_task_projections,
@@ -250,7 +257,40 @@ async def commit_step_outcome(
         await transition_step(session, step, StepStatus.AWAITING_USER, actor_type="worker")
         await transition_run(session, run, RunStatus.AWAITING_USER, actor_type="worker")
     elif outcome.kind is OutcomeKind.NEEDS_APPROVAL:
-        await transition_step(session, step, StepStatus.WAITING_APPROVAL, actor_type="worker")
+        # Shared installation can settle between handler return and outcome
+        # commit. Serialize with consumption so a waiter cannot miss its wakeup.
+        shared_id = step.payload.get("capability_wait_approval_id")
+        settled = False
+        if isinstance(shared_id, str):
+            from vuzol.storage.models import Approval
+            from vuzol.storage.types import ApprovalStatus
+
+            shared = await session.scalar(
+                select(Approval).where(Approval.id == uuid.UUID(shared_id)).with_for_update()
+            )
+            settled = shared is not None and shared.status not in {
+                ApprovalStatus.PENDING,
+                ApprovalStatus.APPROVED,
+            }
+        if settled:
+            await transition_step(session, step, StepStatus.QUEUED, actor_type="worker")
+            if step.attempt_count > 0:
+                step.attempt_count -= 1
+        else:
+            await transition_step(session, step, StepStatus.WAITING_APPROVAL, actor_type="worker")
+    elif (
+        outcome.kind is OutcomeKind.BLOCKED
+        and outcome.category == "capability_preflight_required"
+        and step.step_type == "ensure_dependencies"
+        and not outcome.unknown_effects
+    ):
+        if await _schedule_capability_preflight(session, run, step, outcome):
+            await transition_step(
+                session, step, StepStatus.BLOCKED, actor_type="capability_inventory"
+            )
+            await activate_ready_steps(session, run)
+        else:
+            await _block_for_attention(session, run, step)
     elif outcome.kind is OutcomeKind.BLOCKED or outcome.unknown_effects:
         # D1 L3: a BLOCKED verdict is retained in review/outcome history
         # (separate from the mutable Step.result, which this branch
@@ -281,9 +321,14 @@ async def commit_step_outcome(
         if run.status in {RunStatus.BLOCKED, RunStatus.FAILED, RunStatus.CANCELLED}:
             run.failure_category = outcome.category
             run.failure_summary = outcome.summary
+            if step.step_type == "ensure_capabilities":
+                from vuzol.projects.capability_provisioning import abandon_capability_installation
+
+                await abandon_capability_installation(session, step.id, reason="leader_unavailable")
     step.lease_owner = None
     step.lease_expires_at = None
     if step.status is StepStatus.COMPLETED:
+        await _resume_after_capability_preflight(session, run, step)
         await _resume_repaired_step(session, run, step)
         await _resume_review_after_validation(session, run, step)
         await activate_ready_steps(session, run)
@@ -329,6 +374,111 @@ async def record_task_progress(
         )
     )
     await _enqueue_telegram_projection(session, task, run)
+
+
+async def _resume_after_capability_preflight(
+    session: AsyncSession, run: Run, preflight: Step
+) -> None:
+    raw_target = preflight.payload.get("capability_for_step_id")
+    if preflight.step_type != "ensure_capabilities" or not isinstance(raw_target, str):
+        return
+    target = await session.scalar(
+        select(Step)
+        .where(
+            Step.id == uuid.UUID(raw_target),
+            Step.run_id == run.id,
+            Step.step_type == "ensure_dependencies",
+            Step.status == StepStatus.BLOCKED,
+        )
+        .with_for_update()
+    )
+    if (
+        target is None
+        or target.failure_category != "capability_preflight_required"
+        or target.payload.get("capability_preflight_step_id") != str(preflight.id)
+    ):
+        raise ValueError("completed capability preflight has no bound dependency waiter")
+    await transition_step(session, target, StepStatus.QUEUED, actor_type="capability_inventory")
+    if target.attempt_count > 0:
+        target.attempt_count -= 1
+    target.failure_category = None
+    target.failure_summary = None
+
+
+async def _schedule_capability_preflight(
+    session: AsyncSession, run: Run, target: Step, outcome: StepOutcome
+) -> bool:
+    """Create the existing applier step atomically with the fenced outcome.
+
+    A crash/cancellation cannot leave a separate privileged child orphaned.
+    Nothing here grants install permission or runs a model/tool.
+    """
+
+    task = await session.get(Task, run.task_id)
+    if task is None or task.project_id is None:
+        return False
+    environment = await current_environment(session, task.project_id)
+    if (
+        environment is None
+        or outcome.result.get("environment_revision_id") != str(environment.id)
+        or outcome.result.get("environment_hash") != environment.content_hash
+    ):
+        return False
+    existing = await session.scalar(
+        select(Step).where(
+            Step.run_id == run.id,
+            Step.step_type == "ensure_capabilities",
+            Step.payload["capability_for_step_id"].astext == str(target.id),
+        )
+    )
+    if existing is not None:
+        return False
+    ordinal = (
+        int(
+            await session.scalar(
+                select(func.coalesce(func.max(Step.ordinal), 0)).where(Step.run_id == run.id)
+            )
+            or 0
+        )
+        + 1
+    )
+    preflight = Step(
+        run_id=run.id,
+        ordinal=ordinal,
+        step_type="ensure_capabilities",
+        queue_class=QueueClass.PRIVILEGED,
+        status=StepStatus.PENDING,
+        required_capabilities=["host_admin"],
+        dependency_metadata={
+            "template_key": "ensure_capabilities_after_code",
+            "predecessor_ordinals": [],
+        },
+        payload={
+            "capability_for_step_id": str(target.id),
+            "environment_revision_id": str(environment.id),
+        },
+        retry_class=RetryClass.NEVER,
+        idempotency_class=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+        max_attempts=1,
+        timeout_seconds=1800,
+    )
+    session.add(preflight)
+    await session.flush()
+    target.payload = {**target.payload, "capability_preflight_step_id": str(preflight.id)}
+    session.add(
+        Event(
+            entity_type="run",
+            entity_id=run.id,
+            event_type="workflow.capability_preflight_scheduled",
+            actor_type="capability_inventory",
+            payload={
+                "step_id": str(target.id),
+                "preflight_step_id": str(preflight.id),
+                "capabilities": outcome.result.get("capabilities", []),
+            },
+        )
+    )
+    return True
 
 
 async def publish_step_started(session: AsyncSession, token: LeaseToken) -> None:
@@ -630,6 +780,13 @@ def derive_task_status(steps: tuple[Step, ...], run_status: RunStatus) -> TaskSt
         not in {StepStatus.COMPLETED, StepStatus.CANCELLED, StepStatus.FAILED, StepStatus.BLOCKED}
         and isinstance((value := step.payload.get("resume_after_validation_step_id")), str)
     )
+    active_repair_targets.update(
+        value
+        for step in steps
+        if step.status
+        not in {StepStatus.COMPLETED, StepStatus.CANCELLED, StepStatus.FAILED, StepStatus.BLOCKED}
+        and isinstance((value := step.payload.get("capability_for_step_id")), str)
+    )
     active = next(
         (
             step
@@ -649,6 +806,8 @@ def derive_task_status(steps: tuple[Step, ...], run_status: RunStatus) -> TaskSt
         return TaskStatus.BLOCKED
     if active.status is StepStatus.FAILED:
         return TaskStatus.FAILED
+    if isinstance(active.payload.get("capability_for_step_id"), str):
+        return TaskStatus.EXECUTING
     if isinstance(active.payload.get("repair_for_step_id"), str) or isinstance(
         active.payload.get("resume_after_validation_step_id"), str
     ):

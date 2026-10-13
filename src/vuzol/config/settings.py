@@ -386,6 +386,7 @@ class ExecutionSettings(BaseModel):
 
     enabled: bool = False
     reviewer_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    default_executor_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     rootless_docker_socket: Path = Path("/run/user/1000/docker.sock")
     require_preflight: bool = True
     cleanup_interval_seconds: int = Field(default=300, ge=10, le=86_400)

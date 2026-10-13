@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from sqlalchemy import func, select
-from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import ProviderProfileConfig
@@ -1277,51 +1276,17 @@ async def _history_token_totals(session: AsyncSession, task_id: uuid.UUID) -> tu
 
 
 async def _history_work_seconds(session: AsyncSession, task: Task) -> int:
-    """Active work time excluding human approval wait.
+    """Recorded model-call time, never task age, approval waits or tool setup.
 
-    Prefer the sum of provider invocation durations (never includes approval wait).
-    If no usage rows exist, fall back to wall-clock minus approval pending spans.
+    Unknown/unsettled call durations are not invented from the task's lifetime.
+    The same measured counter is used in live cards and terminal history.
     """
 
     rows = list(
         (await session.scalars(select(UsageRecord).where(UsageRecord.task_id == task.id))).all()
     )
-    if rows:
-        total_ms = sum(max(0, int(row.duration_ms or 0)) for row in rows)
-        return max(0, total_ms // 1000)
-
-    state = sqlalchemy_inspect(task, raiseerr=False)
-    if state is not None and {"created_at", "updated_at"} & state.expired_attributes:
-        await session.refresh(task, attribute_names=("created_at", "updated_at"))
-    started = task.created_at
-    ended = task.updated_at or datetime.now(UTC)
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=UTC)
-    if ended.tzinfo is None:
-        ended = ended.replace(tzinfo=UTC)
-    total = max(0.0, (ended - started).total_seconds())
-
-    approvals = list(
-        (
-            await session.scalars(
-                select(Approval)
-                .join(Step, Approval.step_id == Step.id)
-                .join(Run, Step.run_id == Run.id)
-                .where(Run.task_id == task.id)
-            )
-        ).all()
-    )
-    for approval in approvals:
-        requested = approval.requested_at
-        decided = approval.decided_at
-        if requested is None or decided is None:
-            continue
-        if requested.tzinfo is None:
-            requested = requested.replace(tzinfo=UTC)
-        if decided.tzinfo is None:
-            decided = decided.replace(tzinfo=UTC)
-        total -= max(0.0, (decided - requested).total_seconds())
-    return max(0, int(total))
+    total_ms = sum(max(0, int(row.duration_ms or 0)) for row in rows)
+    return total_ms // 1000
 
 
 def _one_line_summary(text: str, *, limit: int = 280) -> str:
@@ -1788,8 +1753,8 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         if failed_stage:
             lines.append(f"<b>Остановка:</b> {step_type_label(failed_stage)}")
         lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
-    elapsed = max(0, int((datetime.now(UTC) - task.created_at).total_seconds()))
-    lines.append(f"Прошло: {_format_duration_ru(elapsed)}")
+    model_seconds = await _history_work_seconds(session, task)
+    lines.append(f"Работа моделей: {_format_duration_ru(model_seconds)}")
     identity_footer = _task_identity_footer(task)
     if identity_footer is not None:
         lines.append(identity_footer)

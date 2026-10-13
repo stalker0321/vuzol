@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -151,11 +152,72 @@ def detect_environment_contract(repository: Path) -> dict[str, object]:
         capabilities["android-sdk"] = _detected_capability("android-sdk", "Android SDK")
     if (repository / "pyproject.toml").is_file():
         capabilities["python-runtime"] = _detected_capability("python-runtime", "Python runtime")
+    capabilities.update(detect_tool_requirements(repository))
     return {
         "schema_version": "project-environment.v1",
         "components": components,
         "capabilities": capabilities,
     }
+
+
+def detect_tool_requirements(repository: Path) -> dict[str, dict[str, object]]:
+    """Read explicit manifests/recipes, never infer a server from browser JS.
+
+    These are needs, not execution commands or installation permissions. Only
+    bounded regular files inside the worktree are inspected; nothing is run.
+    """
+
+    requirements: dict[str, dict[str, object]] = {}
+    for name, key, label in (
+        ("package.json", "node-runtime", "Node.js runtime"),
+        ("pyproject.toml", "python-runtime", "Python runtime"),
+    ):
+        path = repository / name
+        if path.is_file() and not path.is_symlink() and path.stat().st_size <= 1_000_000:
+            requirements[key] = _detected_capability(key, label)
+    makefile = repository / "Makefile"
+    if makefile.is_file() and not makefile.is_symlink() and makefile.stat().st_size <= 1_000_000:
+        content = makefile.read_text(encoding="utf-8", errors="replace")
+        if re.search(r"(?m)^\t[@+\-]*(?:node|npm|npx)(?:\s|$)", content):
+            requirements["node-runtime"] = _detected_capability("node-runtime", "Node.js runtime")
+    return requirements
+
+
+async def record_detected_tool_requirements(
+    session: AsyncSession, *, project_id: str, repository: Path
+) -> ProjectEnvironmentRevision | None:
+    """Append newly declared needs after code generation, preserving old revisions.
+
+    Does not alter components, choose a stack, or approve an installation.
+    """
+
+    detected = detect_tool_requirements(repository)
+    if not detected:
+        return await current_environment(session, project_id)
+    lock_key = int.from_bytes(
+        hashlib.sha256(f"environment:{project_id}".encode()).digest()[:8], signed=True
+    )
+    await session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+    parent = await current_environment(session, project_id, for_update=True)
+    existing = {} if parent is None else parent.contract.get("capabilities", {})
+    keys = set(existing) if isinstance(existing, dict) else set()
+    missing = [detected[key] for key in sorted(detected) if key not in keys]
+    if not missing:
+        return parent
+    contract = _merge_environment(
+        {} if parent is None else parent.contract, {"required_capabilities": missing}
+    )
+    revision = ProjectEnvironmentRevision(
+        project_id=project_id,
+        revision_number=1 if parent is None else parent.revision_number + 1,
+        parent_revision_id=None if parent is None else parent.id,
+        source="detected",
+        contract=contract,
+        content_hash=environment_hash(contract),
+    )
+    session.add(revision)
+    await session.flush()
+    return revision
 
 
 def _detected_capability(key: str, label: str) -> dict[str, object]:

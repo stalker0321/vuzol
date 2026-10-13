@@ -75,11 +75,16 @@ Do not infer a permanent stack merely from an early product idea. Add or replace
 when the current discussion has established that choice. Use remove_components when the user
 rejects an existing technology. A web_service component requires an argv-style run_command, port,
 and optional healthcheck_path. Non-web projects do not require a preview or web component. Mark
-local runtimes and tools automatic, secrets or privileged external resources approval_required,
+local runtimes and tools as requirements only (the legacy provisioning field may stay automatic);
+do not decide how they are installed or whether a healthy shared tool needs approval.
+Mark secrets or privileged external resources approval_required,
 and unavailable user/account setup external_setup. Every non-web component must declare a bounded
 argv-style acceptance run_command. Android components must also declare android-sdk and use a
 Gradle acceptance command plus an APK artifact pattern; never claim that approving the plan itself
-authorizes toolchain installation. Missing managed tools require a separate runtime approval."""
+authorizes toolchain installation. The system first checks shared node inventory: healthy installed
+tools are reused without approval; a missing shared tool requires one installation approval.
+Project-local dependencies are prepared automatically in isolation, without a separate approval.
+Availability does not grant secrets, external writes, production deploy or other privileges."""
 
 
 def discussion_schema_for_model() -> dict[str, Any]:

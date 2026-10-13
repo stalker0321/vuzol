@@ -112,3 +112,20 @@ def test_preflight_ignores_malformed_contract_and_defaults_label() -> None:
     assert len(checks) == 1
     assert checks[0].label == "git"
     assert checks[0].state is CapabilityState.READY
+
+
+def test_legacy_installation_flags_do_not_block_existing_tools_or_grant_external_access() -> None:
+    checks = preflight_capabilities(
+        {
+            "capabilities": {
+                "node-runtime": {"provisioning": "approval_required"},
+                "production-token": {"provisioning": "approval_required"},
+            }
+        },
+        which=lambda executable: f"/usr/bin/{executable}",
+        installation_status={"node-runtime": "installed"},
+    )
+    assert [(check.key, check.state) for check in checks] == [
+        ("node-runtime", CapabilityState.READY),
+        ("production-token", CapabilityState.NEEDS_APPROVAL),
+    ]

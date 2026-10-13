@@ -1,10 +1,13 @@
-"""Hash-bound approval lifecycle for immutable project dependency environments."""
+"""Automatic, hash-bound preparation of isolated project dependencies.
+
+Legacy approval records remain readable, but ordinary dependency preparation
+does not create a new human-approval boundary.
+"""
 
 from __future__ import annotations
 
-import hashlib
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -14,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.config import DependencyProvisioningSettings
 from vuzol.execution.dependency_build import DependencyBuildError
 from vuzol.execution.paths import PathViolation, contained, trusted_root
+from vuzol.projects.capability_provisioning import CapabilityProvisioningHandler
 from vuzol.projects.custom_sources import CustomDependencySource
 from vuzol.projects.dependencies import (
     DEPENDENCY_APPROVAL_SCHEMA,
@@ -29,9 +33,7 @@ from vuzol.storage.models import Approval, ProjectDependencySource, Step, Task, 
 from vuzol.storage.types import ApprovalStatus, StepStatus
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
-from vuzol.workflows.result_approval import envelope_hash, verified_envelope
-
-DEPENDENCY_APPROVAL_TTL = timedelta(days=7)
+from vuzol.workflows.result_approval import verified_envelope
 
 
 class DependencyBuilder(Protocol):
@@ -56,12 +58,14 @@ class DependencyProvisioningHandler:
         *,
         worktree_root: Path,
         catalog: SourceCatalog | None = None,
+        capabilities: CapabilityProvisioningHandler | None = None,
     ) -> None:
         self._factory = factory
         self._settings = settings
         self._builder = builder
         self._worktree_root = trusted_root(worktree_root, create=False)
         self._catalog = catalog or SourceCatalog.builtin()
+        self._capabilities = capabilities
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -74,6 +78,12 @@ class DependencyProvisioningHandler:
             if task.project_id is None:
                 raise DependencyError("dependency task has no project")
             root = contained(self._worktree_root, Path(worktree.path))
+            if self._capabilities is not None:
+                capability_outcome = await self._capabilities.ensure_before_dependencies(
+                    request, cancellation
+                )
+                if capability_outcome.kind is not OutcomeKind.SUCCEEDED:
+                    return capability_outcome
             requirements = inspect_dependency_requests(
                 root,
                 self._catalog,
@@ -106,30 +116,27 @@ class DependencyProvisioningHandler:
                         "environments": [item.environment_key for item in requirements],
                     }
                 )
-            if approval is None:
-                approval = await self._request_approval(
-                    request,
-                    task=task,
-                    step=step,
-                    worktree=worktree,
-                    requirements=missing,
-                )
-                return _needs_approval(approval.id, missing)
-            if approval.status is ApprovalStatus.PENDING:
-                return _needs_approval(approval.id, missing)
-            if approval.status not in {ApprovalStatus.APPROVED, ApprovalStatus.CONSUMED}:
-                raise DependencyError("dependency installation was not approved")
-            envelope = verified_envelope(step, approval)
-            _verify_envelope(
-                envelope,
-                task_id=task.id,
-                run_id=request.run_id,
-                step_id=step.id,
-                project_id=task.project_id,
-                worktree_id=worktree.id,
-                environment_root=self._settings.environment_root,
-                requirements=missing,
-            )
+            # Keep approved legacy envelopes hash-bound, and respect an explicit
+            # rejection. Pending legacy records are not fabricated as approved.
+            if approval is not None:
+                if approval.status not in {
+                    ApprovalStatus.APPROVED,
+                    ApprovalStatus.CONSUMED,
+                    ApprovalStatus.PENDING,
+                }:
+                    raise DependencyError("legacy dependency installation was rejected or expired")
+                if approval.status in {ApprovalStatus.APPROVED, ApprovalStatus.CONSUMED}:
+                    envelope = verified_envelope(step, approval)
+                    _verify_envelope(
+                        envelope,
+                        task_id=task.id,
+                        run_id=request.run_id,
+                        step_id=step.id,
+                        project_id=task.project_id,
+                        worktree_id=worktree.id,
+                        environment_root=self._settings.environment_root,
+                        requirements=missing,
+                    )
             environments: list[str] = []
             if self._builder is None:
                 raise DependencyError("controlled dependency builder is unavailable")
@@ -147,12 +154,13 @@ class DependencyProvisioningHandler:
                     cancellation=cancellation,
                 )
                 environments.append(environment.request.environment_key)
-            await self._consume(request, approval.id)
+            if approval is not None and approval.status is ApprovalStatus.APPROVED:
+                await self._consume(request, approval.id)
             return StepOutcome.succeeded(
                 {
                     "status": "installed",
                     "environments": environments,
-                    "approval_id": str(approval.id),
+                    "authorization": "project_local_dependency_policy",
                 }
             )
         except LeaseLost:
@@ -193,7 +201,10 @@ class DependencyProvisioningHandler:
             )
             approval = await session.scalar(
                 select(Approval)
-                .where(Approval.step_id == request.step_id)
+                .where(
+                    Approval.step_id == request.step_id,
+                    Approval.requested_action == "install_dependencies",
+                )
                 .order_by(Approval.requested_at.desc())
                 .limit(1)
             )
@@ -234,68 +245,6 @@ class DependencyProvisioningHandler:
         )
         return task, step, worktree, approval, sources
 
-    async def _request_approval(
-        self,
-        request: StepExecutionRequest,
-        *,
-        task: Task,
-        step: Step,
-        worktree: Worktree,
-        requirements: tuple[DependencyRequest, ...],
-    ) -> Approval:
-        envelope: dict[str, Any] = {
-            "schema_version": DEPENDENCY_APPROVAL_SCHEMA,
-            "requested_action": "install_dependencies",
-            "task_id": str(task.id),
-            "run_id": str(request.run_id),
-            "step_id": str(step.id),
-            "project_id": task.project_id,
-            "worktree_id": str(worktree.id),
-            "environment_root": str(self._settings.environment_root),
-            "requirements": [item.approval_record() for item in requirements],
-        }
-        digest = envelope_hash(envelope)
-        approval_id = uuid.uuid4()
-        approval = Approval(
-            id=approval_id,
-            step_id=step.id,
-            action_envelope_hash=digest,
-            requested_action="install_dependencies",
-            normalized_target=f"{task.project_id}:dependency-environments",
-            human_summary=(
-                "Собрать изолированные зависимости проекта: "
-                + ", ".join(item.ecosystem for item in requirements)
-            ),
-            token_hash=hashlib.sha256(f"{approval_id}:{digest}".encode()).hexdigest(),
-            status=ApprovalStatus.PENDING,
-            expires_at=datetime.now(UTC) + DEPENDENCY_APPROVAL_TTL,
-        )
-        async with self._factory.begin() as session:
-            locked = await session.scalar(
-                select(Step)
-                .where(
-                    Step.id == request.step_id,
-                    Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
-                    Step.lease_owner == request.lease.owner,
-                    Step.lease_generation == request.lease.generation,
-                )
-                .with_for_update()
-            )
-            if locked is None:
-                raise LeaseLost("dependency approval lost its step lease")
-            existing = await session.scalar(select(Approval).where(Approval.step_id == step.id))
-            if existing is not None:
-                return existing
-            session.add(approval)
-            locked.payload = {
-                **locked.payload,
-                "approval_id": str(approval.id),
-                "action_envelope": envelope,
-            }
-            locked.external_idempotency_key = f"install-dependencies:{digest}"
-            await session.flush()
-        return approval
-
     async def _assert_current_lease(self, request: StepExecutionRequest) -> None:
         async with self._factory() as session:
             step = await session.scalar(
@@ -330,20 +279,6 @@ class DependencyProvisioningHandler:
                 raise DependencyError("dependency approval changed before completion")
             approval.status = ApprovalStatus.CONSUMED
             approval.consumed_at = approval.consumed_at or datetime.now(UTC)
-
-
-def _needs_approval(
-    approval_id: uuid.UUID, requirements: tuple[DependencyRequest, ...]
-) -> StepOutcome:
-    return StepOutcome(
-        kind=OutcomeKind.NEEDS_APPROVAL,
-        result={
-            "approval_id": str(approval_id),
-            "ecosystems": [item.ecosystem for item in requirements],
-        },
-        category="dependency_installation_approval_required",
-        summary="Зависимости проекта требуют отдельного разрешения.",
-    )
 
 
 def _verify_envelope(

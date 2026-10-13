@@ -43,6 +43,18 @@ class AsyncContext:
         return None
 
 
+@pytest.fixture
+def mock_inventory(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """These handler tests mock storage; real inventory is covered with TEST PG."""
+
+    inventory = AsyncMock(return_value=frozenset())
+    monkeypatch.setattr(CapabilityProvisioningHandler, "_inventory", inventory)
+    monkeypatch.setattr(
+        "vuzol.projects.capability_provisioning.wake_capability_waiters", AsyncMock()
+    )
+    return inventory
+
+
 def _settings(tmp_path: Path, *, enabled: bool = True) -> CapabilityProvisioningSettings:
     bundle_root = tmp_path / "bundles"
     toolchain_root = tmp_path / "toolchains"
@@ -343,7 +355,7 @@ def test_install_rejects_changed_incomplete_and_missing_toolchain(tmp_path: Path
     _android_bundle(incomplete_settings)
     incomplete = OfflineCapabilityInstaller(incomplete_settings)
     (incomplete_settings.toolchain_root / "android-sdk").mkdir()
-    with pytest.raises(CapabilityProvisioningError, match="needs cleanup"):
+    with pytest.raises(CapabilityProvisioningError, match="needs operator attention"):
         incomplete.install(incomplete.inspect_bundle("android-sdk"))
 
     missing_settings = _settings(tmp_path / "missing")
@@ -379,12 +391,13 @@ def test_install_rejects_excessive_or_invalid_tar(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_missing_android_bundle_requests_separate_hash_bound_approval(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mock_inventory: AsyncMock
 ) -> None:
     settings = _settings(tmp_path)
     digest = _android_bundle(settings)
     installer = MagicMock(spec=OfflineCapabilityInstaller)
     installer.installation_root = settings.toolchain_root
+    installer.node_id = "local"
     installer.ready.return_value = False
     installer.inspect_bundle.return_value = CapabilityBundle(
         "android-sdk",
@@ -406,6 +419,7 @@ async def test_missing_android_bundle_requests_separate_hash_bound_approval(
     write = MagicMock()
     write.scalar = AsyncMock(side_effect=(step, None))
     write.flush = AsyncMock()
+    write.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
     factory = MagicMock(return_value=AsyncContext(read))
     factory.begin.side_effect = (AsyncContext(read), AsyncContext(write))
     monkeypatch.setattr(
@@ -438,9 +452,15 @@ async def test_capability_handler_ready_and_external_setup_paths(
     provisioning: str,
     expected_kind: OutcomeKind,
     expected_category: str | None,
+    mock_inventory: AsyncMock,
 ) -> None:
     request = _request()
     task, step, environment = _state(request, provisioning=provisioning)
+    if provisioning == "external_setup":
+        environment.contract["capabilities"] = {
+            "user-account": {"label": "Account", "provisioning": provisioning}
+        }
+    mock_inventory.return_value = frozenset({"android-sdk"}) if ready else frozenset()
     read = MagicMock()
     read.get = AsyncMock(return_value=task)
     read.scalar = AsyncMock(side_effect=(step, None))
@@ -465,7 +485,7 @@ async def test_capability_handler_ready_and_external_setup_paths(
 
 @pytest.mark.anyio
 async def test_approved_capability_bundle_is_installed_consumed_and_reported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mock_inventory: AsyncMock
 ) -> None:
     settings = _settings(tmp_path)
     digest = _android_bundle(settings)
@@ -511,7 +531,7 @@ async def test_approved_capability_bundle_is_installed_consumed_and_reported(
     factory.begin.side_effect = (AsyncContext(read), AsyncContext(consume))
     installer = MagicMock(spec=OfflineCapabilityInstaller)
     installer.installation_root = settings.toolchain_root
-    installer.ready.side_effect = (False, True)
+    installer.ready.return_value = True
     installer.inspect_bundle.return_value = bundle
     monkeypatch.setattr(
         "vuzol.projects.capability_provisioning.current_environment",
@@ -531,7 +551,7 @@ async def test_approved_capability_bundle_is_installed_consumed_and_reported(
 
 @pytest.mark.anyio
 async def test_pending_capability_approval_waits_without_installing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mock_inventory: AsyncMock
 ) -> None:
     request = _request()
     task, step, environment = _state(request)

@@ -15,9 +15,10 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.execution.paths import contained
 from vuzol.projects.toolchains import ToolchainSpec, load_installed_toolchain
 from vuzol.security.confined_paths import executable_within_roots
 from vuzol.storage.models import CapabilityInstallation, CapabilityRunPin
@@ -83,6 +84,11 @@ async def record_installation(
 ) -> CapabilityInstallation:
     state, spec, detail = probe
     moment = now or datetime.now(UTC)
+    lock_key = int.from_bytes(
+        hashlib.sha256(f"installation:{node_id}:{capability_key}".encode()).digest()[:8],
+        signed=True,
+    )
+    await session.execute(select(func.pg_advisory_xact_lock(lock_key)))
     row = await session.scalar(
         select(CapabilityInstallation)
         .where(
@@ -136,13 +142,84 @@ async def installation_states(
     states: dict[str, str] = {}
     for row in rows:
         if row.status == InstallationState.INSTALLED.value:
-            if row.health_until is not None and row.health_until <= moment:
+            if row.probe_status != "healthy":
+                states[row.capability_key] = InstallationState.FAILED.value
+            elif row.health_until is None or row.health_until <= moment:
                 states[row.capability_key] = InstallationState.STALE.value
             else:
                 states[row.capability_key] = InstallationState.INSTALLED.value
         else:
             states[row.capability_key] = row.status or InstallationState.UNKNOWN.value
     return states
+
+
+async def verify_installed_capability(
+    session: AsyncSession,
+    *,
+    root: Path,
+    capability_key: str,
+    node_id: str,
+    health_ttl_seconds: int,
+    environment_hash: str | None = None,
+) -> ToolchainSpec | None:
+    """Resolve the shared inventory, rechecking bytes before sandbox exposure.
+
+    A stale or legacy receipt can be re-verified without installation or human
+    approval. A recorded failed installation is attention, never silently healed.
+    This does not grant permission to execute an action or access a secret.
+    """
+
+    lock_key = int.from_bytes(
+        hashlib.sha256(f"installation:{node_id}:{capability_key}".encode()).digest()[:8],
+        signed=True,
+    )
+    await session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+    row = await session.scalar(
+        select(CapabilityInstallation)
+        .where(
+            CapabilityInstallation.capability_key == capability_key,
+            CapabilityInstallation.node_id == node_id,
+        )
+        .with_for_update()
+    )
+    if row is not None and (
+        row.status == InstallationState.FAILED.value or row.probe_status == "failed"
+    ):
+        raise ValueError(f"registered capability is not healthy: {capability_key}")
+    if row is not None and row.installation_root != str(root):
+        raise ValueError(f"registered capability belongs to another root: {capability_key}")
+    state, spec, detail = probe_toolchain(root, capability_key, confined_roots=(root,))
+    if spec is None and row is None:
+        if _installation_target_exists(root, capability_key):
+            raise ValueError(f"capability installation is incomplete: {capability_key}")
+        return None
+    if spec is None:
+        raise ValueError(f"registered capability receipt is missing or invalid: {capability_key}")
+    if (
+        row is not None
+        and spec is not None
+        and row.receipt_hash
+        not in {
+            None,
+            receipt_digest(spec),
+        }
+    ):
+        state = InstallationState.FAILED
+        detail = "managed toolchain receipt differs from the registered installation"
+    await record_installation(
+        session,
+        probe=(state, spec, detail),
+        capability_key=capability_key,
+        installation_root=root,
+        node_id=node_id,
+        environment_hash=environment_hash,
+        health_ttl_seconds=health_ttl_seconds,
+    )
+    return spec if state is InstallationState.INSTALLED else None
+
+
+def _installation_target_exists(root: Path, capability_key: str) -> bool:
+    return root.is_dir() and contained(root, root / capability_key, must_exist=False).exists()
 
 
 async def pin_capability(
@@ -171,9 +248,7 @@ async def pin_capability(
     return pin
 
 
-async def pin_matches(
-    session: AsyncSession, *, run_id: uuid.UUID, spec: ToolchainSpec
-) -> bool:
+async def pin_matches(session: AsyncSession, *, run_id: uuid.UUID, spec: ToolchainSpec) -> bool:
     """A downgrade/upgrade must not silently change an already-pinned run."""
 
     pin = await session.scalar(

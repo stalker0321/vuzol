@@ -186,6 +186,20 @@ def descriptor_for(key: str) -> CapabilityDescriptor | None:
     return _DESCRIPTORS_BY_KEY.get(key)
 
 
+def is_tool_requirement(key: str) -> bool:
+    """Tools declare a need; legacy project provisioning flags are not policy.
+
+    Unknown resources and actions retain their explicit authorization boundary.
+    Android's operator-staged bundle predates the descriptor registry.
+    """
+
+    descriptor = descriptor_for(key)
+    return key == "android-sdk" or (
+        descriptor is not None
+        and descriptor.kind in {CapabilityKind.HOST_TOOL, CapabilityKind.MANAGED_TOOLCHAIN}
+    )
+
+
 # Capability enum value (vuzol.config.models.Capability) -> descriptor key.
 # Only capabilities with a vetted retrieval/execution meaning are mapped;
 # unmapped capabilities have no registry selection.

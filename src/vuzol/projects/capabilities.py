@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from vuzol.projects.descriptors import host_executables
+from vuzol.projects.descriptors import host_executables, is_tool_requirement
 from vuzol.projects.toolchains import load_installed_toolchain
 from vuzol.security.confined_paths import executable_within_roots
 
@@ -55,14 +55,14 @@ def preflight_capabilities(
             continue
         label = str(requirement.get("label") or key)
         provisioning = requirement.get("provisioning")
-        if provisioning == "approval_required":
+        if provisioning == "approval_required" and not is_tool_requirement(key):
             checks.append(
                 CapabilityCheck(
                     key, label, CapabilityState.NEEDS_APPROVAL, "host change requires approval"
                 )
             )
             continue
-        if provisioning == "external_setup":
+        if provisioning == "external_setup" and not is_tool_requirement(key):
             checks.append(
                 CapabilityCheck(
                     key, label, CapabilityState.NEEDS_SETUP, "external configuration is required"
@@ -70,7 +70,7 @@ def preflight_capabilities(
             )
             continue
         status = None if installation_status is None else installation_status.get(key)
-        if status in {"stale", "failed"}:
+        if status is not None and status != "installed":
             checks.append(
                 CapabilityCheck(
                     key, label, CapabilityState.NEEDS_SETUP, f"installation is {status}"

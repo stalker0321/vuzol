@@ -10,10 +10,29 @@ from vuzol.project_environment import (
     apply_approved_environment_delta,
     current_environment,
     detect_environment_contract,
+    detect_tool_requirements,
     environment_hash,
     record_detected_environment,
 )
 from vuzol.storage.models import ProjectEnvironmentRevision
+
+
+def test_tool_detection_reads_explicit_needs_not_browser_code(tmp_path: Path) -> None:
+    (tmp_path / "app.js").write_text("// node is just a word here\n")
+    (tmp_path / "Makefile").write_text("# node --test\nhelp:\n\techo node\n")
+    assert detect_tool_requirements(tmp_path) == {}
+    (tmp_path / "Makefile").write_text("test:\n\t@node --test\n")
+    assert set(detect_tool_requirements(tmp_path)) == {"node-runtime"}
+
+
+def test_tool_detection_does_not_read_external_symlinks(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.write_text("test:\n\tnode --test\n")
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "Makefile").symlink_to(outside)
+    (repository / "package.json").symlink_to(outside)
+    assert detect_tool_requirements(repository) == {}
 
 
 def test_detects_node_web_service_without_executing_repository(tmp_path: Path) -> None:

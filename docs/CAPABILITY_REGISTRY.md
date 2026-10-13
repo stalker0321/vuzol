@@ -1,5 +1,43 @@
 # Capability registry, installations and local node (WP03)
 
+## Current capability / dependency policy (2026-10-13)
+
+Projects declare **what they need**, not how to install it or which permissions
+to grant. Legacy `provisioning` fields remain readable, but do not determine
+installation approval for known tools. Action/secret/external-resource boundaries
+are not removed: available != authorized, installed != healthy, declared != verified.
+
+The existing handler resolves node-scoped inventory first, rechecks the receipt
+and confined executable paths, refreshes stale health without installation, and
+fails closed on recorded failure, missing receipt, changed registered receipt or
+root mismatch. A verified existing installation is reused across projects, even
+when the installer feature is disabled. Built-in Git/Python host tools retain
+their existing compatibility path; a recorded non-healthy host tool is rejected.
+
+Missing reviewed shared toolchains use one hash/source/root/node-bound approval.
+Concurrent projects (including overlapping requirement sets) share the pending
+installation; consumption wakes the waiters, rejection wakes them to attention.
+Only the applier installs shared toolchains. The executor remains read-only on
+the shared toolchain root. An approval wait does not spend an install attempt.
+
+After code generation, explicit manifests and Node Makefile recipes can append
+new requirements to the existing immutable environment history. No permanent
+stack/component is inferred from browser JS. Missing tools add an ordinary
+existing privileged `ensure_capabilities` step before the dependency step resumes;
+this is not an LLM repair, another planner, or a new workflow type.
+
+Project-local dependencies use the existing bounded manifest/lockfile inspection,
+controlled-egress sandbox builder and immutable per-project environments without
+a new human approval. Legacy approval envelopes/decisions remain readable; an
+explicit rejection is not silently overridden. Custom sources still require
+explicit project-scoped registration. Secrets, prod deployment, external writes
+and sensitive integrations retain their separate authorization paths.
+
+The default-off provisioning feature flags are deployment readiness controls,
+not project-level permission grants; this code change does not enable installation
+in production or fabricate owner consent. Node's first shared installation still
+requires the real installation approval.
+
 Status: implemented additively. Three distinct facts stay separate
 (`docs/contracts/ADR-A01.md`): **descriptor** (what the capability means), **installation** (where
 it is verifiably available) and **permission grant** (`Capability` enum /
@@ -54,8 +92,8 @@ status.
 `record_installation` is called from the existing post-install probe in
 `CapabilityProvisioningHandler.execute` (after `installer.install` + `ready()`):
 managed capabilities are probed and recorded with the environment hash; a failed
-probe is recorded as `failed` before the step blocks. Approval-path code is not
-touched.
+probe is recorded as `failed` before the step blocks. These records are also
+checked/refreshed before reuse under the current policy.
 
 `preflight_capabilities(..., installation_status=..., approved_roots=...)`
 excludes `stale`/`failed` installations (→ `NEEDS_SETUP`) and rejects a

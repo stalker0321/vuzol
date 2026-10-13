@@ -28,7 +28,7 @@ from vuzol.projects.dependencies import (
     dependency_environment_path,
     load_dependency_environment,
 )
-from vuzol.projects.installations import enforce_run_pins
+from vuzol.projects.installations import enforce_run_pins, verify_installed_capability
 from vuzol.projects.toolchains import toolchain_runtime
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
@@ -77,6 +77,15 @@ class SandboxedDependencyBuilder:
                 # WP03: fail closed if the managed Node toolchain changed after
                 # this run pinned its version.
                 async with self._factory.begin() as session:
+                    spec = await verify_installed_capability(
+                        session,
+                        root=toolchain_root,
+                        capability_key="node-runtime",
+                        node_id=self._settings.capability_provisioning.node_id,
+                        health_ttl_seconds=self._settings.capability_provisioning.health_ttl_seconds,
+                    )
+                    if spec is None:
+                        raise DependencyBuildError("managed Node.js installation is not healthy")
                     await enforce_run_pins(
                         session,
                         run_id=step_request.run_id,

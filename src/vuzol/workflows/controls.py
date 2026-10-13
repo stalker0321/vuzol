@@ -257,6 +257,10 @@ async def decide_result(
     )
     if decision == "approve":
         approval.status = ApprovalStatus.APPROVED
+        if installation_action and step.attempt_count > 0:
+            # Inspecting needs and asking for consent performed no installation.
+            # The approved install must remain claimable even with max_attempts=1.
+            step.attempt_count -= 1
         await transition_step(
             session, step, StepStatus.QUEUED, actor_type="user", actor_id=actor_id
         )
@@ -339,6 +343,10 @@ async def decide_result(
         )
     else:
         raise ValueError(f"unsupported result decision: {decision}")
+    if approval.requested_action == "install_capabilities" and decision == "reject":
+        from vuzol.projects.capability_provisioning import wake_capability_waiters
+
+        await wake_capability_waiters(session, approval)
     session.add(
         Event(
             entity_type="task",
@@ -446,6 +454,11 @@ async def cancel_task(
         step.lease_expires_at = None
     await transition_run(session, run, RunStatus.CANCELLED, actor_type="user", actor_id=actor_id)
     await transition_task(session, task, TaskStatus.CANCELLED, actor_type="user", actor_id=actor_id)
+    from vuzol.projects.capability_provisioning import abandon_capability_installation
+
+    for step in steps:
+        if step.step_type == "ensure_capabilities":
+            await abandon_capability_installation(session, step.id, reason="leader_cancelled")
     session.add(
         Event(
             entity_type="task",

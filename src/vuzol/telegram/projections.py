@@ -1002,6 +1002,7 @@ def _capability_approval_fact_lines(
             f"• Скачать/проверить: {_format_bytes(total_bytes)}",
             "• Установка: управляемое хранилище Vuzol, без системного package manager",
             "• После установки toolchain монтируется в sandbox только для чтения",
+            "• Проверенная установка будет доступна другим проектам без повторного разрешения",
             "",
             "Разрешить установку этих инструментов?",
         )
@@ -1677,6 +1678,11 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
                 Approval.status == ApprovalStatus.PENDING,
             )
         )
+        if approval is None and isinstance(step.payload.get("capability_wait_approval_id"), str):
+            lines.append(
+                "Ожидается общая установка инструмента на ноду. "
+                "Разрешение уже запрошено; для этого проекта повторный апрув не нужен."
+            )
     if (
         approval is not None
         and materialization is not None

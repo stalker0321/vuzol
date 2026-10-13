@@ -66,22 +66,25 @@ def _state(
 
 
 @pytest.mark.anyio
-async def test_dependency_manifest_requests_separate_hash_bound_approval(tmp_path: Path) -> None:
+async def test_dependency_manifest_builds_automatically_without_approval(tmp_path: Path) -> None:
     request = _request()
     task, step, worktree = _state(tmp_path, request)
     read = MagicMock()
     read.get = AsyncMock(side_effect=(task, step))
     read.scalar = AsyncMock(side_effect=(worktree, None))
     read.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
-    write = MagicMock()
-    write.scalar = AsyncMock(side_effect=(step, None))
-    write.flush = AsyncMock()
-    factory = MagicMock(return_value=AsyncContext(read))
-    factory.begin.return_value = AsyncContext(write)
+    lease = MagicMock()
+    lease.scalar = AsyncMock(return_value=step)
+    factory = MagicMock(side_effect=(AsyncContext(read), AsyncContext(lease)))
     settings = DependencyProvisioningSettings(
         enabled=True, environment_root=tmp_path / "environments"
     )
     builder = MagicMock()
+    builder.build = AsyncMock(
+        return_value=SimpleNamespace(
+            request=SimpleNamespace(environment_key="verified-python-environment")
+        )
+    )
     handler = DependencyProvisioningHandler(
         cast(Any, factory),
         settings,
@@ -91,13 +94,12 @@ async def test_dependency_manifest_requests_separate_hash_bound_approval(tmp_pat
 
     outcome = await handler.execute(request, CancellationContext())
 
-    assert outcome.kind is OutcomeKind.NEEDS_APPROVAL
-    approval = write.add.call_args.args[0]
-    assert approval.requested_action == "install_dependencies"
-    envelope = step.payload["action_envelope"]
-    assert envelope["schema_version"] == DEPENDENCY_APPROVAL_SCHEMA
-    assert envelope["requirements"][0]["direct_dependencies"] == ["fastapi>=1"]
-    builder.build.assert_not_called()
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    assert outcome.result["authorization"] == "project_local_dependency_policy"
+    assert "action_envelope" not in step.payload
+    factory.begin.assert_not_called()
+    builder.build.assert_awaited_once()
+    assert builder.build.call_args.kwargs["request"].direct_dependencies == ("fastapi>=1",)
 
 
 @pytest.mark.anyio

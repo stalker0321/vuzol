@@ -44,10 +44,11 @@ from vuzol.projects.dependencies import (
     inspect_dependency_requests,
     load_dependency_environment,
 )
+from vuzol.projects.descriptors import is_tool_requirement
 from vuzol.projects.executor_preference import apply_profile_overrides
-from vuzol.projects.installations import enforce_run_pins
+from vuzol.projects.installations import enforce_run_pins, verify_installed_capability
 from vuzol.projects.source_catalog import SourceCatalog
-from vuzol.projects.toolchains import ToolchainRuntime, toolchain_runtime
+from vuzol.projects.toolchains import ToolchainRuntime, load_installed_toolchain, toolchain_runtime
 from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.grok import (
     GROK_DIAGNOSTIC_FILE_MAX_BYTES,
@@ -359,8 +360,6 @@ class ExecutionEnvelopeFactory:
 
     async def _managed_artifact_runtime(self, worktree_id: uuid.UUID) -> ToolchainRuntime:
         root = self._settings.capability_provisioning.toolchain_root
-        if not root.is_dir():
-            return ToolchainRuntime()
         async with self._factory() as session:
             worktree = await session.get(Worktree, worktree_id)
             environment = (
@@ -377,15 +376,39 @@ class ExecutionEnvelopeFactory:
                 for key, value in raw.items()
                 if isinstance(key, str)
                 and isinstance(value, dict)
-                and value.get("provisioning", "automatic") == "automatic"
+                and (
+                    is_tool_requirement(key)
+                    or value.get("provisioning", "automatic") == "automatic"
+                )
             )
             if isinstance(raw, dict)
             else ()
         )
+        if not root.is_dir():
+            if any(key not in {"git", "python-runtime"} for key in capability_keys):
+                raise ValueError("declared managed capability is not installed on this node")
+            return ToolchainRuntime()
         verified_root = trusted_root(root, create=False)
         # WP03: pin the resolved versions on first use and fail closed if the
         # on-disk toolchain changed (downgrade/upgrade) for this run.
         async with self._factory.begin() as session:
+            for key in capability_keys:
+                # Hosts tools already provided by the pinned validation image
+                # do not require a managed receipt. A present managed receipt,
+                # however, must agree with the healthy shared inventory.
+                if load_installed_toolchain(verified_root, key) is None:
+                    if key in {"git", "python-runtime"}:
+                        continue
+                    raise ValueError(f"managed capability receipt is missing or invalid: {key}")
+                spec = await verify_installed_capability(
+                    session,
+                    root=verified_root,
+                    capability_key=key,
+                    node_id=self._settings.capability_provisioning.node_id,
+                    health_ttl_seconds=self._settings.capability_provisioning.health_ttl_seconds,
+                )
+                if spec is None:
+                    raise ValueError(f"managed capability is not healthy: {key}")
             await enforce_run_pins(
                 session,
                 run_id=worktree.run_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import CapabilityProvisioningSettings
@@ -25,11 +26,15 @@ from vuzol.project_environment import (
     current_environment,
     environment_hash,
     record_detected_environment,
+    record_detected_tool_requirements,
 )
+from vuzol.projects.descriptors import is_tool_requirement
 from vuzol.projects.installations import (
     InstallationState,
+    installation_states,
     probe_toolchain,
     record_installation,
+    verify_installed_capability,
 )
 from vuzol.projects.source_catalog import SourceCatalog, ToolchainSource
 from vuzol.projects.source_download import SourceDownloadError, TrustedSourceDownloader
@@ -42,11 +47,25 @@ from vuzol.projects.toolchains import (
     parse_toolchain_spec,
 )
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import Approval, ProjectEnvironmentRevision, Step, Task
-from vuzol.storage.types import ApprovalStatus, StepStatus
+from vuzol.storage.models import (
+    Approval,
+    Event,
+    ProjectEnvironmentRevision,
+    Run,
+    Step,
+    Task,
+    Worktree,
+)
+from vuzol.storage.types import (
+    ApprovalStatus,
+    RunStatus,
+    StepStatus,
+    TaskStatus,
+)
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.result_approval import envelope_hash, verified_envelope
+from vuzol.workflows.transitions import transition_step, transition_task
 
 CAPABILITY_APPROVAL_SCHEMA = "capability-provisioning-approval.v1"
 CAPABILITY_BUNDLE_SCHEMA = "capability-bundle.v2"
@@ -242,20 +261,34 @@ class OfflineCapabilityInstaller:
         )
 
     def install(self, bundle: CapabilityBundle) -> None:
+        if self.inspect_bundle(bundle.capability_key) != bundle:
+            raise CapabilityProvisioningError("capability bundle changed after approval")
+        root = trusted_root(self._settings.toolchain_root, create=True)
+        lock_path = contained(root, root / ".installation.lock", must_exist=False)
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "rb") as lock:
+            if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+                raise CapabilityProvisioningError("installation lock is not a regular file")
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            self._install_locked(bundle, root)
+
+    def _install_locked(self, bundle: CapabilityBundle, root: Path) -> None:
         current = self.inspect_bundle(bundle.capability_key)
         if current != bundle:
             raise CapabilityProvisioningError("capability bundle changed after approval")
+        target = contained(root, root / bundle.capability_key, must_exist=False)
+        if target.exists():
+            installed = load_installed_toolchain(root, bundle.capability_key)
+            if installed == bundle.toolchain_spec():
+                return
+            raise CapabilityProvisioningError(
+                "incomplete or different capability installation needs operator attention"
+            )
         if bundle.source is not None:
             try:
                 bundle = replace(bundle, archive=self._downloader.materialize(bundle.source))
             except SourceDownloadError as error:
                 raise CapabilityProvisioningError(str(error)) from error
-        root = trusted_root(self._settings.toolchain_root, create=True)
-        target = contained(root, root / bundle.capability_key, must_exist=False)
-        if target.exists():
-            if self.ready(bundle.capability_key):
-                return
-            raise CapabilityProvisioningError("incomplete capability installation needs cleanup")
         temporary = contained(
             root, root / f".{bundle.capability_key}-{uuid.uuid4().hex}.tmp", must_exist=False
         )
@@ -407,10 +440,54 @@ class CapabilityProvisioningHandler:
         installer: OfflineCapabilityInstaller,
         *,
         registries: ConfigurationBundle | None = None,
+        worktree_root: Path | None = None,
     ) -> None:
         self._factory = factory
         self._installer = installer
         self._registries = registries
+        self._worktree_root = worktree_root
+
+    async def ensure_before_dependencies(
+        self, request: StepExecutionRequest, cancellation: CancellationContext
+    ) -> StepOutcome:
+        """Hand newly declared needs to the existing privileged applier step.
+
+        The executor never installs a shared toolchain or gains host-write access.
+        This is an ordinary additional instance of ensure_capabilities, not a
+        planner call, a source repair, or a new workflow type.
+        """
+
+        if cancellation.requested:
+            return StepOutcome(kind=OutcomeKind.CANCELLED, result={}, category="cancelled")
+        try:
+            _task, _step, environment, _approval, inventory = await self._load(request)
+            missing = [
+                key
+                for key, _label, _mode in _requirements(environment.contract)
+                if key not in inventory
+            ]
+            if not missing:
+                return StepOutcome.succeeded({"status": "ready"})
+            return StepOutcome(
+                kind=OutcomeKind.BLOCKED,
+                result={
+                    "environment_revision_id": str(environment.id),
+                    "environment_hash": environment.content_hash,
+                    "capabilities": missing,
+                },
+                category="capability_preflight_required",
+                summary="Общую установку инструментов проверит привилегированный applier.",
+            )
+        except LeaseLost:
+            cancellation.request()
+            return StepOutcome(kind=OutcomeKind.CANCELLED, result={}, category="lease_lost")
+        except (CapabilityProvisioningError, LookupError, ValueError) as error:
+            return StepOutcome(
+                kind=OutcomeKind.BLOCKED,
+                result={},
+                category="capability_provisioning_failed",
+                summary=str(error)[:500],
+            )
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -419,13 +496,15 @@ class CapabilityProvisioningHandler:
             return StepOutcome(kind=OutcomeKind.CANCELLED, result={}, category="cancelled")
         side_effect_started = False
         try:
-            task, step, environment, approval = await self._load(request)
+            task, step, environment, approval, inventory = await self._load(request)
             requirements = _requirements(environment.contract)
-            missing = tuple(
-                key for key, _label, _mode in requirements if not self._installer.ready(key)
-            )
+            missing = tuple(key for key, _label, _mode in requirements if key not in inventory)
             if not missing:
-                if approval is not None and approval.status is ApprovalStatus.APPROVED:
+                if (
+                    approval is not None
+                    and approval.status is ApprovalStatus.APPROVED
+                    and step.payload.get("capability_wait_approval_id") != str(approval.id)
+                ):
                     await self._consume(request, approval.id)
                 return StepOutcome.succeeded({"status": "ready", "capabilities": []})
             if approval is None:
@@ -433,7 +512,7 @@ class CapabilityProvisioningHandler:
                 for key, label, mode in requirements:
                     if key not in missing:
                         continue
-                    if mode == "external_setup":
+                    if mode == "external_setup" and not is_tool_requirement(key):
                         return _needs_setup(key, label, "external configuration is required")
                     try:
                         bundles.append(self._installer.inspect_bundle(key))
@@ -450,16 +529,32 @@ class CapabilityProvisioningHandler:
                     kind=OutcomeKind.NEEDS_APPROVAL,
                     result={"approval_id": str(approval.id), "capabilities": list(missing)},
                     category="capability_installation_approval_required",
-                    summary="Установка инструментов проекта требует отдельного разрешения.",
+                    summary=(
+                        "Ожидается общая установка инструмента на ноду; новый апрув не нужен."
+                        if step.payload.get("capability_wait_approval_id")
+                        else "Нужен апрув первой установки инструмента на общую ноду."
+                    ),
                 )
-            if approval.status is ApprovalStatus.PENDING:
+            shared_waiter = step.payload.get("capability_wait_approval_id") == str(approval.id)
+            if approval.status is ApprovalStatus.PENDING or (
+                shared_waiter and approval.status is ApprovalStatus.APPROVED
+            ):
                 return StepOutcome(
                     kind=OutcomeKind.NEEDS_APPROVAL,
                     result={"approval_id": str(approval.id), "capabilities": list(missing)},
                     category="capability_installation_approval_required",
+                    summary=(
+                        "Ожидается общая установка инструмента на ноду."
+                        if shared_waiter
+                        else "Ожидается подтверждение установки инструмента."
+                    ),
                 )
             if approval.status not in {ApprovalStatus.APPROVED, ApprovalStatus.CONSUMED}:
                 raise CapabilityProvisioningError("capability installation was not approved")
+            if shared_waiter:
+                raise CapabilityProvisioningError(
+                    "shared installation is not healthy after install"
+                )
             envelope = verified_envelope(step, approval)
             _verify_environment(envelope, environment, self._installer)
             raw_bundles = envelope.get("bundles")
@@ -529,7 +624,7 @@ class CapabilityProvisioningHandler:
 
     async def _load(
         self, request: StepExecutionRequest
-    ) -> tuple[Task, Step, ProjectEnvironmentRevision, Approval | None]:
+    ) -> tuple[Task, Step, ProjectEnvironmentRevision, Approval | None, frozenset[str]]:
         async with self._factory.begin() as session:
             task = await session.get(Task, request.task_id)
             step = await session.scalar(
@@ -561,15 +656,95 @@ class CapabilityProvisioningHandler:
                 environment = await record_detected_environment(
                     session, project_id=task.project_id, repository=project.repository_path
                 )
+            if task.project_id is not None and self._worktree_root is not None:
+                worktree = await session.scalar(
+                    select(Worktree).where(
+                        Worktree.task_id == task.id,
+                        Worktree.run_id == request.run_id,
+                        Worktree.project_id == task.project_id,
+                    )
+                )
+                if worktree is not None:
+                    path = contained(self._worktree_root, Path(worktree.path))
+                    environment = await record_detected_tool_requirements(
+                        session, project_id=task.project_id, repository=path
+                    )
             approval = await session.scalar(
                 select(Approval)
-                .where(Approval.step_id == request.step_id)
+                .where(
+                    Approval.step_id == request.step_id,
+                    Approval.requested_action == "install_capabilities",
+                )
                 .order_by(Approval.requested_at.desc())
                 .limit(1)
             )
+            shared_id = step.payload.get("capability_wait_approval_id")
+            if approval is None and isinstance(shared_id, str):
+                approval = await session.get(Approval, uuid.UUID(shared_id))
+                if approval is None:
+                    raise CapabilityProvisioningError("shared installation approval is missing")
+                leader = await session.get(Step, approval.step_id)
+                if leader is None:
+                    raise CapabilityProvisioningError("shared installation step is missing")
+                shared_envelope = verified_envelope(leader, approval)
+                if shared_envelope.get("node_id") != self._installer.node_id or shared_envelope.get(
+                    "installation_root"
+                ) != str(self._installer.installation_root):
+                    raise CapabilityProvisioningError("shared installation targets another node")
+                if approval.status is ApprovalStatus.CONSUMED:
+                    step.payload = {
+                        key: value
+                        for key, value in step.payload.items()
+                        if key != "capability_wait_approval_id"
+                    }
+                    session.add(
+                        Event(
+                            entity_type="step",
+                            entity_id=step.id,
+                            event_type="capability.shared_installation_settled",
+                            actor_type="capability_inventory",
+                            payload={"approval_id": str(approval.id)},
+                        )
+                    )
+                    approval = None
+            inventory = (
+                frozenset() if environment is None else await self._inventory(session, environment)
+            )
         if environment is None:
             raise LookupError("capability provisioning state is incomplete")
-        return task, step, environment, approval
+        return task, step, environment, approval, inventory
+
+    async def _inventory(
+        self, session: AsyncSession, environment: ProjectEnvironmentRevision
+    ) -> frozenset[str]:
+        """Resolve verified node installations independently of the project flags."""
+
+        ready: set[str] = set()
+        requirements = _requirements(environment.contract)
+        if not requirements:
+            return frozenset()
+        states = await installation_states(session, node_id=self._installer.node_id)
+        for key, _label, mode in requirements:
+            if not is_tool_requirement(key) and mode in {"external_setup", "approval_required"}:
+                continue
+            if key in _HOST_EXECUTABLES and self._installer.ready(key):
+                if key in states and states[key] != InstallationState.INSTALLED.value:
+                    raise CapabilityProvisioningError(f"host capability is not healthy: {key}")
+                ready.add(key)
+                continue
+            spec = await verify_installed_capability(
+                session,
+                root=self._installer.installation_root,
+                capability_key=key,
+                node_id=self._installer.node_id,
+                health_ttl_seconds=self._installer.health_ttl_seconds,
+                environment_hash=environment.content_hash,
+            )
+            if spec is not None:
+                ready.add(key)
+            elif load_installed_toolchain(self._installer.installation_root, key) is not None:
+                raise CapabilityProvisioningError(f"installed capability is not healthy: {key}")
+        return frozenset(ready)
 
     async def _request_approval(
         self,
@@ -592,18 +767,27 @@ class CapabilityProvisioningHandler:
             "environment_revision_id": str(environment.id),
             "environment_hash": environment.content_hash,
             "installation_root": str(self._installer.installation_root),
+            "node_id": self._installer.node_id,
             "bundles": [bundle.approval_record() for bundle in bundles],
         }
         digest = envelope_hash(envelope)
+        binding = envelope_hash(
+            {
+                "node_id": self._installer.node_id,
+                "installation_root": str(self._installer.installation_root),
+                "bundles": envelope["bundles"],
+            }
+        )
+        target = f"{self._installer.node_id}:managed-toolchains:{binding}"
         approval_id = uuid.uuid4()
         approval = Approval(
             id=approval_id,
             step_id=step.id,
             action_envelope_hash=digest,
             requested_action="install_capabilities",
-            normalized_target=f"{task.project_id}:managed-toolchains",
+            normalized_target=target,
             human_summary=(
-                "Установить в изолированное хранилище Vuzol: "
+                f"Установить один раз на ноду {self._installer.node_id} для всех проектов: "
                 + ", ".join(bundle.capability_key for bundle in bundles)
             ),
             token_hash=hashlib.sha256(f"{approval_id}:{digest}".encode()).hexdigest(),
@@ -611,6 +795,11 @@ class CapabilityProvisioningHandler:
             expires_at=datetime.now(UTC) + CAPABILITY_APPROVAL_TTL,
         )
         async with self._factory.begin() as session:
+            lock_scope = (
+                f"capability-install:{self._installer.node_id}:{self._installer.installation_root}"
+            )
+            lock_key = int.from_bytes(hashlib.sha256(lock_scope.encode()).digest()[:8], signed=True)
+            await session.execute(select(func.pg_advisory_xact_lock(lock_key)))
             locked = await session.scalar(
                 select(Step)
                 .where(
@@ -623,9 +812,66 @@ class CapabilityProvisioningHandler:
             )
             if locked is None:
                 raise LeaseLost("capability approval lost its step lease")
-            existing = await session.scalar(select(Approval).where(Approval.step_id == step.id))
+            existing = await session.scalar(
+                select(Approval).where(
+                    Approval.step_id == step.id, Approval.requested_action == "install_capabilities"
+                )
+            )
             if existing is not None:
                 return existing
+            shared_candidates = tuple(
+                (
+                    await session.execute(
+                        select(Approval, Step)
+                        .join(Step, Step.id == Approval.step_id)
+                        .join(Run, Run.id == Step.run_id)
+                        .where(
+                            Approval.normalized_target.startswith(
+                                f"{self._installer.node_id}:managed-toolchains:"
+                            ),
+                            Approval.requested_action == "install_capabilities",
+                            Approval.status.in_((ApprovalStatus.PENDING, ApprovalStatus.APPROVED)),
+                            Approval.expires_at > func.now(),
+                            Run.status == RunStatus.RUNNING,
+                            Step.status.in_(
+                                (
+                                    StepStatus.RUNNING,
+                                    StepStatus.WAITING_APPROVAL,
+                                    StepStatus.QUEUED,
+                                    StepStatus.LEASED,
+                                )
+                            ),
+                        )
+                        .order_by(Approval.requested_at)
+                    )
+                ).all()
+            )
+            expected_records = {
+                bundle.capability_key: bundle.approval_record() for bundle in bundles
+            }
+            shared: Approval | None = None
+            for candidate, candidate_step in shared_candidates:
+                candidate_envelope = verified_envelope(candidate_step, candidate)
+                records = candidate_envelope.get("bundles")
+                if (
+                    candidate_envelope.get("node_id") == self._installer.node_id
+                    and candidate_envelope.get("installation_root")
+                    == str(self._installer.installation_root)
+                    and isinstance(records, list)
+                    and any(
+                        isinstance(record, dict)
+                        and expected_records.get(str(record.get("capability_key"))) == record
+                        for record in records
+                    )
+                ):
+                    shared = candidate
+                    break
+            if shared is not None:
+                locked.payload = {
+                    **locked.payload,
+                    "capability_wait_approval_id": str(shared.id),
+                }
+                return shared
             session.add(approval)
             locked.payload = {
                 **locked.payload,
@@ -670,6 +916,68 @@ class CapabilityProvisioningHandler:
                 raise CapabilityProvisioningError("capability approval changed before completion")
             approval.status = ApprovalStatus.CONSUMED
             approval.consumed_at = approval.consumed_at or datetime.now(UTC)
+            await wake_capability_waiters(session, approval)
+
+
+async def wake_capability_waiters(session: AsyncSession, approval: Approval) -> None:
+    """Wake existing steps after a shared install settles; never invent an approval."""
+
+    waiters = tuple(
+        (
+            await session.scalars(
+                select(Step)
+                .join(Run, Run.id == Step.run_id)
+                .where(
+                    Step.status == StepStatus.WAITING_APPROVAL,
+                    Step.payload["capability_wait_approval_id"].astext == str(approval.id),
+                    Run.status == RunStatus.RUNNING,
+                )
+                .with_for_update(of=Step, skip_locked=True)
+            )
+        ).all()
+    )
+    for waiter in waiters:
+        await transition_step(session, waiter, StepStatus.QUEUED, actor_type="capability_inventory")
+        if waiter.attempt_count > 0:
+            waiter.attempt_count -= 1
+        run = await session.get(Run, waiter.run_id)
+        task = None if run is None else await session.get(Task, run.task_id)
+        if task is not None and task.status is TaskStatus.WAITING_APPROVAL:
+            await transition_task(
+                session, task, TaskStatus.EXECUTING, actor_type="capability_inventory"
+            )
+
+
+async def abandon_capability_installation(
+    session: AsyncSession, step_id: uuid.UUID, *, reason: str
+) -> None:
+    """A cancelled/failed leader must not strand other projects' waiters."""
+
+    approvals = tuple(
+        (
+            await session.scalars(
+                select(Approval)
+                .where(
+                    Approval.step_id == step_id,
+                    Approval.requested_action == "install_capabilities",
+                    Approval.status.in_((ApprovalStatus.PENDING, ApprovalStatus.APPROVED)),
+                )
+                .with_for_update()
+            )
+        ).all()
+    )
+    for approval in approvals:
+        approval.status = ApprovalStatus.EXPIRED
+        session.add(
+            Event(
+                entity_type="approval",
+                entity_id=approval.id,
+                event_type="capability.installation_unavailable",
+                actor_type="workflow_manager",
+                payload={"step_id": str(step_id), "reason": reason},
+            )
+        )
+        await wake_capability_waiters(session, approval)
 
 
 def _requirements(contract: dict[str, object]) -> tuple[tuple[str, str, str], ...]:
@@ -707,6 +1015,7 @@ def _verify_environment(
         or envelope.get("environment_hash") != environment.content_hash
         or envelope.get("project_id") != environment.project_id
         or envelope.get("installation_root") != str(installer.installation_root)
+        or envelope.get("node_id", installer.node_id) != installer.node_id
     ):
         raise CapabilityProvisioningError(
             "project environment changed after approval was requested"

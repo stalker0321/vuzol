@@ -24,7 +24,9 @@ from vuzol.providers.ports import CodexInvocation, CodexProcessTransport
 from vuzol.workflows.ports import CancellationContext
 
 
-def canonical_grok_argv(model: str, *, read_only: bool = False) -> tuple[str, ...]:
+def canonical_grok_argv(
+    model: str, *, read_only: bool = False, reasoning_effort: str | None = None
+) -> tuple[str, ...]:
     """Return the only Grok command accepted by the production transport."""
     argv = [
         "grok",
@@ -84,6 +86,10 @@ def canonical_grok_argv(model: str, *, read_only: bool = False) -> tuple[str, ..
         "--disable-web-search",
         "--verbatim",
     ]
+    if reasoning_effort is not None:
+        if reasoning_effort not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+            raise ValueError("unsupported Grok reasoning effort")
+        argv.extend(["--reasoning-effort", reasoning_effort])
     if not read_only:
         edit_index = argv.index("Read(**)") - 1
         argv[edit_index:edit_index] = ["--allow", "Edit(**)"]
@@ -141,6 +147,7 @@ class GrokCliAdapter:
             argv=canonical_grok_argv(
                 profile.model,
                 read_only=Capability.CODE_EDIT not in request.required_capabilities,
+                reasoning_effort=profile.model_reasoning_effort,
             ),
             stdin=prompt,
             runtime_identity=profile.runtime_identity,
@@ -250,6 +257,25 @@ class GrokProviderCancelled(ValueError):
 def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str, object] | None:
     from pydantic import ValidationError
 
+    if request.output_schema_version == "independent-review.v1":
+        from jsonschema import Draft202012Validator
+        from jsonschema.exceptions import ValidationError as SchemaError
+
+        try:
+            report = json.loads(value)
+            if request.output_json_schema is None:
+                raise ValueError("review output schema is missing")
+            Draft202012Validator(request.output_json_schema).validate(report)
+            if not isinstance(report, dict):
+                raise ValueError("review output must be an object")
+            return report
+        except (json.JSONDecodeError, SchemaError, ValueError) as error:
+            raise ProviderFailure(
+                ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+                retryable=False,
+                request_sent=True,
+                safe_summary="Grok CLI returned an invalid independent review report",
+            ) from error
     if request.output_schema_version == "discussion-agent-reply.v1":
         from vuzol.discussion.agent import DiscussionAgentReply
 

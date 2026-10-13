@@ -144,6 +144,34 @@ def test_content_revision_is_stable_for_frozenset_fields() -> None:
     assert digests == {content_revision(left)}
 
 
+@pytest.mark.parametrize(
+    "invalid", [{"enabled": False}, {"roles": {"executor"}}, {"provider": "pi"}]
+)
+def test_configured_cli_reviewer_fails_closed(tmp_path, invalid):
+    configured = settings(tmp_path, execution={"reviewer_profile_id": "grok-a"})
+    values = dict(
+        id="grok-a",
+        provider="grok",
+        model="grok-4.7",
+        model_reasoning_effort="high",
+        launch_mode="cli",
+        api_base_url=None,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="grok-a",
+        state_directory=tmp_path,
+        roles={"reviewer"},
+        supported_task_types={"coding"},
+        sandbox_required=True,
+    )
+    valid = profile(**values)
+    assert (
+        build_bundle(RegistryDocument(profiles=(valid,)), configured).profiles.get("grok-a").enabled
+    )
+    with pytest.raises(ConfigurationLoadError, match="sandboxed Grok CLI reviewer"):
+        build_bundle(RegistryDocument(profiles=(profile(**{**values, **invalid}),)), configured)
+
+
 def test_bundle_rejects_unknown_topic_project(tmp_path: Path) -> None:
     topic = TopicConfig(
         chat_id=-1,

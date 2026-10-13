@@ -37,6 +37,7 @@ from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.observability import configure_logging, get_logger
 from vuzol.projects.dependency_provisioning import DependencyProvisioningHandler
+from vuzol.providers.cli_readonly import ReadOnlyCliAdapter
 from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.grok import GrokCliAdapter
 from vuzol.providers.handlers import ProviderStepHandler, executor_provider_handlers
@@ -45,6 +46,8 @@ from vuzol.providers.kimi import KimiCliAdapter
 from vuzol.providers.pi import PiCliAdapter
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
+from vuzol.review import ResultReviewHandler
+from vuzol.review.independent import DatabaseReviewAccounting, IndependentModelReviewer
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
@@ -60,11 +63,19 @@ VALIDATION_IMAGE_PREFLIGHT_COMMANDS: tuple[tuple[str, ...], ...] = (
 
 
 class ExecutorChain:
-    def __init__(self, worktrees: WorkflowWorker, providers: RoutedWorkflowWorker) -> None:
+    def __init__(
+        self,
+        worktrees: WorkflowWorker,
+        providers: RoutedWorkflowWorker,
+        reviews: WorkflowWorker | None = None,
+    ) -> None:
         self._worktrees = worktrees
         self._providers = providers
+        self._reviews = reviews
 
     async def process_one(self) -> bool:
+        if self._reviews is not None and await self._reviews.process_one():
+            return True
         return await self._worktrees.process_one() or await self._providers.process_one()
 
 
@@ -291,8 +302,36 @@ async def run() -> None:
             handlers=executor_provider_handlers(provider_handler),
             queue_classes=frozenset({QueueClass.HEAVY}),
         )
+        review_worker = None
+        reviewer_id = settings.execution.reviewer_profile_id
+        if reviewer_id is not None:
+            cli_review = ReadOnlyCliAdapter(GrokCliAdapter(transport), runtime, factory)
+            review_registry = AdapterRegistry(
+                runtime.registries.profiles, resolver, adapters={reviewer_id: cli_review}
+            )
+            reviewer = IndependentModelReviewer(
+                runtime.registries,
+                review_registry,
+                DatabaseReviewAccounting(factory, settings.limits),
+                policy_revision=runtime.registries.revision,
+                profile_id=reviewer_id,
+            )
+            review_worker = WorkflowWorker(
+                settings,
+                factory,
+                owner=f"{owner}:review",
+                handlers={
+                    "review": ResultReviewHandler(
+                        factory,
+                        local_git,
+                        worktree_root=settings.worktree_root,
+                        independent_reviewer=reviewer,
+                    )
+                },
+                queue_classes=frozenset({QueueClass.LIGHT}),
+            )
         await _run_loop(
-            ExecutorChain(worktree_worker, provider_worker),
+            ExecutorChain(worktree_worker, provider_worker, review_worker),
             settings.workflow.poll_interval_seconds,
             session_factory=factory,
             registries=runtime.registries,

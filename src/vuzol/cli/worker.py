@@ -136,12 +136,13 @@ async def run() -> None:
                 secret_file_root=settings.secret_file_root,
             )
             adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver)
-            independent_reviewer = IndependentModelReviewer(
-                runtime.registries,
-                adapter_registry,
-                DatabaseReviewAccounting(factory, settings.limits),
-                policy_revision=runtime.registries.revision,
-            )
+            if settings.execution.reviewer_profile_id is None:
+                independent_reviewer = IndependentModelReviewer(
+                    runtime.registries,
+                    adapter_registry,
+                    DatabaseReviewAccounting(factory, settings.limits),
+                    policy_revision=runtime.registries.revision,
+                )
         handlers = {
             **BASE_INTERNAL_HANDLERS,
             "deliver_discussion_reply": DeliverDiscussionReplyHandler(factory),
@@ -167,6 +168,10 @@ async def run() -> None:
                 else None,
             ),
         }
+        if settings.execution.reviewer_profile_id is not None:
+            # CLI review belongs to the already supervised rootless executor.
+            # This container has neither the account state nor the socket ACLs.
+            handlers.pop("review")
         internal_worker = WorkflowWorker(
             settings,
             factory,

@@ -242,6 +242,28 @@ async def test_codex_envelope_and_lifecycle_mocks(
         artifact_root / "execution" / str(grok_inv.step_id) / "1"
     )
     assert grok_envelope.sandbox.mounts[2].source.is_dir()
+    # Review cannot accept the executor's writable command, and both workspace
+    # and Git mounts are read-only even though the account needs writable state.
+    mock_step.step_type = "review"
+    mock_step.payload = {"executor_model_override": "grok-4.7", "executor_reasoning_effort": "high"}
+    mock_reg.profiles.get.return_value = MagicMock(
+        state_directory=state_dir,
+        enabled=True,
+        provider="grok",
+        model="grok-4.7",
+        model_reasoning_effort="high",
+    )
+    mock_reg.profiles.get.return_value.model_copy.return_value = mock_reg.profiles.get.return_value
+    grok_inv.argv = canonical_grok_argv("grok-4.7", reasoning_effort="high")
+    with pytest.raises(ValueError, match="read-only Grok"):
+        await envf.build(grok_inv)
+    grok_inv.argv = canonical_grok_argv("grok-4.7", read_only=True, reasoning_effort="high")
+    grok_inv.provider_attempt = 2
+    readonly_envelope, _ = await envf.build(grok_inv)
+    assert readonly_envelope.sandbox.mounts[0].mode is MountMode.READ_ONLY
+    assert readonly_envelope.sandbox.mounts[1].mode is MountMode.READ_ONLY
+    assert readonly_envelope.argv[-2:] == ("--reasoning-effort", "high")
+    mock_step.step_type = "execute_code"
     gate_context = GateExecutionContext(
         task_id=task_id,
         run_id=run_id,
@@ -628,10 +650,19 @@ async def test_executor_chain_short_circuits_between_workers() -> None:
     worktrees.process_one.return_value = False
     assert await ExecutorChain(worktrees, providers).process_one() is True
     providers.process_one.assert_awaited_once()
+    reviews = MagicMock(process_one=AsyncMock(return_value=True))
+    worktrees.process_one.reset_mock()
+    providers.process_one.reset_mock()
+    assert await ExecutorChain(worktrees, providers, reviews).process_one()
+    worktrees.process_one.assert_not_awaited()
+    providers.process_one.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("cli_review", [False, True])
+async def test_executor_composes_enabled_runtime(
+    monkeypatch: pytest.MonkeyPatch, cli_review
+) -> None:
     from vuzol.cli import executor as executor_cli
     from vuzol.config.models import LaunchMode
 
@@ -650,6 +681,7 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     settings.service_name = "vuzol"
     settings.log_level = "INFO"
     settings.execution.enabled = True
+    settings.execution.reviewer_profile_id = "grok-a" if cli_review else None
     settings.execution.require_preflight = True
     settings.execution.rootless_docker_socket = Path("/run/executor/docker.sock")
     settings.execution.sandbox_seccomp_profile = Path("/etc/vuzol/sandbox-seccomp.json")
@@ -716,6 +748,13 @@ async def test_executor_composes_enabled_runtime(monkeypatch: pytest.MonkeyPatch
     run_loop.assert_awaited_once()
     assert run_loop.await_args is not None
     assert run_loop.await_args.kwargs["subscription_limit_settings"] is settings.subscription_limits
+    chain = run_loop.await_args.args[0]
+    assert (chain._reviews is not None) is cli_review
+    if cli_review:
+        review_args = executor_cli.WorkflowWorker.call_args.kwargs
+        assert set(review_args["handlers"]) == {"review"}
+        reviewer = review_args["handlers"]["review"]._independent
+        assert reviewer._profile_id == "grok-a"
     engine.dispose.assert_awaited_once()
 
 

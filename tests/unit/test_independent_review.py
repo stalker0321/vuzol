@@ -643,12 +643,24 @@ async def test_independent_reviewer_adapter_missing() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("with_context", [False, True])
+@pytest.mark.parametrize("cli", [False, True])
 async def test_independent_reviewer_partitions_many_files_instead_of_rejecting(
     with_context,
+    cli,
 ) -> None:
     profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
+    if cli:
+        profile = profile.model_copy(
+            update={
+                "provider": "grok",
+                "model": "grok-4.7",
+                "model_reasoning_effort": "high",
+                "launch_mode": LaunchMode.CLI,
+            }
+        )
     registries = MagicMock()
     registries.profiles.items.return_value = (profile,)
+    registries.profiles.get.return_value = profile
     adapter = MagicMock()
     adapter.execute = AsyncMock(
         return_value=ProviderResult(
@@ -665,6 +677,8 @@ async def test_independent_reviewer_partitions_many_files_instead_of_rejecting(
     adapters = MagicMock()
     adapters.get.return_value = adapter
     reviewer = _reviewer(registries, adapters)
+    if cli:
+        reviewer._profile_id = profile.id
     context = _work_context() if with_context else ()
     verdict = await reviewer.review(
         task=SimpleNamespace(task_draft={}, original_text=""),  # type: ignore[arg-type]
@@ -690,6 +704,9 @@ async def test_independent_reviewer_partitions_many_files_instead_of_rejecting(
     assert verdict.allows_progress
     assert verdict.partition_count == 2
     assert adapter.execute.await_count == 3
+    attempts = [call.args[0].provider_attempt for call in adapter.execute.await_args_list]
+    assert len(set(attempts)) == 3
+    assert all(call.args[1].id == profile.id for call in adapter.execute.await_args_list)
     if with_context:
         assert all(call.args[0].context[:2] == context for call in adapter.execute.await_args_list)
     with pytest.raises(IndependentReviewError, match="maximum is 120000"):

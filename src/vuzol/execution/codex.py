@@ -156,6 +156,16 @@ class ExecutionEnvelopeFactory:
                 profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
             )
+            if step.step_type == "review" and (
+                profile.provider != "grok"
+                or invocation.argv
+                != canonical_grok_argv(
+                    profile.model,
+                    read_only=True,
+                    reasoning_effort=profile.model_reasoning_effort,
+                )
+            ):
+                raise ValueError("CLI reviewer must use the canonical read-only Grok command")
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
             if not sandbox.enabled or profile.state_directory is None:
@@ -177,7 +187,7 @@ class ExecutionEnvelopeFactory:
                     target=Path("/workspace"),
                     mode=(
                         MountMode.READ_ONLY
-                        if step.step_type == "execute_agent"
+                        if step.step_type in {"execute_agent", "review"}
                         else MountMode.READ_WRITE
                     ),
                     purpose="task-worktree",
@@ -258,9 +268,10 @@ class ExecutionEnvelopeFactory:
                 stdin=invocation.stdin,
                 sandbox=spec,
             )
-            idempotency_key = hashlib.sha256(
-                f"{invocation.step_id}:{invocation.provider_attempt}".encode()
-            ).hexdigest()
+            identity = f"{invocation.step_id}:{invocation.provider_attempt}"
+            if step.step_type == "review":
+                identity += ":" + hashlib.sha256(invocation.stdin.encode()).hexdigest()
+            idempotency_key = hashlib.sha256(identity.encode()).hexdigest()
             existing = await session.scalar(
                 select(SupervisedProcess).where(
                     SupervisedProcess.idempotency_key == idempotency_key
@@ -960,7 +971,10 @@ def _require_provider_command(
             canonical_codex_argv(model=model, reasoning_effort=effort, read_only=True),
         }
     elif provider == "grok":
-        expected = {canonical_grok_argv(model), canonical_grok_argv(model, read_only=True)}
+        expected = {
+            canonical_grok_argv(model, reasoning_effort=effort),
+            canonical_grok_argv(model, read_only=True, reasoning_effort=effort),
+        }
     elif provider == "kimi":
         expected = {
             canonical_kimi_argv(model, reasoning_effort=effort or "low"),

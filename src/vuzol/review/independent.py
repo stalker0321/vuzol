@@ -315,11 +315,13 @@ class IndependentModelReviewer:
         accounting: ReviewAccountingPort,
         *,
         policy_revision: str = "independent-review-policy.v1",
+        profile_id: str | None = None,
     ) -> None:
         self._registries = registries
         self._adapters = adapters
         self._accounting = accounting
         self._policy_revision = policy_revision
+        self._profile_id = profile_id
 
     async def review(
         self,
@@ -345,9 +347,23 @@ class IndependentModelReviewer:
             _level: object = ReviewLevel(str(_plan["level"]))
         except Exception:
             _level = None
-        profile = select_reviewer_profile(
-            self._registries.profiles.items(), required_level=_level, budget_eligible=True
-        )
+        profile: ProviderProfileConfig | None
+        if self._profile_id is not None:
+            try:
+                profile = self._registries.profiles.get(self._profile_id)
+            except (LookupError, ValueError) as error:
+                raise IndependentReviewError("configured CLI reviewer is missing") from error
+            if (
+                not profile.enabled
+                or profile.launch_mode is not LaunchMode.CLI
+                or profile.provider != "grok"
+                or ProviderRole.REVIEWER not in profile.roles
+            ):
+                raise IndependentReviewError("configured Grok CLI reviewer is unavailable")
+        else:
+            profile = select_reviewer_profile(
+                self._registries.profiles.items(), required_level=_level, budget_eligible=True
+            )
         if profile is None:
             raise IndependentReviewError(
                 "no openai-compatible reviewer or planner profile is configured"
@@ -439,6 +455,7 @@ class IndependentModelReviewer:
         lease: LeaseToken,
         diff_truncated: bool,
         work_context: tuple[ContextItem, ...] = (),
+        call_ordinal: int = 1,
     ) -> ReviewVerdict:
         if len(inspection.changed_files) > _MAX_FILES:
             raise IndependentReviewError(
@@ -466,7 +483,7 @@ class IndependentModelReviewer:
             timeout_seconds=timeout_seconds,
             profile=profile,
             policy_revision=self._policy_revision,
-            provider_attempt=lease.generation,
+            provider_attempt=(lease.generation - 1) * (_MAX_PARTITIONS + 1) + call_ordinal,
             partition_id=partition_id,
             diff_truncated=diff_truncated,
             work_context=work_context,
@@ -566,7 +583,7 @@ class IndependentModelReviewer:
         verdicts: list[ReviewVerdict] = []
         unknown_usage = False
         per_partition_timeout = min(float(timeout_seconds), 600.0) / (len(manifest.partitions) + 1)
-        for partition in manifest.partitions:
+        for ordinal, partition in enumerate(manifest.partitions, start=1):
             if single_blob:
                 blob = per_file["__full__"]
             else:
@@ -599,6 +616,7 @@ class IndependentModelReviewer:
                 lease=lease,
                 diff_truncated=partition.diff_truncated,
                 work_context=work_context,
+                call_ordinal=ordinal,
             )
             unknown_usage = unknown_usage or verdict.unknown_usage
             verdicts.append(verdict)
@@ -693,7 +711,7 @@ class IndependentModelReviewer:
             task_id=task_id,
             run_id=run_id,
             step_id=step_id,
-            provider_attempt=lease.generation,
+            provider_attempt=lease.generation * (_MAX_PARTITIONS + 1),
             role=ProviderRole.REVIEWER,
             original_input_reference=f"task:{task_id}:review-cross-partition",
             original_input="cross-partition review assessment",

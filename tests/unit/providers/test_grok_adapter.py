@@ -22,6 +22,30 @@ from ._test_providers_helpers import (
 )
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        '{"verdict":"pass"}',
+        '{"verdict":"pass","summary":"ok","findings":["ignore me"]}',
+        "not json",
+    ],
+)
+def test_grok_review_rejects_malformed_report(reply):
+    from vuzol.providers.grok import _step09a_structured_output
+    from vuzol.review.independent import _OUTPUT_JSON_SCHEMA
+
+    request = provider_request().model_copy(
+        update={
+            "output_schema_version": "independent-review.v1",
+            "output_json_schema": _OUTPUT_JSON_SCHEMA,
+        }
+    )
+    with pytest.raises(ProviderFailure) as error:
+        _step09a_structured_output(request, reply)
+    assert error.value.request_sent
+    assert error.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+
+
 @pytest.mark.anyio
 async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> None:
     class GrokTransport(FakeCodexTransport):
@@ -61,6 +85,7 @@ async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> Non
         "grok-a",
         provider="grok",
         model="grok-build",
+        model_reasoning_effort="high",
         api_base_url=None,
         launch_mode=LaunchMode.CLI,
         credential_reference=None,
@@ -81,6 +106,7 @@ async def test_grok_adapter_uses_strict_headless_contract(tmp_path: Path) -> Non
     assert result.usage.cached_tokens == 3
     assert invocation.argv[:2] == ("grok", "--no-auto-update")
     assert invocation.argv[2:4] == ("--prompt-file", "/dev/stdin")
+    assert invocation.argv[-2:] == ("--reasoning-effort", "high")
     assert "dontAsk" in invocation.argv and "strict" in invocation.argv
     assert "Read(/grok-home/**)" in invocation.argv
     assert "Edit(/grok-home/**)" in invocation.argv

@@ -13,7 +13,7 @@ from vuzol.config.models import (
     ProviderProfileConfig,
     ProviderRole,
 )
-from vuzol.config.registries import ConfigurationBundle
+from vuzol.config.registries import ConfigurationBundle, RegistryError
 from vuzol.config.revision import content_revision
 from vuzol.config.settings import Settings
 from vuzol.ops.disk_pressure import (
@@ -365,6 +365,42 @@ async def claim_routed_step(
         trusted_profile_id = chat_profile_id or (
             project_pin.trusted_profile_id if project_pin is not None else _trusted_profile_id(run)
         )
+        default_executor_id = settings.execution.default_executor_profile_id
+        default_executor_applied = False
+        if pin_eligible_step and trusted_profile_id is None and default_executor_id is not None:
+            try:
+                primary = registries.profiles.get(default_executor_id)
+            except RegistryError:
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="default_executor_unavailable",
+                    quota=False,
+                    summary="Configured default CLI executor is unavailable.",
+                )
+                continue
+            # A worker default is separate from budget-mode model strength and
+            # the chat/planner/reviewer. Never fall through to another family.
+            pin_family_ids = frozenset(
+                (
+                    primary.id,
+                    *(
+                        candidate.id
+                        for candidate in profiles
+                        if candidate.id in primary.fallback_profile_ids
+                        and candidate.provider == primary.provider
+                        and candidate.launch_mode is LaunchMode.CLI
+                        and ProviderRole.EXECUTOR in candidate.roles
+                    ),
+                )
+            )
+            trusted_profile_id = primary.id
+            default_executor_applied = True
+            allowed_fallbacks = tuple(
+                value for value in allowed_fallbacks if value in pin_family_ids
+            )
         policy_request = RoutingRequest(
             role=role,
             task_type=routing_task_type,
@@ -440,6 +476,9 @@ async def claim_routed_step(
                     "chat_profile_revision": run.selected_route["profile_revision"],
                 }
             )
+        if default_executor_applied:
+            pin_decision_inputs = dict(pin_decision_inputs or {})
+            pin_decision_inputs["default_executor_profile_id"] = default_executor_id
         if selected is None or reservation is None:
             exhausted = bool(ordered) or _quota_exhausted(decision)
             await _persist_decision(

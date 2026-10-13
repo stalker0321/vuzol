@@ -226,7 +226,7 @@ async def test_work_seconds_prefers_usage_durations() -> None:
 
 
 @pytest.mark.anyio
-async def test_work_seconds_falls_back_excluding_approval_wait() -> None:
+async def test_work_seconds_without_usage_does_not_turn_waits_into_model_time() -> None:
     task = SimpleNamespace(
         id=uuid4(),
         created_at=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
@@ -244,7 +244,8 @@ async def test_work_seconds_falls_back_excluding_approval_wait() -> None:
             SimpleNamespace(all=lambda: [approval]),
         ]
     )
-    assert await _history_work_seconds(session, task) == 1800  # type: ignore[arg-type]
+    assert await _history_work_seconds(session, task) == 0  # type: ignore[arg-type]
+    assert session.scalars.await_count == 1
 
 
 @pytest.mark.anyio

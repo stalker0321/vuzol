@@ -461,6 +461,9 @@ def test_terminal_history_report_shows_worker_preview_and_token_totals(postgres_
             assert 'href="https://preview.vuzol.local/docs"' in report.html
             assert "1,200" in report.html and "340" in report.html and "100" in report.html
             assert "Работа: <code>2 мин 5 с</code>" in report.html  # noqa: RUF001
+            card = await build_status_card(session, task.id)
+            assert "Работа моделей: 2 мин 5 с" in card.html  # noqa: RUF001
+            assert "Прошло:" not in card.html
         await engine.dispose()
 
     asyncio.run(scenario())

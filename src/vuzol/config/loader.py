@@ -167,6 +167,20 @@ def build_bundle(
                             "must match its sandbox"
                         )
         topics = TopicRegistry(document.topics, projects=projects)
+        if settings.execution.reviewer_profile_id is not None:
+            reviewer = profiles.get(settings.execution.reviewer_profile_id)
+            if (
+                not reviewer.enabled
+                or reviewer.provider != "grok"
+                or reviewer.launch_mode is not LaunchMode.CLI
+                or ProviderRole.REVIEWER not in reviewer.roles
+                or not reviewer.sandbox_required
+                or Capability.REPOSITORY_READ not in reviewer.capabilities
+                or "coding" not in reviewer.supported_task_types
+            ):
+                raise RegistryError(
+                    "execution.reviewer_profile_id must be a sandboxed Grok CLI reviewer"
+                )
         if settings.chat.enabled:
             assert settings.chat.profile_id is not None
             responder = profiles.get(settings.chat.profile_id)

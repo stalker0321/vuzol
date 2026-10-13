@@ -193,10 +193,19 @@ async def test_project_provisioner_fails_closed_before_loop_when_migration_head_
     assert order == ["require_migration_head", "dispose"]
 
 
+@pytest.mark.parametrize("cli_review", [False, True])
 def test_worker_main_composes_runtime_and_handles_stop(
-    monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+    monkeypatch: MonkeyPatch, caplog: LogCaptureFixture, cli_review: bool
 ) -> None:
     settings = Settings(environment="test")
+    runtime = runtime_configuration(settings)
+    if cli_review:
+        settings = settings.model_copy(
+            update={
+                "execution": settings.execution.model_copy(update={"reviewer_profile_id": "grok-a"})
+            }
+        )
+        runtime = RuntimeConfiguration(settings=settings, registries=runtime.registries)
     handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
     calls: dict[str, object] = {}
 
@@ -232,7 +241,7 @@ def test_worker_main_composes_runtime_and_handles_stop(
 
     class WorkflowWorker:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+            calls["workflow_handlers"] = _kwargs["handlers"]
 
         async def process_one(self) -> bool:
             return False
@@ -240,7 +249,7 @@ def test_worker_main_composes_runtime_and_handles_stop(
     monkeypatch.setattr(
         worker_cli,
         "get_runtime_configuration",
-        lambda **_kwargs: runtime_configuration(settings),
+        lambda **_kwargs: runtime,
     )
     monkeypatch.setattr(worker_cli, "configure_logging", lambda **kwargs: calls.update(kwargs))
     monkeypatch.setattr(
@@ -271,6 +280,7 @@ def test_worker_main_composes_runtime_and_handles_stop(
     assert calls["service"] == "vuzol-worker"
     assert calls["recovery_batch_size"] == 100
     assert calls["disposed"] is True
+    assert ("review" in calls["workflow_handlers"]) is not cli_review
     migration_head.assert_awaited()
     assert any(record.__dict__.get("signal") == signal.SIGTERM for record in caplog.records)
 

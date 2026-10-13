@@ -306,6 +306,43 @@ async def commit_step_outcome(
             await enqueue_terminal_task_projections(session, task, run)
         else:
             await _enqueue_telegram_projection(session, task, run)
+    elif outcome.kind is OutcomeKind.SUCCEEDED:
+        # A stage change is visible progress even when several consecutive
+        # steps derive EXECUTING (or CONTEXT_PREPARED). Use the existing task
+        # revision fence so stale delivery cannot replace a newer card.
+        await record_task_progress(session, task, run, step, phase="completed")
+
+
+async def record_task_progress(
+    session: AsyncSession, task: Task, run: Run, step: Step, *, phase: str
+) -> None:
+    if task.task_type == "discussion_agent_internal":
+        return
+    task.version += 1
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type="task.progress_updated",
+            actor_type="workflow_manager",
+            payload={"run_id": str(run.id), "step_id": str(step.id), "phase": phase},
+        )
+    )
+    await _enqueue_telegram_projection(session, task, run)
+
+
+async def publish_step_started(session: AsyncSession, token: LeaseToken) -> None:
+    """Project a fenced claim without fabricating a task-status transition."""
+    step = await session.get(Step, token.step.id)
+    if step is None:
+        raise LeaseLost("started step is missing")
+    run = await session.get(Run, step.run_id)
+    if run is None:
+        raise LeaseLost("started run is missing")
+    task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
+    if task is None:
+        raise LeaseLost("started task is missing")
+    await record_task_progress(session, task, run, step, phase="started")
 
 
 async def _schedule_bounded_repair(

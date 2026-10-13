@@ -401,13 +401,13 @@ async def test_missing_android_bundle_requests_separate_hash_bound_approval(
     request = _request()
     task, step, environment = _state(request)
     read = MagicMock()
-    read.get = AsyncMock(side_effect=(task, step))
-    read.scalar = AsyncMock(return_value=None)
+    read.get = AsyncMock(return_value=task)
+    read.scalar = AsyncMock(side_effect=(step, None))
     write = MagicMock()
     write.scalar = AsyncMock(side_effect=(step, None))
     write.flush = AsyncMock()
     factory = MagicMock(return_value=AsyncContext(read))
-    factory.begin.return_value = AsyncContext(write)
+    factory.begin.side_effect = (AsyncContext(read), AsyncContext(write))
     monkeypatch.setattr(
         "vuzol.projects.capability_provisioning.current_environment",
         AsyncMock(return_value=environment),
@@ -442,9 +442,10 @@ async def test_capability_handler_ready_and_external_setup_paths(
     request = _request()
     task, step, environment = _state(request, provisioning=provisioning)
     read = MagicMock()
-    read.get = AsyncMock(side_effect=(task, step))
-    read.scalar = AsyncMock(return_value=None)
+    read.get = AsyncMock(return_value=task)
+    read.scalar = AsyncMock(side_effect=(step, None))
     factory = MagicMock(return_value=AsyncContext(read))
+    factory.begin.return_value = AsyncContext(read)
     installer = MagicMock(spec=OfflineCapabilityInstaller)
     installer.ready.return_value = ready
     installer.installation_root = tmp_path / "toolchains"
@@ -500,14 +501,14 @@ async def test_approved_capability_bundle_is_installed_consumed_and_reported(
     )
     step.payload = {"action_envelope": envelope}
     read = MagicMock()
-    read.get = AsyncMock(side_effect=(task, step))
-    read.scalar = AsyncMock(return_value=approval)
+    read.get = AsyncMock(return_value=task)
+    read.scalar = AsyncMock(side_effect=(step, approval))
     lease_read = MagicMock()
     lease_read.scalar = AsyncMock(return_value=step)
     consume = MagicMock()
     consume.scalar = AsyncMock(side_effect=(step, approval))
-    factory = MagicMock(side_effect=(AsyncContext(read), AsyncContext(lease_read)))
-    factory.begin.return_value = AsyncContext(consume)
+    factory = MagicMock(return_value=AsyncContext(lease_read))
+    factory.begin.side_effect = (AsyncContext(read), AsyncContext(consume))
     installer = MagicMock(spec=OfflineCapabilityInstaller)
     installer.installation_root = settings.toolchain_root
     installer.ready.side_effect = (False, True)
@@ -536,9 +537,10 @@ async def test_pending_capability_approval_waits_without_installing(
     task, step, environment = _state(request)
     approval = SimpleNamespace(id=uuid.uuid4(), status=ApprovalStatus.PENDING)
     read = MagicMock()
-    read.get = AsyncMock(side_effect=(task, step))
-    read.scalar = AsyncMock(return_value=approval)
+    read.get = AsyncMock(return_value=task)
+    read.scalar = AsyncMock(side_effect=(step, approval))
     factory = MagicMock(return_value=AsyncContext(read))
+    factory.begin.return_value = AsyncContext(read)
     installer = MagicMock(spec=OfflineCapabilityInstaller)
     installer.installation_root = tmp_path / "toolchains"
     installer.ready.return_value = False
@@ -553,6 +555,45 @@ async def test_pending_capability_approval_waits_without_installing(
 
     assert outcome.kind is OutcomeKind.NEEDS_APPROVAL
     installer.install.assert_not_called()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stale", [False, True])
+async def test_legacy_registry_baseline_is_fenced_and_never_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale: bool
+) -> None:
+    request = _request()
+    task, step, _ = _state(request)
+    if stale:
+        step.lease_generation += 1
+    read = MagicMock()
+    read.get = AsyncMock(return_value=task)
+    read.scalar = AsyncMock(side_effect=(step, None))
+    factory = MagicMock()
+    factory.begin.return_value = AsyncContext(read)
+    current = AsyncMock(return_value=None)
+    baseline = SimpleNamespace(contract={"components": {}, "capabilities": {}})
+    detected = AsyncMock(return_value=baseline)
+    monkeypatch.setattr("vuzol.projects.capability_provisioning.current_environment", current)
+    monkeypatch.setattr(
+        "vuzol.projects.capability_provisioning.record_detected_environment", detected
+    )
+    registries = MagicMock()
+    registries.projects.get.return_value = SimpleNamespace(enabled=True, repository_path=tmp_path)
+    installer = MagicMock(spec=OfflineCapabilityInstaller)
+    handler = CapabilityProvisioningHandler(cast(Any, factory), installer, registries=registries)
+
+    outcome = await handler.execute(request, CancellationContext())
+
+    if stale:
+        assert outcome.kind is OutcomeKind.CANCELLED
+        current.assert_not_awaited()
+        detected.assert_not_awaited()
+    else:
+        assert outcome.kind is OutcomeKind.SUCCEEDED
+        detected.assert_awaited_once_with(read, project_id=task.project_id, repository=tmp_path)
+    installer.install.assert_not_called()
+    installer.inspect_bundle.assert_not_called()
 
 
 @pytest.mark.anyio

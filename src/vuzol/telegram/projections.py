@@ -43,6 +43,7 @@ from vuzol.storage.types import (
     USER_REPORTABLE_TASK_STATUSES,
     USER_TERMINAL_TASK_STATUSES,
     ApprovalStatus,
+    RunStatus,
     StepStatus,
     TaskStatus,
     WorktreeDeliveryState,
@@ -1550,6 +1551,13 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         )
         if step is None:
             step = await session.scalar(
+                select(Step)
+                .where(Step.run_id == run.id, Step.status == StepStatus.PENDING)
+                .order_by(Step.ordinal.asc())
+                .limit(1)
+            )
+        if step is None:
+            step = await session.scalar(
                 select(Step).where(Step.run_id == run.id).order_by(Step.ordinal.desc()).limit(1)
             )
     redo_requested = await session.scalar(
@@ -1612,7 +1620,9 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             f"Статус: <b>{status_label}</b>",
         )
     )
-    if step is not None and not final_package_result and not final_package_delivery_failure:
+    if run is not None and run.status is RunStatus.CREATED:
+        lines.append("Этап: Ожидает запуска")
+    elif step is not None and not final_package_result and not final_package_delivery_failure:
         lines.append(f"Этап: {step_type_label(step.step_type)} ({step_status_label(step.status)})")
     worker = await _task_worker_label(session, task.id) if run is not None else None
     if worker is not None:

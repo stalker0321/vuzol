@@ -19,8 +19,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import CapabilityProvisioningSettings
+from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.paths import contained, trusted_root
-from vuzol.project_environment import current_environment, environment_hash
+from vuzol.project_environment import (
+    current_environment,
+    environment_hash,
+    record_detected_environment,
+)
 from vuzol.projects.installations import (
     InstallationState,
     probe_toolchain,
@@ -400,9 +405,12 @@ class CapabilityProvisioningHandler:
         self,
         factory: async_sessionmaker[AsyncSession],
         installer: OfflineCapabilityInstaller,
+        *,
+        registries: ConfigurationBundle | None = None,
     ) -> None:
         self._factory = factory
         self._installer = installer
+        self._registries = registries
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -522,29 +530,45 @@ class CapabilityProvisioningHandler:
     async def _load(
         self, request: StepExecutionRequest
     ) -> tuple[Task, Step, ProjectEnvironmentRevision, Approval | None]:
-        async with self._factory() as session:
+        async with self._factory.begin() as session:
             task = await session.get(Task, request.task_id)
-            step = await session.get(Step, request.step_id)
+            step = await session.scalar(
+                select(Step).where(Step.id == request.step_id).with_for_update()
+            )
+            if task is None or step is None:
+                raise LookupError("capability provisioning state is incomplete")
+            if (
+                step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
+                or step.lease_owner != request.lease.owner
+                or step.lease_generation != request.lease.generation
+                or step.run_id != request.run_id
+                or task.id != request.task_id
+            ):
+                raise LeaseLost("capability provisioning step lease is stale")
             environment = (
                 None
-                if task is None or task.project_id is None
+                if task.project_id is None
                 else await current_environment(session, task.project_id)
             )
+            # Registry-created projects may predate environment versioning and
+            # have no ProjectProvisioning row. Detect only the existing managed
+            # repository, once, using the same conservative import baseline.
+            # This neither chooses a stack nor authorizes installs/commands.
+            if environment is None and task.project_id is not None and self._registries:
+                project = self._registries.projects.get(task.project_id)
+                if not project.enabled or not project.repository_path.is_dir():
+                    raise LookupError("managed project repository is unavailable")
+                environment = await record_detected_environment(
+                    session, project_id=task.project_id, repository=project.repository_path
+                )
             approval = await session.scalar(
                 select(Approval)
                 .where(Approval.step_id == request.step_id)
                 .order_by(Approval.requested_at.desc())
                 .limit(1)
             )
-        if task is None or step is None or environment is None:
+        if environment is None:
             raise LookupError("capability provisioning state is incomplete")
-        if (
-            step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
-            or step.lease_owner != request.lease.owner
-            or step.lease_generation != request.lease.generation
-            or step.run_id != request.run_id
-        ):
-            raise LeaseLost("capability provisioning step lease is stale")
         return task, step, environment, approval
 
     async def _request_approval(

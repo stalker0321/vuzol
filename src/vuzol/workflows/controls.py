@@ -347,6 +347,8 @@ async def pause_task(
         )
     )
 
+    await _enqueue_telegram_projection(session, task, run)
+
 
 async def resume_task(
     session: AsyncSession,
@@ -366,6 +368,7 @@ async def resume_task(
     await activate_ready_steps(session, run)
     target = derive_task_status(await _steps(session, run.id), run.status)
     await transition_task(session, task, target, actor_type="user", actor_id=actor_id)
+    await _enqueue_telegram_projection(session, task, run)
 
 
 async def cancel_task(
@@ -404,6 +407,7 @@ async def cancel_task(
             payload={"rollback_attempted": False},
         )
     )
+    await _enqueue_telegram_projection(session, task, run)
 
 
 async def retry_blocked_step(
@@ -453,6 +457,7 @@ async def retry_blocked_step(
         await transition_task(
             session, task, TaskStatus.RETRYING, actor_type="user", actor_id=actor_id
         )
+        await _enqueue_telegram_projection(session, task, run)
 
 
 async def _locked_context(

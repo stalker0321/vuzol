@@ -420,6 +420,7 @@ async def _schedule_bounded_repair(
     await transition_step(session, failed_step, StepStatus.BLOCKED, actor_type="workflow_manager")
     failed_step.failure_category = outcome.category
     failed_step.failure_summary = outcome.summary
+    failed_step.result = outcome.result
     failed_step.unknown_effects = False
     failed_step.payload = {
         **failed_step.payload,

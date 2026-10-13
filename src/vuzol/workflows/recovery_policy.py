@@ -35,6 +35,7 @@ BACKPRESSURE_CATEGORIES = frozenset(
 REPAIRABLE_CATEGORY_PREFIXES = ("validation_", "review_")
 REPAIRABLE_STEP_TYPES = frozenset({"validate", "review"})
 
+
 # Actions bounded by the table. TAKEOVER and WAIT are modelled explicitly even
 # though only WAIT is produced today (TAKEOVER has no producer yet; ADR-A01
 # keeps the label available for a future bounded hand-off).
@@ -133,6 +134,10 @@ class RecoveryState:
 
     @property
     def repairable(self) -> bool:
+        if self.category == "validation_environment_missing_tool":
+            # Missing validation infrastructure is not a source-code defect;
+            # code retries cannot grant installation authority.
+            return False
         return self.step_type in REPAIRABLE_STEP_TYPES and (
             (self.category or "").startswith(REPAIRABLE_CATEGORY_PREFIXES)
         )
@@ -182,9 +187,7 @@ def recovery_attempt_summary(state: RecoveryState, action: RecoveryAction) -> di
     }
 
 
-def append_fingerprint_history(
-    existing: object, fingerprint: str
-) -> list[str]:
+def append_fingerprint_history(existing: object, fingerprint: str) -> list[str]:
     """Append a fingerprint to a bounded history list, newest last."""
 
     history = [str(item) for item in existing] if isinstance(existing, list) else []

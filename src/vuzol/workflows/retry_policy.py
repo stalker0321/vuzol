@@ -6,6 +6,7 @@ from vuzol.storage.types import StepStatus
 EXPLICITLY_RETRYABLE_FAILURES = frozenset(
     {
         "authentication",
+        "budget_exhausted",
         "cancelled",
         "dependency_provisioning_failed",
         "independent_review_required",
@@ -15,6 +16,32 @@ EXPLICITLY_RETRYABLE_FAILURES = frozenset(
         "provider_unavailable",
     }
 )
+
+
+def current_retry_target(steps: tuple[Step, ...]) -> Step | None:
+    """One blocked leaf, allowing only a mutually bound existing repair pair."""
+    blocked = tuple(step for step in steps if step.status is StepStatus.BLOCKED)
+    suspended: set[object] = set()
+    for parent in blocked:
+        if parent.unknown_effects or parent.step_type not in {"validate", "review"}:
+            continue
+        parent_payload = parent.payload if isinstance(parent.payload, dict) else {}
+        for child in blocked:
+            payload = child.payload if isinstance(child.payload, dict) else {}
+            metadata = (
+                child.dependency_metadata if isinstance(child.dependency_metadata, dict) else {}
+            )
+            if (
+                child.step_type == "execute_code"
+                and child.run_id == parent.run_id
+                and payload.get("repair_for_step_id") == str(parent.id)
+                and parent_payload.get("repair_scheduled_step_id") == str(child.id)
+                and metadata.get("template_key") == "repair_code"
+                and metadata.get("repair_for_ordinal") == parent.ordinal
+            ):
+                suspended.add(parent.id)
+    leaves = [step for step in blocked if step.id not in suspended]
+    return leaves[0] if len(leaves) == 1 else None
 
 
 def blocked_step_is_retryable(step: Step) -> bool:

@@ -74,10 +74,13 @@ class SystemCheck:
 class ResultValidationError(RuntimeError):
     """Deterministic validation rejected the retained worktree."""
 
-    def __init__(self, category: str, summary: str) -> None:
+    def __init__(
+        self, category: str, summary: str, *, result: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(summary)
         self.category = category
         self.safe_summary = summary
+        self.result = result or {}
 
 
 class ResultValidationHandler:
@@ -136,7 +139,7 @@ class ResultValidationHandler:
         except ResultValidationError as error:
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
-                result={},
+                result=error.result,
                 category=error.category,
                 summary=error.safe_summary,
                 unknown_effects=False,
@@ -381,9 +384,24 @@ class ResultValidationHandler:
                 ) from error
             if any(run.evidence.exit_code != 0 for run in gate_runs):
                 failed = next(run for run in gate_runs if run.evidence.exit_code != 0)
+                failure_result = self._gate_failure_result(failed)
+                missing_node = any(
+                    marker in failed.stderr.content
+                    for marker in (
+                        b"node: No such file or directory",
+                        b"node: not found",
+                        b"node: command not found",
+                    )
+                )
+                if missing_node:
+                    failure_result["missing_validation_tool"] = "node"
                 raise ResultValidationError(
-                    "validation_gate_failed",
-                    f"required gate failed: {failed.evidence.name}",
+                    "validation_environment_missing_tool"
+                    if missing_node
+                    else "validation_gate_failed",
+                    f"required gate failed: {failed.evidence.name}"
+                    + ("; validation runtime requires Node.js" if missing_node else ""),
+                    result=failure_result,
                 )
             post_gate = await self._git.inspect(path, worktree.base_commit)
             if (
@@ -474,6 +492,18 @@ class ResultValidationHandler:
             gate_runs=gate_runs,
             suspicious=tuple(signal.model_dump(mode="json") for signal in suspicious),
         )
+
+    def _gate_failure_result(self, failed: GateRun) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "schema_version": RESULT_VALIDATION_SCHEMA,
+            "status": "failed",
+            "failed_gate": failed.evidence.model_dump(mode="json"),
+        }
+        if self._artifacts is not None:
+            for name, captured in (("stdout", failed.stdout), ("stderr", failed.stderr)):
+                redacted, _ = self._artifacts.redact(captured.content)
+                result[f"{name}_tail"] = redacted.decode("utf-8", "replace")[-1_000:]
+        return result
 
     async def _persist(
         self,

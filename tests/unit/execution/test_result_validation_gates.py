@@ -174,7 +174,8 @@ async def test_validate_trusted_gates_pass_and_revoke_access(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
-async def test_validate_trusted_gate_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("missing_node", [False, True])
+async def test_validate_trusted_gate_failure(tmp_path: Path, missing_node: bool) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
     _write_real_test_makefile(worktree_path)
@@ -197,9 +198,10 @@ async def test_validate_trusted_gate_failure(tmp_path: Path) -> None:
         stderr_bytes=0,
         stderr_truncated=False,
     )
+    stderr = _captured(b"make: node: No such file or directory") if missing_node else empty
     gate_runner = MagicMock()
     gate_runner.run = AsyncMock(
-        return_value=(GateRun(evidence=evidence, stdout=empty, stderr=empty),)
+        return_value=(GateRun(evidence=evidence, stdout=empty, stderr=stderr),)
     )
     access = MagicMock()
     access.grant = AsyncMock(return_value=MagicMock(revoke=AsyncMock()))
@@ -217,7 +219,14 @@ async def test_validate_trusted_gate_failure(tmp_path: Path) -> None:
     )
     handler._load = AsyncMock(return_value=(worktree, project, worktree_path))  # type: ignore[method-assign]
     outcome = await handler.execute(_request(worktree), CancellationContext())
-    assert outcome.category == "validation_gate_failed"
+    assert outcome.category == (
+        "validation_environment_missing_tool" if missing_node else "validation_gate_failed"
+    )
+    if missing_node:
+        assert outcome.result["missing_validation_tool"] == "node"
+    assert outcome.result["status"] == "failed"
+    assert outcome.result["failed_gate"]["command_id"] == "make test"
+    assert outcome.result["failed_gate"]["exit_code"] == 1
 
 
 @pytest.mark.anyio

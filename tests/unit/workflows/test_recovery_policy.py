@@ -42,6 +42,13 @@ def test_changed_failure_fingerprint_may_repair() -> None:
     assert decide_recovery(state) is RecoveryAction.REPAIR
 
 
+def test_missing_validation_runtime_is_attention_not_paid_code_repair() -> None:
+    from vuzol.workflows.recovery_policy import decide_recovery
+
+    state = _repairable(category="validation_environment_missing_tool")
+    assert decide_recovery(state) is RecoveryAction.ATTENTION
+
+
 def test_oscillation_a_b_a_is_attention() -> None:
     from vuzol.workflows.recovery_policy import decide_recovery
 

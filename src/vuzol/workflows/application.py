@@ -18,7 +18,7 @@ from enum import StrEnum
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.storage.models import Event, Task
-from vuzol.storage.types import RunStatus, StepStatus
+from vuzol.storage.types import RunStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.workflows.controls import (
     _locked_context,
@@ -27,6 +27,7 @@ from vuzol.workflows.controls import (
     resume_task,
     retry_blocked_step,
 )
+from vuzol.workflows.retry_policy import current_retry_target
 from vuzol.workflows.service import _enqueue_telegram_projection, start_run
 
 INGRESS_SOURCES = frozenset({"telegram", "cli", "api"})
@@ -124,14 +125,14 @@ async def apply_task_command(
             raise ValueError("task retry requires the task owner's principal")
         if expected_task_version is None or expected_task_version != task.version:
             raise ValueError("stale task version for retry")
-        targets = [s for s in steps if s.status is StepStatus.BLOCKED]
+        target = current_retry_target(steps)
         if (
             run.status is not RunStatus.BLOCKED
-            or len(targets) != 1
-            or (step_id is not None and targets[0].id != step_id)
+            or target is None
+            or (step_id is not None and target.id != step_id)
         ):
-            raise ValueError("retry requires exactly one current blocked step")
-        await retry_blocked_step(session, targets[0].id, actor_id=actor_id)
+            raise ValueError("retry requires one unambiguous current blocked step")
+        await retry_blocked_step(session, target.id, actor_id=actor_id)
         session.add(
             Event(
                 entity_type="task",
@@ -141,7 +142,7 @@ async def apply_task_command(
                 actor_id=actor_id,
                 payload={
                     "ingress_source": principal.ingress_source,
-                    "step_id": str(targets[0].id),
+                    "step_id": str(target.id),
                     "expected_task_version": expected_task_version,
                 },
             )

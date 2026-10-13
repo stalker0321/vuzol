@@ -22,8 +22,16 @@ from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.naming import ProjectNamingControlError, ProjectNamingController
 from vuzol.security.secret_ingress import cancel_request
 from vuzol.storage.errors import EntityNotFound
-from vuzol.storage.models import Approval, EditSession, TelegramControlAction
-from vuzol.storage.types import EditSessionStatus
+from vuzol.storage.models import (
+    Approval,
+    EditSession,
+    Run,
+    Step,
+    Task,
+    TelegramControlAction,
+    TelegramMessageLink,
+)
+from vuzol.storage.types import EditSessionStatus, RunStatus, StepStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import (
     ControlUpdate,
@@ -186,14 +194,143 @@ class TelegramControlService:
                     approval = await uow.session.get(Approval, update.approval_id)
                     if approval is None:
                         raise EntityNotFound(f"approval not found: {update.approval_id}")
+                action_payload: dict[str, Any] = {}
+                target_step = update.step_id
+                if (
+                    update.action_kind in {"start", "pause", "resume", "cancel"}
+                    and update.expected_task_version is not None
+                ):
+                    assert uow.session is not None
+                    current = await uow.session.get(Task, update.task_id)
+                    if (
+                        current is None
+                        or current.source_thread_id is None
+                        or (
+                            current.user_id,
+                            current.source_chat_id,
+                            current.source_thread_id,
+                        )
+                        != (update.user_id, update.chat_id, update.message_thread_id)
+                    ):
+                        raise TelegramPolicyError("task_retry_scope_mismatch")
+                    link = await uow.session.scalar(
+                        select(TelegramMessageLink).where(
+                            TelegramMessageLink.chat_id == update.chat_id,
+                            TelegramMessageLink.message_id == update.message_id,
+                            TelegramMessageLink.task_id == current.id,
+                            TelegramMessageLink.message_role.in_(
+                                ("task_status", "task_control_snapshot", "task_status_archived")
+                            ),
+                        )
+                    )
+                    if link is None or (
+                        current.version == update.expected_task_version
+                        and link.projection_revision != update.expected_task_version
+                    ):
+                        raise TelegramPolicyError("task_retry_message_mismatch")
+                    if current.version != update.expected_task_version:
+                        from vuzol.telegram.projections import enqueue_task_control_snapshot
+
+                        assert update.message_thread_id is not None
+                        await enqueue_task_control_snapshot(
+                            uow.session,
+                            task=current,
+                            chat_id=update.chat_id,
+                            thread_id=update.message_thread_id,
+                            user_id=update.user_id,
+                            key=f"task:control-stale:{update.callback_query_id}",
+                        )
+                        await uow.inbox.mark_processed(
+                            inbox_id, entity_type="task", entity_id=current.id
+                        )
+                        return IngressResult(
+                            status=IngressStatus.REJECTED, reason="task_retry_stale"
+                        )
+                    action_payload = {"expected_task_version": update.expected_task_version}
+                if update.action_kind == "retry":
+                    assert uow.session is not None
+                    task = await uow.session.get(Task, update.task_id)
+                    if (
+                        task is None
+                        or task.source_thread_id is None
+                        or (
+                            task.user_id,
+                            task.source_chat_id,
+                            task.source_thread_id,
+                        )
+                        != (update.user_id, update.chat_id, update.message_thread_id)
+                    ):
+                        raise TelegramPolicyError("task_retry_scope_mismatch")
+                    version = update.expected_task_version
+                    assert update.message_thread_id is not None
+                    if version is None:
+                        raise TelegramPolicyError("task_retry_version_required")
+                    link = await uow.session.scalar(
+                        select(TelegramMessageLink).where(
+                            TelegramMessageLink.chat_id == update.chat_id,
+                            TelegramMessageLink.message_id == update.message_id,
+                            TelegramMessageLink.task_id == task.id,
+                            TelegramMessageLink.message_role.in_(
+                                ("task_status", "task_control_snapshot", "task_status_archived")
+                            ),
+                        )
+                    )
+                    if link is None or (
+                        task.version == version and link.projection_revision != version
+                    ):
+                        raise TelegramPolicyError("task_retry_message_mismatch")
+                    run = await uow.session.scalar(
+                        select(Run)
+                        .where(Run.task_id == task.id)
+                        .order_by(Run.created_at.desc())
+                        .limit(1)
+                    )
+                    step = (
+                        None
+                        if run is None
+                        else await uow.session.scalar(
+                            select(Step).where(
+                                Step.run_id == run.id,
+                                Step.ordinal == update.retry_step_ordinal,
+                            )
+                        )
+                    )
+                    from vuzol.workflows.retry_policy import blocked_step_is_retryable
+
+                    if (
+                        task.version != version
+                        or run is None
+                        or run.status is not RunStatus.BLOCKED
+                        or step is None
+                        or step.status is not StepStatus.BLOCKED
+                        or not blocked_step_is_retryable(step)
+                    ):
+                        from vuzol.telegram.projections import enqueue_task_control_snapshot
+
+                        await enqueue_task_control_snapshot(
+                            uow.session,
+                            task=task,
+                            chat_id=update.chat_id,
+                            thread_id=update.message_thread_id,
+                            user_id=update.user_id,
+                            key=f"task:retry-stale:{update.callback_query_id}",
+                        )
+                        await uow.inbox.mark_processed(
+                            inbox_id, entity_type="task", entity_id=task.id
+                        )
+                        return IngressResult(
+                            status=IngressStatus.REJECTED, reason="task_retry_stale"
+                        )
+                    target_step = step.id
+                    action_payload = {"expected_task_version": version}
                 action = TelegramControlAction(
                     external_action_id=update.callback_query_id,
                     action_kind=update.action_kind,
                     requested_by_user_id=update.user_id,
                     task_id=update.task_id,
-                    step_id=update.step_id,
+                    step_id=target_step,
                     approval_id=update.approval_id,
-                    payload={},
+                    payload=action_payload,
                 )
                 action_id, action_created = await uow.telegram_actions.queue_once(action)
                 prior_outcome: dict[str, Any] | None = None

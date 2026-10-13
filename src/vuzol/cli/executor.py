@@ -228,6 +228,7 @@ async def run() -> None:
             worktree_access=worktree_access,
             agent_certificates=AgentCertificateStore(settings.artifact_root / "agent-certificates"),
             redaction_patterns=settings.redaction_patterns,
+            dependency_provisioning_enabled=settings.dependency_provisioning.enabled,
         )
         worktree_handler = PrepareWorktreeHandler(
             factory,
@@ -261,6 +262,7 @@ async def run() -> None:
             SandboxedArtifactCommandRunner(envelope_factory, sandbox_runtime),
             artifact_store,
             worktree_root=settings.worktree_root,
+            delivery_uid=settings.artifact_delivery_uid,
         )
         dependency_builder = (
             None

@@ -27,6 +27,37 @@ class WorktreeAccessError(RuntimeError):
     """A sandbox worktree grant could not be proven or safely revoked."""
 
 
+async def grant_artifact_read(path: Path, *, delivery_uid: int) -> None:
+    """Grant one existing delivery identity read-only access to one owned file."""
+    metadata = os.lstat(path)
+    if (
+        delivery_uid <= 0
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise WorktreeAccessError("candidate artifact read grant is unsafe")
+    command = Path("/usr/bin/setfacl")
+    _require_trusted_command(command)
+    process = await asyncio.create_subprocess_exec(
+        str(command),
+        "-m",
+        f"u:{delivery_uid}:r--",
+        "--",
+        str(path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+    )
+    try:
+        returncode = await asyncio.wait_for(process.wait(), timeout=10)
+    except (TimeoutError, asyncio.CancelledError):
+        process.kill()
+        await process.wait()
+        raise
+    if returncode != 0 or not _acl_has_named_user(_get_xattr(path, _ACCESS_XATTR), delivery_uid):
+        raise WorktreeAccessError("candidate artifact read grant failed")
+
+
 @dataclass(frozen=True, slots=True)
 class RootlessIdentity:
     namespace_pid: int

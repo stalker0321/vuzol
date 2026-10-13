@@ -558,6 +558,7 @@ class Settings(BaseSettings):
     repository_root: Path = Path("/srv/vuzol/repositories")
     worktree_root: Path = Path("/srv/vuzol/worktrees")
     artifact_root: Path = Path("/srv/vuzol/artifacts")
+    artifact_delivery_uid: int | None = Field(default=None, ge=1)
     static_site_root: Path = Path("/srv/vuzol/sites/hryshyn.dev")
     static_site_base_url: HttpUrl = HttpUrl("https://hryshyn.dev")
     preview_site_root: Path = Path("/srv/vuzol/sites/test.hryshyn.dev")

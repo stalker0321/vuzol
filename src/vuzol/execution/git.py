@@ -464,6 +464,28 @@ class LocalGit:
         except GitError:
             return None
 
+    async def source_archive(self, worktree: Path, commit: str, *, max_bytes: int) -> bytes:
+        """Export only bounded regular files from the measured retained commit."""
+        if len(commit) not in {40, 64} or any(char not in "0123456789abcdef" for char in commit):
+            raise GitError("candidate archive requires a measured commit")
+        listing = await self._run(worktree, "ls-tree", "-r", "-l", "-z", commit)
+        total = 0
+        for entry in listing.split(b"\0"):
+            if not entry:
+                continue
+            metadata, path = entry.split(b"\t", 1)
+            mode, kind, _hash, size = metadata.split()
+            _require_safe_path(path.decode("utf-8"))
+            if kind != b"blob" or mode not in {b"100644", b"100755"}:
+                raise GitError("candidate archive may contain only regular files")
+            total += int(size)
+            if total > max_bytes:
+                raise GitError("candidate source exceeds the artifact byte limit")
+        result = await self._run(worktree, "archive", "--format=zip", commit)
+        if len(result) > max_bytes:
+            raise GitError("candidate archive exceeds the artifact byte limit")
+        return result
+
     async def _run(
         self, cwd: Path, *args: str, extra_environment: dict[str, str] | None = None
     ) -> bytes:

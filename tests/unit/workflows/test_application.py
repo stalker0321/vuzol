@@ -34,4 +34,5 @@ def test_command_vocabulary_covers_lifecycle() -> None:
         "cancel",
         "resume",
         "inspect",
+        "retry",
     }

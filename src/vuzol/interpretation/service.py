@@ -120,7 +120,7 @@ from vuzol.storage.types import (
     TaskStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram.projections import enqueue_chat_notice
+from vuzol.telegram.projections import enqueue_chat_notice, enqueue_task_control_snapshot
 from vuzol.telegram.tracing import enqueue_interpreter_trace
 
 INTERPRETATION_DESTINATIONS = frozenset(
@@ -819,6 +819,38 @@ class InterpretationPipeline:
                     assert source_turn is not None
                     source_turn.should_create_task = False
             if (
+                result.draft.action is TaskAction.CONTINUE_TASK
+                and not result.draft.needs_clarification
+                and context_failure is None
+            ) or (
+                effect is IntakeEffect.CONTROL_REQUEST
+                and receipt.get("target_id") is not None
+                and not receipt.get("abstain")
+            ):
+                target_id = result.draft.referenced_task_id
+                if target_id is None and isinstance(receipt.get("target_id"), str):
+                    target_id = uuid.UUID(receipt["target_id"])
+                target = await session.get(Task, target_id) if target_id is not None else None
+                sent = target is not None and await enqueue_task_control_snapshot(
+                    session,
+                    task=target,
+                    chat_id=intake.chat_id,
+                    thread_id=intake.message_thread_id,
+                    user_id=intake.user_id,
+                    key=f"chat:controls:{intake.id}",
+                )
+                if not sent:
+                    await enqueue_chat_notice(
+                        session,
+                        chat_id=intake.chat_id,
+                        thread_id=intake.message_thread_id,
+                        key=f"chat:clarify:{intake.id}",
+                        text=(
+                            "Не удалось подготовить безопасное продолжение задачи в этом топике. "  # noqa: RUF001
+                            "Ничего не запущено."
+                        ),
+                    )
+            elif (
                 context_failure is not None
                 or result.draft.needs_clarification
                 or effect
@@ -835,7 +867,10 @@ class InterpretationPipeline:
                     key=f"chat:clarify:{intake.id}",
                     text=context_failure
                     or result.draft.clarification_question
-                    or "Продолжение существующей задачи — её кнопками. Ничего не запущено.",
+                    or (
+                        "Не удалось подготовить безопасное продолжение. "  # noqa: RUF001
+                        "Уточни запрос; ничего не запущено."
+                    ),
                 )
             elif work:
                 assert policy is not None

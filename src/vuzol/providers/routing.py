@@ -40,6 +40,7 @@ from vuzol.providers.budgets import (
 from vuzol.providers.domain import EffectiveProfileState
 from vuzol.providers.fallback_policy import should_fallback_provider
 from vuzol.providers.health import effective_health
+from vuzol.providers.planner_handoff import execution_constraints_context
 from vuzol.providers.policy import (
     ExclusionReason,
     PolicyDecision,
@@ -192,6 +193,13 @@ async def claim_routed_step(
             continue
         estimated_input = _estimated_input_tokens(task, step, run)
         estimated_input += (sum(len(item.content) for item in work_context) + 3) // 4
+        if step.step_type == "execute_code":
+            facts = execution_constraints_context(
+                registries.projects.get(task.project_id) if task.project_id else None,
+                dependency_provisioning_enabled=settings.dependency_provisioning.enabled,
+            )
+            if facts is not None:
+                estimated_input += (len(facts.content) + 3) // 4
         if work_context and estimated_input > settings.limits.provider_call_input_tokens:
             await _block_route(
                 session,
@@ -635,7 +643,10 @@ async def _block_route(
 ) -> None:
     if summary is None:
         summary = (
-            "Доступный лимит провайдера исчерпан; задача ожидает возобновления квоты."
+            "Внутренний бюджет этапа исчерпан. Сохранённый результат и расходы не потеряны; "
+            "безопасный ручной повтор доступен через актуальную карточку задачи."
+            if category == "budget_exhausted"
+            else "Доступный лимит провайдера исчерпан; задача ожидает возобновления квоты."
             if quota
             else "Маршрутизатор не нашёл безопасного доступного исполнителя для этого этапа."
         )

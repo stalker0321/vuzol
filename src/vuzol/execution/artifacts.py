@@ -61,6 +61,19 @@ class ArtifactStore:
         if any(pattern.search(content) for pattern in self._redactors):
             raise ArtifactSecretError("artifact matched a configured secret pattern")
 
+    @property
+    def max_bytes(self) -> int:
+        return self._max_bytes
+
+    def path_for(self, content_uri: str) -> Path:
+        """Resolve a managed URI without allowing foreign/escaping paths."""
+        if not content_uri.startswith("artifact:"):
+            raise ArtifactError("artifact reference is not managed")
+        relative = content_uri[len("artifact:") :]
+        if not relative or relative.startswith("/") or ".." in Path(relative).parts:
+            raise ArtifactError("artifact reference is unsafe")
+        return contained(self._root, self._root / relative)
+
     def redact(self, content: bytes) -> tuple[bytes, str | None]:
         redacted = content
         matched = False
@@ -85,7 +98,13 @@ class ArtifactStore:
         destination = contained(self._root, self._root / relative)
         if not destination.is_file():
             raise ArtifactError("artifact bytes are missing")
-        return destination.read_bytes()
+        if destination.stat().st_size > self._max_bytes:
+            raise ArtifactError("artifact exceeds configured byte limit")
+        with destination.open("rb") as stream:
+            content = stream.read(self._max_bytes + 1)
+        if len(content) > self._max_bytes:
+            raise ArtifactError("artifact exceeds configured byte limit")
+        return content
 
     def read_verified(self, content_uri: str, expected_hash: str) -> bytes:
         """Read back with hash verification (transfer receipt path).

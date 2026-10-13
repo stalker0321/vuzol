@@ -28,7 +28,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Start, pause, cancel, resume or inspect a task (operator CLI)."
     )
-    parser.add_argument("command", choices=["start", "pause", "cancel", "resume", "inspect"])
+    parser.add_argument(
+        "command", choices=["start", "pause", "cancel", "resume", "retry", "inspect"]
+    )
+    parser.add_argument("--step-id", type=uuid.UUID, default=None, help="Bounded retry step UUID")
     parser.add_argument("--task-id", required=True, help="Task UUID")
     parser.add_argument("--user-id", required=True, type=int, help="Operator user ID")
     parser.add_argument(
@@ -61,6 +64,7 @@ async def _run(args: argparse.Namespace) -> int:
                 command=args.command,
                 principal=Principal(user_id=args.user_id, ingress_source="cli"),
                 expected_task_version=args.expected_version,
+                step_id=getattr(args, "step_id", None),
             )
         except ValueError as error:
             logger.info("task command rejected", extra={"event": "ops.task.rejected"})

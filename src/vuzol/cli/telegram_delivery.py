@@ -8,6 +8,7 @@ import socket
 from telegram import Bot
 
 from vuzol.config import get_runtime_configuration
+from vuzol.execution.artifacts import ArtifactStore
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
@@ -58,6 +59,14 @@ async def run() -> None:
                 ),
                 dogfood_settings=settings.telegram_dogfood,
                 rich_messages=settings.chat.rich_messages,
+                artifacts=ArtifactStore(
+                    settings.artifact_root,
+                    max_bytes=settings.limits.artifact_bytes,
+                    retention_days=settings.retention.artifact_days,
+                    redaction_patterns=settings.redaction_patterns,
+                )
+                if settings.artifact_delivery_uid is not None
+                else None,
             )
             await run_delivery_loop(
                 service,

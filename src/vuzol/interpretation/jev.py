@@ -323,7 +323,9 @@ class JevDecisionsInterpreter:
         if choices["effect"] == "abstain":
             question = "Нужно обсудить и ответить или выполнить изменения? Ничего не запущено."
         if decision.effect is IntakeEffect.CONTROL_REQUEST:
-            question = "Для управления задачей используй кнопки её карточки."
+            question = (
+                "Уточни, какой задачей нужно управлять: укажи её номер или ответь на её сообщение."
+            )
         if mixed:
             question = (
                 "Запрос содержит несколько действий, которые текущий маршрут не может выполнить "

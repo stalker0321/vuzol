@@ -17,9 +17,16 @@ from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.storage.models import Task
+from vuzol.storage.models import Event, Task
+from vuzol.storage.types import RunStatus, StepStatus
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.workflows.controls import _locked_context, cancel_task, pause_task, resume_task
+from vuzol.workflows.controls import (
+    _locked_context,
+    cancel_task,
+    pause_task,
+    resume_task,
+    retry_blocked_step,
+)
 from vuzol.workflows.service import _enqueue_telegram_projection, start_run
 
 INGRESS_SOURCES = frozenset({"telegram", "cli", "api"})
@@ -31,6 +38,7 @@ class TaskCommand(StrEnum):
     CANCEL = "cancel"
     RESUME = "resume"
     INSPECT = "inspect"
+    RETRY = "retry"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +101,7 @@ async def apply_task_command(
     command: TaskCommand | str,
     principal: Principal,
     expected_task_version: int | None = None,
+    step_id: uuid.UUID | None = None,
 ) -> TaskCommandResult:
     """Session-level core shared by Telegram ingress, dispatch and the CLI."""
 
@@ -109,7 +118,36 @@ async def apply_task_command(
             status=task.status.value,
             applied=False,
         )
-    if action is TaskCommand.START:
+    if action is TaskCommand.RETRY:
+        task, run, steps = await _locked_context(session, task_id)
+        if task.user_id != principal.user_id:
+            raise ValueError("task retry requires the task owner's principal")
+        if expected_task_version is None or expected_task_version != task.version:
+            raise ValueError("stale task version for retry")
+        targets = [s for s in steps if s.status is StepStatus.BLOCKED]
+        if (
+            run.status is not RunStatus.BLOCKED
+            or len(targets) != 1
+            or (step_id is not None and targets[0].id != step_id)
+        ):
+            raise ValueError("retry requires exactly one current blocked step")
+        await retry_blocked_step(session, targets[0].id, actor_id=actor_id)
+        session.add(
+            Event(
+                entity_type="task",
+                entity_id=task.id,
+                event_type="task.retry_requested",
+                actor_type="user",
+                actor_id=actor_id,
+                payload={
+                    "ingress_source": principal.ingress_source,
+                    "step_id": str(targets[0].id),
+                    "expected_task_version": expected_task_version,
+                },
+            )
+        )
+        applied = True
+    elif action is TaskCommand.START:
         applied = await _start(session, task_id, actor_id, expected_task_version)
     elif action is TaskCommand.PAUSE:
         before = await _read_version(session, task_id)
@@ -153,6 +191,7 @@ class TaskControlService:
         command: TaskCommand | str,
         principal: Principal,
         expected_task_version: int | None = None,
+        step_id: uuid.UUID | None = None,
     ) -> TaskCommandResult:
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
@@ -162,4 +201,5 @@ class TaskControlService:
                 command=command,
                 principal=principal,
                 expected_task_version=expected_task_version,
+                step_id=step_id,
             )

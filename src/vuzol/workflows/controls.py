@@ -579,7 +579,10 @@ async def recover_validation_environment(
     )
     if (
         worktree is None
-        or worktree.result_commit is not None
+        # Legacy worker finalization can record the unchanged base commit before
+        # a later successful worker writes uncommitted source. It is not a new,
+        # validated result; retain that evidence and prepare its environment.
+        or worktree.result_commit not in {None, worktree.base_commit}
         or worktree.delivery_state
         not in {WorktreeDeliveryState.ACTIVE, WorktreeDeliveryState.WORKTREE_RETAINED}
         or not any(

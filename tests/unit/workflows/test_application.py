@@ -35,4 +35,5 @@ def test_command_vocabulary_covers_lifecycle() -> None:
         "resume",
         "inspect",
         "retry",
+        "revalidate",
     }

@@ -328,6 +328,7 @@ async def commit_step_outcome(
     step.lease_owner = None
     step.lease_expires_at = None
     if step.status is StepStatus.COMPLETED:
+        await _resume_after_validation_environment(session, run, step)
         await _resume_after_capability_preflight(session, run, step)
         await _resume_repaired_step(session, run, step)
         await _resume_review_after_validation(session, run, step)
@@ -401,6 +402,33 @@ async def _resume_after_capability_preflight(
     await transition_step(session, target, StepStatus.QUEUED, actor_type="capability_inventory")
     if target.attempt_count > 0:
         target.attempt_count -= 1
+    target.failure_category = None
+    target.failure_summary = None
+
+
+async def _resume_after_validation_environment(
+    session: AsyncSession, run: Run, preparation: Step
+) -> None:
+    raw_target = preparation.payload.get("validation_environment_for_step_id")
+    if preparation.step_type != "ensure_dependencies" or not isinstance(raw_target, str):
+        return
+    target = await session.scalar(
+        select(Step)
+        .where(
+            Step.id == uuid.UUID(raw_target),
+            Step.run_id == run.id,
+            Step.step_type == "validate",
+            Step.status == StepStatus.BLOCKED,
+        )
+        .with_for_update()
+    )
+    if target is None or target.payload.get("environment_recovery_step_id") != str(preparation.id):
+        raise ValueError("environment preparation has no mutually bound validation waiter")
+    await transition_step(session, target, StepStatus.QUEUED, actor_type="workflow_manager")
+    if target.attempt_count >= target.max_attempts:
+        target.max_attempts += 1
+    # Original failure/evidence remain in history; the new independent attempt
+    # must not carry the stale code-repair instruction into the reviewer.
     target.failure_category = None
     target.failure_summary = None
 
@@ -786,6 +814,21 @@ def derive_task_status(steps: tuple[Step, ...], run_status: RunStatus) -> TaskSt
         if step.status
         not in {StepStatus.COMPLETED, StepStatus.CANCELLED, StepStatus.FAILED, StepStatus.BLOCKED}
         and isinstance((value := step.payload.get("capability_for_step_id")), str)
+    )
+    active_repair_targets.update(
+        value
+        for step in steps
+        if (
+            step.status
+            not in {
+                StepStatus.COMPLETED,
+                StepStatus.CANCELLED,
+                StepStatus.FAILED,
+                StepStatus.BLOCKED,
+            }
+            or str(step.id) in active_repair_targets
+        )
+        and isinstance((value := step.payload.get("validation_environment_for_step_id")), str)
     )
     active = next(
         (

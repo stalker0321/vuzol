@@ -166,7 +166,7 @@ def test_completed_agent_result_is_rendered_in_project_topic(postgres_dsn: str) 
 
         async with factory() as session:
             card = await build_status_card(session, task.id)
-            assert "<b>Отчёт о выполнении</b>" in card.html  # noqa: RUF001
+            assert "<b>Сделано:</b>" in card.html
             assert "Use &lt;ports&gt; and adapters." in card.html
             assert "Исполнитель: Codex Sol" in card.html
             assert "Rewrite the service next" not in card.html
@@ -214,8 +214,7 @@ def test_failed_result_reports_stage_and_reason_in_project_topic(postgres_dsn: s
         async with factory() as session:
             card = await build_status_card(session, task.id)
             assert "Завершена неудачно" in card.html
-            assert "<b>Отчёт о завершении</b>" in card.html  # noqa: RUF001
-            assert "<b>Этап:</b> Проверка" in card.html
+            assert "<b>Остановка:</b> Проверка" in card.html
             assert "API contract test failed." in card.html
         await engine.dispose()
 
@@ -362,7 +361,7 @@ def test_work_package_item_card_encodes_edit_and_retry_callbacks(postgres_dsn: s
             assert parsed.revision_number == 1
 
             failed_card = await build_status_card(session, failed_id)
-        assert "Отчёт о завершении" in failed_card.html  # noqa: RUF001
+        assert "Причина:" in failed_card.html
         assert "Причина не указана" in failed_card.html
         (failed_row,) = failed_card.callback_buttons
         retry_labels = [label for label, _ in failed_row]
@@ -457,7 +456,7 @@ def test_terminal_history_report_shows_worker_preview_and_token_totals(postgres_
             assert (report.chat_id, report.thread_id) == (-100, 40)
             assert "<b>#100001</b>" in report.html
             assert "Завершена успешно" in report.html
-            assert "<b>Результат:</b> Docs published" in report.html
+            assert "<b>Сделано:</b> Docs published" in report.html
             assert "<b>Исполнитель:</b> Codex Sol" in report.html
             assert 'href="https://preview.vuzol.local/docs"' in report.html
             assert "1,200" in report.html and "340" in report.html and "100" in report.html

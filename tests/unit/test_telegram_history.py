@@ -390,7 +390,7 @@ async def test_failed_task_history_reports_stage_and_reason() -> None:
 
     assert report is not None
     assert "Завершена неудачно" in report.html
-    assert "Этап:</b> Проверка" in report.html
+    assert "Остановка:</b> Проверка" in report.html
     assert "API contract test failed on the response schema" in report.html
     assert "Результат:</b>" not in report.html
 
@@ -478,7 +478,7 @@ async def test_build_and_enqueue_history_report() -> None:
     assert "#730004" in report.html
     assert "Bill Buddy" in report.html
     assert "Задача:</b> Build a responsive landing page for Bill Buddy" in report.html
-    assert "Результат:</b> Landing page implemented" in report.html
+    assert "Сделано:</b> Landing page implemented" in report.html
     assert "Исполнитель:</b> Codex Sol" in report.html
     assert "Landing page implemented" in report.html
     assert "1,000" in report.html

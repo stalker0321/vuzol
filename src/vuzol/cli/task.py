@@ -29,7 +29,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Start, pause, cancel, resume or inspect a task (operator CLI)."
     )
     parser.add_argument(
-        "command", choices=["start", "pause", "cancel", "resume", "retry", "inspect"]
+        "command", choices=["start", "pause", "cancel", "resume", "retry", "revalidate", "inspect"]
     )
     parser.add_argument("--step-id", type=uuid.UUID, default=None, help="Bounded retry step UUID")
     parser.add_argument("--task-id", required=True, help="Task UUID")

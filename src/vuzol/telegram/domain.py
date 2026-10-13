@@ -58,6 +58,8 @@ class ControlUpdate(TelegramModel):
     )
     task_id: uuid.UUID | None = None
     step_id: uuid.UUID | None = None
+    expected_task_version: int | None = Field(default=None, ge=1)
+    retry_step_ordinal: int | None = Field(default=None, ge=0)
     approval_id: uuid.UUID | None = None
     naming_request_id: uuid.UUID | None = None
     naming_revision: int | None = Field(default=None, ge=1)

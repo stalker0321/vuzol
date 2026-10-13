@@ -68,6 +68,7 @@ from vuzol.providers.planner_handoff import (
     PlannerHandoffFenced,
     PlannerResultUnusable,
     assess_planner_provider_result,
+    execution_constraints_context,
     load_planner_context_for_run,
     planner_result_payload,
 )
@@ -123,6 +124,7 @@ class ProviderStepHandler:
         redaction_patterns: tuple[str, ...] = (),
         research_fetcher: SourceFetcher | None = None,
         research_retriever: str = "approved-http",
+        dependency_provisioning_enabled: bool = False,
     ) -> None:
         self._factory = factory
         self._registries = registries
@@ -137,6 +139,7 @@ class ProviderStepHandler:
         # legacy provider-text only (prod default: live trials forbidden).
         self._research_fetcher = research_fetcher
         self._research_retriever = research_retriever
+        self._dependency_provisioning_enabled = dependency_provisioning_enabled
         self._commit_messages = DatabaseCommitMessageResolver(factory)
 
     def _accounting(
@@ -1304,6 +1307,13 @@ class ProviderStepHandler:
                     or run.selected_route.get("chat_work_spec_revision"),
                 ),
             )
+            if step.step_type == "execute_code":
+                facts = execution_constraints_context(
+                    self._registries.projects.get(task.project_id) if task.project_id else None,
+                    dependency_provisioning_enabled=self._dependency_provisioning_enabled,
+                )
+                if facts is not None:
+                    context = (*context, facts)
             original_input = task.transcript or task.original_text
             input_task = task
             original_reference = provenance_reference(task)

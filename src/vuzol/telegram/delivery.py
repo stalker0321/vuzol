@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -13,6 +13,8 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Tele
 
 from vuzol.config import TelegramDogfoodSettings, TopicKind, TopicRegistry
 from vuzol.config.registries import ProfileRegistry, ProjectRegistry
+from vuzol.execution.artifacts import ArtifactError, ArtifactStore
+from vuzol.execution.paths import PathViolation
 from vuzol.interpretation.discussion import (
     DISCUSSION_REPLY_DESTINATION,
     DISCUSSION_THINKING_ROLE,
@@ -30,6 +32,7 @@ from vuzol.storage.leasing import (
     retry_outbox_item,
 )
 from vuzol.storage.models import (
+    Artifact,
     ConversationTurn,
     Interpretation,
     ProjectDiscussionSession,
@@ -45,10 +48,16 @@ from vuzol.storage.models import (
     TransactionalOutbox,
     UsageRecord,
     WorkPackage,
+    Worktree,
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.repositories.delivery import OutboxRepository
-from vuzol.storage.types import ConversationTurnRole, ConversationTurnSource, TaskStatus
+from vuzol.storage.types import (
+    ArtifactStorageState,
+    ConversationTurnRole,
+    ConversationTurnSource,
+    TaskStatus,
+)
 from vuzol.telegram.formatting import telegram_markdown_parts, telegram_rich_html
 from vuzol.telegram.layout import (
     HELP_CARD_ROLE,
@@ -97,6 +106,7 @@ TELEGRAM_DESTINATIONS = frozenset({"telegram", WORK_PACKAGE_PROJECTION_DESTINATI
 
 
 class DeliveryAction(StrEnum):
+    SEND_DOCUMENT = "send_document"
     SEND_STATUS = "send_status"
     EDIT_STATUS = "edit_status"
     EDIT_MESSAGE = "edit_message"
@@ -135,6 +145,8 @@ class PreparedDelivery:
     discussion_parts: tuple[tuple[str, str], ...] = ()
     discussion_part_index: int = 0
     rich_html: str | None = None
+    document_content: bytes = field(default=b"", repr=False)
+    document_filename: str = ""
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -159,11 +171,59 @@ async def prepare_delivery(
     trace_sample_percent: int = 100,
     trace_always_include_anomalies: bool = True,
     rich_messages: bool = False,
+    artifacts: ArtifactStore | None = None,
 ) -> PreparedDelivery:
     if getattr(item, "destination", "telegram") == WORK_PACKAGE_PROJECTION_DESTINATION:
         return await _prepare_work_package_projection(session, item)
     if item.operation_type not in {"send_message", "delete_message"}:
         raise PermanentDeliveryError("unsupported_telegram_operation")
+    if item.payload.get("role") == "task_result_archive":
+        artifact = await session.get(Artifact, item.linked_entity_id)
+        task = None if artifact is None else await session.get(Task, artifact.task_id)
+        worktree = (
+            None
+            if artifact is None
+            else await session.scalar(
+                select(Worktree).where(
+                    Worktree.task_id == artifact.task_id, Worktree.run_id == artifact.run_id
+                )
+            )
+        )
+        if (
+            artifacts is None
+            or item.linked_entity_type != "artifact"
+            or artifact is None
+            or artifact.artifact_type != "candidate_source_archive"
+            or artifact.media_type != "application/zip"
+            or artifact.storage_state is not ArtifactStorageState.AVAILABLE
+            or task is None
+            or task.ingress_source != "chat_work"
+            or task.source_chat_id is None
+            or task.source_thread_id is None
+            or str(task.id) != item.payload.get("task_id")
+            or worktree is None
+            or worktree.result_commit != item.payload.get("source_commit")
+        ):
+            raise PermanentDeliveryError("candidate_archive_binding_invalid")
+        try:
+            content = artifacts.read_verified(artifact.content_uri, artifact.content_hash)
+            if len(content) != artifact.size_bytes or len(content) > artifacts.max_bytes:
+                raise ArtifactError("candidate archive size differs")
+        except (ArtifactError, PathViolation, OSError):
+            raise PermanentDeliveryError("candidate_archive_bytes_invalid") from None
+        return PreparedDelivery(
+            DeliveryAction.SEND_DOCUMENT,
+            chat_id=task.source_chat_id,
+            thread_id=task.source_thread_id,
+            task_id=task.id,
+            run_id=artifact.run_id,
+            step_id=artifact.step_id,
+            message_role="task_result_archive",
+            html="Кандидат после проверок и ревью. Распакуй архив для проверки сайта. "
+            "Применение в основной репозиторий и публикация не выполнялись.",
+            document_content=content,
+            document_filename=f"candidate-{task.public_task_number or task.id}.zip",
+        )
     if (
         item.operation_type == "delete_message"
         and item.payload.get("role") == "user_command_delete"
@@ -210,6 +270,39 @@ async def prepare_delivery(
             callback_buttons=((("Ещё раз", f"v1:chat_retry:{task.id}"),),)
             if item.payload.get("retry_allowed")
             else (),
+        )
+    if item.payload.get("role") == "task_control_snapshot":
+        task = await session.get(Task, item.linked_entity_id)
+        if (
+            task is None
+            or task.source_chat_id is None
+            or task.source_thread_id is None
+            or (task.user_id, task.source_chat_id, task.source_thread_id)
+            != (
+                item.payload.get("user_id"),
+                item.payload.get("chat_id"),
+                item.payload.get("message_thread_id"),
+            )
+        ):
+            raise PermanentDeliveryError("task_control_snapshot_scope_mismatch")
+        card = await build_status_card(session, task.id)
+        return PreparedDelivery(
+            DeliveryAction.SEND_STATUS,
+            chat_id=task.source_chat_id,
+            thread_id=task.source_thread_id,
+            html=(
+                "Показано состояние сохранённой задачи. Ничего не запущено; "
+                "спецификация не изменена.\n\n" + card.html
+            ),
+            task_id=task.id,
+            revision=card.revision,
+            buttons=card.buttons,
+            approval_id=card.approval_id,
+            callback_buttons=card.callback_buttons,
+            message_role="task_control_snapshot",
+            work_package_id=card.work_package_id,
+            plan_revision_id=card.plan_revision_id,
+            control_status_generation=card.control_status_generation,
         )
     if item.payload.get("role") in {
         "project_import_prompt",
@@ -1172,6 +1265,7 @@ class TelegramDeliveryService:
         trace_always_include_anomalies: bool = True,
         dogfood_settings: TelegramDogfoodSettings | None = None,
         rich_messages: bool = False,
+        artifacts: ArtifactStore | None = None,
     ) -> None:
         self._factory = session_factory
         self._client = client
@@ -1188,6 +1282,7 @@ class TelegramDeliveryService:
         self._trace_always_include_anomalies = trace_always_include_anomalies
         self._dogfood_settings = dogfood_settings or TelegramDogfoodSettings()
         self._rich_messages = rich_messages
+        self._artifacts = artifacts
         self._logger = get_logger(__name__)
 
     async def deliver_one(self) -> bool:
@@ -1215,6 +1310,7 @@ class TelegramDeliveryService:
                     trace_sample_percent=self._trace_sample_percent,
                     trace_always_include_anomalies=self._trace_always_include_anomalies,
                     rich_messages=self._rich_messages,
+                    artifacts=self._artifacts,
                 )
             if prepared.action == DeliveryAction.NOOP:
                 await self._complete(token, prepared, None)
@@ -1237,6 +1333,7 @@ class TelegramDeliveryService:
                     confirmed_message_id = await self._call_telegram(prepared)
             except (TimedOut, NetworkError) as error:
                 if prepared.action in {
+                    DeliveryAction.SEND_DOCUMENT,
                     DeliveryAction.SEND_STATUS,
                     DeliveryAction.SEND_CLARIFICATION,
                     DeliveryAction.SEND_PROJECT_WELCOME,
@@ -1312,6 +1409,17 @@ class TelegramDeliveryService:
         return message_id
 
     async def _call_telegram(self, prepared: PreparedDelivery) -> int | None:
+        if prepared.action == DeliveryAction.SEND_DOCUMENT:
+            message_id = await self._client.send_document(
+                chat_id=prepared.chat_id,
+                thread_id=prepared.thread_id,
+                content=prepared.document_content,
+                filename=prepared.document_filename,
+                caption=prepared.html,
+            )
+            if type(message_id) is not int or message_id <= 0:
+                raise LostTelegramResponse("document send returned no confirmed message ID")
+            return message_id
         if prepared.action in {
             DeliveryAction.SEND_STATUS,
             DeliveryAction.SEND_CLARIFICATION,
@@ -1387,9 +1495,53 @@ class TelegramDeliveryService:
         confirmed_message_id: int | None,
     ) -> None:
         async with self._factory.begin() as session:
+            if prepared.action == DeliveryAction.SEND_DOCUMENT:
+                assert confirmed_message_id is not None
+                session.add(
+                    TelegramMessageLink(
+                        chat_id=prepared.chat_id,
+                        message_thread_id=prepared.thread_id,
+                        message_id=confirmed_message_id,
+                        task_id=prepared.task_id,
+                        run_id=prepared.run_id,
+                        step_id=prepared.step_id,
+                        message_role="task_result_archive",
+                    )
+                )
             if prepared.action == DeliveryAction.SEND_STATUS:
                 assert prepared.revision is not None
                 assert confirmed_message_id is not None
+                message_role = prepared.message_role or "task_status"
+                if message_role == "task_control_snapshot":
+                    # Promote only a confirmed send, retaining old reply lineage.
+                    task = await session.get(Task, prepared.task_id, with_for_update=True)
+                    if task is None:
+                        raise LeaseLost("task disappeared before snapshot confirmation")
+                    previous = await session.scalars(
+                        select(TelegramMessageLink).where(
+                            TelegramMessageLink.task_id == task.id,
+                            TelegramMessageLink.message_role == "task_status",
+                        )
+                    )
+                    for previous_link in previous:
+                        previous_link.message_role = "task_status_archived"
+                    message_role = "task_status"
+                    if task.version != prepared.revision:
+                        session.add(
+                            TransactionalOutbox(
+                                destination="telegram",
+                                operation_type="send_message",
+                                linked_entity_type="task",
+                                linked_entity_id=task.id,
+                                idempotency_key=f"task:snapshot-refresh:{confirmed_message_id}:{task.id}",
+                                payload={
+                                    "role": "intake_ack",
+                                    "task_id": str(task.id),
+                                    "chat_id": prepared.chat_id,
+                                    "message_thread_id": prepared.thread_id,
+                                },
+                            )
+                        )
                 if (
                     prepared.message_role
                     not in {PROJECT_STATUS_DASHBOARD_ROLE, WORK_PACKAGE_STATUS_ROLE}
@@ -1408,7 +1560,7 @@ class TelegramDeliveryService:
                         work_package_id=prepared.work_package_id,
                         plan_revision_id=prepared.plan_revision_id,
                         control_status_generation=prepared.control_status_generation,
-                        message_role=prepared.message_role or "task_status",
+                        message_role=message_role,
                         projection_revision=prepared.revision,
                     )
                 )

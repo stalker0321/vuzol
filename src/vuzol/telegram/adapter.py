@@ -2,6 +2,7 @@
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from io import BytesIO
 from typing import Any
 
 from pydantic import SecretStr
@@ -42,6 +43,14 @@ StartupHandlerFn = Callable[[Bot], Awaitable[None]]
 
 def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
     chat_messages = {
+        "task_retry_stale": "Состояние задачи изменилось. Отправляю актуальную карточку.",
+        "task_retry_scope_mismatch": "Эта кнопка не относится к твоей задаче в этом топике.",
+        "task_retry_version_required": (
+            "Старая кнопка. Напиши «продолжи», чтобы получить актуальную карточку."
+        ),
+        "task_retry_message_mismatch": (
+            "Кнопка устарела. Напиши «продолжи» для актуальной карточки."
+        ),
         "chat_retry_stale": "Это старый запрос. Используй кнопку под последней ошибкой.",
         "chat_retry_ambiguous": (
             "Результат доставки неизвестен. Повтор заблокирован, чтобы не отправить дубль."
@@ -96,6 +105,21 @@ def resolve_bot_token(
 class PythonTelegramClient:
     def __init__(self, bot: Bot) -> None:
         self._bot = bot
+
+    async def send_document(
+        self, *, chat_id: int, thread_id: int | None, content: bytes, filename: str, caption: str
+    ) -> int:
+        message = await self._bot.send_document(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            document=BytesIO(content),
+            filename=filename,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+        if type(message.message_id) is not int or message.message_id <= 0:
+            raise LostTelegramResponse("document send returned no confirmed message ID")
+        return message.message_id
 
     async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int:
         try:
@@ -304,6 +328,48 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
     parts = query.data.split(":")
     message_thread_id = getattr(query.message, "message_thread_id", None)
     message_id = getattr(query.message, "message_id", None)
+    if len(parts) == 5 and parts[:2] == ["v2", "task"]:
+        if parts[2] not in {"start", "pause", "resume", "cancel"}:
+            return None
+        try:
+            control_task_id, version = uuid.UUID(parts[3]), int(parts[4])
+            if version < 1:
+                return None
+        except ValueError:
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+            message_id=message_id,
+            action_kind=parts[2],
+            task_id=control_task_id,
+            expected_task_version=version,
+        )
+    if len(parts) == 5 and parts[:2] == ["v2", "retry"]:
+        try:
+            retry_task_id = uuid.UUID(parts[2])
+            version, ordinal = int(parts[3]), int(parts[4])
+            if version < 1 or ordinal < 0:
+                return None
+        except ValueError:
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+            message_id=message_id,
+            action_kind="retry",
+            task_id=retry_task_id,
+            expected_task_version=version,
+            retry_step_ordinal=ordinal,
+        )
     if query.data.startswith("v1:wp:"):
         return WorkPackageControlUpdate(
             bot_id=bot_id,
@@ -489,6 +555,14 @@ def _control_markup(
 ) -> InlineKeyboardMarkup | None:
     if not actions and not callback_buttons:
         return None
+    # Fresh versioned task callbacks replace their legacy UUID-only counterpart.
+    overridden = {
+        data.split(":")[2]
+        for row in callback_buttons
+        for _, data in row
+        if data.startswith("v2:task:") and len(data.split(":")) == 5
+    }
+    actions = tuple(action for action in actions if action not in overridden)
     labels = {
         "start": "Старт",
         "pause": "Пауза",

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import mimetypes
 import uuid
+import zipfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -14,7 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.registries import ConfigurationBundle
-from vuzol.execution.access import WorktreeAccessLease, WorktreeAccessManager
+from vuzol.execution.access import (
+    WorktreeAccessError,
+    WorktreeAccessLease,
+    WorktreeAccessManager,
+    grant_artifact_read,
+)
 from vuzol.execution.artifacts import ArtifactError, ArtifactStore
 from vuzol.execution.domain import ProcessEnvelope
 from vuzol.execution.git import GitError, LocalGit
@@ -22,7 +30,7 @@ from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.project_environment import current_environment
 from vuzol.projects.artifact_contracts import ArtifactExpectation, expected_artifacts
-from vuzol.storage.models import Artifact, Step, Task, Worktree
+from vuzol.storage.models import Artifact, Step, Task, TransactionalOutbox, Worktree
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
@@ -106,6 +114,7 @@ class ArtifactProductionHandler:
         artifacts: ArtifactStore,
         *,
         worktree_root: Path,
+        delivery_uid: int | None = None,
     ) -> None:
         self._factory = factory
         self._registries = registries
@@ -114,6 +123,7 @@ class ArtifactProductionHandler:
         self._runner = runner
         self._artifacts = artifacts
         self._worktree_root = trusted_root(worktree_root, create=False)
+        self._delivery_uid = delivery_uid
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -134,6 +144,8 @@ class ArtifactProductionHandler:
                 and components[expectation.component_key].get("kind") not in _WEB_KINDS
             )
             if not pending:
+                if self._delivery_uid is not None and task.ingress_source == "chat_work":
+                    return await self._export_candidate(request, task, worktree, root)
                 return StepOutcome.succeeded({"status": "skipped", "reason": "no_artifacts"})
             assert task.project_id is not None
             project = self._registries.projects.get(task.project_id)
@@ -202,7 +214,17 @@ class ArtifactProductionHandler:
                     "artifacts": produced,
                 }
             )
-        except (ArtifactError, GitError, LookupError, PathViolation, ValueError) as error:
+        except (
+            ArtifactError,
+            GitError,
+            LookupError,
+            PathViolation,
+            ValueError,
+            OSError,
+            zipfile.BadZipFile,
+            TimeoutError,
+            WorktreeAccessError,
+        ) as error:
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
                 result={},
@@ -240,6 +262,99 @@ class ArtifactProductionHandler:
             raise ValueError("approved project environment is missing")
         root = contained(self._worktree_root, Path(worktree.path))
         return task, worktree, step, root, environment.contract
+
+    async def _export_candidate(
+        self,
+        request: StepExecutionRequest,
+        task: Task,
+        worktree: Worktree,
+        root: Path,
+    ) -> StepOutcome:
+        """Deliver inspectable source, not a deployment or an acceptance claim."""
+        if task.source_chat_id is None or task.source_thread_id is None:
+            raise ValueError("candidate delivery has no owned Telegram destination")
+        assert worktree.result_commit is not None
+        await self._git.require_clean_tracked_worktree(root)
+        if await self._git.resolve_commit(root, "HEAD") != worktree.result_commit:
+            raise ValueError("candidate source does not match the retained result")
+        content = await self._git.source_archive(
+            root, worktree.result_commit, max_bytes=self._artifacts.max_bytes
+        )
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            for item in archive.infolist():
+                self._artifacts.reject_secrets(archive.read(item))
+        self._artifacts.reject_secrets(content)
+        async with self._factory.begin() as session:
+            step = await session.get(Step, request.step_id, with_for_update=True)
+            if (
+                step is None
+                or step.run_id != request.run_id
+                or step.lease_owner != request.lease.owner
+                or step.lease_generation != request.lease.generation
+                or step.status is not StepStatus.RUNNING
+                or step.lease_expires_at is None
+                or step.lease_expires_at <= datetime.now(UTC)
+            ):
+                raise ValueError("candidate export lease is stale")
+            review = await session.scalar(
+                select(Step).where(
+                    Step.run_id == request.run_id,
+                    Step.step_type == "review",
+                    Step.status == StepStatus.COMPLETED,
+                )
+            )
+            if (
+                review is None
+                or not isinstance(review.result, dict)
+                or review.result.get("verdict") not in {"pass", "pass_with_warnings"}
+                or review.result.get("result_commit") != worktree.result_commit
+            ):
+                raise ValueError("candidate archive requires the checked review result")
+            row = await self._artifacts.persist(
+                session,
+                task_id=task.id,
+                run_id=request.run_id,
+                step_id=request.step_id,
+                artifact_type="candidate_source_archive",
+                content=content,
+                media_type="application/zip",
+            )
+            path = self._artifacts.path_for(row.content_uri)
+            # Narrow read grant for the configured existing delivery UID only.
+            assert self._delivery_uid is not None
+            await grant_artifact_read(path, delivery_uid=self._delivery_uid)
+            key = f"task:candidate-archive:{task.id}:{worktree.result_commit}"
+            if not await session.scalar(
+                select(TransactionalOutbox.id).where(TransactionalOutbox.idempotency_key == key)
+            ):
+                session.add(
+                    TransactionalOutbox(
+                        destination="telegram",
+                        operation_type="send_message",
+                        linked_entity_type="artifact",
+                        linked_entity_id=row.id,
+                        idempotency_key=key,
+                        payload={
+                            "role": "task_result_archive",
+                            "task_id": str(task.id),
+                            "source_commit": worktree.result_commit,
+                        },
+                    )
+                )
+        return StepOutcome.succeeded(
+            {
+                "status": "produced",
+                "source_commit": worktree.result_commit,
+                "artifacts": [
+                    {
+                        "artifact_id": str(row.id),
+                        "artifact_type": row.artifact_type,
+                        "content_hash": row.content_hash,
+                        "size_bytes": row.size_bytes,
+                    }
+                ],
+            }
+        )
 
     async def _persist(
         self,

@@ -89,10 +89,31 @@ class WorkflowControlConsumer:
             if action is None:
                 raise ValueError("workflow control action is missing")
             try:
-                await self._apply(session, action)
+                async with session.begin_nested():
+                    await self._apply(session, action)
             except ValueError as error:
                 action.status = ControlActionStatus.REJECTED
                 action.payload = {**action.payload, "rejection_reason": str(error)[:500]}
+                if (
+                    action.task_id is not None
+                    and action.payload.get("expected_task_version") is not None
+                ):
+                    task = await session.get(Task, action.task_id)
+                    if (
+                        task is not None
+                        and task.source_chat_id is not None
+                        and task.source_thread_id is not None
+                    ):
+                        from vuzol.telegram.projections import enqueue_task_control_snapshot
+
+                        await enqueue_task_control_snapshot(
+                            session,
+                            task=task,
+                            chat_id=task.source_chat_id,
+                            thread_id=task.source_thread_id,
+                            user_id=action.requested_by_user_id,
+                            key=f"task:control-rejected:{action.id}",
+                        )
             else:
                 action.status = ControlActionStatus.PROCESSED
             action.processed_at = func.now()
@@ -102,7 +123,6 @@ class WorkflowControlConsumer:
     async def _apply(self, session: AsyncSession, action: TelegramControlAction) -> None:
         from vuzol.workflows.application import Principal, apply_task_command
 
-        actor_id = str(action.requested_by_user_id)
         if action.action_kind in {"approve", "redo", "reject"}:
             if action.approval_id is None:
                 raise ValueError("result decision requires an approval target")
@@ -116,7 +136,32 @@ class WorkflowControlConsumer:
         if action.action_kind == "retry":
             if action.step_id is None:
                 raise ValueError("retry requires a step target")
-            await retry_blocked_step(session, action.step_id, actor_id=actor_id)
+            if action.status is not ControlActionStatus.QUEUED:
+                return
+            stored_step = await session.get(Step, action.step_id)
+            stored_run = None if stored_step is None else await session.get(Run, stored_step.run_id)
+            if stored_run is None or (
+                action.task_id is not None and action.task_id != stored_run.task_id
+            ):
+                raise ValueError("retry task/step binding is invalid")
+            target_task_id = stored_run.task_id
+            version = action.payload.get("expected_task_version")
+            if version is None:
+                # Compatibility for already queued legacy step-target receipts.
+                # New Telegram retries require a version at ingress.
+                stored_task = await session.get(Task, target_task_id)
+                if stored_task is None:
+                    raise ValueError("retry task is missing")
+                version = stored_task.version
+            result = await apply_task_command(
+                session,
+                task_id=target_task_id,
+                command="retry",
+                principal=Principal(action.requested_by_user_id, "telegram"),
+                expected_task_version=version,
+                step_id=action.step_id,
+            )
+            action.payload = {**action.payload, "outcome": _command_outcome(result)}
             return
         if action.task_id is None:
             raise ValueError("workflow control requires a task target")
@@ -129,6 +174,7 @@ class WorkflowControlConsumer:
                 task_id=action.task_id,
                 command="pause",
                 principal=Principal(action.requested_by_user_id, "telegram"),
+                expected_task_version=action.payload.get("expected_task_version"),
             )
             action.payload = {**action.payload, "outcome": _command_outcome(result)}
             return
@@ -138,6 +184,7 @@ class WorkflowControlConsumer:
                 task_id=action.task_id,
                 command="resume",
                 principal=Principal(action.requested_by_user_id, "telegram"),
+                expected_task_version=action.payload.get("expected_task_version"),
             )
             action.payload = {**action.payload, "outcome": _command_outcome(result)}
             return
@@ -147,6 +194,7 @@ class WorkflowControlConsumer:
                 task_id=action.task_id,
                 command="cancel",
                 principal=Principal(action.requested_by_user_id, "telegram"),
+                expected_task_version=action.payload.get("expected_task_version"),
             )
             action.payload = {**action.payload, "outcome": _command_outcome(result)}
             return
@@ -156,6 +204,7 @@ class WorkflowControlConsumer:
                 task_id=action.task_id,
                 command="start",
                 principal=Principal(action.requested_by_user_id, "telegram"),
+                expected_task_version=action.payload.get("expected_task_version"),
             )
             action.payload = {**action.payload, "outcome": _command_outcome(result)}
             return
@@ -436,6 +485,11 @@ async def retry_blocked_step(
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
     assert task is not None
     task.budget_epoch += 1
+    run.selected_route = {
+        **run.selected_route,
+        "recovery_epoch": task.budget_epoch,
+        "recovery_epoch_started_at": datetime.now(UTC).isoformat(),
+    }
     session.add(
         Event(
             entity_type="task",

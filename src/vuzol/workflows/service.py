@@ -674,6 +674,16 @@ def _can_retry(step: Step) -> bool:
 
 def _recovery_deadline_exceeded(run: Run, step: Step, policy: RecoveryPolicy) -> bool:
     started = run.started_at or step.created_at
+    route = run.selected_route if isinstance(run.selected_route, dict) else {}
+    epoch_start = route.get("recovery_epoch_started_at")
+    if epoch_start is not None:
+        try:
+            candidate = datetime.fromisoformat(epoch_start)
+            if candidate.tzinfo is None or candidate > datetime.now(UTC):
+                return True
+            started = candidate
+        except (TypeError, ValueError):
+            return True
     if started is None:
         return False
     return (datetime.now(UTC) - started).total_seconds() > policy.recovery_deadline_seconds

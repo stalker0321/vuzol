@@ -54,6 +54,7 @@ from vuzol.telegram.layout import (
     STATUS_DASHBOARD_TOPIC_KIND,
 )
 from vuzol.workflows.result_approval import verified_envelope
+from vuzol.workflows.retry_policy import blocked_step_is_retryable
 
 TELEGRAM_TEXT_LIMIT = 4096
 # Outbox/message_role for the single editable card in the task_dashboard topic.
@@ -1418,6 +1419,45 @@ async def enqueue_chat_notice(
     await session.flush()
 
 
+async def enqueue_task_control_snapshot(
+    session: AsyncSession,
+    *,
+    task: Task,
+    chat_id: int,
+    thread_id: int,
+    user_id: int,
+    key: str,
+) -> bool:
+    """Request a fresh canonical card here, without starting or copying work."""
+    if (task.user_id, task.source_chat_id, task.source_thread_id) != (user_id, chat_id, thread_id):
+        return False
+    if not await session.scalar(select(Run.id).where(Run.task_id == task.id).limit(1)):
+        # A Task row alone has no saved workflow to continue. Do not offer
+        # Start/Resume controls that cannot target an actual run.
+        return False
+    if await session.scalar(
+        select(TransactionalOutbox.id).where(TransactionalOutbox.idempotency_key == key)
+    ):
+        return True
+    session.add(
+        TransactionalOutbox(
+            destination="telegram",
+            operation_type="send_message",
+            linked_entity_type="task",
+            linked_entity_id=task.id,
+            idempotency_key=key,
+            payload={
+                "role": "task_control_snapshot",
+                "chat_id": chat_id,
+                "message_thread_id": thread_id,
+                "user_id": user_id,
+            },
+        )
+    )
+    await session.flush()
+    return True
+
+
 async def enqueue_task_status_projection(
     session: AsyncSession,
     task: Task,
@@ -1614,6 +1654,8 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         if task.status in USER_REPORTABLE_TASK_STATUSES
         else user_status_label(task.status)
     )
+    if step is not None and step.failure_category == "budget_exhausted":
+        status_label = "Остановлена: внутренний бюджет этапа исчерпан"
     lines.extend(
         (
             f"Проект: {telegram_html(scope)}",
@@ -1720,6 +1762,37 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             else tuple(status_buttons(task.status.value))
         )
     callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = ()
+    if package is None and approval is None:
+        labels = {"start": "Старт", "pause": "Пауза", "resume": "Продолжить", "cancel": "Отмена"}
+        callback_buttons = tuple(
+            ((labels[action], f"v2:task:{action}:{task.id.hex}:{task.version}"),)
+            for action in buttons
+            if action in labels
+        )
+    if (
+        package is None
+        and approval is None
+        and run is not None
+        and run.status is RunStatus.BLOCKED
+        and step is not None
+        and step.status is StepStatus.BLOCKED
+    ):
+        if blocked_step_is_retryable(step):
+            data = f"v2:retry:{task.id.hex}:{task.version}:{step.ordinal}"
+            if len(data.encode()) > 64:
+                raise ValueError("retry callback exceeds Telegram bound")
+            callback_buttons = ((("Повторить этап", data),),)
+            lines.extend(
+                ("", "Повтор сохранит задачу и её контекст. Новый запуск — только по кнопке.")
+            )
+        elif step.unknown_effects:
+            lines.extend(
+                ("", "Автоматический повтор небезопасен: сначала нужно проверить последствия сбоя.")
+            )
+        else:
+            lines.extend(
+                ("", "Безопасный повтор этого этапа недоступен; нужна проверка причины остановки.")
+            )
     if (
         package is not None
         and revision is not None
@@ -1838,6 +1911,10 @@ async def build_approval_card(session: AsyncSession, task_id: uuid.UUID) -> Stat
 
 
 class TelegramClient(Protocol):
+    async def send_document(
+        self, *, chat_id: int, thread_id: int | None, content: bytes, filename: str, caption: str
+    ) -> int: ...
+
     async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int: ...
 
     async def edit_rich_message(self, *, chat_id: int, message_id: int, html: str) -> None: ...
@@ -1883,6 +1960,9 @@ class RichMessageRejected(RuntimeError):
 class FakeTelegramClient:
     fail: Exception | None = None
     next_message_id: int = 1
+    documents: list[tuple[int, int | None, bytes, str, str]] = field(
+        default_factory=list, init=False, repr=False
+    )
     sent: list[tuple[int, int | None, str]] = field(default_factory=list, init=False)
     edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
     deleted: list[tuple[int, int]] = field(default_factory=list, init=False)
@@ -1892,6 +1972,16 @@ class FakeTelegramClient:
     sent_keyboards: list[tuple[tuple[tuple[str, str], ...], ...]] = field(
         default_factory=list, init=False
     )
+
+    async def send_document(
+        self, *, chat_id: int, thread_id: int | None, content: bytes, filename: str, caption: str
+    ) -> int:
+        if self.fail:
+            raise self.fail
+        self.documents.append((chat_id, thread_id, content, filename, caption))
+        message_id = self.next_message_id
+        self.next_message_id += 1
+        return message_id
 
     async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int:
         if self.fail:

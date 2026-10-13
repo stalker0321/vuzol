@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +22,7 @@ from vuzol.providers.planner_handoff import (
     bound_planner_text,
     build_planner_context_items,
     describe_planner_handoff,
+    execution_constraints_context,
     load_planner_context_for_run,
     redact_planner_text,
 )
@@ -27,6 +30,19 @@ from vuzol.providers.routing import PROVIDER_STEP_ROLES
 from vuzol.storage.models import Step
 from vuzol.storage.types import IdempotencyClass, QueueClass, RetryClass, StepStatus
 from vuzol.workflows.definitions import WORKFLOW_REGISTRY
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_actual_execution_policy_is_explicit_bounded_context(enabled):
+    project = SimpleNamespace(
+        id="afterword", validation_commands=[SimpleNamespace(argv=("make", "test"))]
+    )
+    item = execution_constraints_context(project, dependency_provisioning_enabled=enabled)
+    body = json.loads(item.content)
+    assert body["trusted_validation_commands"] == [["make", "test"]]
+    assert body["dependency_provisioning_enabled"] is enabled
+    assert item.content_hash == hashlib.sha256(item.content.encode()).hexdigest()
+    assert execution_constraints_context(None, dependency_provisioning_enabled=enabled) is None
 
 
 def _usage() -> NormalizedUsage:

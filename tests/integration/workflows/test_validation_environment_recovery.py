@@ -37,7 +37,17 @@ pytestmark = pytest.mark.postgresql
 
 
 @pytest.mark.parametrize(
-    "case", ("ok", "wrong_owner", "stale", "repair_started", "unknown_effects", "api")
+    "case",
+    (
+        "ok",
+        "legacy_base",
+        "finalized",
+        "wrong_owner",
+        "stale",
+        "repair_started",
+        "unknown_effects",
+        "api",
+    ),
 )
 def test_operator_recovery_is_fenced_and_does_not_spend_another_model_attempt(
     postgres_dsn: str,
@@ -112,6 +122,13 @@ def test_operator_recovery_is_fenced_and_does_not_spend_another_model_attempt(
                     project_id="site",
                     repository_identity_hash="a" * 64,
                     base_commit="b" * 40,
+                    result_commit=(
+                        "b" * 40
+                        if case == "legacy_base"
+                        else "d" * 40
+                        if case == "finalized"
+                        else None
+                    ),
                     expected_target_head="b" * 40,
                     default_branch="main",
                     branch="site-work",
@@ -130,7 +147,7 @@ def test_operator_recovery_is_fenced_and_does_not_spend_another_model_attempt(
             "expected_task_version": 18 if case == "stale" else 19,
             "step_id": validation_record.id,
         }
-        if case != "ok":
+        if case not in {"ok", "legacy_base"}:
             with pytest.raises(ValueError):
                 await service.execute(**args)
             async with factory() as session:

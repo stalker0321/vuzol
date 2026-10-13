@@ -292,3 +292,11 @@ async def test_codex_adapter_rejects_missing_isolation_sandbox_and_bad_output(
             CancellationContext(),
         )
     assert captured.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+
+
+def test_native_cli_cached_input_tokens_alias_preserves_accounting():
+    from vuzol.providers.codex import _usage_int
+
+    assert _usage_int({"cached_input_tokens": 700000}, "cached_tokens") == 700000
+    assert _usage_int({"cached_tokens": 0, "cached_input_tokens": 21}, "cached_tokens") == 0
+    assert _usage_int({"cached_input_tokens": None}, "cached_tokens") is None

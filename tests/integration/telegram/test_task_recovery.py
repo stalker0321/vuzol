@@ -1,6 +1,7 @@
 """Actual chat→fresh card→callback→same-task retry, real TEST PostgreSQL."""
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -25,7 +26,13 @@ from vuzol.storage.models import (
     TransactionalOutbox,
     UsageRecord,
 )
-from vuzol.storage.types import ControlActionStatus, RunStatus, StepStatus, TaskStatus
+from vuzol.storage.types import (
+    ControlActionStatus,
+    IdempotencyClass,
+    RunStatus,
+    StepStatus,
+    TaskStatus,
+)
 from vuzol.telegram.adapter import _control_markup, control_update
 from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.delivery import TelegramDeliveryService, prepare_delivery
@@ -236,6 +243,64 @@ async def test_natural_continuation_posts_working_controls_without_start(
             assert await session.scalar(select(func.count()).select_from(Task)) == 1
         stale = await service.accept(callback(data, link.message_id, 1203))
         assert stale.status is IngressStatus.REJECTED and stale.reason == "task_retry_stale"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("bound", [True, False])
+async def test_retry_bound_repair_not_unrelated_second_block(postgres_dsn, bound):
+    engine, factory = storage(postgres_dsn)
+    try:
+        task_id, run_id, step_id, revision, started = await stopped(factory)
+        parent_id = uuid.uuid4()
+        async with factory.begin() as session:
+            session.add(
+                Step(
+                    id=parent_id,
+                    run_id=run_id,
+                    ordinal=0,
+                    step_type="validate",
+                    status=StepStatus.BLOCKED,
+                    unknown_effects=False,
+                    timeout_seconds=60,
+                    idempotency_class=IdempotencyClass.ISOLATED_RETRYABLE,
+                    failure_category="validation_gate_failed",
+                    payload={"repair_scheduled_step_id": str(step_id)} if bound else {},
+                )
+            )
+            child = await session.get(Step, step_id)
+            child.payload = {"repair_for_step_id": str(parent_id)}
+            child.dependency_metadata = {"template_key": "repair_code", "repair_for_ordinal": 0}
+        async with factory.begin() as session:
+            if bound:
+                result = await apply_task_command(
+                    session,
+                    task_id=task_id,
+                    command="retry",
+                    principal=Principal(42, "cli"),
+                    expected_task_version=1,
+                    step_id=step_id,
+                )
+                assert result.applied
+            else:
+                with pytest.raises(ValueError, match="unambiguous"):
+                    await apply_task_command(
+                        session,
+                        task_id=task_id,
+                        command="retry",
+                        principal=Principal(42, "cli"),
+                        expected_task_version=1,
+                        step_id=step_id,
+                    )
+        async with factory() as session:
+            task = await session.get(Task, task_id)
+            run = await session.get(Run, run_id)
+            parent = await session.get(Step, parent_id)
+            child = await session.get(Step, step_id)
+            assert task.spec_revision == revision and run.started_at == started
+            assert task.budget_epoch == (1 if bound else 0)
+            assert parent.status is StepStatus.BLOCKED
+            assert child.status is (StepStatus.QUEUED if bound else StepStatus.BLOCKED)
     finally:
         await engine.dispose()
 

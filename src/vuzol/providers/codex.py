@@ -210,7 +210,7 @@ class CodexCliAdapter:
 def _usage_int(usage: object, key: str) -> int | None:
     if not isinstance(usage, dict):
         return None
-    value = usage.get(key)
+    value = usage.get(key, usage.get("cached_input_tokens") if key == "cached_tokens" else None)
     return int(value) if isinstance(value, int | float) and value >= 0 else None
 
 

@@ -28,6 +28,7 @@ from vuzol.storage.types import (
     RunStatus,
     StepStatus,
     TaskStatus,
+    WorktreeDeliveryState,
 )
 from vuzol.workflows.result_approval import verified_envelope
 from vuzol.workflows.retry_policy import blocked_step_is_retryable
@@ -525,6 +526,136 @@ async def retry_blocked_step(
             session, task, TaskStatus.RETRYING, actor_type="user", actor_id=actor_id
         )
         await _enqueue_telegram_projection(session, task, run)
+
+
+async def recover_validation_environment(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    user_id: int,
+    expected_task_version: int | None,
+    step_id: uuid.UUID | None,
+) -> None:
+    """Owner-requested environment recovery, not another source/model attempt.
+
+    Preserve the failed validation and completed source. Retire only its mutually
+    bound, never-started repair; queue the existing dependency/capability path.
+    """
+
+    from vuzol.storage.models import (
+        ProviderBudgetReservation,
+        SupervisedProcess,
+        UsageRecord,
+        Worktree,
+    )
+    from vuzol.storage.types import IdempotencyClass, QueueClass, RetryClass
+
+    task, run, steps = await _locked_context(session, task_id)
+    if task.user_id != user_id:
+        raise ValueError("environment recovery requires the task owner's principal")
+    if expected_task_version is None or task.version != expected_task_version:
+        raise ValueError("stale task version for environment recovery")
+    target = next((step for step in steps if step.id == step_id), None)
+    if (
+        run.status is not RunStatus.BLOCKED
+        or target is None
+        or target.step_type != "validate"
+        or target.status is not StepStatus.BLOCKED
+        or target.unknown_effects
+        or task.project_id is None
+        or target.failure_category
+        not in {"validation_gate_failed", "validation_environment_missing_tool"}
+        or target.payload.get("environment_recovery_step_id")
+    ):
+        raise ValueError("environment recovery requires an unambiguous failed validation")
+    if any(step.status in {StepStatus.LEASED, StepStatus.RUNNING} for step in steps):
+        raise ValueError("environment recovery cannot race active work")
+    worktree = await session.scalar(
+        select(Worktree).where(
+            Worktree.run_id == run.id,
+            Worktree.task_id == task.id,
+            Worktree.project_id == task.project_id,
+        )
+    )
+    if (
+        worktree is None
+        or worktree.result_commit is not None
+        or worktree.delivery_state
+        not in {WorktreeDeliveryState.ACTIVE, WorktreeDeliveryState.WORKTREE_RETAINED}
+        or not any(
+            step.step_type == "execute_code" and step.status is StepStatus.COMPLETED
+            for step in steps
+        )
+    ):
+        raise ValueError("environment recovery requires retained, unfinalized completed source")
+    repairs = [step for step in steps if step.status is StepStatus.BLOCKED and step.id != target.id]
+    if len(repairs) > 1:
+        raise ValueError("unrelated blocked steps require attention")
+    if repairs:
+        repair = repairs[0]
+        if (
+            repair.step_type != "execute_code"
+            or repair.attempt_count != 0
+            or repair.unknown_effects
+            or repair.payload.get("repair_for_step_id") != str(target.id)
+            or target.payload.get("repair_scheduled_step_id") != str(repair.id)
+            or repair.dependency_metadata.get("template_key") != "repair_code"
+            or repair.dependency_metadata.get("repair_for_ordinal") != target.ordinal
+        ):
+            raise ValueError("source repair has already started or is not mutually bound")
+        for model in (SupervisedProcess, UsageRecord, ProviderBudgetReservation):
+            if await session.scalar(select(model.id).where(model.step_id == repair.id).limit(1)):
+                raise ValueError("source repair has execution or accounting evidence")
+        await transition_step(
+            session,
+            repair,
+            StepStatus.CANCELLED,
+            actor_type="operator",
+            actor_id=str(user_id),
+            payload={"reason": "environment_recovery"},
+        )
+    preparation = Step(
+        run_id=run.id,
+        ordinal=max(step.ordinal for step in steps) + 1,
+        step_type="ensure_dependencies",
+        queue_class=QueueClass.HEAVY,
+        status=StepStatus.QUEUED,
+        required_capabilities=["project_shell", "filesystem_write"],
+        dependency_metadata={
+            "template_key": "validation_environment_recovery",
+            "predecessor_ordinals": [],
+        },
+        payload={"validation_environment_for_step_id": str(target.id)},
+        retry_class=RetryClass.NEVER,
+        idempotency_class=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+        max_attempts=1,
+        timeout_seconds=1800,
+    )
+    session.add(preparation)
+    await session.flush()
+    target.payload = {**target.payload, "environment_recovery_step_id": str(preparation.id)}
+    await transition_run(
+        session, run, RunStatus.RUNNING, actor_type="operator", actor_id=str(user_id)
+    )
+    await transition_task(
+        session, task, TaskStatus.RETRYING, actor_type="operator", actor_id=str(user_id)
+    )
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type="task.validation_environment_recovery",
+            actor_type="operator",
+            actor_id=str(user_id),
+            payload={
+                "ingress_source": "cli",
+                "expected_task_version": expected_task_version,
+                "validation_step_id": str(target.id),
+                "preparation_step_id": str(preparation.id),
+            },
+        )
+    )
+    await _enqueue_telegram_projection(session, task, run)
 
 
 async def _locked_context(

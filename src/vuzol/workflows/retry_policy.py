@@ -28,6 +28,20 @@ def current_retry_target(steps: tuple[Step, ...]) -> Step | None:
         if parent.unknown_effects:
             continue
         parent_payload = parent.payload if isinstance(parent.payload, dict) else {}
+        if parent.step_type == "validate":
+            for child in blocked:
+                payload = child.payload if isinstance(child.payload, dict) else {}
+                metadata = (
+                    child.dependency_metadata if isinstance(child.dependency_metadata, dict) else {}
+                )
+                if (
+                    child.step_type == "ensure_dependencies"
+                    and child.run_id == parent.run_id
+                    and parent_payload.get("environment_recovery_step_id") == str(child.id)
+                    and payload.get("validation_environment_for_step_id") == str(parent.id)
+                    and metadata.get("template_key") == "validation_environment_recovery"
+                ):
+                    suspended.add(parent.id)
         if (
             parent.step_type == "ensure_dependencies"
             and parent.failure_category == "capability_preflight_required"
@@ -42,8 +56,7 @@ def current_retry_target(steps: tuple[Step, ...]) -> Step | None:
                     and child.run_id == parent.run_id
                     and child_payload.get("capability_for_step_id") == str(parent.id)
                     and parent_payload.get("capability_preflight_step_id") == str(child.id)
-                    and child_metadata.get("template_key")
-                    == "ensure_capabilities_after_code"
+                    and child_metadata.get("template_key") == "ensure_capabilities_after_code"
                 ):
                     suspended.add(parent.id)
         if parent.step_type not in {"validate", "review"}:

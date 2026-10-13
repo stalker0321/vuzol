@@ -647,14 +647,14 @@ async def build_task_history_report(
         lines.extend(
             (
                 "<b>Итог:</b> ✅ Завершена успешно",
-                f"<b>Результат:</b> {telegram_html(result_summary or 'Без описания')}",
+                f"<b>Сделано:</b> {telegram_html(result_summary or 'Без описания')}",
             )
         )
     else:
         stage, reason = await _failure_details(session, task)
         lines.append(f"<b>Итог:</b> {_task_outcome_label(task.status)}")
         if stage:
-            lines.append(f"<b>Этап:</b> {step_type_label(stage)}")
+            lines.append(f"<b>Остановка:</b> {step_type_label(stage)}")
         lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
     if worker is not None:
         lines.append(f"<b>Исполнитель:</b> {telegram_html(worker)}")
@@ -1152,7 +1152,7 @@ def _bounded_report(text: str, limit: int = 1_800) -> str:
 def _concise_completion_report(text: str, *, limit: int = 900, bullet_limit: int = 6) -> str:
     """Keep implementation facts while dropping provider hand-off and suggestion sections."""
 
-    lines = [line.strip() for line in text.strip().splitlines()]
+    lines = [_report_facts_only(line.strip()) for line in text.strip().splitlines()]
     first_index = next((index for index, line in enumerate(lines) if line), None)
     if first_index is None:
         return "Без описания"
@@ -1194,6 +1194,48 @@ def _concise_completion_report(text: str, *, limit: int = 900, bullet_limit: int
 def _plain_report_text(text: str) -> str:
     value = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text.strip())
     return value.lstrip("# ").strip()
+
+
+def _report_facts_only(text: str) -> str:
+    """Drop routine hand-off assurances from completion text, not failure causes."""
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept: list[str] = []
+    for sentence in sentences:
+        lower = sentence.casefold().lstrip("-*• ")
+        if lower.startswith(
+            (
+                "пересоздавать",
+                "контекст и расходы сохран",
+                "контекст сохран",
+                "расходы сохран",
+                "история сохран",
+                "ничего не изменено",
+            )
+        ):
+            continue
+        if lower.startswith(
+            ("grok-ревью", "ревью", "применение", "публикация", "деплой", "миграции")
+        ) and any(phrase in lower for phrase in ("не выполнял", "не запускал", "не производил")):
+            continue
+        kept.append(sentence)
+    return " ".join(kept)
+
+
+def task_progress_report(
+    *, completed: str | None = None, stopped: str | None = None, reason: str | None = None
+) -> str:
+    """Plain factual report for existing notices: done, stop point, cause only."""
+
+    return "\n".join(
+        f"{label}: {_bounded_report(value, 700)}"
+        for label, value in (
+            ("Сделано", completed),
+            ("Остановка", stopped),
+            ("Причина", reason),
+        )
+        if value and value.strip()
+    )
 
 
 async def _task_worker_label(session: AsyncSession, task_id: uuid.UUID) -> str | None:
@@ -1724,11 +1766,14 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
             )
     if task.status is TaskStatus.COMPLETED:
         report, agent_checks, gates = await _completion_report(session, task)
-        lines.extend(("", "<b>Отчёт о выполнении</b>", telegram_html(report)))
+        lines.extend(("", "<b>Сделано:</b>", telegram_html(report)))
         preview_url = await _published_preview_url(session, task.id)
         if preview_url is not None:
             escaped_url = telegram_html(preview_url)
             lines.append(f'<b>Прототип:</b> <a href="{escaped_url}">{escaped_url}</a>')
+        agent_checks = tuple(
+            check for check in agent_checks if check.get("status") not in {"not_run", "unavailable"}
+        )
         if agent_checks:
             lines.extend(("", "<b>Проверки агента (не доверенные)</b>"))
             lines.extend(_agent_check_html(check) for check in agent_checks)
@@ -1740,9 +1785,8 @@ async def build_status_card(session: AsyncSession, task_id: uuid.UUID) -> Status
         and not final_package_delivery_failure
     ):
         failed_stage, reason = await _failure_details(session, task)
-        lines.extend(("", "<b>Отчёт о завершении</b>"))
         if failed_stage:
-            lines.append(f"<b>Этап:</b> {step_type_label(failed_stage)}")
+            lines.append(f"<b>Остановка:</b> {step_type_label(failed_stage)}")
         lines.append(f"<b>Причина:</b> {telegram_html(reason)}")
     elapsed = max(0, int((datetime.now(UTC) - task.created_at).total_seconds()))
     lines.append(f"Прошло: {_format_duration_ru(elapsed)}")

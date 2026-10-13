@@ -219,8 +219,7 @@ async def prepare_delivery(
             run_id=artifact.run_id,
             step_id=artifact.step_id,
             message_role="task_result_archive",
-            html="Кандидат после проверок и ревью. Распакуй архив для проверки сайта. "
-            "Применение в основной репозиторий и публикация не выполнялись.",
+            html="Сделано: подготовлен кандидат сайта после независимых проверок и ревью.",
             document_content=content,
             document_filename=f"candidate-{task.public_task_number or task.id}.zip",
         )

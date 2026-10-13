@@ -6,7 +6,9 @@ import signal
 import socket
 from contextlib import suppress
 
-from vuzol.config import Capability, get_runtime_configuration
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from vuzol.config import Capability, RuntimeConfiguration, get_runtime_configuration
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.effect_reconciliation import EffectReconciler
 from vuzol.execution.git import LocalGit
@@ -21,6 +23,7 @@ from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
 from vuzol.workflows.acceptance import AcceptanceGateHandler
 from vuzol.workflows.controls import WorkflowControlConsumer
+from vuzol.workflows.ports import StepHandler
 from vuzol.workflows.worker import WorkflowWorker
 
 
@@ -35,6 +38,30 @@ class ApplierChain:
 
 def main() -> None:
     asyncio.run(run())
+
+
+def applier_handlers(
+    factory: async_sessionmaker[AsyncSession], runtime: RuntimeConfiguration
+) -> dict[str, StepHandler]:
+    """Actual narrow service assembly, also exercised by composition tests."""
+    settings = runtime.settings
+    return {
+        "approval": ResultApplyHandler(factory, runtime.registries, LocalGit()),
+        "ensure_capabilities": CapabilityProvisioningHandler(
+            factory,
+            OfflineCapabilityInstaller(settings.capability_provisioning),
+            registries=runtime.registries,
+        ),
+        "acceptance": AcceptanceGateHandler(
+            factory,
+            artifacts=ArtifactStore(
+                settings.artifact_root,
+                max_bytes=settings.limits.artifact_bytes,
+                retention_days=settings.retention.artifact_days,
+                redaction_patterns=settings.redaction_patterns,
+            ),
+        ),
+    }
 
 
 async def run() -> None:
@@ -72,29 +99,11 @@ async def run() -> None:
                 },
             )
         controls = WorkflowControlConsumer(settings, factory, owner=f"{owner}:control")
-        handler = ResultApplyHandler(factory, runtime.registries, LocalGit())
-        capability_handler = CapabilityProvisioningHandler(
-            factory,
-            OfflineCapabilityInstaller(settings.capability_provisioning),
-        )
-        acceptance_handler = AcceptanceGateHandler(
-            factory,
-            artifacts=ArtifactStore(
-                settings.artifact_root,
-                max_bytes=settings.limits.artifact_bytes,
-                retention_days=settings.retention.artifact_days,
-                redaction_patterns=settings.redaction_patterns,
-            ),
-        )
         worker = WorkflowWorker(
             settings,
             factory,
             owner=f"{owner}:apply",
-            handlers={
-                "approval": handler,
-                "ensure_capabilities": capability_handler,
-                "acceptance": acceptance_handler,
-            },
+            handlers=applier_handlers(factory, runtime),
             capabilities=frozenset({Capability.GIT, Capability.HOST_ADMIN}),
             queue_classes=frozenset({QueueClass.PRIVILEGED}),
         )

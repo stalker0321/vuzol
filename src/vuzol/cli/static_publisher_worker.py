@@ -9,15 +9,16 @@ import socket
 from contextlib import suppress
 
 import uvicorn
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.app.preview_gateway import create_preview_gateway
-from vuzol.config import Capability, get_runtime_configuration
+from vuzol.config import Capability, RuntimeConfiguration, get_runtime_configuration
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
-from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
+from vuzol.workflows.ports import CancellationContext, StepExecutionRequest, StepHandler
 from vuzol.workflows.runtime_preview import (
     PreviewRuntimeRegistry,
     RuntimePreviewHandler,
@@ -29,6 +30,21 @@ from vuzol.workflows.worker import WorkflowWorker
 
 def main() -> None:
     asyncio.run(run())
+
+
+def publisher_handlers(
+    factory: async_sessionmaker[AsyncSession],
+    runtime: RuntimeConfiguration,
+    registry: PreviewRuntimeRegistry,
+) -> dict[str, StepHandler]:
+    """Share the real publication assembly with end-to-end lifecycle tests."""
+    return {
+        "publish_static": StaticPublishHandler(factory, runtime),
+        "publish_preview": _PreviewHandler(
+            RuntimePreviewHandler(factory, runtime, registry),
+            StaticPublishHandler(factory, runtime, preview=True),
+        ),
+    }
 
 
 async def run() -> None:
@@ -45,16 +61,11 @@ async def run() -> None:
         owner = f"{socket.gethostname()}:{os.getpid()}:publisher"
         preview_registry = PreviewRuntimeRegistry()
         cleanup_orphaned_runtimes(settings.preview_site_root / ".runtime")
-        runtime_preview = RuntimePreviewHandler(factory, runtime, preview_registry)
-        static_preview = StaticPublishHandler(factory, runtime, preview=True)
         worker = WorkflowWorker(
             settings,
             factory,
             owner=owner,
-            handlers={
-                "publish_static": StaticPublishHandler(factory, runtime),
-                "publish_preview": _PreviewHandler(runtime_preview, static_preview),
-            },
+            handlers=publisher_handlers(factory, runtime, preview_registry),
             capabilities=frozenset({Capability.FILESYSTEM_WRITE}),
             queue_classes=frozenset({QueueClass.LIGHT}),
         )

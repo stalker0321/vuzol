@@ -22,7 +22,7 @@ from vuzol.storage.types import QueueClass
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest, StepHandler
 from vuzol.workflows.recovery_policy import recovery_policy_from_settings
-from vuzol.workflows.service import commit_step_outcome
+from vuzol.workflows.service import commit_step_outcome, publish_step_started
 
 
 class WorkflowWorker:
@@ -62,6 +62,7 @@ class WorkflowWorker:
             return False
         async with self._factory.begin() as session:
             await start_step(session, token)
+            await publish_step_started(session, token)
         request = await self._request(token.step.id, token)
         cancellation = CancellationContext()
         heartbeat = asyncio.create_task(self._heartbeat(token, cancellation))

@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.storage.models import Task
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.workflows.controls import _locked_context, cancel_task, pause_task, resume_task
-from vuzol.workflows.service import start_run
+from vuzol.workflows.service import _enqueue_telegram_projection, start_run
 
 INGRESS_SOURCES = frozenset({"telegram", "cli", "api"})
 
@@ -81,6 +81,8 @@ async def _start(
         raise ValueError(f"stale task version: expected {expected_task_version}")
     before = task.version
     await start_run(session, run, task=task, actor_type="user", actor_id=actor_id)
+    if task.version != before:
+        await _enqueue_telegram_projection(session, task, run)
     return task.version != before
 
 

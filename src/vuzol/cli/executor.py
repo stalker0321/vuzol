@@ -341,6 +341,9 @@ async def run() -> None:
                     )
                 },
                 queue_classes=frozenset({QueueClass.LIGHT}),
+                profile_limits={
+                    reviewer_id: runtime.registries.profiles.get(reviewer_id).concurrency_limit
+                },
             )
         await _run_loop(
             ExecutorChain(worktree_worker, provider_worker, review_worker),

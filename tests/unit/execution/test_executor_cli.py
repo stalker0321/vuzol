@@ -696,6 +696,7 @@ async def test_executor_composes_enabled_runtime(
     settings.workflow.poll_interval_seconds = 0.01
     registries = MagicMock()
     registries.profiles.items.return_value = (profile,)
+    registries.profiles.get.return_value.concurrency_limit = 2
     registries.revision = "a" * 64
     runtime = MagicMock(settings=settings, registries=registries)
 
@@ -760,6 +761,7 @@ async def test_executor_composes_enabled_runtime(
     if cli_review:
         review_args = executor_cli.WorkflowWorker.call_args.kwargs
         assert set(review_args["handlers"]) == {"review"}
+        assert review_args["profile_limits"] == {"grok-a": 2}
         reviewer = review_args["handlers"]["review"]._independent
         assert reviewer._profile_id == "grok-a"
     engine.dispose.assert_awaited_once()

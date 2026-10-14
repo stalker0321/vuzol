@@ -44,7 +44,9 @@ class WorkflowWorker:
         self._handlers = dict(handlers)
         self._capabilities = capabilities
         self._queue_classes = queue_classes
-        self._profile_limits = dict(profile_limits or {})
+        # None means no profile filter; an explicit empty map excludes all
+        # assigned profiles. Conflating them strands previously assigned retries.
+        self._profile_limits = dict(profile_limits) if profile_limits is not None else None
         self._free_space_probe = free_space_probe
         self._recovery_policy = recovery_policy_from_settings(settings.workflow)
 

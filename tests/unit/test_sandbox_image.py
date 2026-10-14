@@ -34,7 +34,8 @@ def test_sandbox_image_pins_and_verifies_grok_binary() -> None:
 def test_binary_only_grok_upgrade_preserves_base_and_identity() -> None:
     content = (DOCKERFILE.parent / "Dockerfile.sandbox-grok-upgrade").read_text()
     assert (
-        "ARG BASE_IMAGE=vuzol-sandbox@sha256:e75a5358bf1f4a5a67de29bdb33de4721321161bbf58abeedda6ee9856150d15"
+        "ARG BASE_IMAGE=vuzol-sandbox@sha256:"
+        "e75a5358bf1f4a5a67de29bdb33de4721321161bbf58abeedda6ee9856150d15"
         in content
     )
     assert "FROM ${BASE_IMAGE}" in content

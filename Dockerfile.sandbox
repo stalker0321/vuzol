@@ -6,11 +6,12 @@ ARG KIMI_CODE_VERSION=0.31.1
 ARG PI_CODING_AGENT_VERSION=1.0.3
 ARG GROK_VERSION=1.0.41
 ARG GROK_SHA256=9ce03ed23e16ea01072b4496263d6213a27899e1e3e107f008d36edf82e70407
+ARG BUBBLEWRAP_VERSION=0.8.0-2+deb12u1
 ARG SAFE_CHAIN_VERSION=1.5.15
 ARG SAFE_CHAIN_INSTALLER_SHA256=de0565e3d6346407a604e84e639e95fea8758748063da2216bbfdca5feda5dd2
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl git make \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git make "bubblewrap=${BUBBLEWRAP_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}" "@moonshot-ai/kimi-code@${KIMI_CODE_VERSION}" \
         "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \

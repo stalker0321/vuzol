@@ -23,12 +23,26 @@ def test_sandbox_image_contains_minimal_grok_iteration_tools() -> None:
 
 def test_sandbox_image_pins_and_verifies_grok_binary() -> None:
     content = DOCKERFILE.read_text()
-    assert "ARG GROK_VERSION=0.2.99" in content
+    assert "ARG GROK_VERSION=1.0.41" in content
     assert (
-        "ARG GROK_SHA256=9fccba400d3808ec34a991892096b34c6f5846b2b118d355001601fd5428445c"
+        "ARG GROK_SHA256=9ce03ed23e16ea01072b4496263d6213a27899e1e3e107f008d36edf82e70407"
         in content
     )
     assert "sha256sum --check --strict" in content
+
+
+def test_binary_only_grok_upgrade_preserves_base_and_identity() -> None:
+    content = (DOCKERFILE.parent / "Dockerfile.sandbox-grok-upgrade").read_text()
+    assert (
+        "ARG BASE_IMAGE=vuzol-sandbox@sha256:e75a5358bf1f4a5a67de29bdb33de4721321161bbf58abeedda6ee9856150d15"
+        in content
+    )
+    assert "FROM ${BASE_IMAGE}" in content
+    assert "COPY --chmod=0755 grok-1.0.41-linux-x86_64 /usr/local/bin/grok" in content
+    assert "9ce03ed23e16ea01072b4496263d6213a27899e1e3e107f008d36edf82e70407" in content
+    assert 'grok 1.0.41 (4220f3b224a6)' in content
+    assert content.rstrip().endswith("USER 10001:10001\nWORKDIR /workspace")
+    assert "apt-get" not in content and "npm install" not in content
 
 
 def test_sandbox_image_pins_safe_chain_and_enforces_package_age() -> None:

@@ -1,0 +1,9 @@
+# Binary-only upgrade: all existing toolchains and hardening remain unchanged.
+ARG BASE_IMAGE=vuzol-sandbox@sha256:e75a5358bf1f4a5a67de29bdb33de4721321161bbf58abeedda6ee9856150d15
+FROM ${BASE_IMAGE}
+USER 0:0
+COPY --chmod=0755 grok-1.0.41-linux-x86_64 /usr/local/bin/grok
+RUN echo "9ce03ed23e16ea01072b4496263d6213a27899e1e3e107f008d36edf82e70407  /usr/local/bin/grok" | sha256sum --check --strict \
+    && /usr/local/bin/grok --version | grep --fixed-strings "grok 1.0.41 (4220f3b224a6)"
+USER 10001:10001
+WORKDIR /workspace

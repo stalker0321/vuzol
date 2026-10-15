@@ -265,6 +265,8 @@ async def test_codex_envelope_and_lifecycle_mocks(
     grok_inv.argv = canonical_grok_argv("grok-4.7", read_only=True, reasoning_effort="high")
     grok_inv.provider_attempt = 2
     readonly_envelope, _ = await envf.build(grok_inv)
+    assert readonly_envelope.sandbox.environment["GROK_MAX_RETRIES"] == "0"
+    assert readonly_envelope.sandbox.environment["GROK_TURN_TRANSIENT_RETRY"] == "0"
     assert readonly_envelope.sandbox.mounts[0].mode is MountMode.READ_ONLY
     assert readonly_envelope.sandbox.mounts[1].mode is MountMode.READ_ONLY
     assert readonly_envelope.argv[-2:] == ("--reasoning-effort", "high")
@@ -619,7 +621,11 @@ def test_grok_execution_boundary_accepts_only_canonical_runtime() -> None:
     _require_provider_command(argv, "grok", "grok-build")
     target, environment = _provider_state_runtime("grok")
     assert target == Path("/grok-home")
-    assert environment == {"HOME": "/grok-home"}
+    assert environment == {
+        "HOME": "/grok-home",
+        "GROK_MAX_RETRIES": "0",
+        "GROK_TURN_TRANSIENT_RETRY": "0",
+    }
     with pytest.raises(ValueError, match="non-canonical"):
         _require_provider_command(("grok",), "grok", "grok-build")
     with pytest.raises(ValueError, match="unsupported"):

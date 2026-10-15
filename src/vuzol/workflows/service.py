@@ -532,6 +532,9 @@ async def _schedule_bounded_repair(
 ) -> bool:
     """Schedule a worker repair under the shared, fingerprinted recovery bounds."""
 
+    if failed_step.step_type == "review" and failed_step.payload.get("review_only_recovery"):
+        # This explicit operator recovery grants review, not source regeneration.
+        return False
     task = await session.get(Task, run.task_id)
     if task is None:
         return False

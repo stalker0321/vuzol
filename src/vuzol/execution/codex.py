@@ -1021,7 +1021,13 @@ def _provider_state_runtime(provider: str) -> tuple[Path, dict[str, str]]:
             "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
         }
     if provider == "grok":
-        return Path("/grok-home"), {"HOME": "/grok-home"}
+        # Workflow attempts/deadlines own retries. A single native request must
+        # not silently multiply into the CLI's default 15 hidden retries.
+        return Path("/grok-home"), {
+            "HOME": "/grok-home",
+            "GROK_MAX_RETRIES": "0",
+            "GROK_TURN_TRANSIENT_RETRY": "0",
+        }
     if provider == "kimi":
         return Path("/kimi-home"), {
             "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs

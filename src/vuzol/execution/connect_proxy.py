@@ -201,17 +201,64 @@ async def _relay(
     *,
     maximum: int,
     idle_timeout: float,
+    shared_idle: asyncio.Timeout | None = None,
 ) -> None:
     total = 0
     while True:
-        chunk = await asyncio.wait_for(reader.read(65_536), timeout=idle_timeout)
+        chunk = (
+            await asyncio.wait_for(reader.read(65_536), timeout=idle_timeout)
+            if shared_idle is None
+            else await reader.read(65_536)
+        )
         if not chunk:
             return
         total += len(chunk)
         if total > maximum:
             raise ConnectProxyError("proxy tunnel byte limit exceeded")
+        if shared_idle is not None:
+            # HTTP/SSE normally has a silent request direction while the
+            # response streams. Activity belongs to the duplex tunnel, not
+            # independently to each socket reader. Drain is bounded too.
+            shared_idle.reschedule(asyncio.get_running_loop().time() + idle_timeout)
         writer.write(chunk)
         await writer.drain()
+
+
+async def _relay_tunnel(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    upstream_reader: asyncio.StreamReader,
+    upstream_writer: asyncio.StreamWriter,
+    policy: ConnectProxyPolicy,
+) -> None:
+    async with (
+        asyncio.timeout(policy.tunnel_timeout_seconds),
+        asyncio.timeout(policy.idle_timeout_seconds) as idle,
+    ):
+        relays = [
+            asyncio.create_task(
+                _relay(
+                    source,
+                    destination,
+                    maximum=policy.maximum_bytes_per_direction,
+                    idle_timeout=policy.idle_timeout_seconds,
+                    shared_idle=idle,
+                ),
+                name=f"vuzol-connect-relay-{direction}",
+            )
+            for direction, source, destination in (
+                ("request", reader, upstream_writer),
+                ("response", upstream_reader, writer),
+            )
+        ]
+        try:
+            await asyncio.gather(*relays)
+        finally:
+            # gather alone does not cancel siblings when one relay fails.
+            # Never leave a reader or a stalled drain alive after tunnel exit.
+            for relay in relays:
+                relay.cancel()
+            await asyncio.gather(*relays, return_exceptions=True)
 
 
 async def _handle_client(
@@ -237,21 +284,7 @@ async def _handle_client(
         )
         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await writer.drain()
-        async with asyncio.timeout(policy.tunnel_timeout_seconds):
-            await asyncio.gather(
-                _relay(
-                    reader,
-                    upstream,
-                    maximum=policy.maximum_bytes_per_direction,
-                    idle_timeout=policy.idle_timeout_seconds,
-                ),
-                _relay(
-                    upstream_reader,
-                    writer,
-                    maximum=policy.maximum_bytes_per_direction,
-                    idle_timeout=policy.idle_timeout_seconds,
-                ),
-            )
+        await _relay_tunnel(reader, writer, upstream_reader, upstream, policy)
     except (ConnectProxyError, asyncio.IncompleteReadError, OSError, TimeoutError):
         if upstream is None:
             writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")

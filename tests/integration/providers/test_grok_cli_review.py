@@ -3,6 +3,7 @@
 import hashlib
 import json
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -19,11 +20,20 @@ from vuzol.providers.domain import ContextItem
 from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.grok import GrokCliAdapter
 from vuzol.providers.ports import CodexProcessResult
-from vuzol.review.independent import DatabaseReviewAccounting, IndependentModelReviewer
+from vuzol.review.independent import (
+    DatabaseReviewAccounting,
+    IndependentModelReviewer,
+    IndependentReviewError,
+)
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import ProviderBudgetReservation, Step, Task, UsageRecord, Worktree
 from vuzol.storage.records import LeaseToken, StepRecord
-from vuzol.storage.types import RiskLevel, StepStatus, WorktreeDeliveryState
+from vuzol.storage.types import (
+    BudgetReservationStatus,
+    RiskLevel,
+    StepStatus,
+    WorktreeDeliveryState,
+)
 from vuzol.workflows.ports import CancellationContext
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
@@ -148,7 +158,7 @@ async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path):
                 content_hash=hashlib.sha256(text.encode()).hexdigest(),
             ),
         )
-        verdict = await reviewer.review(
+        review_kwargs = dict(
             task=task,
             risk=RiskLevel.HIGH,
             inspection=GitInspection(
@@ -168,6 +178,7 @@ async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path):
             lease=lease,
             work_context=context,
         )
+        verdict = await reviewer.review(**review_kwargs)
         assert verdict.allows_progress and verdict.partition_count == 2
         assert len({i.provider_attempt for i in invocations}) == 3
         assert access.revoke.await_count == 3
@@ -206,10 +217,11 @@ async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path):
             provider_attempt=4,
         )
         request = request.model_copy(update={"lease_generation": 1})
-        with pytest.raises(LeaseLost, match="assignment changed"):
+        with pytest.raises(ProviderFailure, match="assignment changed") as changed:
             await wrapper.execute(
                 request, configured.model_copy(update={"model": "other"}), CancellationContext()
             )
+        assert not changed.value.request_sent and not changed.value.retryable
         with pytest.raises(LeaseLost, match="stale"):
             await wrapper.execute(
                 request.model_copy(update={"lease_generation": 2}),
@@ -246,5 +258,22 @@ async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path):
         with pytest.raises(RuntimeError, match="transport failed"):
             await wrapper.execute(request, configured, CancellationContext())
         assert access.revoke.await_count == 4
+        # A new generation with an old pin must stop before transport and
+        # release its actual DB reservation (not create an orphan charge).
+        async with factory.begin() as session:
+            stored = await session.get(Step, step_record.id)
+            stored.lease_generation = 2
+        registries.profiles.get.return_value = configured.model_copy(update={"model": "other"})
+        with pytest.raises(IndependentReviewError, match="explicit retry required"):
+            await reviewer.review(**{**review_kwargs, "lease": replace(lease, generation=2)})
+        assert len(invocations) == 3
+        async with factory() as session:
+            rows = (await session.scalars(select(UsageRecord))).all()
+            reservations = (await session.scalars(select(ProviderBudgetReservation))).all()
+            assert len(rows) == 3 and len(reservations) == 4
+            assert (
+                next(r for r in reservations if r.provider_attempt == 10).status
+                is BudgetReservationStatus.RELEASED
+            )
     finally:
         await engine.dispose()

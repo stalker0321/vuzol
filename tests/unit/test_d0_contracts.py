@@ -234,10 +234,13 @@ def test_d0_old_textual_artifact_not_source_report() -> None:
 
 
 @pytest.mark.anyio
-async def test_d0_direct_command_creates_no_review() -> None:
+async def test_d0_direct_command_creates_no_review(monkeypatch: pytest.MonkeyPatch) -> None:
     """5. Direct command/status creates zero review calls."""
     from vuzol.storage.models import Task
     from vuzol.workflows.application import Principal, TaskCommand, apply_task_command
+
+    recovery = AsyncMock()
+    monkeypatch.setattr("vuzol.workflows.application.recover_unsent_cli_review", recovery)
 
     task_id = uuid.uuid4()
     task = MagicMock(spec=Task)
@@ -257,11 +260,15 @@ async def test_d0_direct_command_creates_no_review() -> None:
     )
     assert result.applied is False
     assert reviewer_calls == []
-    # static guard: direct command path does not reference review dispatch
+    recovery.assert_not_awaited()
+    session.add.assert_not_called()
+    # An explicit operator recovery command may queue an existing review;
+    # ordinary direct controls still never call a model themselves.
     import inspect as _inspect
 
     src = _inspect.getsource(apply_task_command)
-    assert "review" not in src.lower()
+    assert "adapter.execute" not in src.lower()
+    assert "independentmodelreviewer" not in src.lower()
 
 
 @pytest.mark.anyio

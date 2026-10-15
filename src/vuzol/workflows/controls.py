@@ -498,6 +498,8 @@ async def retry_blocked_step(
     assert run is not None
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
     assert task is not None
+    if actor_id is not None and step.step_type == "review":
+        _reset_review_pin(session, step, actor_id=actor_id)
     task.budget_epoch += 1
     run.selected_route = {
         **run.selected_route,
@@ -526,6 +528,206 @@ async def retry_blocked_step(
             session, task, TaskStatus.RETRYING, actor_type="user", actor_id=actor_id
         )
         await _enqueue_telegram_projection(session, task, run)
+
+
+def _reset_review_pin(session: AsyncSession, step: Step, *, actor_id: str) -> None:
+    """Explicit owner retry starts a fresh binding; never loosen an active lease."""
+    old_pin = step.payload.get("cli_reviewer_pin")
+    if old_pin is None:
+        return
+    session.add(
+        Event(
+            entity_type="step",
+            entity_id=step.id,
+            event_type="step.cli_reviewer_rebind_requested",
+            actor_type="user",
+            actor_id=actor_id,
+            payload={"previous_pin": old_pin, "lease_generation": step.lease_generation},
+        )
+    )
+    step.payload = {
+        key: value
+        for key, value in step.payload.items()
+        if key not in {"cli_reviewer_pin", "executor_model_override", "executor_reasoning_effort"}
+    }
+
+
+async def recover_unsent_cli_review(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    user_id: int,
+    expected_task_version: int | None,
+    step_id: uuid.UUID | None,
+) -> None:
+    """Narrow operator escape for legacy pre-transport review fencing failures.
+
+    Terminal transitions stay closed in the general workflow. Only the owner,
+    with an exact revision and retained validated source, can grant one attempt
+    here. The supervised transport persists its process BEFORE any launch; a
+    process in the failed generation therefore rules out this recovery entirely.
+    """
+    from vuzol.providers.budgets import release_reservation_unfenced
+    from vuzol.storage.models import (
+        ProviderBudgetReservation,
+        SupervisedProcess,
+        UsageRecord,
+        Worktree,
+    )
+    from vuzol.storage.types import BudgetReservationStatus
+
+    task, run, steps = await _locked_context(session, task_id)
+    if task.user_id != user_id:
+        raise ValueError("review recovery requires the task owner's principal")
+    if expected_task_version is None or expected_task_version != task.version:
+        raise ValueError("stale task version for review recovery")
+    target = next((step for step in steps if step.id == step_id), None)
+    if (
+        task.status is not TaskStatus.FAILED
+        or run.status is not RunStatus.FAILED
+        or target is None
+        or target.step_type != "review"
+        or target.status is not StepStatus.FAILED
+        or target.failure_category != "handler_exception"
+        or target.failure_summary != "LeaseLost"
+        or target.unknown_effects
+        or target.lease_owner is not None
+        or target.lease_generation < 1
+        or task.project_id is None
+        or not target.executor_profile_id
+        or not isinstance(target.payload.get("cli_reviewer_pin"), dict)
+        or target.payload["cli_reviewer_pin"].get("profile_id") != target.executor_profile_id
+    ):
+        raise ValueError("review recovery requires one failed, pinned prelaunch CLI review")
+    if any(
+        step.status in {StepStatus.LEASED, StepStatus.RUNNING}
+        or (step.status in {StepStatus.FAILED, StepStatus.BLOCKED} and step.id != target.id)
+        for step in steps
+    ):
+        raise ValueError("review recovery cannot race active work or unrelated failures")
+    if await session.scalar(
+        select(SupervisedProcess.id)
+        .where(
+            SupervisedProcess.step_id == target.id,
+            SupervisedProcess.lease_generation >= target.lease_generation,
+        )
+        .limit(1)
+    ):
+        raise ValueError("review recovery refuses a generation with transport evidence")
+    worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
+    if (
+        worktree is None
+        or worktree.task_id != task.id
+        or worktree.project_id != task.project_id
+        or worktree.delivery_state is not WorktreeDeliveryState.WORKTREE_RETAINED
+        or worktree.result_commit is None
+        or not any(
+            s.step_type == "execute_code" and s.status is StepStatus.COMPLETED for s in steps
+        )
+        or not any(s.step_type == "validate" and s.status is StepStatus.COMPLETED for s in steps)
+        or any(
+            s.attempt_count
+            for s in steps
+            if s.ordinal > target.ordinal
+            and s.step_type
+            in {
+                "produce_artifacts",
+                "build_static",
+                "publish_preview",
+                "acceptance",
+                "approval",
+                "apply_result",
+                "publish_static",
+                "finalize",
+            }
+        )
+    ):
+        raise ValueError("review recovery requires retained validated source before delivery")
+    # Preserve all historical charges, including conservative orphan receipts.
+    # Only still-RESERVED accounting with no receipt can be released as unsent.
+    reservations = (
+        await session.scalars(
+            select(ProviderBudgetReservation)
+            .where(
+                ProviderBudgetReservation.step_id == target.id,
+                ProviderBudgetReservation.budget_epoch == task.budget_epoch,
+            )
+            .with_for_update()
+        )
+    ).all()
+    if not reservations or any(r.profile_id != target.executor_profile_id for r in reservations):
+        raise ValueError("review recovery requires matching failed-epoch accounting")
+    for reservation in reservations:
+        if reservation.status is BudgetReservationStatus.RESERVED:
+            if await session.scalar(
+                select(SupervisedProcess.id)
+                .where(
+                    SupervisedProcess.step_id == target.id,
+                    SupervisedProcess.provider_attempt == reservation.provider_attempt,
+                )
+                .limit(1)
+            ):
+                raise ValueError("review recovery refuses a reservation with transport evidence")
+            if await session.scalar(
+                select(UsageRecord.id).where(UsageRecord.reservation_id == reservation.id).limit(1)
+            ):
+                raise ValueError("review recovery refuses an unreconciled usage receipt")
+            await release_reservation_unfenced(session, reservation_id=reservation.id)
+    actor_id = str(user_id)
+    old_failure = {"category": target.failure_category, "summary": target.failure_summary}
+    _reset_review_pin(session, target, actor_id=actor_id)
+    target.payload = {**target.payload, "review_only_recovery": True}
+    target.max_attempts = target.attempt_count + 1
+    task.completed_at = None
+    run.ended_at = None
+    task.budget_epoch += 1
+    run.selected_route = {
+        **run.selected_route,
+        "recovery_epoch": task.budget_epoch,
+        "recovery_epoch_started_at": datetime.now(UTC).isoformat(),
+    }
+    for entity, kind, status in (
+        (target, "step", StepStatus.QUEUED),
+        (run, "run", RunStatus.RUNNING),
+        (task, "task", TaskStatus.RETRYING),
+    ):
+        previous = entity.status.value
+        entity.status = status
+        entity.version += 1
+        session.add(
+            Event(
+                entity_type=kind,
+                entity_id=entity.id,
+                event_type=f"{kind}.status_changed",
+                actor_type="operator",
+                actor_id=actor_id,
+                previous_state=previous,
+                new_state=status.value,
+                payload={"reason": "explicit_unsent_review_recovery"},
+            )
+        )
+    target.failure_category = target.failure_summary = None
+    run.failure_category = run.failure_summary = None
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type="task.unsent_review_recovery",
+            actor_type="operator",
+            actor_id=actor_id,
+            payload={
+                "ingress_source": "cli",
+                "step_id": str(target.id),
+                "expected_task_version": expected_task_version,
+                "previous_failure": old_failure,
+                "lease_generation": target.lease_generation,
+                "attempt_count": target.attempt_count,
+                "max_attempts": target.max_attempts,
+                "budget_epoch": task.budget_epoch,
+            },
+        )
+    )
+    await _enqueue_telegram_projection(session, task, run)
 
 
 async def recover_validation_environment(

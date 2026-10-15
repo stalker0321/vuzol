@@ -83,7 +83,16 @@ class ReadOnlyCliAdapter:
             }
             existing_pin = step.payload.get("cli_reviewer_pin")
             if existing_pin is not None and existing_pin != pin:
-                raise LeaseLost("CLI reviewer assignment changed during review")
+                # This is a configuration boundary, not a stale lease. No
+                # transport has run: let review accounting release its reserve
+                # and surface an actionable block instead of leaking a reserve
+                # through an opaque handler_exception/LeaseLost.
+                raise ProviderFailure(
+                    ProviderErrorCategory.PERMANENT_REQUEST,
+                    retryable=False,
+                    request_sent=False,
+                    safe_summary="CLI reviewer assignment changed; explicit retry required",
+                )
             active = await session.scalar(
                 select(func.count())
                 .select_from(Step)

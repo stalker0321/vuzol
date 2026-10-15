@@ -24,6 +24,7 @@ from vuzol.workflows.controls import (
     _locked_context,
     cancel_task,
     pause_task,
+    recover_unsent_cli_review,
     recover_validation_environment,
     resume_task,
     retry_blocked_step,
@@ -42,6 +43,7 @@ class TaskCommand(StrEnum):
     INSPECT = "inspect"
     RETRY = "retry"
     REVALIDATE = "revalidate"
+    REREVIEW = "rereview"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +123,18 @@ async def apply_task_command(
             status=task.status.value,
             applied=False,
         )
-    if action is TaskCommand.REVALIDATE:
+    if action is TaskCommand.REREVIEW:
+        if principal.ingress_source != "cli":
+            raise ValueError("review recovery requires an explicit operator CLI request")
+        await recover_unsent_cli_review(
+            session,
+            task_id=task_id,
+            user_id=principal.user_id,
+            expected_task_version=expected_task_version,
+            step_id=step_id,
+        )
+        applied = True
+    elif action is TaskCommand.REVALIDATE:
         if principal.ingress_source != "cli":
             raise ValueError("environment recovery requires an explicit operator CLI request")
         await recover_validation_environment(

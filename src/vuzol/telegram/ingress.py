@@ -152,7 +152,11 @@ class TelegramIngressService:
                 if not topic.enabled:
                     raise TelegramPolicyError("project topic is disabled")
                 return await self._handle_plan_command(update, topic)
-            lead = parse_lead_command(update.text) if settings.project_lead.enabled else None
+            lead = parse_lead_command(update.text)
+            if lead is not None and lead[0] == "enable" and not settings.project_lead.enabled:
+                # New goals stay on the legacy path. Existing goals keep pause,
+                # cancel, status, and an answer to a question already asked.
+                lead = None
             if lead is not None:
                 if topic.kind is not TopicKind.PROJECT or topic.project_id is None:
                     raise TelegramPolicyError("/lead is only available in a project topic")

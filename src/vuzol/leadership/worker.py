@@ -5,39 +5,54 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.leadership.actor import server_agent_principal
 from vuzol.leadership.batches import execute_batch
-from vuzol.leadership.commands import CommandStatus, LeadCommand, payload_hash
+from vuzol.leadership.card import owner_answer_text
+from vuzol.leadership.commands import CommandStatus, LeadCommand
 from vuzol.leadership.evidence import assess_completion
 from vuzol.leadership.model import (
     LeadDecision,
     LeadModel,
     LeadModelUnavailable,
     LeadSnapshot,
-    decision_from_payload,
-    decision_payload,
+    freeze_decision,
     normalize_usage,
 )
 from vuzol.leadership.persistence import (
     POLICY_REVISION,
     GoalDelegation,
+    LeadershipCommandReceipt,
     LeadershipTurn,
     ManagedGoal,
 )
 from vuzol.leadership.rules import delegation_is_expired
 from vuzol.leadership.service import LeadershipCommandService
-from vuzol.leadership.wakeups import completed_wakeup_key, enabled_wakeup_key, enqueue_goal_wakeup
+from vuzol.leadership.wakeups import (
+    enabled_wakeup_key,
+    enqueue_goal_wakeup,
+    terminal_wakeup_key,
+)
+from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, defer_outbox_item
 from vuzol.storage.models import Event, TransactionalOutbox, WorkPackage
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.storage.types import WorkPackageStatus
+from vuzol.storage.types import WorkPackagePauseReason, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
 _TERMINAL_GOAL = frozenset({"paused", "cancelled", "completed"})
+_MODEL_BLOCKERS = frozenset(
+    {
+        "lead_model_unconfigured",
+        "lead_profile_unselected",
+        "lead_response_invalid",
+        "lead_model_unavailable",
+    }
+)
 
 
 class ProjectLeadWorker:
@@ -94,25 +109,23 @@ class ProjectLeadWorker:
             snapshot = await self._snapshot(goal_id)
             try:
                 decision = await self._model.decide(snapshot)
-            except LeadModelUnavailable:
-                await self._park_unconfigured(goal_id, wakeup_id, token)
+            except LeadModelUnavailable as error:
+                reason = str(error)
+                if reason not in _MODEL_BLOCKERS:
+                    reason = "lead_model_unavailable"
+                await self._park_unconfigured(goal_id, wakeup_id, token, reason=reason)
                 return
-            await self._save_decision(goal_id, wakeup_id, decision)
-            if not self._enabled():
-                await self._park(goal_id, wakeup_id, token, reason="feature_disabled", bump=True)
+            saved = await self._save_decision(goal_id, wakeup_id, decision)
+            if not saved:
+                await self._release_outbox(token)
                 return
-            if not await self._fence_ok(goal_id, wakeup_id):
-                await self._park(goal_id, wakeup_id, token, reason=None, bump=False)
-                return
-        else:
-            decision = await self._load_decision(goal_id, wakeup_id)
-            if not self._enabled():
-                await self._park(goal_id, wakeup_id, token, reason="feature_disabled", bump=True)
-                return
-            if not await self._response_admissible(goal_id):
-                await self._park(goal_id, wakeup_id, token, reason=None, bump=False)
-                return
-        await self._apply_if_current(goal_id=goal_id, wakeup_id=wakeup_id, decision=decision)
+        if not self._enabled():
+            await self._park(goal_id, wakeup_id, token, reason="feature_disabled", bump=True)
+            return
+        if not await self._saved_decision_admissible(goal_id, wakeup_id):
+            await self._park(goal_id, wakeup_id, token, reason=None, bump=False)
+            return
+        await self._apply_if_current(goal_id=goal_id, wakeup_id=wakeup_id, decision=LeadDecision())
         await self._ack(goal_id, wakeup_id, token)
 
     async def _prepare_turn(
@@ -138,9 +151,34 @@ class ProjectLeadWorker:
             )
             now = datetime.now(UTC)
             if turn is not None and turn.status in {"claimed", "responded"}:
+                if _lease_current(goal, turn, self._owner, now):
+                    goal.lease_until = now + timedelta(seconds=self._lease_seconds)
+                    return goal.id, wakeup_id, turn.status
+                if turn.status == "responded":
+                    goal.lease_owner = self._owner
+                    goal.lease_until = now + timedelta(seconds=self._lease_seconds)
+                    return goal.id, wakeup_id, "responded"
+                held_by_other = (
+                    goal.lease_owner not in {None, self._owner}
+                    and goal.lease_until is not None
+                    and goal.lease_until > now
+                    and goal.lease_epoch == turn.lease_epoch
+                )
+                if held_by_other:
+                    await self._defer_in_session(uow.session, token, "lead_lease_held")
+                    return None
+                goal.lease_epoch += 1
                 goal.lease_owner = self._owner
                 goal.lease_until = now + timedelta(seconds=self._lease_seconds)
-                return goal.id, wakeup_id, turn.status
+                turn.lease_epoch = goal.lease_epoch
+                turn.owner = self._owner
+                turn.status = "claimed"
+                turn.decision = None
+                turn.goal_version = goal.version
+                turn.scope_revision = goal.scope_revision
+                turn.fence_epoch = goal.fence_epoch
+                turn.usage = {"cost_known": False}
+                return goal.id, wakeup_id, "claimed"
             if turn is not None:
                 await self._complete(uow.session, token)
                 return None
@@ -184,6 +222,14 @@ class ProjectLeadWorker:
             status = None if package is None else package.status.value
             head = None if package is None else package.integration_head_commit
             criteria = tuple(item for item in goal.criteria if isinstance(item, dict))
+            completed = await uow.session.scalar(
+                select(func.count())
+                .select_from(WorkPackage)
+                .where(
+                    WorkPackage.managed_goal_id == goal.id,
+                    WorkPackage.status == WorkPackageStatus.COMPLETED,
+                )
+            )
             return LeadSnapshot(
                 goal_id=goal.id,
                 project_id=goal.project_id,
@@ -200,93 +246,134 @@ class ProjectLeadWorker:
                 original_request=goal.original_request,
                 scope_text=goal.scope_text,
                 waiting_reason=goal.waiting_reason,
+                completed_package_count=int(completed or 0),
+                owner_answer=owner_answer_text(goal.constraints),
             )
 
     async def _save_decision(
         self, goal_id: uuid.UUID, wakeup_id: uuid.UUID, decision: LeadDecision
-    ) -> None:
-        body = decision_payload(decision)
+    ) -> bool:
+        """Persist the response bound to the claim-time fence. A taken lease cannot save."""
+
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
+            goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
             turn = await _turn(uow.session, goal_id, wakeup_id)
+            now = datetime.now(UTC)
+            if goal is None or turn.status != "claimed":
+                return False
+            taken_over = goal.lease_epoch != turn.lease_epoch or (
+                goal.lease_owner not in {None, self._owner}
+                and goal.lease_until is not None
+                and goal.lease_until > now
+            )
+            if taken_over:
+                return False
             turn.status = "responded"
-            turn.decision = body
             turn.profile_id = decision.profile_id
             turn.usage = normalize_usage(decision.usage)
+            turn.decision = freeze_decision(
+                decision,
+                goal_id=goal.id,
+                wakeup_id=wakeup_id,
+                input_version=turn.goal_version,
+                input_fence=turn.fence_epoch,
+                input_scope=turn.scope_revision,
+                input_lease_epoch=turn.lease_epoch,
+            )
+            return True
 
-    async def _load_decision(self, goal_id: uuid.UUID, wakeup_id: uuid.UUID) -> LeadDecision:
-        async with UnitOfWork(self._factory) as uow:
-            assert uow.session is not None
-            turn = await _turn(uow.session, goal_id, wakeup_id)
-            return decision_from_payload(turn.decision)
-
-    async def _fence_ok(self, goal_id: uuid.UUID, wakeup_id: uuid.UUID) -> bool:
-        async with UnitOfWork(self._factory) as uow:
-            assert uow.session is not None
-            goal = await uow.session.get(ManagedGoal, goal_id)
-            turn = await _turn(uow.session, goal_id, wakeup_id)
-            if goal is None:
-                return False
-            delegation = await uow.session.get(GoalDelegation, goal.delegation_id)
-            if delegation is None:
-                return False
-            if goal.fence_epoch != turn.fence_epoch or goal.lease_epoch != turn.lease_epoch:
-                return False
-            if goal.lease_owner != self._owner:
-                return False
-            if goal.lifecycle in _TERMINAL_GOAL:
-                return False
-            if delegation.revoked_at is not None:
-                return False
-            if delegation_is_expired(delegation.expires_at, now=datetime.now(UTC)):
-                return False
-            return delegation.policy_revision == POLICY_REVISION
-
-    async def _response_admissible(self, goal_id: uuid.UUID) -> bool:
-        """A resumed response may repeat its own commands. A pause or revoke may not."""
+    async def _saved_decision_admissible(self, goal_id: uuid.UUID, wakeup_id: uuid.UUID) -> bool:
+        """Own receipts may replay. An owner control after the decision may not."""
 
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
             goal = await uow.session.get(ManagedGoal, goal_id)
-            if goal is None or goal.lifecycle in _TERMINAL_GOAL:
+            turn = await _turn(uow.session, goal_id, wakeup_id)
+            if goal is None or not isinstance(turn.decision, dict):
                 return False
             delegation = await uow.session.get(GoalDelegation, goal.delegation_id)
             if delegation is None or delegation.revoked_at is not None:
                 return False
-            return not delegation_is_expired(delegation.expires_at, now=datetime.now(UTC))
+            if delegation_is_expired(delegation.expires_at, now=datetime.now(UTC)):
+                return False
+            if delegation.policy_revision != POLICY_REVISION:
+                return False
+            if goal.lifecycle in _TERMINAL_GOAL:
+                return False
+            if goal.scope_revision != turn.scope_revision:
+                return False
+            body = turn.decision
+            if body.get("input_fence") != turn.fence_epoch:
+                return False
+            if body.get("input_scope") != turn.scope_revision:
+                return False
+            commands = body.get("commands")
+            if not isinstance(commands, list):
+                return False
+            if not commands:
+                return goal.fence_epoch == turn.fence_epoch
+            principal = server_agent_principal(goal.project_id)
+            for ordinal, command in enumerate(commands):
+                if not isinstance(command, dict):
+                    return False
+                receipt = await _command_receipt(
+                    uow.session,
+                    principal,
+                    str(command.get("idempotency_key") or ""),
+                )
+                if receipt is None:
+                    expected = command.get("expected_version")
+                    return (
+                        isinstance(expected, int)
+                        and goal.version == expected
+                        and goal.fence_epoch == turn.fence_epoch + ordinal
+                    )
+                if receipt.status not in {
+                    CommandStatus.APPLIED.value,
+                    CommandStatus.WAITING.value,
+                }:
+                    return False
+            return True
 
     async def _apply_if_current(
         self, *, goal_id: uuid.UUID, wakeup_id: uuid.UUID, decision: LeadDecision
     ) -> None:
-        if not decision.commands:
+        del decision
+        frozen = await self._frozen_commands(goal_id, wakeup_id)
+        if frozen is None:
+            return
+        project_id, commands = frozen
+        if not commands:
             await self._mark_waiting(goal_id, "model_idle")
             return
-        version = await self._goal_version(goal_id)
         service = self._service()
-        principal = await self._principal(goal_id)
-        for draft in decision.commands:
-            placeholder = LeadCommand(
-                name=draft.name,
-                project_id=await self._project_id(goal_id),
-                goal_id=goal_id,
-                expected_version=version,
-                idempotency_key="pending",
-                payload=dict(draft.payload),
-                reason=draft.reason,
+        principal = server_agent_principal(project_id)
+        for command in commands:
+            key = str(command["idempotency_key"])
+            if await self._applied_receipt(principal, key):
+                continue
+            if not await self._saved_decision_admissible(goal_id, wakeup_id):
+                await self._mark_lost(goal_id, wakeup_id)
+                return
+            payload = command.get("payload")
+            expected_version = command.get("expected_version")
+            if type(expected_version) is not int:
+                await self._mark_lost(goal_id, wakeup_id)
+                return
+            result = await service.apply_agent(
+                principal,
+                "worker",
+                LeadCommand(
+                    name=str(command["name"]),
+                    project_id=project_id,
+                    goal_id=goal_id,
+                    expected_version=expected_version,
+                    idempotency_key=key,
+                    payload=dict(payload) if isinstance(payload, dict) else {},
+                    reason=str(command.get("reason") or ""),
+                ),
             )
-            digest = payload_hash(placeholder)
-            command = LeadCommand(
-                name=draft.name,
-                project_id=placeholder.project_id,
-                goal_id=goal_id,
-                expected_version=version,
-                idempotency_key=f"lead:{goal_id}:{wakeup_id}:{draft.name}:{digest}",
-                payload=dict(draft.payload),
-                reason=draft.reason,
-            )
-            result = await service.apply_agent(principal, "worker", command)
-            if result.version is not None:
-                version = result.version
             if result.status in {
                 CommandStatus.DENIED.value,
                 CommandStatus.STALE.value,
@@ -299,13 +386,19 @@ class ProjectLeadWorker:
             await self._complete(session, token)
             turn = await _turn(session, goal_id, wakeup_id)
             goal = await session.get(ManagedGoal, goal_id)
-            turn.status = "applied"
+            if turn.status != "lost":
+                turn.status = "applied"
             if goal is not None and goal.lease_owner == self._owner:
                 goal.lease_owner = None
                 goal.lease_until = None
 
     async def _park_unconfigured(
-        self, goal_id: uuid.UUID, wakeup_id: uuid.UUID, token: OutboxLeaseToken
+        self,
+        goal_id: uuid.UUID,
+        wakeup_id: uuid.UUID,
+        token: OutboxLeaseToken,
+        *,
+        reason: str,
     ) -> None:
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
@@ -313,12 +406,12 @@ class ProjectLeadWorker:
             turn = await _turn(uow.session, goal_id, wakeup_id)
             if goal is not None and goal.lifecycle not in {"cancelled", "completed"}:
                 goal.lifecycle = "waiting"
-                goal.waiting_reason = "lead_model_unconfigured"
+                goal.waiting_reason = reason
                 goal.lease_owner = None
                 goal.lease_until = None
                 goal.version += 1
                 goal.fence_epoch += 1
-                _system_event(uow.session, goal, "lead_model_unconfigured")
+                _system_event(uow.session, goal, reason)
             turn.status = "lost"
             turn.usage = {"cost_known": False}
             turn.decision = None
@@ -379,7 +472,9 @@ class ProjectLeadWorker:
         now = datetime.now(UTC)
         goals = (
             await session.scalars(
-                select(ManagedGoal).where(ManagedGoal.lifecycle == "active").with_for_update()
+                select(ManagedGoal)
+                .where(ManagedGoal.lifecycle.in_(("active", "waiting")))
+                .with_for_update()
             )
         ).all()
         for goal in goals:
@@ -389,7 +484,11 @@ class ProjectLeadWorker:
                 and goal.lease_until > now
             ):
                 continue
+            if goal.lifecycle == "waiting" and not await _waiting_exit_ready(session, goal):
+                continue
             if goal.current_package_id is None:
+                if goal.lifecycle != "active":
+                    continue
                 await enqueue_goal_wakeup(
                     session,
                     goal_id=goal.id,
@@ -399,13 +498,14 @@ class ProjectLeadWorker:
                 )
                 continue
             package = await session.get(WorkPackage, goal.current_package_id)
-            if package is not None and package.status is WorkPackageStatus.COMPLETED:
+            kind = _terminal_kind(package) if package is not None else None
+            if package is not None and kind is not None:
                 await enqueue_goal_wakeup(
                     session,
                     goal_id=goal.id,
-                    idempotency_key=completed_wakeup_key(goal.id, package.id),
+                    idempotency_key=terminal_wakeup_key(goal.id, package.id, package.version),
                     package_id=package.id,
-                    kind="completed",
+                    kind=kind,
                 )
 
     def _service(self) -> LeadershipCommandService:
@@ -418,25 +518,45 @@ class ProjectLeadWorker:
             batch_executor=execute_batch,
         )
 
-    async def _goal_version(self, goal_id: uuid.UUID) -> int:
+    async def _release_outbox(self, token: OutboxLeaseToken) -> None:
+        try:
+            await self._defer(token, "lead_lease_lost")
+        except LeaseLost:
+            return
+
+    async def _frozen_commands(
+        self, goal_id: uuid.UUID, wakeup_id: uuid.UUID
+    ) -> tuple[str, list[dict[str, object]]] | None:
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
             goal = await uow.session.get(ManagedGoal, goal_id)
-            if goal is None:
-                raise LeadModelUnavailable("goal_missing")
-            return goal.version
+            turn = await _turn(uow.session, goal_id, wakeup_id)
+            if goal is None or not isinstance(turn.decision, dict):
+                return None
+            raw = turn.decision.get("commands")
+            if not isinstance(raw, list):
+                return None
+            commands = [item for item in raw if isinstance(item, dict)]
+            return goal.project_id, commands
 
-    async def _project_id(self, goal_id: uuid.UUID) -> str:
+    async def _applied_receipt(self, principal: str, key: str) -> bool:
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
-            goal = await uow.session.get(ManagedGoal, goal_id)
-            if goal is None:
-                raise LeadModelUnavailable("goal_missing")
-            return goal.project_id
+            receipt = await _command_receipt(uow.session, principal, key)
+            return receipt is not None and receipt.status in {
+                CommandStatus.APPLIED.value,
+                CommandStatus.WAITING.value,
+            }
 
-    async def _principal(self, goal_id: uuid.UUID) -> str:
-        project_id = await self._project_id(goal_id)
-        return server_agent_principal(project_id)
+    async def _mark_lost(self, goal_id: uuid.UUID, wakeup_id: uuid.UUID) -> None:
+        async with UnitOfWork(self._factory) as uow:
+            assert uow.session is not None
+            goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
+            turn = await _turn(uow.session, goal_id, wakeup_id)
+            turn.status = "lost"
+            if goal is not None and goal.lease_owner == self._owner:
+                goal.lease_owner = None
+                goal.lease_until = None
 
 
 async def _turn(session: AsyncSession, goal_id: uuid.UUID, wakeup_id: uuid.UUID) -> LeadershipTurn:
@@ -455,6 +575,63 @@ def _goal_id(item: TransactionalOutbox) -> uuid.UUID:
     if isinstance(raw, str):
         return uuid.UUID(raw)
     return item.linked_entity_id
+
+
+def _lease_current(goal: ManagedGoal, turn: LeadershipTurn, owner: str, now: datetime) -> bool:
+    return (
+        goal.lease_owner == owner
+        and goal.lease_until is not None
+        and goal.lease_until > now
+        and goal.lease_epoch == turn.lease_epoch
+    )
+
+
+async def _command_receipt(
+    session: AsyncSession, principal: str, key: str
+) -> LeadershipCommandReceipt | None:
+    if not key:
+        return None
+    return cast(
+        LeadershipCommandReceipt | None,
+        await session.scalar(
+            select(LeadershipCommandReceipt).where(
+                LeadershipCommandReceipt.actor_kind == "agent",
+                LeadershipCommandReceipt.actor_subject == principal,
+                LeadershipCommandReceipt.idempotency_key == key,
+            )
+        ),
+    )
+
+
+def _terminal_kind(package: WorkPackage) -> str | None:
+    if package.status is WorkPackageStatus.COMPLETED:
+        return "completed"
+    if package.status is not WorkPackageStatus.PAUSED:
+        return None
+    if package.pause_reason is WorkPackagePauseReason.ITEM_FAILED:
+        return "failed"
+    if package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED:
+        return "blocked"
+    return None
+
+
+async def _waiting_exit_ready(session: AsyncSession, goal: ManagedGoal) -> bool:
+    condition = goal.wakeup_condition if isinstance(goal.wakeup_condition, dict) else {}
+    if condition.get("kind") != "package":
+        return False
+    try:
+        package_id = uuid.UUID(str(condition.get("package_id")))
+    except (TypeError, ValueError):
+        return False
+    package = await session.get(WorkPackage, package_id)
+    if package is None:
+        return False
+    return package.status in {
+        WorkPackageStatus.COMPLETED,
+        WorkPackageStatus.PAUSED,
+        WorkPackageStatus.STOPPED,
+        WorkPackageStatus.DISCARDED,
+    }
 
 
 def _system_event(session: AsyncSession, goal: ManagedGoal, reason: str) -> None:

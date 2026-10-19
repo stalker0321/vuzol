@@ -85,6 +85,7 @@ class ProviderRole(StrEnum):
     REVIEWER = "reviewer"
     SUMMARIZER = "summarizer"
     TRANSCRIBER = "transcriber"
+    LEAD = "lead"
 
 
 class BudgetMode(StrEnum):

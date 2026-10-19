@@ -39,7 +39,7 @@ from vuzol.leadership.policy import (
     delegation_is_expired,
     integration_branch_rejection,
 )
-from vuzol.leadership.wakeups import enabled_wakeup_key, enqueue_goal_wakeup
+from vuzol.leadership.wakeups import enabled_wakeup_key, enqueue_goal_wakeup, resume_wakeup_key
 from vuzol.storage.models import Event, WorkPackage
 from vuzol.storage.types import EstimatedComplexity, RiskLevel, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -189,32 +189,59 @@ class LeadershipCommandService:
             LeadCommandName.RESUME_GOAL,
             LeadCommandName.CANCEL_GOAL,
             LeadCommandName.REVOKE_DELEGATION,
+            LeadCommandName.ANSWER_PERMISSION,
         }:
             return _Outcome(CommandStatus.DENIED, "goal_paused", {}, goal)
         if name in READ_COMMANDS:
-            return _Outcome(CommandStatus.APPLIED, None, _view(name, goal, delegation), goal)
+            body = _view(name, goal, delegation)
+            if name in {LeadCommandName.GET_GOAL, LeadCommandName.GET_RESULT}:
+                body.update(await _goal_projection(uow.session, goal))
+            return _Outcome(CommandStatus.APPLIED, None, body, goal)
         if name is LeadCommandName.PAUSE_GOAL:
+            await _settle_children(uow.session, goal, actor, stop=False)
             return _transition(goal, actor, "paused", "owner_pause", CommandStatus.APPLIED)
         if name is LeadCommandName.RESUME_GOAL:
             if goal.lifecycle != "paused":
                 return _Outcome(CommandStatus.DENIED, "goal_not_paused", {}, goal)
-            return _transition(goal, actor, "active", None, CommandStatus.APPLIED)
+            outcome = _transition(goal, actor, "active", None, CommandStatus.APPLIED)
+            await enqueue_goal_wakeup(
+                uow.session,
+                goal_id=goal.id,
+                idempotency_key=resume_wakeup_key(goal.id, goal.fence_epoch),
+                package_id=goal.current_package_id,
+                kind="resume",
+            )
+            return outcome
         if name is LeadCommandName.CANCEL_GOAL:
+            await _settle_children(uow.session, goal, actor, stop=True)
             return _transition(goal, actor, "cancelled", "cancelled", CommandStatus.APPLIED)
         if name is LeadCommandName.REVOKE_DELEGATION:
             delegation.revoked_at = datetime.now(UTC)
             delegation.version += 1
+            await _settle_children(uow.session, goal, actor, stop=True)
             return _transition(goal, actor, "paused", "delegation_revoked", CommandStatus.APPLIED)
         if name is LeadCommandName.REQUEST_PERMISSION:
             question = str(command.payload.get("question") or "").strip()
             if not question:
                 return _Outcome(CommandStatus.DENIED, "question_required", {}, goal)
-            goal.wakeup_condition = {"kind": "owner", "question": question}
-            return _transition(goal, actor, "waiting", "owner", CommandStatus.WAITING)
+            asked_version = goal.version + 1
+            goal.wakeup_condition = {
+                "kind": "owner",
+                "question": question,
+                "scope_revision": goal.scope_revision,
+                "asked_version": asked_version,
+            }
+            outcome = _transition(goal, actor, "waiting", "owner", CommandStatus.WAITING)
+            await _enqueue_owner_question(uow.session, goal, question, asked_version)
+            return outcome
+        if name is LeadCommandName.ANSWER_PERMISSION:
+            return await _answer_permission(uow.session, actor, command, goal)
         if name is LeadCommandName.WAIT_FOR:
             condition = command.payload.get("condition")
             if not isinstance(condition, dict) or not condition.get("kind"):
                 return _Outcome(CommandStatus.DENIED, "wait_condition_required", {}, goal)
+            if not _wait_supported(condition):
+                return _Outcome(CommandStatus.UNSUPPORTED, "wait_condition_unsupported", {}, goal)
             if await _wait_already_satisfied(uow.session, condition):
                 return _Outcome(
                     CommandStatus.APPLIED,
@@ -255,8 +282,7 @@ class LeadershipCommandService:
             reason = produced.pop("reason", None)
             return _Outcome(status, None if reason is None else str(reason), produced, goal)
         if name is LeadCommandName.REQUEST_REVISION:
-            goal.wakeup_condition = {"kind": "revision", "note": command.reason}
-            return _transition(goal, actor, "waiting", "revision", CommandStatus.WAITING)
+            return _Outcome(CommandStatus.UNSUPPORTED, "revision_unsupported", {}, goal)
         if name is LeadCommandName.PROPOSE_COMPLETION:
             assessment = await assess_completion(uow.session, goal)
             if assessment.satisfied:
@@ -473,6 +499,117 @@ def _bump(goal: ManagedGoal, actor: Actor) -> None:
     del actor
     goal.version += 1
     goal.fence_epoch += 1
+
+
+async def goal_card_view(
+    session: AsyncSession, goal: ManagedGoal, delegation: GoalDelegation
+) -> dict[str, Any]:
+    """Projection delivered to the owner. It includes the checker result, not a plan id."""
+
+    body = _view(LeadCommandName.GET_GOAL, goal, delegation)
+    body.update(await _goal_projection(session, goal))
+    return body
+
+
+async def _answer_permission(
+    session: AsyncSession, actor: Actor, command: LeadCommand, goal: ManagedGoal
+) -> _Outcome:
+    answer = str(command.payload.get("answer") or "").strip()
+    if not answer:
+        return _Outcome(CommandStatus.DENIED, "answer_required", {}, goal)
+    condition = goal.wakeup_condition if isinstance(goal.wakeup_condition, dict) else {}
+    question = condition.get("question")
+    if condition.get("kind") != "owner" or not isinstance(question, str) or not question.strip():
+        return _Outcome(CommandStatus.DENIED, "question_closed", {}, goal)
+    if condition.get("scope_revision") != goal.scope_revision:
+        return _Outcome(CommandStatus.DENIED, "question_revision_mismatch", {}, goal)
+    constraints = dict(goal.constraints)
+    constraints["owner_answer"] = {
+        "answer": answer,
+        "question": question.strip(),
+        "scope_revision": goal.scope_revision,
+        "question_version": condition.get("asked_version"),
+        "version": goal.version,
+    }
+    goal.constraints = constraints
+    goal.wakeup_condition = None
+    if goal.lifecycle == "paused":
+        _bump(goal, actor)
+        return _Outcome(
+            CommandStatus.APPLIED,
+            None,
+            {"version": goal.version, "lifecycle": goal.lifecycle},
+            goal,
+        )
+    outcome = _transition(goal, actor, "active", None, CommandStatus.APPLIED)
+    await enqueue_goal_wakeup(
+        session,
+        goal_id=goal.id,
+        idempotency_key=resume_wakeup_key(goal.id, goal.fence_epoch),
+        package_id=goal.current_package_id,
+        kind="resume",
+    )
+    return outcome
+
+
+async def _enqueue_owner_question(
+    session: AsyncSession, goal: ManagedGoal, question: str, version: int
+) -> None:
+    from vuzol.leadership.card import render_question
+    from vuzol.telegram.projections import enqueue_chat_notice
+
+    await enqueue_chat_notice(
+        session,
+        chat_id=goal.source_chat_id,
+        thread_id=goal.source_thread_id,
+        key=f"lead:question:{goal.id}:{version}",
+        text=render_question(question, version),
+    )
+
+
+async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str, Any]:
+    from vuzol.leadership.card import open_question, owner_answer_text
+
+    package = None
+    if goal.current_package_id is not None:
+        package = await session.get(WorkPackage, goal.current_package_id)
+    assessment = await assess_completion(session, goal)
+    question = open_question(goal.wakeup_condition)
+    if assessment.covered:
+        result = "покрыто: " + ", ".join(assessment.covered)
+    elif package is not None and package.integration_head_commit:
+        result = f"{package.integration_head_commit[:12]}, доказательств нет"
+    else:
+        result = "доказательств нет"
+    package_line = None if package is None else f"{package.status.value} {str(package.id)[:8]}"
+    return {
+        "package_line": package_line,
+        "current_package_status": None if package is None else package.status.value,
+        "next_operation": _next_operation(goal, package, question),
+        "result_summary": result,
+        "question": question,
+        "owner_answer": owner_answer_text(goal.constraints),
+        "covered": list(assessment.covered),
+        "missing": list(assessment.missing),
+    }
+
+
+def _next_operation(goal: ManagedGoal, package: WorkPackage | None, question: str | None) -> str:
+    if goal.lifecycle == "completed":
+        return "цель закрыта"
+    if goal.lifecycle == "cancelled":
+        return "цель отменена"
+    if question:
+        return "ответ владельца"
+    if goal.lifecycle == "paused":
+        return "пауза"
+    if package is not None:
+        return f"пакет {package.status.value}"
+    plan = goal.proposed_plan if isinstance(goal.proposed_plan, dict) else None
+    title = None if plan is None else plan.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return "решение руководителя"
 
 
 def _view(name: LeadCommandName, goal: ManagedGoal, delegation: GoalDelegation) -> dict[str, Any]:
@@ -705,6 +842,137 @@ def _event(
             },
         )
     )
+
+
+def _wait_supported(condition: Mapping[str, Any]) -> bool:
+    """Only a package id has a consumer. Other stored conditions would wait forever."""
+
+    if condition.get("kind") != "package":
+        return False
+    try:
+        uuid.UUID(str(condition.get("package_id")))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+async def _settle_children(
+    session: AsyncSession, goal: ManagedGoal, actor: Actor, *, stop: bool
+) -> None:
+    """Pause or stop the goal's live packages and their tasks in this transaction.
+
+    Already finished packages stay as they are. This records the control; it does
+    not promise to undo an effect that already happened.
+    """
+
+    from vuzol.discussion.domain import WorkPackageEvent
+    from vuzol.storage.models import MaterializationLink, Task
+    from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, WorkPackagePauseReason
+
+    live = (
+        WorkPackageStatus.DRAFT,
+        WorkPackageStatus.APPROVED,
+        WorkPackageStatus.RUNNING,
+        WorkPackageStatus.PAUSED,
+    )
+    packages = (
+        await session.scalars(
+            select(WorkPackage)
+            .where(
+                WorkPackage.managed_goal_id == goal.id,
+                WorkPackage.status.in_(live),
+            )
+            .with_for_update()
+        )
+    ).all()
+    for package in packages:
+        pausable = {
+            WorkPackageStatus.DRAFT,
+            WorkPackageStatus.APPROVED,
+            WorkPackageStatus.RUNNING,
+        }
+        if package.status not in pausable and not (
+            stop and package.status is WorkPackageStatus.PAUSED
+        ):
+            continue
+        previous = package.status
+        links = (
+            await session.scalars(
+                select(MaterializationLink).where(MaterializationLink.work_package_id == package.id)
+            )
+        ).all()
+        for link in links:
+            task = await session.get(Task, link.task_id)
+            if task is None or task.status in USER_TERMINAL_TASK_STATUSES:
+                continue
+            await _control_task(session, task.id, actor, stop=stop)
+        if stop:
+            if package.status in {
+                WorkPackageStatus.COMPLETED,
+                WorkPackageStatus.STOPPED,
+                WorkPackageStatus.DISCARDED,
+            }:
+                continue
+            package.status = WorkPackageStatus.STOPPED
+            package.pause_reason = None
+            package.version += 1
+            event_type = WorkPackageEvent.PACKAGE_STOPPED.value
+            new_state = WorkPackageStatus.STOPPED.value
+        else:
+            package.status = WorkPackageStatus.PAUSED
+            package.pause_reason = WorkPackagePauseReason.USER
+            package.version += 1
+            event_type = WorkPackageEvent.PACKAGE_PAUSED.value
+            new_state = WorkPackageStatus.PAUSED.value
+        session.add(
+            Event(
+                entity_type="work_package",
+                entity_id=package.id,
+                event_type=event_type,
+                actor_type="user" if actor.user_id is not None else "system",
+                actor_id=actor.subject,
+                previous_state=previous.value,
+                new_state=new_state,
+                payload={
+                    "reason": "owner_stop" if stop else WorkPackagePauseReason.USER.value,
+                    "status_generation": package.version,
+                    "managed_goal_id": str(goal.id),
+                },
+            )
+        )
+
+
+async def _control_task(
+    session: AsyncSession, task_id: uuid.UUID, actor: Actor, *, stop: bool
+) -> None:
+    from vuzol.storage.errors import IllegalTransition
+    from vuzol.storage.models import Task
+    from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, TaskStatus
+    from vuzol.workflows.controls import cancel_task, pause_task
+    from vuzol.workflows.transitions import transition_task
+
+    try:
+        async with session.begin_nested():
+            if stop:
+                await cancel_task(session, task_id, actor_id=actor.subject)
+            else:
+                await pause_task(session, task_id, actor_id=actor.subject)
+        return
+    except (ValueError, IllegalTransition):
+        pass
+    task = await session.get(Task, task_id, with_for_update=True)
+    if (
+        task is None
+        or task.status in USER_TERMINAL_TASK_STATUSES
+        or task.status is TaskStatus.PAUSED
+    ):
+        return
+    target = TaskStatus.CANCELLED if stop else TaskStatus.PAUSED
+    try:
+        async with session.begin_nested():
+            await transition_task(session, task, target, actor_type="user", actor_id=actor.subject)
+    except (ValueError, IllegalTransition):
+        return
 
 
 async def _wait_already_satisfied(session: AsyncSession, condition: Mapping[str, Any]) -> bool:

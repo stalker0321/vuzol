@@ -38,7 +38,7 @@ from vuzol.interpretation.domain import (
 )
 from vuzol.leadership.persistence import GoalDelegation
 from vuzol.leadership.rules import delegation_is_expired
-from vuzol.leadership.wakeups import completed_wakeup_key, enqueue_goal_wakeup
+from vuzol.leadership.wakeups import enqueue_goal_wakeup, terminal_wakeup_key
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
@@ -77,6 +77,7 @@ class SequenceResult:
     task_id: uuid.UUID | None
     ordinal: int | None
     completed: bool = False
+    terminal_kind: str | None = None
 
 
 def _same_plan_item(left: PlanRevisionItem, right: PlanRevisionItem) -> bool:
@@ -261,7 +262,14 @@ class WorkPackageSequencer:
             )
             await self._projection(package.id, package.version, "terminal_pause")
             await self._task_projection(task, package.version, "terminal_pause")
-            return SequenceResult(package.id, package.version, task.id, link.ordinal)
+            kind = (
+                "blocked"
+                if task.status in {TaskStatus.BLOCKED, TaskStatus.QUOTA_EXHAUSTED}
+                else "failed"
+            )
+            return SequenceResult(
+                package.id, package.version, task.id, link.ordinal, terminal_kind=kind
+            )
 
         package.cursor_ordinal = link.ordinal + 1
         package.version += 1
@@ -493,7 +501,8 @@ class WorkPackageSequencer:
             },
         )
         await self._projection(package.id, package.version, "horizon_limit")
-        return SequenceResult(package.id, package.version, None, ordinal)
+        kind = "recovery_exhausted" if "exhausted" in reason else "blocked"
+        return SequenceResult(package.id, package.version, None, ordinal, terminal_kind=kind)
 
     async def _check_horizon_limits(
         self, package: object, revision: PlanRevision, ordinal: int
@@ -586,7 +595,14 @@ class WorkPackageSequencer:
                 payload={"revision_id": str(revision.id)},
             )
             await self._projection(package.id, package.version, "completed")
-            return SequenceResult(package.id, package.version, None, None, completed=True)
+            return SequenceResult(
+                package.id,
+                package.version,
+                None,
+                None,
+                completed=True,
+                terminal_kind="completed",
+            )
 
         if (
             horizon_enabled
@@ -959,7 +975,11 @@ class WorkPackageSequenceConsumer:
                     task_id=item.linked_entity_id,
                     horizon_enabled=horizon_enabled(self._settings),
                 )
-                if observed is not None and observed.completed:
+                if (
+                    observed is not None
+                    and observed.terminal_kind
+                    in {"completed", "blocked", "failed", "recovery_exhausted"}
+                ):
                     finished = await uow.work_packages.get_package(observed.package_id)
                     if (
                         finished.managed_goal_id is not None
@@ -968,11 +988,13 @@ class WorkPackageSequenceConsumer:
                         await enqueue_goal_wakeup(
                             uow.session,
                             goal_id=finished.managed_goal_id,
-                            idempotency_key=completed_wakeup_key(
-                                finished.managed_goal_id, finished.id
+                            idempotency_key=terminal_wakeup_key(
+                                finished.managed_goal_id,
+                                finished.id,
+                                observed.status_generation,
                             ),
                             package_id=finished.id,
-                            kind="completed",
+                            kind=observed.terminal_kind,
                         )
                 await complete_outbox_item(uow.session, token)
         except (DomainError, ValueError) as error:

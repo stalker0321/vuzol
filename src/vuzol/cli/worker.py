@@ -108,32 +108,13 @@ async def run() -> None:
                 enabled=settings.project_discussion_enabled,
             ),
         ]
-        if settings.project_lead.enabled:
-            from vuzol.leadership.model import UnconfiguredLeadModel
-            from vuzol.leadership.worker import ProjectLeadWorker
-
-            control_processors.append(
-                ProjectLeadWorker(
-                    factory,
-                    owner=f"{owner}:project-lead",
-                    model=UnconfiguredLeadModel(),
-                    enabled=lambda: settings.project_lead.enabled,
-                    lease_seconds=settings.project_lead.lease_seconds,
-                    repeat_limit=settings.project_lead.repeat_limit,
-                    branch_prefix=settings.project_lead.integration_branch_prefix,
-                    default_branches={
-                        project.id: project.default_branch
-                        for project in runtime.registries.projects.items()
-                    },
-                )
-            )
-        controls = ProcessorChain(*control_processors)
         model_roles = frozenset(
             {
                 ProviderRole.EXECUTOR,
                 ProviderRole.PLANNER,
                 ProviderRole.SUMMARIZER,
                 ProviderRole.REVIEWER,
+                ProviderRole.LEAD,
             }
         )
         routable_profiles = tuple(
@@ -156,14 +137,31 @@ async def run() -> None:
                 secret_file_root=settings.secret_file_root,
             )
             adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver)
-            if settings.execution.reviewer_profile_id is None:
-                independent_reviewer = IndependentModelReviewer(
-                    runtime.registries,
-                    adapter_registry,
-                    DatabaseReviewAccounting(factory, settings.limits),
-                    policy_revision=runtime.registries.revision,
-                    input_token_limit=settings.limits.provider_call_input_tokens,
+        if settings.project_lead.enabled:
+            from vuzol.leadership.composition import build_project_lead_worker
+
+            control_processors.append(
+                build_project_lead_worker(
+                    factory,
+                    settings=settings,
+                    profiles=runtime.registries.profiles,
+                    owner=f"{owner}:project-lead",
+                    default_branches={
+                        project.id: project.default_branch
+                        for project in runtime.registries.projects.items()
+                    },
+                    adapter_registry=adapter_registry,
                 )
+            )
+        controls = ProcessorChain(*control_processors)
+        if adapter_registry is not None and settings.execution.reviewer_profile_id is None:
+            independent_reviewer = IndependentModelReviewer(
+                runtime.registries,
+                adapter_registry,
+                DatabaseReviewAccounting(factory, settings.limits),
+                policy_revision=runtime.registries.revision,
+                input_token_limit=settings.limits.provider_call_input_tokens,
+            )
         handlers = {
             **BASE_INTERNAL_HANDLERS,
             "deliver_discussion_reply": DeliverDiscussionReplyHandler(factory),

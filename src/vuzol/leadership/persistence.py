@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -215,3 +216,43 @@ class LeadershipTurn(IdentityMixin, TimestampMixin, Base):
     decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     owner: Mapped[str] = mapped_column(String(200), nullable=False)
+
+
+class ManagedGoalEvidence(IdentityMixin, Base):
+    """Checker verdict for one criterion at one scope revision and result commit.
+
+    The criterion id is the address. ``satisfied`` is the checker's verdict
+    about the description, never a plan item's self-declared id and never an
+    owner waiver.
+    """
+
+    __tablename__ = "managed_goal_evidence"
+    __table_args__ = (
+        Index(
+            "uq_managed_goal_evidence_binding",
+            "goal_id",
+            "criterion_id",
+            "scope_revision",
+            "result_commit",
+            unique=True,
+        ),
+    )
+
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("managed_goals.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    criterion_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    observation: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )
+    satisfied: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    checker: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

@@ -263,6 +263,11 @@ class ResultApplyHandler:
                 ApprovalStatus.CONSUMED,
             }:
                 raise ValueError("result has not been approved")
+            from vuzol.leadership.evidence import new_effect_blocker
+
+            blocker = await new_effect_blocker(session, request.task_id)
+            if blocker is not None:
+                raise ValueError(blocker)
             effect = await record_intent(session, intent)
         return effect.id
 
@@ -323,6 +328,15 @@ class ResultApplyHandler:
                     raise LookupError("applied package disappeared")
                 if target_branch == package.integration_branch:
                     package.integration_head_commit = worktree.result_commit
+                    if package.managed_goal_id is not None and worktree.result_commit:
+                        from vuzol.leadership.evidence import record_head_evidence
+
+                        await record_head_evidence(
+                            session,
+                            package=package,
+                            worktree_path=worktree.path,
+                            result_commit=worktree.result_commit,
+                        )
             if effect_id is not None:
                 effect = await session.get(Effect, effect_id, with_for_update=True)
                 if effect is not None and effect.status in {

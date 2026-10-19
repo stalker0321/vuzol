@@ -99,7 +99,7 @@ async def run() -> None:
             )
         owner = f"{socket.gethostname()}:{os.getpid()}"
         dispatcher = WorkflowDispatcher(runtime, factory, owner=f"{owner}:dispatch")
-        controls = ProcessorChain(
+        control_processors: list[Processor] = [
             WorkflowControlConsumer(settings, factory, owner=f"{owner}:control"),
             WorkPackageSequenceConsumer(
                 settings,
@@ -107,7 +107,27 @@ async def run() -> None:
                 owner=f"{owner}:work-package-sequence",
                 enabled=settings.project_discussion_enabled,
             ),
-        )
+        ]
+        if settings.project_lead.enabled:
+            from vuzol.leadership.model import UnconfiguredLeadModel
+            from vuzol.leadership.worker import ProjectLeadWorker
+
+            control_processors.append(
+                ProjectLeadWorker(
+                    factory,
+                    owner=f"{owner}:project-lead",
+                    model=UnconfiguredLeadModel(),
+                    enabled=lambda: settings.project_lead.enabled,
+                    lease_seconds=settings.project_lead.lease_seconds,
+                    repeat_limit=settings.project_lead.repeat_limit,
+                    branch_prefix=settings.project_lead.integration_branch_prefix,
+                    default_branches={
+                        project.id: project.default_branch
+                        for project in runtime.registries.projects.items()
+                    },
+                )
+            )
+        controls = ProcessorChain(*control_processors)
         model_roles = frozenset(
             {
                 ProviderRole.EXECUTOR,

@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 
 from vuzol.leadership.actor import Actor, ActorKind
 from vuzol.leadership.commands import (
     DELEGATED_ACTIONS,
     OWNER_ONLY_COMMANDS,
-    PROTECTED_BRANCHES,
     READ_COMMANDS,
     LeadCommandName,
 )
 from vuzol.leadership.persistence import POLICY_REVISION
+from vuzol.leadership.rules import delegation_is_expired, integration_branch_rejection
+
+__all__ = ["PolicyDecision", "authorize", "delegation_is_expired", "integration_branch_rejection"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,26 +22,6 @@ class PolicyDecision:
     allowed: bool
     status: str
     reason: str | None = None
-
-
-def integration_branch_rejection(
-    branch: str, *, prefix: str, default_branch: str | None
-) -> str | None:
-    """Return a reason when the branch is not an isolated managed ref."""
-
-    if not branch.startswith(prefix) or len(branch) > 255:
-        return "integration_branch_not_delegated"
-    remainder = branch[len(prefix) :]
-    if not remainder or remainder.startswith("/") or ".." in remainder.split("/"):
-        return "integration_branch_not_delegated"
-    leaf = remainder.rsplit("/", 1)[-1]
-    if leaf in PROTECTED_BRANCHES or branch in PROTECTED_BRANCHES:
-        return "protected_branch"
-    if default_branch and (branch == default_branch or leaf == default_branch):
-        return "protected_branch"
-    if any(part in PROTECTED_BRANCHES for part in remainder.split("/")):
-        return "protected_branch"
-    return None
 
 
 def authorize(
@@ -101,9 +82,3 @@ def authorize(
     if command.value not in delegation_actions or command.value not in DELEGATED_ACTIONS:
         return PolicyDecision(False, "denied", "action_not_delegated")
     return PolicyDecision(True, "applied")
-
-
-def delegation_is_expired(expires_at: datetime | None, *, now: datetime) -> bool:
-    if expires_at is None:
-        return False
-    return expires_at <= now

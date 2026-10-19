@@ -177,3 +177,41 @@ class LeadershipCommandReceipt(IdentityMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class LeadershipTurn(IdentityMixin, TimestampMixin, Base):
+    """One model attempt. A lost lease cannot apply this row later."""
+
+    __tablename__ = "leadership_turns"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('claimed','responded','applied','superseded','lost')",
+            name="leadership_turn_status",
+        ),
+        CheckConstraint("lease_epoch >= 1", name="leadership_turn_lease_epoch_positive"),
+        CheckConstraint("jsonb_typeof(usage) = 'object'", name="leadership_turn_usage_object"),
+        Index(
+            "uq_leadership_turn_wakeup",
+            "goal_id",
+            "wakeup_id",
+            unique=True,
+        ),
+    )
+
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("managed_goals.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    wakeup_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    goal_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    scope_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    fence_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(100), nullable=False, default="unconfigured")
+    usage: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )
+    decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    owner: Mapped[str] = mapped_column(String(200), nullable=False)

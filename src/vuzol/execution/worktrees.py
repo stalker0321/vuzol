@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.config.models import ProjectConfig
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.domain import WorktreeReference
+from vuzol.execution.git import GitError
 from vuzol.execution.paths import (
     PathViolation,
     contained,
@@ -22,6 +23,7 @@ from vuzol.execution.paths import (
     worktree_path,
 )
 from vuzol.execution.ports import GitPort
+from vuzol.leadership.persistence import ManagedGoal
 from vuzol.storage.models import MaterializationLink, SupervisedProcess, WorkPackage, Worktree
 from vuzol.storage.types import ProcessStatus, WorktreeDeliveryState
 
@@ -64,6 +66,18 @@ class WorktreeService:
             )
             if package is None:
                 raise WorktreeError("materialized task has no work package")
+            if package.managed_goal_id is not None and package.integration_branch is None:
+                goal = await session.get(ManagedGoal, package.managed_goal_id)
+                if goal is None:
+                    raise WorktreeError("managed package has no goal")
+                try:
+                    base = await self._git.resolve_commit(repository, goal.integration_branch)
+                except GitError:
+                    base = await self._git.resolve_commit(repository, project.default_branch)
+                package.integration_branch = goal.integration_branch
+                package.integration_target_branch = goal.integration_branch
+                package.integration_base_commit = base
+                package.integration_head_commit = base
             target_branch = package.integration_branch or (
                 f"vuzol/package/{package.id.hex}/{materialization.plan_revision_id.hex[:12]}"
             )

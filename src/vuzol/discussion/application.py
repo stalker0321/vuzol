@@ -26,6 +26,7 @@ from vuzol.interpretation.discussion import (
     plan_draft_from_interpretation,
 )
 from vuzol.interpretation.domain import FrozenModel
+from vuzol.leadership.fence import legacy_package_is_fenced
 from vuzol.storage.models import TelegramControlAction
 from vuzol.storage.types import (
     ControlActionStatus,
@@ -43,6 +44,7 @@ class PackageControlSource(StrEnum):
 
 class PackageControlResultCode(StrEnum):
     APPLIED = "applied"
+    QUEUED = "queued"
     START_NOT_WIRED = "start_not_wired"
     ACTION_NOT_WIRED = "action_not_wired"
 
@@ -306,6 +308,26 @@ class PackageControlIngress:
             assert persisted is not None
             if not created:
                 return _duplicate_result(persisted, command_payload, command)
+            if command.action in {
+                PackageControlAction.APPROVE,
+                PackageControlAction.START,
+                PackageControlAction.RESTART_PACKAGE,
+            }:
+                watched = await uow.work_packages.get_package(command.package_id)
+                if await legacy_package_is_fenced(uow.session, watched):
+                    outcome = {
+                        "code": PackageControlResultCode.QUEUED.value,
+                        "status_generation": watched.version,
+                        "revision_id": None,
+                    }
+                    persisted.payload = {"command": command_payload, "outcome": outcome}
+                    persisted.status = ControlActionStatus.PROCESSED
+                    return PackageControlResult(
+                        action_id=action_id,
+                        code=PackageControlResultCode.QUEUED,
+                        status_generation=watched.version,
+                        revision_id=None,
+                    )
             service = WorkPackageService(uow)
             if command.action is PackageControlAction.APPROVE:
                 approved_generation = await service.approve(

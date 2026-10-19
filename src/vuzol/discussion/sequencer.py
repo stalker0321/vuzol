@@ -36,6 +36,9 @@ from vuzol.interpretation.domain import (
     TaskOperation,
     TaskType,
 )
+from vuzol.leadership.persistence import GoalDelegation
+from vuzol.leadership.rules import delegation_is_expired
+from vuzol.leadership.wakeups import completed_wakeup_key, enqueue_goal_wakeup
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
@@ -99,6 +102,10 @@ class WorkPackageSequencer:
         expected_status_generation: int,
         user_id: int,
         horizon_enabled: bool = False,
+        actor_type: str = "user",
+        actor_id: str | None = None,
+        delegation_id: uuid.UUID | None = None,
+        accountable_owner_user_id: int | None = None,
     ) -> SequenceResult:
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         require_generation(package.version, expected_status_generation)
@@ -122,18 +129,29 @@ class WorkPackageSequencer:
         # re-pin (no downgrade of active workflows to legacy).
         if getattr(package, "execution_contract_version", None) is None:
             package.execution_contract_version = pinned_contract_for(bool(horizon_enabled))
+        if actor_type == "user":
+            start_payload: dict[str, object] = {
+                "revision_id": str(revision.id),
+                "start_generation": package.start_generation,
+                "started_by_user_id": user_id,
+            }
+        else:
+            start_payload = {
+                "revision_id": str(revision.id),
+                "start_generation": package.start_generation,
+                "started_by_actor_type": actor_type,
+                "started_by_actor_id": actor_id,
+                "accountable_owner_user_id": accountable_owner_user_id,
+                "delegation_id": None if delegation_id is None else str(delegation_id),
+            }
         await self._uow.events.append(
             entity_type="work_package",
             entity_id=package.id,
             event_type=WorkPackageEvent.PACKAGE_STARTED.value,
-            actor_type="user",
+            actor_type=actor_type,
             previous_state=previous.value,
             new_state=package.status.value,
-            payload={
-                "revision_id": str(revision.id),
-                "start_generation": package.start_generation,
-                "started_by_user_id": user_id,
-            },
+            payload=start_payload,
         )
         return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
 
@@ -629,8 +647,21 @@ class WorkPackageSequencer:
         discussion = await self._uow.session.get(ProjectDiscussionSession, package.session_id)
         if discussion is None:
             raise DomainError("discussion_session_missing")
-        if revision.approved_by_user_id is None:
-            raise DomainError("approval_provenance_missing")
+        accountable_user_id = revision.approved_by_user_id
+        if accountable_user_id is None:
+            from datetime import UTC, datetime
+            if revision.approved_by_delegation_id is None:
+                raise DomainError("approval_provenance_missing")
+            delegation = await self._uow.session.get(
+                GoalDelegation, revision.approved_by_delegation_id
+            )
+            if (
+                delegation is None
+                or delegation.revoked_at is not None
+                or delegation_is_expired(delegation.expires_at, now=datetime.now(UTC))
+            ):
+                raise DomainError("approval_provenance_missing")
+            accountable_user_id = delegation.owner_user_id
         draft = _task_draft(package.project_id, item)
         original = _original_text(item)
         assert self._uow.session is not None
@@ -644,7 +675,7 @@ class WorkPackageSequencer:
                 ordinal=ordinal,
             )
         task_record = await self._uow.tasks.create(
-            user_id=revision.approved_by_user_id,
+            user_id=accountable_user_id,
             chat_id=discussion.chat_id,
             thread_id=discussion.message_thread_id,
             project_id=package.project_id,
@@ -924,10 +955,25 @@ class WorkPackageSequenceConsumer:
                     or item.linked_entity_type != "task"
                 ):
                     raise ValueError("invalid_sequence_item")
-                await WorkPackageSequencer(uow).observe_terminal(
+                observed = await WorkPackageSequencer(uow).observe_terminal(
                     task_id=item.linked_entity_id,
                     horizon_enabled=horizon_enabled(self._settings),
                 )
+                if observed is not None and observed.completed:
+                    finished = await uow.work_packages.get_package(observed.package_id)
+                    if (
+                        finished.managed_goal_id is not None
+                        and self._settings.project_lead.enabled
+                    ):
+                        await enqueue_goal_wakeup(
+                            uow.session,
+                            goal_id=finished.managed_goal_id,
+                            idempotency_key=completed_wakeup_key(
+                                finished.managed_goal_id, finished.id
+                            ),
+                            package_id=finished.id,
+                            kind="completed",
+                        )
                 await complete_outbox_item(uow.session, token)
         except (DomainError, ValueError) as error:
             category = str(error)

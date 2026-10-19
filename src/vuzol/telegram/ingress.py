@@ -42,6 +42,7 @@ from vuzol.telegram.layout import (
     is_receipt_command,
     is_status_dashboard_topic,
     is_update_command,
+    parse_lead_command,
     parse_receipt_amount,
 )
 from vuzol.telegram.model_command import enqueue_worker_picker
@@ -151,6 +152,13 @@ class TelegramIngressService:
                 if not topic.enabled:
                     raise TelegramPolicyError("project topic is disabled")
                 return await self._handle_plan_command(update, topic)
+            lead = parse_lead_command(update.text) if settings.project_lead.enabled else None
+            if lead is not None:
+                if topic.kind is not TopicKind.PROJECT or topic.project_id is None:
+                    raise TelegramPolicyError("/lead is only available in a project topic")
+                if not topic.enabled:
+                    raise TelegramPolicyError("project topic is disabled")
+                return await self._handle_lead_command(update, topic, lead)
             if is_source_command(update.text):
                 if topic.kind is not TopicKind.PROJECT or topic.project_id is None:
                     raise TelegramPolicyError("/source is only available in a project topic")
@@ -852,6 +860,24 @@ class TelegramIngressService:
                 inbox_id, entity_type="telegram_command", entity_id=inbox_id
             )
         return IngressResult(status=IngressStatus.HANDLED)
+
+    async def _handle_lead_command(
+        self, update: MessageUpdate, topic: TopicConfig, lead: tuple[str, str]
+    ) -> IngressResult:
+        from vuzol.leadership.telegram_commands import apply_telegram_lead
+
+        assert topic.project_id is not None
+        project = self._runtime.registries.projects.get(topic.project_id)
+        kind, argument = lead
+        return await apply_telegram_lead(
+            settings=self._runtime.settings,
+            session_factory=self._session_factory,
+            update=update,
+            project_id=topic.project_id,
+            default_branch=project.default_branch,
+            kind=kind,
+            argument=argument,
+        )
 
     async def _handle_plan_command(
         self, update: MessageUpdate, topic: TopicConfig

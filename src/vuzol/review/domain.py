@@ -1,5 +1,6 @@
 """Structured review verdicts for Step 09."""
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -22,12 +23,35 @@ class FindingSeverity(StrEnum):
     BLOCKER = "blocker"
 
 
+@dataclass(frozen=True, slots=True)
+class ExitCriterionSpec:
+    """One package criterion, including the words the reviewer has to judge."""
+
+    criterion_id: str
+    statement: str | None = None
+    evidence_kind: str | None = None
+    observable: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PackageReviewContract:
+    """Package goal and criteria bound to the revision under review."""
+
+    goal: str | None
+    goal_revision: int | None
+    plan_revision_id: str | None
+    criteria: tuple[ExitCriterionSpec, ...]
+
+
 class ReviewFinding(FrozenModel):
     severity: FindingSeverity
     classification: str = Field(min_length=1, max_length=100)
     summary: str = Field(min_length=1, max_length=500)
     path: str | None = Field(default=None, max_length=500)
     line: int | None = Field(default=None, ge=1)
+    # Optional criterion measurement. ``human_accepted`` is not an owner action.
+    criterion_id: str | None = Field(default=None, max_length=200)
+    evidence: str | None = Field(default=None, max_length=2_000)
 
 
 class ReviewVerdict(FrozenModel):

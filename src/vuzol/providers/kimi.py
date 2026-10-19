@@ -179,6 +179,7 @@ class KimiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Kimi Code CLI returned invalid structured output",
+                usage=NormalizedUsage(duration_ms=result.duration_ms),
             ) from None
         if not text and structured is None:
             raise ProviderFailure(
@@ -186,6 +187,7 @@ class KimiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Kimi Code CLI returned no final response",
+                usage=NormalizedUsage(duration_ms=result.duration_ms),
             )
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,

@@ -225,6 +225,8 @@ def test_large_review_bundle_is_complete_across_hashed_context_chunks() -> None:
 def _build_request_for_profile(
     profile: ProviderProfileConfig,
     work_context: tuple[ContextItem, ...] = (),
+    *,
+    input_token_limit: int = 32_000,
 ) -> ProviderRequest:
     inspection = GitInspection(
         head="b" * 40,
@@ -249,6 +251,7 @@ def _build_request_for_profile(
         policy_revision="test-policy.v1",
         provider_attempt=1,
         work_context=work_context,
+        input_token_limit=input_token_limit,
     )
 
 
@@ -274,6 +277,57 @@ def test_review_preserves_frozen_spec_and_respects_full_context_budget():
     small = profile.model_copy(update={"context_limit": 1000})
     with pytest.raises(IndependentReviewError, match="context budget"):
         _build_request_for_profile(small, context)
+
+
+@pytest.mark.parametrize(
+    ("profile_limit", "configured_limit", "expected"),
+    [
+        (None, 100_000, 100_000),
+        (200_000, 100_000, 100_000),
+        (50_000, 100_000, 50_000),
+        (None, 20_000, 20_000),
+    ],
+)
+def test_review_uses_configured_input_cap_without_exceeding_profile(
+    profile_limit: int | None, configured_limit: int, expected: int
+) -> None:
+    profile = _api_profile(
+        profile_id="reviewer", roles={ProviderRole.REVIEWER}, context_limit=profile_limit
+    )
+    request = _build_request_for_profile(profile, input_token_limit=configured_limit)
+    assert request.max_input_tokens == expected
+
+
+def test_review_large_frozen_context_uses_configured_cap_without_truncation() -> None:
+    texts = ("x" * 20_000,) * 7
+    context = tuple(
+        ContextItem(
+            source="chat_work_context",
+            reference=f"task:large-spec:part-{n}-of-{len(texts)}",
+            content=value,
+            content_hash=hashlib.sha256(value.encode()).hexdigest(),
+        )
+        for n, value in enumerate(texts, 1)
+    )
+    profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER}, context_limit=None)
+    with pytest.raises(IndependentReviewError, match="context budget"):
+        _build_request_for_profile(profile, context)
+    request = _build_request_for_profile(profile, context, input_token_limit=100_000)
+    assert request.context[: len(context)] == context
+    assert request.max_input_tokens == 100_000
+    for profile_limit, configured_limit in [(30_000, 100_000), (None, 30_000)]:
+        with pytest.raises(IndependentReviewError, match="context budget"):
+            _build_request_for_profile(
+                profile.model_copy(update={"context_limit": profile_limit}),
+                context,
+                input_token_limit=configured_limit,
+            )
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_review_rejects_nonpositive_input_cap(limit: int) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        IndependentModelReviewer(MagicMock(), MagicMock(), MagicMock(), input_token_limit=limit)
 
 
 def test_build_request_uses_profile_role_limits() -> None:
@@ -467,7 +521,8 @@ async def test_independent_reviewer_builds_pass_verdict() -> None:
 
 
 @pytest.mark.anyio
-async def test_independent_reviewer_fails_closed_on_provider_error() -> None:
+@pytest.mark.parametrize("has_receipt", [False, True])
+async def test_independent_reviewer_fails_closed_on_provider_error(has_receipt: bool) -> None:
     profile = _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER})
     registries = MagicMock()
     registries.profiles.items.return_value = (profile,)
@@ -478,6 +533,10 @@ async def test_independent_reviewer_fails_closed_on_provider_error() -> None:
             retryable=True,
             request_sent=True,
             safe_summary="provider request timed out",
+            usage=NormalizedUsage(input_tokens=42, output_tokens=7, duration_ms=1)
+            if has_receipt
+            else None,
+            provider_request_id="review-receipt" if has_receipt else None,
         )
     )
     adapters = MagicMock()
@@ -503,6 +562,13 @@ async def test_independent_reviewer_fails_closed_on_provider_error() -> None:
             cancellation=CancellationContext(),
             lease=_lease(),
         )
+    reconciled = reviewer._accounting.reconcile.call_args.kwargs
+    assert reconciled["conservative"] is (not has_receipt)
+    if has_receipt:
+        assert reconciled["result"].usage.output_tokens == 7
+        assert reconciled["result"].provider_request_id == "review-receipt"
+    else:
+        assert reconciled["result"] is None
     adapter.execute.side_effect = ProviderFailure(
         ProviderErrorCategory.PROVIDER_UNAVAILABLE,
         retryable=True,

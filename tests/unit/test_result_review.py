@@ -219,7 +219,7 @@ async def test_review_passes_after_clean_validate(tmp_path: Path) -> None:
     )
     session = MagicMock()
     session.get = AsyncMock(side_effect=[step, run, task])
-    session.scalar = AsyncMock(side_effect=[validate, worktree])
+    session.scalar = AsyncMock(side_effect=[validate, worktree, None])
     factory = MagicMock(return_value=AsyncContext(session))
     git = MagicMock()
     git.require_clean_worktree = AsyncMock()
@@ -286,6 +286,7 @@ async def test_review_blocks_high_risk_without_independent_reviewer(tmp_path: Pa
                 diff_hash="c" * 64,
                 branch="task-branch",
             ),
+            None,
         ]
     )
     factory = MagicMock(return_value=AsyncContext(session))
@@ -375,6 +376,7 @@ async def test_review_escalates_sensitive_diff_to_independent_reviewer(
                 diff_hash="c" * 64,
                 branch="task-branch",
             ),
+            None,
         ]
     )
     factory = MagicMock(return_value=AsyncContext(session))
@@ -467,6 +469,7 @@ async def test_review_blocks_suspicious_diff(tmp_path: Path) -> None:
                 diff_hash="c" * 64,
                 branch="task-branch",
             ),
+            None,
         ]
     )
     factory = MagicMock(return_value=AsyncContext(session))
@@ -534,6 +537,7 @@ async def test_review_fails_closed_on_git_error(tmp_path: Path) -> None:
                 diff_hash="c" * 64,
                 branch="task-branch",
             ),
+            None,
         ]
     )
     factory = MagicMock(return_value=AsyncContext(session))

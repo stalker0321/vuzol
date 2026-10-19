@@ -44,6 +44,7 @@ from vuzol.workflows.acceptance import (
     record_evidence,
     record_waiver,
 )
+from vuzol.workflows.ports import CancellationContext
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
@@ -126,9 +127,7 @@ async def _prove_promotion(
         assert uow.session is not None
         links = (
             await uow.session.scalars(
-                select(MaterializationLink).where(
-                    MaterializationLink.work_package_id == package_id
-                )
+                select(MaterializationLink).where(MaterializationLink.work_package_id == package_id)
             )
         ).all()
         last = max(links, key=lambda link: link.ordinal or 0)
@@ -274,6 +273,65 @@ async def test_d2_promotion_gate_blocks_without_evidence(postgres_dsn: str) -> N
                 reason="emergency ship",
             )
             await promotion_gate(uow.session, task_id=task_id, envelope=real_envelope)
+    finally:
+        await _engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_d2_unmeasured_criterion_does_not_promote(postgres_dsn: str) -> None:
+    """A criterion id is not evidence, and review-history:N does not measure it."""
+
+    from vuzol.workflows.acceptance import promotion_gate, record_evidence
+
+    _engine, factory = storage(postgres_dsn)
+    try:
+        package_id, revision_id, _sess = await _horizon_package(factory)
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            package = await uow.session.get(WorkPackage, package_id, with_for_update=True)
+            assert package is not None
+            package.integration_branch = "vuzol/package/x"
+            package.integration_target_branch = "main"
+            package.integration_base_commit = "a" * 40
+            package.integration_head_commit = "c" * 40
+            links = (
+                await uow.session.scalars(
+                    select(MaterializationLink).where(
+                        MaterializationLink.work_package_id == package_id
+                    )
+                )
+            ).all()
+            task_id = links[0].task_id
+            revision = await uow.session.get(PlanRevision, revision_id)
+            assert revision is not None
+            commit = "b" * 40
+            fake = _evidence_doc(
+                package_id=package_id,
+                revision_id=revision_id,
+                result_commit=commit,
+                plan_hash=revision.content_hash,
+                criteria=[
+                    {
+                        "criterion_id": "unmeasured-end-to-end-behavior",
+                        "satisfied": True,
+                        "evidence_ref": "review-history:2",
+                    }
+                ],
+            )
+            await record_evidence(
+                uow.session,
+                package_id=package_id,
+                plan_revision_id=revision_id,
+                document=fake,
+                artifact_id=None,
+            )
+            envelope = {
+                "target_branch": "main",
+                "expected_target_head": "a" * 40,
+                "result_commit": commit,
+            }
+            with pytest.raises(ValueError, match="not proven for this candidate"):
+                await promotion_gate(uow.session, task_id=task_id, envelope=envelope)
     finally:
         await _engine.dispose()
 
@@ -557,7 +615,13 @@ def _evidence_doc(
         "criteria": (
             criteria
             if criteria is not None
-            else [{"criterion_id": "done", "satisfied": True}]
+            else [
+                {
+                    "criterion_id": "done",
+                    "satisfied": True,
+                    "evidence_ref": f"gate:done:{result_commit}",
+                }
+            ]
         ),
         "test_results": [],
         "review_refs": ["aa" * 32],
@@ -602,10 +666,48 @@ async def _evidence_artifact(
         return artifact.id
 
 
-@pytest.mark.anyio
-async def test_d2_evidence_negatives_and_waiver_accept(
-    postgres_dsn: str, tmp_path: Path
+def _cited(result_commit: str, *criterion_ids: str) -> list[dict[str, object]]:
+    return [
+        {
+            "criterion_id": criterion_id,
+            "satisfied": True,
+            "evidence_ref": f"gate:{criterion_id}:{result_commit}",
+        }
+        for criterion_id in criterion_ids
+    ]
+
+
+async def _measure_gates(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    task_id: uuid.UUID,
+    run_id: uuid.UUID,
+    result_commit: str,
+    names: tuple[str, ...],
+    exit_code: int = 0,
+    ordinal: int = 4,
 ) -> None:
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        step = await uow.steps.create(
+            run_id=run_id,
+            ordinal=ordinal,
+            step_type="validate",
+            idempotency_class=IdempotencyClass.IDEMPOTENT,
+        )
+        stored = await uow.session.get(Step, step.id, with_for_update=True)
+        assert stored is not None
+        stored.status = StepStatus.COMPLETED
+        stored.result = {
+            "structured_output": {
+                "result_commit": result_commit,
+                "gates": [{"name": name, "exit_code": exit_code} for name in names],
+            }
+        }
+
+
+@pytest.mark.anyio
+async def test_d2_evidence_negatives_and_waiver_accept(postgres_dsn: str, tmp_path: Path) -> None:
     """pp.2-4 + waiver: empty/foreign/stale evidence blocked; waiver accepts."""
 
     from vuzol.discussion.domain import DomainError
@@ -656,6 +758,21 @@ async def test_d2_evidence_negatives_and_waiver_accept(
                 project_id="other-project",
             )
             foreign_task_id = foreign_task.id
+        await _measure_gates(
+            factory,
+            task_id=task_id,
+            run_id=run_id,
+            result_commit="c" * 40,
+            names=("done", "clean"),
+        )
+        await _measure_gates(
+            factory,
+            task_id=task_id,
+            run_id=run_id,
+            result_commit="b" * 40,
+            names=("done", "clean"),
+            ordinal=5,
+        )
         # Phase B: artifacts (own transactions, see committed rows).
         async with UnitOfWork(factory) as uow:
             assert uow.session is not None
@@ -689,6 +806,7 @@ async def test_d2_evidence_negatives_and_waiver_accept(
             revision_id=revision_id,
             result_commit="c" * 40,
             plan_hash=plan_hash,
+            criteria=_cited("c" * 40, "done", "clean"),
         )
         stale_artifact = await _evidence_artifact(
             factory,
@@ -699,7 +817,10 @@ async def test_d2_evidence_negatives_and_waiver_accept(
             root=tmp_path,
         )
         good_doc = _evidence_doc(
-            package_id=package_id, revision_id=revision_id, plan_hash=plan_hash
+            package_id=package_id,
+            revision_id=revision_id,
+            plan_hash=plan_hash,
+            criteria=_cited("b" * 40, "done", "clean"),
         )
         good_artifact = await _evidence_artifact(
             factory,
@@ -720,9 +841,7 @@ async def test_d2_evidence_negatives_and_waiver_accept(
             h8 = revision.content_hash[:8]
             plan_hash = revision.content_hash
 
-            async def _try_accept(
-                *, artifact: uuid.UUID | None, waiver: uuid.UUID | None
-            ) -> str:
+            async def _try_accept(*, artifact: uuid.UUID | None, waiver: uuid.UUID | None) -> str:
                 try:
                     await service.record_acceptance(
                         package_id=package_id,
@@ -886,13 +1005,23 @@ async def test_d2_accept_ingress_completes_package(postgres_dsn: str, tmp_path: 
                 idempotency_class=IdempotencyClass.IDEMPOTENT,
             )
             step_id = step_record.id
+        await _measure_gates(
+            factory,
+            task_id=link_task_id,
+            run_id=run_id,
+            result_commit="b" * 40,
+            names=("done", "clean"),
+        )
         async with UnitOfWork(factory) as uow:
             assert uow.session is not None
             _rev = await uow.session.get(PlanRevision, revision_id)
             assert _rev is not None
             _plan_hash = _rev.content_hash
         doc = _evidence_doc(
-            package_id=package_id, revision_id=revision_id, plan_hash=_plan_hash
+            package_id=package_id,
+            revision_id=revision_id,
+            plan_hash=_plan_hash,
+            criteria=_cited("b" * 40, "done", "clean"),
         )
         artifact_id = await _evidence_artifact(
             factory,
@@ -1171,9 +1300,7 @@ async def test_d2_apply_head_drift_blocked_not_failed(postgres_dsn: str) -> None
 
 
 @pytest.mark.anyio
-async def test_d2_acceptance_step_assembles_evidence(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+async def test_d2_acceptance_step_assembles_evidence(postgres_dsn: str, tmp_path: Path) -> None:
     """REDO-1/2: pre-apply assembly binds the promotion base; gate opens after."""
 
     from vuzol.execution.artifacts import ArtifactStore
@@ -1271,6 +1398,24 @@ async def test_d2_acceptance_step_assembles_evidence(
             assert db_review is not None
             db_review.status = StepStatus.COMPLETED
             db_review.result = {"verdict": "pass", "summary": "ok"}
+            validate_step = await uow.steps.create(
+                run_id=acc_run,
+                ordinal=4,
+                step_type="validate",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+            )
+            db_validate = await uow.session.get(Step, validate_step.id, with_for_update=True)
+            assert db_validate is not None
+            db_validate.status = StepStatus.COMPLETED
+            db_validate.result = {
+                "structured_output": {
+                    "result_commit": "b" * 40,
+                    "gates": [
+                        {"name": "done", "exit_code": 0},
+                        {"name": "clean", "exit_code": 0},
+                    ],
+                }
+            }
             acc_step = await uow.steps.create(
                 run_id=acc_run,
                 ordinal=9,
@@ -1337,6 +1482,12 @@ async def test_d2_acceptance_step_assembles_evidence(
             # moved head, even though head != base after intermediates.
             assert row.integration_base_head == "a" * 40
             assert row.result_commit == "b" * 40
+            proven = row.evidence["criteria"]
+            assert {item["criterion_id"] for item in proven} == {"done", "clean"}
+            assert all(item["satisfied"] is True for item in proven)
+            assert all(
+                item["evidence_ref"] == f"gate:{item['criterion_id']}:{'b' * 40}" for item in proven
+            )
             # the promotion gate opens on the assembled evidence…
             await promotion_gate(
                 uow.session,
@@ -1484,9 +1635,7 @@ async def test_d2_apply_revision_drift_blocked(postgres_dsn: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_d2_e2e_acceptance_then_promotion_apply(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+async def test_d2_e2e_acceptance_then_promotion_apply(postgres_dsn: str, tmp_path: Path) -> None:
     """REDO-1 e2e: acceptance assembles → last-item promotion apply succeeds."""
 
     from types import SimpleNamespace as _NS
@@ -1588,6 +1737,24 @@ async def test_d2_e2e_acceptance_then_promotion_apply(
             assert db_review is not None
             db_review.status = StepStatus.COMPLETED
             db_review.result = {"verdict": "pass", "summary": "ok"}
+            validate_step = await uow.steps.create(
+                run_id=acc_run,
+                ordinal=4,
+                step_type="validate",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+            )
+            db_validate = await uow.session.get(Step, validate_step.id, with_for_update=True)
+            assert db_validate is not None
+            db_validate.status = StepStatus.COMPLETED
+            db_validate.result = {
+                "structured_output": {
+                    "result_commit": "b" * 40,
+                    "gates": [
+                        {"name": "done", "exit_code": 0},
+                        {"name": "clean", "exit_code": 0},
+                    ],
+                }
+            }
             acc_step = await uow.steps.create(
                 run_id=acc_run,
                 ordinal=9,
@@ -1641,9 +1808,7 @@ async def test_d2_e2e_acceptance_then_promotion_apply(
                 idempotency_class=IdempotencyClass.IDEMPOTENT,
                 status=StepStatus.LEASED,
             )
-            db_approval_step = await uow.session.get(
-                Step, approval_step.id, with_for_update=True
-            )
+            db_approval_step = await uow.session.get(Step, approval_step.id, with_for_update=True)
             assert db_approval_step is not None
             db_approval_step.lease_owner = "owner"
             db_approval_step.lease_generation = 1
@@ -1746,3 +1911,775 @@ async def test_d2_e2e_acceptance_then_promotion_apply(
             assert effect is not None and effect.status == "settled"
     finally:
         await _engine.dispose()
+
+
+def _validate_output(result_commit: str, gates: tuple[tuple[str, int], ...]) -> dict[str, object]:
+    return {
+        "structured_output": {
+            "result_commit": result_commit,
+            "base_commit": "a" * 40,
+            "gates": [{"name": name, "exit_code": code} for name, code in gates],
+        }
+    }
+
+
+async def _prepare_candidate_acceptance(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    *,
+    validates: tuple[tuple[int, str, tuple[tuple[str, int], ...]], ...],
+) -> dict[str, object]:
+    """Last item of a horizon package, leased for the real acceptance handler."""
+
+    from vuzol.storage.records import LeaseToken, StepRecord
+    from vuzol.workflows.ports import StepExecutionRequest
+
+    package_id, _revision_id, _session_id = await _horizon_package(factory)
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        first_link = await uow.session.scalar(
+            select(MaterializationLink).where(
+                MaterializationLink.work_package_id == package_id,
+                MaterializationLink.ordinal == 1,
+            )
+        )
+        assert first_link is not None
+        first_task = await uow.session.get(Task, first_link.task_id, with_for_update=True)
+        assert first_task is not None
+        first_task.status = TaskStatus.COMPLETED
+        await WorkPackageSequencer(uow).observe_terminal(
+            task_id=first_link.task_id, horizon_enabled=True
+        )
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        package = await uow.session.get(WorkPackage, package_id, with_for_update=True)
+        assert package is not None
+        package.integration_branch = "vuzol/package/x"
+        package.integration_target_branch = "main"
+        package.integration_base_commit = "a" * 40
+        package.integration_head_commit = "c" * 40
+        last = await uow.session.scalar(
+            select(MaterializationLink).where(
+                MaterializationLink.work_package_id == package_id,
+                MaterializationLink.ordinal == 2,
+            )
+        )
+        assert last is not None
+        last_task = await uow.session.get(Task, last.task_id, with_for_update=True)
+        assert last_task is not None
+        last_task.status = TaskStatus.EXECUTING
+        run_id = await uow.runs.create(
+            task_id=last.task_id,
+            workflow_type="coding",
+            workflow_version="4",
+            budget_mode="balanced",
+            configuration_revision="c" * 64,
+            policy_revision="d" * 64,
+            status=RunStatus.RUNNING,
+        )
+        for ordinal, result_commit, gates in validates:
+            stored = await uow.steps.create(
+                run_id=run_id,
+                ordinal=ordinal,
+                step_type="validate",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+            )
+            row = await uow.session.get(Step, stored.id, with_for_update=True)
+            assert row is not None
+            row.status = StepStatus.COMPLETED
+            row.result = _validate_output(result_commit, gates)
+        review = await uow.steps.create(
+            run_id=run_id,
+            ordinal=5,
+            step_type="review",
+            idempotency_class=IdempotencyClass.IDEMPOTENT,
+        )
+        review_row = await uow.session.get(Step, review.id, with_for_update=True)
+        assert review_row is not None
+        review_row.status = StepStatus.COMPLETED
+        review_row.result = {"verdict": "pass", "summary": "mechanical pass"}
+        acceptance = await uow.steps.create(
+            run_id=run_id,
+            ordinal=9,
+            step_type="acceptance",
+            idempotency_class=IdempotencyClass.IDEMPOTENT,
+            status=StepStatus.LEASED,
+        )
+        acceptance_row = await uow.session.get(Step, acceptance.id, with_for_update=True)
+        assert acceptance_row is not None
+        acceptance_row.lease_owner = "owner"
+        acceptance_row.lease_generation = 1
+        uow.session.add(
+            Worktree(
+                task_id=last.task_id,
+                run_id=run_id,
+                project_id="vuzol",
+                repository_identity_hash="r" * 64,
+                base_commit="a" * 40,
+                default_branch="main",
+                expected_target_head="a" * 40,
+                branch="wt-1",
+                path=str(tmp_path / f"wt-{uuid.uuid4().hex}"),
+                owner="test",
+                delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
+                result_commit="b" * 40,
+                diff_hash="c" * 64,
+                retention_until=datetime.now(UTC) + timedelta(days=1),
+            )
+        )
+        request = StepExecutionRequest(
+            task_id=last.task_id,
+            run_id=run_id,
+            step_id=acceptance_row.id,
+            step_type="acceptance",
+            payload={},
+            timeout_seconds=120,
+            lease=LeaseToken(
+                step=StepRecord(
+                    id=acceptance_row.id,
+                    run_id=run_id,
+                    status=StepStatus.LEASED,
+                    lease_generation=1,
+                    lease_owner="owner",
+                    lease_expires_at=None,
+                ),
+                owner="owner",
+                generation=1,
+            ),
+        )
+        return {"task_id": last.task_id, "run_id": run_id, "request": request}
+
+
+@pytest.mark.anyio
+async def test_r1_old_commit_and_failed_gate_do_not_prove_candidate(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    """A stored check proves only the commit it measured, and only if it passed."""
+
+    from vuzol.execution.artifacts import ArtifactStore
+    from vuzol.workflows.acceptance import AcceptanceGateHandler
+
+    engine, factory = storage(postgres_dsn)
+    try:
+        ready = await _prepare_candidate_acceptance(
+            factory,
+            tmp_path,
+            validates=(
+                (4, "c" * 40, (("done", 0), ("clean", 0))),
+                (6, "b" * 40, (("lint", 0), ("test", 0))),
+                (7, "b" * 40, (("done", 1), ("clean", 1))),
+            ),
+        )
+        handler = AcceptanceGateHandler(
+            factory,
+            artifacts=ArtifactStore(
+                tmp_path, max_bytes=1_000_000, retention_days=7, redaction_patterns=()
+            ),
+        )
+        blocked = await handler.execute(ready["request"], CancellationContext())  # type: ignore[arg-type]
+        assert blocked.kind.value == "blocked"
+        assert blocked.category == "acceptance_evidence_missing"
+        assert "criteria lack evidence" in (blocked.summary or "")
+        envelope = {
+            "target_branch": "main",
+            "expected_target_head": "a" * 40,
+            "result_commit": "b" * 40,
+        }
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            with pytest.raises(ValueError, match="acceptance evidence or a waiver"):
+                await promotion_gate(
+                    uow.session,
+                    task_id=ready["task_id"],  # type: ignore[arg-type]
+                    envelope=envelope,
+                )
+        await _measure_gates(
+            factory,
+            task_id=ready["task_id"],  # type: ignore[arg-type]
+            run_id=ready["run_id"],  # type: ignore[arg-type]
+            result_commit="b" * 40,
+            names=("done", "clean"),
+            ordinal=8,
+        )
+        opened = await handler.execute(ready["request"], CancellationContext())  # type: ignore[arg-type]
+        assert opened.kind.value == "succeeded"
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            row = await uow.session.get(
+                AcceptanceEvidence, uuid.UUID(opened.result["acceptance_evidence_id"])
+            )
+            assert row is not None
+            assert {item["criterion_id"] for item in row.evidence["criteria"]} == {"done", "clean"}
+            assert all(
+                item["evidence_ref"] == f"gate:{item['criterion_id']}:{'b' * 40}"
+                for item in row.evidence["criteria"]
+            )
+            await promotion_gate(
+                uow.session,
+                task_id=ready["task_id"],  # type: ignore[arg-type]
+                envelope=envelope,
+            )
+            cited = dict(row.evidence)
+            cited["criteria"] = [
+                item for item in cited["criteria"] if item["criterion_id"] == "done"
+            ]
+            row.evidence = cited
+            await uow.session.flush()
+            with pytest.raises(ValueError, match="not proven for this candidate"):
+                await promotion_gate(
+                    uow.session,
+                    task_id=ready["task_id"],  # type: ignore[arg-type]
+                    envelope=envelope,
+                )
+            stale = dict(row.evidence)
+            stale["plan_content_hash"] = "ff" * 32
+            row.evidence = stale
+            await uow.session.flush()
+            with pytest.raises(ValueError, match="evidence revision is stale"):
+                await promotion_gate(
+                    uow.session,
+                    task_id=ready["task_id"],  # type: ignore[arg-type]
+                    envelope=envelope,
+                )
+    finally:
+        await engine.dispose()
+
+
+_KEEPS_STATEMENT = "saved work remains after process restart and database reconnect"
+_KEEPS_CRITERIA = [
+    {"criterion_id": "keeps-saved-work", "statement": _KEEPS_STATEMENT},
+]
+
+
+class _CriterionTransport:
+    """Deterministic provider transport. It checks the real request schema."""
+
+    def __init__(
+        self,
+        classification: str,
+        *,
+        criteria: list[dict[str, object]],
+        package_goal: str,
+    ) -> None:
+        self.classification = classification
+        self.criteria = criteria
+        self.package_goal = package_goal
+        self.calls = 0
+        self.saw_exit_criteria = False
+
+    async def execute(self, request: object, profile: object, cancellation: object) -> object:
+        import json
+        from decimal import Decimal
+
+        from jsonschema import Draft202012Validator
+
+        from vuzol.providers.domain import NormalizedUsage, ProviderResult, ProviderResultStatus
+
+        del profile, cancellation
+        self.calls += 1
+        context = request.context  # type: ignore[attr-defined]
+        body = json.loads("".join(item.content for item in context))
+        assert body["exit_criteria"] == self.criteria
+        assert body["package_goal"] == self.package_goal
+        assert body["goal"] == self.package_goal
+        assert body["goal_revision"] == 1
+        assert body["task_goal"] == "Goal 2"
+        assert body["result_commit"] == "b" * 40
+        uuid.UUID(str(body["plan_revision_id"]))
+        self.saw_exit_criteria = True
+        schema = request.output_json_schema  # type: ignore[attr-defined]
+        finding_schema = schema["properties"]["findings"]["items"]
+        assert finding_schema["additionalProperties"] is False
+        assert "criterion_id" in finding_schema["required"]
+        assert "evidence" in finding_schema["required"]
+        payload = {
+            "verdict": "pass",
+            "summary": "Observed on the retained diff, not on an older commit.",
+            "findings": [
+                {
+                    "severity": "info",
+                    "classification": self.classification,
+                    "summary": "src/keep.py still contains the saved work.",
+                    "path": "src/keep.py",
+                    "line": 1,
+                    "criterion_id": "keeps-saved-work",
+                    "evidence": "saved work stays",
+                }
+            ],
+        }
+        Draft202012Validator(schema).validate(payload)
+        return ProviderResult(
+            status=ProviderResultStatus.SUCCEEDED,
+            structured_output=payload,
+            usage=NormalizedUsage(
+                input_tokens=20,
+                output_tokens=10,
+                cost_units=Decimal("0.01"),
+                quota_units=Decimal("0"),
+                duration_ms=5,
+            ),
+            adapter_version="fake-review.v1",
+        )
+
+
+class _ReviewAdapters:
+    def __init__(self, transport: _CriterionTransport) -> None:
+        self._transport = transport
+
+    def get(self, profile_id: str) -> _CriterionTransport:
+        del profile_id
+        return self._transport
+
+
+class _ReviewGit:
+    def __init__(self, inspection: object) -> None:
+        self._inspection = inspection
+
+    async def require_clean_worktree(self, path: Path) -> None:
+        del path
+
+    async def require_no_remotes(self, path: Path) -> None:
+        del path
+
+    async def inspect(self, path: Path, base_commit: str) -> object:
+        del path, base_commit
+        return self._inspection
+
+
+async def _run_criterion_review(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    *,
+    classification: str,
+    risk: object | None = None,
+    independent: bool = True,
+    criteria: list[dict[str, object]] | None = None,
+    package_goal: str = "ship the horizon",
+    expect: str = "independent",
+) -> dict[str, object]:
+    """Real reviewer, real history write, then a leased acceptance step."""
+
+    from tests.integration.providers._test_routing_helpers import bundle, profile
+    from vuzol.config.settings import HardLimits
+    from vuzol.execution.domain import GitInspection
+    from vuzol.review.handler import ResultReviewHandler
+    from vuzol.review.independent import DatabaseReviewAccounting, IndependentModelReviewer
+    from vuzol.storage.records import LeaseToken, StepRecord
+    from vuzol.storage.types import RiskLevel
+    from vuzol.workflows.ports import StepExecutionRequest
+    from vuzol.workflows.service import commit_step_outcome
+
+    criterion_rows = list(_KEEPS_CRITERIA if criteria is None else criteria)
+    package_id, _revision_id, _session_id = await _horizon_package(
+        factory, goal=package_goal, criteria=criterion_rows
+    )
+    diff = (
+        b"diff --git a/src/keep.py b/src/keep.py\n"
+        b"--- a/src/keep.py\n"
+        b"+++ b/src/keep.py\n"
+        b"@@ -1 +1 @@\n"
+        b"-previous\n"
+        b"+saved work stays\n"
+    )
+    inspection = GitInspection(
+        head="b" * 40,
+        branch="kept",
+        changed_files=("src/keep.py",),
+        diff=diff,
+    )
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        first_link = await uow.session.scalar(
+            select(MaterializationLink).where(
+                MaterializationLink.work_package_id == package_id,
+                MaterializationLink.ordinal == 1,
+            )
+        )
+        assert first_link is not None
+        first_task = await uow.session.get(Task, first_link.task_id, with_for_update=True)
+        assert first_task is not None
+        first_task.status = TaskStatus.COMPLETED
+        await WorkPackageSequencer(uow).observe_terminal(
+            task_id=first_link.task_id, horizon_enabled=True
+        )
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        package = await uow.session.get(WorkPackage, package_id, with_for_update=True)
+        assert package is not None
+        package.integration_branch = "vuzol/package/x"
+        package.integration_target_branch = "main"
+        package.integration_base_commit = "a" * 40
+        package.integration_head_commit = "c" * 40
+        last = await uow.session.scalar(
+            select(MaterializationLink).where(
+                MaterializationLink.work_package_id == package_id,
+                MaterializationLink.ordinal == 2,
+            )
+        )
+        assert last is not None
+        last_task = await uow.session.get(Task, last.task_id, with_for_update=True)
+        assert last_task is not None
+        last_task.status = TaskStatus.EXECUTING
+        last_task.risk = RiskLevel.MEDIUM if risk is None else risk
+        run_id = await uow.runs.create(
+            task_id=last.task_id,
+            workflow_type="coding",
+            workflow_version="4",
+            budget_mode="balanced",
+            configuration_revision="c" * 64,
+            policy_revision="d" * 64,
+            status=RunStatus.RUNNING,
+        )
+        validate = await uow.steps.create(
+            run_id=run_id,
+            ordinal=4,
+            step_type="validate",
+            idempotency_class=IdempotencyClass.IDEMPOTENT,
+        )
+        validate_row = await uow.session.get(Step, validate.id, with_for_update=True)
+        assert validate_row is not None
+        validate_row.status = StepStatus.COMPLETED
+        validate_row.result = _validate_output("b" * 40, (("tests", 0),))
+        review = await uow.steps.create(
+            run_id=run_id,
+            ordinal=5,
+            step_type="review",
+            idempotency_class=IdempotencyClass.IDEMPOTENT,
+            dependency_metadata={"predecessor_ordinals": [4]},
+        )
+        review_row = await uow.session.get(Step, review.id, with_for_update=True)
+        assert review_row is not None
+        review_row.status = StepStatus.RUNNING
+        review_row.lease_owner = "reviewer"
+        review_row.lease_generation = 1
+        work_dir = tmp_path / f"kept-{uuid.uuid4().hex}"
+        work_dir.mkdir()
+        uow.session.add(
+            Worktree(
+                task_id=last.task_id,
+                run_id=run_id,
+                project_id="vuzol",
+                repository_identity_hash="r" * 64,
+                base_commit="a" * 40,
+                default_branch="main",
+                expected_target_head="a" * 40,
+                branch="kept",
+                path=str(work_dir),
+                owner="test",
+                delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
+                result_commit="b" * 40,
+                diff_hash=inspection.diff_hash,
+                retention_until=datetime.now(UTC) + timedelta(days=1),
+            )
+        )
+        review_token = LeaseToken(
+            step=StepRecord(
+                id=review_row.id,
+                run_id=run_id,
+                status=StepStatus.RUNNING,
+                lease_generation=1,
+                lease_owner="reviewer",
+                lease_expires_at=None,
+            ),
+            owner="reviewer",
+            generation=1,
+        )
+        review_request = StepExecutionRequest(
+            task_id=last.task_id,
+            run_id=run_id,
+            step_id=review_row.id,
+            step_type="review",
+            payload={},
+            timeout_seconds=60,
+            lease=review_token,
+        )
+        task_id = last.task_id
+    _settings, registries = bundle(
+        tmp_path,
+        profile(
+            "criterion-reviewer",
+            roles=frozenset({"reviewer"}),
+            supported_task_types=frozenset({"coding", "general"}),
+            output_limit=1_000,
+            context_limit=8_000,
+        ),
+    )
+    transport = _CriterionTransport(
+        classification, criteria=criterion_rows, package_goal=package_goal
+    )
+    reviewer = None
+    if independent:
+        reviewer = IndependentModelReviewer(
+            registries,
+            _ReviewAdapters(transport),
+            DatabaseReviewAccounting(factory, HardLimits()),
+        )
+    outcome = await ResultReviewHandler(
+        factory,
+        _ReviewGit(inspection),  # type: ignore[arg-type]
+        worktree_root=tmp_path,
+        independent_reviewer=reviewer,
+    ).execute(review_request, CancellationContext())
+    if expect == "blocked":
+        assert transport.calls == 0
+        assert outcome.kind.value == "blocked"
+        assert outcome.category == "independent_review_required"
+        return {"package_id": package_id, "task_id": task_id, "outcome": outcome}
+    if expect == "mechanical":
+        assert transport.calls == 0
+        assert outcome.kind.value == "succeeded"
+        assert outcome.result["review_kind"] == "mechanical"
+        return {"package_id": package_id, "task_id": task_id, "outcome": outcome}
+    assert transport.calls == 1
+    assert transport.saw_exit_criteria is True
+    assert outcome.kind.value == "succeeded"
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        acceptance = await uow.steps.create(
+            run_id=run_id,
+            ordinal=9,
+            step_type="acceptance",
+            idempotency_class=IdempotencyClass.IDEMPOTENT,
+            status=StepStatus.LEASED,
+        )
+        acceptance_row = await uow.session.get(Step, acceptance.id, with_for_update=True)
+        assert acceptance_row is not None
+        acceptance_row.lease_owner = "owner"
+        acceptance_row.lease_generation = 1
+        acceptance_request = StepExecutionRequest(
+            task_id=task_id,
+            run_id=run_id,
+            step_id=acceptance_row.id,
+            step_type="acceptance",
+            payload={},
+            timeout_seconds=120,
+            lease=LeaseToken(
+                step=StepRecord(
+                    id=acceptance_row.id,
+                    run_id=run_id,
+                    status=StepStatus.LEASED,
+                    lease_generation=1,
+                    lease_owner="owner",
+                    lease_expires_at=None,
+                ),
+                owner="owner",
+                generation=1,
+            ),
+        )
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        await commit_step_outcome(uow.session, review_token, outcome)
+    async with UnitOfWork(factory) as uow:
+        assert uow.session is not None
+        history = await uow.session.scalar(
+            select(ReviewOutcomeHistory).where(
+                ReviewOutcomeHistory.step_id == review_request.step_id
+            )
+        )
+        assert history is not None
+        assert history.result_commit == "b" * 40
+        assert history.findings[0]["classification"] == classification
+        assert history.findings[0]["criterion_id"] == "keeps-saved-work"
+    return {"package_id": package_id, "task_id": task_id, "request": acceptance_request}
+
+
+def _acceptance_handler(factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> object:
+    from vuzol.execution.artifacts import ArtifactStore
+    from vuzol.workflows.acceptance import AcceptanceGateHandler
+
+    return AcceptanceGateHandler(
+        factory,
+        artifacts=ArtifactStore(
+            tmp_path / "artifacts",
+            max_bytes=1_000_000,
+            retention_days=7,
+            redaction_patterns=(),
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_r2_reviewer_criterion_opens_acceptance(postgres_dsn: str, tmp_path: Path) -> None:
+    """A criterion that is not a validation command is measured by the reviewer."""
+
+    engine, factory = storage(postgres_dsn)
+    try:
+        ready = await _run_criterion_review(factory, tmp_path, classification="criterion_pass")
+        handler = _acceptance_handler(factory, tmp_path)
+        outcome = await handler.execute(ready["request"], CancellationContext())  # type: ignore[attr-defined]
+        assert outcome.kind.value == "succeeded"
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            row = await uow.session.get(
+                AcceptanceEvidence, uuid.UUID(outcome.result["acceptance_evidence_id"])
+            )
+            assert row is not None
+            proven = row.evidence["criteria"]
+            assert proven[0]["criterion_id"] == "keeps-saved-work"
+            assert proven[0]["evidence_ref"].startswith("review-criterion:")
+            assert proven[0]["evidence_ref"].endswith(f":keeps-saved-work:{'b' * 40}")
+            await promotion_gate(
+                uow.session,
+                task_id=ready["task_id"],  # type: ignore[arg-type]
+                envelope={
+                    "target_branch": "main",
+                    "expected_target_head": "a" * 40,
+                    "result_commit": "b" * 40,
+                },
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_r2_human_accepted_needs_an_owner_action(postgres_dsn: str, tmp_path: Path) -> None:
+    """A model cannot accept a criterion by naming the owner action."""
+
+    from vuzol.storage.models import Event
+    from vuzol.storage.types import RunStatus, StepStatus
+    from vuzol.workflows.application import OwnerDecision, Principal, apply_task_command
+    from vuzol.workflows.service import commit_step_outcome
+
+    engine, factory = storage(postgres_dsn)
+    try:
+        ready = await _run_criterion_review(factory, tmp_path, classification="human_accepted")
+        handler = _acceptance_handler(factory, tmp_path)
+        blocked = await handler.execute(ready["request"], CancellationContext())  # type: ignore[attr-defined]
+        assert blocked.category == "acceptance_evidence_missing"
+        assert "criteria lack evidence" in (blocked.summary or "")
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            await commit_step_outcome(uow.session, ready["request"].lease, blocked)  # type: ignore[attr-defined]
+        async with factory() as session:
+            task = await session.get(Task, ready["task_id"])
+            assert task is not None and task.user_id == 42
+            version = task.version
+            step = await session.get(Step, ready["request"].step_id)  # type: ignore[attr-defined]
+            run = await session.get(Run, ready["request"].run_id)  # type: ignore[attr-defined]
+            assert step is not None and step.status is StepStatus.BLOCKED
+            assert run is not None and run.status is RunStatus.BLOCKED
+        with pytest.raises(ValueError, match="task owner's principal"):
+            async with UnitOfWork(factory) as uow:
+                assert uow.session is not None
+                await apply_task_command(
+                    uow.session,
+                    task_id=ready["task_id"],  # type: ignore[arg-type]
+                    command="accept_criterion",
+                    principal=Principal(user_id=7, ingress_source="cli"),
+                    expected_task_version=version,
+                    decision=OwnerDecision(reason="stranger checked the retained diff"),
+                )
+        async with factory() as session:
+            stranger = await session.scalar(
+                select(Event.id).where(Event.event_type == "acceptance.owner_criterion")
+            )
+            step = await session.get(Step, ready["request"].step_id)  # type: ignore[attr-defined]
+            assert stranger is None
+            assert step is not None and step.status is StepStatus.BLOCKED
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            await apply_task_command(
+                uow.session,
+                task_id=ready["task_id"],  # type: ignore[arg-type]
+                command="accept_criterion",
+                principal=Principal(user_id=42, ingress_source="cli"),
+                expected_task_version=version,
+                decision=OwnerDecision(reason="owner checked the retained diff"),
+            )
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            step = await uow.session.get(Step, ready["request"].step_id, with_for_update=True)  # type: ignore[attr-defined]
+            assert step is not None and step.status is StepStatus.QUEUED
+            step.status = StepStatus.LEASED
+            step.lease_owner = "owner"
+            step.lease_generation = 1
+        opened = await handler.execute(ready["request"], CancellationContext())  # type: ignore[attr-defined]
+        assert opened.kind.value == "succeeded"
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            row = await uow.session.get(
+                AcceptanceEvidence, uuid.UUID(opened.result["acceptance_evidence_id"])
+            )
+            assert row is not None
+            assert row.evidence["criteria"][0]["evidence_ref"].startswith("owner-criterion:")
+            await promotion_gate(
+                uow.session,
+                task_id=ready["task_id"],  # type: ignore[arg-type]
+                envelope={
+                    "target_branch": "main",
+                    "expected_target_head": "a" * 40,
+                    "result_commit": "b" * 40,
+                },
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_low_risk_unproven_criterion_reaches_the_reviewer(
+    postgres_dsn: str, tmp_path: Path
+) -> None:
+    """LOW risk still asks the model when a required criterion has no proof."""
+
+    from vuzol.storage.types import RiskLevel
+
+    engine, factory = storage(postgres_dsn)
+    try:
+        ready = await _run_criterion_review(
+            factory,
+            tmp_path,
+            classification="criterion_pass",
+            risk=RiskLevel.LOW,
+        )
+        assert ready["request"] is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_low_risk_without_reviewer_stays_blocked(postgres_dsn: str, tmp_path: Path) -> None:
+    """A missing reviewer cannot turn an unproven criterion into a mechanical pass."""
+
+    from vuzol.storage.types import RiskLevel
+
+    engine, factory = storage(postgres_dsn)
+    try:
+        ready = await _run_criterion_review(
+            factory,
+            tmp_path,
+            classification="criterion_pass",
+            risk=RiskLevel.LOW,
+            independent=False,
+            expect="blocked",
+        )
+        assert ready["outcome"].category == "independent_review_required"  # type: ignore[attr-defined]
+        assert "keeps-saved-work" in (ready["outcome"].summary or "")  # type: ignore[attr-defined]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_proven_gate_does_not_force_a_model_call(postgres_dsn: str, tmp_path: Path) -> None:
+    """A criterion already measured by the passing gate stays mechanical."""
+
+    from vuzol.storage.types import RiskLevel
+
+    engine, factory = storage(postgres_dsn)
+    try:
+        ready = await _run_criterion_review(
+            factory,
+            tmp_path,
+            classification="criterion_pass",
+            risk=RiskLevel.LOW,
+            criteria=[
+                {
+                    "criterion_id": "tests",
+                    "statement": "the tests gate passed on this retained commit",
+                }
+            ],
+            expect="mechanical",
+        )
+        assert ready["outcome"].result["review_kind"] == "mechanical"  # type: ignore[attr-defined]
+        assert ready["outcome"].result["findings"] == []  # type: ignore[attr-defined]
+    finally:
+        await engine.dispose()

@@ -12,6 +12,7 @@ from vuzol.interpretation.domain import (
     TaskOperation,
     TaskType,
 )
+from vuzol.interpretation.work_contract import WORK_CONTRACT_QUESTION, work_contract_error
 from vuzol.storage.types import RiskLevel
 
 _RISK_ORDER = {
@@ -130,11 +131,23 @@ def enforce_interpretation_policy(
         return PolicyResult(tightened, False, ("mixed_turn_requires_clarification",), decision)
     reasons: list[str] = []
     updates: dict[str, object] = {}
+    contract_error = work_contract_error(semantic_effect or "", draft.task_type, draft.operation)
+    if contract_error is not None:
+        tightened = draft.model_copy(
+            update={
+                "needs_clarification": True,
+                "clarification_question": WORK_CONTRACT_QUESTION,
+                "required_capabilities": frozenset(),
+            }
+        )
+        decision = classify_decision(tightened).model_copy(update={"policy_allowed": False})
+        return PolicyResult(tightened, False, (contract_error,), decision)
     risk = draft.suggested_risk
     normalized_input = request.original_input.casefold()
     design_intent = _has_directed_marker(normalized_input, _DESIGN_DISCUSSION_MARKERS)
     implementation_intent = (
-        _has_directed_marker(normalized_input, _IMPLEMENTATION_MARKERS)
+        semantic_effect is None
+        and _has_directed_marker(normalized_input, _IMPLEMENTATION_MARKERS)
         and not design_intent
         and semantic_effect in {None, "execute_request"}
     )

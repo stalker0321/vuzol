@@ -32,6 +32,7 @@ from vuzol.telegram.projections import (
 )
 from vuzol.telegram.tracing import enqueue_planner_trace
 from vuzol.workflows.domain import MaterializedWorkflow, OutcomeKind, StepOutcome
+from vuzol.workflows.locking import lock_task_run_step
 from vuzol.workflows.recovery_policy import (
     DEFAULT_RECOVERY_POLICY,
     FINGERPRINT_SCHEMA,
@@ -209,16 +210,16 @@ async def commit_step_outcome(
     recovery_policy: RecoveryPolicy | None = None,
 ) -> None:
     policy = recovery_policy or DEFAULT_RECOVERY_POLICY
-    step = await session.scalar(select(Step).where(Step.id == token.step.id).with_for_update())
+    locked = await lock_task_run_step(session, token.step.id)
+    if locked is None:
+        raise LeaseLost(f"step lease lost: {token.step.id}")
+    _locked_task, run, step = locked
     if (
-        step is None
-        or step.lease_owner != token.owner
+        step.lease_owner != token.owner
         or step.lease_generation != token.generation
         or step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
     ):
         raise LeaseLost(f"step lease lost: {token.step.id}")
-    run = await session.scalar(select(Run).where(Run.id == step.run_id).with_for_update())
-    assert run is not None
     if run.status in {RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.COMPLETED}:
         raise LeaseLost(f"parent run is terminal: {run.id}")
     if run.status is RunStatus.PAUSED:
@@ -229,6 +230,23 @@ async def commit_step_outcome(
     if outcome.kind is OutcomeKind.SUCCEEDED:
         await transition_step(session, step, StepStatus.COMPLETED, actor_type="worker")
         step.result = outcome.result
+        # A passing review used to live only on the mutable step result. The
+        # acceptor reads durable history, so the same retention used for a
+        # blocked verdict also keeps a passing criterion measurement.
+        if (
+            step.step_type == "review"
+            and isinstance(outcome.result, dict)
+            and outcome.result.get("verdict")
+        ):
+            from vuzol.storage.attempts import record_review_outcome
+
+            await record_review_outcome(
+                session,
+                task_id=run.task_id,
+                run_id=run.id,
+                step_id=step.id,
+                verdict=outcome.result,
+            )
     elif outcome.kind is OutcomeKind.TRANSIENT_FAILURE:
         state, _components = await _build_recovery_state(session, run, step, outcome, policy)
         action = decide_recovery(state, policy)

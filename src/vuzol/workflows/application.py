@@ -13,13 +13,37 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.storage.models import Event, Task
-from vuzol.storage.types import RunStatus
+from vuzol.providers.budgets import (
+    _explicit_money_family,
+    accept_cost_uncertainty,
+    reconcile_unknown_usage,
+    record_admission_only_consent,
+)
+from vuzol.storage.models import (
+    Event,
+    MaterializationLink,
+    Run,
+    Step,
+    Task,
+    UsageRecord,
+    WorkPackage,
+    Worktree,
+)
+from vuzol.storage.types import RunStatus, StepStatus
 from vuzol.storage.unit_of_work import UnitOfWork
+from vuzol.workflows.acceptance import (
+    criterion_choice_token,
+    load_stored_proofs,
+    record_owner_criterion_acceptance,
+    required_criterion_ids,
+    unproven_criterion_ids,
+)
 from vuzol.workflows.controls import (
     _locked_context,
     cancel_task,
@@ -44,6 +68,29 @@ class TaskCommand(StrEnum):
     RETRY = "retry"
     REVALIDATE = "revalidate"
     REREVIEW = "rereview"
+    ADMIT_CEILING = "admit_ceiling"
+    ACCEPT_UNCERTAINTY = "accept_uncertainty"
+    RECONCILE_COST = "reconcile_cost"
+    ACCEPT_CRITERION = "accept_criterion"
+
+
+_OWNER_CATEGORY = {
+    TaskCommand.ADMIT_CEILING: "admission_only_consent_required",
+    TaskCommand.ACCEPT_UNCERTAINTY: "money_cap_uncertified",
+    TaskCommand.RECONCILE_COST: "money_cap_uncertified",
+    TaskCommand.ACCEPT_CRITERION: "acceptance_evidence_missing",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerDecision:
+    """Stored owner choice that lets one blocked step continue."""
+
+    reason: str
+    cost_units: Decimal | None = None
+    usage_id: uuid.UUID | None = None
+    criterion_id: str | None = None
+    criterion_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +146,187 @@ async def _start(
     return task.version != before
 
 
+async def _unknown_usage_id(
+    session: AsyncSession, task_id: uuid.UUID, usage_id: uuid.UUID | None
+) -> uuid.UUID:
+    """One uncovered receipt, or the id the owner named. Never invent an amount."""
+
+    family = await _explicit_money_family(session, task_id)
+    rows = (
+        await session.scalars(
+            select(UsageRecord.id).where(
+                UsageRecord.task_id.in_(family),
+                UsageRecord.cost_known.is_(False),
+            )
+        )
+    ).all()
+    if usage_id is not None:
+        if usage_id not in rows:
+            raise ValueError("unknown usage receipt is missing")
+        return usage_id
+    if len(rows) != 1:
+        raise ValueError("reconciliation needs one unknown receipt or an explicit usage id")
+    return rows[0]
+
+
+async def _accept_named_criterion(
+    session: AsyncSession,
+    *,
+    task: Task,
+    run_id: uuid.UUID,
+    principal: Principal,
+    decision: OwnerDecision,
+) -> None:
+    link = await session.scalar(
+        select(MaterializationLink).where(MaterializationLink.task_id == task.id)
+    )
+    package = None if link is None else await session.get(WorkPackage, link.work_package_id)
+    if package is None:
+        raise ValueError("criterion acceptance requires a work package")
+    worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run_id))
+    if worktree is None or not worktree.result_commit:
+        raise ValueError("criterion acceptance requires the retained result commit")
+    proofs = await load_stored_proofs(session, package_id=package.id)
+    missing = unproven_criterion_ids(
+        result_commit=worktree.result_commit,
+        required_ids=required_criterion_ids(package.exit_criteria),
+        gates=proofs.gates,
+        findings=proofs.findings,
+        owner_decisions=proofs.owner_decisions,
+    )
+    chosen = decision.criterion_id
+    if chosen is None and decision.criterion_token:
+        matches = [
+            criterion_id
+            for criterion_id in missing
+            if criterion_choice_token(criterion_id) == decision.criterion_token
+        ]
+        if len(matches) != 1:
+            raise ValueError("criterion token does not match one unproven criterion")
+        chosen = matches[0]
+    elif chosen is None:
+        if len(missing) != 1:
+            raise ValueError("criterion acceptance needs exactly one unproven criterion")
+        chosen = missing[0]
+    elif chosen not in missing:
+        raise ValueError("criterion is not an unproven required criterion")
+    await record_owner_criterion_acceptance(
+        session,
+        package_id=package.id,
+        criterion_id=chosen,
+        result_commit=worktree.result_commit,
+        principal_user_id=principal.user_id,
+        reason=decision.reason,
+    )
+
+
+async def _continue_owner_decision(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    action: TaskCommand,
+    principal: Principal,
+    expected_task_version: int | None,
+    step_id: uuid.UUID | None,
+    decision: OwnerDecision | None,
+) -> None:
+    """Permission, stored decision, then the same blocked step continues."""
+
+    if decision is None or not decision.reason.strip():
+        raise ValueError("owner decision requires a reason")
+    task, run, steps = await _locked_context(session, task_id)
+    if task.user_id != principal.user_id:
+        raise ValueError("task continuation requires the task owner's principal")
+    if expected_task_version is None or expected_task_version != task.version:
+        raise ValueError("stale task version for continuation")
+    if run.status is RunStatus.PAUSED:
+        raise ValueError("run is paused; resume to continue the saved work or cancel to close it")
+    target = current_retry_target(steps)
+    if (
+        run.status is not RunStatus.BLOCKED
+        or target is None
+        or (step_id is not None and target.id != step_id)
+    ):
+        raise ValueError("continuation requires one unambiguous current blocked step")
+    if target.failure_category != _OWNER_CATEGORY[action]:
+        raise ValueError("owner action does not match the blocked step")
+    if action is TaskCommand.ADMIT_CEILING:
+        await record_admission_only_consent(
+            session,
+            task_id=task.id,
+            principal_user_id=principal.user_id,
+            reason=decision.reason,
+        )
+    elif action is TaskCommand.ACCEPT_UNCERTAINTY:
+        await accept_cost_uncertainty(
+            session,
+            task_id=task.id,
+            principal_user_id=principal.user_id,
+            reason=decision.reason,
+        )
+    elif action is TaskCommand.RECONCILE_COST:
+        if decision.cost_units is None or decision.cost_units <= 0:
+            raise ValueError("reconciliation requires a measured receipt")
+        usage_id = await _unknown_usage_id(session, task.id, decision.usage_id)
+        await reconcile_unknown_usage(
+            session,
+            usage_id=usage_id,
+            cost_units=decision.cost_units,
+            principal_user_id=principal.user_id,
+        )
+    else:
+        await _accept_named_criterion(
+            session,
+            task=task,
+            run_id=run.id,
+            principal=principal,
+            decision=decision,
+        )
+    await retry_blocked_step(session, target.id, actor_id=str(principal.user_id))
+
+
+async def continue_blocked_receipt(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    thread_id: int,
+    principal: Principal,
+    cost_units: Decimal,
+) -> TaskCommandResult:
+    """Reconcile the single owner-blocked unknown receipt in this thread."""
+
+    validate_principal(principal)
+    if cost_units <= 0:
+        raise ValueError("a measured receipt is not zero")
+    tasks = (
+        await session.scalars(
+            select(Task)
+            .join(Run, Run.task_id == Task.id)
+            .join(Step, Step.run_id == Run.id)
+            .where(
+                Task.user_id == principal.user_id,
+                Task.source_chat_id == chat_id,
+                Task.source_thread_id == thread_id,
+                Run.status == RunStatus.BLOCKED,
+                Step.status == StepStatus.BLOCKED,
+                Step.failure_category == "money_cap_uncertified",
+            )
+        )
+    ).all()
+    unique = {task.id: task for task in tasks}
+    if len(unique) != 1:
+        raise ValueError("receipt requires exactly one blocked unknown-cost task in this thread")
+    task = next(iter(unique.values()))
+    return await apply_task_command(
+        session,
+        task_id=task.id,
+        command=TaskCommand.RECONCILE_COST,
+        principal=principal,
+        expected_task_version=task.version,
+        decision=OwnerDecision(reason="late receipt from the owner", cost_units=cost_units),
+    )
+
+
 async def apply_task_command(
     session: AsyncSession,
     *,
@@ -107,6 +335,7 @@ async def apply_task_command(
     principal: Principal,
     expected_task_version: int | None = None,
     step_id: uuid.UUID | None = None,
+    decision: OwnerDecision | None = None,
 ) -> TaskCommandResult:
     """Session-level core shared by Telegram ingress, dispatch and the CLI."""
 
@@ -151,6 +380,10 @@ async def apply_task_command(
             raise ValueError("task retry requires the task owner's principal")
         if expected_task_version is None or expected_task_version != task.version:
             raise ValueError("stale task version for retry")
+        if run.status is RunStatus.PAUSED:
+            raise ValueError(
+                "run is paused; resume to continue the saved work or cancel to close it"
+            )
         target = current_retry_target(steps)
         if (
             run.status is not RunStatus.BLOCKED
@@ -172,6 +405,17 @@ async def apply_task_command(
                     "expected_task_version": expected_task_version,
                 },
             )
+        )
+        applied = True
+    elif action in _OWNER_CATEGORY:
+        await _continue_owner_decision(
+            session,
+            task_id=task_id,
+            action=action,
+            principal=principal,
+            expected_task_version=expected_task_version,
+            step_id=step_id,
+            decision=decision,
         )
         applied = True
     elif action is TaskCommand.START:
@@ -219,6 +463,7 @@ class TaskControlService:
         principal: Principal,
         expected_task_version: int | None = None,
         step_id: uuid.UUID | None = None,
+        decision: OwnerDecision | None = None,
     ) -> TaskCommandResult:
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
@@ -229,4 +474,5 @@ class TaskControlService:
                 principal=principal,
                 expected_task_version=expected_task_version,
                 step_id=step_id,
+                decision=decision,
             )

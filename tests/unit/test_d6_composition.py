@@ -114,6 +114,7 @@ async def test_medium_review_invokes_expected_policy_reviewer(tmp_path: Path) ->
                 diff_hash="c" * 64,
                 branch="task-branch",
             ),
+            None,
         ]
     )
     factory = MagicMock(return_value=AsyncContext(session))

@@ -39,8 +39,10 @@ from vuzol.telegram.layout import (
     is_import_command,
     is_model_command,
     is_plan_command,
+    is_receipt_command,
     is_status_dashboard_topic,
     is_update_command,
+    parse_receipt_amount,
 )
 from vuzol.telegram.model_command import enqueue_worker_picker
 from vuzol.telegram.policy import TelegramPolicyError, authorize, validate_message
@@ -117,6 +119,8 @@ class TelegramIngressService:
                 ):
                     raise TelegramPolicyError("secret name is not enabled")
                 return await self._handle_secret_command(update, secret_name)
+            if is_receipt_command(update.text):
+                return await self._handle_receipt_command(update)
             if is_help_command(update.text):
                 if not topic.enabled:
                     raise TelegramPolicyError("topic is disabled")
@@ -673,6 +677,44 @@ class TelegramIngressService:
                     revision=update.message_id,
                 )
         return IngressResult(status=IngressStatus.HANDLED, intake_id=intake_id)
+
+    async def _handle_receipt_command(self, update: MessageUpdate) -> IngressResult:
+        """Record one measured receipt and continue the blocked step in this thread."""
+
+        from vuzol.workflows.application import Principal, continue_blocked_receipt
+
+        try:
+            amount = parse_receipt_amount(update.text or "")
+        except ValueError as error:
+            return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            assert uow.session is not None
+            try:
+                async with uow.session.begin_nested():
+                    result = await continue_blocked_receipt(
+                        uow.session,
+                        chat_id=update.chat_id,
+                        thread_id=update.message_thread_id,
+                        principal=Principal(user_id=update.user_id, ingress_source="telegram"),
+                        cost_units=amount,
+                    )
+            except ValueError as error:
+                await uow.inbox.mark_processed(
+                    inbox_id, entity_type="telegram_command", entity_id=inbox_id
+                )
+                return IngressResult(status=IngressStatus.REJECTED, reason=str(error)[:500])
+            await uow.inbox.mark_processed(
+                inbox_id, entity_type="telegram_command", entity_id=inbox_id
+            )
+        return IngressResult(status=IngressStatus.HANDLED, task_id=result.task_id)
 
     async def _handle_help_command(
         self, update: MessageUpdate, topic: TopicConfig

@@ -41,8 +41,47 @@ binding it to a real horizon is WP08.
   cost and **not zero**. Unknown stays visible in its own bucket.
 - `cached_tokens` are recorded for provenance but never priced or added on top
   of `input_tokens`, so cached usage cannot be double-charged.
-- Lifetime budget: usage rows are never reset by a new `budget_epoch`. Epochs
-  only reset the task/step **caps**; the ledger total is cumulative.
+- Output validation and usage receipts are independent. A rejected answer still
+  settles any provider-reported tokens, cost, request ID and duration, including
+  review failures and late receipts. Only missing dimensions retain their
+  conservative reservation floor; a format error does not turn measured usage
+  into a full-reservation charge.
+- Under hard cumulative token limits, routing fits the next output reservation
+  to the remaining task/step allowance (settled usage plus outstanding reserves,
+  in the current epoch). This calculation and reservation share the budget
+  transaction lock. A retry gets the remainder, not a fresh full ceiling; zero
+  remainder blocks admission. Money, quota and input checks remain unchanged.
+- Lifetime budget: usage rows are never reset by a new `budget_epoch`. When
+  cumulative token or estimated-cost enforcement is `hard` (the migration
+  default), epochs still reset those task/step caps. The ledger total stays
+  cumulative.
+- **Soft vs hard (stabilization).** `usage_total_enforcement` (cumulative
+  task/step input and output) and
+  `estimated_cost_enforcement` default to `hard` because a stored number does
+  not say whether an owner chose it. `soft` records `budget.soft_overrun`
+  once per dimension and does not stop work or required review. Per-call
+  context/output limits, daily cost, daily quota, package lifetime budget,
+  and loop counters stay hard in both modes.
+- **Explicit money ceiling.** `explicit_money_cap_units`, when set, is a
+  lifetime sum of known cost plus outstanding reservations for the root task
+  and its children. Epoch bumps, retries, replans, and review allowance do
+  not grant a new ceiling and do not erase spend. A known sum over the
+  ceiling stops with `explicit money cap exceeded`; raising the configured
+  ceiling continues the remainder. Unknown cost (`cost_known=false`) is not
+  zero and is not an upper bound. Raising the ceiling does not certify it.
+  Continuation needs a measured late receipt (`budget.cost_reconciled`) or a
+  separate owner decision (`budget.cost_uncertainty_accepted`) that names the
+  current unknown rows and keeps their floor. A later unknown row is not
+  covered. CLI and tool launches under this ceiling need a stored
+  `budget.admission_only_consent` on the task family before a lease. The
+  event `budget.ceiling_unenforceable` records the limit after that consent;
+  it is not itself consent. Routing eligibility follows
+  `estimated_cost_enforcement`: `soft` does not exclude a profile merely
+  because `task_cost_units` is below `minimum_unknown_usage_cost`.
+  `task_duration_seconds` is configured and is not applied by admission.
+- **Production switch.** This code does not change a deployed limit file.
+  Moving ordinary tasks from the historical hard token/cost stops to `soft`
+  is an owner decision. Until that switch, the previous hard behavior remains.
 - Canonical lifetime (D3, lead Q2): settled usage + outstanding reservations
   for a lifetime owner (`horizon_id`), **no epoch filter** (same canon as
   `_lifetime_spend`). Retry, goal revision and epoch bumps never erase it.
@@ -63,6 +102,11 @@ binding it to a real horizon is WP08.
   task's package. Defaults `50/500/10` are guardrail ceilings roughly an
   order above observed pilot maxima — admittedly arbitrary, see ADR-0014 §8;
   follow-up calibrates them from cohort telemetry.
+- `provider_attempts` bounds selected routes per step in one owner-admitted
+  budget epoch. Automatic retry cannot reset it; explicit guarded continuation
+  can start a fresh bounded epoch. Lifetime route IDs and receipts are retained,
+  and the separate all-epoch `max_provider_calls` guard still applies. Legacy
+  decisions without a reservation count in epoch zero.
 - Step-less calls (D3, lead Q3): nullable task/run/step refs +
   `invocation_id` (partial unique, idempotency key); reserve before spend
   (scout) or reserve→settle around it (intake observer). No fake Step.

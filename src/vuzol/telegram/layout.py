@@ -7,6 +7,8 @@ control forum presents the same structure.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
+
 from vuzol.config.models import TopicConfig, TopicKind
 
 # Permanently pinned system topics, top → bottom in the forum pin stack.
@@ -56,6 +58,33 @@ def is_update_command(text: str | None) -> bool:
         return False
     command = parts[0].split("@", 1)[0]
     return command == "/update"
+
+
+def is_receipt_command(text: str | None) -> bool:
+    """True when the message is a ``/receipt`` command, with or without an amount."""
+
+    if text is None:
+        return False
+    parts = text.strip().split(maxsplit=1)
+    if not parts:
+        return False
+    return parts[0].split("@", 1)[0] == "/receipt"
+
+
+def parse_receipt_amount(text: str) -> Decimal:
+    """Positive decimal from ``/receipt AMOUNT``. A bad amount is rejected."""
+
+    parts = text.strip().split()
+    command = parts[0].split("@", 1)[0] if parts else ""
+    if command != "/receipt" or len(parts) != 2:
+        raise ValueError("usage: /receipt AMOUNT")
+    try:
+        amount = Decimal(parts[1])
+    except InvalidOperation as error:
+        raise ValueError("usage: /receipt AMOUNT") from error
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("a measured receipt is not zero")
+    return amount
 
 
 def is_help_command(text: str | None) -> bool:

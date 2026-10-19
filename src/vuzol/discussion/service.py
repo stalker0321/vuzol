@@ -192,9 +192,7 @@ class WorkPackageService:
         # contract, not the live flag. Pre-D0 rows (NULL) fall back to the
         # passed admission flag for compatibility.
         if getattr(package, "execution_contract_version", None) is not None:
-            horizon_effective = pinned_horizon_enabled(
-                package, fallback=bool(horizon_enabled)
-            )
+            horizon_effective = pinned_horizon_enabled(package, fallback=bool(horizon_enabled))
         else:
             horizon_effective = bool(horizon_enabled)
         if horizon_effective and is_horizon(package.goal, package.exit_criteria):
@@ -271,9 +269,7 @@ class WorkPackageService:
             package.goal_revision = (package.goal_revision or 0) + 1
         if exit_criteria is not None:
             for entry in exit_criteria:
-                if not isinstance(entry, dict) or not isinstance(
-                    entry.get("criterion_id"), str
-                ):
+                if not isinstance(entry, dict) or not isinstance(entry.get("criterion_id"), str):
                     raise DomainError("criterion_malformed")
             package.exit_criteria = [dict(entry) for entry in exit_criteria]
         previous_state = package.status
@@ -625,9 +621,7 @@ class WorkPackageService:
         # active package reads the pinned contract, not the live flag.
         # Pre-D0 rows (NULL) fall back to the passed flag for compatibility.
         if getattr(package, "execution_contract_version", None) is not None:
-            acceptance_effective = pinned_horizon_enabled(
-                package, fallback=bool(horizon_enabled)
-            )
+            acceptance_effective = pinned_horizon_enabled(package, fallback=bool(horizon_enabled))
         else:
             acceptance_effective = bool(horizon_enabled)
         if not (acceptance_effective and is_horizon(package.goal, package.exit_criteria)):
@@ -722,9 +716,7 @@ class WorkPackageService:
         await self._enqueue_plan_projection(package.id, package.version, "accepted")
         return package.version
 
-    async def _resolve_waiver(
-        self, waiver_id: uuid.UUID, package: WorkPackage
-    ) -> AcceptanceWaiver:
+    async def _resolve_waiver(self, waiver_id: uuid.UUID, package: WorkPackage) -> AcceptanceWaiver:
         """Validate a waiver for THIS package and its current head (D2 L3)."""
 
         assert self._uow.session is not None
@@ -748,7 +740,13 @@ class WorkPackageService:
         plan drift and head mismatch all raise instead of completing.
         """
 
-        from vuzol.workflows.acceptance import find_evidence, validate_evidence
+        from vuzol.workflows.acceptance import (
+            criteria_are_proven,
+            find_evidence,
+            load_stored_proofs,
+            required_criterion_ids,
+            validate_evidence,
+        )
 
         assert self._uow.session is not None
         # Foreign scope: the artifact must belong to this package's project.
@@ -766,14 +764,10 @@ class WorkPackageService:
         else:
             rows = (
                 await self._uow.session.scalars(
-                    select(AcceptanceEvidence).where(
-                        AcceptanceEvidence.artifact_id == artifact.id
-                    )
+                    select(AcceptanceEvidence).where(AcceptanceEvidence.artifact_id == artifact.id)
                 )
             ).all()
-            candidate = next(
-                (row for row in rows if row.package_id == package.id), None
-            )
+            candidate = next((row for row in rows if row.package_id == package.id), None)
         if candidate is None:
             raise DomainError("acceptance_evidence_unknown")
         errors = validate_evidence(candidate.evidence)
@@ -782,16 +776,21 @@ class WorkPackageService:
         document = candidate.evidence
         if document.get("plan_content_hash") != revision.content_hash:
             raise DomainError("acceptance_evidence_stale_revision")
-        criteria = document.get("criteria")
-        if (
-            not isinstance(criteria, list)
-            or not criteria
-            or any(
-                not isinstance(entry, dict) or entry.get("satisfied") is not True
-                for entry in criteria
-            )
-        ):
+        result_commit = document.get("result_commit")
+        required = required_criterion_ids(package.exit_criteria)
+        if not isinstance(result_commit, str):
             raise DomainError("acceptance_criteria_unmet")
+        if required:
+            proofs = await load_stored_proofs(self._uow.session, package_id=package.id)
+            if not criteria_are_proven(
+                document,
+                result_commit=result_commit,
+                required_ids=required,
+                gates=proofs.gates,
+                findings=proofs.findings,
+                owner_decisions=proofs.owner_decisions,
+            ):
+                raise DomainError("acceptance_criteria_unmet")
         # REDO-2: a real-target apply does not move integration_head (only
         # integration-branch applies do), so the promoted result is proven
         # through the CONSUMED approval envelope, not the head pointer.
@@ -815,18 +814,14 @@ class WorkPackageService:
             raise DomainError("acceptance_evidence_invalid")
         links = (
             await self._uow.session.scalars(
-                select(MaterializationLink).where(
-                    MaterializationLink.work_package_id == package.id
-                )
+                select(MaterializationLink).where(MaterializationLink.work_package_id == package.id)
             )
         ).all()
         if not links:
             raise DomainError("acceptance_promotion_unproven")
         last_task_id = max(links, key=lambda link: link.ordinal or 0).task_id
         run_ids = (
-            await self._uow.session.scalars(
-                select(Run.id).where(Run.task_id == last_task_id)
-            )
+            await self._uow.session.scalars(select(Run.id).where(Run.task_id == last_task_id))
         ).all()
         if not run_ids:
             raise DomainError("acceptance_promotion_unproven")
@@ -845,10 +840,7 @@ class WorkPackageService:
             if step is None or not isinstance(step.payload, dict):
                 continue
             envelope = step.payload.get("action_envelope")
-            if (
-                isinstance(envelope, dict)
-                and envelope.get("result_commit") == result_commit
-            ):
+            if isinstance(envelope, dict) and envelope.get("result_commit") == result_commit:
                 return
         raise DomainError("acceptance_promotion_unproven")
 
@@ -860,17 +852,13 @@ class WorkPackageService:
         assert self._uow.session is not None
         links = (
             await self._uow.session.scalars(
-                select(MaterializationLink).where(
-                    MaterializationLink.work_package_id == package.id
-                )
+                select(MaterializationLink).where(MaterializationLink.work_package_id == package.id)
             )
         ).all()
         if not links:
             return
         last = max(links, key=lambda link: link.ordinal or 0)
-        run = await self._uow.session.scalar(
-            select(Run).where(Run.task_id == last.task_id)
-        )
+        run = await self._uow.session.scalar(select(Run).where(Run.task_id == last.task_id))
         if run is None:
             return
         for field in ("configuration_revision", "policy_revision"):

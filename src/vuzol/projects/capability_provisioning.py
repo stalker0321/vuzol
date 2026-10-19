@@ -11,6 +11,7 @@ import stat
 import tarfile
 import uuid
 import zipfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -19,8 +20,9 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config import CapabilityProvisioningSettings
+from vuzol.config import CapabilityProvisioningSettings, DeliveryMode
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.execution.git import GitError
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.project_environment import (
     current_environment,
@@ -441,11 +443,13 @@ class CapabilityProvisioningHandler:
         *,
         registries: ConfigurationBundle | None = None,
         worktree_root: Path | None = None,
+        apply_access_check: Callable[[Path], Awaitable[None]] | None = None,
     ) -> None:
         self._factory = factory
         self._installer = installer
         self._registries = registries
         self._worktree_root = worktree_root
+        self._apply_access_check = apply_access_check
 
     async def ensure_before_dependencies(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -497,6 +501,18 @@ class CapabilityProvisioningHandler:
         side_effect_started = False
         try:
             task, step, environment, approval, inventory = await self._load(request)
+            if self._apply_access_check and self._registries and task.project_id is not None:
+                project = self._registries.projects.get(task.project_id)
+                if project.enabled and DeliveryMode.APPLY in project.git_delivery.allowed_modes:
+                    try:
+                        await self._apply_access_check(project.repository_path)
+                    except GitError as error:
+                        return StepOutcome(
+                            kind=OutcomeKind.BLOCKED,
+                            result={},
+                            category="apply_access_preflight_failed",
+                            summary=str(error)[:500],
+                        )
             requirements = _requirements(environment.contract)
             missing = tuple(key for key, _label, _mode in requirements if key not in inventory)
             if not missing:

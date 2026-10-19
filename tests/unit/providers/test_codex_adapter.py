@@ -73,7 +73,8 @@ async def test_codex_adapter_uses_isolated_identity_without_auth_copy(tmp_path: 
     assert 'default_permissions="vuzol-reader"' in invocation.argv
     assert '"/workspace"="read"' in " ".join(invocation.argv)
     assert '"/artifacts"' not in " ".join(invocation.argv)
-    assert '"/codex-home"="none"' in " ".join(invocation.argv)
+    assert '"/codex-home/auth.json"="none"' in " ".join(invocation.argv)
+    assert '"/codex-home/tmp/arg0"="read"' in " ".join(invocation.argv)
     assert "network={enabled=false}" in " ".join(invocation.argv)
     assert invocation.argv[-3:] == ("--cd", "/workspace", "-")
 

@@ -1,8 +1,13 @@
 """Closed provider failure taxonomy safe for business logic and logs."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from vuzol.providers.domain import ProviderErrorCategory
+from vuzol.providers.domain import (
+    NormalizedUsage,
+    ProviderErrorCategory,
+    ProviderResult,
+    ProviderResultStatus,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +17,31 @@ class ProviderFailure(Exception):
     request_sent: bool
     retry_after_seconds: float | None = None
     safe_summary: str = "provider call failed"
+    # A rejected answer is still a measured invocation. Keep the receipt
+    # independent of output validation so accounting never substitutes a
+    # reservation for facts the provider already reported.
+    usage: NormalizedUsage | None = None
+    provider_request_id: str | None = None
+
+    def with_receipt(
+        self, usage: NormalizedUsage, provider_request_id: str | None = None
+    ) -> "ProviderFailure":
+        return replace(
+            self,
+            usage=self.usage if self.usage is not None else usage,
+            provider_request_id=self.provider_request_id or provider_request_id,
+        )
+
+    def receipt_result(self) -> ProviderResult | None:
+        """Adapt a failure receipt for accounting ports shared with successes."""
+        if self.usage is None:
+            return None
+        return ProviderResult(
+            status=ProviderResultStatus.FAILED,
+            usage=self.usage,
+            provider_request_id=self.provider_request_id,
+            adapter_version="failure-receipt.v1",
+        )
 
     def __str__(self) -> str:
         return self.safe_summary

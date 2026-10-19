@@ -297,6 +297,21 @@ def test_acceptance_evidence_emits_memory_unit_with_refs(postgres_dsn: str, tmp_
                 step_type="acceptance",
                 idempotency_class=IdempotencyClass.IDEMPOTENT,
             )
+            validate = await uow.steps.create(
+                run_id=run_id,
+                ordinal=2,
+                step_type="validate",
+                idempotency_class=IdempotencyClass.IDEMPOTENT,
+            )
+            measured = await uow.session.get(Step, validate.id, with_for_update=True)
+            assert measured is not None
+            measured.status = StepStatus.COMPLETED
+            measured.result = {
+                "structured_output": {
+                    "result_commit": "b" * 40,
+                    "gates": [{"name": "done", "exit_code": 0}],
+                }
+            }
         store = ArtifactStore(
             tmp_path, max_bytes=1_000_000, retention_days=7, redaction_patterns=()
         )
@@ -312,7 +327,13 @@ def test_acceptance_evidence_emits_memory_unit_with_refs(postgres_dsn: str, tmp_
             "policy_revision": "d" * 64,
             "integration_base_head": "a" * 40,
             "result_commit": "b" * 40,
-            "criteria": [{"criterion_id": "done", "satisfied": True}],
+            "criteria": [
+                {
+                    "criterion_id": "done",
+                    "satisfied": True,
+                    "evidence_ref": "gate:done:" + ("b" * 40),
+                }
+            ],
             "test_results": [],
             "review_refs": ["aa" * 32],
             "unresolved_caveats": [],
@@ -490,7 +511,13 @@ def test_exhaustion_blocks_spend_but_keeps_final_evidence(postgres_dsn: str) -> 
                     "goal": "ship the horizon",
                     "integration_base_head": "a" * 40,
                     "result_commit": "b" * 40,
-                    "criteria": [{"criterion_id": "done", "satisfied": True}],
+                    "criteria": [
+                        {
+                            "criterion_id": "done",
+                            "satisfied": True,
+                            "evidence_ref": "gate:done:" + ("b" * 40),
+                        }
+                    ],
                     "test_results": [],
                     "review_refs": ["aa" * 32],
                 },

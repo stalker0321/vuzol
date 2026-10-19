@@ -132,8 +132,11 @@ def _parse_connect_request(header: bytes) -> tuple[str, int] | None:
     if not _is_canonical_hostname(hostname) or port_text != "443":
         raise ConnectProxyError("CONNECT authority is prohibited")
     host_headers = [line[5:].strip() for line in lines[1:-2] if line.lower().startswith("host:")]
-    if len(host_headers) != 1 or host_headers[0].lower() != authority:
-        raise ConnectProxyError("Host header must exactly match CONNECT authority")
+    # Node/Undici omits the default HTTPS port in Host even for CONNECT.
+    # Route solely by the validated CONNECT authority; permit only these two
+    # equivalent Host spellings, never another destination or another port.
+    if len(host_headers) != 1 or host_headers[0].lower() not in {authority, hostname}:
+        raise ConnectProxyError("Host header must match CONNECT authority")
     if any(line[:1] in {" ", "\t"} or ":" not in line for line in lines[1:-2]):
         raise ConnectProxyError("proxy request contains a malformed header")
     return hostname, 443

@@ -46,6 +46,8 @@ class RoutingRequest:
     estimated_input_tokens: int
     max_output_tokens: int
     remaining_cost_units: float
+    # Soft estimated cost is an accounting note, not an eligibility exclusion.
+    estimated_cost_enforcement: str = "hard"
     trusted_profile_id: str | None = None
     failed_profile_id: str | None = None
     allowed_fallback_ids: tuple[str, ...] = ()
@@ -162,7 +164,10 @@ def _exclusions(
         reasons.append(ExclusionReason.CONTEXT_LIMIT)
     if profile.output_limit is not None and request.max_output_tokens > profile.output_limit:
         reasons.append(ExclusionReason.OUTPUT_LIMIT)
-    if request.remaining_cost_units < profile.minimum_unknown_usage_cost:
+    if (
+        request.estimated_cost_enforcement != "soft"
+        and request.remaining_cost_units < profile.minimum_unknown_usage_cost
+    ):
         reasons.append(ExclusionReason.BUDGET)
     if state.active_leases >= profile.concurrency_limit:
         reasons.append(ExclusionReason.CONCURRENCY)

@@ -260,8 +260,58 @@ def test_worker_shutdown_cancellation_records_uncertainty(postgres_dsn: str) -> 
             step = await session.scalar(select(Step).where(Step.step_type == "execute_model"))
             run = await session.scalar(select(Run).where(Run.task_id == task_id))
             assert step is not None and step.status is StepStatus.BLOCKED
-            assert step.unknown_effects
+            assert step.failure_category == "shutdown_cancelled"
+            # execute_model is read-only and has no mutating capability.
+            # Shutdown loses the verdict, not an external write.
+            assert step.unknown_effects is False
             assert run is not None and run.status is RunStatus.BLOCKED
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_worker_shutdown_of_unknown_step_keeps_mutation_uncertain(postgres_dsn: str) -> None:
+    from vuzol.storage.types import IdempotencyClass
+
+    started = asyncio.Event()
+
+    class BlockingHandler:
+        async def execute(self, _request: object, _cancellation: object) -> StepOutcome:
+            started.set()
+            await asyncio.Event().wait()
+            return StepOutcome.succeeded()
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, interpretation_id = await seed_interpreted(factory)
+        async with factory.begin() as session:
+            await materialize_run(
+                session,
+                task_id=task_id,
+                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+                prompt_revision=None,
+                automatic_start=True,
+            )
+            step = await session.scalar(select(Step).where(Step.step_type == "execute_model"))
+            assert step is not None
+            step.idempotency_class = IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
+        worker = WorkflowWorker(
+            Settings(environment="test"),
+            factory,
+            owner="worker",
+            handlers={"execute_model": BlockingHandler()},
+        )
+        execution = asyncio.create_task(worker.process_one())
+        await started.wait()
+        execution.cancel()
+        assert await execution
+        async with factory() as session:
+            step = await session.scalar(select(Step).where(Step.step_type == "execute_model"))
+            assert step is not None and step.status is StepStatus.BLOCKED
+            assert step.unknown_effects is True
         await engine.dispose()
 
     asyncio.run(scenario())

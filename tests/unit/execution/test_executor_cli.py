@@ -195,7 +195,8 @@ async def test_codex_envelope_and_lifecycle_mocks(
     assert envelope.sandbox.mounts[2].source == state_dir
     assert all(mount.target != Path("/artifacts") for mount in envelope.sandbox.mounts)
     assert all("docker.sock" not in str(mount.source) for mount in envelope.sandbox.mounts)
-    assert '"/codex-home"="none"' in " ".join(envelope.argv)
+    assert '"/codex-home/auth.json"="none"' in " ".join(envelope.argv)
+    assert '"/codex-home/tmp/arg0"="read"' in " ".join(envelope.argv)
     assert '"/workspace"="write"' in " ".join(envelope.argv)
     assert '"/artifacts"' not in " ".join(envelope.argv)
     assert "network={enabled=false}" in " ".join(envelope.argv)
@@ -695,6 +696,7 @@ async def test_executor_composes_enabled_runtime(
     settings.log_level = "INFO"
     settings.execution.enabled = True
     settings.execution.reviewer_profile_id = "grok-a" if cli_review else None
+    settings.limits.provider_call_input_tokens = 100_000
     settings.execution.require_preflight = True
     settings.execution.rootless_docker_socket = Path("/run/executor/docker.sock")
     settings.execution.sandbox_seccomp_profile = Path("/etc/vuzol/sandbox-seccomp.json")
@@ -770,6 +772,7 @@ async def test_executor_composes_enabled_runtime(
         assert review_args["profile_limits"] == {"grok-a": 2}
         reviewer = review_args["handlers"]["review"]._independent
         assert reviewer._profile_id == "grok-a"
+        assert reviewer._input_token_limit == 100_000
     engine.dispose.assert_awaited_once()
 
 

@@ -17,6 +17,7 @@ from vuzol.config.models import CostClass, LaunchMode, ProviderProfileConfig, Pr
 from vuzol.execution.domain import GitInspection
 from vuzol.providers.budgets import BudgetExceeded
 from vuzol.providers.domain import (
+    ContextItem,
     NormalizedUsage,
     ProviderErrorCategory,
     ProviderResult,
@@ -104,6 +105,8 @@ def _reviewer(
     registries: MagicMock,
     adapters: MagicMock,
     accounting: MagicMock | None = None,
+    *,
+    input_token_limit: int = 32_000,
 ) -> IndependentModelReviewer:
     if accounting is None:
         accounting = MagicMock()
@@ -116,7 +119,9 @@ def _reviewer(
         )
         accounting.reconcile = AsyncMock()
         accounting.release = AsyncMock()
-    return IndependentModelReviewer(registries, adapters, accounting)
+    return IndependentModelReviewer(
+        registries, adapters, accounting, input_token_limit=input_token_limit
+    )
 
 
 def _pass_result(summary: str = "ok") -> ProviderResult:
@@ -554,6 +559,59 @@ async def test_cross_partition_defect_blocks_passing_partitions() -> None:
     assert any(item.classification == "cross_partition_contradiction" for item in verdict.findings)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("configured_limit", [100_000, 60_000, 30_000])
+async def test_all_partition_requests_obey_configured_cap_and_keep_full_context(
+    configured_limit: int,
+) -> None:
+    diff = _file_diff("src/a.py", _big_body()) + _file_diff("src/b.py", _big_body())
+    inspection = GitInspection(
+        head="b" * 40, branch="task", changed_files=("src/a.py", "src/b.py"), diff=diff
+    )
+    registries, adapters = _registries_and_adapter(_pass_result())
+    profile = _api_profile().model_copy(update={"context_limit": None})
+    registries.profiles.items.return_value = (profile,)
+    reviewer = _reviewer(registries, adapters, input_token_limit=configured_limit)
+    context = tuple(
+        ContextItem(
+            source="chat_work_context",
+            reference=f"task:large-spec:part-{n}-of-7",
+            content="x" * 20_000,
+            content_hash=hashlib.sha256(("x" * 20_000).encode()).hexdigest(),
+        )
+        for n in range(1, 8)
+    )
+    review = reviewer.review(
+        task=_task(),  # type: ignore[arg-type]
+        risk=RiskLevel.HIGH,
+        inspection=inspection,
+        base_commit="a" * 40,
+        result_commit="b" * 40,
+        diff_hash=inspection.diff_hash,
+        gates=[],
+        mechanical_findings=(),
+        request_ids=(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
+        timeout_seconds=120,
+        cancellation=CancellationContext(),
+        lease=_lease(),
+        work_context=context,
+    )
+    if configured_limit == 30_000:
+        with pytest.raises(IndependentReviewError, match="context budget"):
+            await review
+        adapters.get.return_value.execute.assert_not_awaited()
+        reviewer._accounting.reserve.assert_not_awaited()
+        return
+    verdict = await review
+    assert verdict.allows_progress
+    calls = adapters.get.return_value.execute.await_args_list
+    assert len(calls) == 3  # Two partitions plus their cross-partition assessment.
+    for call in calls:
+        request = call.args[0]
+        assert request.max_input_tokens == configured_limit
+        assert request.context[: len(context)] == context
+
+
 def test_aggregation_failure_is_never_pass() -> None:
     with pytest.raises(IndependentReviewError, match="no partition verdicts"):
         aggregate_partition_verdicts(
@@ -772,6 +830,7 @@ def _handler_fixtures(
                 diff_hash=before.diff_hash,
                 branch="task-branch",
             ),
+            None,
         ]
     )
     factory = MagicMock(return_value=_AsyncContext(session))

@@ -1151,9 +1151,9 @@ def test_step09a_result_schema_discussion_branch() -> None:
     name, version, schema = _step09a_result_schema(
         "execute_agent", {"discussion_agent_contract": {"channel": "x"}}
     )
-    assert name == "DiscussionAgentReply"
-    assert version == "discussion-agent-reply.v1"
-    assert schema is not None
+    assert name == "DiscussionTextReply"
+    assert version == "discussion-text-reply.v2"
+    assert schema is None
 
     plain = _step09a_result_schema("execute_model", {})
     assert plain == (None, None, None)

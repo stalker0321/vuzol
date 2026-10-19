@@ -9,12 +9,10 @@ def result_schema_for_step(
     step_type: str, task_draft: dict[str, object]
 ) -> tuple[str | None, str | None, dict[str, object] | None]:
     if step_type == "execute_agent" and task_draft.get("discussion_agent_contract"):
-        from vuzol.discussion.agent import DiscussionAgentReply
-
         return (
-            "DiscussionAgentReply",
-            "discussion-agent-reply.v1",
-            DiscussionAgentReply.model_json_schema(),
+            "DiscussionTextReply",
+            "discussion-text-reply.v2",
+            None,
         )
     if step_type != "execute_code" or "step09a_capsule" not in task_draft:
         return None, None, None

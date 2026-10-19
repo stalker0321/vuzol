@@ -51,6 +51,7 @@ class ControlUpdate(TelegramModel):
     action_kind: str = Field(
         pattern=(
             r"^(approve|redo|reject|start|pause|resume|cancel|retry|"
+            r"admit|uncertain|criterion|cpage|"
             r"project_name_select|project_name_regenerate|"
             r"project_model_select_auto|project_model_select_connection|"
             r"project_model_select_worker|project_model_select_effort|secret_cancel|chat_retry)$"
@@ -60,6 +61,8 @@ class ControlUpdate(TelegramModel):
     step_id: uuid.UUID | None = None
     expected_task_version: int | None = Field(default=None, ge=1)
     retry_step_ordinal: int | None = Field(default=None, ge=0)
+    criterion_token: str | None = Field(default=None, pattern=r"^[0-9a-f]{8}$")
+    criterion_page: int | None = Field(default=None, ge=1)
     approval_id: uuid.UUID | None = None
     naming_request_id: uuid.UUID | None = None
     naming_revision: int | None = Field(default=None, ge=1)

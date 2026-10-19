@@ -25,6 +25,16 @@ def test_planner_reasoning_budget_is_bounded_by_output_budget() -> None:
         HardLimits(planner_output_tokens=1_000, planner_reasoning_tokens=1_001)
 
 
+def test_historical_budget_numbers_stay_hard_until_switched() -> None:
+    limits = HardLimits()
+
+    assert limits.usage_total_enforcement == "hard"
+    assert limits.estimated_cost_enforcement == "hard"
+    assert limits.explicit_money_cap_units is None
+    with raises(ValidationError, match="explicit money cap"):
+        HardLimits(explicit_money_cap_units=0)
+
+
 def test_settings_accept_valid_values() -> None:
     settings = Settings(environment="test", port=9000, worker_poll_interval_seconds=0.1)
 

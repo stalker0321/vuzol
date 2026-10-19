@@ -22,6 +22,7 @@ from vuzol.storage.types import QueueClass
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest, StepHandler
 from vuzol.workflows.recovery_policy import recovery_policy_from_settings
+from vuzol.workflows.retry_policy import repeatable_without_new_mutation
 from vuzol.workflows.service import commit_step_outcome, publish_step_started
 
 
@@ -77,22 +78,21 @@ class WorkflowWorker:
                     handler.execute(request, cancellation), timeout=request.timeout_seconds
                 )
         except TimeoutError:
-            outcome = StepOutcome(
-                kind=OutcomeKind.BLOCKED,
-                result={},
+            # wait_for already cancelled the handler, which is what stops its
+            # process. Do not set the cancellation flag here: that flag means
+            # the handler abandoned its own outcome and must not be committed.
+            outcome = await self._interrupted_outcome(
+                request.step_id,
                 category="timeout",
                 summary="handler exceeded its persisted timeout",
-                unknown_effects=True,
             )
         except asyncio.CancelledError:
             cancellation.request()
             commit_after_cancellation = True
-            outcome = StepOutcome(
-                kind=OutcomeKind.BLOCKED,
-                result={},
+            outcome = await self._interrupted_outcome(
+                request.step_id,
                 category="shutdown_cancelled",
                 summary="handler did not drain before shutdown",
-                unknown_effects=True,
             )
         except Exception as error:
             outcome = StepOutcome(
@@ -175,6 +175,31 @@ class WorkflowWorker:
                     unknown_effects=False,
                 )
         return None
+
+    async def _interrupted_outcome(
+        self, step_id: uuid.UUID, *, category: str, summary: str
+    ) -> StepOutcome:
+        """Unknown verdict is not an unknown mutation when the step cannot write."""
+
+        uncertain = True
+        try:
+            uncertain = await asyncio.shield(self._effects_uncertain(step_id))
+        except Exception:
+            uncertain = True
+        return StepOutcome(
+            kind=OutcomeKind.BLOCKED,
+            result={},
+            category=category,
+            summary=summary,
+            unknown_effects=uncertain,
+        )
+
+    async def _effects_uncertain(self, step_id: uuid.UUID) -> bool:
+        async with self._factory() as session:
+            step = await session.get(Step, step_id)
+            if step is None:
+                return True
+            return not repeatable_without_new_mutation(step)
 
     async def _claim(
         self, session: AsyncSession, class_limits: Mapping[QueueClass, int]

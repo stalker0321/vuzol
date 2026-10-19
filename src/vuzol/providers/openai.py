@@ -82,6 +82,8 @@ class OpenAICompatibleAdapter:
         started = time.monotonic()
         payload = _payload(request, profile)
         headers = {"Authorization": f"Bearer {self._credential.get_secret_value()}"}
+        measured_usage: NormalizedUsage | None = None
+        request_id: str | None = None
         try:
             response = await self._post(
                 profile,
@@ -93,10 +95,20 @@ class OpenAICompatibleAdapter:
             if response.status_code >= 400:
                 raise _http_failure(response, profile=profile)
             body = response.json()
+            request_id = response.headers.get("x-request-id")
+            if isinstance(body, dict) and isinstance(body.get("usage"), dict):
+                measured_usage = _response_usage(body["usage"], started)
             choice = body["choices"][0]
             content = choice["message"]["content"]
+            if not isinstance(content, str):
+                raise ProviderFailure(
+                    ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+                    retryable=True,
+                    request_sent=True,
+                    safe_summary="provider returned no text response",
+                )
             structured = None
-            text: str | None = str(content)
+            text: str | None = content
             if request.output_json_schema is not None:
                 try:
                     decoded = json.loads(str(content))
@@ -168,7 +180,9 @@ class OpenAICompatibleAdapter:
                     ) from error
                 structured = decoded
                 text = None
-        except ProviderFailure:
+        except ProviderFailure as failure:
+            if measured_usage is not None:
+                raise failure.with_receipt(measured_usage, request_id) from failure
             raise
         except httpx.TimeoutException as error:
             raise ProviderFailure(
@@ -190,23 +204,15 @@ class OpenAICompatibleAdapter:
                 retryable=False,
                 request_sent=True,
                 safe_summary="provider response shape is invalid",
+                usage=measured_usage,
+                provider_request_id=request_id,
             ) from error
-        usage = body.get("usage", {})
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,
             text=text,
             structured_output=structured,
             provider_request_id=response.headers.get("x-request-id"),
-            usage=NormalizedUsage(
-                input_tokens=_optional_int(usage.get("prompt_tokens")),
-                output_tokens=_optional_int(usage.get("completion_tokens")),
-                cached_tokens=_optional_int(
-                    usage.get("prompt_tokens_details", {}).get("cached_tokens")
-                    if isinstance(usage.get("prompt_tokens_details"), dict)
-                    else None
-                ),
-                duration_ms=int((time.monotonic() - started) * 1_000),
-            ),
+            usage=measured_usage or _response_usage({}, started),
             finish_reason=str(choice.get("finish_reason")) if choice.get("finish_reason") else None,
             adapter_version=self.adapter_version,
         )
@@ -231,6 +237,19 @@ class OpenAICompatibleAdapter:
             )
         async with httpx.AsyncClient(base_url=str(profile.api_base_url).rstrip("/")) as client:
             return await client.post(path, headers=headers, json=json, timeout=timeout_seconds)
+
+
+def _response_usage(usage: dict[str, Any], started: float) -> NormalizedUsage:
+    return NormalizedUsage(
+        input_tokens=_optional_int(usage.get("prompt_tokens")),
+        output_tokens=_optional_int(usage.get("completion_tokens")),
+        cached_tokens=_optional_int(
+            usage.get("prompt_tokens_details", {}).get("cached_tokens")
+            if isinstance(usage.get("prompt_tokens_details"), dict)
+            else None
+        ),
+        duration_ms=int((time.monotonic() - started) * 1_000),
+    )
 
 
 def _payload(request: ProviderRequest, profile: ProviderProfileConfig) -> dict[str, Any]:

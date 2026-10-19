@@ -1880,11 +1880,11 @@ def test_client_errors_dead_letter_outbox_item(
 
 
 @pytest.mark.postgresql
-def test_bad_request_delete_is_retried_as_transient(postgres_dsn: str) -> None:
+def test_bad_request_delete_is_an_explicit_refusal(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
-        # BadRequest subclasses NetworkError, so the transient handler precedes the
-        # dead-letter handler for every action; deletes are retried, not buried.
+        # BadRequest subclasses NetworkError, but a definite API refusal is not an
+        # unknown or transient send.
         async with UnitOfWork(factory) as uow:
             outbox_id = await uow.outbox.enqueue(
                 destination="telegram",
@@ -1899,8 +1899,26 @@ def test_bad_request_delete_is_retried_as_transient(postgres_dsn: str) -> None:
         async with factory() as session:
             item = await session.get(TransactionalOutbox, outbox_id)
             assert item is not None
-            assert item.status is DeliveryStatus.PENDING
-            assert item.last_error_category == "badrequest"
+            assert item.status is DeliveryStatus.DEAD_LETTER
+            assert item.last_error_category == "telegram_badrequest"
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_bad_request_send_is_an_explicit_refusal(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        _task_id, outbox_id = await seed_delivery(factory, message_id=96)
+        client = FakeTelegramClient(fail=BadRequest("message is too long"))
+        assert await service(factory, client).deliver_one()
+        assert client.sent == []
+        async with factory() as session:
+            item = await session.get(TransactionalOutbox, outbox_id)
+            assert item is not None
+            assert item.status is DeliveryStatus.DEAD_LETTER
+            assert item.last_error_category == "telegram_badrequest"
         await engine.dispose()
 
     asyncio.run(scenario())

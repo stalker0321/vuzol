@@ -19,6 +19,24 @@ def test_parse_commands_and_ids() -> None:
         ["inspect", "--task-id", task_id, "--user-id", "7", "--expected-version", "3"]
     )
     assert args.command == "inspect" and args.expected_version == 3
+    args = _parse_args(
+        [
+            "reconcile_cost",
+            "--task-id",
+            task_id,
+            "--user-id",
+            "1",
+            "--expected-version",
+            "4",
+            "--reason",
+            "measured receipt",
+            "--cost",
+            "0.25",
+        ]
+    )
+    assert args.command == "reconcile_cost"
+    assert args.reason == "measured receipt"
+    assert args.cost == "0.25"
 
 
 def test_parse_rejects_unknown_command() -> None:

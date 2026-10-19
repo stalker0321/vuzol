@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vuzol.config import CapabilityProvisioningSettings
+from vuzol.config import CapabilityProvisioningSettings, DeliveryMode, GitDeliveryPolicy
+from vuzol.execution.git import GitError
 from vuzol.projects.capability_provisioning import (
     CAPABILITY_APPROVAL_SCHEMA,
     CAPABILITY_BUNDLE_SCHEMA,
@@ -627,6 +628,51 @@ async def test_capability_handler_cancels_before_loading(tmp_path: Path) -> None
     outcome = await handler.execute(_request(), cancellation)
 
     assert outcome.kind is OutcomeKind.CANCELLED
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("apply_allowed", [True, False])
+async def test_applier_access_checked_even_when_no_tool_installation_is_needed(
+    tmp_path: Path,
+    apply_allowed: bool,
+) -> None:
+    request = _request()
+    task, step, _ = _state(request)
+    registries = MagicMock()
+    registries.projects.get.return_value = SimpleNamespace(
+        enabled=True,
+        repository_path=tmp_path,
+        git_delivery=GitDeliveryPolicy(
+            allowed_modes=frozenset({DeliveryMode.APPLY if apply_allowed else DeliveryMode.RETAIN})
+        ),
+    )
+    check = AsyncMock(side_effect=GitError("applier path is on a read-only filesystem"))
+    installer = MagicMock(spec=OfflineCapabilityInstaller)
+    handler = CapabilityProvisioningHandler(
+        MagicMock(),
+        installer,
+        registries=registries,
+        apply_access_check=check,
+    )
+    handler._load = AsyncMock(
+        return_value=(
+            task,
+            step,
+            SimpleNamespace(contract={}),
+            None,
+            frozenset(),
+        )
+    )
+    outcome = await handler.execute(request, CancellationContext())
+    if apply_allowed:
+        assert outcome.kind is OutcomeKind.BLOCKED
+        assert outcome.category == "apply_access_preflight_failed"
+        check.assert_awaited_once_with(tmp_path)
+    else:
+        assert outcome.kind is OutcomeKind.SUCCEEDED
+        check.assert_not_awaited()
+    installer.install.assert_not_called()
+    installer.inspect_bundle.assert_not_called()
 
 
 def test_capability_approval_helpers_reject_stale_or_malformed_evidence(tmp_path: Path) -> None:

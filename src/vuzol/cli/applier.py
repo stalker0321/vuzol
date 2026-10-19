@@ -8,10 +8,10 @@ from contextlib import suppress
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config import Capability, RuntimeConfiguration, get_runtime_configuration
+from vuzol.config import Capability, DeliveryMode, RuntimeConfiguration, get_runtime_configuration
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.effect_reconciliation import EffectReconciler
-from vuzol.execution.git import LocalGit
+from vuzol.execution.git import LocalGit, require_writable_directory
 from vuzol.execution.result_apply import ResultApplyHandler
 from vuzol.observability import configure_logging, get_logger
 from vuzol.projects.capability_provisioning import (
@@ -45,13 +45,15 @@ def applier_handlers(
 ) -> dict[str, StepHandler]:
     """Actual narrow service assembly, also exercised by composition tests."""
     settings = runtime.settings
+    git = LocalGit()
     return {
-        "approval": ResultApplyHandler(factory, runtime.registries, LocalGit()),
+        "approval": ResultApplyHandler(factory, runtime.registries, git),
         "ensure_capabilities": CapabilityProvisioningHandler(
             factory,
             OfflineCapabilityInstaller(settings.capability_provisioning),
             registries=runtime.registries,
             worktree_root=settings.worktree_root,
+            apply_access_check=git.require_apply_access,
         ),
         "acceptance": AcceptanceGateHandler(
             factory,
@@ -73,6 +75,13 @@ async def run() -> None:
     try:
         # S-2.1: fail closed before control/apply workers, ready event, or poll loops.
         await require_migration_head(engine)
+        # Run in this service's real mount namespace, not in the interpreter
+        # container. A single-project systemd exception cannot admit new projects.
+        if any(
+            project.enabled and DeliveryMode.APPLY in project.git_delivery.allowed_modes
+            for project in runtime.registries.projects.items()
+        ):
+            require_writable_directory(settings.repository_root)
         factory = create_session_factory(engine)
         owner = f"{socket.gethostname()}:{os.getpid()}:applier"
         # Reconcile unsettled apply effects before claiming new work (WP05): a

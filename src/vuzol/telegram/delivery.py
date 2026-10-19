@@ -2,10 +2,11 @@
 
 import asyncio
 import uuid
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -68,7 +69,9 @@ from vuzol.telegram.layout import (
 from vuzol.telegram.model_command import PROJECT_MODEL_CONFIRM_ROLE, PROJECT_MODEL_PICKER_ROLE
 from vuzol.telegram.projections import (
     PROJECT_STATUS_DASHBOARD_ROLE,
+    TASK_CONTROL_SNAPSHOT_NOTE,
     TASK_HISTORY_ROLE,
+    TELEGRAM_TEXT_LIMIT,
     LostTelegramResponse,
     RichMessageRejected,
     TelegramClient,
@@ -159,6 +162,17 @@ class PermanentDeliveryError(RuntimeError):
 
 class DeliveryRunner(Protocol):
     async def deliver_one(self) -> bool: ...
+
+
+def _criterion_page_argument(payload: Mapping[str, Any]) -> tuple[int, bool]:
+    """Page requested by a view callback. Absent means the default first page."""
+
+    if "criterion_page" not in payload:
+        return 1, False
+    raw = payload.get("criterion_page")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+        return raw, True
+    return 1, True
 
 
 async def prepare_delivery(
@@ -284,15 +298,16 @@ async def prepare_delivery(
             )
         ):
             raise PermanentDeliveryError("task_control_snapshot_scope_mismatch")
-        card = await build_status_card(session, task.id)
+        card = await build_status_card(
+            session,
+            task.id,
+            text_limit=max(1, TELEGRAM_TEXT_LIMIT - len(TASK_CONTROL_SNAPSHOT_NOTE)),
+        )
         return PreparedDelivery(
             DeliveryAction.SEND_STATUS,
             chat_id=task.source_chat_id,
             thread_id=task.source_thread_id,
-            html=(
-                "Показано состояние сохранённой задачи. Ничего не запущено; "
-                "спецификация не изменена.\n\n" + card.html
-            ),
+            html=TASK_CONTROL_SNAPSHOT_NOTE + card.html,
             task_id=task.id,
             revision=card.revision,
             buttons=card.buttons,
@@ -513,11 +528,12 @@ async def prepare_delivery(
     if role not in {"intake_ack", "approval_card"} or task_id is None:
         raise PermanentDeliveryError("invalid_telegram_payload")
     approval_projection = role == "approval_card"
-    card = (
-        await build_approval_card(session, task_id)
-        if approval_projection
-        else await build_status_card(session, task_id)
-    )
+    if approval_projection:
+        card = await build_approval_card(session, task_id)
+        page_requested = False
+    else:
+        criterion_page, page_requested = _criterion_page_argument(item.payload)
+        card = await build_status_card(session, task_id, criterion_page=criterion_page)
     message_role = "approval_card" if approval_projection else "task_status"
     if approval_projection:
         destination = topics.system_topic(chat_id, TopicKind.APPROVALS) if topics else None
@@ -535,7 +551,7 @@ async def prepare_delivery(
             ),
         )
     )
-    if link is not None and card.revision <= link.projection_revision:
+    if link is not None and card.revision <= link.projection_revision and not page_requested:
         return PreparedDelivery(
             DeliveryAction.NOOP,
             chat_id=chat_id,
@@ -1330,6 +1346,10 @@ class TelegramDeliveryService:
                         prepared = replace(prepared, discussion_parts=())
                 else:
                     confirmed_message_id = await self._call_telegram(prepared)
+            except BadRequest:
+                # BadRequest subclasses NetworkError. An explicit API refusal is not
+                # an unknown send, so it must not become LostTelegramResponse.
+                raise
             except (TimedOut, NetworkError) as error:
                 if prepared.action in {
                     DeliveryAction.SEND_DOCUMENT,
@@ -1352,10 +1372,10 @@ class TelegramDeliveryService:
             await self._mark_ambiguous(token)
         except RetryAfter as error:
             await self._defer_rate_limit(token, error)
-        except (TimedOut, NetworkError) as error:
-            await self._handle_transient(token, attempt_count, type(error).__name__.lower())
         except (BadRequest, Forbidden) as error:
             await self._dead_letter(token, f"telegram_{type(error).__name__.lower()}")
+        except (TimedOut, NetworkError) as error:
+            await self._handle_transient(token, attempt_count, type(error).__name__.lower())
         except TelegramError as error:
             await self._dead_letter(token, f"telegram_{type(error).__name__.lower()}")
         except PermanentDeliveryError as error:
@@ -1568,7 +1588,9 @@ class TelegramDeliveryService:
                 link = await session.get(TelegramMessageLink, prepared.link_id)
                 if link is None:
                     raise LeaseLost(f"Telegram projection disappeared: {prepared.link_id}")
-                link.projection_revision = prepared.revision
+                # A criterion page is another view of the same card revision.
+                if prepared.revision > link.projection_revision:
+                    link.projection_revision = prepared.revision
                 # A task card changes roles in place (work -> approval ->
                 # result). Keep the callback target synchronized with the
                 # buttons rendered by this exact edit.

@@ -104,7 +104,7 @@ def _handler_fixture(
     )
     session = MagicMock()
     session.get = AsyncMock(side_effect=[step, SimpleNamespace(task_id=task_id), task])
-    session.scalar = AsyncMock(side_effect=[validate, worktree])
+    session.scalar = AsyncMock(side_effect=[validate, worktree, None])
     factory = MagicMock(return_value=AsyncContext(session))
     git = MagicMock()
     git.require_clean_worktree = AsyncMock()

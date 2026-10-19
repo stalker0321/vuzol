@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Settings
+from vuzol.providers.budgets import ADMISSION_ONLY_CONSENT_SUMMARY
 from vuzol.providers.fallback_policy import should_fallback_provider
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item
 from vuzol.storage.models import (
@@ -31,7 +32,11 @@ from vuzol.storage.types import (
     WorktreeDeliveryState,
 )
 from vuzol.workflows.result_approval import verified_envelope
-from vuzol.workflows.retry_policy import blocked_step_is_retryable
+from vuzol.workflows.retry_policy import (
+    LEASE_EXPIRED_ATTEMPTS_EXHAUSTED,
+    blocked_step_is_retryable,
+    repeatable_without_new_mutation,
+)
 from vuzol.workflows.service import (
     _enqueue_telegram_projection,
     activate_ready_steps,
@@ -44,6 +49,17 @@ if TYPE_CHECKING:
 
 RUN_TERMINAL = {RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.COMPLETED}
 STEP_TERMINAL = {StepStatus.FAILED, StepStatus.CANCELLED, StepStatus.COMPLETED}
+_TELEGRAM_OWNER_ACTIONS = {
+    "admit": ("admit_ceiling", ADMISSION_ONLY_CONSENT_SUMMARY),
+    "uncertain": (
+        "accept_uncertainty",
+        "owner accepted the current unknown cost from the status card",
+    ),
+    "criterion": (
+        "accept_criterion",
+        "owner confirmed the unproven criterion from the status card",
+    ),
+}
 
 
 def _command_outcome(result: TaskCommandResult) -> dict[str, object]:
@@ -134,7 +150,7 @@ class WorkflowControlConsumer:
                 deciding_user_id=action.requested_by_user_id,
             )
             return
-        if action.action_kind == "retry":
+        if action.action_kind in {"retry", "admit", "uncertain", "criterion"}:
             if action.step_id is None:
                 raise ValueError("retry requires a step target")
             if action.status is not ControlActionStatus.QUEUED:
@@ -154,14 +170,32 @@ class WorkflowControlConsumer:
                 if stored_task is None:
                     raise ValueError("retry task is missing")
                 version = stored_task.version
-            result = await apply_task_command(
-                session,
-                task_id=target_task_id,
-                command="retry",
-                principal=Principal(action.requested_by_user_id, "telegram"),
-                expected_task_version=version,
-                step_id=action.step_id,
-            )
+            if action.action_kind == "retry":
+                result = await apply_task_command(
+                    session,
+                    task_id=target_task_id,
+                    command="retry",
+                    principal=Principal(action.requested_by_user_id, "telegram"),
+                    expected_task_version=version,
+                    step_id=action.step_id,
+                )
+            else:
+                from vuzol.workflows.application import OwnerDecision
+
+                command, reason = _TELEGRAM_OWNER_ACTIONS[action.action_kind]
+                token = action.payload.get("criterion_token")
+                result = await apply_task_command(
+                    session,
+                    task_id=target_task_id,
+                    command=command,
+                    principal=Principal(action.requested_by_user_id, "telegram"),
+                    expected_task_version=version,
+                    step_id=action.step_id,
+                    decision=OwnerDecision(
+                        reason=reason,
+                        criterion_token=token if isinstance(token, str) else None,
+                    ),
+                )
             action.payload = {**action.payload, "outcome": _command_outcome(result)}
             return
         if action.task_id is None:
@@ -408,6 +442,39 @@ async def pause_task(
     await _enqueue_telegram_projection(session, task, run)
 
 
+async def _continue_paused_step(
+    session: AsyncSession,
+    task: Task,
+    run: Run,
+    step: Step,
+    *,
+    actor_id: str | None,
+) -> None:
+    """Grant one bounded attempt of the parked step. Completed work stays put."""
+
+    if step.attempt_count >= step.max_attempts:
+        step.max_attempts += 1
+    await transition_step(session, step, StepStatus.QUEUED, actor_type="user", actor_id=actor_id)
+    step.failure_category = None
+    step.failure_summary = None
+    task.budget_epoch += 1
+    run.selected_route = {
+        **run.selected_route,
+        "recovery_epoch": task.budget_epoch,
+        "recovery_epoch_started_at": datetime.now(UTC).isoformat(),
+    }
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type="task.budget_epoch_started",
+            actor_type="user",
+            actor_id=actor_id,
+            payload={"budget_epoch": task.budget_epoch, "reason": "paused_step_continuation"},
+        )
+    )
+
+
 async def resume_task(
     session: AsyncSession,
     task_id: uuid.UUID,
@@ -415,14 +482,36 @@ async def resume_task(
     actor_id: str | None = None,
     expected_task_version: int | None = None,
 ) -> None:
-    task, run, _current_steps = await _locked_context(session, task_id)
+    task, run, steps = await _locked_context(session, task_id)
     _check_task_version(task, expected_task_version)
     if run.status is RunStatus.RUNNING:
         await _noop(session, run.id, "resume", actor_id)
         return
     if run.status is not RunStatus.PAUSED:
         raise ValueError(f"run cannot resume from {run.status.value}")
+    if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.COMPLETED}:
+        raise ValueError(
+            f"task is {task.status.value} while its run is paused; no automatic repair is applied"
+        )
+    continuable = [
+        step
+        for step in steps
+        if step.status is StepStatus.BLOCKED
+        and step.failure_category == LEASE_EXPIRED_ATTEMPTS_EXHAUSTED
+        and not step.unknown_effects
+        and repeatable_without_new_mutation(step)
+    ]
+    unsafe = [step for step in steps if step.status is StepStatus.BLOCKED and step.unknown_effects]
+    if unsafe:
+        raise ValueError(
+            "resume cannot continue a step with unknown external effects; "
+            "reconcile the effect or cancel"
+        )
+    if len(continuable) > 1:
+        raise ValueError("resume requires one continuable paused step")
     await transition_run(session, run, RunStatus.RUNNING, actor_type="user", actor_id=actor_id)
+    if continuable:
+        await _continue_paused_step(session, task, run, continuable[0], actor_id=actor_id)
     await activate_ready_steps(session, run)
     target = derive_task_status(await _steps(session, run.id), run.status)
     await transition_task(session, task, target, actor_type="user", actor_id=actor_id)
@@ -441,6 +530,10 @@ async def cancel_task(
     if run.status is RunStatus.CANCELLED:
         await _noop(session, run.id, "cancel", actor_id)
         return
+    if task.status in {TaskStatus.FAILED, TaskStatus.COMPLETED} and run.status is RunStatus.PAUSED:
+        raise ValueError(
+            f"task is {task.status.value} while its run is paused; no automatic repair is applied"
+        )
     if run.status in {RunStatus.FAILED, RunStatus.COMPLETED}:
         raise ValueError(f"terminal run cannot cancel: {run.status.value}")
     for step in steps:

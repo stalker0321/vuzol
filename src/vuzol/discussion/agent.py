@@ -44,7 +44,7 @@ from vuzol.workflows.service import materialize_run
 
 DISCUSSION_INTERNAL_TASK_TYPE = "discussion_agent_internal"
 DISCUSSION_AGENT_SCHEMA_VERSION = "discussion-agent-reply.v1"
-DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v5"
+DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v6"
 
 
 class DiscussionAgentReply(BaseModel):
@@ -56,6 +56,41 @@ class DiscussionAgentReply(BaseModel):
     # Optional derived memory must never cause an otherwise valid reply to be
     # discarded for exceeding an arbitrary summary size. Validate it separately.
     memory_summary: str | None = None
+
+
+def normalize_discussion_reply(text: str | None, structured: object = None) -> DiscussionAgentReply:
+    """Normalize the text-only chat boundary; never relax worker/review schemas.
+
+    A legacy reply envelope is supported for retained answers and optional
+    derived memory. All other non-empty text is the user's answer, including
+    code, JSON examples, or Markdown. No substring extraction or repair call.
+    """
+    if structured is not None:
+        return DiscussionAgentReply.model_validate(structured)
+    if text is None or not text.strip():
+        raise ValueError("discussion reply is empty")
+    candidate = text.strip()
+    if candidate.startswith("```json\n") and candidate.endswith("```"):
+        candidate = candidate[8:-3].strip()
+    try:
+        decoded = json.loads(candidate)
+    except json.JSONDecodeError:
+        decoded = None
+    if (
+        isinstance(decoded, dict)
+        and isinstance(decoded.get("reply"), str)
+        and decoded["reply"].strip()
+        and set(decoded) <= {"reply", "memory_summary"}
+    ):
+        return DiscussionAgentReply(
+            reply=decoded["reply"],
+            memory_summary=(
+                decoded.get("memory_summary")
+                if isinstance(decoded.get("memory_summary"), str)
+                else None
+            ),
+        )
+    return DiscussionAgentReply(reply=text)
 
 
 _REPLY_UNWRAP_DEPTH = 3
@@ -350,6 +385,8 @@ async def persist_discussion_reply(
     uow: UnitOfWork,
     task: Task,
     parsed: DiscussionAgentReply,
+    *,
+    literal_reply: bool = False,
 ) -> uuid.UUID:
     """Idempotent answer persistence, also usable after a local delivery-step failure."""
     assert uow.session is not None
@@ -374,7 +411,7 @@ async def persist_discussion_reply(
         session_id=session_id,
         role=ConversationTurnRole.ASSISTANT,
         source=ConversationTurnSource.MODEL,
-        content=unwrap_agent_reply(parsed.reply),
+        content=parsed.reply if literal_reply else unwrap_agent_reply(parsed.reply),
         classifier_mode=InteractionMode(str(task.task_draft["interaction_mode"])),
         classifier_confidence=Decimal(str(task.task_draft["classifier_confidence"])),
         classifier_prompt_version=DISCUSSION_AGENT_PROMPT_VERSION,
@@ -440,7 +477,17 @@ class DeliverDiscussionReplyHandler:
                 )
             try:
                 parsed = DiscussionAgentReply.model_validate(structured)
-                assistant_turn_id = await persist_discussion_reply(uow, task, parsed)
+                assistant_turn_id = await persist_discussion_reply(
+                    uow,
+                    task,
+                    parsed,
+                    literal_reply=(
+                        execute_step is not None
+                        and execute_step.result is not None
+                        and execute_step.result.get("output_schema_version")
+                        == "discussion-text-reply.v2"
+                    ),
+                )
             except (KeyError, TypeError, ValueError):
                 return StepOutcome(
                     kind=OutcomeKind.PERMANENT_FAILURE,
@@ -479,7 +526,7 @@ def _discussion_prompt(
         or "(none)"
     )
     memory_instruction = (
-        'Return a "memory_summary" string alongside the reply whenever you can summarize '
+        'Optionally return an envelope with "reply" and "memory_summary" when you can summarize '
         "faithfully (the field remains optional for compatibility). Keep it within "
         "2000 characters. Update the existing rolling summary using the conversation and full "
         "current turn: preserve user goals, conditions, negations, unresolved questions, and "
@@ -516,10 +563,10 @@ For PDF/DOCX only extracted text is available, not images, diagrams or visual la
 Long replies are delivered in multiple messages when necessary; do not truncate an answer
 just to fit one Telegram message.
 
-Output contract (violations are discarded): your final message must be exactly one JSON object
-of the form {{"reply": "<your answer>"}} and nothing else. Never write prose before or after the
-object, never wrap it in code fences, and never embed another JSON object inside the reply string.
-The reply string itself is plain Markdown for the user.
+Output contract: return your complete answer directly as Markdown text. A JSON wrapper is not
+required. For optional derived memory, you may instead return exactly one object of the form
+{{"reply": "<your complete Markdown answer>", "memory_summary": "<derived summary>"}}.
+Do not let formatting or optional memory truncate or replace the answer.
 {memory_instruction}
 
 Accepted decisions:

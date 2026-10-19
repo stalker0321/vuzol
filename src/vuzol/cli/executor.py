@@ -327,6 +327,7 @@ async def run() -> None:
                 DatabaseReviewAccounting(factory, settings.limits),
                 policy_revision=runtime.registries.revision,
                 profile_id=reviewer_id,
+                input_token_limit=settings.limits.provider_call_input_tokens,
             )
             review_worker = WorkflowWorker(
                 settings,

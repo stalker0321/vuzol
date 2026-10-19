@@ -348,6 +348,23 @@ class ProviderStepHandler:
         provider_request, _profile_id, reservation_id, configuration_revision = built
         try:
             result = await adapter.execute(provider_request, profile, cancellation)
+            if provider_request.output_schema_version == "discussion-text-reply.v2":
+                from vuzol.discussion.agent import normalize_discussion_reply
+
+                try:
+                    reply = normalize_discussion_reply(result.text, result.structured_output)
+                except ValueError as error:
+                    raise ProviderFailure(
+                        ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+                        retryable=True,
+                        request_sent=True,
+                        safe_summary="provider returned an empty or invalid discussion reply",
+                        usage=result.usage,
+                        provider_request_id=result.provider_request_id,
+                    ) from error
+                result = result.model_copy(
+                    update={"text": None, "structured_output": reply.model_dump(mode="json")}
+                )
         except ProviderFailure as failure:
             if not failure.request_sent:
                 return await self._pre_provider_failure(
@@ -358,7 +375,10 @@ class ProviderStepHandler:
                 )
             try:
                 async with self._factory.begin() as session:
-                    if failure.category is ProviderErrorCategory.AUTHENTICATION:
+                    if (
+                        failure.category is ProviderErrorCategory.AUTHENTICATION
+                        and failure.usage is None
+                    ):
                         # Authentication rejection happens before generation. Charging the
                         # full reservation fabricates usage and can prevent a retry on a
                         # newly selected provider.
@@ -372,10 +392,14 @@ class ProviderStepHandler:
                             token=request.lease,
                             provider=profile.provider,
                             model=profile.model,
-                            usage=None,
-                            provider_request_id=None,
+                            usage=(
+                                account_usage(profile, failure.usage)
+                                if failure.usage is not None
+                                else None
+                            ),
+                            provider_request_id=failure.provider_request_id,
                             outcome=failure.category.value,
-                            conservative=True,
+                            conservative=failure.usage is None,
                             accounting=self._accounting(request, profile),
                         )
                     await record_failure_observation(
@@ -385,15 +409,22 @@ class ProviderStepHandler:
                         failure=failure,
                     )
             except LeaseLost:
-                if failure.category is ProviderErrorCategory.AUTHENTICATION:
+                if (
+                    failure.category is ProviderErrorCategory.AUTHENTICATION
+                    and failure.usage is None
+                ):
                     await self._record_late_release(request, reservation_id=reservation_id)
                 else:
                     await self._record_late_receipt(
                         request,
                         profile=profile,
                         reservation_id=reservation_id,
-                        usage=None,
-                        provider_request_id=None,
+                        usage=(
+                            account_usage(profile, failure.usage)
+                            if failure.usage is not None
+                            else None
+                        ),
+                        provider_request_id=failure.provider_request_id,
                         outcome=failure.category.value,
                     )
             await self._retain_active_worktree(request)
@@ -595,6 +626,7 @@ class ProviderStepHandler:
                 "provider_request_id": result.provider_request_id,
                 "text": result.text,
                 "structured_output": structured_output,
+                "output_schema_version": provider_request.output_schema_version,
                 "implementation_summary": (
                     finalized.evidence.provider_edit_report.implementation_summary
                     if finalized is not None

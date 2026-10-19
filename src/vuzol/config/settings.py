@@ -522,6 +522,17 @@ class HorizonSettings(BaseModel):
     enabled: bool = False
 
 
+class ProjectLeadSettings(BaseModel):
+    """Opt-in project-lead overlay. Off leaves legacy sequencing as the only path."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    repeat_limit: int = Field(default=2, ge=1, le=20)
+    lease_seconds: int = Field(default=120, ge=30, le=3600)
+    integration_branch_prefix: str = Field(default="vuzol-managed/", min_length=1, max_length=80)
+
+
 class ChatSettings(BaseModel):
     """Opt-in read-only conversation, independent of project executor preferences."""
 
@@ -562,6 +573,7 @@ class Settings(BaseSettings):
     registry_overlay_file: Path | None = None
     project_template_id: str = Field(default="vuzol", pattern=r"^[a-z][a-z0-9_-]*$")
     project_discussion_enabled: bool = False
+    project_lead: ProjectLeadSettings = ProjectLeadSettings()
     chat: ChatSettings = ChatSettings()
     # J5 canary: at most one Jev decision kind in a small deterministic cohort.
     # Empty means disabled (the default); the kill switch freezes kinds.

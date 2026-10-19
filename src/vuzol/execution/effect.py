@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.storage.models import Effect
+from vuzol.storage.models import Effect, Event
 
 EFFECT_SCHEMA_VERSION = "effect.v1"
 APPLY_OPERATION_PREFIX = "apply"
@@ -42,9 +42,7 @@ class EffectUncertainError(ValueError):
     """An existing effect outcome is unproven; launching again is forbidden."""
 
 
-def apply_operation_key(
-    *, approval_id: uuid.UUID, result_commit: str, target_branch: str
-) -> str:
+def apply_operation_key(*, approval_id: uuid.UUID, result_commit: str, target_branch: str) -> str:
     """Stable key for one approved local apply; reused across retries."""
 
     return f"{APPLY_OPERATION_PREFIX}:{approval_id}:{result_commit}:{target_branch}"
@@ -85,6 +83,56 @@ async def record_intent(session: AsyncSession, intent: EffectIntent) -> Effect:
             raise EffectUncertainError(
                 f"effect {intent.operation_key} is uncertain; manual reconciliation required"
             )
+        if existing.status == STATUS_FAILED and existing.reconcile_status == RECONCILE_DENIED:
+            # The reconciler proved that no mutation occurred. A freshly leased
+            # approved retry must become active before Git for crash recovery.
+            fields = (
+                "step_id",
+                "task_id",
+                "run_id",
+                "target_kind",
+                "effect_class",
+                "idempotency",
+                "target_reference",
+                "payload_hash",
+                "approval_id",
+                "approval_envelope_hash",
+                "permission_envelope_hash",
+                "context",
+            )
+            if intent.target_kind != TARGET_KIND_GIT_REF or any(
+                getattr(existing, key) != getattr(intent, key) for key in fields
+            ):
+                raise ValueError("denied effect retry does not match the approved intent")
+            if intent.lease_generation <= existing.lease_generation:
+                raise ValueError("denied effect retry requires a newer lease")
+            session.add(
+                Event(
+                    entity_type="effect",
+                    entity_id=existing.id,
+                    event_type="effect.retry_dispatched",
+                    actor_type="applier",
+                    payload={
+                        "previous_lease_generation": existing.lease_generation,
+                        "lease_generation": intent.lease_generation,
+                        "previous_reconcile_status": existing.reconcile_status,
+                        "previous_receipt_status": existing.receipt_status,
+                    },
+                )
+            )
+            existing.lease_generation = intent.lease_generation
+            existing.launch_generation = intent.lease_generation
+            existing.launch_started_at = datetime.now(UTC)
+            existing.receipt_status = None
+            existing.receipt_observed_at = None
+            existing.receipt_external_ref = None
+            existing.receipt_output_hash = None
+            existing.reconcile_status = RECONCILE_NOT_STARTED
+            existing.reconcile_reconciled_at = None
+            existing.reconcile_method = None
+            existing.status = STATUS_DISPATCHED
+            await session.flush()
+            return existing
         if existing.status in (STATUS_SETTLED, STATUS_FAILED):
             return existing
         existing.status = STATUS_DISPATCHED
@@ -152,9 +200,7 @@ def mark_uncertain(effect: Effect) -> None:
     effect.reconcile_method = METHOD_READ_GIT_REF
 
 
-async def active_effects(
-    session: AsyncSession, *, limit: int = 100
-) -> tuple[Effect, ...]:
+async def active_effects(session: AsyncSession, *, limit: int = 100) -> tuple[Effect, ...]:
     rows = await session.scalars(
         select(Effect)
         .where(Effect.status.in_(_ACTIVE_STATUSES))

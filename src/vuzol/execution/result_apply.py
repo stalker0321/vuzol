@@ -89,6 +89,10 @@ class ResultApplyHandler:
                     result={},
                     category="cancelled_before_apply",
                 )
+            # Recheck after approval too: host permissions may have drifted
+            # since ensure_capabilities. Do not record an effect for a known
+            # read-only destination.
+            await self._git.require_apply_access(project.repository_path)
             effect_id = await self._record_intent(
                 request,
                 approval_id=approval_id,
@@ -190,9 +194,7 @@ class ResultApplyHandler:
             for field in ("configuration_revision", "policy_revision"):
                 pinned_revision = envelope.get(field)
                 if pinned_revision is not None and pinned_revision != getattr(run, field):
-                    raise ValueError(
-                        f"approval envelope {field} drifted since approval"
-                    )
+                    raise ValueError(f"approval envelope {field} drifted since approval")
             # D2 Q1 final gate: promotion of the last item into the real
             # target requires acceptance evidence (or a waiver). Intermediate
             # applies and legacy packages pass through unchanged.
@@ -252,9 +254,7 @@ class ResultApplyHandler:
                 .with_for_update()
             )
             if step is None:
-                raise LeaseLost(
-                    f"apply step lease lost before effect intent: {request.step_id}"
-                )
+                raise LeaseLost(f"apply step lease lost before effect intent: {request.step_id}")
             approval = await session.scalar(
                 select(Approval).where(Approval.id == approval_id).with_for_update()
             )

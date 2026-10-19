@@ -1,0 +1,32 @@
+# Worker-side origin for the separate public edge. Import at top level.
+# Bind explicitly: a site address alone does not constrain the listen interface.
+# Firewall: only 10.0.0.2 -> 10.0.0.3:8092 on the private interface is allowed.
+http://:8092 {
+	bind 10.0.0.3
+
+	@preview host test.hryshyn.dev
+	handle @preview {
+		reverse_proxy 127.0.0.1:8091 {
+			flush_interval -1
+		}
+	}
+
+	@production host hryshyn.dev www.hryshyn.dev
+	handle @production {
+		@originProjectExact path_regexp originProjectExact ^/([a-z][a-z0-9-]{0,62})$
+		redir @originProjectExact {http.request.uri.path}/ 308
+
+		@originProject path_regexp originProject ^/([a-z][a-z0-9-]{0,62})/(.*)$
+		handle @originProject {
+			uri strip_prefix /{re.originProject.1}
+			root * /srv/vuzol/sites/hryshyn.dev/{re.originProject.1}/current
+			encode gzip zstd
+			try_files {path} {path}/ /index.html
+			file_server
+		}
+
+		respond "Unknown project" 404
+	}
+
+	respond "Unknown publication host" 404
+}

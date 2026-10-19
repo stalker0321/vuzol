@@ -386,6 +386,54 @@ def test_project_naming_callback_rejects_malformed_payload() -> None:
     assert control_update(invalid_target, "main") is None
 
 
+def _callback(data: str, update_id: int = 11) -> Update:
+    return Update.de_json(
+        {
+            "update_id": update_id,
+            "callback_query": {
+                "id": f"callback-{update_id}",
+                "from": {"id": 42, "is_bot": False, "first_name": "Owner"},
+                "chat_instance": "test",
+                "data": data,
+                "message": {
+                    "message_id": 77,
+                    "message_thread_id": 10,
+                    "date": 0,
+                    "chat": {"id": -100, "type": "supergroup"},
+                },
+            },
+        },
+        None,
+    )
+
+
+def test_package_card_callback_keeps_the_composite_revision_and_criterion_token() -> None:
+    task_id = uuid.uuid4()
+    admit = control_update(_callback(f"v2:admit:{task_id.hex}:40004:2"), "main")
+    assert isinstance(admit, ControlUpdate)
+    assert admit.action_kind == "admit"
+    assert admit.expected_task_version == 40004
+    assert admit.retry_step_ordinal == 2
+    assert admit.criterion_token is None
+
+    chosen = control_update(_callback(f"v2:c:{task_id.hex}:40004:2:ab12cd34", update_id=12), "main")
+    assert isinstance(chosen, ControlUpdate)
+    assert chosen.action_kind == "criterion"
+    assert chosen.expected_task_version == 40004
+    assert chosen.criterion_token == "ab12cd34"  # noqa: S105
+    assert control_update(_callback(f"v2:c:{task_id.hex}:40004:2:AB12CD34"), "main") is None
+    assert control_update(_callback(f"v2:c:{task_id.hex}:40004:2:short"), "main") is None
+
+    page = control_update(_callback(f"v2:cp:{task_id.hex}:40004:2", update_id=13), "main")
+    assert isinstance(page, ControlUpdate)
+    assert page.action_kind == "cpage"
+    assert page.expected_task_version == 40004
+    assert page.criterion_page == 2
+    assert page.criterion_token is None
+    assert page.retry_step_ordinal is None
+    assert control_update(_callback(f"v2:cp:{task_id.hex}:40004:0"), "main") is None
+
+
 def test_python_telegram_client_builds_custom_markup_and_best_effort_delete() -> None:
     async def scenario() -> None:
         bot = AsyncMock()

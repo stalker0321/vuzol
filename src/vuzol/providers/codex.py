@@ -1,6 +1,7 @@
 """Codex CLI adapter contract; production sandbox transport arrives in Step 08."""
 
 import json
+from contextlib import suppress
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -21,15 +22,21 @@ from vuzol.providers.ports import CodexInvocation, CodexProcessTransport
 from vuzol.workflows.ports import CancellationContext
 
 CODEX_PERMISSION_PROFILE = "vuzol-executor"
+# Codex 0.161 dispatches its native sandbox through aliases under this directory.
+# A deny on the entire CODEX_HOME also hides those aliases from the bootstrap
+# sandbox. :minimal leaves the rest of CODEX_HOME unreadable; grant only the
+# helper directory and retain an explicit denial on the credential file.
 CODEX_PERMISSION_CONFIG = (
     'permissions.vuzol-executor={filesystem={":minimal"="read",'
-    '"/workspace"="write","/codex-home"="none"},'
+    '"/workspace"="write","/codex-home/tmp/arg0"="read",'
+    '"/codex-home/auth.json"="none"},'
     "network={enabled=false}}"
 )
 CODEX_READ_ONLY_PERMISSION_PROFILE = "vuzol-reader"
 CODEX_READ_ONLY_PERMISSION_CONFIG = (
     'permissions.vuzol-reader={filesystem={":minimal"="read",'
-    '"/workspace"="read","/codex-home"="none"},'
+    '"/workspace"="read","/codex-home/tmp/arg0"="read",'
+    '"/codex-home/auth.json"="none"},'
     "network={enabled=false}}"
 )
 
@@ -156,17 +163,31 @@ class CodexCliAdapter:
                 request_sent=True,
                 safe_summary="supervised Codex transport failed after launch was possible",
             ) from error
+        body: dict[str, object] = {}
+        with suppress(json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            body = _decode_output(result.stdout)
+        raw_usage = body.get("usage", {})
+        measured_usage = NormalizedUsage(
+            input_tokens=_usage_int(raw_usage, "input_tokens"),
+            output_tokens=_usage_int(raw_usage, "output_tokens"),
+            cached_tokens=_usage_int(raw_usage, "cached_tokens"),
+            duration_ms=result.duration_ms,
+        )
+        request_id = body.get("request_id")
+        request_id = request_id if isinstance(request_id, str) else None
         if result.exit_code != 0:
             raise ProviderFailure(
                 ProviderErrorCategory.PROVIDER_UNAVAILABLE,
                 retryable=True,
                 request_sent=True,
                 safe_summary="Codex CLI invocation failed",
+                usage=measured_usage,
+                provider_request_id=request_id,
             )
         try:
-            body = _decode_output(result.stdout)
+            if body.get("text") is None and body.get("structured_output") is None:
+                raise ValueError("Codex stream has no final response")
             text, structured = _normalize_output(body, validator)
-            usage = body.get("usage", {})
         except (
             json.JSONDecodeError,
             JsonSchemaValidationError,
@@ -179,6 +200,8 @@ class CodexCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Codex CLI returned invalid structured output",
+                usage=measured_usage,
+                provider_request_id=request_id,
             ) from None
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,
@@ -190,12 +213,7 @@ class CodexCliAdapter:
             provider_session_id=(
                 str(body["session_id"]) if isinstance(body.get("session_id"), str) else None
             ),
-            usage=NormalizedUsage(
-                input_tokens=_usage_int(usage, "input_tokens"),
-                output_tokens=_usage_int(usage, "output_tokens"),
-                cached_tokens=_usage_int(usage, "cached_tokens"),
-                duration_ms=result.duration_ms,
-            ),
+            usage=measured_usage,
             finish_reason=(
                 str(body["finish_reason"]) if isinstance(body.get("finish_reason"), str) else None
             ),
@@ -259,7 +277,7 @@ def _decode_output(stdout: str) -> dict[str, object]:
                 final["text"] = item["text"]
         if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
             usage = event["usage"]
-    if not final:
+    if not final and not usage:
         raise ValueError("Codex JSONL contains no final agent message")
     final["usage"] = usage
     return final

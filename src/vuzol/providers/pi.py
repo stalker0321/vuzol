@@ -155,6 +155,20 @@ class PiCliAdapter:
                 request_sent=True,
                 safe_summary="supervised Pi transport failed after launch was possible",
             ) from error
+        receipt: NormalizedUsage | None = None
+        receipt_id: str | None = None
+        try:
+            reported = _decode_pi_output(result.stdout, require_settled=False)
+            receipt = NormalizedUsage(
+                input_tokens=reported.input_tokens,
+                output_tokens=reported.output_tokens,
+                cached_tokens=reported.cached_tokens,
+                cost_units=reported.cost_units,
+                duration_ms=result.duration_ms,
+            )
+            receipt_id = reported.response_id
+        except PiOutputError:
+            pass
         if result.exit_code != 0:
             failure = f"{result.stdout}\n{result.stderr}".lower()
             if "401" in failure or "unauthorized" in failure or "authentication" in failure:
@@ -166,7 +180,14 @@ class PiCliAdapter:
             else:
                 category = ProviderErrorCategory.PROVIDER_UNAVAILABLE
                 summary = "Pi CLI invocation failed"
-            raise ProviderFailure(category, retryable=True, request_sent=True, safe_summary=summary)
+            raise ProviderFailure(
+                category,
+                retryable=True,
+                request_sent=True,
+                safe_summary=summary,
+                usage=receipt,
+                provider_request_id=receipt_id,
+            )
         try:
             decoded = _decode_pi_output(result.stdout)
         except PiOutputError as error:
@@ -175,6 +196,8 @@ class PiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary=str(error),
+                usage=receipt,
+                provider_request_id=receipt_id,
             ) from None
         if decoded.retry_count:
             # Agent-level retries are visible in the stream; log them, never
@@ -187,6 +210,13 @@ class PiCliAdapter:
                     "profile_id": profile.id,
                 },
             )
+        measured_usage = NormalizedUsage(
+            input_tokens=decoded.input_tokens,
+            output_tokens=decoded.output_tokens,
+            cached_tokens=decoded.cached_tokens,
+            cost_units=decoded.cost_units,
+            duration_ms=result.duration_ms,
+        )
         stop_reason = decoded.stop_reason
         if stop_reason == "aborted":
             raise ProviderFailure(
@@ -194,6 +224,8 @@ class PiCliAdapter:
                 retryable=False,
                 request_sent=True,
                 safe_summary="Pi request was aborted",
+                usage=measured_usage,
+                provider_request_id=decoded.response_id,
             )
         if stop_reason == "error":
             raise ProviderFailure(
@@ -201,6 +233,8 @@ class PiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Pi agent stopped with an error",
+                usage=measured_usage,
+                provider_request_id=decoded.response_id,
             )
         text: str | None = decoded.text
         structured: dict[str, Any] | None = None
@@ -216,6 +250,8 @@ class PiCliAdapter:
                     retryable=True,
                     request_sent=True,
                     safe_summary="Pi returned invalid structured output",
+                    usage=measured_usage,
+                    provider_request_id=decoded.response_id,
                 ) from None
             structured = decoded_json
             text = None
@@ -225,6 +261,8 @@ class PiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Pi returned no final response",
+                usage=measured_usage,
+                provider_request_id=decoded.response_id,
             )
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,
@@ -232,13 +270,7 @@ class PiCliAdapter:
             structured_output=structured,
             provider_request_id=decoded.response_id,
             provider_session_id=decoded.session_id,
-            usage=NormalizedUsage(
-                input_tokens=decoded.input_tokens,
-                output_tokens=decoded.output_tokens,
-                cached_tokens=decoded.cached_tokens,
-                cost_units=decoded.cost_units,
-                duration_ms=result.duration_ms,
-            ),
+            usage=measured_usage,
             finish_reason=stop_reason,
             adapter_version=self.adapter_version,
         )
@@ -276,7 +308,7 @@ def _assistant_text(content: object) -> str:
     return ""
 
 
-def _decode_pi_output(stdout: str) -> PiDecoded:
+def _decode_pi_output(stdout: str, *, require_settled: bool = True) -> PiDecoded:
     """Parse the ``-p --mode json`` stream: final answer is bound to agent_settled."""
 
     events: list[dict[str, Any]] = []
@@ -293,7 +325,7 @@ def _decode_pi_output(stdout: str) -> PiDecoded:
     if not events:
         raise PiOutputError("Pi returned an empty event stream")
     settled = any(event.get("type") == PI_SETTLED_EVENT for event in events)
-    if not settled:
+    if not settled and require_settled:
         raise PiOutputError("Pi stream ended without agent_settled")
     session_id: str | None = None
     retry_count = 0

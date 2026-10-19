@@ -15,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -23,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled, unmet_exit_criteria
 from vuzol.execution.artifacts import ArtifactStore
+from vuzol.review.domain import ExitCriterionSpec
 from vuzol.storage.models import (
     AcceptanceEvidence,
     AcceptanceWaiver,
@@ -101,6 +104,278 @@ def validate_evidence(doc: object) -> tuple[str, ...]:
             continue
         return ("evidence_review_ref_malformed",)
     return ()
+
+
+def required_criterion_ids(exit_criteria: object) -> tuple[str, ...]:
+    """Ids declared on the current goal. A colon would break evidence refs."""
+
+    if not isinstance(exit_criteria, list):
+        return ()
+    ids: list[str] = []
+    for entry in exit_criteria:
+        if not isinstance(entry, dict):
+            continue
+        criterion_id = entry.get("criterion_id")
+        if not isinstance(criterion_id, str):
+            continue
+        criterion_id = criterion_id.strip()
+        if criterion_id and ":" not in criterion_id:
+            ids.append(criterion_id)
+    return tuple(ids)
+
+
+def _bounded_text(entry: Mapping[str, Any], key: str, limit: int) -> str | None:
+    raw = entry.get(key)
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    return text[:limit]
+
+
+def exit_criterion_specs(exit_criteria: object) -> tuple[ExitCriterionSpec, ...]:
+    """Keep each criterion's statement. An id alone is not the requirement."""
+
+    if not isinstance(exit_criteria, list):
+        return ()
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for entry in exit_criteria:
+        if not isinstance(entry, dict):
+            continue
+        raw_id = entry.get("criterion_id")
+        if isinstance(raw_id, str) and raw_id.strip():
+            by_id[raw_id.strip()] = entry
+    specs: list[ExitCriterionSpec] = []
+    for criterion_id in required_criterion_ids(exit_criteria):
+        entry = by_id.get(criterion_id, {})
+        observable = entry.get("observable")
+        specs.append(
+            ExitCriterionSpec(
+                criterion_id=criterion_id,
+                statement=_bounded_text(entry, "statement", 1000),
+                evidence_kind=_bounded_text(entry, "evidence_kind", 100),
+                observable=observable if isinstance(observable, bool) else None,
+            )
+        )
+    return tuple(specs)
+
+
+def unproven_criterion_ids(
+    *,
+    result_commit: str,
+    required_ids: Sequence[str],
+    gates: Sequence[Mapping[str, Any]],
+    findings: Sequence[Mapping[str, Any]],
+    owner_decisions: Sequence[Mapping[str, Any]] = (),
+) -> tuple[str, ...]:
+    """Required criteria that have no stored proof of this candidate."""
+
+    missing: list[str] = []
+    for criterion_id in required_ids:
+        if (
+            evidence_ref_for_criterion(
+                criterion_id,
+                result_commit=result_commit,
+                test_results=gates,
+                findings=findings,
+                owner_decisions=owner_decisions,
+            )
+            is None
+        ):
+            missing.append(criterion_id)
+    return tuple(missing)
+
+
+def evidence_ref_for_criterion(
+    criterion_id: str,
+    *,
+    result_commit: str,
+    test_results: Sequence[Mapping[str, Any]],
+    findings: Sequence[Mapping[str, Any]],
+    owner_decisions: Sequence[Mapping[str, Any]] = (),
+) -> str | None:
+    """Bind one required criterion to a stored check of this exact candidate.
+
+    The candidate commit is never written onto a gate or finding that was
+    measured against a different commit. ``review-history:N`` and a model
+    string ``human_accepted`` are not measurements.
+    """
+
+    for gate in test_results:
+        if gate.get("name") != criterion_id or gate.get("result_commit") != result_commit:
+            continue
+        exit_code = gate.get("exit_code")
+        if isinstance(exit_code, bool) or exit_code != 0:
+            continue
+        return f"gate:{criterion_id}:{result_commit}"
+    for finding in findings:
+        if finding.get("criterion_id") != criterion_id:
+            continue
+        if finding.get("result_commit") != result_commit:
+            continue
+        if finding.get("classification") != "criterion_pass":
+            continue
+        evidence = finding.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
+            continue
+        if evidence.strip() == criterion_id:
+            continue
+        key = finding.get("acceptance_key")
+        if not isinstance(key, str) or len(key) != 64:
+            continue
+        try:
+            int(key, 16)
+        except ValueError:
+            continue
+        return f"review-criterion:{key}:{criterion_id}:{result_commit}"
+    for decision in owner_decisions:
+        if decision.get("criterion_id") != criterion_id:
+            continue
+        if decision.get("result_commit") != result_commit:
+            continue
+        principal = decision.get("principal_user_id")
+        reason = decision.get("reason")
+        event_id = decision.get("event_id")
+        if not isinstance(principal, int) or principal == 0:
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            continue
+        if not isinstance(event_id, str) or not event_id or ":" in event_id:
+            continue
+        return f"owner-criterion:{event_id}:{criterion_id}:{result_commit}"
+    return None
+
+
+def criteria_are_proven(
+    document: object,
+    *,
+    result_commit: str,
+    required_ids: Sequence[str],
+    gates: Sequence[Mapping[str, Any]],
+    findings: Sequence[Mapping[str, Any]],
+    owner_decisions: Sequence[Mapping[str, Any]] = (),
+) -> bool:
+    """Every current required criterion cites a stored proof of this commit.
+
+    A well-formed ``evidence_ref`` is only a citation. It counts when the same
+    ref is produced from ``gates``, ``findings``, or an owner decision.
+    """
+
+    if not required_ids:
+        return False
+    if not isinstance(document, dict) or document.get("result_commit") != result_commit:
+        return False
+    criteria = document.get("criteria")
+    if not isinstance(criteria, list):
+        return False
+    cited: dict[str, str] = {}
+    for entry in criteria:
+        if not isinstance(entry, dict) or entry.get("satisfied") is not True:
+            continue
+        criterion_id = entry.get("criterion_id")
+        ref = entry.get("evidence_ref")
+        if isinstance(criterion_id, str) and isinstance(ref, str):
+            cited[criterion_id] = ref
+    for criterion_id in required_ids:
+        ref = evidence_ref_for_criterion(
+            criterion_id,
+            result_commit=result_commit,
+            test_results=gates,
+            findings=findings,
+            owner_decisions=owner_decisions,
+        )
+        if ref is None or cited.get(criterion_id) != ref:
+            return False
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class StoredCriterionProofs:
+    """Checks loaded from validate output, review history, and owner actions."""
+
+    gates: tuple[dict[str, Any], ...]
+    findings: tuple[dict[str, Any], ...]
+    owner_decisions: tuple[dict[str, Any], ...]
+
+
+async def load_stored_proofs(
+    session: AsyncSession, *, package_id: uuid.UUID
+) -> StoredCriterionProofs:
+    """Resolve criterion proofs from retained rows, not from the evidence text."""
+
+    links = (
+        await session.scalars(
+            select(MaterializationLink).where(MaterializationLink.work_package_id == package_id)
+        )
+    ).all()
+    task_ids = [link.task_id for link in links]
+    gates: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    if task_ids:
+        run_ids = (await session.scalars(select(Run.id).where(Run.task_id.in_(task_ids)))).all()
+        if run_ids:
+            steps = (
+                await session.scalars(
+                    select(Step).where(Step.run_id.in_(run_ids), Step.step_type == "validate")
+                )
+            ).all()
+            for validate in steps:
+                if not isinstance(validate.result, dict):
+                    continue
+                structured = validate.result.get("structured_output")
+                if not isinstance(structured, dict):
+                    continue
+                origin = structured.get("result_commit")
+                raw_gates = structured.get("gates")
+                if not isinstance(origin, str) or not isinstance(raw_gates, list):
+                    continue
+                for gate in raw_gates:
+                    if not isinstance(gate, dict):
+                        continue
+                    exit_code = gate.get("exit_code")
+                    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+                        continue
+                    gates.append(
+                        {
+                            "name": str(gate.get("name", ""))[:200],
+                            "exit_code": exit_code,
+                            "result_commit": origin,
+                            "step_id": str(validate.id),
+                            "attempt": validate.attempt_count,
+                        }
+                    )
+        history = (
+            await session.scalars(
+                select(ReviewOutcomeHistory).where(ReviewOutcomeHistory.task_id.in_(task_ids))
+            )
+        ).all()
+        for row in history:
+            if not isinstance(row.result_commit, str):
+                continue
+            for finding in row.findings or []:
+                if isinstance(finding, dict):
+                    findings.append(
+                        {
+                            **finding,
+                            "acceptance_key": row.acceptance_key,
+                            "result_commit": row.result_commit,
+                        }
+                    )
+    decisions = (
+        await session.scalars(
+            select(Event).where(
+                Event.entity_type == "work_package",
+                Event.entity_id == package_id,
+                Event.event_type == "acceptance.owner_criterion",
+            )
+        )
+    ).all()
+    owner: list[dict[str, Any]] = []
+    for event in decisions:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        owner.append({**payload, "event_id": str(event.id)})
+    return StoredCriterionProofs(tuple(gates), tuple(findings), tuple(owner))
 
 
 async def record_evidence(
@@ -203,6 +478,45 @@ async def record_waiver(
     return row
 
 
+def criterion_choice_token(criterion_id: str) -> str:
+    """Short stable token for one criterion. The callback cannot carry the full id."""
+
+    return hashlib.sha256(criterion_id.strip().encode()).hexdigest()[:8]
+
+
+async def record_owner_criterion_acceptance(
+    session: AsyncSession,
+    *,
+    package_id: uuid.UUID,
+    criterion_id: str,
+    result_commit: str,
+    principal_user_id: int,
+    reason: str,
+) -> Event:
+    """Owner accepts one criterion for one candidate. A model cannot do this."""
+
+    if principal_user_id == 0 or not reason.strip() or not criterion_id.strip():
+        raise ValueError("owner criterion acceptance requires a principal and a reason")
+    if ":" in criterion_id:
+        raise ValueError("criterion id cannot contain a colon")
+    row = Event(
+        entity_type="work_package",
+        entity_id=package_id,
+        event_type="acceptance.owner_criterion",
+        actor_type="user",
+        actor_id=str(principal_user_id),
+        payload={
+            "criterion_id": criterion_id.strip(),
+            "result_commit": result_commit,
+            "principal_user_id": principal_user_id,
+            "reason": reason.strip(),
+        },
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
 async def find_waiver(
     session: AsyncSession, *, package_id: uuid.UUID, integration_head: str
 ) -> AcceptanceWaiver | None:
@@ -258,13 +572,37 @@ async def promotion_gate(
         integration_base_head=expected_head,
         result_commit=result_commit,
     )
-    if evidence is not None:
-        return
-    waiver = await find_waiver(
-        session, package_id=package.id, integration_head=expected_head
+    revision = await session.get(PlanRevision, link.plan_revision_id)
+    document = evidence.evidence if evidence is not None else None
+    revision_current = (
+        evidence is not None
+        and isinstance(document, dict)
+        and revision is not None
+        and evidence.plan_revision_id == link.plan_revision_id
+        and document.get("plan_content_hash") == revision.content_hash
+        and (
+            package.goal_revision is None or document.get("goal_revision") == package.goal_revision
+        )
     )
+    proofs = await load_stored_proofs(session, package_id=package.id)
+    if revision_current and criteria_are_proven(
+        document,
+        result_commit=result_commit,
+        required_ids=required_criterion_ids(package.exit_criteria),
+        gates=proofs.gates,
+        findings=proofs.findings,
+        owner_decisions=proofs.owner_decisions,
+    ):
+        return
+    waiver = await find_waiver(session, package_id=package.id, integration_head=expected_head)
     if waiver is not None:
         return
+    if evidence is not None and not revision_current:
+        raise ValueError("final acceptance gate: evidence revision is stale")
+    if evidence is not None:
+        raise ValueError(
+            "final acceptance gate: required criteria are not proven for this candidate"
+        )
     raise ValueError(
         "final acceptance gate: promotion to the real target requires "
         "acceptance evidence or a waiver"
@@ -373,9 +711,7 @@ class AcceptanceGateHandler:
                 summary=str(error)[:500],
                 unknown_effects=False,
             )
-        return StepOutcome.succeeded(
-            {"acceptance_evidence_id": evidence_id, "summary": summary}
-        )
+        return StepOutcome.succeeded({"acceptance_evidence_id": evidence_id, "summary": summary})
 
     async def _assess(self, request: StepExecutionRequest) -> tuple[str | None, str]:
         async with self._factory() as session:
@@ -443,18 +779,12 @@ class AcceptanceGateHandler:
         if revision is None:
             raise LookupError("acceptance plan revision is missing")
         raw_criteria = package.exit_criteria
-        criterion_ids = [
-            entry["criterion_id"]
-            for entry in (raw_criteria if isinstance(raw_criteria, list) else [])
-            if isinstance(entry, dict) and isinstance(entry.get("criterion_id"), str)
-        ]
+        criterion_ids = list(required_criterion_ids(raw_criteria))
         # Empty/missing criteria are NOT success: fail closed via the shared
         # horizon helper (empty → ("__no_exit_criteria__",)).
         unmet = unmet_exit_criteria(raw_criteria, frozenset(criterion_ids))
         if unmet:
-            raise ValueError(
-                f"acceptance blocked: unmet exit criteria: {','.join(unmet[:5])}"
-            )
+            raise ValueError(f"acceptance blocked: unmet exit criteria: {','.join(unmet[:5])}")
         # All materialized items must be terminal: the last review cannot
         # vouch for unfinished scope.
         links = (
@@ -482,16 +812,12 @@ class AcceptanceGateHandler:
                     )
                 )
                 if review is None or not _verdict_allows_progress(review.result):
-                    raise ValueError(
-                        "acceptance blocked: last item is not reviewed"
-                    )
+                    raise ValueError("acceptance blocked: last item is not reviewed")
                 current_review_refs.append(f"step-review:{review.id}")
                 continue
             other = await session.get(Task, item.task_id)
             if other is None or other.status is not TaskStatus.COMPLETED:
-                raise ValueError(
-                    "acceptance blocked: package items are not all complete"
-                )
+                raise ValueError("acceptance blocked: package items are not all complete")
         # Review refs: every D1 history verdict for this package's steps.
         step_ids: list[uuid.UUID] = []
         for item_task_id in task_ids:
@@ -500,52 +826,36 @@ class AcceptanceGateHandler:
             ).all()
             for item_run_id in item_runs:
                 step_ids.extend(
-                    (
-                        await session.scalars(
-                            select(Step.id).where(Step.run_id == item_run_id)
-                        )
-                    ).all()
+                    (await session.scalars(select(Step.id).where(Step.run_id == item_run_id))).all()
                 )
         history = (
             (
                 await session.scalars(
-                    select(ReviewOutcomeHistory).where(
-                        ReviewOutcomeHistory.step_id.in_(step_ids)
-                    )
+                    select(ReviewOutcomeHistory).where(ReviewOutcomeHistory.step_id.in_(step_ids))
                 )
             ).all()
             if step_ids
             else []
         )
-        review_refs = sorted(
-            {row.acceptance_key for row in history} | set(current_review_refs)
-        )
+        review_refs = sorted({row.acceptance_key for row in history} | set(current_review_refs))
         if not review_refs:
             raise ValueError("acceptance blocked: no review verdicts retained")
-        test_results = await self._collect_gates(session, task_ids)
+        proofs = await load_stored_proofs(session, package_id=package.id)
+        test_results = list(proofs.gates)
         effects = (
-            (
-                await session.scalars(
-                    select(Effect).where(Effect.step_id.in_(step_ids))
-                )
-            ).all()
+            (await session.scalars(select(Effect).where(Effect.step_id.in_(step_ids)))).all()
             if step_ids
             else []
         )
         unresolved_effects = sorted(
-            {
-                effect.operation_key
-                for effect in effects
-                if effect.status in _ACTIVE_STATUSES
-            }
+            {effect.operation_key for effect in effects if effect.status in _ACTIVE_STATUSES}
         )
         unresolved_caveats = sorted(
             {
                 str(finding.get("summary", ""))[:200]
                 for row in history
                 for finding in (row.findings or [])
-                if isinstance(finding, dict)
-                and finding.get("severity") in {"warning", "error"}
+                if isinstance(finding, dict) and finding.get("severity") in {"warning", "error"}
             }
         )
         worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
@@ -557,6 +867,27 @@ class AcceptanceGateHandler:
         result_commit = worktree.result_commit if worktree is not None else None
         if not isinstance(base_head, str) or not isinstance(result_commit, str):
             raise ValueError("acceptance blocked: integration heads are missing")
+        criteria_rows: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for criterion_id in criterion_ids:
+            ref = evidence_ref_for_criterion(
+                criterion_id,
+                result_commit=result_commit,
+                test_results=proofs.gates,
+                findings=proofs.findings,
+                owner_decisions=proofs.owner_decisions,
+            )
+            if ref is None:
+                missing.append(criterion_id)
+            criteria_rows.append(
+                {
+                    "criterion_id": criterion_id,
+                    "satisfied": ref is not None,
+                    "evidence_ref": ref,
+                }
+            )
+        if missing:
+            raise ValueError("acceptance blocked: criteria lack evidence: " + ",".join(missing[:5]))
         document: dict[str, Any] = {
             "schema": ACCEPTANCE_EVIDENCE_SCHEMA,
             "package_id": str(package.id),
@@ -569,14 +900,7 @@ class AcceptanceGateHandler:
             "policy_revision": run.policy_revision,
             "integration_base_head": base_head,
             "result_commit": result_commit,
-            "criteria": [
-                {
-                    "criterion_id": criterion_id,
-                    "satisfied": True,
-                    "evidence_ref": f"review-history:{len(review_refs)}",
-                }
-                for criterion_id in criterion_ids
-            ],
+            "criteria": criteria_rows,
             "test_results": test_results,
             "review_refs": review_refs,
             "unresolved_caveats": unresolved_caveats,
@@ -591,7 +915,18 @@ class AcceptanceGateHandler:
             plan_revision_id=revision.id,
             integration_base_head=base_head,
         )
-        if existing is not None:
+        if (
+            existing is not None
+            and existing.result_commit == result_commit
+            and criteria_are_proven(
+                existing.evidence,
+                result_commit=result_commit,
+                required_ids=tuple(criterion_ids),
+                gates=proofs.gates,
+                findings=proofs.findings,
+                owner_decisions=proofs.owner_decisions,
+            )
+        ):
             return str(existing.id), "acceptance evidence already recorded"
         if self._artifacts is None:
             raise ValueError("acceptance blocked: artifact store is unavailable")
@@ -615,45 +950,3 @@ class AcceptanceGateHandler:
             artifact_id=artifact.id,
         )
         return str(row.id), f"acceptance evidence recorded for {len(criterion_ids)} criteria"
-
-    async def _collect_gates(
-        self, session: AsyncSession, task_ids: list[uuid.UUID]
-    ) -> list[dict[str, Any]]:
-        """Deterministic test results from retained validate gates (best effort).
-
-        Reads the structured validate output of each item run when present;
-        an empty list is honest (no gates retained), never fabricated.
-        """
-
-        collected: list[dict[str, Any]] = []
-        for item_task_id in task_ids:
-            run_ids = (
-                await session.scalars(select(Run.id).where(Run.task_id == item_task_id))
-            ).all()
-            for item_run_id in run_ids:
-                validate = await session.scalar(
-                    select(Step).where(
-                        Step.run_id == item_run_id, Step.step_type == "validate"
-                    )
-                )
-                if validate is None or not isinstance(validate.result, dict):
-                    continue
-                structured = validate.result.get("structured_output")
-                if not isinstance(structured, dict):
-                    continue
-                gates = structured.get("gates")
-                if not isinstance(gates, list):
-                    continue
-                for gate in gates:
-                    if not isinstance(gate, dict):
-                        continue
-                    name = gate.get("name", "gate")
-                    exit_code = gate.get("exit_code")
-                    if isinstance(exit_code, bool):
-                        continue
-                    if not isinstance(exit_code, int):
-                        continue
-                    collected.append(
-                        {"name": str(name)[:200], "exit_code": exit_code}
-                    )
-        return collected

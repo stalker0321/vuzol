@@ -31,6 +31,7 @@ def test_docker_argv_enforces_outer_isolation(tmp_path: Path) -> None:
     argv = docker_run_argv(tmp_path / "docker.sock", "task", configured)
     rendered = " ".join(argv)
     assert "--network none" in rendered
+    assert not any(value.startswith("NODE_USE_ENV_PROXY=") for value in argv)
     assert "--read-only" in argv
     assert "--rm" not in argv
     assert "--cap-drop ALL" in rendered
@@ -118,7 +119,7 @@ async def test_sandbox_preflight_and_argv_edges(tmp_path: Path) -> None:
         network_disabled=False,
         proxy_network="vuzol-internal",
         https_proxy_url="http://vuzol-proxy:8888",
-        environment={"FOO": "bar"},
+        environment={"FOO": "bar", "NODE_USE_ENV_PROXY": "0"},
     )
     env = ProcessEnvelope(
         task_id=uuid.uuid4(),
@@ -144,3 +145,5 @@ async def test_sandbox_preflight_and_argv_edges(tmp_path: Path) -> None:
         assert f"{key}=http://vuzol-proxy:8888" in argv
     for key in ("ALL_PROXY", "NO_PROXY", "all_proxy", "no_proxy"):
         assert f"{key}=" in argv
+    # A caller cannot turn off proxy support for Node in a controlled-egress sandbox.
+    assert argv.index("NODE_USE_ENV_PROXY=1") > argv.index("NODE_USE_ENV_PROXY=0")

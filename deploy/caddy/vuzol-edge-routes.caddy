@@ -1,0 +1,38 @@
+# Edge snippets: import this file at top level, then import the named snippets
+# inside the existing hosts. Keep explicit unrelated application handlers first.
+(vuzol_edge_projects) {
+	@projectExact path_regexp projectExact ^/([a-z][a-z0-9-]{0,62})$
+	redir @projectExact {http.request.uri.path}/ 308
+
+	@project path_regexp project ^/([a-z][a-z0-9-]{0,62})/(.*)$
+	handle @project {
+		@localProject file {
+			root /srv/vuzol/sites/hryshyn.dev/{re.project.1}/current
+			try_files /index.html
+		}
+		handle @localProject {
+			uri strip_prefix /{re.project.1}
+			root * /srv/vuzol/sites/hryshyn.dev/{re.project.1}/current
+			encode gzip zstd
+			try_files {path} {path}/ /index.html
+			file_server
+		}
+
+		handle {
+			# Preserve the original URI/Host for the worker-side router.
+			reverse_proxy 10.0.0.3:8092
+		}
+	}
+
+	handle {
+		root * /var/www/hryshyn.dev
+		encode gzip zstd
+		file_server
+	}
+}
+
+(vuzol_edge_preview) {
+	reverse_proxy 10.0.0.3:8092 {
+		flush_interval -1
+	}
+}

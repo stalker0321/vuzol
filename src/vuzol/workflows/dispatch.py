@@ -13,6 +13,7 @@ from vuzol.interpretation.planning import (
     PlanningTier,
     budget_mode_for_tier,
 )
+from vuzol.providers.readiness import configured_executor_preflight
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
@@ -38,7 +39,10 @@ from vuzol.storage.types import (
     StepStatus,
     TaskStatus,
 )
-from vuzol.telegram.projections import enqueue_project_status_dashboard
+from vuzol.telegram.projections import (
+    enqueue_project_status_dashboard,
+    enqueue_task_status_projection,
+)
 from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.service import materialize_run, start_run
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
@@ -150,6 +154,14 @@ class WorkflowDispatcher:
             automatic_start = (
                 self._runtime.settings.interpretation.automatic_execution_enabled or package_owned
             ) and task.ingress_source != "chat_work"
+            readiness = await configured_executor_preflight(
+                session,
+                settings=self._runtime.settings,
+                registries=self._runtime.registries,
+                project_id=task.project_id,
+                task_type=draft.task_type.value,
+                workflow=workflow,
+            )
             run = await materialize_run(
                 session,
                 task_id=task.id,
@@ -157,7 +169,7 @@ class WorkflowDispatcher:
                 configuration_revision=self._runtime.registries.revision,
                 policy_revision=POLICY_REVISION,
                 prompt_revision=interpretation.prompt_version,
-                automatic_start=automatic_start,
+                automatic_start=automatic_start and readiness is None,
                 budget_mode=budget_mode_for_tier(tier) if tier is not None else "balanced",
             )
             from vuzol.discussion.work_context import load_work_context
@@ -178,6 +190,42 @@ class WorkflowDispatcher:
                     step.payload = {**step.payload, "chat_work_spec_revision": task.spec_revision}
             # Also repairs a run materialized by an older dispatcher before package
             # start provenance was recognized.
+            if readiness is not None and run.status is RunStatus.CREATED:
+                from vuzol.providers.routing import _block_route
+
+                blocked_step = await session.scalar(
+                    # Retry must enter through context/worktree, not skip
+                    # predecessors by queuing the future executor directly.
+                    select(Step)
+                    .where(Step.run_id == run.id, Step.status == StepStatus.PENDING)
+                    .order_by(Step.ordinal)
+                    .limit(1)
+                )
+                assert blocked_step is not None
+                session.add(
+                    Event(
+                        entity_type="run",
+                        entity_id=run.id,
+                        event_type="workflow.executor_preflight_failed",
+                        actor_type="workflow_manager",
+                        payload={
+                            "task_type": draft.task_type.value,
+                            "executor_step_type": readiness.step_type,
+                            "evaluations": list(readiness.evaluations),
+                        },
+                    )
+                )
+                await _block_route(
+                    session,
+                    task=task,
+                    run=run,
+                    step=blocked_step,
+                    category="executor_route_unavailable",
+                    quota=False,
+                    summary=readiness.summary,
+                )
+                await self._enqueue_task_projection(session, task, run)
+                return
             if automatic_start and run.status is RunStatus.CREATED:
                 await start_run(session, run, task=task, actor_type="workflow_manager")
             await self._enqueue_task_projection(session, task, run)
@@ -325,6 +373,8 @@ class WorkflowDispatcher:
             .limit(1)
         )
         if intake is None:
+            if task.ingress_source == "chat_work":
+                await enqueue_task_status_projection(session, task, run)
             return
         session.add(
             TransactionalOutbox(

@@ -1,7 +1,7 @@
 """Shared fail-closed policy for user-requested step retries."""
 
 from vuzol.storage.models import Step
-from vuzol.storage.types import StepStatus
+from vuzol.storage.types import IdempotencyClass, StepStatus
 
 EXPLICITLY_RETRYABLE_FAILURES = frozenset(
     {
@@ -12,12 +12,53 @@ EXPLICITLY_RETRYABLE_FAILURES = frozenset(
         "cancelled",
         "dependency_provisioning_failed",
         "independent_review_required",
+        "admission_only_consent_required",
+        "money_cap_reached",
+        "money_cap_uncertified",
+        "acceptance_evidence_missing",
         "quota_exhausted",
         "rate_limited",
         "timeout",
         "provider_unavailable",
+        "provider_attempts_exhausted",
     }
 )
+
+# A label of read-only does not authorize a repeat when the step can still mutate.
+MUTATING_CAPABILITIES = frozenset(
+    {
+        "filesystem_write",
+        "code_edit",
+        "git",
+        "host_admin",
+        "project_shell",
+        "telegram_send",
+        "secrets",
+        "network",
+    }
+)
+LEASE_EXPIRED_ATTEMPTS_EXHAUSTED = "lease_expired_attempts_exhausted"
+LEASE_EXPIRED_UNKNOWN_EFFECTS = "lease_expired_unknown_effects"
+
+
+def repeatable_without_new_mutation(step: Step) -> bool:
+    """True only when a repeat cannot invent a second external write.
+
+    Read-only is accepted when the step also lacks mutating capabilities.
+    An idempotent step needs a real external key; the key is what makes the
+    write comparable. Every other class stays unknown.
+    """
+
+    capabilities = {str(item) for item in (step.required_capabilities or [])}
+    labeled_read_only = step.idempotency_class is IdempotencyClass.READ_ONLY
+    if labeled_read_only:
+        return capabilities.isdisjoint(MUTATING_CAPABILITIES)
+    key = step.external_idempotency_key
+    return (
+        step.idempotency_class is IdempotencyClass.IDEMPOTENT
+        and isinstance(key, str)
+        and bool(key.strip())
+    )
 
 
 def current_retry_target(steps: tuple[Step, ...]) -> Step | None:

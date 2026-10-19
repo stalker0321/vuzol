@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import subprocess
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -389,6 +390,75 @@ def test_not_applied_observation_denies_without_touching_business_state(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("crash_after_git", [False, True])
+def test_denied_apply_retry_rearms_and_can_recover_a_second_crash(
+    postgres_dsn: str,
+    tmp_path: Path,
+    crash_after_git: bool,
+) -> None:
+    class CrashAfterGit(ResultApplyHandler):
+        async def _record_applied(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated process crash after Git CAS")
+
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        seed = await _seed(factory, tmp_path)
+        git = CountingGit()
+        registries = _registries(seed.repository)
+        handler = ResultApplyHandler(factory, registries, git)
+        request = _request(seed)
+        approval_id, envelope, worktree = await handler._load(request)
+        effect_id = await handler._record_intent(
+            request,
+            approval_id=approval_id,
+            envelope=envelope,
+            worktree=worktree,
+        )
+        report = await EffectReconciler(factory, git, registries, owner="test").reconcile_startup()
+        assert report.denied_count == 1
+        async with factory.begin() as session:
+            step = await session.get(Step, seed.step_id)
+            assert step is not None
+            step.lease_generation = 2
+        request = replace(
+            request,
+            lease=replace(
+                request.lease,
+                generation=2,
+                step=replace(request.lease.step, lease_generation=2),
+            ),
+        )
+        if crash_after_git:
+            with pytest.raises(RuntimeError, match="simulated process crash"):
+                await CrashAfterGit(factory, registries, git).execute(
+                    request, CancellationContext()
+                )
+            async with factory() as session:
+                effect = await session.get(Effect, effect_id)
+                assert effect is not None and effect.status == "dispatched"
+                assert effect.launch_generation == 2
+            report = await EffectReconciler(
+                factory, git, registries, owner="test"
+            ).reconcile_startup()
+            assert report.confirmed_count == 1
+        else:
+            outcome = await handler.execute(request, CancellationContext())
+            assert outcome.kind is OutcomeKind.SUCCEEDED
+        async with factory() as session:
+            effect = await session.get(Effect, effect_id)
+            approval = await session.get(Approval, seed.approval_id)
+            assert effect is not None and effect.status == "settled"
+            assert effect.receipt_status == "applied"
+            assert effect.reconcile_status == "confirmed"
+            assert effect.launch_generation == 2
+            assert approval is not None and approval.status is ApprovalStatus.CONSUMED
+        assert git.apply_calls == 1
+        assert await git.resolve_commit(seed.repository, "main") == seed.result_commit
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_uncertain_observation_blocks_and_relaunch_is_refused(
     postgres_dsn: str, tmp_path: Path
 ) -> None:
@@ -464,9 +534,7 @@ def test_revoked_grant_does_not_start_an_effect(postgres_dsn: str, tmp_path: Pat
     asyncio.run(scenario())
 
 
-def test_stale_generation_cannot_record_intent_or_settle(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+def test_stale_generation_cannot_record_intent_or_settle(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         seed = await _seed(factory, tmp_path)

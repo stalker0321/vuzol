@@ -142,6 +142,7 @@ async def run() -> None:
                     adapter_registry,
                     DatabaseReviewAccounting(factory, settings.limits),
                     policy_revision=runtime.registries.revision,
+                    input_token_limit=settings.limits.provider_call_input_tokens,
                 )
         handlers = {
             **BASE_INTERNAL_HANDLERS,

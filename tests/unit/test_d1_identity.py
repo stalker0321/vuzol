@@ -211,7 +211,7 @@ async def test_d1_guard_off_without_flag_and_on_when_pinned() -> None:
 async def test_d1_pause_closes_commit_path() -> None:
     """pp.6: a live lease cannot commit while the run is PAUSED (soft pause)."""
 
-    from vuzol.storage.models import Run, Step
+    from vuzol.storage.models import Run, Step, Task
     from vuzol.storage.records import LeaseToken, StepRecord
     from vuzol.storage.types import RunStatus, StepStatus
     from vuzol.workflows.domain import StepOutcome
@@ -238,8 +238,13 @@ async def test_d1_pause_closes_commit_path() -> None:
     run = MagicMock(spec=Run)
     run.id = lease.step.run_id
     run.status = RunStatus.PAUSED
+    task = MagicMock(spec=Task)
+    task.id = uuid.uuid4()
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=[step, run])
+    located = MagicMock()
+    located.one_or_none.return_value = (task.id, run.id)
+    session.execute = AsyncMock(return_value=located)
+    session.scalar = AsyncMock(side_effect=[task, run, step])
     with pytest.raises(LeaseLost, match="paused"):
         await commit_step_outcome(
             session,

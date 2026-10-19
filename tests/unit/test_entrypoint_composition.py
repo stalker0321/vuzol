@@ -16,7 +16,14 @@ from vuzol.cli import project_provisioner as provisioner_cli
 from vuzol.cli import telegram as telegram_cli
 from vuzol.cli import telegram_delivery as delivery_cli
 from vuzol.cli import worker as worker_cli
-from vuzol.config import RegistryDocument, RuntimeConfiguration, Settings, build_bundle
+from vuzol.config import (
+    DeliveryMode,
+    ProviderProfileConfig,
+    RegistryDocument,
+    RuntimeConfiguration,
+    Settings,
+    build_bundle,
+)
 
 
 def runtime_configuration(settings: Settings) -> RuntimeConfiguration:
@@ -193,11 +200,12 @@ async def test_project_provisioner_fails_closed_before_loop_when_migration_head_
     assert order == ["require_migration_head", "dispose"]
 
 
-@pytest.mark.parametrize("cli_review", [False, True])
+@pytest.mark.parametrize("review_mode", ["none", "cli", "api"])
 def test_worker_main_composes_runtime_and_handles_stop(
-    monkeypatch: MonkeyPatch, caplog: LogCaptureFixture, cli_review: bool
+    monkeypatch: MonkeyPatch, caplog: LogCaptureFixture, review_mode: str
 ) -> None:
     settings = Settings(environment="test")
+    cli_review = review_mode == "cli"
     runtime = runtime_configuration(settings)
     if cli_review:
         settings = settings.model_copy(
@@ -206,6 +214,29 @@ def test_worker_main_composes_runtime_and_handles_stop(
             }
         )
         runtime = RuntimeConfiguration(settings=settings, registries=runtime.registries)
+    if review_mode == "api":
+        profile = ProviderProfileConfig.model_validate(
+            {
+                "id": "reviewer",
+                "provider": "openai-compatible",
+                "model": "test",
+                "api_base_url": "https://api.example.com/v1",
+                "launch_mode": "api",
+                "credential_required": False,
+                "capabilities": [],
+                "concurrency_limit": 1,
+                "roles": ["reviewer"],
+                "cost_class": "cheap",
+                "supported_task_types": ["coding"],
+                "sandbox_required": False,
+            }
+        )
+        runtime = RuntimeConfiguration(
+            settings=settings,
+            registries=build_bundle(RegistryDocument(profiles=(profile,)), settings),
+        )
+        monkeypatch.setattr(worker_cli, "synchronize_profiles", AsyncMock())
+        monkeypatch.setattr(worker_cli, "RoutedWorkflowWorker", MagicMock())
     handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
     calls: dict[str, object] = {}
 
@@ -281,6 +312,9 @@ def test_worker_main_composes_runtime_and_handles_stop(
     assert calls["recovery_batch_size"] == 100
     assert calls["disposed"] is True
     assert ("review" in calls["workflow_handlers"]) is not cli_review
+    if review_mode == "api":
+        reviewer = worker_cli.ResultReviewHandler.call_args.kwargs["independent_reviewer"]
+        assert reviewer._input_token_limit == settings.limits.provider_call_input_tokens
     migration_head.assert_awaited()
     assert any(record.__dict__.get("signal") == signal.SIGTERM for record in caplog.records)
 
@@ -383,7 +417,8 @@ async def test_applier_composes_narrow_control_and_privileged_worker(
         )
     )
     monkeypatch.setattr(applier_cli, "EffectReconciler", lambda *_args, **_kwargs: reconciler)
-    monkeypatch.setattr(applier_cli, "WorkflowWorker", lambda *_args, **_kwargs: worker)
+    worker_constructor = MagicMock(return_value=worker)
+    monkeypatch.setattr(applier_cli, "WorkflowWorker", worker_constructor)
     monkeypatch.setattr("vuzol.cli.applier.asyncio.Event", Stop)
 
     await applier_cli.run()
@@ -393,6 +428,46 @@ async def test_applier_composes_narrow_control_and_privileged_worker(
     migration_head.assert_awaited()
     controls.process_one.assert_awaited_once()
     worker.process_one.assert_awaited_once()
+    capability_handler = worker_constructor.call_args.kwargs["handlers"]["ensure_capabilities"]
+    assert capability_handler._apply_access_check is not None
+    assert capability_handler._apply_access_check.__name__ == "require_apply_access"
+
+
+@pytest.mark.anyio
+async def test_applier_refuses_readonly_root_before_reconciliation_or_worker_claims(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from vuzol.execution.git import GitError
+
+    settings = Settings(environment="test")
+    registries = MagicMock()
+    registries.projects.items.return_value = (
+        SimpleNamespace(
+            enabled=True, git_delivery=SimpleNamespace(allowed_modes={DeliveryMode.APPLY})
+        ),
+    )
+    runtime = SimpleNamespace(settings=settings, registries=registries)
+    engine = MagicMock(dispose=AsyncMock())
+    monkeypatch.setattr(applier_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
+    monkeypatch.setattr(applier_cli, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(applier_cli, "resolve_database_dsn", lambda _settings: object())
+    monkeypatch.setattr(applier_cli, "create_engine", lambda *_args: engine)
+    monkeypatch.setattr(applier_cli, "require_migration_head", AsyncMock())
+    preflight = MagicMock(side_effect=GitError("applier path is on a read-only filesystem"))
+    factory = MagicMock()
+    reconciler = MagicMock()
+    worker = MagicMock()
+    monkeypatch.setattr(applier_cli, "require_writable_directory", preflight)
+    monkeypatch.setattr(applier_cli, "create_session_factory", factory)
+    monkeypatch.setattr(applier_cli, "EffectReconciler", reconciler)
+    monkeypatch.setattr(applier_cli, "WorkflowWorker", worker)
+    with pytest.raises(GitError, match="read-only filesystem"):
+        await applier_cli.run()
+    preflight.assert_called_once_with(settings.repository_root)
+    factory.assert_not_called()
+    reconciler.assert_not_called()
+    worker.assert_not_called()
+    engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.anyio

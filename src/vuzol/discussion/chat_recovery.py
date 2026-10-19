@@ -265,7 +265,14 @@ async def retry_chat_turn(
                 parsed = DiscussionAgentReply.model_validate(structured)
             except ValueError:
                 raise TelegramPolicyError("chat_retry_unavailable") from None
-            await persist_discussion_reply(uow, task, parsed)
+            await persist_discussion_reply(
+                uow,
+                task,
+                parsed,
+                literal_reply=(
+                    completed.result.get("output_schema_version") == "discussion-text-reply.v2"
+                ),
+            )
             session.add(
                 Event(
                     entity_type="task",

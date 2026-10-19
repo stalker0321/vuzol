@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
@@ -32,6 +32,7 @@ from vuzol.providers.budgets import (
     reserve_budget,
     resolve_horizon_scope,
 )
+from vuzol.providers.control import ceiling_is_admission_only
 from vuzol.providers.domain import (
     ContextItem,
     ProviderRequest,
@@ -42,6 +43,7 @@ from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.review.domain import (
     FindingSeverity,
+    PackageReviewContract,
     ReviewFinding,
     ReviewVerdict,
     ReviewVerdictKind,
@@ -86,7 +88,15 @@ _OUTPUT_JSON_SCHEMA: dict[str, Any] = {
                 # OpenAI strict Structured Outputs requires every declared
                 # property to be present. Optional location data is expressed
                 # as an explicit null rather than an omitted key.
-                "required": ["severity", "classification", "summary", "path", "line"],
+                "required": [
+                    "severity",
+                    "classification",
+                    "summary",
+                    "path",
+                    "line",
+                    "criterion_id",
+                    "evidence",
+                ],
                 "properties": {
                     "severity": {
                         "type": "string",
@@ -96,6 +106,8 @@ _OUTPUT_JSON_SCHEMA: dict[str, Any] = {
                     "summary": {"type": "string", "minLength": 1, "maxLength": 500},
                     "path": {"type": ["string", "null"], "maxLength": 500},
                     "line": {"type": ["integer", "null"], "minimum": 1},
+                    "criterion_id": {"type": ["string", "null"], "maxLength": 200},
+                    "evidence": {"type": ["string", "null"], "maxLength": 2000},
                 },
             },
         },
@@ -193,6 +205,7 @@ class DatabaseReviewAccounting:
                         # D3 lifetime owner (lead Q1), sticky through settle.
                         horizon_id=await resolve_horizon_scope(session, task_id=request.task_id),
                     ),
+                    admission_only=ceiling_is_admission_only(profile),
                 )
             except BudgetExceeded as error:
                 raise IndependentReviewError(
@@ -316,12 +329,16 @@ class IndependentModelReviewer:
         *,
         policy_revision: str = "independent-review-policy.v1",
         profile_id: str | None = None,
+        input_token_limit: int = 32_000,
     ) -> None:
+        if input_token_limit < 1:
+            raise ValueError("review input token limit must be positive")
         self._registries = registries
         self._adapters = adapters
         self._accounting = accounting
         self._policy_revision = policy_revision
         self._profile_id = profile_id
+        self._input_token_limit = input_token_limit
 
     async def review(
         self,
@@ -339,6 +356,7 @@ class IndependentModelReviewer:
         cancellation: CancellationContext,
         lease: LeaseToken,
         work_context: tuple[ContextItem, ...] = (),
+        package_contract: PackageReviewContract | None = None,
     ) -> ReviewVerdict:
         from vuzol.review.policy import ReviewLevel, resolve_review_plan
 
@@ -410,6 +428,7 @@ class IndependentModelReviewer:
                 lease=lease,
                 diff_truncated=manifest.partitions[0].diff_truncated,
                 work_context=work_context,
+                package_contract=package_contract,
             )
             return verdict
         return await self._review_partitioned(
@@ -431,6 +450,7 @@ class IndependentModelReviewer:
             cancellation=cancellation,
             lease=lease,
             work_context=work_context,
+            package_contract=package_contract,
         )
 
     async def _review_single_partition(
@@ -456,6 +476,7 @@ class IndependentModelReviewer:
         diff_truncated: bool,
         work_context: tuple[ContextItem, ...] = (),
         call_ordinal: int = 1,
+        package_contract: PackageReviewContract | None = None,
     ) -> ReviewVerdict:
         if len(inspection.changed_files) > _MAX_FILES:
             raise IndependentReviewError(
@@ -483,10 +504,12 @@ class IndependentModelReviewer:
             timeout_seconds=timeout_seconds,
             profile=profile,
             policy_revision=self._policy_revision,
+            input_token_limit=self._input_token_limit,
             provider_attempt=(lease.generation - 1) * (_MAX_PARTITIONS + 1) + call_ordinal,
             partition_id=partition_id,
             diff_truncated=diff_truncated,
             work_context=work_context,
+            package_contract=package_contract,
         )
         try:
             reservation = await self._accounting.reserve(request=provider_request, profile=profile)
@@ -511,9 +534,9 @@ class IndependentModelReviewer:
                     reservation=reservation,
                     lease=lease,
                     profile=profile,
-                    result=None,
+                    result=failure.receipt_result(),
                     outcome=failure.category.value,
-                    conservative=True,
+                    conservative=failure.usage is None,
                 )
             else:
                 await self._accounting.release(reservation=reservation, lease=lease)
@@ -563,6 +586,7 @@ class IndependentModelReviewer:
         cancellation: CancellationContext,
         lease: LeaseToken,
         work_context: tuple[ContextItem, ...] = (),
+        package_contract: PackageReviewContract | None = None,
     ) -> ReviewVerdict:
         from vuzol.review.partitions import split_diff_by_file
 
@@ -617,6 +641,7 @@ class IndependentModelReviewer:
                 diff_truncated=partition.diff_truncated,
                 work_context=work_context,
                 call_ordinal=ordinal,
+                package_contract=package_contract,
             )
             unknown_usage = unknown_usage or verdict.unknown_usage
             verdicts.append(verdict)
@@ -734,7 +759,7 @@ class IndependentModelReviewer:
             prompt_revision=_PROMPT_REVISION,
             timeout_seconds=min(float(timeout_seconds), 600.0),
             deadline=None,
-            max_input_tokens=min(int(profile.context_limit or 32_000), 32_000),
+            max_input_tokens=_input_token_budget(profile, self._input_token_limit),
             max_output_tokens=int(profile.output_limit or 4_000),
             reasoning_max_tokens=min(
                 profile.max_reasoning_tokens or _REVIEW_REASONING_MAX_TOKENS,
@@ -768,9 +793,9 @@ class IndependentModelReviewer:
                     reservation=reservation,
                     lease=lease,
                     profile=profile,
-                    result=None,
+                    result=failure.receipt_result(),
                     outcome=failure.category.value,
-                    conservative=True,
+                    conservative=failure.usage is None,
                 )
             else:
                 await self._accounting.release(reservation=reservation, lease=lease)
@@ -798,15 +823,7 @@ class IndependentModelReviewer:
             if not isinstance(item, dict):
                 continue
             try:
-                findings.append(
-                    ReviewFinding(
-                        severity=FindingSeverity(str(item["severity"])),
-                        classification=str(item["classification"])[:100],
-                        summary=str(item["summary"])[:500],
-                        path=(str(item["path"])[:500] if item.get("path") is not None else None),
-                        line=int(item["line"]) if isinstance(item.get("line"), int) else None,
-                    )
-                )
+                findings.append(_finding_from_output(item))
             except (KeyError, TypeError, ValueError) as error:
                 raise IndependentReviewError(
                     "cross-partition assessment output failed schema interpretation"
@@ -831,6 +848,26 @@ class IndependentModelReviewer:
         return tuple(findings)
 
 
+def _optional_text(value: object, limit: int) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()[:limit]
+
+
+def _finding_from_output(item: Mapping[str, Any]) -> ReviewFinding:
+    """Parse one model finding, including an optional criterion measurement."""
+
+    return ReviewFinding(
+        severity=FindingSeverity(str(item["severity"])),
+        classification=str(item["classification"])[:100],
+        summary=str(item["summary"])[:500],
+        path=(str(item["path"])[:500] if item.get("path") is not None else None),
+        line=int(item["line"]) if isinstance(item.get("line"), int) else None,
+        criterion_id=_optional_text(item.get("criterion_id"), 200),
+        evidence=_optional_text(item.get("evidence"), 2_000),
+    )
+
+
 def _build_request(
     *,
     task: Task,
@@ -847,22 +884,41 @@ def _build_request(
     timeout_seconds: float,
     profile: ProviderProfileConfig,
     policy_revision: str,
+    input_token_limit: int = 32_000,
     provider_attempt: int = 1,
     partition_id: str | None = None,
     diff_truncated: bool = False,
     work_context: tuple[ContextItem, ...] = (),
+    package_contract: PackageReviewContract | None = None,
 ) -> ProviderRequest:
     files = inspection.changed_files
     diff_text = inspection.diff.decode("utf-8", "replace")
-    goal = ""
+    task_goal = ""
     draft = task.task_draft if isinstance(task.task_draft, dict) else {}
     for key in ("goal", "normalized_title", "summary"):
         raw = draft.get(key)
         if isinstance(raw, str) and raw.strip():
-            goal = raw.strip()[:1_000]
+            task_goal = raw.strip()[:1_000]
             break
-    if not goal and isinstance(task.original_text, str):
-        goal = task.original_text.strip()[:1_000]
+    if not task_goal and isinstance(task.original_text, str):
+        task_goal = task.original_text.strip()[:1_000]
+    package_goal = None if package_contract is None else package_contract.goal
+    goal_revision = None if package_contract is None else package_contract.goal_revision
+    plan_revision_id = None if package_contract is None else package_contract.plan_revision_id
+    criteria_payload: list[dict[str, object]] = []
+    if package_contract is not None:
+        for spec in package_contract.criteria:
+            item: dict[str, object] = {"criterion_id": spec.criterion_id}
+            if spec.statement:
+                item["statement"] = spec.statement
+            if spec.evidence_kind:
+                item["evidence_kind"] = spec.evidence_kind
+            if spec.observable is not None:
+                item["observable"] = spec.observable
+            criteria_payload.append(item)
+    # The package goal is what the criteria belong to. The item goal stays
+    # visible as task_goal and does not replace it.
+    goal = package_goal or task_goal
 
     payload = {
         "instruction": (
@@ -875,10 +931,20 @@ def _build_request(
             "retained diff, its practical consequence, and the affected path/line when one "
             "exists. Do not emit generic, hypothetical, best-practice, or 'ensure/consider' "
             "warnings merely because build, deploy, network, or dependency scripts exist. "
-            "Return only the required JSON object."
+            "When exit_criteria are present, judge each statement against the retained "
+            "diff of result_commit. package_goal and goal_revision are the package being "
+            "checked; task_goal is only this item. A criterion you can observe is a finding "
+            "with classification criterion_pass, criterion_id set to that id, and evidence "
+            "quoting the observation. Do not emit human_accepted: that is an owner action, "
+            "not a model result. A validation gate name is not an exit criterion. Return "
+            "only the required JSON object."
         ),
         "risk": risk.value,
         "goal": goal,
+        "task_goal": task_goal,
+        "package_goal": package_goal,
+        "goal_revision": goal_revision,
+        "plan_revision_id": plan_revision_id,
         "base_commit": base_commit,
         "result_commit": result_commit,
         "diff_hash": diff_hash or inspection.diff_hash,
@@ -890,6 +956,7 @@ def _build_request(
         "review_policy_revision": _REVIEW_POLICY_REVISION,
         "partition_id": partition_id,
         "gates": gates[:20],
+        "exit_criteria": criteria_payload,
         "mechanical_findings": [
             finding.model_dump(mode="json") for finding in mechanical_findings[:20]
         ],
@@ -943,7 +1010,7 @@ def _build_request(
         prompt_revision=_PROMPT_REVISION,
         timeout_seconds=min(float(timeout_seconds), 600.0),
         deadline=None,
-        max_input_tokens=min(int(profile.context_limit or 32_000), 32_000),
+        max_input_tokens=_input_token_budget(profile, input_token_limit),
         # Reviews can contain several concrete findings. The profile bound must
         # leave room for both unbounded upstream reasoning and the JSON report.
         max_output_tokens=total_output_tokens,
@@ -959,6 +1026,13 @@ def _build_request(
         verify_chunk_receipts(work_context)
         _require_work_context_budget(request)
     return request
+
+
+def _input_token_budget(profile: ProviderProfileConfig, configured_limit: int) -> int:
+    """Respect both configured admission limits and an explicit model context cap."""
+    if configured_limit < 1:
+        raise ValueError("review input token limit must be positive")
+    return min(profile.context_limit or configured_limit, configured_limit)
 
 
 def _require_work_context_budget(request: ProviderRequest) -> None:
@@ -997,15 +1071,7 @@ def _verdict_from_provider_result(
         for item in raw_findings:
             if not isinstance(item, dict):
                 continue
-            findings.append(
-                ReviewFinding(
-                    severity=FindingSeverity(str(item["severity"])),
-                    classification=str(item["classification"])[:100],
-                    summary=str(item["summary"])[:500],
-                    path=(str(item["path"])[:500] if item.get("path") is not None else None),
-                    line=int(item["line"]) if isinstance(item.get("line"), int) else None,
-                )
-            )
+            findings.append(_finding_from_output(item))
     except (KeyError, TypeError, ValueError) as error:
         raise IndependentReviewError(
             "independent reviewer output failed schema interpretation"

@@ -15,6 +15,24 @@ class GitError(RuntimeError):
     """A bounded system-controlled Git operation failed."""
 
 
+def require_writable_directory(path: Path) -> None:
+    """Read-only admission check in the caller's real UID/mount namespace."""
+    _require_writable_path(path, directory=True)
+
+
+def _require_writable_path(path: Path, *, directory: bool) -> None:
+    try:
+        if directory and not path.is_dir():
+            raise GitError(f"applier directory is unavailable: {path}")
+        if os.statvfs(path).f_flag & os.ST_RDONLY:
+            raise GitError(f"applier path is on a read-only filesystem: {path}")
+        mode = os.W_OK | (os.X_OK if directory else 0)
+        if not os.access(path, mode, effective_ids=True):
+            raise GitError(f"applier lacks write access to: {path}")
+    except OSError as error:
+        raise GitError(f"applier cannot inspect write access to: {path}") from error
+
+
 SYSTEM_GIT_CONFIG = (
     "core.hooksPath=/dev/null",
     "core.pager=cat",
@@ -27,6 +45,24 @@ SYSTEM_GIT_CONFIG = (
 class LocalGit:
     def __init__(self, *, timeout_seconds: float = 30) -> None:
         self._timeout = timeout_seconds
+
+    async def require_apply_access(self, repository: Path) -> None:
+        """Check source and actual Git metadata without modifying Git state."""
+        require_writable_directory(repository)
+        metadata = set()
+        for option in ("--absolute-git-dir", "--git-common-dir"):
+            raw = await self._run(repository, "rev-parse", "--path-format=absolute", option)
+            metadata.add(Path(raw.decode().strip()))
+        for root in metadata:
+            require_writable_directory(root)
+            for name in ("objects", "objects/pack", "refs", "refs/heads"):
+                path = root / name
+                if path.exists():
+                    require_writable_directory(path)
+            for name in ("HEAD", "index", "FETCH_HEAD", "packed-refs"):
+                path = root / name
+                if path.exists():
+                    _require_writable_path(path, directory=False)
 
     async def repository_identity(self, repository: Path) -> tuple[str, str | None]:
         common = await self._run(

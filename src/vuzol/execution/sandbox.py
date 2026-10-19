@@ -475,6 +475,9 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         proxy_environment = {
             "HTTPS_PROXY": spec.https_proxy_url,
             "HTTP_PROXY": spec.https_proxy_url,
+            # Node's built-in fetch ignores proxy variables unless explicitly enabled.
+            # Keep this runtime-owned so every Node client uses the controlled egress.
+            "NODE_USE_ENV_PROXY": "1",
             "https_proxy": spec.https_proxy_url,
             "http_proxy": spec.https_proxy_url,
             "ALL_PROXY": "",

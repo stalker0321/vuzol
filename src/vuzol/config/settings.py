@@ -252,7 +252,21 @@ class HardLimits(BaseModel):
     fallback_depth: int = Field(default=2, ge=0, le=10)
     daily_cost_units: float = Field(default=100, gt=0)
     daily_quota_units: float = Field(default=100, gt=0)
+    # Watchdog value in seconds. Admission does not enforce it, and it is
+    # neither a money ceiling nor a provider-call timeout.
     task_duration_seconds: int = Field(default=7_200, ge=1)
+    # Cumulative task/step token totals and estimated cost_units.
+    # ``hard`` is the migration default: historical numbers have no recorded
+    # origin, so this build does not grant extra spend. ``soft`` records the
+    # overrun and continues, including required review. Production stays on
+    # ``hard`` until the owner switches it.
+    usage_total_enforcement: Literal["soft", "hard"] = "hard"
+    estimated_cost_enforcement: Literal["soft", "hard"] = "hard"
+    # Owner money ceiling in cost units, across epochs, retries, and child
+    # tasks. None adds no ceiling. Review allowance does not bypass it.
+    # Unknown cost cannot certify it. Daily and package lifetime budgets
+    # stay in force either way.
+    explicit_money_cap_units: float | None = None
     artifact_bytes: int = Field(default=100_000_000, ge=1)
     input_bytes: int = Field(default=25_000_000, ge=1)
     # D3 admission counters (lead W4): enforced alongside caps, never instead
@@ -270,6 +284,8 @@ class HardLimits(BaseModel):
     def validate_planner_reasoning_budget(self) -> "HardLimits":
         if self.planner_reasoning_tokens > self.planner_output_tokens:
             raise ValueError("planner reasoning token limit must not exceed planner output limit")
+        if self.explicit_money_cap_units is not None and self.explicit_money_cap_units <= 0:
+            raise ValueError("explicit money cap must be positive")
         return self
 
 

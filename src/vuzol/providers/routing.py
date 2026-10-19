@@ -29,14 +29,20 @@ from vuzol.projects.executor_preference import (
     same_family_fallback_ids,
 )
 from vuzol.providers.budgets import (
+    ADMISSION_ONLY_CONSENT_SUMMARY,
+    EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY,
+    EXPLICIT_MONEY_CAP_UNKNOWN_SUMMARY,
     BudgetExceeded,
     accounting_for_profile,
     attempt_kind_for_step,
     estimate_reservation,
+    note_admission_only_ceiling,
     purpose_for_step_type,
+    remaining_output_allowance,
     reserve_budget,
     resolve_horizon_scope,
 )
+from vuzol.providers.control import ceiling_is_admission_only
 from vuzol.providers.domain import EffectiveProfileState
 from vuzol.providers.fallback_policy import should_fallback_provider
 from vuzol.providers.health import effective_health
@@ -49,7 +55,7 @@ from vuzol.providers.policy import (
 )
 from vuzol.providers.result_schema import result_schema_for_step, schema_char_count
 from vuzol.storage.leasing import STEP_CLAIM_LOCK_KEY
-from vuzol.storage.models import RoutingDecision, Run, Step, Task
+from vuzol.storage.models import ProviderBudgetReservation, RoutingDecision, Run, Step, Task
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.repositories.core import step_record
 from vuzol.storage.types import QueueClass, RunStatus, StepStatus, TaskStatus
@@ -141,9 +147,21 @@ async def claim_routed_step(
             await session.scalar(
                 select(func.count())
                 .select_from(RoutingDecision)
+                .outerjoin(
+                    ProviderBudgetReservation,
+                    (ProviderBudgetReservation.step_id == RoutingDecision.step_id)
+                    & (
+                        ProviderBudgetReservation.provider_attempt
+                        == RoutingDecision.provider_attempt
+                    ),
+                )
                 .where(
                     RoutingDecision.step_id == step.id,
                     RoutingDecision.selected_profile_id.is_not(None),
+                    # Explicit owner continuation admits a fresh bounded epoch.
+                    # Lifetime attempt IDs/history remain; unreserved legacy
+                    # rows belong to epoch zero and consume its attempt cap.
+                    func.coalesce(ProviderBudgetReservation.budget_epoch, 0) == task.budget_epoch,
                 )
             )
             or 0
@@ -216,6 +234,19 @@ async def claim_routed_step(
             if role is ProviderRole.PLANNER
             else settings.limits.provider_call_output_tokens
         )
+        requested_output = await remaining_output_allowance(
+            session,
+            task_id=task.id,
+            step_id=step.id,
+            budget_epoch=task.budget_epoch,
+            requested=requested_output,
+            limits=settings.limits,
+        )
+        if requested_output == 0:
+            await _block_route(
+                session, step=step, run=run, task=task, category="budget_exhausted", quota=True
+            )
+            continue
         retry_failed_profile_id = step.payload.get("retry_failed_profile_id")
         failed_profile_id = (
             (
@@ -317,6 +348,7 @@ async def claim_routed_step(
                             estimated_input_tokens=estimated_input,
                             max_output_tokens=requested_output,
                             remaining_cost_units=settings.limits.task_cost_units,
+                            estimated_cost_enforcement=settings.limits.estimated_cost_enforcement,
                         ),
                         pin_inputs={
                             "project_pin_mode": preference.mode.value,
@@ -410,6 +442,7 @@ async def claim_routed_step(
             estimated_input_tokens=estimated_input,
             max_output_tokens=requested_output,
             remaining_cost_units=settings.limits.task_cost_units,
+            estimated_cost_enforcement=settings.limits.estimated_cost_enforcement,
             trusted_profile_id=trusted_profile_id,
             failed_profile_id=failed_profile_id,
             allowed_fallback_ids=allowed_fallbacks,
@@ -431,6 +464,9 @@ async def claim_routed_step(
             continue
         selected: ProviderProfileConfig | None = None
         reservation = None
+        money_cap_hit = False
+        unknown_cost = False
+        consent_required = False
         for profile_id in ordered:
             profile = registries.profiles.get(profile_id)
             estimate = estimate_reservation(
@@ -457,10 +493,22 @@ async def claim_routed_step(
                         # settle inherits it (sticky, no per-call plumbing).
                         horizon_id=await resolve_horizon_scope(session, task_id=task.id),
                     ),
+                    admission_only=ceiling_is_admission_only(profile),
                 )
-            except BudgetExceeded:
+            except BudgetExceeded as error:
+                message = str(error)
+                if message.startswith("explicit money cap cannot cover"):
+                    consent_required = True
+                elif message.startswith("explicit money cap cannot be certified"):
+                    unknown_cost = True
+                elif message.startswith("explicit money cap"):
+                    money_cap_hit = True
                 continue
             selected = profile
+            if settings.limits.explicit_money_cap_units is not None and ceiling_is_admission_only(
+                profile
+            ):
+                await note_admission_only_ceiling(session, task.id, profile.id)
             break
         pin_decision_inputs = _pin_decision_inputs(
             project_pin=project_pin,
@@ -492,14 +540,45 @@ async def claim_routed_step(
                 request=policy_request,
                 pin_inputs=pin_decision_inputs,
             )
-            await _block_route(
-                session,
-                step=step,
-                run=run,
-                task=task,
-                category="budget_exhausted" if exhausted else "no_compatible_profile",
-                quota=exhausted,
-            )
+            if consent_required:
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="admission_only_consent_required",
+                    quota=False,
+                    summary=ADMISSION_ONLY_CONSENT_SUMMARY,
+                )
+            elif unknown_cost:
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="money_cap_uncertified",
+                    quota=False,
+                    summary=EXPLICIT_MONEY_CAP_UNKNOWN_SUMMARY,
+                )
+            elif money_cap_hit:
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="money_cap_reached",
+                    quota=False,
+                    summary=EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY,
+                )
+            else:
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="budget_exhausted" if exhausted else "no_compatible_profile",
+                    quota=exhausted,
+                )
             continue
         await _persist_decision(
             session,
@@ -525,7 +604,9 @@ async def claim_routed_step(
             "budget_reservation_id": str(reservation.id),
         }
         if role is ProviderRole.PLANNER:
-            next_payload["reasoning_max_tokens"] = settings.limits.planner_reasoning_tokens
+            next_payload["reasoning_max_tokens"] = min(
+                settings.limits.planner_reasoning_tokens, reservation.reserved_output_tokens
+            )
         if project_pin is not None and pin_family_ids is not None:
             if selected.id not in pin_family_ids:
                 # Defensive: fence must make this unreachable; never mis-attribute.

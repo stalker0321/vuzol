@@ -111,8 +111,9 @@ def test_policy_rejects_additional_noncanonical_hostnames(tmp_path: Path, hostna
         ConnectProxyPolicy.load(_policy(tmp_path, targets=[{"hostname": hostname, "port": 443}]))
 
 
-def test_connect_parser_requires_exact_hostname_port_and_host_header() -> None:
-    request = b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n"
+@pytest.mark.parametrize("host", ["api.openai.com:443", "api.openai.com", "API.OPENAI.COM"])
+def test_connect_parser_requires_matching_hostname_and_https_port(host: str) -> None:
+    request = f"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
     assert _parse_connect_request(request) == ("api.openai.com", 443)
 
 
@@ -125,6 +126,13 @@ def test_connect_parser_requires_exact_hostname_port_and_host_header() -> None:
         b"CONNECT api.openai.com:443 HTTP/1.0\r\n\r\n",
         b"GET https://api.openai.com/ HTTP/1.1\r\nHost: api.openai.com\r\n\r\n",
         b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: other.example:443\r\n\r\n",
+        b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: other.example\r\n\r\n",
+        b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:80\r\n\r\n",
+        b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:0443\r\n\r\n",
+        b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com.\r\n\r\n",
+        b"CONNECT api.openai.com:443 HTTP/1.1\r\n"
+        b"Host: api.openai.com\r\nHost: api.openai.com:443\r\n\r\n",
+        b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com@other.example\r\n\r\n",
         b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n folded\r\n\r\n",
     ],
 )

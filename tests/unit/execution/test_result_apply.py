@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vuzol.config import DeliveryMode, GitDeliveryPolicy
-from vuzol.execution.git import GitError
+from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.result_apply import ResultApplyHandler
 from vuzol.storage.types import ApprovalStatus, StepStatus
 from vuzol.workflows.domain import OutcomeKind
@@ -46,6 +46,7 @@ def project_policy(
         "branch_changed",
         "identity_changed",
         "git",
+        "access",
     ),
 )
 async def test_result_apply_fails_closed_before_recording_delivery(failure: str) -> None:
@@ -56,13 +57,15 @@ async def test_result_apply_fails_closed_before_recording_delivery(failure: str)
         enabled=failure != "disabled",
         default_branch="other" if failure == "branch_changed" else "main",
     )
-    git = MagicMock()
+    git = MagicMock(spec=LocalGit)
     git.repository_identity = AsyncMock(
         return_value=(("c" if failure == "identity_changed" else "b") * 64, None)
     )
     git.apply_result = AsyncMock()
     if failure == "git":
         git.apply_result.side_effect = GitError("target branch changed")
+    if failure == "access":
+        git.require_apply_access.side_effect = GitError("applier path is read-only")
     handler = ResultApplyHandler(MagicMock(), registries, git)
     approval_id = uuid.uuid4()
     worktree = SimpleNamespace(id=uuid.uuid4(), project_id="vuzol", path="/retained/result")
@@ -84,6 +87,9 @@ async def test_result_apply_fails_closed_before_recording_delivery(failure: str)
     assert outcome.kind is OutcomeKind.BLOCKED
     assert outcome.category == "approved_result_not_applied"
     handler._record_applied.assert_not_awaited()
+    if failure == "access":
+        handler._record_intent.assert_not_awaited()
+        git.apply_result.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -92,7 +98,7 @@ async def test_result_apply_tolerates_unrelated_bundle_revision_drift() -> None:
 
     registries = MagicMock(revision="z" * 64)
     registries.projects.get.return_value = project_policy()
-    git = MagicMock()
+    git = MagicMock(spec=LocalGit)
     git.repository_identity = AsyncMock(return_value=("b" * 64, None))
     git.apply_result = AsyncMock(return_value=True)
     handler = ResultApplyHandler(MagicMock(), registries, git)
@@ -122,7 +128,7 @@ async def test_result_apply_tolerates_unrelated_bundle_revision_drift() -> None:
 async def test_result_apply_records_the_exact_successful_operation() -> None:
     registries = MagicMock(revision="a" * 64)
     registries.projects.get.return_value = project_policy()
-    git = MagicMock()
+    git = MagicMock(spec=LocalGit)
     git.repository_identity = AsyncMock(return_value=("b" * 64, None))
     git.apply_result = AsyncMock(return_value=True)
     handler = ResultApplyHandler(MagicMock(), registries, git)

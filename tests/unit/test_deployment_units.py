@@ -41,6 +41,17 @@ def test_static_publisher_is_unprivileged_and_path_fenced() -> None:
     assert "Persistent=true" in timer
 
 
+def test_applier_allows_managed_repositories_without_single_project_exception() -> None:
+    config = APPLIER_UNIT.read_text()
+    assert "ReadWritePaths=/srv/vuzol/repositories\n" in config
+    assert "ReadOnlyPaths=/srv/vuzol/repositories" not in config
+    assert "ReadOnlyPaths=/srv/vuzol/worktrees /etc/vuzol" in config
+    assert "ReadWritePaths=/srv/vuzol/artifacts" in config
+    assert "ProtectSystem=strict" in config
+    assert "afterword" not in config
+    assert "books-rating" not in config
+
+
 def test_static_publisher_worker_is_unprivileged_and_path_fenced() -> None:
     service = _read(STATIC_PUBLISHER_WORKER)
     assert "User=vuzol-publisher" in service
@@ -57,6 +68,32 @@ def test_static_site_caddy_route_is_project_generic() -> None:
     assert "path_regexp project" in config
     assert "/srv/vuzol/sites/hryshyn.dev/{re.project.1}/current" in config
     assert "bill-buddy" not in config
+
+
+def test_split_host_origin_is_private_and_host_scoped() -> None:
+    config = (REPO_ROOT / "deploy/caddy/vuzol-private-origin.caddy").read_text()
+    assert "http://:8092" in config
+    assert "bind 10.0.0.3" in config
+    assert "0.0.0.0" not in config  # noqa: S104 - explicitly forbid wildcard binding
+    assert "@preview host test.hryshyn.dev" in config
+    assert "reverse_proxy 127.0.0.1:8091" in config
+    assert "@production host hryshyn.dev www.hryshyn.dev" in config
+    assert "/srv/vuzol/sites/hryshyn.dev/{re.originProject.1}/current" in config
+    assert 'respond "Unknown publication host" 404' in config
+
+
+def test_split_host_edge_keeps_local_sites_and_proxies_unknown_projects() -> None:
+    config = (REPO_ROOT / "deploy/caddy/vuzol-edge-routes.caddy").read_text()
+    assert "@localProject file" in config
+    assert "try_files /index.html" in config
+    assert "handle @localProject" in config
+    assert config.index("handle @localProject") < config.index("reverse_proxy 10.0.0.3:8092")
+    assert "root * /var/www/hryshyn.dev" in config
+    preview = config.split("(vuzol_edge_preview)", 1)[1]
+    assert "reverse_proxy 10.0.0.3:8092" in preview
+    assert "127.0.0.1:8091" not in preview
+    assert "flush_interval -1" in preview
+    assert "books-rating" not in config
 
 
 def _read(p: Path) -> str:
@@ -254,7 +291,8 @@ def test_applier_has_only_the_managed_repository_write_boundary() -> None:
     text = _read(APPLIER_UNIT)
     assert "ExecStart=/opt/vuzol/.venv/bin/vuzol-applier" in text
     assert "ReadWritePaths=/srv/vuzol/repositories" in text
-    assert "ReadOnlyPaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /etc/vuzol" in text
+    assert "ReadOnlyPaths=/srv/vuzol/worktrees /etc/vuzol" in text
+    assert "ReadWritePaths=/srv/vuzol/artifacts" in text
     assert "/var/lib/vuzol-provider-state" not in text
     assert "docker.sock" not in text
     assert "NoNewPrivileges=true" in text

@@ -26,7 +26,8 @@ LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 ReadWritePaths=/srv/vuzol/repositories
-ReadOnlyPaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /etc/vuzol
+ReadOnlyPaths=/srv/vuzol/worktrees /etc/vuzol
+ReadWritePaths=/srv/vuzol/artifacts
 ReadWritePaths=/var/lib/vuzol/toolchains
 ReadWritePaths=/var/lib/vuzol/capability-downloads
 

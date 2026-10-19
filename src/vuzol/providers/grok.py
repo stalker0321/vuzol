@@ -172,6 +172,7 @@ class GrokCliAdapter:
                 request_sent=True,
                 safe_summary="supervised Grok transport failed after launch was possible",
             ) from error
+        measured_usage, receipt_id = _usage_receipt(result.stdout, result.duration_ms)
         if result.exit_code != 0:
             failure_text = f"{result.stdout}\n{result.stderr}".lower()
             if "free-usage-exhausted" in failure_text or "usage limit" in failure_text:
@@ -180,22 +181,30 @@ class GrokCliAdapter:
                     retryable=True,
                     request_sent=True,
                     safe_summary="Grok subscription usage is exhausted for the current window",
+                    usage=measured_usage,
+                    provider_request_id=receipt_id,
                 )
             raise ProviderFailure(
                 ProviderErrorCategory.PROVIDER_UNAVAILABLE,
                 retryable=True,
                 request_sent=True,
                 safe_summary="Grok CLI invocation failed",
+                usage=measured_usage,
+                provider_request_id=receipt_id,
             )
         try:
-            body = _decode_output(result.stdout)
-            usage = body.get("usage", {})
+            body = _decode_output(
+                result.stdout,
+                final_response_only=request.output_schema_version is not None,
+            )
         except GrokProviderCancelled as error:
             raise ProviderFailure(
                 ProviderErrorCategory.CANCELLED,
                 retryable=True,
                 request_sent=True,
                 safe_summary="Grok CLI reported provider-originated cancellation",
+                usage=measured_usage,
+                provider_request_id=receipt_id,
             ) from error
         except (json.JSONDecodeError, ValueError) as error:
             raise ProviderFailure(
@@ -203,20 +212,31 @@ class GrokCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Grok CLI returned invalid output",
+                usage=measured_usage,
+                provider_request_id=receipt_id,
             ) from error
-        structured_output = _step09a_structured_output(request, str(body["text"]))
+        try:
+            structured_output = _step09a_structured_output(request, str(body["text"]))
+        except ProviderFailure as failure:
+            raise failure.with_receipt(
+                measured_usage, _optional_string(body.get("request_id"))
+            ) from failure
+        except ValueError as error:
+            raise ProviderFailure(
+                ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+                retryable=False,
+                request_sent=True,
+                safe_summary="Grok CLI returned invalid structured output",
+                usage=measured_usage,
+                provider_request_id=receipt_id,
+            ) from error
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,
             text=str(body["text"]),
             structured_output=structured_output,
             provider_request_id=_optional_string(body.get("request_id")),
             provider_session_id=_optional_string(body.get("session_id")),
-            usage=NormalizedUsage(
-                input_tokens=_usage_int(usage, "input_tokens"),
-                output_tokens=_usage_int(usage, "output_tokens"),
-                cached_tokens=_usage_int(usage, "cache_read_input_tokens"),
-                duration_ms=result.duration_ms,
-            ),
+            usage=measured_usage,
             finish_reason=_optional_string(body.get("finish_reason")),
             adapter_version=self.adapter_version,
         )
@@ -226,19 +246,61 @@ class GrokCliAdapter:
         return EffectiveProfileState()
 
 
-def _decode_output(stdout: str) -> dict[str, object]:
+def _usage_receipt(stdout: str, duration_ms: int) -> tuple[NormalizedUsage, str | None]:
+    """Read billing independently of the answer/completion verdict."""
+    final: dict[str, object] = {}
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "end":
+            final = event
+    raw = final.get("usage", {})
+    return (
+        NormalizedUsage(
+            input_tokens=_usage_int(raw, "input_tokens"),
+            output_tokens=_usage_int(raw, "output_tokens"),
+            cached_tokens=_usage_int(raw, "cache_read_input_tokens"),
+            duration_ms=duration_ms,
+        ),
+        _optional_string(final.get("requestId")),
+    )
+
+
+def _decode_output(stdout: str, *, final_response_only: bool = False) -> dict[str, object]:
+    """Keep tool-loop commentary separate from the final structured response.
+
+    Native streaming-json emits text deltas from *all* model responses. A
+    tool_call ends the preceding response; its text is not the final answer.
+    Plain-text consumers retain the whole turn. Structured consumers receive
+    only the response after the last tool call, still subject to strict schema
+    validation. Never extract a JSON-looking substring from arbitrary text.
+    """
     chunks: list[str] = []
     final: dict[str, object] | None = None
     for line in stdout.splitlines():
         event = json.loads(line)
         if not isinstance(event, dict):
             continue
-        if event.get("type") == "text" and isinstance(event.get("data"), str):
+        if final is not None:
+            raise ValueError("Grok JSONL contains events after its terminal response")
+        if event.get("type") == "tool_call" and final_response_only:
+            chunks.clear()
+        elif event.get("type") == "text" and isinstance(event.get("data"), str):
             chunks.append(event["data"])
         elif event.get("type") == "end":
             final = event
-    if final is not None and final.get("stopReason") == "Cancelled":
+    if final is not None and final.get("stopReason") in {"Cancelled", "cancelled"}:
         raise GrokProviderCancelled("Grok JSONL ended with provider cancellation")
+    if final is not None and final.get("stopReason") in {
+        "Error",
+        "error",
+        "MaxTurns",
+        "max_turns",
+        "max_turns_reached",
+    }:
+        raise ValueError("Grok JSONL ended without a completed model response")
     if final is None or not chunks:
         raise ValueError("Grok JSONL contains no completed response")
     return {
@@ -319,6 +381,13 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
 
 
 def _result_contract_instruction(request: ProviderRequest) -> str:
+    if request.output_schema_version == "independent-review.v1":
+        return (
+            "Return only the final independent-review JSON object matching the requested "
+            "schema, without introductory prose, markdown fences or trailing commentary. "
+            "Do not add worker-manifest fields such as unavailable_reason. Preserve all "
+            "findings and their actual verdict; incomplete evidence must not become a pass."
+        )
     if request.output_schema_version == "step09a-worker-edit-report.v1":
         return (
             "Do not invoke shell commands or run local checks. Vuzol owns measured "

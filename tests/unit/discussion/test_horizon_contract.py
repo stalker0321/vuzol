@@ -369,9 +369,7 @@ async def test_restart_keeps_existing_pin_with_flag_off() -> None:
     uow.work_packages.get_fenced_revision = AsyncMock(return_value=revision)
     uow.session = MagicMock()
     uow.session.scalar = AsyncMock(return_value=None)
-    uow.session.scalars = AsyncMock(
-        return_value=SimpleNamespace(all=MagicMock(return_value=[]))
-    )
+    uow.session.scalars = AsyncMock(return_value=SimpleNamespace(all=MagicMock(return_value=[])))
     uow.events.append = AsyncMock()
     uow.outbox.enqueue = AsyncMock()
     sequencer = WorkPackageSequencer(cast(Any, uow))
@@ -648,9 +646,7 @@ def _acceptance_service(
     proof_link = SimpleNamespace(ordinal=1, task_id=uuid.uuid4())
     proof_run_id = uuid.uuid4()
     proof_step_id = uuid.uuid4()
-    proof_step = SimpleNamespace(
-        payload={"action_envelope": {"result_commit": "b" * 40}}
-    )
+    proof_step = SimpleNamespace(payload={"action_envelope": {"result_commit": "b" * 40}})
     proof_approval = SimpleNamespace(step_id=proof_step_id)
     gets: list[object] = []
     if artifact_id is not None:
@@ -674,7 +670,13 @@ def _acceptance_service(
         "policy_revision": "d" * 64,
         "integration_base_head": "a" * 40,
         "result_commit": "b" * 40,
-        "criteria": [{"criterion_id": "done", "satisfied": True}],
+        "criteria": [
+            {
+                "criterion_id": "done",
+                "satisfied": True,
+                "evidence_ref": "gate:done:" + ("b" * 40),
+            }
+        ],
         "test_results": [],
         "review_refs": ["aa" * 32],
         "unresolved_caveats": [],

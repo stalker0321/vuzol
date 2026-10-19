@@ -1,5 +1,7 @@
 """Atomic provider budget reservation and idempotent usage reconciliation."""
 
+from __future__ import annotations
+
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -12,9 +14,11 @@ from vuzol.config.models import ProviderProfileConfig
 from vuzol.config.revision import content_revision
 from vuzol.config.settings import HardLimits
 from vuzol.discussion.horizon import parse_budget
+from vuzol.providers.control import ceiling_is_admission_only
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import (
+    Event,
     MaterializationLink,
     PlanRevision,
     ProviderBudgetReservation,
@@ -45,6 +49,365 @@ ORPHAN_MODEL = "unknown"
 
 class BudgetExceeded(RuntimeError):
     """A hard budget cannot accommodate another provider call."""
+
+
+EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY = (
+    "Явный денежный потолок исчерпан. Сделанная работа сохранена. "
+    "Увеличение потолка продолжает остаток и не стирает историю."
+)
+EXPLICIT_MONEY_CAP_UNKNOWN_SUMMARY = (
+    "Явный денежный потолок нельзя подтвердить: есть неизвестный расход. "
+    "Сделанная работа сохранена. Увеличение потолка само по себе не продолжит задачу. "  # noqa: RUF001
+    "Нужна сверка с поздней квитанцией или отдельное решение владельца, "  # noqa: RUF001
+    "что эта неопределённость допустима. Неизвестный расход не обнуляется."
+)
+ADMISSION_ONLY_CONSENT_SUMMARY = (
+    "Строгий денежный потолок нельзя гарантировать для этой сессии: адаптер "
+    "может отказать до запуска и остановить процесс, но не ограничивает уже "
+    "запущенную сессию. Нужно явное согласие владельца на эту ограниченную "
+    "гарантию либо контролируемый вызов."
+)
+# Kept for callers that still import the exceeded wording.
+EXPLICIT_MONEY_CAP_SUMMARY = EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY
+
+
+async def _note_budget_event(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    *,
+    event_type: str,
+    dimension: str,
+    detail: str,
+) -> None:
+    """Record one budget fact per task and dimension.
+
+    The budget advisory lock serializes callers, so a second overrun of the
+    same dimension does not enqueue another notification.
+    """
+
+    existing = await session.scalar(
+        select(Event.id).where(
+            Event.entity_type == "task",
+            Event.entity_id == task_id,
+            Event.event_type == event_type,
+            Event.payload["dimension"].as_string() == dimension,
+        )
+    )
+    if existing is not None:
+        return
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task_id,
+            event_type=event_type,
+            actor_type="budget",
+            payload={"dimension": dimension, "detail": detail},
+        )
+    )
+
+
+async def _enforce_or_note(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID | None,
+    exceeded: bool,
+    hard: bool,
+    dimension: str,
+    detail: str,
+) -> None:
+    if not exceeded:
+        return
+    if hard or task_id is None:
+        raise BudgetExceeded(detail)
+    await _note_budget_event(
+        session,
+        task_id,
+        event_type="budget.soft_overrun",
+        dimension=dimension,
+        detail=detail,
+    )
+
+
+async def note_admission_only_ceiling(
+    session: AsyncSession, task_id: uuid.UUID, profile_id: str
+) -> None:
+    """Say, once, that a running CLI/tool session can outspend its reservation."""
+
+    await _note_budget_event(
+        session,
+        task_id,
+        event_type="budget.ceiling_unenforceable",
+        dimension=f"launch:{profile_id}",
+        detail=(
+            "explicit money cap is checked only before launch; "
+            "the adapter cannot cap the running session"
+        ),
+    )
+
+
+async def _explicit_money_family(session: AsyncSession, task_id: uuid.UUID) -> set[uuid.UUID]:
+    """Root task plus descendants. A child does not receive a fresh ceiling."""
+
+    root = task_id
+    seen = {task_id}
+    current = task_id
+    for _ in range(20):
+        parent_id = await session.scalar(select(Task.parent_task_id).where(Task.id == current))
+        if parent_id is None or parent_id in seen:
+            break
+        seen.add(parent_id)
+        root = parent_id
+        current = parent_id
+    family = {root}
+    frontier = [root]
+    for _ in range(20):
+        if not frontier:
+            break
+        children = (
+            await session.scalars(select(Task.id).where(Task.parent_task_id.in_(frontier)))
+        ).all()
+        frontier = [child for child in children if child not in family]
+        family.update(frontier)
+    return family
+
+
+async def _task_family_root(session: AsyncSession, task_id: uuid.UUID) -> uuid.UUID:
+    root = task_id
+    seen = {task_id}
+    current = task_id
+    for _ in range(20):
+        parent_id = await session.scalar(select(Task.parent_task_id).where(Task.id == current))
+        if parent_id is None or parent_id in seen:
+            break
+        seen.add(parent_id)
+        root = parent_id
+        current = parent_id
+    return root
+
+
+async def _accepted_unknown_usage_ids(
+    session: AsyncSession, family: set[uuid.UUID]
+) -> set[str]:
+    """Usage ids an owner has explicitly accepted as still unknown."""
+
+    rows = (
+        await session.scalars(
+            select(Event).where(
+                Event.entity_type == "task",
+                Event.entity_id.in_(family),
+                Event.event_type == "budget.cost_uncertainty_accepted",
+            )
+        )
+    ).all()
+    covered: set[str] = set()
+    for event in rows:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        raw_ids = payload.get("usage_ids")
+        if isinstance(raw_ids, list):
+            covered.update(str(item) for item in raw_ids)
+    return covered
+
+
+async def _has_admission_only_consent(session: AsyncSession, task_id: uuid.UUID) -> bool:
+    root = await _task_family_root(session, task_id)
+    existing = await session.scalar(
+        select(Event.id).where(
+            Event.entity_type == "task",
+            Event.entity_id == root,
+            Event.event_type == "budget.admission_only_consent",
+        )
+    )
+    return existing is not None
+
+
+async def _require_admission_only_consent(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID | None,
+    limits: HardLimits,
+    admission_only: bool,
+) -> None:
+    if not admission_only or task_id is None or limits.explicit_money_cap_units is None:
+        return
+    if await _has_admission_only_consent(session, task_id):
+        return
+    raise BudgetExceeded(
+        "explicit money cap cannot cover an admission-only launch without owner consent"
+    )
+
+
+async def record_admission_only_consent(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    principal_user_id: int,
+    reason: str,
+) -> uuid.UUID:
+    """Store the owner's acceptance that a strict cap cannot bound a CLI/tool session."""
+
+    if principal_user_id == 0 or not reason.strip():
+        raise ValueError("admission-only consent requires an owner and a reason")
+    root = await _task_family_root(session, task_id)
+    existing = await session.scalar(
+        select(Event.id).where(
+            Event.entity_type == "task",
+            Event.entity_id == root,
+            Event.event_type == "budget.admission_only_consent",
+        )
+    )
+    if existing is not None:
+        return existing
+    row = Event(
+        entity_type="task",
+        entity_id=root,
+        event_type="budget.admission_only_consent",
+        actor_type="user",
+        actor_id=str(principal_user_id),
+        payload={
+            "principal_user_id": principal_user_id,
+            "reason": reason.strip(),
+            "scope": "task_family",
+            "root_task_id": str(root),
+            "statement": ADMISSION_ONLY_CONSENT_SUMMARY,
+        },
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def reconcile_unknown_usage(
+    session: AsyncSession,
+    *,
+    usage_id: uuid.UUID,
+    cost_units: Decimal,
+    principal_user_id: int,
+) -> None:
+    """Replace an unknown floor with a measured receipt. Does not invent zero."""
+
+    if principal_user_id == 0:
+        raise ValueError("reconciliation requires an owner")
+    if cost_units <= 0:
+        raise ValueError("a measured receipt is not zero")
+    row = await session.get(UsageRecord, usage_id, with_for_update=True)
+    if row is None or row.cost_known or row.task_id is None:
+        raise ValueError("unknown usage receipt is missing")
+    previous = row.cost_units
+    row.cost_units = cost_units
+    row.cost_known = True
+    row.late_receipt = True
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=row.task_id,
+            event_type="budget.cost_reconciled",
+            actor_type="user",
+            actor_id=str(principal_user_id),
+            payload={
+                "usage_id": str(usage_id),
+                "previous_cost_units": None if previous is None else str(previous),
+                "cost_units": str(cost_units),
+                "principal_user_id": principal_user_id,
+            },
+        )
+    )
+    await session.flush()
+
+
+async def accept_cost_uncertainty(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    principal_user_id: int,
+    reason: str,
+) -> None:
+    """Owner accepts the current unknown receipts. Later unknown rows stay blocked.
+
+    The stored floor is kept. ``cost_known`` stays false. Epoch changes do not
+    cover a receipt that was not listed here.
+    """
+
+    if principal_user_id == 0 or not reason.strip():
+        raise ValueError("uncertainty acceptance requires an owner and a reason")
+    family = await _explicit_money_family(session, task_id)
+    unknown_rows = (
+        await session.scalars(
+            select(UsageRecord).where(
+                UsageRecord.task_id.in_(family),
+                UsageRecord.cost_known.is_(False),
+            )
+        )
+    ).all()
+    if not unknown_rows:
+        raise ValueError("no unknown cost to accept")
+    root = await _task_family_root(session, task_id)
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=root,
+            event_type="budget.cost_uncertainty_accepted",
+            actor_type="user",
+            actor_id=str(principal_user_id),
+            payload={
+                "principal_user_id": principal_user_id,
+                "reason": reason.strip(),
+                "scope": "task_family",
+                "usage_ids": [str(row.id) for row in unknown_rows],
+                "floors": [
+                    None if row.cost_units is None else str(row.cost_units) for row in unknown_rows
+                ],
+            },
+        )
+    )
+    await session.flush()
+
+
+async def _enforce_explicit_money_cap(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID | None,
+    estimate: ReservationEstimate,
+    limits: HardLimits,
+) -> None:
+    """Lifetime owner ceiling. Epoch, retry, and review allowance do not reset it.
+
+    Unknown cost is a floor, not a ceiling, so a strict cap cannot be certified
+    while any family receipt is unknown.
+    """
+
+    if task_id is None or limits.explicit_money_cap_units is None:
+        return
+    family = await _explicit_money_family(session, task_id)
+    unknown_rows = (
+        await session.scalars(
+            select(UsageRecord).where(
+                UsageRecord.task_id.in_(family),
+                UsageRecord.cost_known.is_(False),
+            )
+        )
+    ).all()
+    covered = await _accepted_unknown_usage_ids(session, family)
+    floors: list[Decimal] = []
+    for row in unknown_rows:
+        if str(row.id) not in covered or row.cost_units is None:
+            raise BudgetExceeded("explicit money cap cannot be certified while cost is unknown")
+        floors.append(Decimal(row.cost_units))
+    unknown_floor = sum(floors, Decimal("0"))
+    usage_cost = await session.scalar(
+        select(func.coalesce(func.sum(UsageRecord.cost_units), 0)).where(
+            UsageRecord.task_id.in_(family),
+            UsageRecord.cost_known.is_(True),
+        )
+    )
+    reserved_cost = await session.scalar(
+        select(func.coalesce(func.sum(ProviderBudgetReservation.reserved_cost_units), 0)).where(
+            ProviderBudgetReservation.task_id.in_(family),
+            ProviderBudgetReservation.status == BudgetReservationStatus.RESERVED,
+        )
+    )
+    spent = Decimal(usage_cost or 0) + Decimal(reserved_cost or 0) + unknown_floor
+    if spent + estimate.cost_units > Decimal(str(limits.explicit_money_cap_units)):
+        raise BudgetExceeded("explicit money cap exceeded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,9 +490,7 @@ async def resolve_horizon_scope(
     return intake_id
 
 
-async def resolve_package_id(
-    session: AsyncSession, task_id: uuid.UUID
-) -> uuid.UUID | None:
+async def resolve_package_id(session: AsyncSession, task_id: uuid.UUID) -> uuid.UUID | None:
     """Owning package of a materialized task, if any (D3 counters/fences)."""
 
     link = await session.scalar(
@@ -167,9 +528,7 @@ async def _lifetime_task_count(session: AsyncSession, horizon_id: uuid.UUID) -> 
     if tasks:
         attempts = (
             await session.scalar(
-                select(func.count())
-                .select_from(WorkAttempt)
-                .where(WorkAttempt.task_id.in_(tasks))
+                select(func.count()).select_from(WorkAttempt).where(WorkAttempt.task_id.in_(tasks))
             )
         ) or 0
     return len(tasks) + int(attempts)
@@ -199,18 +558,10 @@ async def _lifetime_totals(
     reserved = (
         await session.execute(
             select(
-                func.coalesce(
-                    func.sum(ProviderBudgetReservation.reserved_input_tokens), 0
-                ),
-                func.coalesce(
-                    func.sum(ProviderBudgetReservation.reserved_output_tokens), 0
-                ),
-                func.coalesce(
-                    func.sum(ProviderBudgetReservation.reserved_cost_units), 0
-                ),
-                func.coalesce(
-                    func.sum(ProviderBudgetReservation.reserved_quota_units), 0
-                ),
+                func.coalesce(func.sum(ProviderBudgetReservation.reserved_input_tokens), 0),
+                func.coalesce(func.sum(ProviderBudgetReservation.reserved_output_tokens), 0),
+                func.coalesce(func.sum(ProviderBudgetReservation.reserved_cost_units), 0),
+                func.coalesce(func.sum(ProviderBudgetReservation.reserved_quota_units), 0),
                 func.count(),
             ).where(
                 ProviderBudgetReservation.horizon_id == horizon_id,
@@ -232,9 +583,7 @@ async def _task_lifetime_calls(session: AsyncSession, task_id: uuid.UUID) -> int
 
     usage_calls = (
         await session.scalar(
-            select(func.count())
-            .select_from(UsageRecord)
-            .where(UsageRecord.task_id == task_id)
+            select(func.count()).select_from(UsageRecord).where(UsageRecord.task_id == task_id)
         )
     ) or 0
     reserved_calls = (
@@ -338,6 +687,39 @@ def account_usage(profile: ProviderProfileConfig, usage: NormalizedUsage) -> Nor
     return usage.model_copy(update={"cost_units": cost, "quota_units": quota})
 
 
+async def remaining_output_allowance(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    step_id: uuid.UUID,
+    budget_epoch: int,
+    requested: int,
+    limits: HardLimits,
+) -> int:
+    """Fit the next invocation to the remaining hard token envelope.
+
+    A retry must not request the entire step ceiling on top of its measured
+    first attempt. Outstanding reservations count too. The normal reserve path
+    still enforces every money/quota/input limit; this grants no extra budget.
+    """
+    output = min(requested, limits.provider_call_output_tokens)
+    if limits.usage_total_enforcement != "hard":
+        return output
+    await session.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK_KEY)))
+    task_usage = await _usage_totals(session, task_id=task_id, budget_epoch=budget_epoch)
+    task_reserved = await _reserved_totals(session, task_id=task_id, budget_epoch=budget_epoch)
+    step_usage = await _usage_totals(session, step_id=step_id, budget_epoch=budget_epoch)
+    step_reserved = await _reserved_totals(session, step_id=step_id, budget_epoch=budget_epoch)
+    return max(
+        0,
+        min(
+            output,
+            limits.task_output_tokens - task_usage[1] - task_reserved[1],
+            limits.step_output_tokens - step_usage[1] - step_reserved[1],
+        ),
+    )
+
+
 async def reserve_budget(
     session: AsyncSession,
     *,
@@ -351,6 +733,7 @@ async def reserve_budget(
     review_allowance: bool = False,
     accounting: AccountingContext | None = None,
     invocation_id: uuid.UUID | None = None,
+    admission_only: bool = False,
 ) -> ProviderBudgetReservation:
     await session.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK_KEY)))
     if step_id is None:
@@ -394,10 +777,28 @@ async def reserve_budget(
         raise BudgetExceeded("provider call input-token limit exceeded")
     if estimate.output_tokens > limits.provider_call_output_tokens:
         raise BudgetExceeded("provider call output-token limit exceeded")
-    if step_usage[0] + step_reserved[0] + estimate.input_tokens > limits.step_input_tokens:
-        raise BudgetExceeded("step input-token limit exceeded")
-    if step_usage[1] + step_reserved[1] + estimate.output_tokens > limits.step_output_tokens:
-        raise BudgetExceeded("step output-token limit exceeded")
+    usage_hard = limits.usage_total_enforcement == "hard"
+    cost_hard = limits.estimated_cost_enforcement == "hard"
+    await _enforce_or_note(
+        session,
+        task_id=task_id,
+        exceeded=(
+            step_usage[0] + step_reserved[0] + estimate.input_tokens > limits.step_input_tokens
+        ),
+        hard=usage_hard,
+        dimension="step_input_tokens",
+        detail="step input-token limit exceeded",
+    )
+    await _enforce_or_note(
+        session,
+        task_id=task_id,
+        exceeded=(
+            step_usage[1] + step_reserved[1] + estimate.output_tokens > limits.step_output_tokens
+        ),
+        hard=usage_hard,
+        dimension="step_output_tokens",
+        detail="step output-token limit exceeded",
+    )
     # D3 Q4: review calls are subject to task caps like everything else; the
     # old bypass is gone. A deductible allowance pool per task
     # (HardLimits.review_allowance_*) covers the overage part and is
@@ -412,17 +813,17 @@ async def reserve_budget(
             Decimal(str(limits.review_allowance_cost_units)) - used_cost, Decimal("0")
         )
         over_in = max(
-            task_usage[0] + task_reserved[0] + estimate.input_tokens
-            - limits.task_input_tokens,
+            task_usage[0] + task_reserved[0] + estimate.input_tokens - limits.task_input_tokens,
             0,
         )
         over_out = max(
-            task_usage[1] + task_reserved[1] + estimate.output_tokens
-            - limits.task_output_tokens,
+            task_usage[1] + task_reserved[1] + estimate.output_tokens - limits.task_output_tokens,
             0,
         )
         over_cost = max(
-            task_usage[2] + task_reserved[2] + estimate.cost_units
+            task_usage[2]
+            + task_reserved[2]
+            + estimate.cost_units
             - Decimal(str(limits.task_cost_units)),
             Decimal("0"),
         )
@@ -431,25 +832,50 @@ async def reserve_budget(
             min(estimate.output_tokens, over_out, headroom_out),
             min(estimate.cost_units, over_cost, headroom_cost),
         )
-    if (
-        task_usage[0] + task_reserved[0] + estimate.input_tokens - allowed_in
-        > limits.task_input_tokens
-    ):
-        raise BudgetExceeded("task input-token limit exceeded")
-    if (
-        task_usage[1] + task_reserved[1] + estimate.output_tokens - allowed_out
-        > limits.task_output_tokens
-    ):
-        raise BudgetExceeded("task output-token limit exceeded")
-    if step_usage[2] + step_reserved[2] + estimate.cost_units > Decimal(
-        str(limits.step_cost_units)
-    ):
-        raise BudgetExceeded("step cost limit exceeded")
-    if (
-        task_usage[2] + task_reserved[2] + estimate.cost_units - allowed_cost
-        > Decimal(str(limits.task_cost_units))
-    ):
-        raise BudgetExceeded("task cost limit exceeded")
+    await _enforce_or_note(
+        session,
+        task_id=task_id,
+        exceeded=(
+            task_usage[0] + task_reserved[0] + estimate.input_tokens - allowed_in
+            > limits.task_input_tokens
+        ),
+        hard=usage_hard,
+        dimension="task_input_tokens",
+        detail="task input-token limit exceeded",
+    )
+    await _enforce_or_note(
+        session,
+        task_id=task_id,
+        exceeded=(
+            task_usage[1] + task_reserved[1] + estimate.output_tokens - allowed_out
+            > limits.task_output_tokens
+        ),
+        hard=usage_hard,
+        dimension="task_output_tokens",
+        detail="task output-token limit exceeded",
+    )
+    await _enforce_or_note(
+        session,
+        task_id=task_id,
+        exceeded=(
+            step_usage[2] + step_reserved[2] + estimate.cost_units
+            > Decimal(str(limits.step_cost_units))
+        ),
+        hard=cost_hard,
+        dimension="step_cost_units",
+        detail="step cost limit exceeded",
+    )
+    await _enforce_or_note(
+        session,
+        task_id=task_id,
+        exceeded=(
+            task_usage[2] + task_reserved[2] + estimate.cost_units - allowed_cost
+            > Decimal(str(limits.task_cost_units))
+        ),
+        hard=cost_hard,
+        dimension="task_cost_units",
+        detail="task cost limit exceeded",
+    )
     if daily_usage[2] + daily_reserved[2] + estimate.cost_units > Decimal(
         str(limits.daily_cost_units)
     ):
@@ -476,9 +902,7 @@ async def reserve_budget(
     if limits.max_work_attempts > 0:
         attempt_rows = (
             await session.scalar(
-                select(func.count())
-                .select_from(WorkAttempt)
-                .where(WorkAttempt.task_id == task_id)
+                select(func.count()).select_from(WorkAttempt).where(WorkAttempt.task_id == task_id)
             )
         ) or 0
         step_attempts = (
@@ -503,6 +927,10 @@ async def reserve_budget(
             ) or 0
             if int(revisions) >= limits.max_replans:
                 raise BudgetExceeded("package replan limit exceeded")
+    await _require_admission_only_consent(
+        session, task_id=task_id, limits=limits, admission_only=admission_only
+    )
+    await _enforce_explicit_money_cap(session, task_id=task_id, estimate=estimate, limits=limits)
 
     reservation = ProviderBudgetReservation(
         task_id=task_id,
@@ -606,43 +1034,70 @@ async def reserve_invocation_budget(
         str(limits.daily_quota_units)
     ):
         raise BudgetExceeded("daily quota limit exceeded")
+    budget_epoch = 0
     if task_id is not None:
         task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
         if task is None:
             raise LookupError(f"unknown budget task: {task_id}")
+        # Admission and the stored row must name the same epoch. Epoch 0 is
+        # only the bucket for an invocation that is not bound to a task.
         budget_epoch = task.budget_epoch
         task_usage = await _usage_totals(session, task_id=task_id, budget_epoch=budget_epoch)
-        task_reserved = await _reserved_totals(
-            session, task_id=task_id, budget_epoch=budget_epoch
+        task_reserved = await _reserved_totals(session, task_id=task_id, budget_epoch=budget_epoch)
+        usage_hard = limits.usage_total_enforcement == "hard"
+        cost_hard = limits.estimated_cost_enforcement == "hard"
+        await _enforce_or_note(
+            session,
+            task_id=task_id,
+            exceeded=(
+                task_usage[0] + task_reserved[0] + estimate.input_tokens > limits.task_input_tokens
+            ),
+            hard=usage_hard,
+            dimension="task_input_tokens",
+            detail="task input-token limit exceeded",
         )
-        if (
-            task_usage[0] + task_reserved[0] + estimate.input_tokens
-            > limits.task_input_tokens
-        ):
-            raise BudgetExceeded("task input-token limit exceeded")
-        if (
-            task_usage[1] + task_reserved[1] + estimate.output_tokens
-            > limits.task_output_tokens
-        ):
-            raise BudgetExceeded("task output-token limit exceeded")
-        if (
-            task_usage[2] + task_reserved[2] + estimate.cost_units
-            > Decimal(str(limits.task_cost_units))
-        ):
-            raise BudgetExceeded("task cost limit exceeded")
+        await _enforce_or_note(
+            session,
+            task_id=task_id,
+            exceeded=(
+                task_usage[1] + task_reserved[1] + estimate.output_tokens
+                > limits.task_output_tokens
+            ),
+            hard=usage_hard,
+            dimension="task_output_tokens",
+            detail="task output-token limit exceeded",
+        )
+        await _enforce_or_note(
+            session,
+            task_id=task_id,
+            exceeded=(
+                task_usage[2] + task_reserved[2] + estimate.cost_units
+                > Decimal(str(limits.task_cost_units))
+            ),
+            hard=cost_hard,
+            dimension="task_cost_units",
+            detail="task cost limit exceeded",
+        )
     if accounting.horizon_id is not None:
         await _enforce_lifetime_budget(
             session,
             horizon_id=accounting.horizon_id,
             estimate=estimate,
         )
+    await _require_admission_only_consent(
+        session,
+        task_id=task_id,
+        limits=limits,
+        admission_only=ceiling_is_admission_only(profile),
+    )
+    await _enforce_explicit_money_cap(session, task_id=task_id, estimate=estimate, limits=limits)
     reservation = ProviderBudgetReservation(
         task_id=task_id,
         run_id=run_id,
         step_id=None,
         invocation_id=invocation_id,
         profile_id=profile.id,
-        budget_epoch=0,
+        budget_epoch=budget_epoch,
         provider_attempt=1,
         reserved_input_tokens=estimate.input_tokens,
         reserved_output_tokens=estimate.output_tokens,
@@ -976,9 +1431,7 @@ async def release_reservation(
         reservation.reconciled_at = func.now()
 
 
-async def release_reservation_unfenced(
-    session: AsyncSession, *, reservation_id: uuid.UUID
-) -> None:
+async def release_reservation_unfenced(session: AsyncSession, *, reservation_id: uuid.UUID) -> None:
     """Release a reservation whose lease is already gone.
 
     Used only when it is known that no provider request was sent (e.g. an
@@ -1206,8 +1659,7 @@ async def usage_totals_by_purpose(
         statement = statement.where(UsageRecord.task_id == task_id)
     rows = (await session.execute(statement)).all()
     return [
-        (str(row[0]) if row[0] is not None else None, Decimal(row[1]), int(row[2]))
-        for row in rows
+        (str(row[0]) if row[0] is not None else None, Decimal(row[1]), int(row[2])) for row in rows
     ]
 
 

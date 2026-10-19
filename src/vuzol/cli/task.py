@@ -12,11 +12,16 @@ import asyncio
 import json
 import sys
 import uuid
+from decimal import Decimal, InvalidOperation
 
 from vuzol.config import get_runtime_configuration
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
-from vuzol.workflows.application import Principal, TaskControlService
+from vuzol.workflows.application import OwnerDecision, Principal, TaskControlService
+
+_OWNER_COMMANDS = frozenset(
+    {"admit_ceiling", "accept_uncertainty", "reconcile_cost", "accept_criterion"}
+)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -38,10 +43,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "retry",
             "revalidate",
             "rereview",
+            "admit_ceiling",
+            "accept_uncertainty",
+            "reconcile_cost",
+            "accept_criterion",
             "inspect",
         ],
     )
     parser.add_argument("--step-id", type=uuid.UUID, default=None, help="Bounded retry step UUID")
+    parser.add_argument("--reason", default=None, help="Owner reason for a continuation decision")
+    parser.add_argument("--cost", default=None, help="Measured receipt for reconcile_cost")
+    parser.add_argument("--criterion-id", default=None, help="One unproven exit criterion")
+    parser.add_argument("--usage-id", type=uuid.UUID, default=None, help="Unknown usage row")
     parser.add_argument("--task-id", required=True, help="Task UUID")
     parser.add_argument("--user-id", required=True, type=int, help="Operator user ID")
     parser.add_argument(
@@ -60,6 +73,27 @@ async def _run(args: argparse.Namespace) -> int:
     except ValueError:
         print("error: --task-id must be a UUID", file=sys.stderr)
         return 2
+    decision = None
+    if args.command in _OWNER_COMMANDS:
+        if not isinstance(args.reason, str) or not args.reason.strip():
+            print("error: --reason is required", file=sys.stderr)
+            return 2
+        cost = None
+        if args.cost is not None:
+            try:
+                cost = Decimal(args.cost)
+            except InvalidOperation:
+                print("error: --cost must be a positive decimal", file=sys.stderr)
+                return 2
+        if args.command == "reconcile_cost" and (cost is None or cost <= 0):
+            print("error: --cost must be a positive decimal", file=sys.stderr)
+            return 2
+        decision = OwnerDecision(
+            reason=args.reason.strip(),
+            cost_units=cost,
+            usage_id=args.usage_id,
+            criterion_id=args.criterion_id,
+        )
     runtime = get_runtime_configuration(validate_profile_credentials=False)
     settings = runtime.settings
     configure_logging(service=f"{settings.service_name}-task", level=settings.log_level)
@@ -75,6 +109,7 @@ async def _run(args: argparse.Namespace) -> int:
                 principal=Principal(user_id=args.user_id, ingress_source="cli"),
                 expected_task_version=args.expected_version,
                 step_id=getattr(args, "step_id", None),
+                decision=decision,
             )
         except ValueError as error:
             logger.info("task command rejected", extra={"event": "ops.task.rejected"})

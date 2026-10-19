@@ -58,8 +58,9 @@ pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 @pytest.mark.parametrize("rich_messages", [False, True])
 @pytest.mark.parametrize("long_history", [False, True])
 @pytest.mark.parametrize("document_chars", [0, 50_000])
+@pytest.mark.parametrize("plain_text", [False, True])
 async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage(
-    postgres_dsn, tmp_path, rich_messages, long_history, document_chars
+    postgres_dsn, tmp_path, rich_messages, long_history, document_chars, plain_text
 ):
     engine, factory = storage(postgres_dsn)
     runtime = chat_runtime(tmp_path)
@@ -101,7 +102,12 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
         capture_output=True,
     )
     text = "**Ответ**\n\n" + "я" * 4324  # longer than the former 4000-char protocol cap
-    transport = StaticCodexTransport(codex_jsonl(json.dumps({"reply": text})))
+    # A literal JSON example is not a nested protocol envelope.
+    if plain_text:
+        text += '\n\nExample format: {"reply":"example"}'
+    transport = StaticCodexTransport(
+        codex_jsonl(text if plain_text else json.dumps({"reply": text}))
+    )
     worktrees = WorktreeService(tmp_path / "worktrees", LocalGit(), retention_days=3)
     try:
         async with UnitOfWork(factory) as uow:
@@ -250,6 +256,7 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
         )
         assert await provider.process_one()
         assert len(transport.invocations) == 1
+        assert "--output-schema" not in transport.invocations[0].argv
         envelope = json.loads(transport.invocations[0].stdin)
         if document_chars:
             assert envelope["original_input"].count("D" * document_chars) == 1

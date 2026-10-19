@@ -510,6 +510,54 @@ class WorkPackageService:
         )
         return package.version
 
+    async def bind_delegated_approval(
+        self,
+        *,
+        package_id: uuid.UUID,
+        revision_number: int,
+        h8: str,
+        expected_status_generation: int,
+        delegation_id: uuid.UUID,
+    ) -> int:
+        """Approve a plan as the server, citing the delegation rather than a user."""
+
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        require_generation(package.version, expected_status_generation)
+        if package.status is not WorkPackageStatus.DRAFT:
+            raise DomainError("invalid_transition")
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if package.head_revision_id != revision.id or revision.state is not PlanRevisionState.DRAFT:
+            raise DomainError("stale_revision")
+        revision.state = PlanRevisionState.APPROVED
+        revision.approved_at = datetime.now(UTC)
+        revision.approved_by_user_id = None
+        revision.approved_by_delegation_id = delegation_id
+        package.approved_revision_id = revision.id
+        package.integration_branch = None
+        package.integration_target_branch = None
+        package.integration_base_commit = None
+        package.integration_head_commit = None
+        package.preview_url = None
+        package.status = WorkPackageStatus.APPROVED
+        package.version += 1
+        await self._expire_pending_approvals(package.id)
+        await self._event(
+            revision.id,
+            WorkPackageEvent.REVISION_APPROVED,
+            "agent",
+            entity_type="plan_revision",
+            previous_state=WorkPackageStatus.DRAFT.value,
+            new_state=WorkPackageStatus.APPROVED.value,
+            payload={
+                "package_id": str(package_id),
+                "revision_number": revision.revision_number,
+                "content_hash": revision.content_hash,
+                "status_generation": package.version,
+                "approved_by_delegation_id": str(delegation_id),
+            },
+        )
+        return package.version
+
     async def discard(
         self,
         *,

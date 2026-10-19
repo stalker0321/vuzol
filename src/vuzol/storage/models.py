@@ -1034,6 +1034,11 @@ class WorkPackage(IdentityMixin, TimestampMixin, Base):
     # revise_draft may require the caller to present the expected revision
     # (stale intent → revision_conflict). NULL = legacy, fence opt-in.
     intent_revision: Mapped[str | None] = mapped_column(String(64))
+    managed_goal_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("managed_goals.id", ondelete="RESTRICT", name="fk_work_packages_managed_goal"),
+        index=True,
+    )
 
 
 class PlanRevision(IdentityMixin, Base):
@@ -1046,7 +1051,8 @@ class PlanRevision(IdentityMixin, Base):
             "content_hash ~ '^[0-9a-f]{64}$'", name="plan_revision_content_hash_lower_hex"
         ),
         CheckConstraint(
-            "state != 'approved' OR (approved_at IS NOT NULL AND approved_by_user_id IS NOT NULL)",
+            "state != 'approved' OR (approved_at IS NOT NULL AND "
+            "(approved_by_user_id IS NOT NULL OR approved_by_delegation_id IS NOT NULL))",
             name="plan_revision_approval_provenance",
         ),
         CheckConstraint(
@@ -1081,6 +1087,9 @@ class PlanRevision(IdentityMixin, Base):
     prompt_version: Mapped[str | None] = mapped_column(String(100))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     approved_by_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    approved_by_delegation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("goal_delegations.id", ondelete="RESTRICT")
+    )
     approval_token_hash: Mapped[str | None] = mapped_column(String(64))
     immutable_body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

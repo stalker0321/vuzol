@@ -24,6 +24,7 @@ from vuzol.leadership.commands import (
     parse_command_name,
     payload_hash,
 )
+from vuzol.leadership.evidence import assess_completion
 from vuzol.leadership.persistence import (
     CONTRACT_VERSION,
     LIVE_GOAL_LIFECYCLES,
@@ -38,8 +39,9 @@ from vuzol.leadership.policy import (
     delegation_is_expired,
     integration_branch_rejection,
 )
-from vuzol.storage.models import Event
-from vuzol.storage.types import EstimatedComplexity, RiskLevel
+from vuzol.leadership.wakeups import enabled_wakeup_key, enqueue_goal_wakeup
+from vuzol.storage.models import Event, WorkPackage
+from vuzol.storage.types import EstimatedComplexity, RiskLevel, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.workflows.application import Principal
 
@@ -213,6 +215,13 @@ class LeadershipCommandService:
             condition = command.payload.get("condition")
             if not isinstance(condition, dict) or not condition.get("kind"):
                 return _Outcome(CommandStatus.DENIED, "wait_condition_required", {}, goal)
+            if await _wait_already_satisfied(uow.session, condition):
+                return _Outcome(
+                    CommandStatus.APPLIED,
+                    "already_satisfied",
+                    {"version": goal.version},
+                    goal,
+                )
             goal.wakeup_condition = dict(condition)
             goal.lease_owner = None
             goal.lease_until = None
@@ -230,14 +239,18 @@ class LeadershipCommandService:
         if name is LeadCommandName.START_BATCH:
             if self._batch_executor is None:
                 return _Outcome(CommandStatus.UNSUPPORTED, "batch_executor_unbound", {}, goal)
-            produced = await self._batch_executor(
-                uow,
-                actor=actor,
-                goal=goal,
-                delegation=delegation,
-                command=command,
-                repeat_limit=self._repeat_limit,
-            )
+            try:
+                async with uow.session.begin_nested():
+                    produced = await self._batch_executor(
+                        uow,
+                        actor=actor,
+                        goal=goal,
+                        delegation=delegation,
+                        command=command,
+                        repeat_limit=self._repeat_limit,
+                    )
+            except DomainError as error:
+                return _Outcome(CommandStatus.DENIED, error.code, {}, goal)
             status = CommandStatus(str(produced.pop("status", CommandStatus.APPLIED.value)))
             reason = produced.pop("reason", None)
             return _Outcome(status, None if reason is None else str(reason), produced, goal)
@@ -245,11 +258,36 @@ class LeadershipCommandService:
             goal.wakeup_condition = {"kind": "revision", "note": command.reason}
             return _transition(goal, actor, "waiting", "revision", CommandStatus.WAITING)
         if name is LeadCommandName.PROPOSE_COMPLETION:
-            return _Outcome(
-                CommandStatus.WAITING,
-                "evidence_not_recorded",
-                {"criteria": list(goal.criteria)},
-                goal,
+            assessment = await assess_completion(uow.session, goal)
+            if assessment.satisfied:
+                previous = goal.lifecycle
+                goal.lifecycle = "completed"
+                goal.waiting_reason = None
+                goal.lease_owner = None
+                goal.lease_until = None
+                _bump(goal, actor)
+                _event(
+                    uow.session,
+                    goal,
+                    actor,
+                    "managed_goal.completion_proposed",
+                    previous,
+                    goal.lifecycle,
+                    extra={"covered": list(assessment.covered)},
+                )
+                return _Outcome(
+                    CommandStatus.APPLIED,
+                    None,
+                    {
+                        "version": goal.version,
+                        "lifecycle": goal.lifecycle,
+                        "covered": list(assessment.covered),
+                    },
+                    goal,
+                )
+            goal.wakeup_condition = {"kind": "owner", "missing": list(assessment.missing)}
+            return _transition(
+                goal, actor, "waiting", "evidence_not_recorded", CommandStatus.WAITING
             )
         if name in {
             LeadCommandName.ACCEPT_CRITERION,
@@ -309,6 +347,10 @@ class LeadershipCommandService:
         )
         uow.session.add(delegation)
         await uow.session.flush()
+        default_branch = self._default_branches.get(command.project_id)
+        constraints: dict[str, Any] = {}
+        if default_branch:
+            constraints["project_default_branch"] = default_branch
         goal = ManagedGoal(
             project_id=command.project_id,
             owner_user_id=actor.user_id,
@@ -319,12 +361,19 @@ class LeadershipCommandService:
             original_request=request,
             scope_text=scope,
             criteria=criteria,
-            constraints={},
+            constraints=constraints,
             lifecycle="active",
             integration_branch=branch,
         )
         uow.session.add(goal)
         await uow.session.flush()
+        await enqueue_goal_wakeup(
+            uow.session,
+            goal_id=goal.id,
+            idempotency_key=enabled_wakeup_key(goal.id),
+            package_id=None,
+            kind="enabled",
+        )
         _event(uow.session, goal, actor, "managed_goal.enabled", None, "active")
         return _Outcome(
             CommandStatus.APPLIED,
@@ -470,6 +519,10 @@ def _criteria(value: object) -> list[dict[str, str]]:
         seen.add(criterion_id)
         criteria.append({"id": criterion_id, "description": description})
     return criteria
+
+
+def plan_draft_from_payload(payload: Mapping[str, Any]) -> PlanDraft:
+    return _plan_draft(payload)
 
 
 def _plan_draft(payload: Mapping[str, Any]) -> PlanDraft:
@@ -652,6 +705,23 @@ def _event(
             },
         )
     )
+
+
+async def _wait_already_satisfied(session: AsyncSession, condition: Mapping[str, Any]) -> bool:
+    if condition.get("kind") != "package":
+        return False
+    try:
+        package_id = uuid.UUID(str(condition.get("package_id")))
+    except (TypeError, ValueError):
+        return False
+    package = await session.get(WorkPackage, package_id)
+    if package is None:
+        return False
+    return package.status in {
+        WorkPackageStatus.COMPLETED,
+        WorkPackageStatus.STOPPED,
+        WorkPackageStatus.DISCARDED,
+    }
 
 
 def _uuid(value: uuid.UUID | None) -> str | None:

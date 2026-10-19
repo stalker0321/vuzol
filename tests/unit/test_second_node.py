@@ -122,8 +122,8 @@ def test_migration_chain_has_single_head() -> None:
     config.set_main_option("script_location", "alembic")
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    # D5 advances the single head: memory_units substrate (additive only).
-    assert heads == ["d5e1f4c7a9b2"]
+    # Project-lead execution is the single head. The chain stays additive.
+    assert heads == ["c2b8f1e02d31"]
     seen: set[str] = set()
     revision: str | None = heads[0]
     while revision is not None:

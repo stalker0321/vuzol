@@ -120,6 +120,32 @@ def is_plan_command(text: str | None) -> bool:
     return len(parts) == 1 and parts[0].split("@", 1)[0] == "/plan"
 
 
+def parse_lead_command(text: str | None) -> tuple[str, str] | None:
+    """Return ``(kind, argument)`` for an owner project-lead command."""
+
+    if text is None:
+        return None
+    parts = text.strip().split(maxsplit=1)
+    if not parts:
+        return None
+    command = parts[0].split("@", 1)[0]
+    if command == "/lead":
+        argument = parts[1].strip() if len(parts) > 1 else ""
+        if not argument:
+            return None
+        return ("enable", argument)
+    kinds = {
+        "/lead_pause": "pause",
+        "/lead_resume": "resume",
+        "/lead_cancel": "cancel",
+        "/lead_status": "status",
+    }
+    kind = kinds.get(command)
+    if kind is None or len(parts) != 1:
+        return None
+    return (kind, "")
+
+
 def is_import_command(text: str | None) -> bool:
     """True for bare ``/import`` (optional @bot suffix)."""
 

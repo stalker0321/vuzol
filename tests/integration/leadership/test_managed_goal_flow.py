@@ -58,7 +58,7 @@ from vuzol.leadership.model import (
     LeadSnapshot,
     UnconfiguredLeadModel,
 )
-from vuzol.leadership.persistence import LeadershipTurn, ManagedGoal
+from vuzol.leadership.persistence import GoalDelegation, LeadershipTurn, ManagedGoal
 from vuzol.leadership.service import LeadershipCommandService
 from vuzol.leadership.wakeups import enqueue_goal_wakeup
 from vuzol.leadership.worker import ProjectLeadWorker
@@ -226,6 +226,42 @@ async def test_pause_during_inference_discards_the_response(postgres_dsn: str) -
             goal = await session.get(ManagedGoal, goal_id)
             turn = await session.scalar(select(LeadershipTurn))
             assert goal is not None and goal.lifecycle == "paused"
+            assert turn is not None and turn.status == "lost"
+        assert not await worker.process_one()
+        assert await _package_count(factory) == 0
+
+
+async def test_revoke_during_inference_discards_the_response(postgres_dsn: str) -> None:
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+
+        class Revoking:
+            async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
+                await _lead_service(factory).apply_human(
+                    __import__("vuzol.workflows.application", fromlist=["Principal"]).Principal(
+                        OWNER, "telegram"
+                    ),
+                    LeadCommand(
+                        name="revoke_delegation",
+                        project_id=PROJECT,
+                        goal_id=snapshot.goal_id,
+                        expected_version=snapshot.version,
+                        idempotency_key="revoke-during-inference",
+                        payload={},
+                    ),
+                )
+                return _start_decision()
+
+        worker = _worker(factory, Revoking())
+        assert await worker.process_one()
+        assert await _package_count(factory) == 0
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            turn = await session.scalar(select(LeadershipTurn))
+            assert goal is not None and goal.lifecycle == "paused"
+            assert goal.waiting_reason == "delegation_revoked"
+            delegation = await session.get(GoalDelegation, goal.delegation_id)
+            assert delegation is not None and delegation.revoked_at is not None
             assert turn is not None and turn.status == "lost"
         assert not await worker.process_one()
         assert await _package_count(factory) == 0

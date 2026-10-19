@@ -528,6 +528,9 @@ class ProjectLeadSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = False
+    # Empty means the feature can be on while no model is selected. The worker
+    # then parks the goal with an explicit blocker instead of inventing a plan.
+    profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     repeat_limit: int = Field(default=2, ge=1, le=20)
     lease_seconds: int = Field(default=120, ge=30, le=3600)
     integration_branch_prefix: str = Field(default="vuzol-managed/", min_length=1, max_length=80)

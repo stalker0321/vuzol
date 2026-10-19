@@ -63,9 +63,7 @@ async def apply_telegram_lead(
         Principal(user_id=update.user_id, ingress_source="telegram"),
         command,
     )
-    notice = f"Руководитель: {result.status}"
-    if result.reason:
-        notice = f"{notice} ({result.reason})"
+    notice = await _notice(session_factory, project_id, result.status, result.reason)
     async with UnitOfWork(session_factory) as uow:
         assert uow.session is not None
         await enqueue_chat_notice(
@@ -112,6 +110,7 @@ def _command(
         "resume": "resume_goal",
         "cancel": "cancel_goal",
         "status": "get_goal",
+        "answer": "answer_permission",
     }
     name = names.get(kind)
     if name is None or goal_id is None:
@@ -123,7 +122,7 @@ def _command(
             goal_id=None,
             idempotency_key=key,
             contract_version=_CONTRACT,
-            payload={},
+            payload={"answer": argument} if kind == "answer" else {},
         )
     return LeadCommand(
         name=name,
@@ -132,8 +131,36 @@ def _command(
         expected_version=None if name == "get_goal" else version,
         idempotency_key=key,
         contract_version=_CONTRACT,
-        payload={},
+        payload={"answer": argument} if kind == "answer" else {},
     )
+
+
+async def _notice(
+    session_factory: async_sessionmaker[AsyncSession],
+    project_id: str,
+    status: str,
+    reason: str | None,
+) -> str:
+    from vuzol.leadership.card import render_goal_card
+    from vuzol.leadership.persistence import GoalDelegation
+    from vuzol.leadership.service import goal_card_view
+
+    line = f"Команда: {status}" + (f" ({reason})" if reason else "")
+    async with UnitOfWork(session_factory) as uow:
+        assert uow.session is not None
+        goal = await uow.session.scalar(
+            select(ManagedGoal).where(
+                ManagedGoal.project_id == project_id,
+                ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
+            )
+        )
+        if goal is None:
+            return f"Руководитель\n{line}"
+        delegation = await uow.session.get(GoalDelegation, goal.delegation_id)
+        if delegation is None:
+            return f"Руководитель\n{line}"
+        view = await goal_card_view(uow.session, goal, delegation)
+    return f"{render_goal_card(view)}\n{line}"
 
 
 async def _discussion_session(

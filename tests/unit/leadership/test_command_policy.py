@@ -16,6 +16,7 @@ def test_project_lead_is_off_unless_configured() -> None:
     assert Settings(environment="test").project_lead.enabled is False
     assert Settings(environment="test").project_lead.repeat_limit == 2
     assert Settings(environment="test").project_lead.integration_branch_prefix == "vuzol-managed/"
+    assert Settings(environment="test").project_lead.profile_id is None
 
 
 def test_agent_principal_cannot_be_an_owner_user_id() -> None:

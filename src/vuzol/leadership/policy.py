@@ -43,6 +43,7 @@ def authorize(
         LeadCommandName.PAUSE_GOAL,
         LeadCommandName.CANCEL_GOAL,
         LeadCommandName.REVOKE_DELEGATION,
+        LeadCommandName.ANSWER_PERMISSION,
     }
     if not feature_enabled and (actor.kind is ActorKind.AGENT or command not in owner_keeps):
         # New agent decisions stop. The owner can still read, pause, cancel,

@@ -26,6 +26,7 @@ class LeadCommandName(StrEnum):
     RESUME_GOAL = "resume_goal"
     CANCEL_GOAL = "cancel_goal"
     REVOKE_DELEGATION = "revoke_delegation"
+    ANSWER_PERMISSION = "answer_permission"
     ACCEPT_CRITERION = "accept_criterion"
     ACCEPT_UNCERTAINTY = "accept_uncertainty"
     ADMIT_CEILING = "admit_ceiling"

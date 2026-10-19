@@ -123,7 +123,7 @@ def test_migration_chain_has_single_head() -> None:
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
     # Project-lead execution is the single head. The chain stays additive.
-    assert heads == ["c2b8f1e02d31"]
+    assert heads == ["f3a8c2d14e70"]
     seen: set[str] = set()
     revision: str | None = heads[0]
     while revision is not None:

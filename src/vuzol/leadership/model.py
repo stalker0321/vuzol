@@ -1,4 +1,4 @@
-"""Project-lead model port. Production ships an unconfigured model, not a paid call."""
+"""Project-lead model port. A missing profile parks the goal and does not call a provider."""
 
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ class LeadSnapshot:
     original_request: str
     scope_text: str
     waiting_reason: str | None
+    completed_package_count: int = 0
+    owner_answer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +59,14 @@ class UnconfiguredLeadModel:
         raise LeadModelUnavailable("lead_model_unconfigured")
 
 
+class UnselectedLeadProfile:
+    """The feature is on, but configuration did not select a usable lead profile."""
+
+    async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
+        del snapshot
+        raise LeadModelUnavailable("lead_profile_unselected")
+
+
 def normalize_usage(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """Unknown cost stays unknown. Zero is not a measured amount."""
 
@@ -77,6 +87,42 @@ def decision_payload(decision: LeadDecision) -> dict[str, Any]:
         ],
         "profile_id": decision.profile_id,
         "usage": usage,
+    }
+
+
+def freeze_decision(
+    decision: LeadDecision,
+    *,
+    goal_id: uuid.UUID,
+    wakeup_id: uuid.UUID,
+    input_version: int,
+    input_fence: int,
+    input_scope: int,
+    input_lease_epoch: int,
+) -> dict[str, Any]:
+    """Immutable command list. Keys and expected versions do not follow later state."""
+
+    usage = normalize_usage(decision.usage)
+    commands = []
+    for ordinal, command in enumerate(decision.commands):
+        commands.append(
+            {
+                "ordinal": ordinal,
+                "name": command.name,
+                "payload": dict(command.payload),
+                "reason": command.reason,
+                "idempotency_key": f"lead:{goal_id}:{wakeup_id}:{ordinal}",
+                "expected_version": input_version + ordinal,
+            }
+        )
+    return {
+        "commands": commands,
+        "profile_id": decision.profile_id,
+        "usage": usage,
+        "input_version": input_version,
+        "input_fence": input_fence,
+        "input_scope": input_scope,
+        "input_lease_epoch": input_lease_epoch,
     }
 
 

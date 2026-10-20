@@ -54,6 +54,66 @@ def test_publish_is_atomic_idempotent_and_rollbackable(roots: tuple[Path, Path])
     assert (site.destination / "current" / "index.html").read_text() == "first"
 
 
+def test_compensation_removes_first_activation_and_fences_successors(roots):
+    sources, sites = roots
+    source = sources / "demo"
+    source.mkdir()
+    (source / "index.html").write_text("A")
+    site = StaticSite("demo", source, sites / "demo", (Path("index.html"),))
+    first = publish(site)
+    static_publish.compensate(site, first, site_root=sites)
+    assert not (site.destination / "current").exists()
+    second = publish(site)
+    assert second.activation_id != first.activation_id
+    with pytest.raises(StaticPublishError, match="changed before compensation"):
+        static_publish.compensate(site, first, site_root=sites)
+    assert (site.destination / "current/index.html").read_text() == "A"
+    (source / "index.html").write_text("B")
+    publish(site)
+    rollback(site)  # ABA: same content, different activation.
+    with pytest.raises(StaticPublishError, match="changed before compensation"):
+        static_publish.compensate(site, second, site_root=sites)
+    assert (site.destination / "current/index.html").read_text() == "A"
+
+
+def test_hash_validation_checks_all_digest_bits_before_activation(roots):
+    sources, sites = roots
+    source = sources / "demo"
+    source.mkdir()
+    (source / "index.html").write_text("A")
+    site = StaticSite("demo", source, sites / "demo", (Path("index.html"),))
+    digest = static_publish.measure_static_tree(source).digest
+    wrong = digest[:20] + ("0" if digest[20] != "0" else "1") + digest[21:]
+    with pytest.raises(static_publish.StaticHashMismatch):
+        static_publish.prepare(site, expected_hash=wrong)
+    assert not (site.destination / "current").exists()
+
+
+def test_crash_before_current_swap_preserves_live_release(roots, monkeypatch):
+    sources, sites = roots
+    source = sources / "demo"
+    source.mkdir()
+    (source / "index.html").write_text("A")
+    site = StaticSite("demo", source, sites / "demo", (Path("index.html"),))
+    publish(site)
+    (source / "index.html").write_text("B")
+    real_replace = os.replace
+
+    def crash(source, target):
+        if Path(target).name == "current":
+            raise OSError("injected crash before swap")
+        return real_replace(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", crash)
+        with pytest.raises(OSError, match="injected crash"):
+            publish(site)
+    assert (site.destination / "current/index.html").read_text() == "A"
+    publish(site)  # Recovery derives predecessor from the actual current link.
+    rollback(site)
+    assert (site.destination / "current/index.html").read_text() == "A"
+
+
 def test_publish_rejects_symlinked_allowlisted_content(
     roots: tuple[Path, Path], tmp_path: Path
 ) -> None:

@@ -48,3 +48,27 @@ the `source_commit` recorded in the approval evidence.
 - kernels without Landlock cannot serve runtime previews (fail closed);
 - network access of previewed processes is not restricted by this domain; the
   preview listens on loopback behind the gateway.
+
+## Recovery and publication admission (2026-10-20)
+
+The publisher rechecks the managed grant, task/run state and live step lease
+under owner-control locks immediately before spawn and before exposing a
+healthy process. Cancellation at any point before registration reaps the
+process and removes its disposable directory. Readiness requires HTTP 2xx;
+redirects and 4xx (including a missing health endpoint) are not readiness.
+
+Publisher startup restores the latest completed `publish_preview` result for
+each project from its retained Git commit, never from the previous process's
+writable files. New results record `runtime_spec` (command and health path).
+Recovery requires an exact source/spec match and a still-valid delegation.
+A completed goal may retain its published preview; pause, cancel, revoke,
+expiry, feature disablement or a newer result prohibit restoration.
+Recovery does not replay workflow status transitions.
+
+If the retained commit has been cleaned up, the environment has changed, or
+the old result predates `runtime_spec`, automatic restoration fails closed.
+The gateway returns HTTP 503 with an unavailable category. Republish through
+the normal approved workflow to create a new recoverable result. Historical
+step success records are not rewritten to pretend the runtime is still alive.
+The feature-lead switch remains off by default; legacy publication is
+independent of that switch.

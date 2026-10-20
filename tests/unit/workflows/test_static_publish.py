@@ -1,8 +1,9 @@
 """Workflow publication adapter tests."""
 
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -66,12 +67,12 @@ def _handler(
         }
     )
     (tmp_path / "preview-sites").mkdir()
-    return (
-        StaticPublishHandler(
-            factory, cast(RuntimeConfiguration, runtime), probe=probe, preview=preview
-        ),
-        request,
+    handler = StaticPublishHandler(
+        factory, cast(RuntimeConfiguration, runtime), probe=probe, preview=preview
     )
+    # Filesystem adapter tests; the real DB admission boundary has separate tests.
+    handler._authority = MagicMock(side_effect=lambda *_: nullcontext())  # type: ignore[method-assign]
+    return handler, request
 
 
 @pytest.mark.anyio
@@ -132,21 +133,19 @@ async def test_handler_requires_build_evidence(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_handler_rolls_back_hash_mismatch(tmp_path: Path) -> None:
+async def test_handler_never_activates_hash_mismatch(tmp_path: Path) -> None:
     handler, request = _handler(tmp_path)
     factory = cast(MagicMock, handler._factory)
     session = factory.return_value.__aenter__.return_value
     worktree, build_step, materialization = session.scalar.side_effect
     build_step.result["artifact_hash"] = "f" * 64
     session.scalar.side_effect = [worktree, build_step, materialization]
-    rollback = AsyncMock()
-    handler_mock = cast(object, handler)
-    cast(Any, handler_mock)._rollback_changed = rollback
 
     outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
 
     assert outcome.category == "static_build_hash_mismatch"
-    rollback.assert_awaited_once()
+    assert not (tmp_path / "sites/demo/current").exists()
+    handler._probe.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 @pytest.mark.anyio

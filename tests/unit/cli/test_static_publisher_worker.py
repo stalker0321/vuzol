@@ -40,6 +40,9 @@ async def test_static_publisher_worker_processes_then_stops(
     monkeypatch.setattr(cli, "create_engine", lambda *_args: engine)
     monkeypatch.setattr(cli, "require_migration_head", AsyncMock())
     monkeypatch.setattr(cli, "create_session_factory", lambda _engine: factory)
+    restore = AsyncMock()
+    monkeypatch.setattr(cli.RuntimePreviewHandler, "restore_latest", restore)
+    monkeypatch.setattr(cli, "cleanup_orphaned_runtimes", MagicMock())
     handler = object()
     monkeypatch.setattr(cli, "StaticPublishHandler", lambda *_args, **_kwargs: handler)
     gateway = SimpleNamespace(serve=AsyncMock(), should_exit=False)
@@ -72,6 +75,7 @@ async def test_static_publisher_worker_processes_then_stops(
     assert gateway.should_exit is True
     gateway.serve.assert_awaited_once()
     engine.dispose.assert_awaited_once()
+    restore.assert_awaited_once()
 
 
 @pytest.mark.anyio

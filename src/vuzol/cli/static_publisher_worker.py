@@ -59,8 +59,7 @@ async def run() -> None:
         await require_migration_head(engine)
         factory = create_session_factory(engine)
         owner = f"{socket.gethostname()}:{os.getpid()}:publisher"
-        preview_registry = PreviewRuntimeRegistry()
-        cleanup_orphaned_runtimes(settings.preview_site_root / ".runtime")
+        preview_registry = await initialize_previews(factory, runtime)
         worker = WorkflowWorker(
             settings,
             factory,
@@ -99,6 +98,19 @@ async def run() -> None:
         if preview_registry is not None:
             await preview_registry.close()
         await engine.dispose()
+
+
+async def initialize_previews(
+    factory: async_sessionmaker[AsyncSession], runtime: RuntimeConfiguration
+) -> PreviewRuntimeRegistry:
+    registry = PreviewRuntimeRegistry()
+    cleanup_orphaned_runtimes(runtime.settings.preview_site_root / ".runtime")
+    try:
+        await RuntimePreviewHandler(factory, runtime, registry).restore_latest()
+    except BaseException:
+        await registry.close()
+        raise
+    return registry
 
 
 class _PreviewHandler:

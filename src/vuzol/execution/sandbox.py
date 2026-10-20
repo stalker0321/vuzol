@@ -67,68 +67,70 @@ class RootlessDockerRuntime:
             stderr=asyncio.subprocess.PIPE,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent"},
         )
-        assert process.stdin is not None
-        process.stdin.write(envelope.stdin.encode())
-        await process.stdin.drain()
-        process.stdin.close()
-        stdout_task = asyncio.create_task(
-            _bounded_read(process.stdout, envelope.sandbox.output_bytes), name="sandbox-stdout"
-        )
-        stderr_task = asyncio.create_task(
-            _bounded_read(process.stderr, envelope.sandbox.output_bytes), name="sandbox-stderr"
-        )
-        wait_task = asyncio.create_task(process.wait(), name="sandbox-process")
-        cancel_task = asyncio.create_task(cancellation.wait(), name="sandbox-cancellation")
+        io: asyncio.Future[tuple[bytes, bytes, None, int]] | None = None
+        io_tasks: list[asyncio.Task[bytes] | asyncio.Task[None] | asyncio.Task[int]] = []
+        cancel_task: asyncio.Task[None] | None = None
+        aborted = True
         try:
+            # Spawn owns cleanup immediately, including stdin failures/cancellation.
+            # Drain output concurrently with input: either pipe may fill first.
+            async def feed() -> None:
+                assert process.stdin is not None
+                process.stdin.write(envelope.stdin.encode())
+                await process.stdin.drain()
+                process.stdin.close()
+
+            feed_task = asyncio.create_task(feed())
+            stdout_task = asyncio.create_task(
+                _bounded_read(process.stdout, envelope.sandbox.output_bytes)
+            )
+            stderr_task = asyncio.create_task(
+                _bounded_read(process.stderr, envelope.sandbox.output_bytes)
+            )
+            wait_task = asyncio.create_task(process.wait())
+            io_tasks.extend((stdout_task, stderr_task, feed_task, wait_task))
+            io = asyncio.gather(stdout_task, stderr_task, feed_task, wait_task)
+            cancel_task = asyncio.create_task(cancellation.wait(), name="sandbox-cancellation")
             done, _pending = await asyncio.wait(
-                {wait_task, cancel_task},
+                (io, cancel_task),
                 timeout=envelope.sandbox.timeout_seconds,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if wait_task not in done:
-                await self._stop_owned_container(name, envelope)
-                with contextlib.suppress(ProcessLookupError):
-                    process.kill()
-                await process.wait()
+            if io not in done:
                 if cancel_task in done:
                     raise SandboxError("sandbox execution cancelled after start")
                 raise SandboxError("sandbox execution timed out after start")
-            stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+            stdout, stderr, _, status = await io
             result = CodexProcessResult(
-                exit_code=wait_task.result(),
+                exit_code=status,
                 stdout=stdout.decode("utf-8", "replace"),
                 stderr=stderr.decode("utf-8", "replace"),
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
             if envelope.argv[:1] == ("grok",):
                 await self._stage_grok_diagnostics(name, envelope, result.stdout)
+            aborted = False
             return result
-        except asyncio.CancelledError:
-            await self._stop_owned_container(name, envelope)
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
-            raise
         except ArtifactOutputLimit as error:
-            await self._stop_owned_container(name, envelope)
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
             raise SandboxError("sandbox output limit exceeded") from error
         finally:
-            for task in (wait_task, cancel_task, stdout_task, stderr_task):
-                if not task.done():
+            for task in (*io_tasks, io, cancel_task):
+                if task is not None and not task.done():
                     task.cancel()
-            await asyncio.gather(
-                wait_task, cancel_task, stdout_task, stderr_task, return_exceptions=True
-            )
-            # Ensure docker client process is reaped even on unusual exits
-            if process.returncode is None:
-                await self._stop_owned_container(name, envelope)
+            # Cleanup itself is awaited even when the owner cancels this run.
+            try:
+                if aborted or process.returncode is None:
+                    await self._stop_owned_container(name, envelope)
+            finally:
                 with contextlib.suppress(ProcessLookupError):
-                    process.kill()
+                    if process.returncode is None:
+                        process.kill()
                 await process.wait()
-            await self._remove_owned_container(name, envelope)
+                await asyncio.gather(
+                    *(task for task in (*io_tasks, io, cancel_task) if task is not None),
+                    return_exceptions=True,
+                )
+                await self._remove_owned_container(name, envelope)
 
     async def _stage_grok_diagnostics(
         self, name: str, envelope: ProcessEnvelope, stdout: str

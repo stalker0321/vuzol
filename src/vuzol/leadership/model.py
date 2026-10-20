@@ -32,6 +32,7 @@ class LeadSnapshot:
     completed_package_count: int = 0
     owner_answer: str | None = None
     invocation_id: uuid.UUID | None = None
+    result_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

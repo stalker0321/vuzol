@@ -16,6 +16,11 @@ def enabled_wakeup_key(goal_id: uuid.UUID) -> str:
     return f"lead:wakeup:{goal_id}:enabled"
 
 
+def continuation_wakeup_key(goal_id: uuid.UUID, version: int) -> str:
+    """Never reopen a consumed wakeup; one continuation per authoritative version."""
+    return f"lead:wakeup:{goal_id}:continue:{version}"
+
+
 def completed_wakeup_key(goal_id: uuid.UUID, package_id: uuid.UUID) -> str:
     return f"lead:wakeup:{goal_id}:{package_id}:completed"
 

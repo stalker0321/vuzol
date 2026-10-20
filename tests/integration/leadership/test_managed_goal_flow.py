@@ -723,6 +723,7 @@ async def run_managed_goal_flow(
     expected_completed: bool = True,
     control_before_apply: str | None = None,
     restart_in_subprocess: bool = False,
+    split_corrective_turn: bool = False,
 ) -> None:
     monkeypatch.delenv("VUZOL_TEST_DATABASE_DSN", raising=False)
     monkeypatch.setenv("VUZOL_PROJECT_LEAD__ENABLED", "true")
@@ -866,6 +867,10 @@ async def run_managed_goal_flow(
                 trace["restart"] = "separate Python process; fresh composition and DB engine"
             else:
                 assert await resumed.process_one()
+            if split_corrective_turn:
+                assert await _package_count(factory) == 1
+                resumed = _provider_worker(factory, settings, owner="lead-2-continuation")
+                assert await resumed.process_one()
             assert await _package_count(factory) == 2
             assert not await resumed.process_one()
             assert await _package_count(factory) == 2
@@ -960,7 +965,7 @@ asyncio.run(main())
 """
 
 
-def _provider_worker(factory, settings, *, owner):
+def _provider_worker(factory, settings, *, owner, transport=None):
     from tests.integration.leadership.test_lead_surface import _profile
 
     from vuzol.config.models import ProviderRole
@@ -1047,8 +1052,8 @@ def _provider_worker(factory, settings, *, owner):
         profiles=profiles,
         owner=owner,
         default_branches={PROJECT: "main"},
-        adapter=Transport(),
-        reviewer_adapter=Transport(),
+        adapter=transport if transport is not None else Transport(),
+        reviewer_adapter=transport if transport is not None else Transport(),
     )
 
 

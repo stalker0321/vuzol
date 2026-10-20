@@ -16,7 +16,9 @@ from vuzol.leadership.actor import server_agent_principal
 from vuzol.leadership.batches import execute_batch
 from vuzol.leadership.card import owner_answer_text
 from vuzol.leadership.commands import CommandStatus, LeadCommand
+from vuzol.leadership.continuation import continue_if_idle
 from vuzol.leadership.evidence import assess_completion
+from vuzol.leadership.feedback import result_context
 from vuzol.leadership.fencing import TurnClaim, claim_current
 from vuzol.leadership.model import (
     LeadDecision,
@@ -272,7 +274,7 @@ class ProjectLeadWorker:
             package = None
             if goal.current_package_id is not None:
                 package = await uow.session.get(WorkPackage, goal.current_package_id)
-            assessment = await assess_completion(uow.session, goal)
+            assessment = await assess_completion(uow.session, goal, check_live_head=True)
             status = None if package is None else package.status.value
             head = None if package is None else package.integration_head_commit
             criteria = tuple(item for item in goal.criteria if isinstance(item, dict))
@@ -303,6 +305,7 @@ class ProjectLeadWorker:
                 completed_package_count=int(completed or 0),
                 owner_answer=owner_answer_text(goal.constraints),
                 invocation_id=wakeup_id,
+                result_context=await result_context(uow.session, goal, package),
             )
 
     async def _save_decision(
@@ -465,6 +468,7 @@ class ProjectLeadWorker:
                 and goal.lease_owner == claim.owner
                 and goal.lease_epoch == claim.lease_epoch
             ):
+                await continue_if_idle(session, goal, repeat_limit=self._repeat_limit)
                 goal.lease_owner = None
                 goal.lease_until = None
 
@@ -603,6 +607,7 @@ class ProjectLeadWorker:
                     package_id=None,
                     kind="enabled",
                 )
+                await continue_if_idle(session, goal, repeat_limit=self._repeat_limit)
                 continue
             package = await session.get(WorkPackage, goal.current_package_id)
             kind = _terminal_kind(package) if package is not None else None
@@ -614,6 +619,7 @@ class ProjectLeadWorker:
                     package_id=package.id,
                     kind=kind,
                 )
+            await continue_if_idle(session, goal, repeat_limit=self._repeat_limit)
 
     def _service(self) -> LeadershipCommandService:
         return LeadershipCommandService(

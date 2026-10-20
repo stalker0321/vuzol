@@ -660,7 +660,11 @@ async def _enqueue_owner_question(
 
 
 async def request_owner_recovery(session: AsyncSession, goal: ManagedGoal, reason: str) -> None:
-    question = f"Нужен следующий шаг ({reason}). Уточните поручение после устранения блокера."
+    question = (
+        "Несколько ходов подряд нет нового результата и запуска работы. Уточните следующий шаг."
+        if reason == "continuation_without_progress"
+        else f"Нужен следующий шаг ({reason}). Уточните поручение после устранения блокера."
+    )
     goal.wakeup_condition = {
         "kind": "owner",
         "question": question,

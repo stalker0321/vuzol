@@ -3,7 +3,7 @@
 ## Runtime boundary
 
 The Telegram integration uses `python-telegram-bot` 22 in long-polling mode. Telegram library
-objects remain in `vuzol.telegram.adapter`; ingress and control services consume frozen,
+objects remain in the adapter and durable transport inbox; business ingress and control services consume frozen,
 provider-neutral DTOs. A webhook can later feed the same services.
 
 One bot identity is used for both processes. The bot token is resolved from
@@ -31,8 +31,40 @@ not an in-memory restart flag.
 
 ## Ingress and affinity
 
-Updates are keyed by bot identity and update ID in `external_inbox`. Inbox receipt, intake/task
-creation, message links, and acknowledgement outbox records share one database transaction.
+Polling first commits a raw receipt (`external_inbox.source=telegram_transport`) and a
+`telegram_ingress:main` outbox job in one transaction, **before** acknowledging the update offset.
+The chat/user allowlist is checked before storing a body; unauthorized identities leave only a
+hash/rejection receipt and no replayable job. Authorized bodies are bounded to 1,000,000 serialized
+bytes. Oversized updates retain a rejection/hash, not their body.
+The raw JSON is stored as an escaped string, not decoded nested JSONB, so text containing
+PostgreSQL-incompatible characters cannot make admission retry forever.
+
+A process-owned consumer dispatches committed jobs to the existing ingress/control services.
+Their independent business inbox receipt, intake/task creation, message links, and acknowledgement
+outbox records still share one transaction. Restart before processing or after business commit but
+before transport ack reuses those receipts; it does not create duplicate tasks.
+Database failure during raw admission retains the old Telegram offset. Business-processing
+failure does not stall polling: attempts have a 30-second cooperative timeout, a 60-second fenced
+lease, at most three tries, and a 1/2-second retry delay. Other available updates can progress
+between retries; strict per-chat ordering across failures is not promised.
+
+Exhausted jobs remain in `dead_letter`, with an inbox failure receipt and a secret-safe log
+containing the job ID and exception class, never the body or exception text. After diagnosing
+and correcting the handler failure, inspect/replay only the selected job using the existing
+operator tool (against an explicitly chosen database):
+
+```bash
+vuzol-outbox-replay --destination telegram_ingress:main --item-id UUID --json
+vuzol-outbox-replay --destination telegram_ingress:main --item-id UUID --apply --json
+```
+
+The first command is read-only; `--apply` requeues with a fresh retry budget. Oversized/rejected
+bodies cannot be recovered by replay: request a new valid message. Raw authorized updates are
+private outbox content; do not expose them in logs or dashboards. This change does not add an
+automatic retention/erasure policy for those bodies.
+No new broker, migration, bot token, or project-lead flag is needed. The consumer starts/stops
+with `vuzol-telegram`; outgoing delivery does not claim its destination.
+
 Topic scope is resolved from stable chat and thread IDs, never a display name.
 
 Task affinity is resolved from a reply-linked task first, then from exactly one `awaiting_user`

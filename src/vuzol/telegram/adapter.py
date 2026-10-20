@@ -41,14 +41,15 @@ ControlHandlerFn = Callable[
     [ControlUpdate | WorkPackageControlUpdate], Awaitable[IngressResult | None]
 ]
 StartupHandlerFn = Callable[[Bot], Awaitable[None]]
+AdmissionHandlerFn = Callable[[Update], Awaitable[None]]
 _LOG = logging.getLogger(__name__)
 
 
 class CommittingUpdateQueue(asyncio.Queue[object]):
     """PTB advances getUpdates offset only after put returns.
 
-    Business updates go straight to the durable ingress, not to Application's
-    volatile consumer. Non-update sentinels still use its normal lifecycle queue.
+    Only raw durable admission belongs here, never business processing.
+    Non-update sentinels still use Application's normal lifecycle queue.
     A failed transaction must keep polling at the old offset.
     """
 
@@ -678,13 +679,34 @@ def _control_markup(
     return InlineKeyboardMarkup(rows)
 
 
+async def dispatch_update(
+    update: Update, *, bot_id: str, on_message: MessageHandlerFn, on_control: ControlHandlerFn
+) -> None:
+    query = update.callback_query
+    if query is not None and isinstance(query.data, str) and query.data.startswith(("v1:", "v2:")):
+        converted = control_update(update, bot_id)
+        if converted is not None:
+            result = await on_control(converted)
+            text, show_alert = _callback_answer(result)
+            try:
+                await query.answer(text=text, show_alert=show_alert)
+            except TelegramError:
+                _LOG.warning("telegram callback acknowledgement unavailable")
+    else:
+        message = message_update(update, bot_id)
+        if message is not None:
+            await on_message(message)
+
+
 def build_long_polling_application(
     token: str,
     *,
     bot_id: str,
+    admit_update: AdmissionHandlerFn,
     on_message: MessageHandlerFn,
     on_control: ControlHandlerFn,
     on_startup: StartupHandlerFn | None = None,
+    on_shutdown: Callable[[], Awaitable[None]] | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
     async def handle_message(update: Update, _context: object) -> None:
         converted = message_update(update, bot_id)
@@ -692,37 +714,21 @@ def build_long_polling_application(
             await on_message(converted)
 
     async def handle_control(update: Update, _context: object) -> None:
-        converted = control_update(update, bot_id)
-        if converted is not None:
-            result = await on_control(converted)
-            query = update.callback_query
-            if query is not None:
-                text, show_alert = _callback_answer(result)
-                try:
-                    await query.answer(text=text, show_alert=show_alert)
-                except TelegramError:
-                    # The control is already committed. Toast delivery is not
-                    # part of admission and must not stall subsequent updates.
-                    _LOG.warning("telegram callback acknowledgement unavailable")
+        await dispatch_update(update, bot_id=bot_id, on_message=on_message, on_control=on_control)
 
-    async def dispatch(update: Update) -> None:
-        query = update.callback_query
-        if (
-            query is not None
-            and isinstance(query.data, str)
-            and query.data.startswith(("v1:", "v2:"))
-        ):
-            await handle_control(update, None)
-        else:
-            await handle_message(update, None)
-
-    builder = ApplicationBuilder().token(token).update_queue(CommittingUpdateQueue(dispatch))
+    builder = ApplicationBuilder().token(token).update_queue(CommittingUpdateQueue(admit_update))
     if on_startup is not None:
 
         async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
             await on_startup(application.bot)
 
         builder = builder.post_init(post_init)
+    if on_shutdown is not None:
+
+        async def post_stop(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
+            await on_shutdown()
+
+        builder = builder.post_stop(post_stop)
     application = builder.build()
 
     application.add_handler(CallbackQueryHandler(handle_control, pattern=r"^v[12]:"))

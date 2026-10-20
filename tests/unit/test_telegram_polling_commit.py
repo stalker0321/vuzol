@@ -35,7 +35,8 @@ async def test_offset_waits_for_committed_ingress(monkeypatch, fail_first):
     app = build_long_polling_application(
         "123:FAKE_TOKEN_NOT_A_CREDENTIAL",
         bot_id="fixture",
-        on_message=ingress,
+        admit_update=ingress,
+        on_message=AsyncMock(),
         on_control=AsyncMock(),
     )
     updater = app.updater
@@ -106,7 +107,8 @@ async def test_cancellation_before_commit_does_not_finish_admission():
     app = build_long_polling_application(
         "123:FAKE_TOKEN_NOT_A_CREDENTIAL",
         bot_id="fixture",
-        on_message=ingress,
+        admit_update=ingress,
+        on_message=AsyncMock(),
         on_control=AsyncMock(),
     )
     update = Update.de_json(

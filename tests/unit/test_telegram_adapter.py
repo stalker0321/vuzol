@@ -55,6 +55,7 @@ def test_long_polling_application_registers_boundary_handlers() -> None:
     application = build_long_polling_application(
         "123:test",  # pragma: allowlist secret
         bot_id="main",
+        admit_update=AsyncMock(),
         on_message=message_handler,
         on_control=control_handler,
     )

@@ -106,15 +106,14 @@ async def _run(args: argparse.Namespace) -> int:
     engine = create_engine(settings, resolve_database_dsn(settings))
     factory = create_session_factory(engine)
     try:
-        async with factory() as session:
+        async with factory.begin() as session:
             selected = await list_dead_letter_items(
                 session,
                 destinations=destinations,
                 item_ids=item_ids,
             )
             if args.apply:
-                async with session.begin():
-                    requeued = await requeue_dead_letter_items(session, items=selected)
+                requeued = await requeue_dead_letter_items(session, items=selected)
             else:
                 requeued = 0
     finally:

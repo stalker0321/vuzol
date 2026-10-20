@@ -1,5 +1,7 @@
 """python-telegram-bot adapter; no Telegram types escape this boundary."""
 
+import asyncio
+import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from io import BytesIO
@@ -39,6 +41,35 @@ ControlHandlerFn = Callable[
     [ControlUpdate | WorkPackageControlUpdate], Awaitable[IngressResult | None]
 ]
 StartupHandlerFn = Callable[[Bot], Awaitable[None]]
+_LOG = logging.getLogger(__name__)
+
+
+class CommittingUpdateQueue(asyncio.Queue[object]):
+    """PTB advances getUpdates offset only after put returns.
+
+    Business updates go straight to the durable ingress, not to Application's
+    volatile consumer. Non-update sentinels still use its normal lifecycle queue.
+    A failed transaction must keep polling at the old offset.
+    """
+
+    def __init__(self, dispatch: Callable[[Update], Awaitable[None]]) -> None:
+        super().__init__()
+        self._dispatch = dispatch
+
+    async def put(self, item: object) -> None:
+        if not isinstance(item, Update):
+            await super().put(item)
+            return
+        delay = 0.1
+        while True:
+            try:
+                await self._dispatch(item)
+                return
+            except Exception as error:
+                # Never log the update (possibly a secret) or exception payload.
+                _LOG.warning("telegram ingress not committed: %s", type(error).__name__)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 5.0)
 
 
 def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
@@ -655,17 +686,6 @@ def build_long_polling_application(
     on_control: ControlHandlerFn,
     on_startup: StartupHandlerFn | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
-    builder = ApplicationBuilder().token(token)
-
-    if on_startup is not None:
-
-        async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
-            await on_startup(application.bot)
-
-        builder = builder.post_init(post_init)
-
-    application = builder.build()
-
     async def handle_message(update: Update, _context: object) -> None:
         converted = message_update(update, bot_id)
         if converted is not None:
@@ -678,7 +698,32 @@ def build_long_polling_application(
             query = update.callback_query
             if query is not None:
                 text, show_alert = _callback_answer(result)
-                await query.answer(text=text, show_alert=show_alert)
+                try:
+                    await query.answer(text=text, show_alert=show_alert)
+                except TelegramError:
+                    # The control is already committed. Toast delivery is not
+                    # part of admission and must not stall subsequent updates.
+                    _LOG.warning("telegram callback acknowledgement unavailable")
+
+    async def dispatch(update: Update) -> None:
+        query = update.callback_query
+        if (
+            query is not None
+            and isinstance(query.data, str)
+            and query.data.startswith(("v1:", "v2:"))
+        ):
+            await handle_control(update, None)
+        else:
+            await handle_message(update, None)
+
+    builder = ApplicationBuilder().token(token).update_queue(CommittingUpdateQueue(dispatch))
+    if on_startup is not None:
+
+        async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
+            await on_startup(application.bot)
+
+        builder = builder.post_init(post_init)
+    application = builder.build()
 
     application.add_handler(CallbackQueryHandler(handle_control, pattern=r"^v[12]:"))
     application.add_handler(MessageHandler(filters.ALL, handle_message))

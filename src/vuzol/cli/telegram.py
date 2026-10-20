@@ -2,13 +2,16 @@
 
 import asyncio
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Bot
 
-from vuzol.config import get_runtime_configuration
+from vuzol.config import RuntimeConfiguration, get_runtime_configuration
 from vuzol.observability import configure_logging
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.telegram.adapter import (
+    ControlHandlerFn,
+    MessageHandlerFn,
     PythonTelegramClient,
     build_long_polling_application,
     resolve_bot_token,
@@ -26,6 +29,25 @@ from vuzol.telegram.work_packages import ContinueDiscussionOverrides
 from vuzol.telegram.workspace import TelegramWorkspaceService
 
 
+def ingress_handlers(
+    runtime: RuntimeConfiguration, factory: async_sessionmaker[AsyncSession]
+) -> tuple[MessageHandlerFn, ControlHandlerFn]:
+    """One ingress composition for polling and transport-boundary tests."""
+    overrides = ContinueDiscussionOverrides()
+    ingress = TelegramIngressService(runtime, factory, overrides)
+    dogfood = TelegramDogfoodIngressService(runtime, factory)
+    controls = TelegramControlService(runtime, factory, overrides)
+
+    async def on_message(update: MessageUpdate) -> None:
+        if await dogfood.accept_message(update) is None:
+            await ingress.accept_message(update)
+
+    async def on_control(update: ControlUpdate | WorkPackageControlUpdate) -> IngressResult:
+        return await controls.accept(update)
+
+    return on_message, on_control
+
+
 def main() -> None:
     runtime = get_runtime_configuration(validate_profile_credentials=False)
     settings = runtime.settings
@@ -39,20 +61,8 @@ def main() -> None:
         # S-2.2a: fail closed before session factory, Bot wiring, polling, or schema work.
         loop.run_until_complete(require_migration_head(engine))
         factory = create_session_factory(engine)
-        continue_discussion_overrides = ContinueDiscussionOverrides()
-        ingress = TelegramIngressService(runtime, factory, continue_discussion_overrides)
-        dogfood = TelegramDogfoodIngressService(runtime, factory)
-        controls = TelegramControlService(runtime, factory, continue_discussion_overrides)
+        on_message, on_control = ingress_handlers(runtime, factory)
         workspace = TelegramWorkspaceService(factory, runtime.registries.topics)
-
-        async def on_message(update: MessageUpdate) -> None:
-            if await dogfood.accept_message(update) is None:
-                await ingress.accept_message(update)
-
-        async def on_control(
-            update: ControlUpdate | WorkPackageControlUpdate,
-        ) -> IngressResult:
-            return await controls.accept(update)
 
         async def on_startup(bot: Bot) -> None:
             await workspace.synchronize(PythonTelegramClient(bot))

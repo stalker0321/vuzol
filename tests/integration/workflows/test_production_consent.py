@@ -258,3 +258,37 @@ async def test_authority_is_rechecked_after_preparation_check(
         assert result.kind is OutcomeKind.BLOCKED
         assert not (tmp_path / "sites/demo/current").exists()
         handler._probe.assert_not_awaited()
+
+
+async def test_lease_expiring_during_approval_lookup_blocks_activation(
+    postgres_dsn,
+    tmp_path,
+    monkeypatch,
+):
+    from vuzol.workflows import publication
+
+    async with _factory(postgres_dsn) as factory:
+        request, handler = await fixture(factory, tmp_path)
+        result = await handler.execute(request, CancellationContext())
+        async with factory.begin() as session:
+            await commit_step_outcome(session, request.lease, result)
+        request = await approve(factory, request)
+        real_lookup = publication._production_approval
+
+        async def slow_lookup(*args, **kwargs):
+            approval = await real_lookup(*args, **kwargs)
+            if not kwargs.get("create"):
+                # Simulate time spent waiting on the approval row lock.
+                monkeypatch.setattr(
+                    publication,
+                    "datetime",
+                    SimpleNamespace(now=lambda tz: datetime.now(tz) + timedelta(minutes=30)),
+                )
+            return approval
+
+        monkeypatch.setattr(publication, "_production_approval", slow_lookup)
+        result = await handler.execute(request, CancellationContext())
+        assert result.kind is OutcomeKind.BLOCKED
+        assert result.category == "publication_lease_lost"
+        assert not (tmp_path / "sites/demo/current").exists()
+        handler._probe.assert_not_awaited()

@@ -558,7 +558,10 @@ class LocalGit:
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), self._timeout)
         except TimeoutError as error:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass  # The process may exit between the deadline and kill().
             await process.wait()
             raise GitError("Git operation timed out") from error
         if process.returncode not in allowed_returncodes:

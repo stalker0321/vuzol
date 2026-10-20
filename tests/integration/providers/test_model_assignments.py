@@ -414,6 +414,8 @@ async def test_frozen_run_reaches_selected_native_transport_through_host_entrypo
                     plan_id,
                 )
                 assert process.status is ProcessStatus.EXITED
+                assert process.runtime_metadata["launcher_drained"] is True
+                assert process.runtime_metadata["cleanup_confirmed"] is True
                 worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run_id))
                 assert worktree.task_id == task_id and process.worktree_id == worktree.id
                 assert launched[0].worktree_id == worktree.id
@@ -584,5 +586,46 @@ async def test_api_reviewer_pin_survives_restart_and_changed_default(
             assert all(row.status is BudgetReservationStatus.RECONCILED for row in reservations)
             assert {row.task_id for row in usage} == {task_record.id}
         assert [call["model"] for call in http_boundary[0]] == [chosen.model, chosen.model]
+    finally:
+        await engine.dispose()
+
+
+async def test_auto_planner_uses_available_cli_when_host_owns_planning(postgres_dsn, runtime):
+    chosen = runtime.registries.profiles.get("cli-choice").model_copy(
+        update={"fallback_profile_ids": ()}
+    )
+    runtime = runtime.model_copy(
+        update={
+            "registries": runtime.registries.model_copy(
+                update={"profiles": ProfileRegistry((chosen,))}
+            )
+        }
+    )
+    engine, factory = storage(postgres_dsn)
+    try:
+        _, run_id, plan_id, _ = await _materialize(factory, runtime)
+        async with factory.begin() as session:
+            await synchronize_profiles(
+                session,
+                runtime.registries.profiles.items(),
+                configuration_revision=runtime.registries.revision,
+            )
+            token = await claim_routed_step(
+                session,
+                settings=runtime.settings,
+                registries=runtime.registries,
+                owner="host-auto-plan",
+                lease_seconds=60,
+                candidate_limit=10,
+                step_types=frozenset({"plan"}),
+            )
+            assert token is not None and token.step.id == plan_id
+            step = await session.get(Step, plan_id)
+            assert step.executor_profile_id == chosen.id
+            run = await session.get(Run, run_id)
+            assert run.selected_route[MATRIX_KEY] == {}
+            reservations = (await session.scalars(select(ProviderBudgetReservation))).all()
+            assert len(reservations) == 1 and reservations[0].profile_id == chosen.id
+            assert await session.scalar(select(func.count()).select_from(UsageRecord)) == 0
     finally:
         await engine.dispose()

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.settings import Settings
 from vuzol.leadership.commands import LeadCommand
-from vuzol.leadership.persistence import CONTRACT_VERSION, LIVE_GOAL_LIFECYCLES, ManagedGoal
+from vuzol.leadership.persistence import CONTRACT_VERSION, ManagedGoal
 from vuzol.leadership.service import LeadershipCommandService
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
@@ -109,10 +109,19 @@ def _command(
         "pause": "pause_goal",
         "resume": "resume_goal",
         "cancel": "cancel_goal",
+        "revoke": "revoke_delegation",
         "status": "get_goal",
         "answer": "answer_permission",
     }
     name = names.get(kind)
+    answer_payload = {}
+    if kind == "answer":
+        try:
+            target, question_version, answer = argument.split(maxsplit=2)
+            goal_id = uuid.UUID(target)
+            answer_payload = {"answer": answer, "question_version": int(question_version)}
+        except (ValueError, TypeError):
+            return None
     if name is None or goal_id is None:
         if name is None:
             return None
@@ -122,7 +131,7 @@ def _command(
             goal_id=None,
             idempotency_key=key,
             contract_version=_CONTRACT,
-            payload={"answer": argument} if kind == "answer" else {},
+            payload=answer_payload,
         )
     return LeadCommand(
         name=name,
@@ -131,7 +140,7 @@ def _command(
         expected_version=None if name == "get_goal" else version,
         idempotency_key=key,
         contract_version=_CONTRACT,
-        payload={"answer": argument} if kind == "answer" else {},
+        payload=answer_payload,
     )
 
 
@@ -149,10 +158,10 @@ async def _notice(
     async with UnitOfWork(session_factory) as uow:
         assert uow.session is not None
         goal = await uow.session.scalar(
-            select(ManagedGoal).where(
-                ManagedGoal.project_id == project_id,
-                ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
-            )
+            select(ManagedGoal)
+            .where(ManagedGoal.project_id == project_id)
+            .order_by(ManagedGoal.created_at.desc())
+            .limit(1)
         )
         if goal is None:
             return f"Руководитель\n{line}"
@@ -189,10 +198,10 @@ async def _live_goal(
     async with UnitOfWork(session_factory) as uow:
         assert uow.session is not None
         goal = await uow.session.scalar(
-            select(ManagedGoal).where(
-                ManagedGoal.project_id == project_id,
-                ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
-            )
+            select(ManagedGoal)
+            .where(ManagedGoal.project_id == project_id)
+            .order_by(ManagedGoal.created_at.desc())
+            .limit(1)
         )
         if goal is None:
             return None, None

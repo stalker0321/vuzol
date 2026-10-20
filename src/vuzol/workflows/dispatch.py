@@ -71,6 +71,10 @@ class WorkflowDispatchError(RuntimeError):
     pass
 
 
+class ManagedDispatchPaused(RuntimeError):
+    pass
+
+
 class WorkflowDispatcher:
     def __init__(
         self,
@@ -105,6 +109,11 @@ class WorkflowDispatcher:
             async with self._factory.begin() as session:
                 await self._dispatch(session, token)
                 await complete_outbox_item(session, token)
+        except ManagedDispatchPaused:
+            async with self._factory.begin() as session:
+                await defer_outbox_item(
+                    session, token, delay_seconds=1, reason="managed_goal_inactive"
+                )
         except (ValueError, WorkflowDispatchError):
             async with self._factory.begin() as session:
                 await dead_letter_outbox_item(
@@ -119,6 +128,22 @@ class WorkflowDispatcher:
         interpretation = await session.get(Interpretation, item.linked_entity_id)
         if interpretation is None:
             raise WorkflowDispatchError("interpretation not found")
+        from vuzol.leadership.evidence import new_effect_blocker
+
+        if (
+            await new_effect_blocker(
+                session,
+                interpretation.task_id,
+                feature_enabled=self._runtime.settings.project_lead.enabled,
+            )
+            is not None
+        ):
+            status = await session.scalar(
+                select(Task.status).where(Task.id == interpretation.task_id)
+            )
+            if status is TaskStatus.CANCELLED:
+                return
+            raise ManagedDispatchPaused("managed grant does not permit dispatch")
         task = await session.scalar(
             select(Task).where(Task.id == interpretation.task_id).with_for_update()
         )

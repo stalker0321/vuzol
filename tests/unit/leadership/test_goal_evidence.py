@@ -1,28 +1,34 @@
-"""The goal checker reads the criterion description, not a plan item id."""
+"""Capture is not acceptance, even if the files repeat every criterion word."""
 
-from vuzol.leadership.evidence import judge_description
+import asyncio
+import subprocess
+
+import pytest
+
+from vuzol.execution.git import GitError
+from vuzol.leadership.evidence import GOAL_HEAD_CHECKER, observe_commit
 
 
-def test_marker_description_is_cited_by_the_marker_file() -> None:
-    satisfied, citations = judge_description(
-        "ship the marker",
-        {"README.md": "# Before\n", "MARKER.txt": "marker-a\nrepaired\n"},
+def test_snapshot_uses_the_commit_not_dirty_or_untracked_files(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.org"], check=True
     )
-    assert satisfied
-    assert citations
-    assert citations[0]["path"] == "MARKER.txt"
-
-
-def test_oauth_description_is_not_satisfied_by_marker_files() -> None:
-    satisfied, citations = judge_description(
-        "Working OAuth login",
-        {"MARKER.txt": "marker-a\nrepaired\n", "SECOND.txt": "marker-b\n"},
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Fixture"], check=True)
+    readme = tmp_path / "README.md"
+    readme.write_text("Working OAuth login is a TODO\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-m", "fixture"], check=True, capture_output=True
     )
-    assert not satisfied
-    assert citations == []
-
-
-def test_description_without_a_distinctive_word_fails_closed() -> None:
-    satisfied, citations = judge_description("ship", {"MARKER.txt": "marker-a\n"})
-    assert not satisfied
-    assert citations == []
+    commit = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    readme.write_text("Pretend it works now\n")
+    (tmp_path / "secrets.txt").write_text("untracked")
+    assert asyncio.run(observe_commit(str(tmp_path), commit)) == {
+        "README.md": "Working OAuth login is a TODO\n"
+    }
+    assert GOAL_HEAD_CHECKER != "goal_head_v1"
+    with pytest.raises(GitError):
+        asyncio.run(observe_commit(str(tmp_path), "HEAD"))

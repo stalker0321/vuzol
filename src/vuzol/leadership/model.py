@@ -31,6 +31,7 @@ class LeadSnapshot:
     waiting_reason: str | None
     completed_package_count: int = 0
     owner_answer: str | None = None
+    invocation_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,6 +7,7 @@ Integration fixtures truncate the selected database. Point
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -108,9 +109,12 @@ def _decision(*commands: LeadCommandDraft, usage: dict[str, Any] | None = None) 
 
 def _start_decision() -> LeadDecision:
     return _decision(
-        LeadCommandDraft(name="propose_batch", payload={"plan": _plan(
-            "Package A", "Write the first marker", ["marker-a"], "MARKER.txt"
-        )}),
+        LeadCommandDraft(
+            name="propose_batch",
+            payload={
+                "plan": _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")
+            },
+        ),
         LeadCommandDraft(name="start_batch", payload={}),
         usage={"cost_known": True, "cost_amount": 0},
     )
@@ -474,9 +478,7 @@ async def test_repeat_without_new_evidence_asks_the_owner(postgres_dsn: str) -> 
                 expected_version=1,
                 idempotency_key="propose-repeat",
                 payload={
-                    "plan": _plan(
-                        "Package A", "Write the first marker", ["marker-a"], "MARKER.txt"
-                    )
+                    "plan": _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")
                 },
             ),
         )
@@ -648,9 +650,7 @@ def _runtime(
                 default_workflow="coding_task",
             ),
         ),
-        sandboxes=(
-            SandboxProfileConfig(id="fixture", image="fixture@sha256:" + "a" * 64),
-        ),
+        sandboxes=(SandboxProfileConfig(id="fixture", image="fixture@sha256:" + "a" * 64),),
     )
     return RuntimeConfiguration(settings=settings, registries=build_bundle(document, settings))
 
@@ -708,6 +708,18 @@ async def _drain(workers: tuple[Any, ...], limit: int = 80) -> None:
 async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
     postgres_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    await run_managed_goal_flow(postgres_dsn, tmp_path, monkeypatch)
+
+
+async def run_managed_goal_flow(
+    postgres_dsn: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    request: str = "ship the marker",
+    expected_completed: bool = True,
+    control_before_apply: str | None = None,
+) -> None:
     monkeypatch.delenv("VUZOL_TEST_DATABASE_DSN", raising=False)
     monkeypatch.setenv("VUZOL_PROJECT_LEAD__ENABLED", "true")
     get_settings.cache_clear()
@@ -718,6 +730,30 @@ async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
     trace: dict[str, Any] = {}
     try:
         async with _factory(postgres_dsn) as factory:
+            if control_before_apply is not None:
+                from tests.integration.leadership.test_lead_review_regressions import control
+
+                from vuzol.execution.result_apply import ResultApplyHandler
+                from vuzol.storage.models import Approval
+                from vuzol.storage.types import ApprovalStatus
+
+                record = ResultApplyHandler._record_intent
+                controlled = False
+
+                async def stop_before_new_effect(handler, request, **kwargs):
+                    nonlocal controlled
+                    if not controlled:
+                        controlled = True
+                        async with factory() as session:
+                            approved = await session.get(Approval, kwargs["approval_id"])
+                            assert approved.status is ApprovalStatus.APPROVED
+                            goal = await session.scalar(select(ManagedGoal))
+                            goal_id = goal.id
+                        result = await control(factory, goal_id, control_before_apply)
+                        assert result.status == "applied"
+                    return await record(handler, request, **kwargs)
+
+                monkeypatch.setattr(ResultApplyHandler, "_record_intent", stop_before_new_effect)
             client = FakeTelegramClient()
             delivery = TelegramDeliveryService(
                 factory,
@@ -737,7 +773,7 @@ async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
                     message_thread_id=THREAD,
                     message_id=11,
                     user_id=OWNER,
-                    text="/lead ship the marker",
+                    text=f"/lead {request}",
                 )
             )
             assert opened.status is IngressStatus.HANDLED
@@ -754,9 +790,25 @@ async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
             dispatcher = WorkflowDispatcher(runtime, factory, owner="dispatch-test")
             background = (dispatcher, *workers, sequence)
 
-            first = _worker(factory, _GoalModel(), owner="lead-1")
+            first = _provider_worker(factory, settings, owner="lead-1")
             assert await first.process_one()
             await _drain(background)
+            if control_before_apply is not None:
+                from vuzol.storage.models import Effect
+                from vuzol.storage.types import TaskStatus
+
+                async with factory() as session:
+                    goal = await session.scalar(select(ManagedGoal))
+                    package = await session.scalar(select(WorkPackage))
+                    task = await session.scalar(select(Task))
+                    assert controlled
+                    assert goal.lifecycle in {"paused", "cancelled"}
+                    assert package.status is WorkPackageStatus.STOPPED
+                    assert task.status is TaskStatus.CANCELLED
+                    assert await session.scalar(select(func.count()).select_from(Effect)) == 0
+                assert await git.resolve_commit(repository, "main") == base
+                assert await git.read_ref(repository, goal.integration_branch) is None
+                return
             async with factory() as session:
                 first_package = await session.scalar(select(WorkPackage))
                 assert first_package is not None
@@ -768,9 +820,7 @@ async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
                 trace["package_a"] = str(first_package.id)
                 trace["head_a"] = first_package.integration_head_commit
                 repairs = list(
-                    await session.scalars(
-                        select(Step).where(Step.step_type == "execute_code")
-                    )
+                    await session.scalars(select(Step).where(Step.step_type == "execute_code"))
                 )
                 assert any(
                     isinstance(step.payload, dict) and step.payload.get("repair_for_step_id")
@@ -784,13 +834,13 @@ async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
                 assert approved == 1
 
             assert await git.resolve_commit(repository, "main") == base
-            resumed = _worker(factory, _GoalModel(), owner="lead-2")
+            resumed = _provider_worker(factory, settings, owner="lead-2")
             assert await resumed.process_one()
             assert await _package_count(factory) == 2
             assert not await resumed.process_one()
             assert await _package_count(factory) == 2
             await _drain(background)
-            closer = _worker(factory, _GoalModel(), owner="lead-3")
+            closer = _provider_worker(factory, settings, owner="lead-3")
             for _ in range(3):
                 async with factory() as session:
                     goal = await session.scalar(select(ManagedGoal))
@@ -818,8 +868,7 @@ async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
                 trace["branch"] = goal.integration_branch
                 trace["packages"] = [str(package.id) for package in packages]
                 trace["lifecycle"] = goal.lifecycle
-                request = goal.original_request
-            if request == "ship the marker":
+            if expected_completed:
                 assert trace["lifecycle"] == "completed"
             else:
                 assert trace["lifecycle"] != "completed"
@@ -845,11 +894,110 @@ async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
             assert "repaired" in marker.stdout
             trace["head_b"] = managed
             trace["main"] = base
+            for _ in range(300):
+                if not await delivery.deliver_one():
+                    break
+            assert any(
+                "Статус: completed" in text and "Результат: покрыто:" in text
+                for _, _, text in client.sent
+            )
             print("LEAD_TRACE")
             for key, value in trace.items():
                 print(f"{key}={value}")
     finally:
         get_settings.cache_clear()
+
+
+def _provider_worker(factory, settings, *, owner):
+    from tests.integration.leadership.test_lead_surface import _profile
+
+    from vuzol.config.models import ProviderRole
+    from vuzol.config.registries import ProfileRegistry
+    from vuzol.leadership.composition import build_project_lead_worker
+    from vuzol.providers.domain import NormalizedUsage, ProviderResult, ProviderResultStatus
+
+    class Transport:
+        async def execute(self, request, profile, cancellation):
+            del profile, cancellation
+            prompt = request.original_input
+            if request.role is ProviderRole.REVIEWER:
+                body = json.loads(prompt.split("\n", 1)[1])
+                files = body["files"]
+                passed = (
+                    body["request"] == "ship the marker"
+                    and files.get("MARKER.txt") == "marker-a\nrepaired\n"
+                    and files.get("SECOND.txt") == "marker-b\n"
+                )
+                payload = {
+                    "result_commit": body["result_commit"],
+                    "criteria": [
+                        {
+                            "criterion_id": item["id"],
+                            "verdict": "pass" if passed else "insufficient",
+                            "explanation": "Both committed markers have the required contents."
+                            if passed
+                            else "These marker files do not implement the requested outcome.",
+                            "evidence_paths": ["MARKER.txt", "SECOND.txt"] if passed else [],
+                        }
+                        for item in body["criteria"]
+                    ],
+                }
+            elif "completed_packages: 2" in prompt:
+                payload = {"commands": [{"name": "propose_completion", "payload": {}}]}
+            else:
+                second = "package: completed" in prompt
+                plan = _plan(
+                    "Package B" if second else "Package A",
+                    "Write the second marker" if second else "Write the first marker",
+                    ["requested-outcome"] if second else ["marker-a"],
+                    "SECOND.txt" if second else "MARKER.txt",
+                )
+                payload = {
+                    "commands": [
+                        {"name": "propose_batch", "payload": {"plan": plan}},
+                        {"name": "start_batch", "payload": {}},
+                    ]
+                }
+            return ProviderResult(
+                status=ProviderResultStatus.SUCCEEDED,
+                structured_output=payload,
+                usage=NormalizedUsage(duration_ms=1),
+                adapter_version="fixture-provider",
+            )
+
+        async def health(self, profile):
+            from vuzol.providers.domain import EffectiveProfileState
+
+            return EffectiveProfileState()
+
+    profiles = ProfileRegistry(
+        (
+            _profile().model_copy(update={"context_limit": 16000}),
+            _profile().model_copy(
+                update={
+                    "id": "goal-review",
+                    "roles": frozenset({ProviderRole.REVIEWER}),
+                    "context_limit": 16000,
+                }
+            ),
+        )
+    )
+    configured = settings.model_copy(
+        update={
+            "project_lead": settings.project_lead.model_copy(
+                update={"profile_id": "lead-local", "reviewer_profile_id": "goal-review"}
+            )
+        }
+    )
+    return build_project_lead_worker(
+        factory,
+        settings=configured,
+        profiles=profiles,
+        owner=owner,
+        default_branches={PROJECT: "main"},
+        adapter=Transport(),
+        reviewer_adapter=Transport(),
+    )
 
 
 def _workflow_workers(

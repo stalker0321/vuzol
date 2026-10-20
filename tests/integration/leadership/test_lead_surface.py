@@ -305,7 +305,7 @@ async def test_owner_question_and_answer_bind_the_goal_revision(
         )
         assert stale.status == "stale"
         answered = await TelegramIngressService(runtime, factory).accept_message(
-            _message(52, f"/lead_answer {answer}")
+            _message(52, f"/lead_answer {goal_id} {version + 1} {answer}")
         )
         assert answered.status is IngressStatus.HANDLED
         card = await _drain(factory)
@@ -367,7 +367,7 @@ async def test_paused_answer_keeps_the_question_revision(
                 goal_id=goal_id,
                 expected_version=current,
                 idempotency_key="answer-while-paused",
-                payload={"answer": "да"},
+                payload={"answer": "да", "question_version": version + 1},
             ),
         )
         assert answered.status == "applied"

@@ -47,7 +47,9 @@ def applier_handlers(
     settings = runtime.settings
     git = LocalGit()
     return {
-        "approval": ResultApplyHandler(factory, runtime.registries, git),
+        "approval": ResultApplyHandler(
+            factory, runtime.registries, git, project_lead_enabled=settings.project_lead.enabled
+        ),
         "ensure_capabilities": CapabilityProvisioningHandler(
             factory,
             OfflineCapabilityInstaller(settings.capability_provisioning),

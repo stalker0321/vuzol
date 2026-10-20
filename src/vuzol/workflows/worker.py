@@ -118,14 +118,20 @@ class WorkflowWorker:
                         release=False,
                     )
             return True
-        async with self._factory.begin() as session:
-            await commit_step_outcome(
-                session,
-                token,
-                outcome,
-                retry_delay_seconds=self._retry_delay(token.step.id, token.step.lease_generation),
-                recovery_policy=self._recovery_policy,
-            )
+        try:
+            async with self._factory.begin() as session:
+                await commit_step_outcome(
+                    session,
+                    token,
+                    outcome,
+                    retry_delay_seconds=self._retry_delay(
+                        token.step.id, token.step.lease_generation
+                    ),
+                    recovery_policy=self._recovery_policy,
+                )
+        except LeaseLost:
+            # Cancellation or takeover won the race; its durable state is authoritative.
+            return True
         return True
 
     async def _dogfood_fault_outcome(self, request: StepExecutionRequest) -> StepOutcome | None:

@@ -45,10 +45,13 @@ class ResultApplyHandler:
         session_factory: async_sessionmaker[AsyncSession],
         registries: ConfigurationBundle,
         git: LocalGit,
+        *,
+        project_lead_enabled: bool | None = None,
     ) -> None:
         self._factory = session_factory
         self._registries = registries
         self._git = git
+        self._project_lead_enabled = project_lead_enabled
 
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -242,6 +245,14 @@ class ResultApplyHandler:
             },
         )
         async with self._factory.begin() as session:
+            # Use the same lock order as owner controls: goal, then child step.
+            from vuzol.leadership.evidence import new_effect_blocker
+
+            blocker = await new_effect_blocker(
+                session, request.task_id, feature_enabled=self._project_lead_enabled
+            )
+            if blocker is not None:
+                raise ValueError(blocker)
             step = await session.scalar(
                 select(Step)
                 .where(
@@ -263,11 +274,6 @@ class ResultApplyHandler:
                 ApprovalStatus.CONSUMED,
             }:
                 raise ValueError("result has not been approved")
-            from vuzol.leadership.evidence import new_effect_blocker
-
-            blocker = await new_effect_blocker(session, request.task_id)
-            if blocker is not None:
-                raise ValueError(blocker)
             effect = await record_intent(session, intent)
         return effect.id
 
@@ -335,6 +341,9 @@ class ResultApplyHandler:
                             session,
                             package=package,
                             worktree_path=worktree.path,
+                            repository_path=str(
+                                self._registries.projects.get(worktree.project_id).repository_path
+                            ),
                             result_commit=worktree.result_commit,
                         )
             if effect_id is not None:

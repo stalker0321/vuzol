@@ -111,8 +111,6 @@ async def execute_batch(
     goal.current_package_id = package.id
     goal.lifecycle = "active"
     goal.waiting_reason = None
-    goal.lease_owner = None
-    goal.lease_until = None
     goal.version += 1
     goal.fence_epoch += 1
     return {

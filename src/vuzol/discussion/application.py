@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from pydantic import Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.discussion.domain import (
@@ -313,7 +314,15 @@ class PackageControlIngress:
                 PackageControlAction.START,
                 PackageControlAction.RESTART_PACKAGE,
             }:
-                watched = await uow.work_packages.get_package(command.package_id)
+                from vuzol.leadership.fence import lock_project_admission
+                from vuzol.storage.models import WorkPackage
+
+                project_id = await uow.session.scalar(
+                    select(WorkPackage.project_id).where(WorkPackage.id == command.package_id)
+                )
+                if project_id is not None:
+                    await lock_project_admission(uow.session, project_id)
+                watched = await uow.work_packages.get_package(command.package_id, for_update=True)
                 if await legacy_package_is_fenced(uow.session, watched):
                     outcome = {
                         "code": PackageControlResultCode.QUEUED.value,

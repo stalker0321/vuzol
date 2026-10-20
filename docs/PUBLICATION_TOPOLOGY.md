@@ -31,6 +31,33 @@ also cannot see a newly approved release written only on the worker.
 - DNS, public TLS termination, project builds, artifact hashes and approval
   policies remain unchanged. Routing is not permission to publish a result.
 
+## Integration is not production authority
+
+Managed-goal packages finish on their integration branch/preview. Their automatic
+`publish_static` step returns `skipped: managed_integration_only`; an `apply_integration`
+grant can never publish production, including through a direct publisher-boundary call.
+This remains true with the project-lead feature disabled. A separate managed-goal promotion
+command is **not** implemented in this stage.
+
+For ordinary tasks, accepting a Git result does not authorize production. The existing
+`publish_static` step asks the task owner for a separate
+`production-publication-approval.v1` approval. Its Telegram card shows the production URL,
+source commit and full artifact SHA-256. The immutable envelope binds those values, canonical
+destination, project/task/run/step, configuration revision and policy revision. Only
+approve/reject are offered; asking for consent does not exhaust the execution retry budget.
+
+The effect boundary rechecks exact consent, expiry, deciding owner, active task/run and current
+lease under locks immediately before activation. Changed bytes/targets, revoked consent,
+pause/cancel and lease takeover fail closed. Consumption is bound to the same step and artifact:
+a crash after activation but before step acknowledgement can replay that exact publication,
+not substitute another artifact. Existing preview restoration remains preview-only.
+Expired or changed envelopes do not silently refresh consent; they block for a new reviewed
+workflow. No SQL status repair or preview-to-production copy is a supported promotion path.
+
+These safety checks are unconditional; there is no flag to restore implicit production
+permission. `project_lead.enabled` still defaults to false. This code change does not install,
+restart or deploy any live service or alter edge routing.
+
 ## Verification and recovery
 
 Back up both complete Caddyfiles and hash them before installation; do not

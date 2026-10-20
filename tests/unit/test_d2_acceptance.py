@@ -49,9 +49,7 @@ def test_d2_evidence_schema_file_matches_validator() -> None:
     import json
     from pathlib import Path
 
-    schema = json.loads(
-        Path("docs/schemas/acceptance-evidence.v1.schema.json").read_text()
-    )
+    schema = json.loads(Path("docs/schemas/acceptance-evidence.v1.schema.json").read_text())
     assert schema["title"] == "Acceptance evidence v1"
     assert set(schema["required"]) >= {
         "package_id",
@@ -188,11 +186,12 @@ async def test_d2_decide_rejects_config_drift() -> None:
     )
     task = SimpleNamespace(id=task_id)
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=[approval, step, run, task])
+    located = MagicMock()
+    located.one_or_none.return_value = (task_id, run_id)
+    session.execute = AsyncMock(return_value=located)
+    session.scalar = AsyncMock(side_effect=[step_id, task, run, step, approval])
     with pytest.raises(ValueError, match="drifted since request"):
-        await decide_result(
-            session, approval_id, decision="approve", deciding_user_id=7
-        )
+        await decide_result(session, approval_id, decision="approve", deciding_user_id=7)
 
 
 @pytest.mark.anyio

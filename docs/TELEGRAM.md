@@ -178,31 +178,32 @@ Project topics use adaptive workflow selection. Implementation requests use the 
 repository-aware architecture and design discussions use the read-only architecture-agent
 workflow and return their textual result in the task card.
 
-### Project executor preference (`/model`)
+### Project model assignments (`/model`)
 
-In a project topic, bare `/model` opens an inline chooser for that project's default coding
-executor. The preference is **project-scoped** and durable in PostgreSQL: it applies to future
-executor steps for the project until changed again. It is not a per-task override.
+In a project topic, `/model` opens the durable project role matrix. Choose a role, then
+an enabled profile. The catalog displays provider/model, profile ID, account, and API/CLI
+transport; no vendor is permanently assigned to a role. Available slots are lead, goal
+verification, light/strong planner, light/strong reviewer, and coding executor. Light/strong
+classification remains deterministic policy, not a model-selected privilege.
 
-Choices:
+The menu is built from configured profiles and permitted roles. "По умолчанию" restores
+the installation default/automatic policy for that slot. Model/reasoning variants are profile
+configuration, not a hardcoded list of product names. Adding a new authenticated account or
+new profile remains an operator configuration operation; choosing an existing one requires
+no code edit, deployment, or restart.
 
-- **Routing (auto)** — restore deterministic capability/health/budget routing across all enabled
-  executor accounts (default);
-- **Sol / Terra / Luna** — pin the Codex CLI executor and select the product model variant, then
-  choose reasoning effort (`low` / `medium` / `high` / `xhigh`);
-- **Grok** — pin a Grok CLI executor profile;
-- **Kimi K3 Free** — pin a Kimi CLI executor profile.
+Changes affect new workflow runs and new leadership turns. Already-created runs, retries,
+and in-flight turns preserve their frozen assignment. Explicit selections never silently
+fall back to another profile; a disabled/changed/unavailable selection blocks visibly.
+The coding executor slot does not change research/API executor steps. Interpretation,
+transcription, and synthesis retain their existing configuration paths.
 
-The picker opens with an account stage: users first choose among the enabled CLI executor accounts
-(OpenAI / xAI / TokenRouter per connection label) and then the product model. Pinning an explicit
-account disables same-family fallbacks; only auto routing falls back within the family.
-
-Pinned selection applies only to coding/agent CLI steps (`execute_code` / `execute_agent`). It uses
-the router's trusted-profile path and stores model/effort overrides on the claimed step payload so
-the sandbox transport validates the exact command—including when a same-family profile fallback is
-selected. Cross-family automatic fallback (for example Sol → Grok) is disabled while a pin is
-active. If the pinned worker family has no enabled profile, the step blocks rather than silently
-using auto routing. Planner, reviewer, research, and other API executor roles are unchanged.
+Every callback uses the existing owner/project authorization, durable deduplication, and
+preference revision check. Old buttons ask for a fresh `/model` menu. Selecting a model does
+not approve effects, unpause a goal, or answer a pending question. Use normal goal controls
+to continue waiting work. Legacy executor-family preferences remain compatible for old runs;
+new executor selection/reset clears the old preference. See [Providers](PROVIDERS.md) for
+pinning, shared-account limits, transport ownership, and recovery constraints.
 
 `Новый проект` is an explicit provisioning boundary. An allowlisted text or voice message is
 treated as the project's nature and goal. The interpreter proposes nine distinct display-name and

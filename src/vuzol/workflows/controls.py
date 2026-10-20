@@ -279,7 +279,9 @@ async def decide_result(
             expected = envelope.get(field)
             if expected is not None and expected != getattr(run, field):
                 raise ValueError(f"approval envelope {field} drifted since request")
-    if deciding_user_id != task.user_id:
+    # Existing result/install controls retain their allowlisted-operator contract.
+    # Production introduces a stricter, task-owner-only grant.
+    if approval.requested_action == "publish_static" and deciding_user_id != task.user_id:
         raise ValueError("result approval requires the task owner")
     approval.deciding_user_id = deciding_user_id
     approval.decided_at = func.now()

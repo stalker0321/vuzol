@@ -18,7 +18,7 @@ import subprocess  # fixed argv only, no shell
 import sys
 import tarfile
 import uuid
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,9 +31,13 @@ from vuzol.project_environment import current_environment
 from vuzol.projects.capabilities import CapabilityState, preflight_capabilities
 from vuzol.projects.installations import installation_states
 from vuzol.security import confined_paths, landlock
-from vuzol.storage.models import MaterializationLink, Task, WorkPackage, Worktree
+from vuzol.storage.models import MaterializationLink, Run, Step, Task, WorkPackage, Worktree
+from vuzol.storage.records import LeaseToken
+from vuzol.storage.repositories.core import step_record
+from vuzol.storage.types import StepStatus
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
+from vuzol.workflows.publication import PublicationDenied, publication_authority
 
 _PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -80,10 +84,12 @@ def _remove_runtime_dir(runtime_dir: Path | None) -> None:
 @dataclass(slots=True)
 class PreviewRuntimeRegistry:
     targets: dict[str, RuntimeTarget] = field(default_factory=dict)
+    unavailable: dict[str, str] = field(default_factory=dict)
 
     async def replace(self, target: RuntimeTarget) -> None:
         previous = self.targets.get(target.project_id)
         self.targets[target.project_id] = target
+        self.unavailable.pop(target.project_id, None)
         if previous is not None:
             await _stop_process(previous.process)
             _remove_runtime_dir(previous.runtime_dir)
@@ -214,6 +220,76 @@ class RuntimePreviewHandler:
     async def execute(
         self, request: StepExecutionRequest, cancellation: CancellationContext
     ) -> StepOutcome:
+        return await self._execute(request, cancellation)
+
+    async def restore_latest(self) -> None:
+        """Restore only the newest committed publication per project.
+
+        No replay of workflow mutations: the persisted result is the desired
+        artifact, the retained Git object supplies immutable bytes.
+        """
+        async with self._factory() as session:
+            rows = (
+                await session.execute(
+                    select(Step, Task.project_id, Task.id)
+                    .join(Run, Run.id == Step.run_id)
+                    .join(Task, Task.id == Run.task_id)
+                    .where(Step.step_type == "publish_preview", Step.status == StepStatus.COMPLETED)
+                    .distinct(Task.project_id)
+                    .order_by(Task.project_id, Step.updated_at.desc(), Step.id.desc())
+                )
+            ).all()
+        for step, project_id, task_id in rows:
+            result = step.result
+            if (
+                project_id is None
+                or not isinstance(result, dict)
+                or result.get("artifact_kind") != "web_preview"
+            ):
+                continue
+            self._registry.unavailable[project_id] = "preview_restore_pending"
+            request = StepExecutionRequest(
+                task_id=task_id,
+                run_id=step.run_id,
+                step_id=step.id,
+                step_type=step.step_type,
+                payload=step.payload,
+                timeout_seconds=60,
+                lease=LeaseToken(
+                    step=step_record(step),
+                    owner="publication-recovery",
+                    generation=step.lease_generation,
+                ),
+            )
+            try:
+                outcome = await self._execute(request, CancellationContext(), restoring=result)
+            except Exception:
+                self._registry.unavailable[project_id] = "preview_restore_failed"
+                continue
+            if outcome.result.get("status") != "published":
+                self._registry.unavailable[project_id] = outcome.category or "preview_unavailable"
+
+    def _authority(
+        self,
+        request: StepExecutionRequest,
+        cancellation: CancellationContext,
+        restoring: dict[str, object] | None = None,
+    ) -> AbstractAsyncContextManager[None]:
+        return publication_authority(
+            self._factory,
+            request,
+            cancellation,
+            feature_enabled=self._runtime.settings.project_lead.enabled,
+            restoring=restoring,
+        )
+
+    async def _execute(
+        self,
+        request: StepExecutionRequest,
+        cancellation: CancellationContext,
+        *,
+        restoring: dict[str, object] | None = None,
+    ) -> StepOutcome:
         if cancellation.requested:
             return StepOutcome(kind=OutcomeKind.CANCELLED, result={}, category="cancelled")
         async with self._factory() as session:
@@ -302,6 +378,17 @@ class RuntimePreviewHandler:
                 category="preview_source_missing",
                 summary="runtime preview requires a retained result commit",
             )
+        runtime_spec = {
+            "run_command": command,
+            "healthcheck_path": component.get("healthcheck_path", "/"),
+        }
+        if restoring is not None and (
+            restoring.get("source_commit") != commit
+            or restoring.get("runtime_spec") != runtime_spec
+        ):
+            return StepOutcome(
+                kind=OutcomeKind.BLOCKED, result={}, category="preview_restore_source_changed"
+            )
         if landlock.landlock_abi_version() < 1:
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
@@ -324,49 +411,64 @@ class RuntimePreviewHandler:
             "PORT": str(port),
             "NODE_ENV": "test",
         }
+        process = None
+        registered = False
         try:
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                str(_wrapper_path()),
-                _confinement_spec(_source_root(), run_dir),
-                "--",
-                executable,
-                *command[1:],
-                cwd=str(app_dir),
-                env=environment_variables,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
+            async with self._authority(request, cancellation, restoring):
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    str(_wrapper_path()),
+                    _confinement_spec(_source_root(), run_dir),
+                    "--",
+                    executable,
+                    *command[1:],
+                    cwd=str(app_dir),
+                    env=environment_variables,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=log,
+                )
+            healthcheck = component.get("healthcheck_path")
+            path = healthcheck if isinstance(healthcheck, str) else "/"
+            probe = await _cancellable_ready(
+                process, port=port, path=path, cancellation=cancellation
             )
-        finally:
-            log.close()
-        healthcheck = component.get("healthcheck_path")
-        path = healthcheck if isinstance(healthcheck, str) else "/"
-        try:
-            probe = await _wait_until_ready(process, port=port, path=path)
-        except (RuntimeError, httpx.HTTPError, TimeoutError) as error:
-            await _stop_process(process)
+            target = RuntimeTarget(task.project_id, port, process, commit, runtime_dir=run_dir)
+            # A stop while healthchecking must prevent exposure too.
+            async with self._authority(request, cancellation, restoring):
+                await self._registry.replace(target)
+            base_url = str(self._runtime.settings.preview_site_base_url).rstrip("/")
+            public_url = f"{base_url}/{task.project_id}/"
+            if materialization is not None and restoring is None:
+                async with self._factory.begin() as session:
+                    package = await session.get(WorkPackage, materialization.work_package_id)
+                    if package is not None:
+                        package.preview_url = public_url
+            registered = True
+        except (PublicationDenied, RuntimeError, httpx.HTTPError, TimeoutError) as error:
             category = (
-                "preview_confinement_unavailable"
-                if process.returncode in (landlock.EXIT_BAD_SPEC, landlock.EXIT_CONFINEMENT_FAILED)
+                str(error)
+                if isinstance(error, PublicationDenied)
+                else "preview_confinement_unavailable"
+                if process is not None
+                and process.returncode in (landlock.EXIT_BAD_SPEC, landlock.EXIT_CONFINEMENT_FAILED)
                 else "preview_runtime_unhealthy"
             )
             return StepOutcome(
-                kind=OutcomeKind.BLOCKED,
+                kind=OutcomeKind.CANCELLED if cancellation.requested else OutcomeKind.BLOCKED,
                 result={"log_path": str(log_path)},
                 category=category,
                 summary=str(error)[:500],
             )
-        target = RuntimeTarget(task.project_id, port, process, commit, runtime_dir=run_dir)
-        await self._registry.replace(target)
-        public_url = (
-            f"{str(self._runtime.settings.preview_site_base_url).rstrip('/')}/{task.project_id}/"
-        )
-        if materialization is not None:
-            async with self._factory.begin() as session:
-                package = await session.get(WorkPackage, materialization.work_package_id)
-                if package is not None:
-                    package.preview_url = public_url
+        finally:
+            log.close()
+            if not registered:
+                if process is not None:
+                    await _stop_process(process)
+                    current = self._registry.targets.get(task.project_id)
+                    if current is not None and current.process is process:
+                        self._registry.targets.pop(task.project_id)
+                _remove_runtime_dir(run_dir)
         return StepOutcome.succeeded(
             {
                 "status": "published",
@@ -374,6 +476,7 @@ class RuntimePreviewHandler:
                 "public_url": public_url,
                 "source_commit": commit,
                 "healthcheck": probe,
+                "runtime_spec": runtime_spec,
             }
         )
 
@@ -427,6 +530,26 @@ def _wrapper_path() -> Path:
     return Path(location)
 
 
+async def _cancellable_ready(
+    process: asyncio.subprocess.Process,
+    *,
+    port: int,
+    path: str,
+    cancellation: CancellationContext,
+) -> dict[str, object]:
+    ready = asyncio.create_task(_wait_until_ready(process, port=port, path=path))
+    stopped = asyncio.create_task(cancellation.wait())
+    try:
+        done, _ = await asyncio.wait((ready, stopped), return_when=asyncio.FIRST_COMPLETED)
+        if stopped in done:
+            raise PublicationDenied("cancelled")
+        return await ready
+    finally:
+        ready.cancel()
+        stopped.cancel()
+        await asyncio.gather(ready, stopped, return_exceptions=True)
+
+
 def _source_root() -> Path:
     return _wrapper_path().resolve().parents[2]
 
@@ -468,7 +591,7 @@ async def _wait_until_ready(
                 raise RuntimeError(f"preview process exited with code {process.returncode}")
             try:
                 response = await client.get(url)
-                if 200 <= response.status_code < 500:
+                if 200 <= response.status_code < 300:
                     return {"status_code": response.status_code, "path": path}
             except httpx.HTTPError:
                 pass

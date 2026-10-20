@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tarfile
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -88,6 +89,7 @@ def _handler(
         cast(Any, runtime),
         PreviewRuntimeRegistry(),
     )
+    handler._authority = MagicMock(side_effect=lambda *_: nullcontext())  # type: ignore[method-assign]
     return handler, read_session, write_session
 
 
@@ -606,13 +608,17 @@ async def test_runtime_preview_stops_unhealthy_process(
 
 
 @pytest.mark.anyio
-async def test_healthcheck_retries_http_error_then_accepts_non_server_response(
+async def test_healthcheck_retries_error_and_404_then_accepts_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = AsyncMock()
     client.__aenter__.return_value = client
     client.__aexit__.return_value = None
-    client.get.side_effect = [httpx.ConnectError("starting"), SimpleNamespace(status_code=404)]
+    client.get.side_effect = [
+        httpx.ConnectError("starting"),
+        SimpleNamespace(status_code=404),
+        SimpleNamespace(status_code=200),
+    ]
     monkeypatch.setattr(
         "vuzol.workflows.runtime_preview.httpx.AsyncClient", lambda **_kwargs: client
     )
@@ -621,8 +627,23 @@ async def test_healthcheck_retries_http_error_then_accepts_non_server_response(
 
     result = await _wait_until_ready(process, port=1234, path="/ready")
 
-    assert result == {"status_code": 404, "path": "/ready"}
-    assert client.get.await_count == 2
+    assert result == {"status_code": 200, "path": "/ready"}
+    assert client.get.await_count == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [301, 401, 404, 500])
+async def test_healthcheck_rejects_non_success(monkeypatch, status):
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.get.return_value = SimpleNamespace(status_code=status)
+    monkeypatch.setattr("vuzol.workflows.runtime_preview.httpx.AsyncClient", lambda **_: client)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    with pytest.raises(TimeoutError):
+        await _wait_until_ready(
+            cast(Any, SimpleNamespace(returncode=None)), port=1234, path="/ready"
+        )
+    assert client.get.await_count == 30
 
 
 @pytest.mark.anyio

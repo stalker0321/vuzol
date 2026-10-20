@@ -78,6 +78,10 @@ def create_preview_gateway(registry: PreviewRuntimeRegistry, *, static_root: Pat
         target = registry.targets.get(project_id)
         if target is not None and target.process.returncode is None:
             return await _proxy(client, request, port=target.port, path=preview_path)
+        if project_id in registry.unavailable:
+            return PlainTextResponse(
+                "Preview unavailable: " + registry.unavailable[project_id], status_code=503
+            )
         return _static_preview(static_root, project_id=project_id, path=preview_path)
 
     return app
@@ -107,6 +111,8 @@ def _resolve_preview_request(
 def _project_exists(registry: PreviewRuntimeRegistry, static_root: Path, project_id: str) -> bool:
     if _PROJECT_ID.fullmatch(project_id) is None:
         return False
+    if project_id in registry.unavailable:
+        return True
     target = registry.targets.get(project_id)
     if target is not None and target.process.returncode is None:
         return True

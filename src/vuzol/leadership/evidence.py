@@ -227,7 +227,11 @@ async def package_has_unknown_effects(session: AsyncSession, package_id: uuid.UU
 
 
 async def new_effect_blocker(
-    session: AsyncSession, task_id: uuid.UUID, *, feature_enabled: bool | None = None
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    *,
+    feature_enabled: bool | None = None,
+    restoring_publication: bool = False,
 ) -> str | None:
     """Refuse a new external effect when the managed grant is no longer live."""
 
@@ -246,7 +250,9 @@ async def new_effect_blocker(
     goal = await session.get(ManagedGoal, package.managed_goal_id, with_for_update=True)
     if goal is None:
         return "managed_goal_missing"
-    if goal.lifecycle in _INACTIVE_GOAL:
+    if goal.lifecycle in _INACTIVE_GOAL and not (
+        restoring_publication and goal.lifecycle == "completed"
+    ):
         return "managed_goal_inactive"
     delegation = await session.get(GoalDelegation, goal.delegation_id)
     if delegation is None or delegation.revoked_at is not None:

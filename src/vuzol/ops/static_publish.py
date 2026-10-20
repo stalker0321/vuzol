@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -10,6 +11,8 @@ import shutil
 import stat
 import tempfile
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -24,6 +27,10 @@ MAX_BYTES = 250 * 1024 * 1024
 
 class StaticPublishError(RuntimeError):
     """A bounded publication failure safe to expose in service logs."""
+
+
+class StaticHashMismatch(StaticPublishError):
+    """Prepared bytes differ from the approved build; nothing was activated."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +48,17 @@ class PublishResult:
     site_id: str
     release: str
     changed: bool
+    files: int
+    bytes: int
+    previous_release: str | None = None
+    activation_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRelease:
+    site: StaticSite
+    destination: Path
+    release: Path
     files: int
     bytes: int
 
@@ -71,7 +89,21 @@ def publish(
     *,
     source_root: Path | None = None,
     site_root: Path | None = None,
+    expected_hash: str | None = None,
 ) -> PublishResult:
+    return activate(
+        prepare(site, source_root=source_root, site_root=site_root, expected_hash=expected_hash)
+    )
+
+
+def prepare(
+    site: StaticSite,
+    *,
+    source_root: Path | None = None,
+    site_root: Path | None = None,
+    expected_hash: str | None = None,
+) -> PreparedRelease:
+    """Build and verify private bytes. This phase cannot change the live target."""
     source = _contained_directory(site.source, source_root or SOURCE_ROOT, "source")
     destination = _contained_destination(site.destination, site_root or SITE_ROOT)
     releases = destination / "releases"
@@ -84,18 +116,66 @@ def publish(
             raise StaticPublishError(f"required entrypoint is missing: {site.entrypoint}")
         _require_closed_html_entrypoint(staging, site.entrypoint)
         digest = _tree_digest(staging)
+        if expected_hash is not None and digest != expected_hash:
+            raise StaticHashMismatch("prepared tree does not match the approved build artifact")
         release = releases / digest[:20]
-        if release.exists():
-            shutil.rmtree(staging)
-        else:
-            staging.rename(release)
-        changed = _activate(destination, release)
-        _prune(releases, current=release, keep=site.keep_releases)
-        return PublishResult(site.id, release.name, changed, files, total_bytes)
+        with _site_lock(destination):
+            if release.exists():
+                if _tree_digest(release) != digest:
+                    raise StaticHashMismatch("existing release bytes changed")
+                shutil.rmtree(staging)
+            else:
+                staging.rename(release)
+        return PreparedRelease(site, destination, release, files, total_bytes)
     except Exception:
         if staging.exists():
             shutil.rmtree(staging)
         raise
+
+
+def activate(prepared: PreparedRelease) -> PublishResult:
+    """Short activation boundary; callers must hold their current execution authority."""
+    with _site_lock(prepared.destination):
+        previous = _optional_current(prepared.destination)
+        changed = previous != prepared.release
+        activation_id = _activate(prepared.destination, prepared.release) if changed else None
+        _prune(
+            prepared.destination / "releases",
+            current=prepared.release,
+            keep=prepared.site.keep_releases,
+            previous=previous,
+        )
+        return PublishResult(
+            prepared.site.id,
+            prepared.release.name,
+            changed,
+            prepared.files,
+            prepared.bytes,
+            previous.name if previous else None,
+            activation_id,
+        )
+
+
+def compensate(site: StaticSite, result: PublishResult, *, site_root: Path) -> None:
+    """Undo this activation only, including first publish; never undo a successor."""
+    if not result.changed:
+        return
+    destination = _contained_destination(site.destination, site_root)
+    with _site_lock(destination):
+        journal = _activation_journal(destination)
+        current = _optional_current(destination)
+        if (
+            journal.get("activation_id") != result.activation_id
+            or current is None
+            or current.name != result.release
+        ):
+            raise StaticPublishError("publication changed before compensation")
+        previous = result.previous_release
+        if previous is None:
+            (destination / "current").unlink()
+            _sync_directory(destination)
+        else:
+            _activate(destination, destination / "releases" / previous)
 
 
 def measure_static_tree(
@@ -139,23 +219,18 @@ def measure_static_tree(
 
 def rollback(site: StaticSite, *, site_root: Path | None = None) -> PublishResult:
     destination = _contained_destination(site.destination, site_root or SITE_ROOT)
-    releases = destination / "releases"
-    current = _current_release(destination)
-    candidates = sorted(
-        (
-            path
-            for path in releases.iterdir()
-            if path.is_dir() and not path.name.startswith(".") and path != current
-        ),
-        key=lambda path: path.stat().st_mtime_ns,
-        reverse=True,
-    )
-    if not candidates:
-        raise StaticPublishError(f"no previous release exists for {site.id}")
-    target = candidates[0]
-    _activate(destination, target)
-    files, total_bytes = _tree_size(target)
-    return PublishResult(site.id, target.name, True, files, total_bytes)
+    with _site_lock(destination):
+        current = _current_release(destination)
+        journal = _activation_journal(destination)
+        previous = journal.get("previous")
+        if journal.get("current") != current.name or not isinstance(previous, str):
+            raise StaticPublishError(f"no previous release recorded for {site.id}")
+        target = destination / "releases" / previous
+        activation_id = _activate(destination, target)
+        files, total_bytes = _tree_size(target)
+        return PublishResult(
+            site.id, target.name, True, files, total_bytes, current.name, activation_id
+        )
 
 
 def main() -> None:
@@ -286,23 +361,85 @@ def _require_closed_html_entrypoint(root: Path, entrypoint: Path) -> None:
             raise StaticPublishError(f"entrypoint asset is missing from release: {reference}")
 
 
-def _activate(destination: Path, release: Path) -> bool:
+def _activate(destination: Path, release: Path) -> str:
+    if release.is_symlink() or not release.is_dir() or release.parent != destination / "releases":
+        raise StaticPublishError("activation target is not a retained release")
     current = destination / "current"
-    if current.is_symlink() and current.resolve() == release.resolve():
-        return False
+    previous = _optional_current(destination)
+    activation_id = uuid.uuid4().hex
+    # Journal first: a crash cannot activate a target without its exact predecessor.
+    journal = destination / ".activation.json"
+    staged_journal = destination / f".activation-{activation_id}.tmp"
+    with staged_journal.open("x", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "current": release.name,
+                "previous": previous.name if previous else None,
+                "activation_id": activation_id,
+            },
+            stream,
+        )
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(staged_journal, journal)
+    _sync_directory(destination)
     temporary = destination / f".current-{uuid.uuid4().hex}"
     temporary.symlink_to(Path("releases") / release.name)
     os.replace(temporary, current)
-    return True
+    _sync_directory(destination)
+    return activation_id
 
 
-def _prune(releases: Path, *, current: Path, keep: int) -> None:
+def _activation_journal(destination: Path) -> dict[str, str | None]:
+    try:
+        value = json.loads((destination / ".activation.json").read_text())
+    except (OSError, ValueError) as error:
+        raise StaticPublishError("activation history is unavailable") from error
+    if not isinstance(value, dict) or any(
+        item is not None
+        and (
+            not isinstance(item, str) or not item or any(c not in "0123456789abcdef" for c in item)
+        )
+        for item in value.values()
+    ):
+        raise StaticPublishError("activation history is invalid")
+    return value
+
+
+def _optional_current(destination: Path) -> Path | None:
+    current = destination / "current"
+    if not current.exists() and not current.is_symlink():
+        return None
+    return _current_release(destination)
+
+
+@contextmanager
+def _site_lock(destination: Path) -> Iterator[None]:
+    descriptor = os.open(
+        destination / ".publish.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _prune(releases: Path, *, current: Path, keep: int, previous: Path | None = None) -> None:
     ordered = sorted(
         (path for path in releases.iterdir() if path.is_dir() and not path.name.startswith(".")),
         key=lambda path: path.stat().st_mtime_ns,
         reverse=True,
     )
-    retained = {current, *ordered[:keep]}
+    retained = {current, previous, *ordered[:keep]}
     for path in ordered:
         if path not in retained:
             shutil.rmtree(path)

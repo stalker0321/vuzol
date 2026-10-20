@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -100,6 +101,8 @@ def _handler(tmp_path: Path) -> tuple[RuntimePreviewHandler, MagicMock, MagicMoc
     handler = RuntimePreviewHandler(
         cast(Any, factory), cast(Any, runtime), PreviewRuntimeRegistry()
     )
+    # This suite integrates real Git/Node/Landlock; DB grants are tested separately.
+    handler._authority = MagicMock(side_effect=lambda *_: nullcontext())  # type: ignore[method-assign]
     return handler, read_session, write_session
 
 

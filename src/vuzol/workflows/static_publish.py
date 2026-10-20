@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 import httpx
@@ -12,7 +12,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
-from vuzol.ops.static_publish import StaticPublishError, StaticSite, publish, rollback
+from vuzol.ops.static_publish import (
+    PublishResult,
+    StaticHashMismatch,
+    StaticPublishError,
+    StaticSite,
+    activate,
+    compensate,
+    prepare,
+)
 from vuzol.storage.models import (
     MaterializationLink,
     PlanRevisionItem,
@@ -24,6 +32,7 @@ from vuzol.storage.models import (
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
+from vuzol.workflows.publication import PublicationDenied, publication_authority
 
 
 class StaticPublishHandler:
@@ -137,31 +146,51 @@ class StaticPublishHandler:
             keep_releases=deployment.keep_releases,
         )
         try:
-            result = await asyncio.to_thread(
-                publish,
+            prepared = await asyncio.to_thread(
+                prepare,
                 site,
                 source_root=self._runtime.settings.worktree_root,
                 site_root=site_root,
+                expected_hash=str(build["artifact_hash"]),
+            )
+            if cancellation.requested:
+                raise PublicationDenied("cancelled")
+            async with self._authority(request, cancellation):
+                # No await between the final grant check and the atomic swap.
+                result = activate(prepared)
+        except PublicationDenied as error:
+            return StepOutcome(
+                kind=OutcomeKind.CANCELLED if cancellation.requested else OutcomeKind.BLOCKED,
+                result={},
+                category=str(error),
             )
         except StaticPublishError as error:
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
                 result={"public_url": public_url},
-                category="static_publish_failed",
+                category=(
+                    "static_build_hash_mismatch"
+                    if isinstance(error, StaticHashMismatch)
+                    else "static_publish_failed"
+                ),
                 summary=str(error)[:500],
-            )
-        if result.release != str(build["artifact_hash"])[:20]:
-            await self._rollback_changed(site, result.changed, site_root=site_root)
-            return StepOutcome(
-                kind=OutcomeKind.BLOCKED,
-                result={"public_url": public_url, "release": result.release},
-                category="static_build_hash_mismatch",
-                summary="published tree does not match the approved build artifact",
             )
         try:
             probe = await self._probe(public_url)
+        except asyncio.CancelledError:
+            self._rollback_changed(site, result, site_root=site_root)
+            raise
         except (httpx.HTTPError, ValueError) as error:
-            await self._rollback_changed(site, result.changed, site_root=site_root)
+            try:
+                self._rollback_changed(site, result, site_root=site_root)
+            except (StaticPublishError, OSError) as rollback_error:
+                return StepOutcome(
+                    kind=OutcomeKind.BLOCKED,
+                    result={"public_url": public_url},
+                    category="static_publish_compensation_failed",
+                    summary=str(rollback_error)[:500],
+                    unknown_effects=True,
+                )
             return StepOutcome(
                 kind=OutcomeKind.BLOCKED,
                 result={"public_url": public_url, "release": result.release},
@@ -187,14 +216,20 @@ class StaticPublishHandler:
             }
         )
 
-    async def _rollback_changed(self, site: StaticSite, changed: bool, *, site_root: Path) -> None:
-        if changed:
-            with suppress(StaticPublishError):
-                await asyncio.to_thread(
-                    rollback,
-                    site,
-                    site_root=site_root,
-                )
+    def _authority(
+        self, request: StepExecutionRequest, cancellation: CancellationContext
+    ) -> AbstractAsyncContextManager[None]:
+        return publication_authority(
+            self._factory,
+            request,
+            cancellation,
+            feature_enabled=self._runtime.settings.project_lead.enabled,
+        )
+
+    def _rollback_changed(
+        self, site: StaticSite, result: PublishResult, *, site_root: Path
+    ) -> None:
+        compensate(site, result, site_root=site_root)
 
 
 async def _probe_public_site(public_url: str) -> dict[str, object]:

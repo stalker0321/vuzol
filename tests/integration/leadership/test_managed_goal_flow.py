@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
+import sys
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -83,6 +85,7 @@ OWNER = 42
 CHAT = -100
 THREAD = 10
 PROJECT = "vuzol"
+TEST_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _plan(title: str, summary: str, criteria: list[str], scope: str) -> dict[str, Any]:
@@ -708,7 +711,7 @@ async def _drain(workers: tuple[Any, ...], limit: int = 80) -> None:
 async def test_managed_goal_reviews_repairs_and_resumes_after_restart(
     postgres_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await run_managed_goal_flow(postgres_dsn, tmp_path, monkeypatch)
+    await run_managed_goal_flow(postgres_dsn, tmp_path, monkeypatch, restart_in_subprocess=True)
 
 
 async def run_managed_goal_flow(
@@ -719,6 +722,7 @@ async def run_managed_goal_flow(
     request: str = "ship the marker",
     expected_completed: bool = True,
     control_before_apply: str | None = None,
+    restart_in_subprocess: bool = False,
 ) -> None:
     monkeypatch.delenv("VUZOL_TEST_DATABASE_DSN", raising=False)
     monkeypatch.setenv("VUZOL_PROJECT_LEAD__ENABLED", "true")
@@ -835,7 +839,33 @@ async def run_managed_goal_flow(
 
             assert await git.resolve_commit(repository, "main") == base
             resumed = _provider_worker(factory, settings, owner="lead-2")
-            assert await resumed.process_one()
+            if restart_in_subprocess:
+                restarted = await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        sys.executable,
+                        "-c",
+                        _RESTART_SCRIPT,
+                        postgres_dsn,
+                        str(tmp_path),
+                        str(repository),
+                    ],
+                    cwd=TEST_REPOSITORY_ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                assert restarted.returncode == 0, restarted.stdout + restarted.stderr
+                child = next(
+                    json.loads(line.removeprefix("LEAD_RESTART "))
+                    for line in restarted.stdout.splitlines()
+                    if line.startswith("LEAD_RESTART ")
+                )
+                assert child["pid"] != os.getpid()
+                assert child["processed"] is True
+                trace["restart"] = "separate Python process; fresh composition and DB engine"
+            else:
+                assert await resumed.process_one()
             assert await _package_count(factory) == 2
             assert not await resumed.process_one()
             assert await _package_count(factory) == 2
@@ -906,6 +936,28 @@ async def run_managed_goal_flow(
                 print(f"{key}={value}")
     finally:
         get_settings.cache_clear()
+
+
+_RESTART_SCRIPT = """
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+from tests.integration.leadership.test_managed_goal_flow import (
+    _factory, _provider_worker, _runtime,
+)
+
+async def main():
+    dsn, root, repository = sys.argv[1:]
+    runtime = _runtime(Path(root), Path(repository), lead=True)
+    async with _factory(dsn) as factory:
+        worker = _provider_worker(factory, runtime.settings, owner="lead-restarted-process")
+        processed = await worker.process_one()
+    print("LEAD_RESTART " + json.dumps({"pid": os.getpid(), "processed": processed}))
+
+asyncio.run(main())
+"""
 
 
 def _provider_worker(factory, settings, *, owner):

@@ -210,7 +210,9 @@ def test_worker_main_composes_runtime_and_handles_stop(
     if cli_review:
         settings = settings.model_copy(
             update={
-                "execution": settings.execution.model_copy(update={"reviewer_profile_id": "grok-a"})
+                "execution": settings.execution.model_copy(
+                    update={"enabled": True, "reviewer_profile_id": "grok-a"}
+                )
             }
         )
         runtime = RuntimeConfiguration(settings=settings, registries=runtime.registries)

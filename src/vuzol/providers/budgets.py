@@ -185,9 +185,7 @@ async def _task_family_root(session: AsyncSession, task_id: uuid.UUID) -> uuid.U
     return root
 
 
-async def _accepted_unknown_usage_ids(
-    session: AsyncSession, family: set[uuid.UUID]
-) -> set[str]:
+async def _accepted_unknown_usage_ids(session: AsyncSession, family: set[uuid.UUID]) -> set[str]:
     """Usage ids an owner has explicitly accepted as still unknown."""
 
     rows = (
@@ -1131,9 +1129,58 @@ async def settle_invocation_budget(
     step). Unknown stays unknown (conservative floor + ``cost_known=false``).
     """
 
-    if reservation.status is not BudgetReservationStatus.RESERVED:
-        raise ValueError(f"invocation reservation is not open: {reservation.id}")
     accounted = account_usage(profile, usage) if usage is not None else None
+    if reservation.status is not BudgetReservationStatus.RESERVED:
+        existing = await session.scalar(
+            select(UsageRecord)
+            .where(UsageRecord.reservation_id == reservation.id)
+            .with_for_update()
+        )
+        if existing is None:
+            raise ValueError(f"invocation reservation is not open: {reservation.id}")
+        if existing.cost_known or accounted is None:
+            return existing
+        # The orphan sweep may win the race with a delayed actual receipt.
+        # Replace its conservative floor in-place, never add a second charge.
+        previous_cost = existing.cost_units
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+            "quota_units",
+            "cost_units",
+        ):
+            measured = getattr(accounted, field)
+            if measured is not None:
+                setattr(existing, field, measured)
+                if field != "cached_tokens":
+                    setattr(reservation, f"reconciled_{field}", measured)
+        if accounted.cost_units is not None:
+            existing.cost_known = True
+            reservation.status = BudgetReservationStatus.RECONCILED
+        existing.provider, existing.model = profile.provider, profile.model
+        existing.duration_ms = accounted.duration_ms
+        if provider_request_id is not None:
+            existing.provider_request_id = provider_request_id
+            reservation.provider_request_id = provider_request_id
+        existing.outcome, existing.late_receipt = outcome, True
+        existing.invocation_id = reservation.invocation_id
+        session.add(
+            Event(
+                entity_type="provider_invocation",
+                entity_id=reservation.invocation_id or reservation.id,
+                event_type="budget.late_provider_receipt",
+                actor_type="system",
+                actor_id="provider",
+                payload={
+                    "reservation_id": str(reservation.id),
+                    "previous_cost_units": str(previous_cost),
+                    "cost_units": str(existing.cost_units),
+                },
+            )
+        )
+        await session.flush()
+        return existing
     record = _settle_reservation(
         reservation,
         provider=profile.provider,
@@ -1148,6 +1195,39 @@ async def settle_invocation_budget(
     session.add(record)
     await session.flush()
     return record
+
+
+async def release_unsent_invocation(
+    session: AsyncSession, reservation: ProviderBudgetReservation
+) -> None:
+    """An authoritative no-send receipt may correct an orphan estimate, never measured spend."""
+    existing = await session.scalar(
+        select(UsageRecord).where(UsageRecord.reservation_id == reservation.id).with_for_update()
+    )
+    if existing is not None:
+        if existing.cost_known and existing.outcome != "not_sent":
+            raise ValueError("no-send receipt conflicts with measured provider usage")
+        previous = existing.cost_units
+        existing.input_tokens = existing.output_tokens = existing.cached_tokens = 0
+        existing.cost_units = existing.quota_units = Decimal(0)
+        existing.cost_known, existing.late_receipt = True, True
+        existing.outcome = "not_sent"
+        existing.invocation_id = reservation.invocation_id
+        session.add(
+            Event(
+                entity_type="provider_invocation",
+                entity_id=reservation.invocation_id or reservation.id,
+                event_type="budget.authoritative_no_send",
+                actor_type="system",
+                actor_id="provider",
+                payload={"reservation_id": str(reservation.id), "previous_estimate": str(previous)},
+            )
+        )
+    reservation.status = BudgetReservationStatus.RELEASED
+    reservation.reconciled_input_tokens = reservation.reconciled_output_tokens = 0
+    reservation.reconciled_cost_units = reservation.reconciled_quota_units = Decimal(0)
+    reservation.reconciled_at = func.now()
+    await session.flush()
 
 
 async def reconcile_usage(
@@ -1284,6 +1364,7 @@ def _settle_reservation(
         duration_ms=duration_ms,
         provider_request_id=provider_request_id,
         reservation_id=reservation.id,
+        invocation_id=reservation.invocation_id,
         outcome=outcome,
         purpose=reservation.purpose,
         attempt_kind=reservation.attempt_kind,
@@ -1602,6 +1683,26 @@ async def release_orphan_reservations(
     )
     closed = 0
     for reservation in reservations:
+        if reservation.invocation_id is not None:
+            from vuzol.leadership.persistence import (
+                LeadershipInference,
+                LeadershipTurn,
+                ManagedGoal,
+            )
+
+            phase = await session.get(LeadershipInference, reservation.invocation_id)
+            if phase is not None:
+                turn = await session.get(LeadershipTurn, phase.turn_id)
+                goal = None if turn is None else await session.get(ManagedGoal, turn.goal_id)
+                if (
+                    goal is not None
+                    and turn is not None
+                    and goal.lease_epoch == turn.lease_epoch
+                    and goal.lease_until is not None
+                    and goal.lease_until > now
+                    and turn.status == "claimed"
+                ):
+                    continue
         step = await session.scalar(
             select(Step).where(Step.id == reservation.step_id).with_for_update()
         )
@@ -1617,10 +1718,14 @@ async def release_orphan_reservations(
         )
         if existing is not None:
             continue
-        never_started = step is None or step.status in (
-            StepStatus.PENDING,
-            StepStatus.QUEUED,
-            StepStatus.LEASED,
+        never_started = reservation.invocation_id is None and (
+            step is None
+            or step.status
+            in (
+                StepStatus.PENDING,
+                StepStatus.QUEUED,
+                StepStatus.LEASED,
+            )
         )
         if never_started:
             reservation.status = BudgetReservationStatus.RELEASED

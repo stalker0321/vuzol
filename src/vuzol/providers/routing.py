@@ -22,11 +22,19 @@ from vuzol.ops.disk_pressure import (
     report_claim_disk_pressure_deferred,
 )
 from vuzol.projects.executor_preference import (
+    ExecutorPreferenceError,
     ExecutorRoutePin,
     load_preference,
     preference_payload,
     resolve_route_pin,
     same_family_fallback_ids,
+)
+from vuzol.projects.model_matrix import (
+    MATRIX_KEY,
+    assignment_profile,
+    legacy_executor_preference,
+    pinned_assignment,
+    slot_for_role,
 )
 from vuzol.providers.budgets import (
     ADMISSION_ONLY_CONSENT_SUMMARY,
@@ -265,7 +273,19 @@ async def claim_routed_step(
         )
         allowed_fallbacks: tuple[str, ...] = ()
         if failed_profile_id is not None:
-            allowed_fallbacks = registries.profiles.get(failed_profile_id).fallback_profile_ids
+            try:
+                allowed_fallbacks = registries.profiles.get(failed_profile_id).fallback_profile_ids
+            except RegistryError:
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="project_pin_unresolved",
+                    quota=False,
+                    summary="Previously selected provider profile is unavailable.",
+                )
+                continue
             # A pin without configured fallbacks must still be able to consume its
             # bounded retry attempts. Excluding its only profile turns retries into
             # immediate no_compatible_profile failures without calling the provider.
@@ -317,8 +337,37 @@ async def claim_routed_step(
         pin_eligible_step = (
             step.step_type in {"execute_code", "execute_agent"} and chat_profile_id is None
         )
-        if pin_eligible_step and task.project_id is not None:
-            preference = await load_preference(session, task.project_id)
+        matrix_slot = slot_for_role(role, strong=run.budget_mode == "strong")
+        if chat_profile_id is not None or (role is ProviderRole.EXECUTOR and not pin_eligible_step):
+            matrix_slot = None
+        matrix_profile: ProviderProfileConfig | None = None
+        try:
+            matrix_choice = pinned_assignment(run.selected_route, matrix_slot)
+            if matrix_choice is not None and matrix_slot is not None:
+                matrix_profile = assignment_profile(matrix_choice, registries, matrix_slot)
+            preference = (
+                legacy_executor_preference(run.selected_route)
+                if MATRIX_KEY in run.selected_route
+                else await load_preference(session, task.project_id)
+                if pin_eligible_step and task.project_id is not None
+                else None
+            )
+        except (ValueError, KeyError, ExecutorPreferenceError):
+            await _block_route(
+                session,
+                step=step,
+                run=run,
+                task=task,
+                category="project_pin_unresolved",
+                quota=False,
+                summary="Pinned project model is unavailable or its configuration changed.",
+            )
+            continue
+        if matrix_choice is not None:
+            pin_family_ids = frozenset({matrix_choice.profile_id})
+            failed_profile_id = None
+            allowed_fallbacks = ()
+        elif pin_eligible_step and preference is not None:
             pin_preference_revision = preference.revision
             if not preference.is_auto:
                 pin_worker_key = (
@@ -394,8 +443,14 @@ async def claim_routed_step(
                 else:
                     # Initial claim: prefer trusted, allow same-family only if explicit edges exist.
                     allowed_fallbacks = same_family
-        trusted_profile_id = chat_profile_id or (
-            project_pin.trusted_profile_id if project_pin is not None else _trusted_profile_id(run)
+        trusted_profile_id = (
+            chat_profile_id
+            or (matrix_choice.profile_id if matrix_choice else None)
+            or (
+                project_pin.trusted_profile_id
+                if project_pin is not None
+                else _trusted_profile_id(run)
+            )
         )
         default_executor_id = settings.execution.default_executor_profile_id
         default_executor_applied = False
@@ -447,10 +502,17 @@ async def claim_routed_step(
             failed_profile_id=failed_profile_id,
             allowed_fallback_ids=allowed_fallbacks,
             restrict_to_profile_ids=pin_family_ids,
-            requires_sandbox=step.step_type in {"execute_code", "execute_agent"},
+            requires_sandbox=(
+                step.step_type in {"execute_code", "execute_agent"}
+                or (matrix_profile is not None and matrix_profile.launch_mode is LaunchMode.CLI)
+            ),
             required_launch_mode=(
-                LaunchMode.CLI
+                matrix_profile.launch_mode
+                if matrix_profile is not None
+                else LaunchMode.CLI
                 if step.step_type in {"execute_code", "execute_agent"}
+                else None
+                if role is ProviderRole.PLANNER and settings.execution.enabled is True
                 else LaunchMode.API
             ),
         )
@@ -516,6 +578,12 @@ async def claim_routed_step(
             preference_revision=pin_preference_revision,
             worker_key=pin_worker_key,
         )
+        if matrix_choice is not None:
+            pin_decision_inputs = dict(pin_decision_inputs or {})
+            pin_decision_inputs.update(
+                project_model_slot=matrix_slot,
+                project_model_assignment=matrix_choice.model_dump(mode="json"),
+            )
         if chat_profile_id is not None:
             pin_decision_inputs = dict(pin_decision_inputs or {})
             pin_decision_inputs.update(
@@ -606,6 +674,17 @@ async def claim_routed_step(
         if role is ProviderRole.PLANNER:
             next_payload["reasoning_max_tokens"] = min(
                 settings.limits.planner_reasoning_tokens, reservation.reserved_output_tokens
+            )
+        if matrix_choice is not None:
+            # The configured profile already carries the exact snapshotted model
+            # and effort. Older worker overrides must not replace that selection.
+            next_payload.pop("executor_model_override", None)
+            next_payload.pop("executor_reasoning_effort", None)
+            next_payload.update(
+                {
+                    "project_model_slot": matrix_slot,
+                    "project_model_assignment": matrix_choice.model_dump(mode="json"),
+                }
             )
         if project_pin is not None and pin_family_ids is not None:
             if selected.id not in pin_family_ids:

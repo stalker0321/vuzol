@@ -1,4 +1,4 @@
-"""Project-topic ``/model`` command and callback UX for executor preferences."""
+"""Project-topic model roles and compatibility with existing executor callbacks."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from vuzol.projects.executor_preference import (
     auto_callback_data,
     connection_label,
     effort_callback_data,
-    ensure_preference_row,
     executor_connections,
     format_preference_label,
     load_preference,
@@ -138,35 +137,16 @@ async def enqueue_worker_picker(
     message_thread_id: int,
     inbox_id: uuid.UUID,
 ) -> None:
-    await ensure_preference_row(session, project_id)
-    preference = await load_preference(session, project_id)
-    connections = executor_connections(runtime.registries)
-    session.add(
-        TransactionalOutbox(
-            destination="telegram",
-            operation_type="send_message",
-            linked_entity_type="telegram_inbox",
-            linked_entity_id=inbox_id,
-            idempotency_key=(
-                f"telegram:model_picker:{chat_id}:{message_thread_id}:{preference.revision}:"
-                f"{inbox_id}:worker"
-            ),
-            payload={
-                "role": PROJECT_MODEL_PICKER_ROLE,
-                "stage": ModelPickerStage.CONNECTION.value,
-                "chat_id": chat_id,
-                "message_thread_id": message_thread_id,
-                "project_id": project_id,
-                "revision": preference.revision,
-                "html": build_worker_picker_html(
-                    project_id=project_id,
-                    current_label=format_preference_label(preference),
-                ),
-                "callback_buttons": worker_keyboard(
-                    revision=preference.revision, connections=connections
-                ),
-            },
-        )
+    from vuzol.telegram.model_matrix import enqueue_matrix
+
+    await enqueue_matrix(
+        session,
+        runtime=runtime,
+        project_id=project_id,
+        chat_id=chat_id,
+        thread_id=message_thread_id,
+        identity=inbox_id,
+        entity_type="telegram_inbox",
     )
 
 
@@ -192,6 +172,26 @@ class ProjectModelController:
         if topic.kind is not TopicKind.PROJECT or topic.project_id is None:
             raise ExecutorPreferenceError("/model is only available in a project topic")
         project_id = topic.project_id
+        if update.action_kind.startswith("project_model_matrix_"):
+            from vuzol.telegram.model_matrix import apply_matrix
+
+            await apply_matrix(
+                session,
+                runtime=self._runtime,
+                update=update,
+                project_id=project_id,
+                identity=action_id,
+            )
+            if update.action_kind == "project_model_matrix_pick":
+                await enqueue_project_status_dashboard(session, update.chat_id)
+                await _enqueue_project_topic_refresh(
+                    session,
+                    project_id=project_id,
+                    chat_id=update.chat_id,
+                    thread_id=update.message_thread_id,
+                    action_id=action_id,
+                )
+            return ModelCommandOutcome(project_id=project_id, stage=ModelPickerStage.CONNECTION)
         if update.action_kind == "project_model_select_auto":
             view = await set_auto_preference(
                 session,

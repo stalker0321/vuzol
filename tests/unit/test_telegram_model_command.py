@@ -782,6 +782,14 @@ async def test_enqueue_worker_picker_creates_outbox() -> None:
         revision = 1
         updated_by_user_id = None
 
+        def __init__(self):
+            self.model_assignments = {}
+
+    runtime.settings = MagicMock()
+    runtime.settings.project_lead.profile_id = None
+    runtime.settings.project_lead.reviewer_profile_id = None
+    runtime.settings.execution.reviewer_profile_id = None
+    runtime.settings.execution.default_executor_profile_id = None
     session = MagicMock()
     session.get = AsyncMock(return_value=Row())
     session.add = MagicMock()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
@@ -37,6 +37,10 @@ class GoalVerdict(BaseModel):
 
     result_commit: str
     criteria: list[CriterionVerdict]
+
+
+class GoalVerification(Protocol):
+    async def verify(self, goal_id: uuid.UUID, *, claim: TurnClaim) -> None: ...
 
 
 class GoalVerifier:

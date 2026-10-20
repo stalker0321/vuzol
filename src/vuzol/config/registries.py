@@ -82,7 +82,19 @@ class ProfileRegistry:
     def __init__(self, profiles: Iterable[ProviderProfileConfig]) -> None:
         self._profiles = _unique_by_id(profiles, kind="profile")
         self._validate_fallbacks()
+        self._validate_accounts()
         self._validate_cli_isolation()
+
+    def _validate_accounts(self) -> None:
+        accounts: dict[str, ProviderProfileConfig] = {}
+        for profile in self._profiles.values():
+            if profile.account_id is None:
+                continue
+            owner = accounts.setdefault(profile.account_id, profile)
+            if owner.account_binding != profile.account_binding:
+                raise RegistryError(
+                    f"profiles {owner.id} and {profile.id} have incompatible account bindings"
+                )
 
     def _validate_fallbacks(self) -> None:
         for profile in self._profiles.values():
@@ -122,25 +134,36 @@ class ProfileRegistry:
             for profile in self._profiles.values()
             if profile.enabled and profile.launch_mode.value == "cli"
         ]
-        identities: dict[str, str] = {}
-        directories: dict[Path, str] = {}
+        identities: dict[str, ProviderProfileConfig] = {}
+        directories: dict[Path, ProviderProfileConfig] = {}
         for profile in cli_profiles:
             assert profile.runtime_identity is not None
             assert profile.state_directory is not None
-            if owner := identities.get(profile.runtime_identity):
-                raise RegistryError(f"CLI profiles {owner} and {profile.id} share runtime identity")
-            identities[profile.runtime_identity] = profile.id
+            if (owner := identities.get(profile.runtime_identity)) and (
+                profile.account_id is None or profile.account_id != owner.account_id
+            ):
+                raise RegistryError(
+                    f"CLI profiles {owner.id} and {profile.id} share runtime identity"
+                )
+            identities[profile.runtime_identity] = profile
             normalized = profile.state_directory.resolve()
             for directory, owner in directories.items():
+                if (
+                    normalized == directory
+                    and profile.account_id is not None
+                    and profile.account_id == owner.account_id
+                ):
+                    continue
                 if (
                     normalized == directory
                     or normalized in directory.parents
                     or directory in normalized.parents
                 ):
                     raise RegistryError(
-                        f"CLI profiles {owner} and {profile.id} have overlapping state directories"
+                        f"CLI profiles {owner.id} and {profile.id} "
+                        "have overlapping state directories"
                     )
-            directories[normalized] = profile.id
+            directories[normalized] = profile
 
     def get(self, profile_id: str) -> ProviderProfileConfig:
         try:
@@ -287,6 +310,8 @@ class ConfigurationBundle(BaseModel):
                     reasons.append(f"profile runtime identity changed: {current_profile.id}")
                 if current_profile.state_directory != snapshot.profile.state_directory:
                     reasons.append(f"profile state directory changed: {current_profile.id}")
+                if current_profile.account_binding != snapshot.profile.account_binding:
+                    reasons.append(f"profile account binding changed: {current_profile.id}")
                 accounting_fields = (
                     "input_cost_units_per_million",
                     "output_cost_units_per_million",

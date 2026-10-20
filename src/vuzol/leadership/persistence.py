@@ -210,12 +210,42 @@ class LeadershipTurn(IdentityMixin, TimestampMixin, Base):
     scope_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     fence_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False, default="unconfigured")
+    model_assignments: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     usage: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
     )
     decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     owner: Mapped[str] = mapped_column(String(200), nullable=False)
+
+
+class LeadershipInference(TimestampMixin, Base):
+    """Immutable phase input and durable send/receipt boundary, for API and CLI alike."""
+
+    __tablename__ = "leadership_inferences"
+    __table_args__ = (
+        CheckConstraint("phase IN ('lead', 'goal_review')", name="leadership_inference_phase"),
+        CheckConstraint(
+            "state IN ('sending', 'received', 'unknown', 'not_sent')",
+            name="leadership_inference_state",
+        ),
+        Index("uq_leadership_inference_phase", "turn_id", "phase", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    turn_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leadership_turns.id", ondelete="RESTRICT"), nullable=False
+    )
+    phase: Mapped[str] = mapped_column(String(20), nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    profile_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    reservation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("provider_budget_reservations.id", ondelete="RESTRICT"), nullable=False
+    )
 
 
 class ManagedGoalEvidence(IdentityMixin, Base):

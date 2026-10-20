@@ -51,6 +51,7 @@ class ExecutorPreferenceView:
     reasoning_effort: str | None
     revision: int
     profile_id: str | None = None
+    model: str | None = None
 
     @property
     def is_auto(self) -> bool:
@@ -87,6 +88,20 @@ def default_preference(project_id: str) -> ExecutorPreferenceView:
 
 
 def preference_from_row(row: ProjectExecutorPreference) -> ExecutorPreferenceView:
+    assignments = getattr(row, "model_assignments", None)
+    if isinstance(assignments, dict) and "executor" in assignments:
+        from vuzol.projects.model_matrix import ModelAssignment
+
+        selected = ModelAssignment.model_validate(assignments["executor"])
+        return ExecutorPreferenceView(
+            project_id=row.project_id,
+            mode=ExecutorPreferenceMode.PIN,
+            worker_key=None,
+            reasoning_effort=selected.reasoning_effort,
+            profile_id=selected.profile_id,
+            model=selected.model,
+            revision=row.revision,
+        )
     mode = ExecutorPreferenceMode(row.mode)
     worker = ExecutorWorkerKey(row.worker_key) if row.worker_key else None
     return ExecutorPreferenceView(
@@ -451,6 +466,9 @@ def codex_model_for_worker(base_model: str, worker: ExecutorWorkerKey) -> str:
 
 
 def format_preference_label(view: ExecutorPreferenceView) -> str:
+    if view.model is not None:
+        label = f"{view.model} · {view.profile_id}"
+        return f"{label} · {view.reasoning_effort}" if view.reasoning_effort else label
     if view.is_auto or view.worker_key is None:
         return "Routing (automatic)"
     label = _worker_label(view.worker_key.value)

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.projects.executor_preference import load_preference
+from vuzol.projects.executor_preference import format_preference_label, load_preference
 from vuzol.storage.models import (
     Approval,
     MaterializationLink,
@@ -356,7 +356,11 @@ async def build_work_package_plan_card(
             worker = preference.worker_key.value.title()
         if worker is None:
             worker = (
-                "Auto" if preference.worker_key is None else preference.worker_key.value.title()
+                format_preference_label(preference)
+                if preference.model is not None
+                else "Auto"
+                if preference.worker_key is None
+                else preference.worker_key.value.title()
             )
         current_item = (
             next((item for item in items if item.ordinal == (package.cursor_ordinal or 1)), None)

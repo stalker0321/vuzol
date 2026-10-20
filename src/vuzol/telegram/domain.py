@@ -54,6 +54,7 @@ class ControlUpdate(TelegramModel):
             r"admit|uncertain|criterion|cpage|"
             r"project_name_select|project_name_regenerate|"
             r"project_model_select_auto|project_model_select_connection|"
+            r"project_model_matrix_menu|project_model_matrix_slot|project_model_matrix_pick|"
             r"project_model_select_worker|project_model_select_effort|secret_cancel|chat_retry)$"
         )
     )
@@ -70,6 +71,11 @@ class ControlUpdate(TelegramModel):
     preference_revision: int | None = Field(default=None, ge=1)
     preference_worker: str | None = Field(default=None, pattern=r"^(sol|terra|luna|grok|kimi)$")
     preference_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,99}$")
+    preference_slot: str | None = Field(
+        default=None,
+        pattern=r"^(lead|goal_reviewer|planner_light|planner_strong|reviewer_light|reviewer_strong|executor)$",
+    )
+    preference_profile_token: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
     preference_effort: str | None = Field(
         default=None, pattern=r"^(low|medium|high|xhigh|max|ultra)$"
     )

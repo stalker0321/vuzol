@@ -1,8 +1,8 @@
 """Independent model review for high/privileged coding results.
 
-Read-only: the reviewer receives truncated diff text and metadata only — never
-repository write access, sandbox mounts, or production secrets beyond the
-scoped API credential for the reviewer profile.
+Read-only: reviewers receive bounded diff text and metadata. Supported CLI
+reviewers also use a fenced read-only worktree sandbox; API reviewers use the
+scoped credential for the reviewer profile.
 """
 
 from __future__ import annotations
@@ -12,13 +12,16 @@ import json
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.config.registries import ConfigurationBundle
+from vuzol.config.revision import content_revision
 from vuzol.config.settings import HardLimits
 from vuzol.execution.domain import GitInspection
 from vuzol.providers.budgets import (
@@ -32,6 +35,7 @@ from vuzol.providers.budgets import (
     reserve_budget,
     resolve_horizon_scope,
 )
+from vuzol.providers.catalog import supported_profile
 from vuzol.providers.control import ceiling_is_admission_only
 from vuzol.providers.domain import (
     ContextItem,
@@ -51,9 +55,9 @@ from vuzol.review.domain import (
 from vuzol.review.partitions import PartitionManifest, build_manifest, verify_chunk_receipts
 from vuzol.review.policy import REVIEW_POLICY_REVISION, IndependentReviewError
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import Task
+from vuzol.storage.models import Run, Step, Task
 from vuzol.storage.records import LeaseToken
-from vuzol.storage.types import RiskLevel
+from vuzol.storage.types import RiskLevel, RunStatus, StepStatus
 from vuzol.workflows.ports import CancellationContext
 
 INDEPENDENT_REVIEW_SCHEMA = "independent-review.v1"
@@ -124,6 +128,25 @@ __all__ = [
     "review_cost_export",
     "select_reviewer_profile",
 ]
+
+
+def _require_review_step_binding(
+    step: Step | None,
+    request_ids: tuple[uuid.UUID, uuid.UUID, uuid.UUID],
+    lease: LeaseToken,
+) -> None:
+    if (
+        step is None
+        or step.id != request_ids[2]
+        or step.run_id != request_ids[1]
+        or step.step_type != "review"
+        or step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
+        or step.lease_owner != lease.owner
+        or step.lease_generation != lease.generation
+        or step.lease_expires_at is None
+        or step.lease_expires_at <= datetime.now(UTC)
+    ):
+        raise IndependentReviewError("review step lease is stale")
 
 
 class AdapterLookup(Protocol):
@@ -319,7 +342,7 @@ def select_reviewer_profile(
 
 
 class IndependentModelReviewer:
-    """Call a model-only profile to produce a structured independent verdict."""
+    """Call an authorized profile to produce a structured independent verdict."""
 
     def __init__(
         self,
@@ -330,6 +353,7 @@ class IndependentModelReviewer:
         policy_revision: str = "independent-review-policy.v1",
         profile_id: str | None = None,
         input_token_limit: int = 32_000,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
     ) -> None:
         if input_token_limit < 1:
             raise ValueError("review input token limit must be positive")
@@ -339,6 +363,7 @@ class IndependentModelReviewer:
         self._policy_revision = policy_revision
         self._profile_id = profile_id
         self._input_token_limit = input_token_limit
+        self._factory = session_factory
 
     async def review(
         self,
@@ -365,20 +390,86 @@ class IndependentModelReviewer:
             _level: object = ReviewLevel(str(_plan["level"]))
         except Exception:
             _level = None
-        profile: ProviderProfileConfig | None
-        if self._profile_id is not None:
+        profile: ProviderProfileConfig | None = None
+        executor_profile_ids: set[str] = set()
+        if self._factory is not None:
+            from vuzol.projects.executor_preference import ExecutorPreferenceError
+            from vuzol.projects.model_matrix import (
+                ModelAssignment,
+                assignment_profile,
+                pinned_assignment,
+            )
+
+            async with self._factory() as session:
+                run = await session.get(Run, request_ids[1])
+                if (
+                    run is None
+                    or run.task_id != request_ids[0]
+                    or run.status is not RunStatus.RUNNING
+                    or lease.step.id != request_ids[2]
+                    or lease.step.run_id != run.id
+                ):
+                    raise IndependentReviewError("review run binding is unavailable")
+                step = await session.get(Step, request_ids[2])
+                _require_review_step_binding(step, request_ids, lease)
+                assert step is not None
+                slot = "reviewer_strong" if _level is ReviewLevel.L3 else "reviewer_light"
+                try:
+                    assignment = pinned_assignment(run.selected_route, slot)
+                    previous = step.payload.get("independent_reviewer_pin")
+                    if previous is not None:
+                        pinned = ModelAssignment.model_validate(previous)
+                        profile = self._registries.profiles.get(pinned.profile_id)
+                        if (
+                            not profile.enabled
+                            or not supported_profile(profile)
+                            or not profile.roles.intersection(
+                                {ProviderRole.PLANNER, ProviderRole.REVIEWER}
+                            )
+                            or content_revision(profile) != pinned.content_revision
+                            or profile.model != pinned.model
+                            or profile.model_reasoning_effort != pinned.reasoning_effort
+                            or (assignment is not None and assignment != pinned)
+                        ):
+                            raise ValueError("reviewer pin changed")
+                    elif assignment is not None:
+                        profile = assignment_profile(assignment, self._registries, slot)
+                except (ValueError, LookupError, ExecutorPreferenceError) as error:
+                    raise IndependentReviewError(
+                        "pinned reviewer is unavailable or changed"
+                    ) from error
+                executor_profile_ids = set(
+                    await session.scalars(
+                        select(Step.executor_profile_id).where(
+                            Step.run_id == run.id,
+                            Step.step_type.in_(
+                                (
+                                    "execute_code",
+                                    "execute_agent",
+                                    "execute_model",
+                                    "research_execute",
+                                )
+                            ),
+                            Step.executor_profile_id.is_not(None),
+                        )
+                    )
+                )
+        if profile is None and self._profile_id is not None:
             try:
                 profile = self._registries.profiles.get(self._profile_id)
             except (LookupError, ValueError) as error:
-                raise IndependentReviewError("configured CLI reviewer is missing") from error
+                raise IndependentReviewError("configured reviewer is missing") from error
             if (
                 not profile.enabled
-                or profile.launch_mode is not LaunchMode.CLI
-                or profile.provider != "grok"
                 or ProviderRole.REVIEWER not in profile.roles
+                or not supported_profile(profile)
+                or not (
+                    (profile.launch_mode is LaunchMode.API and profile.api_base_url is not None)
+                    or (profile.launch_mode is LaunchMode.CLI)
+                )
             ):
-                raise IndependentReviewError("configured Grok CLI reviewer is unavailable")
-        else:
+                raise IndependentReviewError("configured reviewer is unavailable")
+        elif profile is None:
             profile = select_reviewer_profile(
                 self._registries.profiles.items(), required_level=_level, budget_eligible=True
             )
@@ -386,6 +477,30 @@ class IndependentModelReviewer:
             raise IndependentReviewError(
                 "no openai-compatible reviewer or planner profile is configured"
             )
+        if profile.id in executor_profile_ids:
+            raise IndependentReviewError("reviewer must differ from the actual executor profile")
+        if self._factory is not None:
+            pin = ModelAssignment(
+                profile_id=profile.id,
+                model=profile.model,
+                reasoning_effort=profile.model_reasoning_effort,
+                content_revision=content_revision(profile),
+            ).model_dump(mode="json")
+            async with self._factory.begin() as session:
+                run = await session.get(Run, request_ids[1], with_for_update=True)
+                step = await session.get(Step, request_ids[2], with_for_update=True)
+                if (
+                    run is None
+                    or run.task_id != request_ids[0]
+                    or run.status is not RunStatus.RUNNING
+                ):
+                    raise IndependentReviewError("review run binding is unavailable")
+                _require_review_step_binding(step, request_ids, lease)
+                assert step is not None
+                previous = step.payload.get("independent_reviewer_pin")
+                if previous is not None and previous != pin:
+                    raise IndependentReviewError("reviewer assignment changed before claim")
+                step.payload = {**step.payload, "independent_reviewer_pin": pin}
         try:
             adapter = self._adapters.get(profile.id)
         except Exception as error:  # adapter registry raises LookupError/KeyError
@@ -541,7 +656,7 @@ class IndependentModelReviewer:
             else:
                 await self._accounting.release(reservation=reservation, lease=lease)
             raise IndependentReviewError(failure.safe_summary) from failure
-        unknown = result.usage is None or result.usage.cost_units is None
+        unknown = result.usage is None or account_usage(profile, result.usage).cost_units is None
         await self._accounting.reconcile(
             reservation=reservation,
             lease=lease,

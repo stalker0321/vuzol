@@ -210,6 +210,9 @@ async def publication_authority(
             if production_target is not None
             else None
         )
+        # Permission lookup can wait on a row lock beyond the lease deadline.
+        # No await is allowed between this final clock/cancellation check and yield.
+        _check_execution(task, run, step, request, cancellation)
         yield
         if approval is not None:
             # Exact same step/artifact can replay after a crash before workflow ack.

@@ -537,6 +537,11 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     ingress.accept_message = AsyncMock()
     dogfood = MagicMock()
     dogfood.accept_message = AsyncMock(return_value=None)
+    workspace = MagicMock()
+    workspace.synchronize = AsyncMock()
+    durable = MagicMock()
+    durable.admit = AsyncMock()
+    durable.close = AsyncMock()
     order: list[str] = []
     loop_ids: list[int] = []
 
@@ -563,6 +568,8 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(telegram_cli, "TelegramIngressService", lambda *_args: ingress)
     monkeypatch.setattr(telegram_cli, "TelegramDogfoodIngressService", lambda *_args: dogfood)
     monkeypatch.setattr(telegram_cli, "TelegramControlService", MagicMock())
+    monkeypatch.setattr(telegram_cli, "TelegramWorkspaceService", lambda *_args: workspace)
+    monkeypatch.setattr(telegram_cli, "DurableTelegramIngress", lambda *args, **kwargs: durable)
     monkeypatch.setattr(telegram_cli, "resolve_bot_token", lambda _settings: SecretStr("token"))
 
     def build(_token: str, **kwargs: object) -> object:
@@ -573,6 +580,13 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     def run_polling(*_args: object, **_kwargs: object) -> None:
         order.append("run_polling")
         polling_kwargs.update(_kwargs)
+        start = callbacks["on_startup"]
+        stop = callbacks["on_shutdown"]
+        assert callable(start) and callable(stop)
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(start(application.bot))
+        durable.start.assert_called_once_with(application.bot)
+        loop.run_until_complete(stop())
 
     application.run_polling = run_polling
     monkeypatch.setattr(telegram_cli, "build_long_polling_application", build)
@@ -583,6 +597,8 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     assert len(loop_ids) == 2
     assert loop_ids[0] == loop_ids[1]
     assert callbacks["bot_id"] == "main"
+    assert callbacks["admit_update"] == durable.admit
+    assert durable.close.await_count == 2  # post_stop and finally cleanup are idempotent
     on_message = callbacks["on_message"]
     assert callable(on_message)
     update = MagicMock()

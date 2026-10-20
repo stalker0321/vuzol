@@ -24,6 +24,7 @@ from vuzol.telegram.domain import (
     MessageUpdate,
     WorkPackageControlUpdate,
 )
+from vuzol.telegram.durable_ingress import DurableTelegramIngress
 from vuzol.telegram.ingress import TelegramIngressService
 from vuzol.telegram.work_packages import ContinueDiscussionOverrides
 from vuzol.telegram.workspace import TelegramWorkspaceService
@@ -56,24 +57,32 @@ def main() -> None:
     # One process-owned loop for gate, PTB polling (AsyncEngine use), and dispose.
     # Avoid nested asyncio.run / multi-loop reuse of the same pooled AsyncEngine (S-2.2a C1).
     loop = asyncio.new_event_loop()
+    durable = None
     try:
         asyncio.set_event_loop(loop)
         # S-2.2a: fail closed before session factory, Bot wiring, polling, or schema work.
         loop.run_until_complete(require_migration_head(engine))
         factory = create_session_factory(engine)
         on_message, on_control = ingress_handlers(runtime, factory)
+        durable = DurableTelegramIngress(
+            factory, settings=settings, bot_id="main", on_message=on_message, on_control=on_control
+        )
         workspace = TelegramWorkspaceService(factory, runtime.registries.topics)
 
         async def on_startup(bot: Bot) -> None:
             await workspace.synchronize(PythonTelegramClient(bot))
+            assert durable is not None
+            durable.start(bot)
 
         token = resolve_bot_token(settings).get_secret_value()
         application = build_long_polling_application(
             token,
             bot_id="main",
+            admit_update=durable.admit,
             on_message=on_message,
             on_control=on_control,
             on_startup=on_startup,
+            on_shutdown=durable.close,
         )
         # Keep this loop open so handler DB work and later dispose share it.
         application.run_polling(
@@ -83,6 +92,8 @@ def main() -> None:
     finally:
         try:
             if not loop.is_closed():
+                if durable is not None:
+                    loop.run_until_complete(durable.close())
                 loop.run_until_complete(_dispose_engine(engine))
         finally:
             if not loop.is_closed():

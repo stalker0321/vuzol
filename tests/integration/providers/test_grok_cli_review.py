@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from tests.integration.providers._test_routing_helpers import profile
 from tests.integration.storage.helpers import seed_task_run_step, storage
-from vuzol.config import RuntimeConfiguration, Settings
+from vuzol.config import Capability, RuntimeConfiguration, Settings
 from vuzol.execution.domain import GitInspection
 from vuzol.providers.cli_readonly import ReadOnlyCliAdapter
 from vuzol.providers.domain import ContextItem
@@ -50,6 +50,7 @@ async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path):
             launch_mode="cli",
             api_base_url=None,
             roles={"reviewer"},
+            capabilities=frozenset({Capability.REPOSITORY_READ}),
             runtime_identity="grok-a",
             state_directory=tmp_path / "state",
             context_limit=100000,
@@ -99,6 +100,9 @@ async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path):
         settings = Settings(environment="test", worktree_root=tmp_path)
         registries = MagicMock()
         registries.profiles.get.return_value = configured
+        registries.projects.get.return_value.allowed_capabilities = frozenset(
+            {Capability.REPOSITORY_READ}
+        )
         registries.sandboxes.get.return_value = SimpleNamespace(uid=10001, gid=10001)
         access = SimpleNamespace(revoke=AsyncMock())
         invocations = []

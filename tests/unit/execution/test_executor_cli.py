@@ -261,7 +261,7 @@ async def test_codex_envelope_and_lifecycle_mocks(
     )
     mock_reg.profiles.get.return_value.model_copy.return_value = mock_reg.profiles.get.return_value
     grok_inv.argv = canonical_grok_argv("grok-4.7", reasoning_effort="high")
-    with pytest.raises(ValueError, match="read-only Grok"):
+    with pytest.raises(ValueError, match="canonical read-only provider command"):
         await envf.build(grok_inv)
     grok_inv.argv = canonical_grok_argv("grok-4.7", read_only=True, reasoning_effort="high")
     grok_inv.provider_attempt = 2
@@ -686,6 +686,7 @@ async def test_executor_composes_enabled_runtime(
         provider="codex",
         launch_mode=LaunchMode.CLI,
         credential_reference=None,
+        concurrency_limit=2,
     )
     settings = MagicMock()
     settings.dependency_provisioning.enabled = False
@@ -695,6 +696,7 @@ async def test_executor_composes_enabled_runtime(
     settings.service_name = "vuzol"
     settings.log_level = "INFO"
     settings.execution.enabled = True
+    settings.project_lead.enabled = False
     settings.execution.reviewer_profile_id = "grok-a" if cli_review else None
     settings.limits.provider_call_input_tokens = 100_000
     settings.execution.require_preflight = True
@@ -736,6 +738,10 @@ async def test_executor_composes_enabled_runtime(
     migration_head = AsyncMock()
     monkeypatch.setattr(executor_cli, "require_migration_head", migration_head)
     monkeypatch.setattr(executor_cli, "create_session_factory", lambda _engine: factory)
+    turn_reconciler = MagicMock()
+    turn_reconciler.reconcile_startup = AsyncMock()
+    turn_reconciler_factory = MagicMock(return_value=turn_reconciler)
+    monkeypatch.setattr(executor_cli, "TurnStartupReconciler", turn_reconciler_factory)
     sync_profiles = AsyncMock()
     monkeypatch.setattr(executor_cli, "synchronize_profiles", sync_profiles)
     for name in (
@@ -743,7 +749,8 @@ async def test_executor_composes_enabled_runtime(
         "ArtifactStore",
         "ExecutionEnvelopeFactory",
         "SandboxCodexTransport",
-        "CodexCliAdapter",
+        "cli_adapter",
+        "ReadOnlyCliAdapter",
         "AdapterRegistry",
         "WorktreeService",
         "LocalGit",
@@ -753,6 +760,7 @@ async def test_executor_composes_enabled_runtime(
         "RoutedWorkflowWorker",
     ):
         monkeypatch.setattr(executor_cli, name, MagicMock())
+    monkeypatch.setattr("vuzol.execution.turn_transport.TurnSandboxTransport", MagicMock())
     run_loop = AsyncMock()
     monkeypatch.setattr(executor_cli, "_run_loop", run_loop)
 
@@ -761,18 +769,28 @@ async def test_executor_composes_enabled_runtime(
     worktree_access.preflight.assert_awaited_once()
     migration_head.assert_awaited_once_with(engine)
     sync_profiles.assert_awaited()
+    turn_reconciler.reconcile_startup.assert_awaited_once()
+    assert turn_reconciler_factory.call_args.args[:2] == (factory, sandbox)
+    assert turn_reconciler_factory.call_args.kwargs["enabled"]() is False
     run_loop.assert_awaited_once()
     assert run_loop.await_args is not None
     assert run_loop.await_args.kwargs["subscription_limit_settings"] is settings.subscription_limits
     chain = run_loop.await_args.args[0]
-    assert (chain._reviews is not None) is cli_review
-    if cli_review:
-        review_args = executor_cli.WorkflowWorker.call_args.kwargs
-        assert set(review_args["handlers"]) == {"review"}
-        assert review_args["profile_limits"] == {"grok-a": 2}
-        reviewer = review_args["handlers"]["review"]._independent
-        assert reviewer._profile_id == "grok-a"
-        assert reviewer._input_token_limit == 100_000
+    assert chain._reviews is not None
+    review_args = executor_cli.WorkflowWorker.call_args.kwargs
+    assert set(review_args["handlers"]) == {"review"}
+    assert review_args["profile_limits"] == {"codex-a": 2}
+    reviewer = review_args["handlers"]["review"]._independent
+    assert reviewer._profile_id == ("grok-a" if cli_review else None)
+    assert reviewer._input_token_limit == 100_000
+    assert reviewer._factory is factory
+    assert executor_cli.cli_adapter.call_count == 2
+    executor_cli.ReadOnlyCliAdapter.assert_called_once()
+    provider_args = executor_cli.RoutedWorkflowWorker.call_args.kwargs
+    assert "plan" in provider_args["handlers"]
+    assert provider_args["queue_classes"] == frozenset(
+        {executor_cli.QueueClass.LIGHT, executor_cli.QueueClass.HEAVY}
+    )
     engine.dispose.assert_awaited_once()
 
 

@@ -300,6 +300,9 @@ class OpenRouterProviderRouting(FrozenModel):
 
 class ProviderProfileConfig(FrozenModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
+    # Operator-assigned, non-secret account identity, independent of model/role.
+    # None preserves the default of isolated CLI profiles.
+    account_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$", max_length=100)
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
     # Optional reasoning effort for models that expose it. CLI profiles forward
@@ -340,6 +343,22 @@ class ProviderProfileConfig(FrozenModel):
     runtime_network: NetworkPolicy = NetworkPolicy()
     agent_runtime_contract: AgentRuntimeContract | None = None
     enabled: bool = True
+
+    @property
+    def account_binding(self) -> tuple[object, ...]:
+        """Fields that must not vary between profiles for one actual account."""
+        return (
+            self.account_id,
+            self.provider,
+            self.launch_mode,
+            self.credential_reference,
+            self.credential_required,
+            self.api_base_url,
+            self.runtime_network,
+            self.state_directory.resolve() if self.state_directory is not None else None,
+            self.runtime_identity,
+            self.concurrency_limit,
+        )
 
     @model_validator(mode="after")
     def validate_credential_reference(self) -> "ProviderProfileConfig":

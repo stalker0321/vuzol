@@ -47,8 +47,10 @@ from vuzol.projects.dependencies import (
 from vuzol.projects.descriptors import is_tool_requirement
 from vuzol.projects.executor_preference import apply_profile_overrides
 from vuzol.projects.installations import enforce_run_pins, verify_installed_capability
+from vuzol.projects.model_matrix import ModelAssignment, assignment_profile
 from vuzol.projects.source_catalog import SourceCatalog
 from vuzol.projects.toolchains import ToolchainRuntime, load_installed_toolchain, toolchain_runtime
+from vuzol.providers.accounts import current_account_execution
 from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.grok import (
     GROK_DIAGNOSTIC_FILE_MAX_BYTES,
@@ -147,26 +149,32 @@ class ExecutionEnvelopeFactory:
             if worktree is None or step is None:
                 raise LookupError("sandbox worktree or step is missing")
             _validate_fenced_binding(invocation, worktree, step)
-            profile = apply_profile_overrides(
-                self._registries.profiles.get(invocation.profile_id),
-                dict(step.payload) if isinstance(step.payload, dict) else {},
-            )
+            profile = self._registries.profiles.get(invocation.profile_id)
+            payload = dict(step.payload) if isinstance(step.payload, dict) else {}
+            if "project_model_assignment" in payload:
+                assignment = ModelAssignment.model_validate(payload["project_model_assignment"])
+                slot = payload.get("project_model_slot")
+                if not isinstance(slot, str) or assignment.profile_id != profile.id:
+                    raise ValueError("CLI model assignment does not match its claim")
+                profile = assignment_profile(assignment, self._registries, slot)
+            if step.step_type in {"plan", "review"} or "project_model_assignment" in payload:
+                # Reviews use the registered profile, including provider-native
+                # model IDs. Claim overrides must agree, not select another model.
+                if (
+                    payload.get("executor_model_override", profile.model) != profile.model
+                    or payload.get("executor_reasoning_effort", profile.model_reasoning_effort)
+                    != profile.model_reasoning_effort
+                ):
+                    raise ValueError("CLI reviewer claim does not match the configured profile")
+            else:
+                profile = apply_profile_overrides(profile, payload)
             _require_provider_command(
                 invocation.argv,
                 profile.provider,
                 profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
+                require_read_only=step.step_type in {"plan", "review"},
             )
-            if step.step_type == "review" and (
-                profile.provider != "grok"
-                or invocation.argv
-                != canonical_grok_argv(
-                    profile.model,
-                    read_only=True,
-                    reasoning_effort=profile.model_reasoning_effort,
-                )
-            ):
-                raise ValueError("CLI reviewer must use the canonical read-only Grok command")
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
             if not sandbox.enabled or profile.state_directory is None:
@@ -188,7 +196,7 @@ class ExecutionEnvelopeFactory:
                     target=Path("/workspace"),
                     mode=(
                         MountMode.READ_ONLY
-                        if step.step_type in {"execute_agent", "review"}
+                        if step.step_type in {"execute_agent", "plan", "review"}
                         else MountMode.READ_WRITE
                     ),
                     purpose="task-worktree",
@@ -280,6 +288,7 @@ class ExecutionEnvelopeFactory:
             )
             if existing is not None:
                 raise ValueError("supervised process attempt already exists")
+            account_execution = current_account_execution()
             process = SupervisedProcess(
                 task_id=invocation.task_id,
                 run_id=invocation.run_id,
@@ -298,6 +307,7 @@ class ExecutionEnvelopeFactory:
                 status=ProcessStatus.STARTING,
                 termination_stage=TerminationStage.NONE,
                 runtime_metadata={
+                    **(account_execution.runtime_metadata if account_execution is not None else {}),
                     "configured_deadline_seconds": spec.timeout_seconds,
                     "cancellation_classification": None,
                     "cancellation_initiator": None,
@@ -627,6 +637,8 @@ class ExecutionEnvelopeFactory:
             process = await session.get(SupervisedProcess, process_id, with_for_update=True)
             if process is None:
                 raise LookupError("supervised process disappeared")
+            if process.task_id is None or process.run_id is None or process.step_id is None:
+                raise ValueError("task sandbox process lacks fenced task identity")
             stdout = await artifacts.persist(
                 session,
                 task_id=process.task_id,
@@ -774,6 +786,11 @@ class ExecutionEnvelopeFactory:
             if forensic_artifact is not None:
                 metadata["provider_diagnostics_artifact_id"] = str(forensic_artifact.id)
             process.runtime_metadata = metadata
+            process.runtime_metadata = {
+                **process.runtime_metadata,
+                "launcher_drained": True,
+                "cleanup_confirmed": True,
+            }
             process.exit_code = result.exit_code
             process.outcome = (
                 ProcessOutcome.SUCCEEDED if result.exit_code == 0 else ProcessOutcome.FAILED
@@ -796,6 +813,13 @@ class ExecutionEnvelopeFactory:
             process.status = ProcessStatus.UNKNOWN
             process.outcome = ProcessOutcome.UNKNOWN
             process.ended_at = func.now()
+            process.reaped_at = None
+            process.runtime_metadata = {
+                **process.runtime_metadata,
+                # Exceptional/repeated cancellation is not a drain proof.
+                "launcher_drained": False,
+                "cleanup_confirmed": False,
+            }
 
 
 class SandboxCodexTransport:
@@ -841,6 +865,11 @@ class SandboxCodexTransport:
             container_name = f"vuzol-{str(envelope.step_id)[:12]}-{envelope.lease_generation}"
             await self._envelopes.mark_running(process_id, container_name)
             result = await self._run_monitored(envelope, cancellation, proxy_lease)
+            if proxy_lease is not None:
+                assert self._proxy is not None
+                await self._proxy.cleanup(proxy_lease)
+                proxy_lease = None
+            # Persist release proof only after both sandbox and proxy cleanup.
             await self._envelopes.complete(process_id, result, self._artifacts)
             return result
         except BaseException as error:
@@ -986,31 +1015,32 @@ def _require_provider_command(
     model: str,
     *,
     reasoning_effort: str | None = None,
+    require_read_only: bool = False,
 ) -> None:
     effort = reasoning_effort if isinstance(reasoning_effort, str) else None
+    modes = (True,) if require_read_only else (False, True)
     if provider == "codex":
         expected = {
-            canonical_codex_argv(model=model, reasoning_effort=effort),
-            canonical_codex_argv(model=model, reasoning_effort=effort, read_only=True),
+            canonical_codex_argv(model=model, reasoning_effort=effort, read_only=read_only)
+            for read_only in modes
         }
     elif provider == "grok":
         expected = {
-            canonical_grok_argv(model, reasoning_effort=effort),
-            canonical_grok_argv(model, read_only=True, reasoning_effort=effort),
+            canonical_grok_argv(model, read_only=read_only, reasoning_effort=effort)
+            for read_only in modes
         }
     elif provider == "kimi":
         expected = {
-            canonical_kimi_argv(model, reasoning_effort=effort or "low"),
-            canonical_kimi_argv(model, reasoning_effort=effort or "low", read_only=True),
+            canonical_kimi_argv(model, reasoning_effort=effort or "low", read_only=read_only)
+            for read_only in modes
         }
     elif provider == "pi":
-        expected = {
-            canonical_pi_argv(model),
-            canonical_pi_argv(model, read_only=True),
-        }
+        expected = {canonical_pi_argv(model, read_only=read_only) for read_only in modes}
     else:
         expected = None
     if expected is None or argv not in expected:
+        if require_read_only:
+            raise ValueError("CLI reviewer must use the canonical read-only provider command")
         raise ValueError("sandbox rejected a non-canonical provider command")
 
 

@@ -22,6 +22,7 @@ from vuzol.discussion.sequencer import WorkPackageSequenceConsumer
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.git import LocalGit
 from vuzol.observability import configure_logging, get_logger
+from vuzol.providers.catalog import credential_access_policy
 from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
 from vuzol.providers.health import synchronize_profiles
 from vuzol.providers.registry import AdapterRegistry
@@ -127,17 +128,15 @@ async def run() -> None:
         )
         independent_reviewer: IndependentModelReviewer | None = None
         adapter_registry: AdapterRegistry | None = None
-        if routable_profiles:
+        if routable_profiles or settings.execution.reviewer_profile_id is not None:
             resolver = ScopedSecretResolver(
-                access_policy={
-                    profile.credential_reference: frozenset({f"profile:{profile.id}"})
-                    for profile in runtime.registries.profiles.items()
-                    if profile.credential_reference is not None
-                },
+                access_policy=credential_access_policy(runtime.registries.profiles.items()),
                 secret_file_root=settings.secret_file_root,
             )
-            adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver)
-        if settings.project_lead.enabled:
+            adapter_registry = AdapterRegistry(
+                runtime.registries.profiles, resolver, session_factory=factory
+            )
+        if settings.project_lead.enabled and not settings.execution.enabled:
             from vuzol.leadership.composition import build_project_lead_worker
 
             control_processors.append(
@@ -154,13 +153,15 @@ async def run() -> None:
                 )
             )
         controls = ProcessorChain(*control_processors)
-        if adapter_registry is not None and settings.execution.reviewer_profile_id is None:
+        if adapter_registry is not None and not settings.execution.enabled:
             independent_reviewer = IndependentModelReviewer(
                 runtime.registries,
                 adapter_registry,
                 DatabaseReviewAccounting(factory, settings.limits),
                 policy_revision=runtime.registries.revision,
                 input_token_limit=settings.limits.provider_call_input_tokens,
+                profile_id=settings.execution.reviewer_profile_id,
+                session_factory=factory,
             )
         handlers = {
             **BASE_INTERNAL_HANDLERS,
@@ -187,8 +188,9 @@ async def run() -> None:
                 else None,
             ),
         }
-        if settings.execution.reviewer_profile_id is not None:
-            # CLI review belongs to the already supervised rootless executor.
+        if settings.execution.enabled:
+            # All project reviews share one owner, so switching API/CLI cannot
+            # race another worker or require changing the service topology.
             # This container has neither the account state nor the socket ACLs.
             handlers.pop("review")
         internal_worker = WorkflowWorker(
@@ -216,12 +218,15 @@ async def run() -> None:
                 artifacts=artifact_store,
                 redaction_patterns=settings.redaction_patterns,
             )
+            safe_handlers = provider_handlers(provider_handler)
+            if settings.execution.enabled:
+                safe_handlers.pop("plan", None)
             routed_worker = RoutedWorkflowWorker(
                 settings,
                 factory,
                 registries=runtime.registries,
                 owner=f"{owner}:provider",
-                handlers=provider_handlers(provider_handler),
+                handlers=safe_handlers,
             )
             worker = ProcessorChain(internal_worker, routed_worker)
         get_logger(__name__).info("worker ready", extra={"event": "worker.ready"})

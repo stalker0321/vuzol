@@ -527,6 +527,9 @@ class ProjectExecutorPreference(TimestampMixin, Base):
     worker_key: Mapped[str | None] = mapped_column(String(40))
     profile_id: Mapped[str | None] = mapped_column(String(100))
     reasoning_effort: Mapped[str | None] = mapped_column(String(20))
+    model_assignments: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_by_user_id: Mapped[int | None] = mapped_column(BigInteger)
 
@@ -852,16 +855,12 @@ class MemoryUnit(IdentityMixin, TimestampMixin, Base):
             "unit_type IN ('decision_template', 'outcome_template', 'observation', 'lesson')",
             name="memory_unit_type_bounded",
         ),
-        CheckConstraint(
-            "char_length(text) BETWEEN 1 AND 4000", name="memory_unit_text_bounded"
-        ),
+        CheckConstraint("char_length(text) BETWEEN 1 AND 4000", name="memory_unit_text_bounded"),
         CheckConstraint(
             "char_length(extraction_identity) BETWEEN 1 AND 255",
             name="memory_unit_extraction_identity_bounded",
         ),
-        UniqueConstraint(
-            "extraction_identity", name="uq_memory_unit_extraction_identity"
-        ),
+        UniqueConstraint("extraction_identity", name="uq_memory_unit_extraction_identity"),
         Index("ix_memory_units_project_type_status", "project_id", "unit_type", "status"),
         Index(
             "ix_memory_units_chain",
@@ -1862,19 +1861,39 @@ class Worktree(IdentityMixin, TimestampMixin, Base):
 
 class SupervisedProcess(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "supervised_processes"
+    __table_args__ = (
+        CheckConstraint(
+            "(leadership_turn_id IS NULL AND invocation_id IS NULL "
+            "AND task_id IS NOT NULL AND run_id IS NOT NULL "
+            "AND step_id IS NOT NULL AND worktree_id IS NOT NULL) OR "
+            "(leadership_turn_id IS NOT NULL AND invocation_id IS NOT NULL "
+            "AND task_id IS NULL AND run_id IS NULL AND step_id IS NULL AND worktree_id IS NULL)",
+            name="supervised_process_binding_xor",
+        ),
+        Index(
+            "uq_supervised_process_invocation",
+            "invocation_id",
+            unique=True,
+            postgresql_where=text("invocation_id IS NOT NULL"),
+        ),
+    )
 
-    step_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("steps.id", ondelete="RESTRICT"), nullable=False, index=True
+    step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("steps.id", ondelete="RESTRICT"), index=True
     )
-    task_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False, index=True
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="RESTRICT"), index=True
     )
-    run_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), index=True
     )
-    worktree_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("worktrees.id", ondelete="RESTRICT"), nullable=False, index=True
+    worktree_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("worktrees.id", ondelete="RESTRICT"), index=True
     )
+    leadership_turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("leadership_turns.id", ondelete="RESTRICT"), index=True
+    )
+    invocation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
     lease_generation: Mapped[int] = mapped_column(Integer, nullable=False)
     provider_attempt: Mapped[int] = mapped_column(Integer, nullable=False)

@@ -22,7 +22,7 @@ from vuzol.interpretation.discussion import (
 )
 from vuzol.observability import get_logger
 from vuzol.ops.telegram_dogfood import DogfoodFault, consume_fault
-from vuzol.projects.executor_preference import load_preference
+from vuzol.projects.executor_preference import format_preference_label, load_preference
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
     claim_outbox_item,
@@ -790,7 +790,13 @@ async def _prepare_project_topic_status(
     if link is not None and link.projection_revision >= revision:
         return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
     preference = await load_preference(session, project_id)
-    worker = "Auto" if preference.worker_key is None else preference.worker_key.value.title()
+    worker = (
+        format_preference_label(preference)
+        if preference.model is not None
+        else "Auto"
+        if preference.worker_key is None
+        else preference.worker_key.value.title()
+    )
     state = "Waiting" if idle else "Thinking"
     return PreparedDelivery(
         DeliveryAction.SEND_STATUS if link is None else DeliveryAction.EDIT_STATUS,

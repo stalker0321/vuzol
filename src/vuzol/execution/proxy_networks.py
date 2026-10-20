@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from vuzol.execution.domain import TurnBindingKeywords, TurnProcessBinding
+
 
 @dataclass(frozen=True)
 class ProxyNetworkLease:
@@ -35,10 +37,15 @@ class ProxyNetworkLease:
 
     internal_name: str
     egress_name: str
-    task_id: UUID
-    run_id: UUID
-    step_id: UUID
+    task_id: UUID | None
+    run_id: UUID | None
+    step_id: UUID | None
     lease_generation: int
+    turn_binding: TurnProcessBinding | None = None
+
+    @property
+    def binding_kwargs(self) -> TurnBindingKeywords:
+        return {} if self.turn_binding is None else {"turn_binding": self.turn_binding}
 
 
 class ProxyNetworkError(RuntimeError):
@@ -61,10 +68,12 @@ class ProxyNetworkManager:
 
     async def create(
         self,
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> ProxyNetworkLease:
         """Create and validate both networks for the lease.
 
@@ -76,8 +85,15 @@ class ProxyNetworkManager:
         """
         if lease_generation < 1:
             raise ProxyNetworkError("lease_generation must be >= 1")
-        internal_name = _make_network_name(task_id, run_id, step_id, lease_generation, "internal")
-        egress_name = _make_network_name(task_id, run_id, step_id, lease_generation, "egress")
+        binding: TurnBindingKeywords = (
+            {} if turn_binding is None else {"turn_binding": turn_binding}
+        )
+        internal_name = _make_network_name(
+            task_id, run_id, step_id, lease_generation, "internal", **binding
+        )
+        egress_name = _make_network_name(
+            task_id, run_id, step_id, lease_generation, "egress", **binding
+        )
 
         base_labels: dict[str, str] = {
             "vuzol.managed": "true",
@@ -87,6 +103,8 @@ class ProxyNetworkManager:
             "vuzol.step_id": str(step_id),
             "vuzol.lease_generation": str(lease_generation),
         }
+        if turn_binding is not None:
+            base_labels = turn_binding.labels(lease_generation, "proxy-network")
 
         # Strict rejection: any pre-existing name collides; no adoption.
         if await self._network_exists(internal_name):
@@ -117,6 +135,7 @@ class ProxyNetworkManager:
                 run_id=run_id,
                 step_id=step_id,
                 lease_generation=lease_generation,
+                turn_binding=turn_binding,
             )
         except Exception as primary_err:
             # Partial rollback only for networks created in this invocation.
@@ -130,6 +149,7 @@ class ProxyNetworkManager:
                         step_id,
                         lease_generation,
                         role,
+                        **binding,
                     )
                 except Exception:
                     combined = ProxyNetworkError(
@@ -148,10 +168,20 @@ class ProxyNetworkManager:
         If egress cleanup fails, does not proceed to internal.
         """
         exp_internal = _make_network_name(
-            lease.task_id, lease.run_id, lease.step_id, lease.lease_generation, "internal"
+            lease.task_id,
+            lease.run_id,
+            lease.step_id,
+            lease.lease_generation,
+            "internal",
+            **lease.binding_kwargs,
         )
         exp_egress = _make_network_name(
-            lease.task_id, lease.run_id, lease.step_id, lease.lease_generation, "egress"
+            lease.task_id,
+            lease.run_id,
+            lease.step_id,
+            lease.lease_generation,
+            "egress",
+            **lease.binding_kwargs,
         )
         if lease.internal_name != exp_internal or lease.egress_name != exp_egress:
             raise ProxyNetworkError("lease network names are inconsistent with identifiers")
@@ -164,6 +194,7 @@ class ProxyNetworkManager:
             lease.step_id,
             lease.lease_generation,
             "egress",
+            **lease.binding_kwargs,
         )
         # then internal
         await self._cleanup_one(
@@ -173,6 +204,7 @@ class ProxyNetworkManager:
             lease.step_id,
             lease.lease_generation,
             "internal",
+            **lease.binding_kwargs,
         )
 
     async def validate_owned(self, lease: ProxyNetworkLease) -> None:
@@ -188,6 +220,7 @@ class ProxyNetworkManager:
                 lease.step_id,
                 lease.lease_generation,
                 role,
+                **lease.binding_kwargs,
             )
             if name != recomputed:
                 raise ProxyNetworkError("lease network names are inconsistent with identifiers")
@@ -201,6 +234,7 @@ class ProxyNetworkManager:
                 lease.step_id,
                 lease.lease_generation,
                 role,
+                **lease.binding_kwargs,
             ):
                 raise ProxyNetworkError(f"refusing foreign recovery network {name}")
             if role == "internal" and data.get("Internal") is not True:
@@ -323,15 +357,22 @@ class ProxyNetworkManager:
     def _matches_ownership(
         self,
         data: dict[str, Any],
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
         role: str,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> bool:
         labels = data.get("Labels") or {}
         if not isinstance(labels, dict):
             return False
+        if turn_binding is not None:
+            return labels == {
+                **turn_binding.labels(lease_generation, "proxy-network"),
+                "vuzol.network_role": role,
+            }
         return labels == {
             "vuzol.managed": "true",
             "vuzol.resource": "proxy-network",
@@ -345,11 +386,13 @@ class ProxyNetworkManager:
     async def _rollback_owned(
         self,
         name: str,
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
         role: str,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> None:
         """Inspect, verify exact ownership+role+no attachments, rm, verify absent.
         Raises on any failure to ensure no owned partial remains.
@@ -357,7 +400,9 @@ class ProxyNetworkManager:
         if not await self._network_exists(name):
             return
         data = await self._inspect_network(name)
-        if not self._matches_ownership(data, task_id, run_id, step_id, lease_generation, role):
+        if not self._matches_ownership(
+            data, task_id, run_id, step_id, lease_generation, role, turn_binding=turn_binding
+        ):
             raise ProxyNetworkError(f"rollback refused to touch non-owned network {name}")
         containers = data.get("Containers") or {}
         if containers:
@@ -369,16 +414,20 @@ class ProxyNetworkManager:
     async def _cleanup_one(
         self,
         name: str,
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
         role: str,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> None:
         if not await self._network_exists(name):
             return
         data = await self._inspect_network(name)
-        if not self._matches_ownership(data, task_id, run_id, step_id, lease_generation, role):
+        if not self._matches_ownership(
+            data, task_id, run_id, step_id, lease_generation, role, turn_binding=turn_binding
+        ):
             raise ProxyNetworkError(f"refusing to remove foreign network {name}")
         containers = data.get("Containers") or {}
         if containers:
@@ -423,7 +472,13 @@ class ProxyNetworkManager:
 
 
 def _make_network_name(
-    task_id: UUID, run_id: UUID, step_id: UUID, lease_generation: int, role: str
+    task_id: UUID | None,
+    run_id: UUID | None,
+    step_id: UUID | None,
+    lease_generation: int,
+    role: str,
+    *,
+    turn_binding: TurnProcessBinding | None = None,
 ) -> str:
     """Deterministic SHA-256 derived name from complete lease identity.
 
@@ -435,6 +490,12 @@ def _make_network_name(
         raise ProxyNetworkError("lease_generation must be >= 1")
     if role not in ("internal", "egress"):
         raise ProxyNetworkError(f"invalid network role {role}")
+    if turn_binding is not None:
+        if any(value is not None for value in (task_id, run_id, step_id)):
+            raise ProxyNetworkError("turn network cannot carry workflow identity")
+        return turn_binding.resource_name(lease_generation, role)
+    if any(value is None for value in (task_id, run_id, step_id)):
+        raise ProxyNetworkError("workflow network identity is incomplete")
     material = f"{task_id}:{run_id}:{step_id}:{lease_generation}:{role}".encode()
     digest = hashlib.sha256(material).hexdigest()[:12]
     return f"vuzol-{digest}-{role}"

@@ -173,7 +173,7 @@ def build_help_card(kind: TopicKind) -> str:
             (
                 "Опишите задачу текстом, голосом или приложите документ.",
                 "Ответьте на сообщение задачи, чтобы продолжить её.",
-                "<code>/model</code> — выбрать исполнителя проекта.",
+                "<code>/model</code> — выбрать модели для ролей проекта.",
                 "<code>/plan</code> — показать текущий план.",
                 (
                     "<code>/source add python|node PACKAGE git|https URL PIN</code> — "

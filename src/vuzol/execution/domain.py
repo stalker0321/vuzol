@@ -5,6 +5,7 @@ import json
 import uuid
 from enum import StrEnum
 from pathlib import Path
+from typing import TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -64,9 +65,18 @@ class SandboxSpec(FrozenModel):
     proxy_network: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
     https_proxy_url: str | None = None
     environment: dict[str, str] = Field(default_factory=dict)
+    empty_workspace: bool = False
 
     @model_validator(mode="after")
     def validate_isolation(self) -> "SandboxSpec":
+        if self.empty_workspace and (
+            self.working_directory != Path("/workspace")
+            or any(
+                mount.target == Path("/workspace") or Path("/workspace") in mount.target.parents
+                for mount in self.mounts
+            )
+        ):
+            raise ValueError("empty workspace cannot expose workspace mounts")
         if not self.working_directory.is_absolute():
             raise ValueError("sandbox working directory must be absolute")
         if not self.seccomp_profile.is_absolute():
@@ -106,17 +116,74 @@ class SandboxSpec(FrozenModel):
         return hashlib.sha256(payload).hexdigest()
 
 
+class TurnProcessBinding(FrozenModel):
+    """Durable inference identity, distinct from workflow execution identity."""
+
+    turn_id: uuid.UUID
+    invocation_id: uuid.UUID
+
+    def resource_name(self, generation: int, resource: str) -> str:
+        material = f"lead-turn:{self.turn_id}:{self.invocation_id}:{generation}:{resource}"
+        return f"vuzol-turn-{hashlib.sha256(material.encode()).hexdigest()[:24]}-{resource}"
+
+    def labels(self, generation: int, resource: str) -> dict[str, str]:
+        return {
+            "vuzol.managed": "true",
+            "vuzol.resource": resource,
+            "vuzol.binding": "leadership-turn",
+            "vuzol.turn_id": str(self.turn_id),
+            "vuzol.invocation_id": str(self.invocation_id),
+            "vuzol.lease_generation": str(generation),
+        }
+
+
+class TurnBindingKeywords(TypedDict, total=False):
+    turn_binding: TurnProcessBinding
+
+
 class ProcessEnvelope(FrozenModel):
-    task_id: uuid.UUID
-    run_id: uuid.UUID
-    step_id: uuid.UUID
-    worktree_id: uuid.UUID
+    task_id: uuid.UUID | None = None
+    run_id: uuid.UUID | None = None
+    step_id: uuid.UUID | None = None
+    worktree_id: uuid.UUID | None = None
+    turn_binding: TurnProcessBinding | None = None
     profile_id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     provider_attempt: int = Field(ge=1)
     lease_generation: int = Field(ge=1)
     argv: tuple[str, ...] = Field(min_length=1, max_length=64)
     stdin: str = Field(max_length=1_000_000)
     sandbox: SandboxSpec
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> "ProcessEnvelope":
+        workflow = (self.task_id, self.run_id, self.step_id, self.worktree_id)
+        if self.turn_binding is None:
+            if any(value is None for value in workflow):
+                raise ValueError(
+                    "workflow process requires complete task/run/step/worktree binding"
+                )
+        elif any(value is not None for value in workflow):
+            raise ValueError("turn process cannot carry workflow bindings")
+        return self
+
+    @property
+    def container_name(self) -> str:
+        if self.turn_binding is not None:
+            return self.turn_binding.resource_name(self.lease_generation, "sandbox")
+        return f"vuzol-{str(self.step_id)[:12]}-{self.lease_generation}"
+
+    @property
+    def ownership_labels(self) -> dict[str, str]:
+        if self.turn_binding is not None:
+            return self.turn_binding.labels(self.lease_generation, "sandbox-container")
+        return {
+            "vuzol.managed": "true",
+            "vuzol.resource": "sandbox-container",
+            "vuzol.task_id": str(self.task_id),
+            "vuzol.run_id": str(self.run_id),
+            "vuzol.step_id": str(self.step_id),
+            "vuzol.lease_generation": str(self.lease_generation),
+        }
 
     @property
     def stable_hash(self) -> str:

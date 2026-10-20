@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from vuzol.execution.domain import TurnBindingKeywords, TurnProcessBinding
 from vuzol.execution.egress import AllowedConnectTarget
 from vuzol.execution.proxy_networks import (
     ProxyNetworkLease,
@@ -34,11 +35,16 @@ class ProxyServiceError(RuntimeError):
 class ProxyServiceLease:
     container_name: str
     networks: ProxyNetworkLease
-    task_id: UUID
-    run_id: UUID
-    step_id: UUID
+    task_id: UUID | None
+    run_id: UUID | None
+    step_id: UUID | None
     lease_generation: int
     policy_hash: str
+    turn_binding: TurnProcessBinding | None = None
+
+    @property
+    def binding_kwargs(self) -> TurnBindingKeywords:
+        return {} if self.turn_binding is None else {"turn_binding": self.turn_binding}
 
     @property
     def proxy_url(self) -> str:
@@ -48,14 +54,19 @@ class ProxyServiceLease:
 @dataclass(frozen=True)
 class ProxyRecoveryManifest:
     directory: Path
-    task_id: UUID
-    run_id: UUID
-    step_id: UUID
+    task_id: UUID | None
+    run_id: UUID | None
+    step_id: UUID | None
     lease_generation: int
     policy_hash: str
+    turn_binding: TurnProcessBinding | None = None
 
     @property
-    def identity(self) -> tuple[UUID, UUID, UUID, int]:
+    def binding_kwargs(self) -> TurnBindingKeywords:
+        return {} if self.turn_binding is None else {"turn_binding": self.turn_binding}
+
+    @property
+    def identity(self) -> tuple[UUID | None, UUID | None, UUID | None, int]:
         return self.task_id, self.run_id, self.step_id, self.lease_generation
 
 
@@ -89,18 +100,23 @@ class ProxyServiceManager:
 
     async def create(
         self,
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
         targets: tuple[AllowedConnectTarget, ...],
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> ProxyServiceLease:
         if lease_generation < 1 or not targets:
             raise ProxyServiceError("proxy identity and targets must be non-empty")
-        name = _make_proxy_name(task_id, run_id, step_id, lease_generation)
+        binding: TurnBindingKeywords = (
+            {} if turn_binding is None else {"turn_binding": turn_binding}
+        )
+        name = _make_proxy_name(task_id, run_id, step_id, lease_generation, **binding)
         policy = _render_policy(targets)
         policy_hash = hashlib.sha256(policy).hexdigest()
-        runtime_dir = self._runtime_directory(task_id, run_id, step_id, lease_generation)
+        runtime_dir = self._runtime_directory(task_id, run_id, step_id, lease_generation, **binding)
         policy_path = runtime_dir / "policy.json"
         networks: ProxyNetworkLease | None = None
         container_created = False
@@ -113,13 +129,23 @@ class ProxyServiceManager:
                 step_id,
                 lease_generation,
                 policy_hash,
+                **binding,
             )
-            networks = await self._networks.create(task_id, run_id, step_id, lease_generation)
+            networks = await self._networks.create(
+                task_id, run_id, step_id, lease_generation, **binding
+            )
             if await self._container_exists(name):
                 raise ProxyServiceError(f"proxy container name collision for {name}")
             await self._docker(
                 *self._create_argv(
-                    name, networks, policy_path, task_id, run_id, step_id, lease_generation
+                    name,
+                    networks,
+                    policy_path,
+                    task_id,
+                    run_id,
+                    step_id,
+                    lease_generation,
+                    **binding,
                 )
             )
             container_created = True
@@ -140,6 +166,7 @@ class ProxyServiceManager:
                 step_id,
                 lease_generation,
                 running=False,
+                **binding,
             )
             await self._docker("start", name)
             await self._wait_ready(name)
@@ -152,6 +179,7 @@ class ProxyServiceManager:
                 step_id,
                 lease_generation,
                 running=True,
+                **binding,
             )
             return ProxyServiceLease(
                 container_name=name,
@@ -161,12 +189,13 @@ class ProxyServiceManager:
                 step_id=step_id,
                 lease_generation=lease_generation,
                 policy_hash=policy_hash,
+                turn_binding=turn_binding,
             )
         except BaseException as primary:
             try:
                 if container_created:
                     await self._remove_owned_container(
-                        name, task_id, run_id, step_id, lease_generation
+                        name, task_id, run_id, step_id, lease_generation, **binding
                     )
                 if networks is not None:
                     await self._networks.cleanup(networks)
@@ -183,11 +212,16 @@ class ProxyServiceManager:
             lease.run_id,
             lease.step_id,
             lease.lease_generation,
+            **lease.binding_kwargs,
         )
         if lease.container_name != expected_name:
             raise ProxyServiceError("proxy lease container identity is inconsistent")
         runtime_dir = self._runtime_directory(
-            lease.task_id, lease.run_id, lease.step_id, lease.lease_generation
+            lease.task_id,
+            lease.run_id,
+            lease.step_id,
+            lease.lease_generation,
+            **lease.binding_kwargs,
         )
         policy_path = runtime_dir / "policy.json"
         await self._remove_owned_container(
@@ -196,9 +230,46 @@ class ProxyServiceManager:
             lease.run_id,
             lease.step_id,
             lease.lease_generation,
+            **lease.binding_kwargs,
         )
         await self._networks.cleanup(lease.networks)
         self._remove_private_policy(runtime_dir, policy_path, expected_hash=lease.policy_hash)
+
+    async def cleanup_turn(self, binding: TurnProcessBinding, generation: int) -> None:
+        """Clean exact turn resources, even if startup failed before returning a lease.
+
+        The caller must first fence the durable process owner. A missing manifest
+        is not proof of absence: deterministic names and exact labels are still
+        checked for the sandbox, proxy, and both networks.
+        """
+        identity = (None, None, None, generation)
+        directory = self._runtime_directory(*identity, turn_binding=binding)
+        manifest = ProxyRecoveryManifest(
+            directory, *identity, policy_hash="0" * 64, turn_binding=binding
+        )
+        if directory.exists() or directory.is_symlink():
+            self._validate_runtime_root()
+            if directory.is_symlink() or not directory.is_dir():
+                raise ProxyServiceError("turn proxy directory is ambiguous")
+            state_path = directory / STATE_FILE
+            if state_path.exists() or state_path.is_symlink():
+                state = self._read_state(state_path)
+                if _state_identity(state) != identity or _state_turn_binding(state) != binding:
+                    raise ProxyServiceError("turn proxy manifest identity is inconsistent")
+                manifest = ProxyRecoveryManifest(
+                    directory, *identity, policy_hash=state["policy_hash"], turn_binding=binding
+                )
+                await self.cleanup_recovery_manifest(manifest)
+                return
+            # No network or container is created before the durable state file.
+            # Preserve a partial policy directory for explicit reconciliation.
+            raise ProxyServiceError("turn proxy startup has an incomplete manifest")
+        await self.validate_recovery_resources(manifest)
+        await self._remove_owned_sandbox(*identity, turn_binding=binding)
+        await self._remove_owned_container(
+            _make_proxy_name(*identity, turn_binding=binding), *identity, turn_binding=binding
+        )
+        await self._networks.cleanup(self._recovery_networks(manifest))
 
     def recovery_manifests(self) -> tuple[ProxyRecoveryManifest, ...]:
         """Discover exact private manifests without deciding whether cleanup is safe."""
@@ -211,13 +282,12 @@ class ProxyServiceManager:
                 raise ProxyServiceError("ambiguous entry in proxy runtime root")
             state_path = directory / STATE_FILE
             state = self._read_state(state_path)
-            identity = (
-                UUID(state["task_id"]),
-                UUID(state["run_id"]),
-                UUID(state["step_id"]),
-                state["lease_generation"],
+            turn_binding = _state_turn_binding(state)
+            binding: TurnBindingKeywords = (
+                {} if turn_binding is None else {"turn_binding": turn_binding}
             )
-            if directory != self._runtime_directory(*identity):
+            identity = _state_identity(state)
+            if directory != self._runtime_directory(*identity, **binding):
                 raise ProxyServiceError("proxy recovery manifest path is inconsistent")
             manifests.append(
                 ProxyRecoveryManifest(
@@ -227,6 +297,7 @@ class ProxyServiceManager:
                     step_id=identity[2],
                     lease_generation=identity[3],
                     policy_hash=state["policy_hash"],
+                    turn_binding=turn_binding,
                 )
             )
         return tuple(manifests)
@@ -234,17 +305,18 @@ class ProxyServiceManager:
     async def validate_recovery_resources(self, manifest: ProxyRecoveryManifest) -> None:
         """Fail closed unless every present runtime resource has the exact ownership identity."""
         identity = manifest.identity
-        sandbox_name = f"vuzol-{str(manifest.step_id)[:12]}-{manifest.lease_generation}"
+        binding = manifest.binding_kwargs
+        sandbox_name = _sandbox_name(*identity, **binding)
         if await self._container_exists(sandbox_name):
             sandbox = await self._inspect_container(sandbox_name)
             config = _dict(sandbox, "Config", sandbox_name)
-            if config.get("Labels") != _sandbox_ownership_labels(*identity):
+            if config.get("Labels") != _sandbox_ownership_labels(*identity, **binding):
                 raise ProxyServiceError(f"foreign sandbox container {sandbox_name}")
-        proxy_name = _make_proxy_name(*identity)
+        proxy_name = _make_proxy_name(*identity, **binding)
         if await self._container_exists(proxy_name):
             proxy = await self._inspect_container(proxy_name)
             config = _dict(proxy, "Config", proxy_name)
-            if config.get("Labels") != _ownership_labels(*identity):
+            if config.get("Labels") != _ownership_labels(*identity, **binding):
                 raise ProxyServiceError(f"foreign proxy container {proxy_name}")
         await self._networks.validate_owned(self._recovery_networks(manifest))
 
@@ -252,19 +324,21 @@ class ProxyServiceManager:
         """Revalidate one exact manifest and remove only its proven-owned resources."""
         state_path = manifest.directory / STATE_FILE
         state = self._read_state(state_path)
-        current = (
-            UUID(state["task_id"]),
-            UUID(state["run_id"]),
-            UUID(state["step_id"]),
-            state["lease_generation"],
-        )
-        if current != manifest.identity or state["policy_hash"] != manifest.policy_hash:
+        current = _state_identity(state)
+        binding = manifest.binding_kwargs
+        if (
+            current != manifest.identity
+            or _state_turn_binding(state) != manifest.turn_binding
+            or state["policy_hash"] != manifest.policy_hash
+        ):
             raise ProxyServiceError("proxy recovery manifest changed before cleanup")
-        if manifest.directory != self._runtime_directory(*current):
+        if manifest.directory != self._runtime_directory(*current, **binding):
             raise ProxyServiceError("proxy recovery manifest identity changed before cleanup")
         await self.validate_recovery_resources(manifest)
-        await self._remove_owned_sandbox(*manifest.identity)
-        await self._remove_owned_container(_make_proxy_name(*manifest.identity), *manifest.identity)
+        await self._remove_owned_sandbox(*manifest.identity, **binding)
+        await self._remove_owned_container(
+            _make_proxy_name(*manifest.identity, **binding), *manifest.identity, **binding
+        )
         await self._networks.cleanup(self._recovery_networks(manifest))
         self._remove_private_policy(
             manifest.directory,
@@ -276,17 +350,24 @@ class ProxyServiceManager:
     @staticmethod
     def _recovery_networks(manifest: ProxyRecoveryManifest) -> ProxyNetworkLease:
         return ProxyNetworkLease(
-            internal_name=_make_network_name(*manifest.identity, "internal"),
-            egress_name=_make_network_name(*manifest.identity, "egress"),
+            internal_name=_make_network_name(
+                *manifest.identity, "internal", **manifest.binding_kwargs
+            ),
+            egress_name=_make_network_name(*manifest.identity, "egress", **manifest.binding_kwargs),
             task_id=manifest.task_id,
             run_id=manifest.run_id,
             step_id=manifest.step_id,
             lease_generation=manifest.lease_generation,
+            turn_binding=manifest.turn_binding,
         )
 
     async def wait_until_dead(self, lease: ProxyServiceLease) -> None:
         expected_name = _make_proxy_name(
-            lease.task_id, lease.run_id, lease.step_id, lease.lease_generation
+            lease.task_id,
+            lease.run_id,
+            lease.step_id,
+            lease.lease_generation,
+            **lease.binding_kwargs,
         )
         if lease.container_name != expected_name:
             raise ProxyServiceError("proxy lease container identity is inconsistent")
@@ -300,6 +381,7 @@ class ProxyServiceManager:
                 lease.run_id,
                 lease.step_id,
                 lease.lease_generation,
+                **lease.binding_kwargs,
             ):
                 raise ProxyServiceError("proxy ownership changed while execution was active")
             state = _dict(data, "State", lease.container_name)
@@ -308,8 +390,16 @@ class ProxyServiceManager:
             await asyncio.sleep(0.25)
 
     def _runtime_directory(
-        self, task_id: UUID, run_id: UUID, step_id: UUID, lease_generation: int
+        self,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
+        lease_generation: int,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> Path:
+        if turn_binding is not None:
+            return self._runtime_root / turn_binding.resource_name(lease_generation, "proxy-files")
         identity = f"{task_id}:{run_id}:{step_id}:{lease_generation}:proxy-files".encode()
         return self._runtime_root / hashlib.sha256(identity).hexdigest()[:20]
 
@@ -347,22 +437,33 @@ class ProxyServiceManager:
     def _write_state(
         self,
         directory: Path,
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
         policy_hash: str,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> None:
+        state = {
+            "version": 1,
+            "task_id": str(task_id),
+            "run_id": str(run_id),
+            "step_id": str(step_id),
+            "lease_generation": lease_generation,
+            "policy_hash": policy_hash,
+        }
+        if turn_binding is not None:
+            state = {
+                "version": 2,
+                "binding": "leadership-turn",
+                **turn_binding.model_dump(mode="json"),
+                "lease_generation": lease_generation,
+                "policy_hash": policy_hash,
+            }
         body = (
             json.dumps(
-                {
-                    "version": 1,
-                    "task_id": str(task_id),
-                    "run_id": str(run_id),
-                    "step_id": str(step_id),
-                    "lease_generation": lease_generation,
-                    "policy_hash": policy_hash,
-                },
+                state,
                 sort_keys=True,
                 separators=(",", ":"),
             )
@@ -401,19 +502,29 @@ class ProxyServiceManager:
                 "lease_generation",
                 "policy_hash",
             }
+            if isinstance(state, dict) and state.get("version") == 2:
+                expected = {
+                    "version",
+                    "binding",
+                    "turn_id",
+                    "invocation_id",
+                    "lease_generation",
+                    "policy_hash",
+                }
+                if state.get("binding") != "leadership-turn":
+                    raise ValueError
             if (
                 not isinstance(state, dict)
                 or set(state) != expected
-                or state["version"] != 1
-                or not isinstance(state["lease_generation"], int)
+                or state["version"] not in (1, 2)
+                or type(state["lease_generation"]) is not int
                 or state["lease_generation"] < 1
                 or not isinstance(state["policy_hash"], str)
                 or len(state["policy_hash"]) != 64
             ):
                 raise ValueError
-            UUID(state["task_id"])
-            UUID(state["run_id"])
-            UUID(state["step_id"])
+            _state_identity(state)
+            _state_turn_binding(state)
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             raise ProxyServiceError("proxy recovery manifest is malformed") from error
         return state
@@ -456,15 +567,21 @@ class ProxyServiceManager:
             directory.rmdir()
 
     async def _remove_owned_sandbox(
-        self, task_id: UUID, run_id: UUID, step_id: UUID, lease_generation: int
+        self,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
+        lease_generation: int,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> None:
-        name = f"vuzol-{str(step_id)[:12]}-{lease_generation}"
+        name = _sandbox_name(task_id, run_id, step_id, lease_generation, turn_binding=turn_binding)
         if not await self._container_exists(name):
             return
         data = await self._inspect_container(name)
         config = _dict(data, "Config", name)
         if config.get("Labels") != _sandbox_ownership_labels(
-            task_id, run_id, step_id, lease_generation
+            task_id, run_id, step_id, lease_generation, turn_binding=turn_binding
         ):
             raise ProxyServiceError(f"refusing to remove foreign sandbox container {name}")
         state = _dict(data, "State", name)
@@ -482,12 +599,16 @@ class ProxyServiceManager:
         name: str,
         networks: ProxyNetworkLease,
         policy_path: Path,
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> tuple[str, ...]:
-        labels = _ownership_labels(task_id, run_id, step_id, lease_generation)
+        labels = _ownership_labels(
+            task_id, run_id, step_id, lease_generation, turn_binding=turn_binding
+        )
         argv = [
             "create",
             "--name",
@@ -526,12 +647,13 @@ class ProxyServiceManager:
         name: str,
         networks: ProxyNetworkLease,
         policy_path: Path,
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
         *,
         running: bool,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> None:
         data = await self._inspect_container(name)
         config = _dict(data, "Config", name)
@@ -549,7 +671,9 @@ class ProxyServiceManager:
         if config.get("Image") != self._proxy_image or config.get("User") != "10002:10002":
             raise ProxyServiceError("proxy image or identity is invalid")
         labels = config.get("Labels")
-        expected_labels = _ownership_labels(task_id, run_id, step_id, lease_generation)
+        expected_labels = _ownership_labels(
+            task_id, run_id, step_id, lease_generation, turn_binding=turn_binding
+        )
         if not isinstance(labels, dict) or labels != expected_labels:
             raise ProxyServiceError("proxy ownership labels are invalid")
         if host.get("ReadonlyRootfs") is not True or host.get("CapDrop") != ["ALL"]:
@@ -614,16 +738,20 @@ class ProxyServiceManager:
     async def _remove_owned_container(
         self,
         name: str,
-        task_id: UUID,
-        run_id: UUID,
-        step_id: UUID,
+        task_id: UUID | None,
+        run_id: UUID | None,
+        step_id: UUID | None,
         lease_generation: int,
+        *,
+        turn_binding: TurnProcessBinding | None = None,
     ) -> None:
         if not await self._container_exists(name):
             return
         data = await self._inspect_container(name)
         config = _dict(data, "Config", name)
-        if config.get("Labels") != _ownership_labels(task_id, run_id, step_id, lease_generation):
+        if config.get("Labels") != _ownership_labels(
+            task_id, run_id, step_id, lease_generation, turn_binding=turn_binding
+        ):
             raise ProxyServiceError(f"refusing to remove foreign proxy container {name}")
         state = _dict(data, "State", name)
         if state.get("Running") is True:
@@ -671,16 +799,36 @@ def _render_policy(targets: tuple[AllowedConnectTarget, ...]) -> bytes:
     return (json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def _make_proxy_name(task_id: UUID, run_id: UUID, step_id: UUID, lease_generation: int) -> str:
+def _make_proxy_name(
+    task_id: UUID | None,
+    run_id: UUID | None,
+    step_id: UUID | None,
+    lease_generation: int,
+    *,
+    turn_binding: TurnProcessBinding | None = None,
+) -> str:
     if lease_generation < 1:
         raise ProxyServiceError("lease_generation must be positive")
+    if turn_binding is not None:
+        if any(value is not None for value in (task_id, run_id, step_id)):
+            raise ProxyServiceError("turn proxy cannot carry workflow identity")
+        return turn_binding.resource_name(lease_generation, "proxy")
+    if any(value is None for value in (task_id, run_id, step_id)):
+        raise ProxyServiceError("workflow proxy identity is incomplete")
     material = f"{task_id}:{run_id}:{step_id}:{lease_generation}:proxy".encode()
     return f"vuzol-{hashlib.sha256(material).hexdigest()[:12]}-proxy"
 
 
 def _ownership_labels(
-    task_id: UUID, run_id: UUID, step_id: UUID, lease_generation: int
+    task_id: UUID | None,
+    run_id: UUID | None,
+    step_id: UUID | None,
+    lease_generation: int,
+    *,
+    turn_binding: TurnProcessBinding | None = None,
 ) -> dict[str, str]:
+    if turn_binding is not None:
+        return turn_binding.labels(lease_generation, "egress-proxy")
     return {
         "vuzol.managed": "true",
         "vuzol.resource": "egress-proxy",
@@ -692,8 +840,15 @@ def _ownership_labels(
 
 
 def _sandbox_ownership_labels(
-    task_id: UUID, run_id: UUID, step_id: UUID, lease_generation: int
+    task_id: UUID | None,
+    run_id: UUID | None,
+    step_id: UUID | None,
+    lease_generation: int,
+    *,
+    turn_binding: TurnProcessBinding | None = None,
 ) -> dict[str, str]:
+    if turn_binding is not None:
+        return turn_binding.labels(lease_generation, "sandbox-container")
     return {
         "vuzol.managed": "true",
         "vuzol.resource": "sandbox-container",
@@ -702,6 +857,36 @@ def _sandbox_ownership_labels(
         "vuzol.step_id": str(step_id),
         "vuzol.lease_generation": str(lease_generation),
     }
+
+
+def _sandbox_name(
+    task_id: UUID | None,
+    run_id: UUID | None,
+    step_id: UUID | None,
+    lease_generation: int,
+    *,
+    turn_binding: TurnProcessBinding | None = None,
+) -> str:
+    if turn_binding is not None:
+        return turn_binding.resource_name(lease_generation, "sandbox")
+    return f"vuzol-{str(step_id)[:12]}-{lease_generation}"
+
+
+def _state_identity(state: dict[str, Any]) -> tuple[UUID | None, UUID | None, UUID | None, int]:
+    if state["version"] == 2:
+        return None, None, None, state["lease_generation"]
+    return (
+        UUID(state["task_id"]),
+        UUID(state["run_id"]),
+        UUID(state["step_id"]),
+        state["lease_generation"],
+    )
+
+
+def _state_turn_binding(state: dict[str, Any]) -> TurnProcessBinding | None:
+    if state["version"] == 2:
+        return TurnProcessBinding(turn_id=state["turn_id"], invocation_id=state["invocation_id"])
+    return None
 
 
 def _dict(parent: dict[str, Any], key: str, name: str) -> dict[str, Any]:

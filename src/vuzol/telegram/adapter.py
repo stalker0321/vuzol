@@ -509,6 +509,32 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
             naming_revision=revision,
             naming_option_index=option_index,
         )
+    if parts[:2] == ["v3", "pm"]:
+        if len(query.data.encode()) > 64 or len(parts) < 4:
+            return None
+        kind = parts[2]
+        if {"b": 4, "s": 5, "p": 6}.get(kind) != len(parts):
+            return None
+        try:
+            return ControlUpdate(
+                bot_id=bot_id,
+                update_id=update.update_id,
+                callback_query_id=query.id,
+                chat_id=query.message.chat.id,
+                user_id=user.id,
+                message_thread_id=message_thread_id,
+                message_id=message_id,
+                action_kind={
+                    "b": "project_model_matrix_menu",
+                    "s": "project_model_matrix_slot",
+                    "p": "project_model_matrix_pick",
+                }[kind],
+                preference_revision=int(parts[3]),
+                preference_slot=parts[4] if kind != "b" else None,
+                preference_profile_token=parts[5] if kind == "p" and parts[5] != "auto" else None,
+            )
+        except (ValueError, TypeError):
+            return None
     if len(parts) >= 4 and parts[:2] == ["v1", "pm"]:
         try:
             kind = parts[2]

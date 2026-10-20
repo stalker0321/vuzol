@@ -6,6 +6,7 @@ import signal
 import socket
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
@@ -29,27 +30,27 @@ from vuzol.execution.finalization import TrustedGateRunner, WorkerFinalizer
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.proxy_service import ProxyServiceManager
-from vuzol.execution.reconciliation import ProxyStartupReconciler
+from vuzol.execution.reconciliation import ProxyStartupReconciler, TurnStartupReconciler
 from vuzol.execution.result_validation import ResultValidationHandler
 from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
+from vuzol.leadership.composition import build_project_lead_worker
+from vuzol.leadership.worker import ProjectLeadWorker
 from vuzol.observability import configure_logging, get_logger
 from vuzol.projects.capability_provisioning import (
     CapabilityProvisioningHandler,
     OfflineCapabilityInstaller,
 )
 from vuzol.projects.dependency_provisioning import DependencyProvisioningHandler
+from vuzol.providers.catalog import cli_adapter, credential_access_policy, supported_profile
 from vuzol.providers.cli_readonly import ReadOnlyCliAdapter
-from vuzol.providers.codex import CodexCliAdapter
-from vuzol.providers.grok import GrokCliAdapter
 from vuzol.providers.handlers import ProviderStepHandler, executor_provider_handlers
 from vuzol.providers.health import synchronize_profiles
-from vuzol.providers.kimi import KimiCliAdapter
-from vuzol.providers.pi import PiCliAdapter
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
+from vuzol.providers.role_cli import RoleBoundCliAdapter
 from vuzol.review import ResultReviewHandler
 from vuzol.review.independent import DatabaseReviewAccounting, IndependentModelReviewer
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
@@ -72,12 +73,22 @@ class ExecutorChain:
         worktrees: WorkflowWorker,
         providers: RoutedWorkflowWorker,
         reviews: WorkflowWorker | None = None,
+        lead: ProjectLeadWorker | None = None,
+        recovery: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._worktrees = worktrees
         self._providers = providers
         self._reviews = reviews
+        self._lead = lead
+        self._recovery = recovery
+        self._next_recovery = time.monotonic() + 30
 
     async def process_one(self) -> bool:
+        if self._recovery is not None and time.monotonic() >= self._next_recovery:
+            await self._recovery()
+            self._next_recovery = time.monotonic() + 30
+        if self._lead is not None and await self._lead.process_one():
+            return True
         if self._reviews is not None and await self._reviews.process_one():
             return True
         return await self._worktrees.process_one() or await self._providers.process_one()
@@ -143,11 +154,7 @@ async def run() -> None:
                 configuration_revision=runtime.registries.revision,
             )
         resolver = ScopedSecretResolver(
-            access_policy={
-                profile.credential_reference: frozenset({f"profile:{profile.id}"})
-                for profile in runtime.registries.profiles.items()
-                if profile.credential_reference is not None
-            },
+            access_policy=credential_access_policy(runtime.registries.profiles.items()),
             secret_file_root=settings.secret_file_root,
         )
         artifact_store = ArtifactStore(
@@ -174,6 +181,14 @@ async def run() -> None:
         )
         if settings.dependency_provisioning.enabled and proxy_manager is None:
             raise RuntimeError("dependency provisioning requires the controlled proxy runtime")
+        turn_reconciler = TurnStartupReconciler(
+            factory,
+            sandbox_runtime,
+            proxy_manager,
+            owner=owner,
+            enabled=lambda: settings.project_lead.enabled,
+        )
+        await turn_reconciler.reconcile_startup()
         if proxy_manager is not None:
             report = await ProxyStartupReconciler(
                 factory,
@@ -196,21 +211,30 @@ async def run() -> None:
         transport = SandboxCodexTransport(
             sandbox_runtime, envelope_factory, artifact_store, proxy_manager
         )
+        from vuzol.execution.turn_transport import TurnSandboxTransport
+
+        turn_transport = TurnSandboxTransport(
+            sandbox_runtime, factory, settings, runtime.registries, proxy_manager
+        )
         adapters: dict[str, ProviderAdapter] = {}
         for profile in runtime.registries.profiles.items():
-            if not profile.enabled or profile.launch_mode is not LaunchMode.CLI:
+            if (
+                not profile.enabled
+                or profile.launch_mode is not LaunchMode.CLI
+                or not supported_profile(profile)
+            ):
                 continue
-            if profile.provider == "codex":
-                adapters[profile.id] = CodexCliAdapter(transport)
-            elif profile.provider == "grok":
-                adapters[profile.id] = GrokCliAdapter(transport)
-            elif profile.provider == "kimi":
-                adapters[profile.id] = KimiCliAdapter(transport)
-            elif profile.provider == "pi":
-                adapters[profile.id] = PiCliAdapter(transport)
+            base = cli_adapter(profile, transport)
+            adapters[profile.id] = RoleBoundCliAdapter(
+                base,
+                ReadOnlyCliAdapter(base, runtime, factory),
+                cli_adapter(profile, turn_transport),
+            )
         if not adapters:
             raise RuntimeError("execution worker has no enabled CLI profile")
-        adapter_registry = AdapterRegistry(runtime.registries.profiles, resolver, adapters=adapters)
+        adapter_registry = AdapterRegistry(
+            runtime.registries.profiles, resolver, adapters=adapters, session_factory=factory
+        )
         local_git = LocalGit()
         worktree_service = WorktreeService(
             settings.worktree_root,
@@ -311,43 +335,60 @@ async def run() -> None:
             factory,
             registries=runtime.registries,
             owner=f"{owner}:provider",
-            handlers=executor_provider_handlers(provider_handler),
-            queue_classes=frozenset({QueueClass.HEAVY}),
+            handlers={**executor_provider_handlers(provider_handler), "plan": provider_handler},
+            queue_classes=frozenset({QueueClass.HEAVY, QueueClass.LIGHT}),
         )
-        review_worker = None
         reviewer_id = settings.execution.reviewer_profile_id
-        if reviewer_id is not None:
-            cli_review = ReadOnlyCliAdapter(GrokCliAdapter(transport), runtime, factory)
-            review_registry = AdapterRegistry(
-                runtime.registries.profiles, resolver, adapters={reviewer_id: cli_review}
-            )
-            reviewer = IndependentModelReviewer(
-                runtime.registries,
-                review_registry,
-                DatabaseReviewAccounting(factory, settings.limits),
-                policy_revision=runtime.registries.revision,
-                profile_id=reviewer_id,
-                input_token_limit=settings.limits.provider_call_input_tokens,
-            )
-            review_worker = WorkflowWorker(
-                settings,
+        reviewer = IndependentModelReviewer(
+            runtime.registries,
+            adapter_registry,
+            DatabaseReviewAccounting(factory, settings.limits),
+            policy_revision=runtime.registries.revision,
+            profile_id=reviewer_id,
+            input_token_limit=settings.limits.provider_call_input_tokens,
+            session_factory=factory,
+        )
+        review_worker = WorkflowWorker(
+            settings,
+            factory,
+            owner=f"{owner}:review",
+            handlers={
+                "review": ResultReviewHandler(
+                    factory,
+                    local_git,
+                    worktree_root=settings.worktree_root,
+                    independent_reviewer=reviewer,
+                )
+            },
+            queue_classes=frozenset({QueueClass.LIGHT}),
+            profile_limits={p.id: p.concurrency_limit for p in runtime.registries.profiles.items()},
+        )
+        lead_worker = (
+            build_project_lead_worker(
                 factory,
-                owner=f"{owner}:review",
-                handlers={
-                    "review": ResultReviewHandler(
-                        factory,
-                        local_git,
-                        worktree_root=settings.worktree_root,
-                        independent_reviewer=reviewer,
-                    )
+                settings=settings,
+                profiles=runtime.registries.profiles,
+                owner=f"{owner}:project-lead",
+                default_branches={
+                    p.id: p.default_branch for p in runtime.registries.projects.items()
                 },
-                queue_classes=frozenset({QueueClass.LIGHT}),
-                profile_limits={
-                    reviewer_id: runtime.registries.profiles.get(reviewer_id).concurrency_limit
-                },
+                adapter_registry=adapter_registry,
             )
+            if settings.project_lead.enabled
+            else None
+        )
+
+        async def recover_cli_resources() -> None:
+            await turn_reconciler.reconcile_startup()
+            if proxy_manager is not None:
+                await ProxyStartupReconciler(
+                    factory, proxy_manager, owner=owner
+                ).reconcile_startup()
+
         await _run_loop(
-            ExecutorChain(worktree_worker, provider_worker, review_worker),
+            ExecutorChain(
+                worktree_worker, provider_worker, review_worker, lead_worker, recover_cli_resources
+            ),
             settings.workflow.poll_interval_seconds,
             session_factory=factory,
             registries=runtime.registries,

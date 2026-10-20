@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import io
+import json
 import os
 import stat
 import tarfile
@@ -57,7 +58,7 @@ class RootlessDockerRuntime:
     async def run(
         self, envelope: ProcessEnvelope, cancellation: CancellationContext
     ) -> CodexProcessResult:
-        name = f"vuzol-{str(envelope.step_id)[:12]}-{envelope.lease_generation}"
+        name = envelope.container_name
         argv = docker_run_argv(self._socket, name, envelope)
         started = time.monotonic()
         process = await asyncio.create_subprocess_exec(
@@ -214,6 +215,35 @@ class RootlessDockerRuntime:
         except SandboxError:
             await self._docker("kill", container_id)
 
+    async def cleanup(self, envelope: ProcessEnvelope) -> None:
+        """Confirm exact owned resource removal, including after an interrupted launch."""
+        name = envelope.container_name
+        # Name-only inspection distinguishes absence from a foreign resource
+        # excluded by the ownership-filtered legacy lookup.
+        names = await self._docker(
+            "ps", "--all", "--filter", f"name=^/{name}$", "--format", "{{.Names}}"
+        )
+        if not names.strip():
+            return
+        if names.splitlines() != [name]:
+            raise SandboxError("sandbox cleanup name is ambiguous")
+        try:
+            data = json.loads(await self._docker("inspect", name, "--format", "{{json .}}"))
+            if (
+                data.get("Name") != f"/{name}"
+                or data["Config"]["Labels"] != envelope.ownership_labels
+            ):
+                raise SandboxError("sandbox cleanup refused foreign ownership")
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            raise SandboxError("sandbox cleanup ownership is ambiguous") from error
+        await self._stop_owned_container(name, envelope)
+        await self._remove_owned_container(name, envelope)
+        remaining = await self._docker(
+            "ps", "--all", "--filter", f"name=^/{name}$", "--format", "{{.Names}}"
+        )
+        if remaining.strip():
+            raise SandboxError("sandbox remains after cleanup")
+
     async def _remove_owned_container(self, name: str, envelope: ProcessEnvelope) -> None:
         container_id = await self._owned_container_id(name, envelope)
         if container_id is None:
@@ -223,12 +253,7 @@ class RootlessDockerRuntime:
     async def _owned_container_id(self, name: str, envelope: ProcessEnvelope) -> str | None:
         filters = (
             f"name=^/{name}$",
-            "label=vuzol.managed=true",
-            "label=vuzol.resource=sandbox-container",
-            f"label=vuzol.task_id={envelope.task_id}",
-            f"label=vuzol.run_id={envelope.run_id}",
-            f"label=vuzol.step_id={envelope.step_id}",
-            f"label=vuzol.lease_generation={envelope.lease_generation}",
+            *(f"label={key}={value}" for key, value in envelope.ownership_labels.items()),
         )
         arguments = [
             "docker",
@@ -259,6 +284,19 @@ class RootlessDockerRuntime:
             for value in matches
         ):
             raise SandboxError("managed sandbox container identity is malformed")
+        if envelope.turn_binding is not None:
+            try:
+                data = json.loads(
+                    await self._docker("inspect", matches[0], "--format", "{{json .}}")
+                )
+                if (
+                    data["Id"] != matches[0]
+                    or data["Name"] != f"/{name}"
+                    or data["Config"]["Labels"] != envelope.ownership_labels
+                ):
+                    raise SandboxError("turn sandbox ownership is foreign")
+            except (ValueError, KeyError, TypeError) as error:
+                raise SandboxError("turn sandbox ownership is ambiguous") from error
         return matches[0]
 
     async def _docker(self, *args: str) -> str:
@@ -447,19 +485,11 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         f"/tmp:rw,nosuid,nodev,noexec,size={spec.tmpfs_bytes}",  # noqa: S108
         "--workdir",
         str(spec.working_directory),
-        "--label",
-        "vuzol.managed=true",
-        "--label",
-        "vuzol.resource=sandbox-container",
-        "--label",
-        f"vuzol.task_id={envelope.task_id}",
-        "--label",
-        f"vuzol.run_id={envelope.run_id}",
-        "--label",
-        f"vuzol.step_id={envelope.step_id}",
-        "--label",
-        f"vuzol.lease_generation={envelope.lease_generation}",
     ]
+    for key, value in envelope.ownership_labels.items():
+        arguments.extend(("--label", f"{key}={value}"))
+    if spec.empty_workspace:
+        arguments.extend(("--tmpfs", "/workspace:ro,nosuid,nodev,noexec,size=1048576,mode=0555"))
     for mount in spec.mounts:
         try:
             source = mount.source.resolve(strict=True)

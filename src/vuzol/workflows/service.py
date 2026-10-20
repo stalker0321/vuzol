@@ -9,9 +9,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.project_environment import current_environment, environment_hash
+from vuzol.projects.model_matrix import LEGACY_EXECUTOR_KEY, MATRIX_KEY, assignment_snapshot
 from vuzol.storage.errors import EntityNotFound, LeaseLost
 from vuzol.storage.models import (
     Event,
+    ProjectExecutorPreference,
     Run,
     Step,
     Task,
@@ -71,13 +73,27 @@ async def materialize_run(
     if task.status is not TaskStatus.INTERPRETED:
         raise ValueError(f"task is not ready for a run: {task.status.value}")
 
+    preference = (
+        await session.get(ProjectExecutorPreference, task.project_id) if task.project_id else None
+    )
+    assignments = assignment_snapshot(preference.model_assignments or {}) if preference else {}
+    selected_route: dict[str, Any] = {MATRIX_KEY: assignments}
+    if preference is not None and preference.mode == "pin" and "executor" not in assignments:
+        selected_route[LEGACY_EXECUTOR_KEY] = {
+            "project_id": preference.project_id,
+            "mode": preference.mode,
+            "worker_key": preference.worker_key,
+            "profile_id": preference.profile_id,
+            "reasoning_effort": preference.reasoning_effort,
+            "revision": preference.revision,
+        }
     run = Run(
         task_id=task.id,
         source_interpretation_id=workflow.interpretation_id,
         workflow_type=workflow.workflow_type,
         workflow_version=workflow.version,
         status=RunStatus.CREATED,
-        selected_route={},
+        selected_route=selected_route,
         budget_mode=budget_mode,
         configuration_revision=configuration_revision,
         policy_revision=policy_revision,

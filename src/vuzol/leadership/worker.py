@@ -20,6 +20,7 @@ from vuzol.leadership.continuation import continue_if_idle
 from vuzol.leadership.evidence import assess_completion
 from vuzol.leadership.feedback import result_context
 from vuzol.leadership.fencing import TurnClaim, claim_current
+from vuzol.leadership.invocation_context import TurnInvocationContext, current_turn
 from vuzol.leadership.model import (
     LeadDecision,
     LeadModel,
@@ -37,7 +38,7 @@ from vuzol.leadership.persistence import (
 )
 from vuzol.leadership.rules import delegation_is_expired
 from vuzol.leadership.service import LeadershipCommandService, request_owner_recovery
-from vuzol.leadership.verification import GoalVerifier
+from vuzol.leadership.verification import GoalVerification
 from vuzol.leadership.wakeups import (
     enabled_wakeup_key,
     enqueue_goal_wakeup,
@@ -80,7 +81,7 @@ class ProjectLeadWorker:
         repeat_limit: int = 2,
         branch_prefix: str = "vuzol-managed/",
         default_branches: Mapping[str, str] | None = None,
-        verifier: GoalVerifier | None = None,
+        verifier: GoalVerification | None = None,
     ) -> None:
         self._factory = session_factory
         self._owner = owner
@@ -132,10 +133,7 @@ class ProjectLeadWorker:
         goal_id, wakeup_id = claim.goal_id, claim.wakeup_id
         if status == "claimed":
             try:
-                if self._verifier is not None:
-                    await self._verifier.verify(goal_id, claim=claim)
-                snapshot = await self._snapshot(goal_id, wakeup_id=wakeup_id)
-                decision = await self._model.decide(snapshot)
+                decision = await self._infer(claim)
             except LeadModelUnavailable as error:
                 reason = str(error)
                 if reason not in _MODEL_BLOCKERS:
@@ -163,6 +161,30 @@ class ProjectLeadWorker:
             goal_id=goal_id, wakeup_id=wakeup_id, decision=LeadDecision(), claim=claim
         )
         await self._ack(goal_id, wakeup_id, token, claim=claim)
+
+    async def _infer(self, claim: TurnClaim) -> LeadDecision:
+        async with self._factory() as session:
+            goal = await session.get(ManagedGoal, claim.goal_id)
+            turn = await _turn(session, claim.goal_id, claim.wakeup_id)
+            if goal is None:
+                raise LeadModelUnavailable("goal_missing")
+            context = TurnInvocationContext(
+                claim=claim,
+                turn_id=turn.id,
+                project_id=goal.project_id,
+                version=turn.goal_version,
+                fence_epoch=turn.fence_epoch,
+                scope_revision=turn.scope_revision,
+                enabled=self._enabled,
+            )
+        token = current_turn.set(context)
+        try:
+            if self._verifier is not None:
+                await self._verifier.verify(claim.goal_id, claim=claim)
+            snapshot = await self._snapshot(claim.goal_id, wakeup_id=claim.wakeup_id)
+            return await self._model.decide(snapshot)
+        finally:
+            current_turn.reset(token)
 
     async def _prepare_turn(self, token: OutboxLeaseToken) -> tuple[TurnClaim, str] | None:
         async with UnitOfWork(self._factory) as uow:
@@ -196,6 +218,18 @@ class ProjectLeadWorker:
                 ), status
 
             if turn is not None and turn.status in {"claimed", "responded"}:
+                if (
+                    turn.status == "claimed"
+                    and turn.model_assignments is not None
+                    and (
+                        turn.goal_version != goal.version
+                        or turn.scope_revision != goal.scope_revision
+                        or turn.fence_epoch != goal.fence_epoch
+                    )
+                ):
+                    turn.status = "lost"
+                    await self._complete(uow.session, token)
+                    return None
                 if _lease_current(goal, turn, self._owner, now):
                     goal.lease_until = now + timedelta(seconds=self._lease_seconds)
                     return prepared(turn.status)

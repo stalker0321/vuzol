@@ -135,7 +135,7 @@ async def _proxy(
     response_headers = {
         key: value
         for key, value in upstream.headers.items()
-        if key.lower() not in _HOP_BY_HOP | {"content-length", "content-encoding"}
+        if key.lower() not in _HOP_BY_HOP | {"content-length"}
     }
     return StreamingResponse(
         upstream.aiter_raw(),

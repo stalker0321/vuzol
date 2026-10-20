@@ -62,13 +62,28 @@ def create_app(
         async def secret_submit(token: str, incoming: Request) -> HTMLResponse:
             if _TOKEN.fullmatch(token) is None:
                 return _page("Ссылка недействительна", status=404)
-            raw = await incoming.body()
-            if len(raw) > resolved.secret_ingress.maximum_secret_bytes * 2:
-                return _page("Значение слишком большое", status=413)
-            values = parse_qs(raw.decode("utf-8", "strict"), keep_blank_values=True)
+            # Check while consuming, not after Starlette buffers an unbounded body.
+            # A form byte may be percent-encoded as three ASCII bytes.
+            limit = resolved.secret_ingress.maximum_secret_bytes * 3 + 64
+            raw = bytearray()
+            async for chunk in incoming.stream():
+                if len(raw) + len(chunk) > limit:
+                    return _page("Значение слишком большое", status=413)
+                raw.extend(chunk)
+            try:
+                values = parse_qs(
+                    raw.decode("utf-8", "strict"),
+                    keep_blank_values=True,
+                    max_num_fields=8,
+                    errors="strict",
+                )
+            except (UnicodeError, ValueError):
+                return _page("Некорректное значение", status=400)
             submitted = values.get("value", [])
             if len(submitted) != 1:
                 return _page("Значение не передано", status=400)
+            if len(submitted[0].encode()) > resolved.secret_ingress.maximum_secret_bytes:
+                return _page("Значение слишком большое", status=413)
             try:
                 async with session_factory.begin() as session:
                     name = await consume_request(

@@ -31,6 +31,7 @@ from vuzol.storage.types import (
     TaskStatus,
     WorktreeDeliveryState,
 )
+from vuzol.workflows.locking import lock_task_run_step
 from vuzol.workflows.result_approval import verified_envelope
 from vuzol.workflows.retry_policy import (
     LEASE_EXPIRED_ATTEMPTS_EXHAUSTED,
@@ -253,6 +254,11 @@ async def decide_result(
     decision: str,
     deciding_user_id: int,
 ) -> None:
+    step_id = await session.scalar(select(Approval.step_id).where(Approval.id == approval_id))
+    locked = await lock_task_run_step(session, step_id) if step_id is not None else None
+    if locked is None:
+        raise ValueError("result approval workflow is missing")
+    task, run, step = locked
     approval = await session.scalar(
         select(Approval).where(Approval.id == approval_id).with_for_update()
     )
@@ -260,12 +266,9 @@ async def decide_result(
         raise ValueError("result approval is missing or already decided")
     if approval.expires_at <= datetime.now(UTC):
         raise ValueError("result approval has expired")
-    step = await session.scalar(select(Step).where(Step.id == approval.step_id).with_for_update())
-    if step is None or step.status is not StepStatus.WAITING_APPROVAL:
+    if step.status is not StepStatus.WAITING_APPROVAL:
         raise ValueError("result approval step is not waiting for a decision")
     verified_envelope(step, approval)
-    run = await session.scalar(select(Run).where(Run.id == step.run_id).with_for_update())
-    assert run is not None
     # D2 L4 correction barrier: the envelope pins the revisions it was
     # requested under; drift between request and decision fails closed
     # (inv.35 — any material change invalidates the approval). Legacy
@@ -276,8 +279,8 @@ async def decide_result(
             expected = envelope.get(field)
             if expected is not None and expected != getattr(run, field):
                 raise ValueError(f"approval envelope {field} drifted since request")
-    task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
-    assert task is not None
+    if deciding_user_id != task.user_id:
+        raise ValueError("result approval requires the task owner")
     approval.deciding_user_id = deciding_user_id
     approval.decided_at = func.now()
     actor_id = str(deciding_user_id)
@@ -285,6 +288,7 @@ async def decide_result(
         "install_capabilities",
         "install_dependencies",
     }
+    publication_action = approval.requested_action == "publish_static"
     installation_event = (
         "capability_installation"
         if approval.requested_action == "install_capabilities"
@@ -292,7 +296,7 @@ async def decide_result(
     )
     if decision == "approve":
         approval.status = ApprovalStatus.APPROVED
-        if installation_action and step.attempt_count > 0:
+        if (installation_action or publication_action) and step.attempt_count > 0:
             # Inspecting needs and asking for consent performed no installation.
             # The approved install must remain claimable even with max_attempts=1.
             step.attempt_count -= 1
@@ -304,8 +308,8 @@ async def decide_result(
         )
         event_type = f"{installation_event}.approved" if installation_action else "result.approved"
     elif decision == "redo":
-        if installation_action:
-            raise ValueError("installation approval does not support redo")
+        if installation_action or publication_action:
+            raise ValueError("effect approval does not support redo")
         # D1 L6: REDO opens a new work attempt of the same logical item and
         # links the superseded candidate/review — it never erases them.
         prior_candidate_hash: str | None = None

@@ -71,7 +71,8 @@ def _handler(
         factory, cast(RuntimeConfiguration, runtime), probe=probe, preview=preview
     )
     # Filesystem adapter tests; the real DB admission boundary has separate tests.
-    handler._authority = MagicMock(side_effect=lambda *_: nullcontext())  # type: ignore[method-assign]
+    handler._authority = MagicMock(side_effect=lambda *_, **__: nullcontext())  # type: ignore[method-assign]
+    handler._ensure_approval = AsyncMock(return_value=True)  # type: ignore[method-assign]
     return handler, request
 
 
@@ -180,7 +181,8 @@ async def test_handler_does_not_publish_intermediate_package_item(tmp_path: Path
     session.scalar.side_effect = [
         worktree,
         build_step,
-        SimpleNamespace(ordinal=2, plan_revision_id=uuid4()),
+        SimpleNamespace(ordinal=2, plan_revision_id=uuid4(), work_package_id=uuid4()),
+        None,
         4,
     ]
 

@@ -922,6 +922,15 @@ def _approval_fact_lines(
 ) -> list[str]:
     """One canonical fact block shared by project and global approval cards."""
 
+    if envelope.get("schema_version") == "production-publication-approval.v1":
+        return [
+            "<b>Публикация в production</b>",
+            f"• Адрес: {telegram_html(envelope.get('public_url', ''))}",
+            f"• Commit: <code>{telegram_html(envelope.get('source_commit', ''))}</code>",
+            f"• SHA-256: <code>{telegram_html(envelope.get('artifact_hash', ''))}</code>",
+            "Разрешение на integration не разрешает публикацию.",
+            "Опубликовать этот артефакт в production?",
+        ]
     if envelope.get("schema_version") == "capability-provisioning-approval.v1":
         return _capability_approval_fact_lines(envelope, human_summary)
     if envelope.get("schema_version") == "dependency-provisioning-approval.v1":
@@ -1078,7 +1087,8 @@ def _dependency_approval_fact_lines(
 def _approval_buttons(approval: Approval) -> tuple[str, ...]:
     return (
         ("approve", "reject")
-        if approval.requested_action in {"install_capabilities", "install_dependencies"}
+        if approval.requested_action
+        in {"install_capabilities", "install_dependencies", "publish_static"}
         else ("approve", "redo", "reject")
     )
 

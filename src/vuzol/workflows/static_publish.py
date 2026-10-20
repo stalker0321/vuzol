@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
+from typing import Any
 
 import httpx
 from sqlalchemy import func, select
@@ -32,7 +33,11 @@ from vuzol.storage.models import (
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
-from vuzol.workflows.publication import PublicationDenied, publication_authority
+from vuzol.workflows.publication import (
+    PublicationDenied,
+    ensure_production_approval,
+    publication_authority,
+)
 
 
 class StaticPublishHandler:
@@ -72,7 +77,13 @@ class StaticPublishHandler:
                 select(MaterializationLink).where(MaterializationLink.task_id == request.task_id)
             )
             plan_size = None
+            managed_goal_id = None
             if materialization is not None:
+                managed_goal_id = await session.scalar(
+                    select(WorkPackage.managed_goal_id).where(
+                        WorkPackage.id == materialization.work_package_id
+                    )
+                )
                 plan_size = await session.scalar(
                     select(func.count(PlanRevisionItem.id)).where(
                         PlanRevisionItem.plan_revision_id == materialization.plan_revision_id
@@ -84,6 +95,10 @@ class StaticPublishHandler:
         deployment = project.static_deployment
         if deployment is None or not deployment.enabled:
             return StepOutcome.succeeded({"status": "skipped", "reason": "not_configured"})
+        if not self._preview and managed_goal_id is not None:
+            return StepOutcome.succeeded(
+                {"status": "skipped", "reason": "managed_integration_only"}
+            )
         if (
             not self._preview
             and materialization is not None
@@ -145,7 +160,25 @@ class StaticPublishHandler:
             entrypoint=deployment.entrypoint,
             keep_releases=deployment.keep_releases,
         )
+        production_target = (
+            None
+            if self._preview
+            else {
+                "source_commit": build["source_commit"],
+                "artifact_hash": build["artifact_hash"],
+                "destination": str(site.destination.resolve()),
+                "public_url": public_url,
+            }
+        )
         try:
+            if production_target is not None and not await self._ensure_approval(
+                request, cancellation, production_target
+            ):
+                return StepOutcome(
+                    kind=OutcomeKind.NEEDS_APPROVAL,
+                    result={"public_url": public_url},
+                    category="production_approval_required",
+                )
             prepared = await asyncio.to_thread(
                 prepare,
                 site,
@@ -155,7 +188,7 @@ class StaticPublishHandler:
             )
             if cancellation.requested:
                 raise PublicationDenied("cancelled")
-            async with self._authority(request, cancellation):
+            async with self._authority(request, cancellation, production_target=production_target):
                 # No await between the final grant check and the atomic swap.
                 result = activate(prepared)
         except PublicationDenied as error:
@@ -217,14 +250,27 @@ class StaticPublishHandler:
         )
 
     def _authority(
-        self, request: StepExecutionRequest, cancellation: CancellationContext
+        self,
+        request: StepExecutionRequest,
+        cancellation: CancellationContext,
+        *,
+        production_target: dict[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[None]:
         return publication_authority(
             self._factory,
             request,
             cancellation,
             feature_enabled=self._runtime.settings.project_lead.enabled,
+            production_target=production_target,
         )
+
+    async def _ensure_approval(
+        self,
+        request: StepExecutionRequest,
+        cancellation: CancellationContext,
+        target: dict[str, Any],
+    ) -> bool:
+        return await ensure_production_approval(self._factory, request, cancellation, target)
 
     def _rollback_changed(
         self, site: StaticSite, result: PublishResult, *, site_root: Path

@@ -143,6 +143,7 @@ def parse_lead_command(text: str | None) -> tuple[str, str] | None:
         "/lead_pause": "pause",
         "/lead_resume": "resume",
         "/lead_cancel": "cancel",
+        "/lead_revoke": "revoke",
         "/lead_status": "status",
     }
     kind = kinds.get(command)

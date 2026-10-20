@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
-import re
 import uuid
+import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +19,8 @@ from vuzol.leadership.rules import delegation_is_expired
 from vuzol.storage.models import MaterializationLink, Step, WorkPackage
 from vuzol.storage.types import WorkPackageStatus
 
-GOAL_HEAD_CHECKER = "goal_head_v1"
-_WORD = re.compile(r"[A-Za-z][A-Za-z0-9_-]{4,}")
+GOAL_HEAD_CHECKER = "goal_review_v2"
+PENDING_CHECKER = "goal_snapshot_v2"
 _INACTIVE_GOAL = frozenset({"paused", "cancelled", "completed"})
 
 
@@ -30,62 +31,17 @@ class CompletionAssessment:
     missing: tuple[str, ...]
 
 
-def content_words(text: str) -> tuple[str, ...]:
-    """Distinctive words of a criterion description. Short glue words are ignored."""
+async def observe_commit(path: str, commit: str) -> dict[str, str]:
+    """Read a bounded Git object, never dirty/untracked files or symlink targets."""
+    from vuzol.execution.git import LocalGit
 
-    seen: dict[str, None] = {}
-    for match in _WORD.finditer(text):
-        seen.setdefault(match.group(0).lower(), None)
-    return tuple(seen)
-
-
-def judge_description(
-    description: str, files: Mapping[str, str]
-) -> tuple[bool, list[dict[str, object]]]:
-    """A description is met only when every distinctive word is cited by this tree.
-
-    Plan criterion ids are not an input. A description with no distinctive word
-    fails closed. Missing files fail closed.
-    """
-
-    words = content_words(description)
-    if not words:
-        return False, []
-    wanted = set(words)
-    covered: set[str] = set()
-    citations: list[dict[str, object]] = []
-    for path, body in files.items():
-        haystack = f"{path}\n{body}".lower()
-        hits = [word for word in words if word in haystack]
-        if not hits:
-            continue
-        citations.append({"path": path, "words": hits})
-        covered.update(hits)
-    return covered == wanted, citations
-
-
-def observe_worktree(path: str) -> dict[str, str]:
-    """Text files at the applied worktree. Git metadata is not an artifact."""
-
-    root = Path(path)
-    if not root.is_dir():
-        return {}
-    files: dict[str, str] = {}
-    for item in sorted(root.rglob("*")):
-        if len(files) >= 200:
-            break
-        if not item.is_file():
-            continue
-        relative = item.relative_to(root).as_posix()
-        if relative == ".git" or relative.startswith(".git/"):
-            continue
-        if item.stat().st_size > 200_000:
-            continue
-        try:
-            files[relative] = item.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-    return files
+    archive = await LocalGit().source_archive(Path(path), commit, max_bytes=120_000)
+    with zipfile.ZipFile(io.BytesIO(archive)) as source:
+        return {
+            item.filename: source.read(item).decode("utf-8")
+            for item in source.infolist()
+            if not item.is_dir()
+        }
 
 
 def _digest(files: Mapping[str, str]) -> str:
@@ -98,16 +54,24 @@ async def record_head_evidence(
     *,
     package: WorkPackage,
     worktree_path: str,
+    repository_path: str,
     result_commit: str,
 ) -> None:
-    """Bind a checker verdict to the goal revision and this integration head."""
+    """Capture evidence only. Independent review, outside this transaction, decides."""
 
     if package.managed_goal_id is None or not result_commit:
         return
     goal = await session.get(ManagedGoal, package.managed_goal_id)
     if goal is None or package.integration_branch != goal.integration_branch:
         return
-    files = observe_worktree(worktree_path)
+    from vuzol.execution.git import GitError
+
+    try:
+        files = await observe_commit(worktree_path, result_commit)
+        capture_error = None
+    except (GitError, UnicodeDecodeError, OSError, zipfile.BadZipFile):
+        files = {}
+        capture_error = "goal_snapshot_unavailable"
     digest = _digest(files)
     for item in goal.criteria:
         if not isinstance(item, dict) or not item.get("id"):
@@ -124,7 +88,6 @@ async def record_head_evidence(
         )
         if existing is not None:
             continue
-        satisfied, citations = judge_description(description, files)
         session.add(
             ManagedGoalEvidence(
                 goal_id=goal.id,
@@ -134,42 +97,72 @@ async def record_head_evidence(
                 result_commit=result_commit,
                 artifact_digest=digest,
                 observation={
-                    "checker": GOAL_HEAD_CHECKER,
+                    "checker": PENDING_CHECKER,
                     "request": goal.original_request,
                     "scope": goal.scope_text,
                     "description": description,
-                    "citations": citations,
-                    "paths": sorted(files),
+                    "files": files,
+                    "capture_error": capture_error,
+                    "repository_path": repository_path,
                 },
-                satisfied=satisfied,
-                checker=GOAL_HEAD_CHECKER,
+                satisfied=False,
+                checker=PENDING_CHECKER,
             )
         )
     await session.flush()
 
 
-async def _current_head(session: AsyncSession, goal: ManagedGoal) -> str | None:
+async def _current_head(
+    session: AsyncSession, goal: ManagedGoal, *, check_live_head: bool = False
+) -> str | None:
     """The integration head of the newest completed package, not the union of old ones."""
 
-    package = await session.scalar(
-        select(WorkPackage)
-        .where(
-            WorkPackage.managed_goal_id == goal.id,
-            WorkPackage.status == WorkPackageStatus.COMPLETED,
-            WorkPackage.integration_branch == goal.integration_branch,
-            WorkPackage.integration_head_commit.is_not(None),
-        )
-        .order_by(WorkPackage.updated_at.desc(), WorkPackage.created_at.desc())
-        .limit(1)
+    package = (
+        await session.get(WorkPackage, goal.current_package_id)
+        if goal.current_package_id is not None
+        else None
     )
-    if package is None or not package.integration_head_commit:
+    if (
+        package is None
+        or package.managed_goal_id != goal.id
+        or package.status is not WorkPackageStatus.COMPLETED
+        or package.integration_branch != goal.integration_branch
+        or not package.integration_head_commit
+        or await package_has_unknown_effects(session, package.id)
+    ):
         return None
     if package.integration_head_commit == package.integration_base_commit:
         return None
+    if check_live_head:
+        from vuzol.execution.git import GitError, LocalGit
+
+        evidence = await session.scalar(
+            select(ManagedGoalEvidence)
+            .where(
+                ManagedGoalEvidence.goal_id == goal.id,
+                ManagedGoalEvidence.scope_revision == goal.scope_revision,
+                ManagedGoalEvidence.result_commit == package.integration_head_commit,
+                ManagedGoalEvidence.checker.in_((PENDING_CHECKER, GOAL_HEAD_CHECKER)),
+            )
+            .limit(1)
+        )
+        # The applier records this server-configured source repository. Task
+        # worktrees are isolated repositories and do not contain the target ref.
+        repository_path = evidence.observation.get("repository_path") if evidence else None
+        if not isinstance(repository_path, str) or not Path(repository_path).is_absolute():
+            return None
+        try:
+            live = await LocalGit().read_ref(Path(repository_path), goal.integration_branch)
+        except (GitError, OSError):
+            return None
+        if live != package.integration_head_commit:
+            return None
     return package.integration_head_commit
 
 
-async def assess_completion(session: AsyncSession, goal: ManagedGoal) -> CompletionAssessment:
+async def assess_completion(
+    session: AsyncSession, goal: ManagedGoal, *, check_live_head: bool = False
+) -> CompletionAssessment:
     """Cover a criterion only with a stored verdict for the current head.
 
     The plan's completion_criteria strings are not evidence. An owner waiver
@@ -181,7 +174,7 @@ async def assess_completion(session: AsyncSession, goal: ManagedGoal) -> Complet
         for item in goal.criteria
         if isinstance(item, dict) and item.get("id")
     ]
-    head = await _current_head(session, goal)
+    head = await _current_head(session, goal, check_live_head=check_live_head)
     covered: list[str] = []
     if head is not None:
         rows = (
@@ -233,7 +226,9 @@ async def package_has_unknown_effects(session: AsyncSession, package_id: uuid.UU
     return found is not None
 
 
-async def new_effect_blocker(session: AsyncSession, task_id: uuid.UUID) -> str | None:
+async def new_effect_blocker(
+    session: AsyncSession, task_id: uuid.UUID, *, feature_enabled: bool | None = None
+) -> str | None:
     """Refuse a new external effect when the managed grant is no longer live."""
 
     from datetime import UTC, datetime
@@ -246,6 +241,8 @@ async def new_effect_blocker(session: AsyncSession, task_id: uuid.UUID) -> str |
     package = await session.get(WorkPackage, link.work_package_id)
     if package is None or package.managed_goal_id is None:
         return None
+    if feature_enabled is False:
+        return "project_lead_disabled"
     goal = await session.get(ManagedGoal, package.managed_goal_id, with_for_update=True)
     if goal is None:
         return "managed_goal_missing"
@@ -256,4 +253,13 @@ async def new_effect_blocker(session: AsyncSession, task_id: uuid.UUID) -> str |
         return "delegation_revoked"
     if delegation_is_expired(delegation.expires_at, now=datetime.now(UTC)):
         return "delegation_expired"
+    from vuzol.leadership.persistence import POLICY_REVISION
+
+    if (
+        delegation.policy_revision != POLICY_REVISION
+        or delegation.project_id != goal.project_id
+        or delegation.integration_branch != goal.integration_branch
+        or "apply_integration" not in delegation.allowed_actions
+    ):
+        return "delegation_changed"
     return None

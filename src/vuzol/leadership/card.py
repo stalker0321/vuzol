@@ -41,6 +41,7 @@ def render_goal_card(view: Mapping[str, object]) -> str:
 
     rows = [
         "Руководитель",
+        line("Цель", "request"),
         line("Статус", "lifecycle"),
         line("Блокер", "waiting_reason"),
         line("Пакет", "package_line"),
@@ -53,10 +54,13 @@ def render_goal_card(view: Mapping[str, object]) -> str:
     answer = view.get("owner_answer")
     if isinstance(answer, str) and answer.strip():
         rows.append(f"Ответ: {answer.strip()}")
-    return "\n".join(rows)
+    return "\n".join(rows)[:3500]
 
 
-def render_question(question: str, version: int) -> str:
+def render_question(question: str, version: int, *, goal_id: str = "") -> str:
     """Owner-facing question bound to the goal version that asked it."""
 
-    return f"Руководитель\nВопрос: {question.strip()}\nВерсия: {version}\nДальше: ответ владельца"
+    return (
+        f"Руководитель\nВопрос: {question.strip()[:2500]}\nВерсия: {version}\n"
+        f"Дальше: ответ владельца\n/lead_answer {goal_id} {version} <ответ>"
+    )

@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.leadership.persistence import LIVE_GOAL_LIFECYCLES, ManagedGoal
 from vuzol.storage.models import WorkPackage
+
+
+async def lock_project_admission(session: AsyncSession, project_id: str) -> None:
+    """Serialize legacy/managed admission without adding another scheduler."""
+    await session.execute(
+        select(
+            func.pg_advisory_xact_lock(func.hashtextextended(f"project-admission:{project_id}", 0))
+        )
+    )
 
 
 async def legacy_package_is_fenced(session: AsyncSession, package: WorkPackage) -> bool:
@@ -26,4 +35,4 @@ async def legacy_package_is_fenced(session: AsyncSession, package: WorkPackage) 
     )
     if goal is None:
         return False
-    return goal.current_package_id != package.id
+    return goal.current_package_id != package.id or goal.lifecycle == "paused"

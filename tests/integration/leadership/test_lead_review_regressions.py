@@ -165,32 +165,19 @@ async def test_resume_wakes_parked_goal(postgres_dsn: str) -> None:
 async def test_goal_description_requires_actual_evidence(
     postgres_dsn: str, tmp_path: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataclasses import replace
-
     from tests.integration.leadership.test_managed_goal_flow import (
-        test_managed_goal_reviews_repairs_and_resumes_after_restart as flow,
+        run_managed_goal_flow,
     )
 
-    from vuzol.leadership import telegram_commands
-
-    original = telegram_commands._command
-
-    def changed_goal(**kwargs: object) -> object:
-        command = original(**kwargs)  # type: ignore[arg-type]
-        if command is not None and command.name == "enable_managed_goal":
-            payload = dict(command.payload)
-            payload.update(
-                request="Implement working OAuth login",
-                scope="OAuth login",
-                criteria=[{"id": "requested-outcome", "description": "Working OAuth login"}],
-            )
-            command = replace(command, payload=payload)
-        return command
-
-    monkeypatch.setattr(telegram_commands, "_command", changed_goal)
     # Fake lead mistakenly plans marker files, not OAuth. Existing execution,
     # review, apply and completion all run unchanged; no status is forged here.
-    await flow(postgres_dsn, tmp_path, monkeypatch)  # type: ignore[arg-type]
+    await run_managed_goal_flow(
+        postgres_dsn,
+        tmp_path,
+        monkeypatch,  # type: ignore[arg-type]
+        request="Implement working OAuth login",
+        expected_completed=False,
+    )
     async with _factory(postgres_dsn) as factory, factory() as session:
         goal = await session.scalar(select(ManagedGoal))
         assert goal.lifecycle != "completed", "OAuth goal completed by writing marker files"

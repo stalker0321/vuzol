@@ -348,3 +348,142 @@ stops at the stage-2 review boundary; this report does not approve rollout.
 | Blocked/failed wakeup and waiting exits | `test_blocked_package_wakes_the_lead`, `test_failed_package_wakes_the_lead`, `test_resume_wakes_parked_goal`, `test_owner_question_and_answer_bind_the_goal_revision` |
 | Telegram content and feature-off legacy | `test_feature_off_still_pauses_and_shows_the_goal_card`, `test_owner_question_and_answer_bind_the_goal_revision`, positive flow final result assertion, `test_flag_off_leaves_lead_text_on_the_legacy_path` |
 | Actual CLI/provider boundary | `test_cli_composes_actual_http_provider_and_settles_its_reservation`, budget refusal and unknown-usage tests in the same file |
+
+## General-boundary follow-up, 2026-10-20
+
+This follow-up starts from clean `9de02867402f8d95266ea1cd56fbe85e1f3ebd1e`
+on `agent/project-lead-v1`. It addresses the two later findings about production
+authority and poison Telegram updates; it is not approval for rollout.
+
+### Changes and commits
+
+- `c10b78c`: commit raw Telegram admission separately from bounded business
+  processing, using the existing inbox/outbox and fenced leases. Offset
+  acknowledgement cannot precede the raw transaction. Authorized raw JSON stays
+  escaped so PostgreSQL-incompatible text cannot poison admission itself.
+  Unauthorized user/chat identities never persist a body or replayable job.
+  Processing gets three attempts, a cooperative 30-second timeout and a
+  60-second lease; exhausted jobs have durable failure receipts and can use the
+  existing operator replay CLI. That CLI's nested-transaction bug is fixed.
+- `67d5611`: an integration grant cannot enter the production effect boundary.
+  Managed packages skip automatic production and continue on integration/preview.
+  Ordinary publication requires a separate immutable, artifact/commit/target-
+  bound approval from the task owner, checked again immediately before activation.
+  Telegram renders the exact production URL, commit and full artifact hash.
+  Exact-step replay is permitted after consumption; another artifact is not.
+- `a3d9408`: keep the existing allowlisted-operator contract for non-production
+  approvals. The initial broad run found that applying the new owner-only rule
+  to legacy REDO was an unintended change. The rule is now production-specific;
+  the old REDO assertion and the new wrong-owner production assertion both pass.
+- `3e45703`: recheck the lease clock/cancellation after the awaited approval
+  lookup, immediately before activation; a lock wait cannot outlive authority.
+
+See `TELEGRAM.md` for quarantine/replay and data handling, and
+`PUBLICATION_TOPOLOGY.md` for the separate publication authority contract.
+
+### Isolation and exact verification commands
+
+Only the owned container `vuzol-boundary-fix-20261020` was created, using the
+already present `postgres:16.13-bookworm` image (`--pull=never`), host port
+`127.0.0.1:32772`, user `boundary_test`. Its disposable databases were
+`vuzol_boundary_test` and `vuzol_boundary_delta`. Name/user were checked with
+`SELECT current_database(), current_user`; both were migrated to `f3a8c2d14e70`.
+Concurrent test processes used different databases, never the same TRUNCATE target.
+The existing disposable venv was reused; no production venv, host install,
+live provider, real Telegram mutation, push, deployment or running service changed.
+After all runs completed, that container and its anonymous volume (both test
+databases) were removed. No database backup was retained; committed fixtures
+recreate the test data. The disposable venv remains available for independent review.
+
+```sh
+cd /home/vodkolyan/vuzol-afterword-stabilization
+export UV_PROJECT_ENVIRONMENT=/tmp/vuzol-stage2.jzwfpD/venv
+export PYTHONPATH=src:.
+export PYTHONDONTWRITEBYTECODE=1
+export VUZOL_TEST_DATABASE_DSN='postgresql://boundary_test:boundary-local-only@127.0.0.1:32772/vuzol_boundary_test'
+uv run --frozen pytest --no-cov -q -rs tests/unit
+uv run --frozen pytest --no-cov -q -rs tests/integration -m 'not docker'
+uv run --frozen mypy src/vuzol
+git diff --name-only 9de0286..3e45703 -- '*.py' | xargs uv run --frozen ruff check
+git diff --name-only 9de0286..3e45703 -- '*.py' | xargs uv run --frozen ruff format --check
+git diff --check
+
+export VUZOL_TEST_DATABASE_DSN='postgresql://boundary_test:boundary-local-only@127.0.0.1:32772/vuzol_boundary_test'
+uv run --frozen pytest --no-cov -q -rs \
+  tests/integration/test_d1_identity_pg.py \
+  tests/integration/telegram/test_durable_ingress.py \
+  tests/integration/telegram/test_polling_commit.py \
+  tests/integration/workflows/test_production_consent.py \
+  tests/integration/workflows/test_publication_boundary.py \
+  tests/integration/ops/test_outbox_replay.py
+export VUZOL_TEST_DATABASE_DSN='postgresql://boundary_test:boundary-local-only@127.0.0.1:32772/vuzol_boundary_delta'
+uv run --frozen pytest --no-cov -q -s \
+  tests/integration/leadership/test_managed_goal_flow.py::test_managed_goal_reviews_repairs_and_resumes_after_restart
+```
+
+These are historical disposable DSNs, not a permanent test service. Recreate and
+verify a fresh isolated database before reusing the commands; never substitute a
+production/shared/default DSN. Migration used `VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_BOUNDARY_DSN`
+with `VUZOL_BOUNDARY_DSN` pointing to the corresponding `postgresql+psycopg://`
+URL, then `uv run --frozen alembic upgrade head`.
+
+Observed results:
+
+- Final unit: **2893 passed, 1 skipped, 3 warnings in 53.98s**.
+- Final non-Docker integration on `3e45703`: **867 passed, 1 skipped,
+  15 deselected, 13 warnings in 689.46s**.
+- Final focused boundary/legacy integration: **44 passed in 39.81s**.
+- Final standalone A/B restart trace: **1 passed in 18.75s**.
+- Mypy: **290 source files**, no errors. Scoped Ruff/format: **16 files**, clean.
+- Initial broad integration: **864 passed, 1 failed, 1 skipped, 15 deselected**;
+  the failure was the legacy REDO regression described above, not a passed check.
+
+The unit skip is the explicitly out-of-scope remote execution test. The
+integration planner trace skip remains the existing disabled per-task planner.
+Docker-marked tests, live model/Telegram calls, deployments and the global
+coverage floor (`--no-cov`) are not claimed as passing. The lint result is scoped
+to changed Python files, not a claim that unrelated baseline lint is clean.
+Broad runs also emitted the known Telegram deprecation notices and the existing
+SQLAlchemy unchecked-in-connection cleanup warning at
+`test_terminal_projections_sequence_work_package_observation_once`; this work
+does not claim to fix that unrelated warning.
+
+### Traces and limits
+
+The actual polling test admits updates 101/102 durably and advances offset to
+103 while 101's business handler repeatedly fails. Update 102 is delivered;
+101 is quarantined after three attempts. The separate worker test asserts
+attempt order `[101, 102, 101, 101]`, then exercises real CLI dry-run/apply replay.
+Restart after admission and crash after business commit before ack both retain
+exactly one task; a late worker cannot acknowledge a successor's lease.
+
+The real publisher assembly uses a fake HTTP probe and temporary site root:
+first call → pending production card/no `current` → owner decision → fresh lease
+→ activation/consumed approval → replay with `changed=false`.
+Changed artifact/target, expiry, revoked approval, wrong owner, pause and takeover
+fail closed. Revocation/pause/takeover are also injected after the preliminary
+approval check to prove the final effect fence is enforced. A separate clock
+injection expires the lease during approval lookup and still prevents activation.
+
+Fresh goal trace on the final runtime:
+
+```text
+goal=034cc245-798e-4058-957b-7b2a29dd16f6
+branch=vuzol-managed/vuzol/fc01a6bdb777
+package_a=6e7aef4b-ef4e-4f3a-a13e-0673ef88da03
+head_a=a340c7386ad3ddd3c9ae5869bf6a6c54849d30a7
+restart=separate Python process; fresh composition and DB engine
+package_b=fd99b522-5889-4fb7-a851-3cc0cd7c92a4
+head_b=6dbf378e407821007034bcc8f2d2970bdf11b298
+lifecycle=completed
+main_before_and_after=cecf507eb43b0c88d4ffab9107bcc3a7aa5f83f6
+```
+
+There is no new migration or safety-bypass flag. The no-charge test pilot is the
+fake-transport suite above; manual project-lead enable/disable remains as documented
+earlier in this file, default off. Disabling the lead never grants production.
+Managed-goal promotion remains unsupported rather than implicitly authorized.
+Expired/changed publication envelopes need a new reviewed workflow. Telegram
+timeouts are cooperative; retries do not promise strict per-chat ordering across
+failures. Raw authorized bodies remain private outbox data; this change adds no
+automatic body-retention/erasure policy. Independent stage-2 review is still required.

@@ -1256,6 +1256,7 @@ async def test_d2_apply_head_drift_blocked_not_failed(postgres_dsn: str) -> None
         git.apply_result = AsyncMock(
             side_effect=GitError("target branch changed after the result was produced")
         )
+        git.require_apply_access = AsyncMock()
         from types import SimpleNamespace as _NS
 
         from vuzol.config.models import DeliveryMode
@@ -1884,6 +1885,7 @@ async def test_d2_e2e_acceptance_then_promotion_apply(postgres_dsn: str, tmp_pat
         git = MagicMock()
         git.repository_identity = AsyncMock(return_value=("r" * 64, None))
         git.apply_result = AsyncMock(return_value=True)
+        git.require_apply_access = AsyncMock()
         project = _NS(
             enabled=True,
             default_branch="main",

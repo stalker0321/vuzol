@@ -7,7 +7,7 @@ meaning and required capabilities but cannot select credentials or concrete acco
 
 Provider profiles are configured in the TOML registry. Common fields include:
 
-- `roles`: interpreter, planner, executor, reviewer, summarizer, or transcriber;
+- `roles`: lead, interpreter, planner, executor, reviewer, summarizer, or transcriber;
 - `capabilities` and `supported_task_types`;
 - `cost_class`: cheap, balanced, or strong;
 - `routing_priority`, where lower values are preferred after policy filtering;
@@ -31,6 +31,7 @@ by workflow step type (`src/vuzol/providers/routing.py`):
 
 | Role | Responsibility | Selected by |
 | --- | --- | --- |
+| `lead` | goal → next bounded command batch | project `/model` choice, then `VUZOL_PROJECT_LEAD__PROFILE_ID` |
 | `transcriber` | Telegram voice/audio → raw transcript text | `VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID` |
 | `interpreter` | raw text plus bounded context → TaskDraft JSON | `VUZOL_INTERPRETATION__PROFILE_ID` |
 | `planner` | task → bounded plan JSON consumed by coding steps | `plan` step |
@@ -76,15 +77,14 @@ checked-in files pin production registry facts and must change together with any
 
 ### Account profiles live only in the local overlay
 
-Account-bound CLI profiles — one profile per logged-in codex/grok/kimi/opencode
-account — are local facts and never belong in the tracked registry. The tracked
+Account-bound CLI profiles are local facts and never belong in the tracked registry. The tracked
 `deploy/registries.executor.toml` carries only provider facts without an account
 binding: the planner and reviewer API profiles, prepared API workers, sandboxes,
 projects, and topics. Every account profile moves to the untracked overlay
 selected by `VUZOL_REGISTRY_OVERLAY_FILE`; the production loader appends it to
-the tracked registry before validation. One account maps to exactly one state
-directory and one profile: there is no default account and no cross-account
-fallback.
+the tracked registry before validation. One account maps to one state directory,
+but may expose several model/role profiles through an explicit shared `account_id`.
+There is no implicit default account or cross-account fallback for explicit choices.
 
 The current local overlay is `/var/lib/vuzol/registry/account-profiles.toml`.
 Because it holds host-specific `state_directory` values, it is checked by a
@@ -98,7 +98,8 @@ check by construction.
 
 ### Role-scoped profiles
 
-One account should not carry one limit for every role. A profile may declare
+Role budgets and model ceilings are separate from an account's shared concurrency limit.
+A profile may declare
 `base_profile_id` and inherit every unset field from the referenced profile in the same
 registry file. The base carries the shared account facts (model, credential, routing,
 context limit) and stays disabled; each role profile overrides only what differs:
@@ -120,8 +121,10 @@ output_limit = 6000
 enabled = true
 ```
 
-This mechanism suits deployments that share one provider account across roles. The current
-production registry instead gives every role its own account and credential reference.
+Inheritance alone is not shared-account admission. Set the same explicit `account_id`
+on profiles which use the same real account. Such profiles must agree on transport,
+credential reference, API endpoint, network policy, runtime identity, state directory,
+and concurrency limit. Model, roles, reasoning, and model ceilings may differ.
 
 API profiles may also carry role-scoped reasoning controls:
 
@@ -134,8 +137,10 @@ API profiles may also carry role-scoped reasoning controls:
   API profiles (CLI profiles forward it to the agent CLI instead). Like every reasoning
   control it is advisory; `output_limit` remains the enforced bound.
 
-CLI profiles require a unique `runtime_identity` and absolute `state_directory`. Enabled CLI
-profiles cannot share or nest state directories. The example registry contains two disabled,
+CLI profiles require a unique `runtime_identity` and absolute `state_directory` unless
+they explicitly share the same validated account binding. Nested state directories remain
+forbidden. Profiles without `account_id` retain the original strict isolation. The example
+registry contains two disabled,
 structurally isolated Codex profiles. Vuzol does not copy or inspect their authentication files.
 
 ## Routing order
@@ -150,14 +155,25 @@ quota, context, output, hard-budget, or concurrency policy. Eligible profiles ar
 5. active leases and queue depth;
 6. stable profile ID.
 
-Project-scoped `/model` preferences (see [Telegram](TELEGRAM.md)) may pin the coding/agent CLI
-executor for a project to a worker family. Auto mode leaves ordering unchanged. Pin mode applies
-only to `execute_code` / `execute_agent` (never API/research executor steps). It supplies the
-trusted profile, restricts eligibility and post-failure fallbacks to the same family (Codex stays
-on Codex; Grok may fall across Grok profiles only), and attaches claim-time model/reasoning-effort
-overrides even on same-family fallbacks. A stored pin that cannot resolve to an enabled profile
-blocks the step (`project_pin_unresolved`) instead of degrading to unrestricted auto routing.
-Routing decisions persist bounded pin inputs (worker, trusted profile, restrict set, revision).
+Project-scoped `/model` preferences (see [Telegram](TELEGRAM.md)) now select profiles
+for lead, goal verification, light/strong planning, light/strong review, and coding executor.
+The picker is generated from enabled profiles and their permitted roles, not model-family
+enums. It displays model, profile, account, and API/CLI transport. Owner authorization,
+deduplication, and revision compare-and-set apply to every callback; old buttons cannot
+overwrite a newer selection. "По умолчанию" removes the explicit choice.
+
+Explicit choices never fall back to a different model or account. Unavailable, disabled,
+or revised profiles fail closed with a visible unresolved-choice error. Workflow run creation
+freezes profile/model/reasoning/content revision; retries preserve it. Lead turns freeze both
+lead and goal-reviewer assignments before inference. Changes affect new runs and new turns,
+not already-started work. Changing `/model` does not unpause a goal or resume a waiting goal:
+use its question/owner controls. A default reviewer is also pinned on its first review attempt.
+
+Legacy worker-family preferences remain readable for existing runs. A new executor choice
+or reset clears that legacy preference so it cannot unexpectedly reappear. The executor slot
+still concerns only sandbox coding/agent steps, not API/research executor steps. Other roles
+(interpretation, transcription, synthesis) retain their existing configurable selection paths;
+they are not added to this project picker.
 
 Every routed workflow call stores its decision, alternatives, bounded exclusion reasons, selected
 profile, and policy revision. Routing, hard-budget reservation, profile assignment, and fenced step
@@ -174,6 +190,33 @@ conservative reservation; it is never treated as free. A timeout after sending a
 the conservative charge because the provider may have consumed quota. A reservation is released
 only when no request was sent.
 
+Lead inference additionally records a stable phase ID, frozen input/profile, and normalized
+provider receipt. A received phase can replay after restart without another call. A send
+whose outcome is unknown is not automatically repeated. A late receipt corrects an orphan
+estimate in place, retaining one usage row; partial usage does not invent a known price.
+Authoritative pre-send failure releases the reservation, including an orphan estimate.
+
+### Shared-account admission and recovery
+
+Explicit accounts use PostgreSQL session advisory slot locks plus committed durable tickets,
+acquired before calling any adapter. Use a direct/session-pooled PostgreSQL connection, not
+transaction pooling. Limits cover all roles and profiles sharing the account, including API
+and supervised CLI calls. A disconnect cannot erase a committed ticket and admit a second
+call while the old launcher may still execute. CLI ownership rows carry the matching ticket.
+Legacy isolated CLI profiles use a stable profile-scoped ticket when composed with the runtime
+database, so lead/planner/reviewer/executor calls on that profile also share admission. This
+does not combine different legacy accounts or invent shared credentials.
+
+Normal completion releases a ticket only after confirmed runtime cleanup. Cancellation,
+lost ownership, or unknown cleanup retains it. Startup/periodic reconciliation cleans exact
+stale turn resources and can release tickets whose original launcher demonstrably drained.
+Container absence alone is not proof that a partitioned launcher cannot resume.
+
+Known limitation: a ticket left by an undrained/crashed launcher has no automatic expiry or
+operator recovery command in this change. The account remains blocked rather than risking a
+duplicate call. Do not repair it with ad-hoc SQL. A future recovery workflow must prove every
+possible launcher stopped and exact runtime/proxy cleanup before matching-token release.
+
 ## Health and failure handling
 
 Health observations are immutable and bound to the current configuration revision. Authentication
@@ -189,11 +232,185 @@ worker journal alone.
 
 ## Current execution boundary
 
-The worker can execute safe, model-only OpenAI-compatible steps such as simple answers, planning,
-research synthesis, and summarization. Automatic workflow start remains disabled by default.
+With `execution.enabled=true`, the host executor owns planning, independent review, and lead
+turns for both API and CLI selections. The general worker omits these consumers, preventing
+competing owners. Other API-only workflow roles remain on the worker. With execution disabled,
+API planning/review/lead retain the worker path; selecting a CLI profile then fails visibly.
+Automatic workflow start and project leadership remain disabled by default.
 
-The production executor registry (`deploy/registries.executor.toml`) plus the local account overlay
-currently routes:
+The host therefore needs access to credential references for any API planner/reviewer selected
+there; a credential available only inside the worker container is insufficient. Verify scoped
+secret access before rollout, without printing the secret or making a paid test call.
+The worker and host must agree on `VUZOL_EXECUTION__ENABLED`: old deployments may deliberately
+set it false inside the worker and true on the host. That mixed configuration must be changed
+atomically with this release; otherwise both processes could claim planning/review/lead work.
+This is a coordinated runtime rollout, not a safe partial image replacement.
+
+Codex, Grok, Kimi, and Pi use the same role dispatch boundary. CLI planning and review use
+read-only repository/git mounts and canonical inspection-only tool permissions. Lead and
+goal-verification CLI calls use an empty read-only workspace and bounded captured evidence,
+with real turn/invocation ownership rather than fabricated Task/Run/Step rows. Lease, goal
+version, scope, delegation, and feature fences are rechecked before launch and during calls.
+
+### Selecting today's models (configuration, not application code)
+
+The requested choices are DeepSeek `deepseek-v4.1-flash` for lead and MiMo
+`mimo-v2.6-flash` for review, both through Pi/OpenCode Go account C. These identifiers are
+choices for the local overlay, not constants in lead/review policy, and are not an attestation
+that production has been switched.
+
+Keep `pi-opencode-go-c` as the DeepSeek profile, give it `account_id = "opencode-go-c"`.
+Add another profile inheriting that binding, with a distinct ID and `model = "mimo-v2.6-flash"`.
+Both can declare `roles = ["lead", "planner", "reviewer", "executor"]`: today's assignment
+does not restrict which role either model may be selected for tomorrow. Per-role read-only
+execution and independent-review checks still apply regardless of these capability flags.
+Both share the same identity/state/network/concurrency. Pi's local authenticated provider
+catalog must expose both model IDs; validate metadata without inference. Do not replace Pi
+with a direct API endpoint merely because the account also offers one.
+
+Then select the profiles through `/model`, or set installation defaults:
+
+```text
+VUZOL_PROJECT_LEAD__PROFILE_ID=pi-opencode-go-c
+VUZOL_PROJECT_LEAD__REVIEWER_PROFILE_ID=<local-mimo-c-profile-id>
+VUZOL_EXECUTION__REVIEWER_PROFILE_ID=<local-mimo-c-profile-id>
+```
+
+Keep `VUZOL_PROJECT_LEAD__ENABLED=false` while preparing the release. Test-enable it only
+after migrations, host transport/secret preflight, and independent review; enable a managed
+goal through its normal owner command. Disable new turns with the feature flag, and use
+pause/cancel/revoke for an existing goal and its child work. Model selection grants neither
+goal execution permission nor approval for publication/deployment.
+
+### Model-assignment verification checkpoint (2026-10-21)
+
+Implementation commit: `3e3bf05` on `agent/project-lead-v1` (baseline `44d527a`);
+additional automatic-planner/cleanup assertions: `c38f999`.
+No production deployment, migration, model invocation, Telegram mutation, or push was performed
+for this change. Production was read-only attested on the existing T128 image; all three host
+services remained active. Stop here for independent review before a coordinated rollout.
+
+Verified contracts include role/profile selection and stale-button CAS; real host-entrypoint
+dispatch to API and Pi with fake external I/O; immutable run/turn/reviewer pins; receipt replay
+without another model call; crash between commands; pause/revoke cancellation; late receipt
+accounting; shared-account admission, uncertain commit, disconnect, and cleanup recovery.
+The installed Pi catalog was queried offline with placeholder credentials and network disabled;
+it lists `opencode-go/mimo-v2.6-flash`. Authenticated account metadata (not inference) also listed
+`deepseek-v4.1-flash` and `mimo-v2.6-flash` for account C. This does not attest the quality or
+availability of a real generated response from either model.
+
+The test PostgreSQL instance was an isolated container named
+`vuzol-model-switch-test-20261020`, label `vuzol.disposable-test=model-switch-20261020`,
+bound to loopback port 32774. Database/user were explicitly verified as
+`vuzol_model_switch_test` / `vuzol_model_test`; production/shared/default DSNs were not used.
+The existing disposable test venv was used, not the production venv. The integration fixture
+terminates connections and truncates tables: serialize these commands and never substitute a
+production DSN. Recreate an isolated instance before reusing commands after its removal.
+After verification the named test container and its sole anonymous PostgreSQL volume were
+removed. Test rows were disposable and are not backed up; fixtures recreate them, and the
+representative trace is preserved below. No production database, container, or volume was removed.
+
+Actual command environment (local disposable password, not a production credential):
+
+```sh
+cd /home/vodkolyan/vuzol-afterword-stabilization
+export PATH=/tmp/vuzol-stage2.jzwfpD/venv/bin:$PATH
+export PYTHONPATH=src:.
+export PYTHONDONTWRITEBYTECODE=1
+export VUZOL_TEST_DATABASE_DSN=postgresql://vuzol_model_test:disposable-local-only@127.0.0.1:32774/vuzol_model_switch_test # pragma: allowlist secret - disposable test credential
+export VUZOL_MODEL_TEST_DSN=postgresql+psycopg://vuzol_model_test:disposable-local-only@127.0.0.1:32774/vuzol_model_switch_test # pragma: allowlist secret - disposable test credential
+VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_MODEL_TEST_DSN alembic upgrade head
+pytest --no-cov -q -rs tests/unit -m 'not docker' --tb=short
+pytest --no-cov -q tests/integration -m 'not docker' --tb=short
+mypy src/vuzol
+git diff --check
+```
+
+Fresh migrations reached `d7a4f50e9404`; the c6/d7 pair was also downgraded/reapplied in
+this disposable database during development. Do not infer safe production downgrade:
+b5 explicitly refuses restoration of workflow NOT NULL fields once turn history exists.
+A rollback must preserve compatible migration metadata and account/turn cleanup handling;
+an old runtime cannot simply be pointed at the new head.
+
+Final unit result: **3364 passed, 1 skipped** (remote execution is explicitly out of scope).
+Type checking: **298 source files passed**. Changed Python files passed Ruff; the complete
+source-tree Ruff invocation also reported a pre-existing `SIM105` in `execution/git.py`, which
+was not changed. Secret scanning of the complete changed-file set passed after allowlisting
+only literal migration identifiers and the explicitly disposable test DSNs, not production
+credentials. Coverage collection was disabled in these
+test commands; these are not coverage claims.
+
+Full integration result: **898 passed, 1 skipped, 15 deselected** (`not docker`), 662.06 seconds.
+The existing skipped test is `test_completed_plan_enqueues_system_trace`; its skip marker was
+not changed. Docker-marked acceptance tests were excluded, not reported as passed.
+This run started before the final auto-planner dispatch adjustment; the final routing/provider/
+leadership paths were rerun separately afterward. The full run emitted 12 Telegram deprecation
+warnings and one SQLAlchemy warning about a garbage-collected, non-checked-in connection. Its
+allocation site was not established; it is not claimed fixed or suppressed. The warning appeared
+during a Telegram projection test, which does not by itself establish the leaking caller.
+
+After the final auto-planner adjustment, the following real-PostgreSQL group passed
+**224 tests**, with SQLAlchemy warnings treated as errors and no reported warnings:
+
+```sh
+pytest --no-cov -q -rs tests/integration/providers tests/integration/leadership tests/integration/test_secret_scan.py --tb=short -W error::sqlalchemy.exc.SAWarning
+git diff --name-only -z 44d527a -- '*.py' | xargs -0 ruff check
+git diff --name-only -z 44d527a | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+```
+
+An early development run also observed one non-reproduced shared-account turn ending with
+an unknown receipt. A separate simultaneous receipt/watchdog failure race was reproduced and
+fixed with deterministic fault tests, but it was not proven to be the original observation's
+cause. Subsequent focused and full runs passed; repeated disconnect/cancellation soak testing
+remains appropriate at independent review.
+
+Rollout prerequisites include agreeing worker/host ownership flags, validating the local account
+overlay with the new shared-account binding, scoped credentials for selected API roles, and a
+schema-compatible rollback. In the inspected production configuration, enabled planning/review
+profiles are CLI profiles; no extra API secret was copied or granted to the host. Adding an API
+profile later still requires its scoped credential to be provisioned for its execution owner.
+
+The original stage-2 goal/review/repair/restart scenario remains a real local Git/PostgreSQL test
+with fake models and Telegram delivery, not a production scenario. Its request is explicitly a
+marker-file outcome; the separate OAuth regression verifies that marker files cannot prove an
+OAuth goal. Reproduce its trace after other integration tests finish:
+
+```sh
+pytest --no-cov -q -s tests/integration/leadership/test_managed_goal_flow.py::test_managed_goal_reviews_repairs_and_resumes_after_restart
+```
+
+Trace contract: owner `/lead` → package A → review rejection → repair → approved managed
+integration commit (main unchanged) → new Python process and fresh database composition →
+package B exactly once → independent criterion evidence → completed goal → meaningful fake
+Telegram result/status. Turn-bound Pi transport and model switching are verified separately
+through the actual executor entrypoint; the two tests are not presented as a paid DeepSeek/MiMo
+end-to-end run.
+
+Final trace plus model-matrix checks: **13 passed**, 22.78 seconds, with SQLAlchemy and
+unraisable-exception warnings treated as errors (no warnings reported):
+
+```sh
+pytest --no-cov -q -s tests/integration/leadership/test_managed_goal_flow.py::test_managed_goal_reviews_repairs_and_resumes_after_restart tests/integration/providers/test_model_assignments.py --tb=short -W error::sqlalchemy.exc.SAWarning -W error::pytest.PytestUnraisableExceptionWarning
+```
+
+Captured disposable-scenario trace (2026-10-20 23:09 UTC / 2026-10-21 Amsterdam):
+
+```text
+package_a=5a1d8415-756c-4cbd-833f-59258739bfd5
+head_a=59a4fcd81d6b53a58fb98917d743f928ff17377f
+restart=separate Python process; fresh composition and DB engine
+goal=55f66b00-90cc-4a2d-82b0-fb2d9b8333d8
+branch=vuzol-managed/vuzol/847ef779c02d
+package_b=3f89db67-30ac-4b35-a3ba-44d5d1638c55
+lifecycle=completed
+head_b=14dbe1f926358fce7bbdbe0b84115bd053384061
+main=852d20746552746979014caf39b06e558de62361
+```
+
+### Historical registry examples
+
+The checked-in executor registry (`deploy/registries.executor.toml`) and older local overlays
+include the following examples; actual deployment defaults must be inspected locally:
 
 | Role | Profile | Model | Credential | Output bound |
 | --- | --- | --- | --- | --- |
@@ -202,7 +419,7 @@ currently routes:
 | executor | account profiles (`codex-a`, `grok-subscription-a/b`, `tokenrouter-a`, `pi-opencode-go-a/b/c`) from the local overlay | subscription agent CLIs | subscription auth (no API keys) | sandbox-bound |
 | interpreter / transcriber | configured in the interpreter registry, not this mirror | DeepSeek-based interpretation; OpenAI transcription API | their own credential references | their own profile limits |
 
-Planning runs on the dedicated DeepSeek API profile with the planner budget from `HardLimits`;
+Planning uses its selected profile with the planner budget from `HardLimits`;
 empty or token-truncated planner output is rejected rather than completed, and a validated plan is
 handed to downstream `execute_code` / `execute_agent` steps as bounded redacted context items.
 Content-quality plan rejection is recorded as a provider failure observation (not a success) and

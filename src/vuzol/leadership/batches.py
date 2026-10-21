@@ -14,6 +14,7 @@ from vuzol.discussion.service import WorkPackageService
 from vuzol.leadership.actor import Actor
 from vuzol.leadership.commands import CommandStatus, LeadCommand
 from vuzol.leadership.evidence import evidence_token, package_has_unknown_effects
+from vuzol.leadership.limits import check_batch_limits
 from vuzol.leadership.persistence import GoalDelegation, ManagedGoal
 from vuzol.leadership.service import plan_draft_from_payload
 from vuzol.storage.models import WorkPackage
@@ -56,6 +57,7 @@ async def execute_batch(
         raise DomainError("package_still_live")
     if current is not None and await package_has_unknown_effects(uow.session, current.id):
         raise DomainError("unknown_effects_open")
+    await check_batch_limits(uow.session, goal, items=len(plan.items))
     token = evidence_token(current)
     fingerprint = _fingerprint(stored)
     stored_token = str(dict(goal.constraints).get("repeat_evidence") or "")

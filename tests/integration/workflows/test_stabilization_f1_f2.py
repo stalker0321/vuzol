@@ -13,7 +13,7 @@ from vuzol.config import Settings
 from vuzol.storage.models import Run, Step, Task
 from vuzol.storage.types import IdempotencyClass, RunStatus, StepStatus, TaskStatus
 from vuzol.workflows.application import Principal, apply_task_command
-from vuzol.workflows.controls import cancel_task, pause_task, resume_task
+from vuzol.workflows.controls import cancel_task, resume_task
 from vuzol.workflows.domain import StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.recovery import recover_expired_steps
@@ -63,7 +63,13 @@ async def _expire_running_review(factory, *, idempotency: IdempotencyClass, atte
         session.add(code)
         await session.flush()
         code_id = code.id
-        await pause_task(session, task.id, actor_id="1")
+        # Fault fixture for a persisted pre-T133 soft pause followed by a crash.
+        # New pause_task revokes this lease immediately; keep testing recovery
+        # of historical rows rather than weakening the lease-expiry assertions.
+        task_row = await session.get(Task, task.id)
+        run_row = await session.get(Run, run_id)
+        task_row.status = TaskStatus.PAUSED
+        run_row.status = RunStatus.PAUSED
     return task.id, run_id, step.id, code_id
 
 

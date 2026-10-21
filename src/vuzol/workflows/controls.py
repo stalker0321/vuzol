@@ -19,6 +19,7 @@ from vuzol.storage.models import (
     Event,
     Run,
     Step,
+    SupervisedProcess,
     Task,
     TelegramControlAction,
     TransactionalOutbox,
@@ -26,6 +27,7 @@ from vuzol.storage.models import (
 from vuzol.storage.types import (
     ApprovalStatus,
     ControlActionStatus,
+    ProcessStatus,
     RunStatus,
     StepStatus,
     TaskStatus,
@@ -428,6 +430,22 @@ async def pause_task(
         raise ValueError(f"terminal run cannot pause: {run.status.value}")
     await transition_run(session, run, RunStatus.PAUSED, actor_type="user", actor_id=actor_id)
     await transition_task(session, task, TaskStatus.PAUSED, actor_type="user", actor_id=actor_id)
+    active = [step for step in steps if step.status in {StepStatus.LEASED, StepStatus.RUNNING}]
+    for step in active:
+        was_running = step.status is StepStatus.RUNNING
+        # Revoke the lease durably, not just while run.status happens to be paused.
+        # A fast resume must never legalize the old process's late result.
+        step.unknown_effects = step.unknown_effects or (
+            was_running and not repeatable_without_new_mutation(step)
+        )
+        await transition_step(
+            session, step, StepStatus.BLOCKED, actor_type="user", actor_id=actor_id
+        )
+        step.failure_category = "owner_paused" if was_running else "owner_paused_before_start"
+        step.failure_summary = "Owner paused execution; the previous lease is revoked"
+        step.lease_owner = None
+        step.lease_expires_at = None
+        step.lease_generation += 1
     session.add(
         Event(
             entity_type="task",
@@ -435,13 +453,7 @@ async def pause_task(
             event_type="task.pause_effective",
             actor_type="user",
             actor_id=actor_id,
-            payload={
-                "active_step_ids": [
-                    str(step.id)
-                    for step in steps
-                    if step.status in {StepStatus.LEASED, StepStatus.RUNNING}
-                ]
-            },
+            payload={"active_step_ids": [str(step.id) for step in active]},
         )
     )
 
@@ -503,10 +515,24 @@ async def resume_task(
         step
         for step in steps
         if step.status is StepStatus.BLOCKED
-        and step.failure_category == LEASE_EXPIRED_ATTEMPTS_EXHAUSTED
+        and step.failure_category
+        in {LEASE_EXPIRED_ATTEMPTS_EXHAUSTED, "owner_paused", "owner_paused_before_start"}
         and not step.unknown_effects
-        and repeatable_without_new_mutation(step)
+        and (
+            repeatable_without_new_mutation(step)
+            or step.failure_category == "owner_paused_before_start"
+        )
     ]
+    undrained = await session.scalar(
+        select(SupervisedProcess.id)
+        .where(
+            SupervisedProcess.run_id == run.id,
+            SupervisedProcess.status != ProcessStatus.EXITED,
+        )
+        .limit(1)
+    )
+    if undrained is not None:
+        raise ValueError("resume requires the previous supervised process to stop")
     unsafe = [step for step in steps if step.status is StepStatus.BLOCKED and step.unknown_effects]
     if unsafe:
         raise ValueError(

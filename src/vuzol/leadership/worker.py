@@ -339,7 +339,10 @@ class ProjectLeadWorker:
                 completed_package_count=int(completed or 0),
                 owner_answer=owner_answer_text(goal.constraints),
                 invocation_id=wakeup_id,
-                result_context=await result_context(uow.session, goal, package),
+                result_context={
+                    **await result_context(uow.session, goal, package),
+                    "work_limits": goal.constraints.get("work_limits", {}),
+                },
             )
 
     async def _save_decision(

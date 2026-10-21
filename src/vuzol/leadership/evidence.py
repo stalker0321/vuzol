@@ -16,8 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.leadership.persistence import GoalDelegation, ManagedGoal, ManagedGoalEvidence
 from vuzol.leadership.rules import delegation_is_expired
-from vuzol.storage.models import MaterializationLink, Step, WorkPackage
-from vuzol.storage.types import WorkPackageStatus
+from vuzol.storage.models import (
+    MaterializationLink,
+    Run,
+    Step,
+    ValidationResult,
+    WorkPackage,
+    Worktree,
+)
+from vuzol.storage.types import StepStatus, WorkPackageStatus
 
 GOAL_HEAD_CHECKER = "goal_review_v2"
 PENDING_CHECKER = "goal_snapshot_v2"
@@ -49,6 +56,90 @@ def _digest(files: Mapping[str, str]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def observation_digest(files: Mapping[str, str], validation: object = None) -> str:
+    # Old captured commits have no runtime evidence; retain their original binding.
+    if validation is None:
+        return _digest(files)
+    payload = json.dumps(
+        {"files": files, "runtime_validation": validation},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+async def runtime_validation(
+    session: AsyncSession, *, package: WorkPackage, result_commit: str, scope_revision: int
+) -> list[dict[str, object]]:
+    """Only completed system validation of this package's exact applied worktree.
+
+    Do not consume executor claims, arbitrary log files, earlier repair attempts,
+    or validation from another run which happens to mention the same commit.
+    """
+    candidates = await session.execute(
+        select(Step, Worktree)
+        .join(Run, Run.id == Step.run_id)
+        .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+        .join(Worktree, (Worktree.run_id == Run.id) & (Worktree.task_id == Run.task_id))
+        .where(
+            MaterializationLink.work_package_id == package.id,
+            Step.step_type == "validate",
+            Step.status == StepStatus.COMPLETED,
+            Step.unknown_effects.is_(False),
+            Worktree.result_commit == result_commit,
+        )
+        .order_by(Step.id)
+    )
+    receipts: list[dict[str, object]] = []
+    for step, worktree in candidates:
+        result = step.result or {}
+        if (
+            result.get("schema_version") != "result-validation.v1"
+            or result.get("result_commit") != result_commit
+            or not worktree.diff_hash
+            or result.get("diff_hash") != worktree.diff_hash
+            or result.get("base_commit") != worktree.base_commit
+        ):
+            continue
+        gates = result.get("gates", [])
+        stored = await session.scalars(
+            select(ValidationResult)
+            .where(ValidationResult.step_id == step.id)
+            .order_by(ValidationResult.id)
+        )
+        for row in stored:
+            gate = row.result
+            if (
+                not isinstance(gate, dict)
+                or gate not in gates
+                or not gate.get("argv")
+                or not gate.get("validation_image_digest")
+                or row.status != "passed"
+                or row.exit_code != 0
+                or gate.get("exit_code") != 0
+                or row.validator_type != gate.get("command_id")
+                or row.command_hash != hashlib.sha256("\0".join(gate["argv"]).encode()).hexdigest()
+            ):
+                continue
+            receipts.append(
+                {
+                    "evidence_path": f"runtime/validation/{row.id}",
+                    "validation_result_id": str(row.id),
+                    "step_id": str(step.id),
+                    "run_id": str(step.run_id),
+                    "package_id": str(package.id),
+                    "scope_revision": scope_revision,
+                    "result_commit": result_commit,
+                    "diff_hash": worktree.diff_hash,
+                    "base_commit": worktree.base_commit,
+                    "command_hash": row.command_hash,
+                    "gate": gate,
+                }
+            )
+    return receipts
+
+
 async def record_head_evidence(
     session: AsyncSession,
     *,
@@ -72,7 +163,10 @@ async def record_head_evidence(
     except (GitError, UnicodeDecodeError, OSError, zipfile.BadZipFile):
         files = {}
         capture_error = "goal_snapshot_unavailable"
-    digest = _digest(files)
+    validation = await runtime_validation(
+        session, package=package, result_commit=result_commit, scope_revision=goal.scope_revision
+    )
+    digest = observation_digest(files, validation)
     for item in goal.criteria:
         if not isinstance(item, dict) or not item.get("id"):
             continue
@@ -102,6 +196,7 @@ async def record_head_evidence(
                     "scope": goal.scope_text,
                     "description": description,
                     "files": files,
+                    "runtime_validation": validation,
                     "capture_error": capture_error,
                     "repository_path": repository_path,
                 },

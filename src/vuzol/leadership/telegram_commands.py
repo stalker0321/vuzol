@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -90,6 +91,14 @@ def _command(
 ) -> LeadCommand | None:
     key = f"telegram:{update.bot_id}:{update.update_id}:{kind}"
     if kind == "enable":
+        limits: dict[str, int] = {}
+        while argument.startswith("--"):
+            parts = argument.split(maxsplit=2)
+            fields = {"--max-packages": "max_packages", "--max-items": "max_items_per_package"}
+            if len(parts) != 3 or parts[0] not in fields or not parts[1].isdigit():
+                return None
+            limits[fields[parts[0]]] = int(parts[1])
+            argument = parts[2]
         branch = f"{prefix}{project_id}/{session_id.hex[:12]}"
         return LeadCommand(
             name="enable_managed_goal",
@@ -103,6 +112,7 @@ def _command(
                 "scope": argument,
                 "criteria": [{"id": "requested-outcome", "description": argument}],
                 "project_default_branch": default_branch,
+                "work_limits": limits,
             },
         )
     names = {
@@ -112,9 +122,21 @@ def _command(
         "revoke": "revoke_delegation",
         "status": "get_goal",
         "answer": "answer_permission",
+        "limits": "set_work_limits",
     }
     name = names.get(kind)
-    answer_payload = {}
+    answer_payload: dict[str, Any] = {}
+    if kind == "limits":
+        try:
+            packages, items = argument.split()
+            answer_payload = {
+                "work_limits": {
+                    "max_packages": None if packages == "unlimited" else int(packages),
+                    "max_items_per_package": None if items == "unlimited" else int(items),
+                }
+            }
+        except ValueError:
+            return None
     if kind == "answer":
         try:
             target, question_version, answer = argument.split(maxsplit=2)

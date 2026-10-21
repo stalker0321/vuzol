@@ -5,6 +5,61 @@ Status: implemented additively in `workflows/service.py`, using only persisted
 required. Existing safety behavior (unknown effects fail closed, approvals,
 budgets) is unchanged.
 
+## Pilot repair — strict owner pause (2026-10-21)
+
+The owner explicitly approved strict pause and its deployment on 2026-10-21
+(“Да, строгая пауза; выкатывай”). This replaces the historical soft-pause
+contract in ADR-0012 §5; it does not authorize resuming the existing paused pilot.
+
+`pause_task` parks active steps, clears their leases and advances the lease fence.
+The worker's next heartbeat requests cancellation at the existing supervised
+transport boundary. Stop latency is bounded by the configured heartbeat plus
+the supervisor's termination/drain grace, not an instantaneous process kill.
+Fast pause/resume cannot authorize an old response. Completed steps and stored
+provider/validation receipts are retained.
+
+Resume requires the previous supervised process to have exited. A step paused
+before start, or a proven repeatable read-only step, can receive a new attempt.
+A running step that could mutate retains `unknown_effects`; resume refuses until
+supported reconciliation resolves it (or the owner cancels). Neither a known
+provider charge nor a successful late model response proves that all worktree
+effects are known. No SQL repair or automatic forgiveness is introduced.
+
+Tests for old persisted soft-paused leases remain: their fixture explicitly
+models an old record; it no longer asks the new pause command to create old state.
+
+### Owner work ceilings
+
+Managed-goal admission accepts `work_limits.max_packages` and
+`work_limits.max_items_per_package` (positive integers, omitted/null means no
+additional owner ceiling). They are independent of monetary/context limits and
+existing repair caps. All admitted packages count, including unsuccessful or
+stopped packages; receipts/restart do not refund admission.
+
+Explicit Telegram admission example:
+
+```text
+/lead --max-packages 1 --max-items 1 Implement the agreed small change
+/lead_limits 2 1
+```
+
+`/lead_limits` is owner-only and version-fenced; `unlimited` explicitly removes
+the corresponding ceiling. It changes only the grant, not pause/wait state or
+the outstanding owner's answer. At exhaustion the lead asks the owner and
+creates no package. Plain prose such as “one package” is not parsed as a grant:
+the later conversational-intake work must surface structured limits explicitly.
+
+### Goal-review evidence
+
+Independent goal review now receives system validation receipts from a completed
+`validate` step of the exact package/run/worktree, bound to result/base commits,
+diff hash and current scope revision. Command hash, exit code, pinned validation
+image and captured output hashes are retained. Files and runtime observations
+share the captured evidence digest. Executor self-reports, stale commits and
+unmatched validator rows are excluded. A passing command is evidence of that
+command only, not automatic goal acceptance. Historical evidence rows are not
+rewritten or declared passed; existing failed/paused pilots remain unaccepted.
+
 ## Normalized failure fingerprint
 
 `vuzol.workflows.recovery_policy` computes a versioned fingerprint

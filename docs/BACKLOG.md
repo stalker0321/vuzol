@@ -3,6 +3,50 @@
 This file records agreed follow-up work that is important but intentionally
 deferred. Completed work belongs in `CHANGELOG.md`.
 
+## Product consolidation — 2026-10-21
+
+Direction: `ASTRA_PRODUCT_CONSOLIDATION_HANDOFF.md` (owner-provided, separate
+from implementation). Safety repairs from the pilot precede new interfaces.
+This inventory is not authorization to delete stored projects, results or grants.
+
+| Mechanism | Supported scenario | Replacement | Dependencies / retained data | Decision |
+| --- | --- | --- | --- | --- |
+| Project lead + command receipts | Goal, bounded packages, independent acceptance | Existing leadership application | Goals, delegations, turns, evidence, receipts | Keep; fix pilot contracts first |
+| Work-package sequencer | Ordering tasks inside the lead's chosen package | None needed | Plans, materialization links, package approvals | Keep; it is not a second lead |
+| Workflow workers, applier, supervisor | Execute/review/repair, stop, reconcile effects | None needed | Runs, leases, effects, validation and provider receipts | Keep; do not infer completion from a green plan |
+| Model role matrix | Explicit interchangeable model/account/reasoning choices | Current `/model` | Revision-pinned runs and turns | Keep; new choices apply to new invocations |
+| Legacy executor preferences and family fallbacks | Older project selections and already-pinned runs | Role matrix | Must audit preference rows AND persisted run/step payloads first | Remove after explicit data conversion; not safe to delete as dead code today |
+| Direct `/lead <goal>` intake | Existing explicit execution command | Discuss-by-default `/lead`, intent-to-lead admission | Existing Telegram routing, durable intake and owner identity | Replace only with tested conversational admission; never make discussion execute accidentally |
+| Horizon planner and per-task planner routes | Historical/optional planning | Lead chooses packages; sequencer runs them | Contract-pinned packages, template and recovery tests | Needs scenario/data inventory before removal; no new parallel planner |
+| Snapshot-only lead/goal-review calls | Bounded decisions and captured-commit checks in an empty workspace | None for this boundary | Durable turn receipts, transport restrictions | Keep; this is NOT the policy for all read-only research |
+| Telegram rich formatting and delivery | Safe formatted answers, durable retries | Reuse existing renderer and delivery | Outbox, part identity, escaped fallback | Keep; replace dense goal cards, not the delivery engine |
+| Memory and context assembly | Project memory and bounded invocation context | Reuse existing assemblers/artifact provenance | Chat turns, memory units, native CLI history | Measure before changing ceilings; do not conflate context with spending |
+| ChatGPT/MCP entry | Explicit durable submission and status lookup | Thin adapter to the same application | Principal/project authorization, stable request identity | Add later; no public endpoint or independent scheduler in the pilot fix |
+
+Next implementation slices after the pilot repair:
+
+1. Compact Telegram cards with rendered working/ready/paused/question/failure examples.
+2. Persist `/lead` and `/think` per topic; Jev routes intent, not work assignments.
+   Explicit changes go to the same lead in either mode. Read-only research may
+   use inspection tools and bounded delegation, with inherited write restrictions.
+3. Minimal authenticated MCP submission/status/result adapter. Confirm hosting,
+   authentication and the actual ChatGPT client's support before exposing it.
+   Per handoff §8.1, MCP, a future personal assistant and the project lead reuse
+   the same application operations with server-enforced principal/project scope.
+   MCP does not route through Telegram or need a second model to reclassify an
+   already explicit request. Equivalent requests must pass identical admission,
+   authorization and idempotency checks; similar separate requests stay separate.
+   The MCP slice does not depend on first building the general inbox.
+4. Measure assembled input and native CLI history; support the owner's preferred
+   250–500k ceiling where the selected model permits, with summaries and original
+   artifact links. No newly imposed 16–32k product cap and no silent truncation.
+5. Remove confirmed obsolete mechanisms together with their configuration/docs;
+   migrate dependent data explicitly. No DB reset or edited applied migration.
+
+Do not present these slices as shipped. Mode switches, research delegation and
+MCP admission require separate end-to-end acceptance; the current pilot remains
+paused and unaccepted until a supported verification/recovery flow proves readiness.
+
 ## Next after Telegram dogfood testing
 
 ### TODO — Discussion intake lifecycle is write-only

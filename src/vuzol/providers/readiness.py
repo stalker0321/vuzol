@@ -11,11 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.config import ConfigurationBundle, Settings
 from vuzol.config.models import BudgetMode, LaunchMode, ProviderRole
 from vuzol.projects.executor_preference import (
+    ExecutorPreferenceError,
     load_preference,
     resolve_route_pin,
     same_family_fallback_ids,
 )
+from vuzol.projects.model_matrix import MATRIX_KEY, assignment_profile, pinned_assignment
 from vuzol.providers.policy import RoutingRequest, select_profile
+from vuzol.storage.models import ProjectExecutorPreference
 from vuzol.workflows.domain import MaterializedWorkflow
 
 
@@ -42,8 +45,26 @@ async def configured_executor_preflight(
     assigned = settings.execution.default_executor_profile_id
     family: frozenset[str] | None = None
     if project_id is not None:
-        preference = await load_preference(session, project_id)
-        if not preference.is_auto:
+        # A matrix assignment is an exact profile/revision pin, not a legacy
+        # worker-family choice. Keep this row stable until materialize_run freezes it.
+        row = await session.get(ProjectExecutorPreference, project_id, with_for_update=True)
+        try:
+            choice = pinned_assignment(
+                {MATRIX_KEY: row.model_assignments or {}} if row is not None else {}, "executor"
+            )
+            if choice is not None:
+                selected = assignment_profile(choice, registries, "executor")
+                assigned = selected.id
+                family = frozenset({assigned})
+        except (ValueError, ExecutorPreferenceError):
+            return ExecutorReadinessFailure(
+                steps[0].step_type,
+                "Выбранный профиль исполнителя недоступен или изменён. "
+                "Работа не запускалась; проверь выбор через /model.",
+                (),
+            )
+        preference = await load_preference(session, project_id) if choice is None else None
+        if preference is not None and not preference.is_auto:
             pin = resolve_route_pin(preference, registries)
             if pin is None:
                 return ExecutorReadinessFailure(

@@ -1251,6 +1251,25 @@ class ProviderStepHandler:
             ):
                 raise LookupError("provider reservation is missing")
             profile = self._registries.profiles.get(step.executor_profile_id)
+            provider_role = PROVIDER_STEP_ROLES[step.step_type]
+            if run.selected_route.get("schema_version") == "discussion-chat-route.v1":
+                from vuzol.config.revision import content_revision
+                from vuzol.discussion.conversation import (
+                    conversation_compatible,
+                    conversation_provider_role,
+                )
+
+                provider_role = conversation_provider_role(run.selected_route)
+                if (
+                    task.task_type != "discussion_agent_internal"
+                    or run.workflow_type != "discussion_agent"
+                    or step.step_type != "execute_agent"
+                    or set(step.required_capabilities) != {Capability.REPOSITORY_READ.value}
+                    or profile.id != run.selected_route.get("trusted_profile_id")
+                    or content_revision(profile) != run.selected_route.get("profile_revision")
+                    or not conversation_compatible(profile, provider_role)
+                ):
+                    raise LookupError("conversation route changed or invalid")
             worktree = None
             context: tuple[ContextItem, ...] = ()
             if step.step_type in {"execute_code", "execute_agent"}:
@@ -1419,7 +1438,7 @@ class ProviderStepHandler:
                     step_id=step.id,
                     provider_attempt=attempt_value,
                     lease_generation=request.lease.generation,
-                    role=PROVIDER_STEP_ROLES[step.step_type],
+                    role=provider_role,
                     required_capabilities=frozenset(
                         Capability(value) for value in step.required_capabilities
                     ),

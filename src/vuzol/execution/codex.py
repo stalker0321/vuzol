@@ -173,7 +173,7 @@ class ExecutionEnvelopeFactory:
                 profile.provider,
                 profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
-                require_read_only=step.step_type in {"plan", "review"},
+                require_read_only=step.step_type in {"execute_agent", "plan", "review"},
             )
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)

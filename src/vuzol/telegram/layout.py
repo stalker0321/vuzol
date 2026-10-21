@@ -174,16 +174,14 @@ def build_help_card(kind: TopicKind) -> str:
         lines.extend(
             (
                 "Задача: текстом, голосом или документом.",
-                "Продолжение — ответом на сообщение задачи.",
                 "<code>/model</code> — модели ролей.",
-                "<code>/plan</code> — текущий план.",
-                "<code>/lead_status</code> — состояние цели.",
-                "<code>/lead_goal</code> — полное задание.",
-                "<code>/lead_details</code> — результат и детали.",
-                (
-                    "<code>/source add python|node PACKAGE git|https URL PIN</code> — "
-                    "доверить проекту точный внешний источник."
-                ),
+                "<code>/think</code> — обсуждение; <code>/lead</code> — руководитель.",
+                "Выбор для топика, не команда запуска или паузы.",
+                "<code>/plan</code> — план.",
+                "<code>/lead_status</code> — статус цели.",
+                "<code>/lead_goal</code> — задание.",
+                "<code>/lead_details</code> — результат.",
+                "<code>/source</code> — внешние источники.",
             )
         )
     elif kind is TopicKind.INBOX:

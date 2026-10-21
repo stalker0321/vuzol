@@ -73,7 +73,7 @@ class ControlUpdate(TelegramModel):
     preference_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,99}$")
     preference_slot: str | None = Field(
         default=None,
-        pattern=r"^(lead|goal_reviewer|planner_light|planner_strong|reviewer_light|reviewer_strong|executor)$",
+        pattern=r"^(think|lead|goal_reviewer|planner_light|planner_strong|reviewer_light|reviewer_strong|executor)$",
     )
     preference_profile_token: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
     preference_effort: str | None = Field(

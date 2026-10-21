@@ -641,6 +641,17 @@ def test_pi_execution_boundary_accepts_only_canonical_runtime() -> None:
     read_only = canonical_pi_argv("kimi-k3", read_only=True)
     _require_provider_command(write, "pi", "kimi-k3")
     _require_provider_command(read_only, "pi", "kimi-k3")
+    snapshot = canonical_pi_argv("kimi-k3", read_only=True, prompt_only=True)
+    _require_provider_command(
+        snapshot, "pi", "kimi-k3", require_read_only=True, require_prompt_only=True
+    )
+    for candidate in (read_only, write, (*snapshot, "--tools", "read")):
+        with pytest.raises(ValueError):
+            _require_provider_command(
+                candidate, "pi", "kimi-k3", require_read_only=True, require_prompt_only=True
+            )
+    with pytest.raises(ValueError):
+        _require_provider_command(snapshot, "pi", "kimi-k3")
     target, environment = _provider_state_runtime("pi")
     assert target == Path("/pi-home")
     assert environment["PI_CODING_AGENT_DIR"] == "/pi-home"

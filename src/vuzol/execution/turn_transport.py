@@ -197,6 +197,7 @@ class TurnSandboxTransport:
                 profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
                 require_read_only=True,
+                require_prompt_only=profile.provider == "pi",
             )
             # Verify the adapter forwarded the frozen phase input, not a different prompt.
             body = json.loads(invocation.stdin)

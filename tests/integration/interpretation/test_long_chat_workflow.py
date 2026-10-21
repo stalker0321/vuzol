@@ -293,15 +293,17 @@ async def test_long_reply_through_whole_hidden_workflow_keeps_actual_token_usage
         assert await common.process_one()
         assert await common.process_one()
         client = FakeTelegramClient()
+        expected_visible_text = f"`Обсуждение · gpt-6.1-sol`\n\n{text}"
         if rich_messages:
             assert await service(factory, client, rich_messages=True).deliver_one()
             assert len(client.rich_sent) == 1 and not client.sent
+            assert "Обсуждение · gpt-6.1-sol" in client.rich_sent[0][2]
             assert "я" * 4324 in client.rich_sent[0][2]
         else:
-            for _ in telegram_markdown_parts(text):
+            for _ in telegram_markdown_parts(expected_visible_text):
                 assert await service(factory, client).deliver_one()
             assert "".join(visible(m[2]) for m in client.sent) == visible(
-                telegram_markdown_html(text)
+                telegram_markdown_html(expected_visible_text)
             )
             assert len(client.sent) == 2
         async with factory() as session:

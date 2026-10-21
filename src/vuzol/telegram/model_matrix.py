@@ -37,6 +37,7 @@ def profile_label(profile: ProviderProfileConfig) -> str:
 
 def default_label(runtime: RuntimeConfiguration, slot: str) -> str:
     configured = {
+        "think": runtime.settings.chat.profile_id,
         "lead": runtime.settings.project_lead.profile_id,
         "goal_reviewer": runtime.settings.project_lead.reviewer_profile_id,
         "reviewer_light": runtime.settings.execution.reviewer_profile_id,

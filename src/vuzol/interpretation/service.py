@@ -610,6 +610,18 @@ class InterpretationPipeline:
             if reply_task is not None and reply_task not in tasks:
                 tasks = (reply_task, *tasks[:19])
             context_lines = []
+            if self._runtime.settings.project_lead.enabled:
+                from vuzol.leadership.chat import conversation_goal_context
+
+                context_lines.append(
+                    await conversation_goal_context(
+                        session,
+                        project_id=project_id,
+                        user_id=intake.user_id,
+                        chat_id=intake.chat_id,
+                        thread_id=intake.message_thread_id,
+                    )
+                )
             for task in tasks:
                 context_lines.append(
                     f"Task {task.id}, number {task.public_task_number}, "
@@ -770,6 +782,12 @@ class InterpretationPipeline:
             )
         )
         async with UnitOfWork(self._factory) as uow:
+            if work and self._runtime.settings.project_lead.enabled:
+                from vuzol.leadership.fence import lock_project_admission
+
+                assert uow.session is not None
+                # Same order as goal/package admission: project before discussion.
+                await lock_project_admission(uow.session, project_id)
             discussion = await uow.discussions.get_session(session_id, for_update=True)
             if discussion.version != expected_version:
                 raise DiscussionContextChanged
@@ -883,6 +901,22 @@ class InterpretationPipeline:
                         text=policy.draft.clarification_question
                         or "Уточни запрос; ничего не запущено.",
                     )
+                elif self._runtime.settings.project_lead.enabled:
+                    from vuzol.leadership.chat import admit_chat_work
+
+                    await admit_chat_work(
+                        uow,
+                        self._factory,
+                        self._runtime,
+                        intake=current_intake,
+                        project_id=project_id,
+                        session_id=session_id,
+                        source_turn_id=user_turn_id,
+                        raw=raw,
+                        draft=policy.draft,
+                        work_context=work_context,
+                    )
+                    current_intake.affinity_kind = "managed_goal"
                 else:
                     created = await uow.tasks.create(
                         user_id=intake.user_id,
@@ -960,6 +994,37 @@ class InterpretationPipeline:
                         )
                     )
             else:
+                from vuzol.discussion.conversation import (
+                    ConversationRoute,
+                    select_conversation_route,
+                )
+                from vuzol.projects.executor_preference import ExecutorPreferenceError
+
+                route_error = item.payload.get("conversation_route_error")
+                try:
+                    if route_error:
+                        raise ExecutorPreferenceError(str(route_error))
+                    raw_route = item.payload.get("conversation_route")
+                    conversation_route = (
+                        ConversationRoute.model_validate(raw_route)
+                        if raw_route is not None
+                        else await select_conversation_route(
+                            session, self._runtime, project_id=project_id, mode="think"
+                        )
+                    )
+                    conversation_route.validate_profile(self._runtime)
+                except (ValueError, ExecutorPreferenceError) as error:
+                    await enqueue_chat_notice(
+                        session,
+                        chat_id=intake.chat_id,
+                        thread_id=intake.message_thread_id,
+                        key=f"chat:responder:{intake.id}",
+                        text=f"Выбранный собеседник недоступен: {error}. Проверь /model. "
+                        "Ответ другой моделью не подменён; ничего не запущено.",
+                    )
+                    current_intake.status = IntakeStatus.COMPLETED
+                    await complete_outbox_item(session, token)
+                    return
                 await schedule_discussion_agent(
                     session,
                     runtime=self._runtime,
@@ -979,6 +1044,7 @@ class InterpretationPipeline:
                     ),
                     current_turn=raw,
                     task_context="\n".join(context_lines),
+                    conversation_route=conversation_route,
                 )
             current_intake.status = IntakeStatus.COMPLETED
             await complete_outbox_item(session, token)

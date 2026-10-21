@@ -64,7 +64,11 @@ def assignment(profile):
 @pytest.mark.parametrize("slot", SLOT_ROLES)
 def test_supported_profiles_are_eligible_by_configured_role(provider, slot):
     profile = configured(provider)
-    expected = () if slot == "executor" and profile.launch_mode is LaunchMode.API else (profile,)
+    expected = (
+        ()
+        if slot in {"think", "executor"} and profile.launch_mode is LaunchMode.API
+        else (profile,)
+    )
     assert eligible_profiles(bundle(profile), slot) == expected
 
 

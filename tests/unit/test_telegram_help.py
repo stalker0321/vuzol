@@ -25,6 +25,8 @@ def test_project_help_is_concise_and_context_aware() -> None:
     html = build_help_card(TopicKind.PROJECT)
 
     assert "/model" in html
+    assert "/think" in html and "<code>/lead</code>" in html
+    assert "не команда запуска" in html
     assert all(command in html for command in ("/lead_status", "/lead_goal", "/lead_details"))
     assert "/update" not in html
     assert "голосом" in html

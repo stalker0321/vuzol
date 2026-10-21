@@ -349,6 +349,10 @@ class TopicMapping(IdentityMixin, TimestampMixin, Base):
     accepts_new_tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     default_workflow: Mapped[str] = mapped_column(String(100), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    conversation_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="think", server_default="think"
+    )
+    conversation_mode_message_id: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class ProjectDependencySource(IdentityMixin, TimestampMixin, Base):

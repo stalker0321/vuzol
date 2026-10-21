@@ -13,7 +13,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, RuntimeConfiguration
-from vuzol.config.revision import content_revision
 from vuzol.discussion.chat_memory import safe_summary_candidate
 from vuzol.discussion.context_budget import (
     CHAT_DOCUMENT_CHARS,
@@ -21,6 +20,7 @@ from vuzol.discussion.context_budget import (
     CHAT_TEXT_CHARS,
     ChatContextError,
 )
+from vuzol.discussion.conversation import ConversationRoute, select_conversation_route
 from vuzol.discussion.memory import MemoryPack
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.interpretation.chat_documents import attach_document_artifacts
@@ -44,7 +44,7 @@ from vuzol.workflows.service import materialize_run
 
 DISCUSSION_INTERNAL_TASK_TYPE = "discussion_agent_internal"
 DISCUSSION_AGENT_SCHEMA_VERSION = "discussion-agent-reply.v1"
-DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v6"
+DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v7"
 
 
 class DiscussionAgentReply(BaseModel):
@@ -160,9 +160,16 @@ async def schedule_discussion_agent(
     memory_pack: MemoryPack,
     current_turn: str | None = None,
     task_context: str = "",
+    conversation_route: ConversationRoute | None = None,
 ) -> uuid.UUID:
     """Create a hidden RO reply; opt-in chat pins a separate responder account."""
 
+    if runtime.settings.chat.enabled:
+        conversation_route = conversation_route or await select_conversation_route(
+            session, runtime, project_id=project_id, mode="think"
+        )
+        conversation_route.validate_profile(runtime)
+    conversation_mode = conversation_route.conversation_mode if conversation_route else "think"
     if current_turn is not None:
         memory_pack = replace(
             memory_pack, turns=tuple(t for t in memory_pack.turns if t.id != source_turn_id)
@@ -172,6 +179,7 @@ async def schedule_discussion_agent(
         memory_pack=memory_pack,
         rich_messages=runtime.settings.chat.rich_messages,
         memory_enabled=runtime.settings.chat.memory_enabled,
+        conversation_mode=conversation_mode,
     )
     if current_turn is not None:
         prompt += (
@@ -226,6 +234,7 @@ async def schedule_discussion_agent(
                 memory_pack=memory_pack,
                 rich_messages=runtime.settings.chat.rich_messages,
                 memory_enabled=runtime.settings.chat.memory_enabled,
+                conversation_mode=conversation_mode,
             )
             if current_turn is not None:
                 prompt += (
@@ -248,6 +257,9 @@ async def schedule_discussion_agent(
         source_turn_id=source_turn_id,
         task_draft={
             "discussion_agent_contract": DISCUSSION_AGENT_SCHEMA_VERSION,
+            "conversation_route": conversation_route.model_dump(mode="json")
+            if conversation_route
+            else None,
             "discussion_session_id": str(session_id),
             "source_turn_id": str(source_turn_id),
             "interaction_mode": interaction_mode.value,
@@ -369,15 +381,8 @@ async def schedule_discussion_agent(
         prompt_revision=DISCUSSION_AGENT_PROMPT_VERSION,
         automatic_start=True,
     )
-    if runtime.settings.chat.enabled:
-        assert runtime.settings.chat.profile_id is not None
-        run.selected_route = {
-            "schema_version": "discussion-chat-route.v1",
-            "trusted_profile_id": runtime.settings.chat.profile_id,
-            "profile_revision": content_revision(
-                runtime.registries.profiles.get(runtime.settings.chat.profile_id)
-            ),
-        }
+    if conversation_route is not None:
+        run.selected_route = conversation_route.selected_route()
     return task.id
 
 
@@ -414,7 +419,7 @@ async def persist_discussion_reply(
         content=parsed.reply if literal_reply else unwrap_agent_reply(parsed.reply),
         classifier_mode=InteractionMode(str(task.task_draft["interaction_mode"])),
         classifier_confidence=Decimal(str(task.task_draft["classifier_confidence"])),
-        classifier_prompt_version=DISCUSSION_AGENT_PROMPT_VERSION,
+        classifier_prompt_version=task.prompt_version or DISCUSSION_AGENT_PROMPT_VERSION,
     )
     await uow.outbox.enqueue(
         destination="telegram",
@@ -428,6 +433,7 @@ async def persist_discussion_reply(
             "source_turn_id": str(source_turn_id),
             "mode": str(task.task_draft["interaction_mode"]),
             "worker_task_id": str(task.id),
+            "conversation_route": task.task_draft.get("conversation_route"),
             "memory_summary": safe_summary_candidate(parsed.memory_summary)
             if task.task_draft.get("memory_enabled")
             else None,
@@ -503,6 +509,7 @@ def _discussion_prompt(
     memory_pack: MemoryPack,
     rich_messages: bool = False,
     memory_enabled: bool = False,
+    conversation_mode: str = "think",
 ) -> str:
     turns = "\n".join(
         f"[{turn.ordinal}] {turn.role.value}: {turn.chat_text}" for turn in memory_pack.turns
@@ -547,7 +554,16 @@ def _discussion_prompt(
         "numbered lists, quotes, and code blocks when useful. Do not use Markdown tables; "
         "express comparisons as compact lists instead."
     )
-    return f"""You are the project discussion agent for project {project_id}.
+    persona = (
+        "project lead, speaking in read-only conversation mode"
+        if conversation_mode == "lead"
+        else "project discussion partner"
+    )
+    return f"""You are the {persona} for project {project_id}.
+The current conversation mode is {conversation_mode}. This selects the interlocutor only,
+not execution authority. Existing authorized work can continue independently. Treat supplied
+goal/task state as a point-in-time snapshot, not proof of future completion. Do not issue
+lead command JSON here; converse with the user. Explicit work is admitted separately by the server.
 Continue the conversation as a capable product and technical partner. The final user turn is the
 message you must answer. Contribute concrete ideas, compare tradeoffs, and recommend a practical
 default when appropriate. Do not merely paraphrase the user, do not hand their question back to

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -92,20 +93,29 @@ class LeadershipCommandService:
         self._batch_executor = batch_executor
 
     async def apply(
-        self, actor: Actor, command: LeadCommand, *, claim: TurnClaim | None = None
+        self,
+        actor: Actor,
+        command: LeadCommand,
+        *,
+        claim: TurnClaim | None = None,
+        uow: UnitOfWork | None = None,
     ) -> CommandResult:
         name = parse_command_name(command.name)
         digest = payload_hash(command)
-        async with UnitOfWork(self._factory) as uow:
+        async with AsyncExitStack() as stack:
+            if uow is None:
+                uow = await stack.enter_async_context(UnitOfWork(self._factory))
             assert uow.session is not None
+            # An enclosing intake transaction uses this same order before it
+            # locks its discussion row. Keep project admission ahead of receipts.
+            if name in {LeadCommandName.ENABLE_MANAGED_GOAL, LeadCommandName.START_BATCH}:
+                await lock_project_admission(uow.session, command.project_id)
             receipt_key = (
                 f"lead-command:{actor.kind.value}:{actor.subject}:{command.idempotency_key}"
             )
             await uow.session.execute(
                 select(func.pg_advisory_xact_lock(func.hashtextextended(receipt_key, 0)))
             )
-            if name in {LeadCommandName.ENABLE_MANAGED_GOAL, LeadCommandName.START_BATCH}:
-                await lock_project_admission(uow.session, command.project_id)
             existing = await _receipt(uow.session, actor, command.idempotency_key)
             if existing is not None:
                 return _duplicate_or_conflict(existing, actor, command, digest)
@@ -165,8 +175,10 @@ class LeadershipCommandService:
                 outcome = _Outcome(CommandStatus.DENIED, error.code, {}, goal)
             return await _store(uow.session, actor, command, digest, outcome)
 
-    async def apply_human(self, principal: Principal, command: LeadCommand) -> CommandResult:
-        return await self.apply(Actor.from_principal(principal), command)
+    async def apply_human(
+        self, principal: Principal, command: LeadCommand, *, uow: UnitOfWork | None = None
+    ) -> CommandResult:
+        return await self.apply(Actor.from_principal(principal), command, uow=uow)
 
     async def apply_agent(
         self,

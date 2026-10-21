@@ -882,14 +882,26 @@ async def _prepare_discussion_reply(
     if type(part_index) is not int or part_index < 0:
         raise PermanentDeliveryError("discussion_reply_part_invalid")
     stored_parts = item.payload.get("reply_parts")
+    reply_text = turn.content
+    if item.payload.get("conversation_route") is not None:
+        from vuzol.discussion.conversation import ConversationRoute
+
+        try:
+            speaker = ConversationRoute.model_validate(item.payload["conversation_route"])
+        except ValueError as error:
+            raise PermanentDeliveryError("discussion_speaker_invalid") from error
+        # An inline code span makes a configured model name literal Markdown.
+        # Never let model-generated text decide who the actual speaker was.
+        label = speaker.label.replace("`", "'")
+        reply_text = f"`{label}`\n\n{reply_text}"
     if stored_parts is None:
-        parts = telegram_markdown_parts(turn.content)
+        parts = telegram_markdown_parts(reply_text)
     else:
         parts = _stored_message_parts(stored_parts, "discussion_reply_part_invalid")
     if part_index >= len(parts):
         raise PermanentDeliveryError("discussion_reply_part_invalid")
     html_body, fallback_body = parts[part_index]
-    rich_body = telegram_rich_html(turn.content) if rich_messages and part_index == 0 else None
+    rich_body = telegram_rich_html(reply_text) if rich_messages and part_index == 0 else None
     if rich_body is not None and len(parts) == 1 and "<table>" not in rich_body:
         # Ordinary Markdown formatting already works in short messages.
         # Posts are useful for long replies or rich-only structure, not every turn.

@@ -316,6 +316,20 @@ async def claim_routed_step(
                 )
                 continue
             chat_profile_id = value
+            from vuzol.discussion.conversation import conversation_provider_role
+
+            try:
+                role = conversation_provider_role(run.selected_route)
+            except ValueError:
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="chat_route_invalid",
+                    quota=False,
+                )
+                continue
             responder = next((p for p in profiles if p.id == value), None)
             if responder is None or run.selected_route.get("profile_revision") != content_revision(
                 responder
@@ -671,6 +685,22 @@ async def claim_routed_step(
             "provider_attempt": attempt,
             "budget_reservation_id": str(reservation.id),
         }
+        if chat_profile_id is not None:
+            from vuzol.projects.model_matrix import ModelAssignment
+
+            # Carry the immutable identity through the host sandbox boundary as
+            # well, using its existing profile revision fence (not live /model).
+            next_payload.pop("executor_model_override", None)
+            next_payload.pop("executor_reasoning_effort", None)
+            next_payload.update(
+                project_model_slot=run.selected_route.get("conversation_mode", "think"),
+                project_model_assignment=ModelAssignment(
+                    profile_id=selected.id,
+                    model=selected.model,
+                    reasoning_effort=selected.model_reasoning_effort,
+                    content_revision=run.selected_route["profile_revision"],
+                ).model_dump(mode="json"),
+            )
         if role is ProviderRole.PLANNER:
             next_payload["reasoning_max_tokens"] = min(
                 settings.limits.planner_reasoning_tokens, reservation.reserved_output_tokens

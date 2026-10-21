@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tests.unit.providers.test_cli_readonly import review_call as review_call
-from vuzol.config.models import ProviderRole, SandboxProfileConfig
+from vuzol.config.models import Capability, ProviderRole, SandboxProfileConfig
 from vuzol.config.revision import content_revision
 from vuzol.execution.codex import ExecutionEnvelopeFactory, _require_provider_command
 from vuzol.execution.domain import MountMode
@@ -154,12 +154,15 @@ async def test_native_review_adapter_uses_canonical_read_only_envelope(envelope_
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("tamper", ["writable", "extra-argument", "wrong-model", "wrong-effort"])
-@pytest.mark.parametrize("step_type", ["plan", "review"])
+@pytest.mark.parametrize("step_type", ["plan", "review", "execute_agent"])
 async def test_review_rejects_noncanonical_commands_before_process_record(
     envelope_call, tamper, step_type
 ):
     c = envelope_call
     c.step.step_type = step_type
+    if step_type == "execute_agent":
+        # Conversation profiles use their native model, not legacy coding overrides.
+        c.step.payload = {}
     if tamper == "writable":
         argv = _argv(c.profile, read_only=False)
     elif tamper == "extra-argument":
@@ -306,6 +309,47 @@ async def test_envelope_enforces_exact_matrix_profile_revision(envelope_call, ch
         envelope, _ = await c.envelopes.build(c.invocation)
         assert envelope.profile_id == pinned.profile_id
         assert envelope.argv == _argv(c.profile)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["think", "lead"])
+@pytest.mark.parametrize("changed", [False, True])
+async def test_conversation_host_envelope_is_read_only_and_revision_fenced(
+    envelope_call, mode, changed
+):
+    c = envelope_call
+    c.profile = c.profile.model_copy(
+        update={
+            "roles": frozenset({ProviderRole.LEAD if mode == "lead" else ProviderRole.EXECUTOR}),
+            "capabilities": frozenset({Capability.REPOSITORY_READ}),
+            "supported_task_types": frozenset({"architecture"}),
+            "sandbox_required": True,
+        }
+    )
+    assignment = ModelAssignment(
+        profile_id=c.profile.id,
+        model=c.profile.model,
+        reasoning_effort=c.profile.model_reasoning_effort,
+        content_revision=content_revision(c.profile),
+    )
+    c.step.step_type = "execute_agent"
+    c.step.payload = {
+        "project_model_slot": mode,
+        "project_model_assignment": assignment.model_dump(mode="json"),
+    }
+    if changed:
+        c.profile = c.profile.model_copy(update={"model": "unexpected-replacement"})
+    c.runtime.registries.profiles.get.return_value = c.profile
+    c.runtime.registries.profiles.items.return_value = (c.profile,)
+    if changed:
+        with pytest.raises(ExecutorPreferenceError, match="configuration changed"):
+            await c.envelopes.build(c.invocation)
+        c.session.add.assert_not_called()
+    else:
+        envelope, _ = await c.envelopes.build(c.invocation)
+        mounts = {mount.purpose: mount for mount in envelope.sandbox.mounts}
+        assert mounts["task-worktree"].mode is MountMode.READ_ONLY
+        assert mounts["worktree-git-metadata"].mode is MountMode.READ_ONLY
 
 
 @pytest.mark.anyio

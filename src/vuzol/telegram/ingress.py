@@ -3,12 +3,18 @@
 import hashlib
 import html
 import uuid
+from typing import cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.config.models import TopicConfig, TopicKind
+from vuzol.discussion.conversation import (
+    ConversationMode,
+    parse_conversation_command,
+    select_conversation_route,
+)
 from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
 from vuzol.projects.custom_sources import (
     AddSourceCommand,
@@ -17,6 +23,7 @@ from vuzol.projects.custom_sources import (
     is_source_command,
     parse_source_command,
 )
+from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.importing import ProjectImportError, parse_github_repository_url
 from vuzol.providers.subscription_limits import SUBSCRIPTION_LIMITS_DESTINATION
 from vuzol.security.secret_ingress import create_request, parse_secret_command
@@ -152,6 +159,15 @@ class TelegramIngressService:
                 if not topic.enabled:
                     raise TelegramPolicyError("project topic is disabled")
                 return await self._handle_plan_command(update, topic)
+            conversation_mode = parse_conversation_command(update.text)
+            if conversation_mode is not None:
+                if not settings.chat.enabled:
+                    raise TelegramPolicyError("conversation modes require chat.enabled")
+                if topic.kind is not TopicKind.PROJECT or topic.project_id is None:
+                    raise TelegramPolicyError("conversation modes require a project topic")
+                if not topic.enabled:
+                    raise TelegramPolicyError("project topic is disabled")
+                return await self._handle_conversation_mode(update, topic, conversation_mode)
             lead = parse_lead_command(update.text)
             if lead is not None and lead[0] == "enable" and not settings.project_lead.enabled:
                 # New goals stay on the legacy path. Existing goals keep pause,
@@ -670,6 +686,7 @@ class TelegramIngressService:
                     "control_override": (
                         None if control_override is None else control_override.value
                     ),
+                    **(await self._conversation_snapshot(uow, topic, update)),
                     **(
                         {
                             "media_group_id": update.media_group_id,
@@ -862,6 +879,105 @@ class TelegramIngressService:
             )
             await uow.inbox.mark_processed(
                 inbox_id, entity_type="telegram_command", entity_id=inbox_id
+            )
+        return IngressResult(status=IngressStatus.HANDLED)
+
+    async def _conversation_snapshot(
+        self, uow: UnitOfWork, topic: TopicConfig, update: MessageUpdate
+    ) -> dict[str, object]:
+        if not self._runtime.settings.chat.enabled:
+            return {}
+        assert uow.session is not None and topic.project_id is not None
+        mapping = await uow.session.scalar(
+            select(TopicMapping).where(
+                TopicMapping.chat_id == update.chat_id,
+                TopicMapping.message_thread_id == update.message_thread_id,
+            )
+        )
+        assert mapping is not None
+        if mapping.conversation_mode not in {"think", "lead"}:
+            return {"conversation_route_error": "invalid conversation mode"}
+        mode = cast(ConversationMode, mapping.conversation_mode)
+        if mapping.conversation_mode_message_id is None:
+            # No explicit selection yet: lead is the primary interlocutor when
+            # enabled. Feature-off chat retains its existing think responder.
+            mode = "lead" if self._runtime.settings.project_lead.enabled else "think"
+        try:
+            route = await select_conversation_route(
+                uow.session,
+                self._runtime,
+                project_id=topic.project_id,
+                mode=mode,
+            )
+        except (ExecutorPreferenceError, ValueError) as error:
+            # Keep the intent available to Jev. A missing chat model must not
+            # reroute to a different one, nor swallow an explicit work request.
+            return {"conversation_route_error": str(error)}
+        return {"conversation_route": route.model_dump(mode="json")}
+
+    async def _handle_conversation_mode(
+        self, update: MessageUpdate, topic: TopicConfig, mode: ConversationMode
+    ) -> IngressResult:
+        from vuzol.telegram.projections import enqueue_chat_notice
+
+        assert topic.project_id is not None
+        async with UnitOfWork(self._session_factory) as uow:
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            mapping_id = await uow.topics.upsert(
+                TopicMapping(
+                    chat_id=update.chat_id,
+                    message_thread_id=update.message_thread_id,
+                    topic_kind=topic.kind.value,
+                    project_id=topic.project_id,
+                    accepts_new_tasks=topic.accepts_new_tasks,
+                    default_workflow=topic.default_workflow,
+                    enabled=topic.enabled,
+                )
+            )
+            assert uow.session is not None
+            mapping = await uow.session.get(TopicMapping, mapping_id, with_for_update=True)
+            assert mapping is not None
+            if (
+                mapping.conversation_mode_message_id is not None
+                and update.message_id <= mapping.conversation_mode_message_id
+            ):
+                notice = "Это старое переключение; текущий собеседник не изменён."
+            else:
+                try:
+                    route = await select_conversation_route(
+                        uow.session,
+                        self._runtime,
+                        project_id=topic.project_id,
+                        mode=mode,
+                    )
+                except (ExecutorPreferenceError, ValueError) as error:
+                    notice = f"Собеседник не изменён: {error}. Проверь /model."
+                else:
+                    mapping.conversation_mode = mode
+                    mapping.conversation_mode_message_id = update.message_id
+                    notice = (
+                        f"{route.label}\n"
+                        "Текст и документы в этом топике теперь идут этому собеседнику. "
+                        "Переключение не запускает и не останавливает работу."
+                    )
+            await enqueue_chat_notice(
+                uow.session,
+                chat_id=update.chat_id,
+                thread_id=update.message_thread_id,
+                key=f"conversation:mode:{inbox_id}",
+                text=notice,
+            )
+            await uow.inbox.mark_processed(
+                inbox_id,
+                entity_type="telegram_command",
+                entity_id=inbox_id,
             )
         return IngressResult(status=IngressStatus.HANDLED)
 

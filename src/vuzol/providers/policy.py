@@ -13,6 +13,7 @@ from vuzol.config.models import (
     ProviderProfileConfig,
     ProviderRole,
 )
+from vuzol.providers.catalog import CONVERSATION_TASK_TYPE, conversation_compatible
 from vuzol.providers.domain import EffectiveProfileState, QuotaState
 
 
@@ -138,7 +139,19 @@ def _exclusions(
         reasons.append(ExclusionReason.DISABLED)
     if request.role not in profile.roles:
         reasons.append(ExclusionReason.ROLE)
-    if request.task_type not in profile.supported_task_types:
+    if request.task_type == CONVERSATION_TASK_TYPE:
+        # Only the server-bound, exact-model, read-only conversation workflow
+        # can use this internal purpose. Never broaden ordinary task eligibility.
+        if not (
+            conversation_compatible(profile, request.role)
+            and request.required_capabilities == frozenset({Capability.REPOSITORY_READ})
+            and request.requires_sandbox
+            and request.required_launch_mode is LaunchMode.CLI
+            and request.trusted_profile_id == profile.id
+            and request.restrict_to_profile_ids == frozenset({profile.id})
+        ):
+            reasons.append(ExclusionReason.TASK_TYPE)
+    elif request.task_type not in profile.supported_task_types:
         reasons.append(ExclusionReason.TASK_TYPE)
     if not request.required_capabilities.issubset(profile.capabilities):
         reasons.append(ExclusionReason.CAPABILITY)

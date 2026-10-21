@@ -184,17 +184,11 @@ def build_bundle(
                     "with repository_read and a sandbox for CLI execution"
                 )
         if settings.chat.enabled:
+            from vuzol.providers.catalog import conversation_compatible
+
             assert settings.chat.profile_id is not None
             responder = profiles.get(settings.chat.profile_id)
-            if (
-                not responder.enabled
-                or responder.provider not in {"codex", "pi", "grok", "kimi"}
-                or responder.launch_mode is not LaunchMode.CLI
-                or not responder.sandbox_required
-                or ProviderRole.EXECUTOR not in responder.roles
-                or "architecture" not in responder.supported_task_types
-                or Capability.REPOSITORY_READ not in responder.capabilities
-            ):
+            if not conversation_compatible(responder, ProviderRole.EXECUTOR):
                 raise RegistryError("chat.profile_id must be an enabled sandboxed CLI responder")
         resolver = ScopedSecretResolver(
             access_policy=_secret_access_policy(document, settings),

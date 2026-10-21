@@ -50,6 +50,7 @@ from vuzol.providers.budgets import (
     reserve_budget,
     resolve_horizon_scope,
 )
+from vuzol.providers.catalog import CONVERSATION_TASK_TYPE
 from vuzol.providers.control import ceiling_is_admission_only
 from vuzol.providers.domain import EffectiveProfileState
 from vuzol.providers.fallback_policy import should_fallback_provider
@@ -195,6 +196,8 @@ async def claim_routed_step(
             configuration_revision=run.configuration_revision,
         )
         role = PROVIDER_STEP_ROLES[step.step_type]
+        # Preserve old, unbound discussion runs. A validated conversation snapshot
+        # below uses its own internal purpose instead of this legacy task alias.
         routing_task_type = (
             "architecture" if task.task_type == "discussion_agent_internal" else task.task_type
         )
@@ -344,6 +347,9 @@ async def claim_routed_step(
                 )
                 continue
             pin_family_ids = frozenset({value})
+            # Conversation has its own already-validated internal purpose.
+            # Do not pretend that an arbitrary lead/think model is an architecture worker.
+            routing_task_type = CONVERSATION_TASK_TYPE
             # An exact responder never uses project /model or any profile fallback.
             failed_profile_id = None
             allowed_fallbacks = ()

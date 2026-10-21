@@ -20,6 +20,7 @@ from vuzol.leadership.invocation_context import (
 )
 from vuzol.leadership.model import LeadModelUnavailable
 from vuzol.leadership.persistence import LeadershipInference
+from vuzol.observability import get_logger
 from vuzol.providers.budgets import (
     BudgetExceeded,
     accounting_for_profile,
@@ -28,12 +29,27 @@ from vuzol.providers.budgets import (
     reserve_invocation_budget,
     settle_invocation_budget,
 )
-from vuzol.providers.domain import ProviderErrorCategory, ProviderRequest, ProviderResult
+from vuzol.providers.domain import (
+    ProviderErrorCategory,
+    ProviderFailureDetails,
+    ProviderRequest,
+    ProviderResult,
+    ProviderResultStatus,
+)
 from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.storage.models import ProviderBudgetReservation
 from vuzol.storage.types import BudgetReservationStatus
 from vuzol.workflows.ports import CancellationContext
+
+_logger = get_logger(__name__)
+
+
+def _failure_reason(failure: ProviderFailureDetails | None, purpose: str) -> str:
+    review = purpose == "project_goal_review"
+    if failure is not None and failure.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT:
+        return "goal_review_invalid" if review else "lead_response_invalid"
+    return "goal_review_unavailable" if review else "lead_model_unavailable"
 
 
 async def invoke(
@@ -94,7 +110,10 @@ async def invoke(
                     ):
                         raise LeadModelUnavailable("lead_inference_reconciliation")
                     if prior.state == "received" and prior.result is not None:
-                        return ProviderResult.model_validate(prior.result)
+                        replay = ProviderResult.model_validate(prior.result)
+                        if replay.status is not ProviderResultStatus.SUCCEEDED:
+                            raise LeadModelUnavailable(_failure_reason(replay.failure, purpose))
+                        return replay
                     if prior.state == "not_sent":
                         raise LeadModelUnavailable("lead_model_unavailable")
                     raise LeadModelUnavailable("lead_inference_reconciliation")
@@ -160,9 +179,29 @@ async def invoke(
     except ProviderFailure as error:
         not_sent = not error.request_sent
         result = error.receipt_result()
-        raise LeadModelUnavailable("lead_model_unavailable") from error
+        _logger.warning(
+            "Project model invocation failed",
+            extra={
+                "event": "leadership.provider_failed",
+                "invocation_id": str(request.task_id),
+                "phase": phase,
+                "profile_id": profile.id,
+                "failure": error.details().model_dump(mode="json"),
+            },
+        )
+        raise LeadModelUnavailable(_failure_reason(error.details(), purpose)) from error
     except Exception as error:
-        raise LeadModelUnavailable("lead_model_unavailable") from error
+        _logger.warning(
+            "Project model invocation ended without a receipt",
+            extra={
+                "event": "leadership.provider_receipt_missing",
+                "invocation_id": str(request.task_id),
+                "phase": phase,
+                "profile_id": profile.id,
+                "category": "timeout" if isinstance(error, TimeoutError) else "unknown",
+            },
+        )
+        raise LeadModelUnavailable(_failure_reason(None, purpose)) from error
     finally:
         async with factory.begin() as session:
             stored = await session.get(

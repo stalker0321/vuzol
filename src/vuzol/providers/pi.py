@@ -185,6 +185,7 @@ class PiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary=summary,
+                execution_completed=True,
                 usage=receipt,
                 provider_request_id=receipt_id,
             )
@@ -196,6 +197,7 @@ class PiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary=str(error),
+                execution_completed=True,
                 usage=receipt,
                 provider_request_id=receipt_id,
             ) from None
@@ -224,6 +226,7 @@ class PiCliAdapter:
                 retryable=False,
                 request_sent=True,
                 safe_summary="Pi request was aborted",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=decoded.response_id,
             )
@@ -233,6 +236,7 @@ class PiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Pi agent stopped with an error",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=decoded.response_id,
             )
@@ -250,6 +254,7 @@ class PiCliAdapter:
                     retryable=True,
                     request_sent=True,
                     safe_summary="Pi returned invalid structured output",
+                    execution_completed=True,
                     usage=measured_usage,
                     provider_request_id=decoded.response_id,
                 ) from None
@@ -261,6 +266,7 @@ class PiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Pi returned no final response",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=decoded.response_id,
             )

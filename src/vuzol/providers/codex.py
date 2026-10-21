@@ -181,6 +181,7 @@ class CodexCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Codex CLI invocation failed",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=request_id,
             )
@@ -200,6 +201,7 @@ class CodexCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Codex CLI returned invalid structured output",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=request_id,
             ) from None

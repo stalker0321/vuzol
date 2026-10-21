@@ -6,6 +6,7 @@ import re
 import uuid
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -181,6 +182,7 @@ class GrokCliAdapter:
                     retryable=True,
                     request_sent=True,
                     safe_summary="Grok subscription usage is exhausted for the current window",
+                    execution_completed=True,
                     usage=measured_usage,
                     provider_request_id=receipt_id,
                 )
@@ -189,6 +191,7 @@ class GrokCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Grok CLI invocation failed",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=receipt_id,
             )
@@ -203,6 +206,7 @@ class GrokCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Grok CLI reported provider-originated cancellation",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=receipt_id,
             ) from error
@@ -212,14 +216,16 @@ class GrokCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Grok CLI returned invalid output",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=receipt_id,
             ) from error
         try:
             structured_output = _step09a_structured_output(request, str(body["text"]))
         except ProviderFailure as failure:
-            raise failure.with_receipt(
-                measured_usage, _optional_string(body.get("request_id"))
+            raise replace(
+                failure.with_receipt(measured_usage, _optional_string(body.get("request_id"))),
+                execution_completed=True,
             ) from failure
         except ValueError as error:
             raise ProviderFailure(
@@ -227,6 +233,7 @@ class GrokCliAdapter:
                 retryable=False,
                 request_sent=True,
                 safe_summary="Grok CLI returned invalid structured output",
+                execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=receipt_id,
             ) from error

@@ -212,6 +212,18 @@ lost ownership, or unknown cleanup retains it. Startup/periodic reconciliation c
 stale turn resources and can release tickets whose original launcher demonstrably drained.
 Container absence alone is not proof that a partitioned launcher cannot resume.
 
+`ProviderFailure.execution_completed` records transport completion independently of
+`request_sent` and `usage`. A fully received API rejection with HTTP 400/401/403/404/413/422/429
+releases the matching-token slot after the ownership checks; a fully read HTTP 200 response
+that fails output validation also ends the invocation. No zero-cost usage is invented, and a
+sent request remains sent. CLI adapters certify completion only after the supervised transport
+returns a process result; the account wrapper still checks persisted runtime cleanup.
+Usage alone (including a partial receipt) is never permission to release an account slot.
+Transport timeouts/disconnects, interrupted bodies, HTTP 408/499/5xx, unrecognized rejections,
+lost ownership, cancellation and unresolved launcher cleanup remain fail-closed. There is no
+blanket error release or TTL. Rate-limit cooldown and authentication repair policies are
+unchanged: admission being available does not itself schedule or authorize a retry.
+
 Known limitation: a ticket left by an undrained/crashed launcher has no automatic expiry or
 operator recovery command in this change. The account remains blocked rather than risking a
 duplicate call. Do not repair it with ad-hoc SQL. A future recovery workflow must prove every
@@ -406,6 +418,85 @@ lifecycle=completed
 head_b=14dbe1f926358fce7bbdbe0b84115bd053384061
 main=852d20746552746979014caf39b06e558de62361
 ```
+
+### HTTP-account review follow-up (2026-10-21)
+
+Baseline: clean `agent/project-lead-v1` at `24d0367`. Review input:
+`/home/vodkolyan/vuzol-audit-2026-10-21/REVIEW_MODEL_ROLES.md` and its accompanying
+`test_account_http_rejection.py`. P1 is fixed by the explicit completion-evidence contract
+above, not by changing roles, setting `request_sent=False`, inventing usage, or expiring tickets.
+No new migration is needed. Production, defaults, live accounts and services were not changed;
+the existing rollout prerequisites and disabled-by-default lead setting still apply.
+
+The original external probe produced **3 failures** and was left unchanged. Its injected
+`httpx.AsyncClient` lacks `base_url`: with this installed httpx, the mock sees the request but
+cookie/URL processing then raises `ValueError("unknown url type: '/chat/completions'")` before
+the adapter receives the rejection. This is not itself proof of HTTP rejection classification.
+The stock copy sets the client's base URL and additionally asserts the actual failure category;
+all original ticket/second-HTTP-call assertions remain. With the old account-release condition
+temporarily restored, this corrected test produced **7 assertion failures** for
+429/401/400/403/404/413/422 (ticket retained, one HTTP call). With the fix, these pass.
+The unmodified external script is not reported as passing.
+
+Regression coverage includes real `AdapterRegistry` construction/secret resolution and a real
+HTTP adapter with only `httpx.MockTransport` substituted: rejection → fresh registry with
+corrected credentials/request → successful call by another role on the same account. Timeout,
+disconnect, protocol error, HTTP 408/499/500/502/504 → durable ticket retained → a fresh registry
+cannot send again. These are registry reconstruction tests, not a new OS process or a live
+provider pilot. The real worker entrypoint verifies that a rejected lead call releases admission
+while recording unknown, nonzero conservative cost and parking the goal for the owner.
+CLI tests separately distinguish a returned process result from an uncertain transport exception;
+token mismatch, lost ownership, cancellation and unresolved cleanup still prevent release.
+
+Verification used only disposable container `vuzol-http-review-test-20261021`, label
+`vuzol.disposable-test=http-review-20261021`, loopback port 32775. SQL verified database/user
+as `vuzol_http_review_test` / `vuzol_http_test` before migrations reached `d7a4f50e9404`.
+Use the disposable venv, not the production venv. Serialize PostgreSQL tests: the fixture
+terminates connections and truncates its selected database. The DSNs below are recorded test
+values, never production/shared defaults; recreate the isolated database before reusing them.
+
+```sh
+cd /home/vodkolyan/vuzol-afterword-stabilization
+export PATH=/tmp/vuzol-stage2.jzwfpD/venv/bin:$PATH
+export PYTHONPATH=src:.
+export PYTHONDONTWRITEBYTECODE=1
+export VUZOL_TEST_DATABASE_DSN=postgresql://vuzol_http_test:disposable-local-only@127.0.0.1:32775/vuzol_http_review_test # pragma: allowlist secret - disposable test credential
+export VUZOL_HTTP_TEST_DSN=postgresql+psycopg://vuzol_http_test:disposable-local-only@127.0.0.1:32775/vuzol_http_review_test # pragma: allowlist secret - disposable test credential
+VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_HTTP_TEST_DSN alembic upgrade head
+pytest --no-cov -q -rs tests/unit --tb=short
+pytest --no-cov -q tests/integration/providers/test_account_http_rejection.py tests/integration/leadership/test_runtime_provider_boundary.py --tb=short -W error::sqlalchemy.exc.SAWarning -W error::pytest.PytestUnraisableExceptionWarning
+pytest --no-cov -q -rs tests/integration/providers tests/integration/leadership tests/integration/telegram/test_durable_ingress.py tests/integration/telegram/test_polling_commit.py tests/integration/workflows/test_production_consent.py tests/integration/test_secret_scan.py --tb=short -W error::sqlalchemy.exc.SAWarning -W error::pytest.PytestUnraisableExceptionWarning
+mypy src/vuzol
+git diff --check
+```
+
+Full unit result: **3391 passed, 1 skipped**, 35.71 seconds; the existing remote-execution
+out-of-scope test remains skipped. Three dependency deprecation warnings (Starlette/PTB) were
+reported, not suppressed. Focused HTTP/entrypoint check: **24 passed**, 14.20 seconds.
+Final expanded integration group (the third pytest command): **271 passed**, 212.92 seconds,
+no skips/deselections or warnings reported. This includes the final cross-role request checks.
+Type checking: **298 source files passed**. These commands disable coverage collection;
+there is no coverage claim. The full integration suite, paid/live providers, real Telegram
+mutations and Docker-marked acceptance tests were not run for this follow-up. The pre-existing
+full-suite connection warning described above is not claimed fixed by these changes.
+
+All 12 changed Python files passed Ruff lint and format checks; changed-file secret scanning
+and `git diff --check` passed. Reproduce lint/scanning against the pre-fix baseline:
+
+```sh
+git diff --name-only -z 24d0367 -- '*.py' | xargs -0 ruff check
+git diff --name-only -z 24d0367 -- '*.py' | xargs -0 ruff format --check
+git diff --name-only -z 24d0367 | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+```
+
+After verification, the exact disposable container and its sole anonymous PostgreSQL volume
+were removed and their absence checked. No production/shared data was deleted. Test rows are
+not backed up; the fixtures recreate them in a new disposable database.
+
+Remaining limit: genuinely unknown tickets still have no automatic expiry or operator recovery
+command; no existing ticket is retroactively deleted by this fix. The goal can remain parked
+after a rejection until normal owner controls are used. A bounded live pilot is still required
+before claiming production readiness; this fix does not itself authorize or perform that pilot.
 
 ### Historical registry examples
 

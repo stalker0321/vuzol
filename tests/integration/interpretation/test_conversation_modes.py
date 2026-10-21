@@ -57,7 +57,9 @@ def modes_runtime(tmp_path):
         model="vendor/current-lead",
         launch_mode="cli",
         roles=frozenset({ProviderRole.LEAD, ProviderRole.REVIEWER}),
-        supported_task_types=frozenset({"architecture", "coding"}),
+        # Shape of the deployed Pi lead catalog: conversation must not require
+        # pretending that this profile also executes architecture tasks.
+        supported_task_types=frozenset({"coding", "project_lead", "general"}),
         capabilities=frozenset({Capability.REPOSITORY_READ}),
         sandbox_required=True,
         runtime_identity="test-lead",

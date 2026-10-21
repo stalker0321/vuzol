@@ -82,10 +82,13 @@ With the lead feature disabled, the legacy task-admission path remains unchanged
 Each admitted message pins its mode, model, reasoning effort, and profile revision. Changing a
 mode or assignment affects later messages, not queued answers. Changed/missing profiles fail
 closed without silently substituting a different model. Replies identify the pinned speaker.
-Conversation currently requires a sandboxed CLI profile with `repository_read`, `architecture`,
+Conversation currently requires a sandboxed CLI profile with `repository_read`
 and the corresponding role (`executor` for think; `lead` for lead). API-only profiles do not
 yet have a repository-capable conversation adapter. Host-side command validation and read-only
 mounts apply to both modes; discussing a plan is not execution authorization.
+Conversation does not require `architecture` in the profile's execution task types; ordinary
+execution still requires its configured task type. Existing profiles/assignment revisions do
+not need rewriting for this distinction.
 
 Apply migration `e8b5a61fa505` to the **explicitly selected** test/deployment database before
 starting this version. Defaults remain off. Disable `chat.enabled` to disable the mode UI;

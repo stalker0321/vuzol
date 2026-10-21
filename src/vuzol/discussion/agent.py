@@ -24,6 +24,7 @@ from vuzol.discussion.conversation import ConversationRoute, select_conversation
 from vuzol.discussion.memory import MemoryPack
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.interpretation.chat_documents import attach_document_artifacts
+from vuzol.providers.catalog import CONVERSATION_TASK_TYPE
 from vuzol.storage.attempts import snapshot_task_spec, validate_source_turn
 from vuzol.storage.models import ConversationTurn, Interpretation, Step, Task, TransactionalOutbox
 from vuzol.storage.types import (
@@ -42,7 +43,7 @@ from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow, Outco
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.service import materialize_run
 
-DISCUSSION_INTERNAL_TASK_TYPE = "discussion_agent_internal"
+DISCUSSION_INTERNAL_TASK_TYPE = CONVERSATION_TASK_TYPE
 DISCUSSION_AGENT_SCHEMA_VERSION = "discussion-agent-reply.v1"
 DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v7"
 

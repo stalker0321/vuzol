@@ -1254,10 +1254,8 @@ class ProviderStepHandler:
             provider_role = PROVIDER_STEP_ROLES[step.step_type]
             if run.selected_route.get("schema_version") == "discussion-chat-route.v1":
                 from vuzol.config.revision import content_revision
-                from vuzol.discussion.conversation import (
-                    conversation_compatible,
-                    conversation_provider_role,
-                )
+                from vuzol.discussion.conversation import conversation_provider_role
+                from vuzol.providers.catalog import conversation_compatible
 
                 provider_role = conversation_provider_role(run.selected_route)
                 if (

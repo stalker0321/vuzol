@@ -5,12 +5,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.config import Capability, RegistryError, RuntimeConfiguration
-from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
+from vuzol.config import RegistryError, RuntimeConfiguration
+from vuzol.config.models import ProviderProfileConfig, ProviderRole
 from vuzol.config.revision import content_revision
 from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.model_matrix import ModelAssignment, assignment_profile, assignment_snapshot
-from vuzol.providers.catalog import supported_profile
+from vuzol.providers.catalog import conversation_compatible
 from vuzol.storage.models import ProjectExecutorPreference
 
 ConversationMode = Literal["think", "lead"]
@@ -61,18 +61,6 @@ class ConversationRoute(BaseModel):
         if not conversation_compatible(profile, self.role):
             raise ExecutorPreferenceError("selected model has no sandboxed read-only chat adapter")
         return profile
-
-
-def conversation_compatible(profile: ProviderProfileConfig, role: ProviderRole) -> bool:
-    return (
-        profile.enabled
-        and supported_profile(profile)
-        and profile.launch_mode is LaunchMode.CLI
-        and profile.sandbox_required
-        and role in profile.roles
-        and "architecture" in profile.supported_task_types
-        and Capability.REPOSITORY_READ in profile.capabilities
-    )
 
 
 async def select_conversation_route(

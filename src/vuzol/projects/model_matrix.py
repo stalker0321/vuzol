@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.config.models import Capability, LaunchMode, ProviderProfileConfig, ProviderRole
+from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.revision import content_revision
 from vuzol.projects.executor_preference import (
@@ -15,7 +15,7 @@ from vuzol.projects.executor_preference import (
     ExecutorWorkerKey,
     ensure_preference_row,
 )
-from vuzol.providers.catalog import supported_profile
+from vuzol.providers.catalog import conversation_compatible, supported_profile
 
 MATRIX_KEY = "project_model_assignments"
 LEGACY_EXECUTOR_KEY = "project_executor_preference"
@@ -75,14 +75,7 @@ def eligible_profiles(
                 and supported_profile(profile)
                 and role in profile.roles
                 and (role is not ProviderRole.EXECUTOR or profile.launch_mode is LaunchMode.CLI)
-                and (
-                    slot != "think"
-                    or (
-                        profile.sandbox_required
-                        and "architecture" in profile.supported_task_types
-                        and Capability.REPOSITORY_READ in profile.capabilities
-                    )
-                )
+                and (slot != "think" or conversation_compatible(profile, role))
             ),
             key=lambda profile: (profile.routing_priority, profile.id),
         )

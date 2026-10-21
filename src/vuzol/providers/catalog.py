@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 
-from vuzol.config.models import LaunchMode, ProviderProfileConfig
+from vuzol.config.models import Capability, LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.grok import GrokCliAdapter
 from vuzol.providers.kimi import KimiCliAdapter
@@ -16,10 +16,25 @@ CLI_ADAPTERS: dict[str, Callable[[CodexProcessTransport], ProviderAdapter]] = {
     "pi": PiCliAdapter,
 }
 
+CONVERSATION_TASK_TYPE = "discussion_agent_internal"
+
 
 def supported_profile(profile: ProviderProfileConfig) -> bool:
     return (profile.launch_mode is LaunchMode.CLI and profile.provider in CLI_ADAPTERS) or (
         profile.launch_mode is LaunchMode.API and profile.provider == "openai-compatible"
+    )
+
+
+def conversation_compatible(profile: ProviderProfileConfig, role: ProviderRole) -> bool:
+    """Read-only conversation is a role/transport capability, not an execution task type."""
+    return (
+        profile.enabled
+        and supported_profile(profile)
+        and profile.launch_mode is LaunchMode.CLI
+        and profile.sandbox_required
+        and role in {ProviderRole.EXECUTOR, ProviderRole.LEAD}
+        and role in profile.roles
+        and Capability.REPOSITORY_READ in profile.capabilities
     )
 
 

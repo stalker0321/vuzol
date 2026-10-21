@@ -44,14 +44,20 @@ def test_chat_is_opt_in_and_requires_explicit_responder() -> None:
         },
         {"sandbox_required": False},
         {"roles": frozenset({"planner"})},
-        {"supported_task_types": frozenset({"coding"})},
         {"capabilities": frozenset()},
     ],
 )
 def test_chat_rejects_unsafe_or_incompatible_responder(
     tmp_path: Path, changes: dict[str, object]
 ) -> None:
-    responder = ProviderProfileConfig.model_validate(
+    responder = chat_profile(tmp_path, **changes)
+    configured = settings(tmp_path, chat=ChatSettings(enabled=True, profile_id=responder.id))
+    with pytest.raises(ConfigurationLoadError, match="sandboxed CLI responder"):
+        build_bundle(RegistryDocument(profiles=(responder,)), configured)
+
+
+def chat_profile(tmp_path: Path, **changes: object) -> ProviderProfileConfig:
+    return ProviderProfileConfig.model_validate(
         {
             "id": "sol-chat",
             "model": "gpt-6.1-sol",
@@ -70,9 +76,17 @@ def test_chat_rejects_unsafe_or_incompatible_responder(
             **changes,
         }
     )
+
+
+@pytest.mark.parametrize(
+    "task_types",
+    [frozenset({"coding"}), frozenset({"project_lead"}), frozenset({"general"}), frozenset()],
+)
+def test_chat_does_not_require_architecture_execution_support(tmp_path, task_types):
+    responder = chat_profile(tmp_path, supported_task_types=task_types)
     configured = settings(tmp_path, chat=ChatSettings(enabled=True, profile_id=responder.id))
-    with pytest.raises(ConfigurationLoadError, match="sandboxed CLI responder"):
-        build_bundle(RegistryDocument(profiles=(responder,)), configured)
+    bundle = build_bundle(RegistryDocument(profiles=(responder,)), configured)
+    assert bundle.profiles.get(responder.id).supported_task_types == task_types
 
 
 def test_chat_profile_is_not_required_by_legacy_configuration(tmp_path: Path) -> None:

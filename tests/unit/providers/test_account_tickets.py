@@ -109,8 +109,9 @@ def test_uncertain_execute_keeps_ticket_after_lock_released(cancelled: bool) -> 
 
 @pytest.mark.parametrize("unresolved", [False, True])
 @pytest.mark.parametrize("sent", [False, True])
+@pytest.mark.parametrize("measured", [False, True])
 def test_authoritative_failure_releases_only_after_confirmed_cleanup(
-    tmp_path: Path, unresolved: bool, sent: bool
+    tmp_path: Path, unresolved: bool, sent: bool, measured: bool
 ) -> None:
     async def scenario() -> None:
         database, adapter = Database(), Adapter()
@@ -121,7 +122,8 @@ def test_authoritative_failure_releases_only_after_confirmed_cleanup(
             else ProviderErrorCategory.QUOTA_EXHAUSTED,
             retryable=False,
             request_sent=sent,
-            usage=NormalizedUsage(duration_ms=1) if sent else None,
+            usage=NormalizedUsage(duration_ms=1) if measured else None,
+            execution_completed=sent,
         )
         adapter.failure = failure
         task = asyncio.create_task(
@@ -138,6 +140,68 @@ def test_authoritative_failure_releases_only_after_confirmed_cleanup(
         assert error.value is failure
         assert bool(database.tickets) == unresolved
         assert not database.locks
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("obstacle", ["none", "wrong-token", "ownership", "cancelled"])
+def test_completion_evidence_cannot_bypass_release_fences(obstacle: str) -> None:
+    async def scenario() -> None:
+        database, adapter = Database(), Adapter()
+        configured = profile("first", account_id="shared")
+        cancellation = CancellationContext()
+        failure = ProviderFailure(
+            ProviderErrorCategory.RATE_LIMITED,
+            retryable=True,
+            request_sent=True,
+            execution_completed=True,
+        )
+        adapter.failure = failure
+        wrapper = bound(database, adapter, configured)
+        task = asyncio.create_task(wrapper.execute(provider_request(), configured, cancellation))
+        await wait_for(adapter.started)
+        if obstacle == "wrong-token":
+            database.tickets[("shared", 0)] = uuid.uuid4()
+        elif obstacle == "ownership":
+            database.connections[0].backend_changed = True
+        elif obstacle == "cancelled":
+            cancellation.request()
+        expected_token = database.tickets[("shared", 0)]
+        adapter.finish.set()
+        with pytest.raises(ProviderFailure) as error:
+            await task
+        assert error.value is failure and failure.usage is None
+        assert not database.locks
+        if obstacle == "none":
+            assert not database.tickets
+        else:
+            assert database.tickets[("shared", 0)] == expected_token
+            with pytest.raises(ProviderFailure, match="ticket"):
+                await wrapper.execute(provider_request(), configured, CancellationContext())
+            assert len(adapter.executions) == 1
+
+    asyncio.run(scenario())
+
+
+def test_usage_alone_is_not_completion_evidence() -> None:
+    async def scenario() -> None:
+        database, adapter = Database(), Adapter()
+        configured = profile("first", account_id="shared")
+        adapter.failure = ProviderFailure(
+            ProviderErrorCategory.TIMEOUT,
+            retryable=True,
+            request_sent=True,
+            usage=NormalizedUsage(input_tokens=42, duration_ms=1),
+        )
+        adapter.finish.set()
+        wrapper = bound(database, adapter, configured)
+        with pytest.raises(ProviderFailure) as failure:
+            await wrapper.execute(provider_request(), configured, CancellationContext())
+        assert failure.value.usage is not None and not failure.value.execution_completed
+        assert database.tickets and not database.locks
+        with pytest.raises(ProviderFailure, match="ticket"):
+            await wrapper.execute(provider_request(), configured, CancellationContext())
+        assert len(adapter.executions) == 1
 
     asyncio.run(scenario())
 

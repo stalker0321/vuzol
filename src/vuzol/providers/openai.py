@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -28,6 +29,10 @@ from vuzol.workflows.ports import CancellationContext
 
 _LOGGER = get_logger(__name__)
 _DIAGNOSTIC_EXCERPT_CHARS = 4_000
+# Definitive rejections, not timeouts or ambiguous gateway/server errors.
+# Unrecognized statuses remain fail-closed; a received HTTP response alone
+# does not prove that upstream generation has stopped (e.g. HTTP 504).
+_COMPLETED_HTTP_REJECTIONS = frozenset({400, 401, 403, 404, 413, 422, 429})
 _SECRET_SHAPED_OUTPUT = (
     re.compile(
         r"(?i)(api[_-]?key|authorization|bearer|token|password|secret)"
@@ -84,6 +89,7 @@ class OpenAICompatibleAdapter:
         headers = {"Authorization": f"Bearer {self._credential.get_secret_value()}"}
         measured_usage: NormalizedUsage | None = None
         request_id: str | None = None
+        execution_completed = False
         try:
             response = await self._post(
                 profile,
@@ -92,10 +98,13 @@ class OpenAICompatibleAdapter:
                 json=payload,
                 timeout_seconds=request.timeout_seconds,
             )
+            request_id = response.headers.get("x-request-id")
             if response.status_code >= 400:
                 raise _http_failure(response, profile=profile)
+            # _post is non-streaming: a synchronous completion body has been
+            # fully read, even if its content later fails validation.
+            execution_completed = response.status_code == 200
             body = response.json()
-            request_id = response.headers.get("x-request-id")
             if isinstance(body, dict) and isinstance(body.get("usage"), dict):
                 measured_usage = _response_usage(body["usage"], started)
             choice = body["choices"][0]
@@ -181,9 +190,16 @@ class OpenAICompatibleAdapter:
                 structured = decoded
                 text = None
         except ProviderFailure as failure:
+            failure_with_evidence = replace(
+                failure,
+                execution_completed=failure.execution_completed or execution_completed,
+                provider_request_id=failure.provider_request_id or request_id,
+            )
             if measured_usage is not None:
-                raise failure.with_receipt(measured_usage, request_id) from failure
-            raise
+                failure_with_evidence = failure_with_evidence.with_receipt(
+                    measured_usage, request_id
+                )
+            raise failure_with_evidence from failure
         except httpx.TimeoutException as error:
             raise ProviderFailure(
                 ProviderErrorCategory.TIMEOUT,
@@ -206,6 +222,7 @@ class OpenAICompatibleAdapter:
                 safe_summary="provider response shape is invalid",
                 usage=measured_usage,
                 provider_request_id=request_id,
+                execution_completed=execution_completed,
             ) from error
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,
@@ -466,6 +483,8 @@ def _http_failure(response: httpx.Response, *, profile: ProviderProfileConfig) -
         request_sent=True,
         retry_after_seconds=retry_after,
         safe_summary=f"provider HTTP failure category={category.value}",
+        provider_request_id=response.headers.get("x-request-id"),
+        execution_completed=status in _COMPLETED_HTTP_REJECTIONS,
     )
 
 

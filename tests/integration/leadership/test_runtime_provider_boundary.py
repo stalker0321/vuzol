@@ -18,6 +18,7 @@ from tests.integration.leadership.test_managed_goal_flow import (
 from vuzol.config.registries import ProfileRegistry
 from vuzol.leadership.composition import build_project_lead_worker
 from vuzol.leadership.persistence import ManagedGoal
+from vuzol.providers.account_persistence import ProviderAccountLease
 from vuzol.storage.models import ProviderBudgetReservation, UsageRecord
 from vuzol.storage.types import BudgetReservationStatus
 
@@ -29,8 +30,9 @@ def anyio_backend():
     return "asyncio"
 
 
+@pytest.mark.parametrize("status", [200, 429, 401, 400])
 async def test_cli_composes_actual_http_provider_and_settles_its_reservation(
-    postgres_dsn, tmp_path, monkeypatch
+    postgres_dsn, tmp_path, monkeypatch, status
 ):
     from vuzol.cli import worker
     from vuzol.config.settings import ProjectLeadSettings
@@ -47,7 +49,11 @@ async def test_cli_composes_actual_http_provider_and_settles_its_reservation(
                 update={"project_lead": ProjectLeadSettings(enabled=True, profile_id="lead-local")}
             ),
             "registries": runtime.registries.model_copy(
-                update={"profiles": ProfileRegistry((_profile(),))}
+                update={
+                    "profiles": ProfileRegistry(
+                        (_profile().model_copy(update={"account_id": "lead-account"}),)
+                    )
+                }
             ),
         }
     )
@@ -58,6 +64,8 @@ async def test_cli_composes_actual_http_provider_and_settles_its_reservation(
         assert request.url.path == "/v1/chat/completions"
         assert payload["model"] == "lead-test"
         requests.append(payload)
+        if status != 200:
+            return httpx.Response(status, json={"error": {"message": "rejected"}})
         return httpx.Response(
             200,
             json={
@@ -89,13 +97,21 @@ async def test_cli_composes_actual_http_provider_and_settles_its_reservation(
             usage = await session.scalar(select(UsageRecord))
             reservation = await session.scalar(select(ProviderBudgetReservation))
             assert usage.purpose == "project_lead"
-            assert usage.provider_request_id == "fixture-request"
-            assert usage.input_tokens == 12
-            assert usage.output_tokens == 4
             assert reservation.status is not BudgetReservationStatus.RESERVED
             assert usage.invocation_id == reservation.invocation_id
+            assert await session.get(ProviderAccountLease, ("lead-account", 0)) is None
             goal = await session.scalar(select(ManagedGoal))
-            assert goal.waiting_reason == "model_idle"
+            if status == 200:
+                assert usage.provider_request_id == "fixture-request"
+                assert usage.input_tokens == 12
+                assert usage.output_tokens == 4
+                assert goal.waiting_reason == "model_idle"
+            else:
+                # Admission release is NOT evidence of zero billing or no send.
+                assert usage.cost_known is False and usage.cost_units > 0
+                assert usage.outcome == "unknown"
+                assert goal.waiting_reason == "lead_model_unavailable"
+                assert goal.wakeup_condition["kind"] == "owner"
 
 
 async def test_budget_refusal_never_reaches_transport(postgres_dsn, monkeypatch):

@@ -22,6 +22,10 @@ class ProviderFailure(Exception):
     # reservation for facts the provider already reported.
     usage: NormalizedUsage | None = None
     provider_request_id: str | None = None
+    # Positive transport evidence that the invocation ended, independent of
+    # whether it was sent or its cost was measured. Defaults to unknown. This
+    # does not waive account ownership or supervised-runtime cleanup checks.
+    execution_completed: bool = False
 
     def with_receipt(
         self, usage: NormalizedUsage, provider_request_id: str | None = None

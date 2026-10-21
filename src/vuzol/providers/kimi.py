@@ -161,6 +161,7 @@ class KimiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary=summary,
+                execution_completed=True,
             )
         try:
             decoded_text = _decode_output(result.stdout)
@@ -179,6 +180,7 @@ class KimiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Kimi Code CLI returned invalid structured output",
+                execution_completed=True,
                 usage=NormalizedUsage(duration_ms=result.duration_ms),
             ) from None
         if not text and structured is None:
@@ -187,6 +189,7 @@ class KimiCliAdapter:
                 retryable=True,
                 request_sent=True,
                 safe_summary="Kimi Code CLI returned no final response",
+                execution_completed=True,
                 usage=NormalizedUsage(duration_ms=result.duration_ms),
             )
         return ProviderResult(

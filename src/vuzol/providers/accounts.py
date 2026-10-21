@@ -135,7 +135,7 @@ class AccountBoundAdapter:
                             connection, backend_pid, request, profile, cancellation
                         )
                     except ProviderFailure as failure:
-                        if not failure.request_sent or failure.usage is not None:
+                        if not failure.request_sent or failure.execution_completed:
                             await self._release_if_confirmed(
                                 connection, backend_pid, execution, cancellation
                             )

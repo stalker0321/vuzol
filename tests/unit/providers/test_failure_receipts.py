@@ -155,6 +155,7 @@ def test_failure_receipt_is_immutable_and_unknown_usage_stays_unknown() -> None:
     usage = NormalizedUsage(input_tokens=42, duration_ms=1)
     measured = failure.with_receipt(usage, "receipt")
     assert measured.usage == usage and failure.usage is None
+    assert not measured.execution_completed  # Usage alone does not certify completion.
     assert measured.with_receipt(NormalizedUsage(input_tokens=99, duration_ms=1)).usage == usage
     result = measured.receipt_result()
     assert result is not None and result.usage.output_tokens is None

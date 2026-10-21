@@ -274,3 +274,68 @@ def test_decoded_session_id_present_in_fixture() -> None:
     first = (FIXTURES / "print-json-text.jsonl").read_text().splitlines()[0]
     assert json.loads(first)["type"] == "session"
     assert json.loads(first)["id"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("content", "stage", "path", "fenced"),
+    [
+        ('```json\n{"answer":"ok"}\n```', "json_parse", None, True),
+        ('{"answer":', "json_parse", None, False),
+        ('["secret-response-value"]', "non_object", None, False),
+        (
+            '{"answer":"secret-response-value"}',
+            "schema_validation",
+            "properties/answer/maxLength",
+            False,
+        ),
+        ('{"foreign-secret-key":"secret-response-value"}', "schema_validation", "required", False),
+    ],
+)
+async def test_failure_retains_structural_diagnostics_not_response_secrets(
+    content, stage, path, fenced
+):
+    import hashlib
+
+    from vuzol.providers.domain import ProviderResult
+
+    message = {
+        "role": "assistant",
+        "stopReason": "stop",
+        "content": [{"type": "text", "text": content}],
+        "usage": {"input": 4435, "output": 2460},
+        "responseId": "measured-failure",
+    }
+    stdout = json.dumps({"type": "agent_end", "messages": [message]}) + '\n{"type":"agent_settled"}'
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string", "maxLength": 2}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    with pytest.raises(ProviderFailure) as caught:
+        await PiCliAdapter(Transport(stdout)).execute(
+            request(output_json_schema=schema), profile(), CancellationContext()
+        )
+    failure = caught.value
+    assert failure.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+    receipt = failure.receipt_result()
+    assert receipt is not None and receipt.failure is not None
+    restored = ProviderResult.model_validate_json(receipt.model_dump_json())
+    assert restored.failure == failure.details()
+    assert restored.usage.input_tokens == 4435 and restored.usage.output_tokens == 2460
+    assert restored.provider_request_id == "measured-failure"
+    diagnostic = restored.failure.diagnostic
+    assert diagnostic.stage == stage and diagnostic.schema_path == path
+    assert diagnostic.content_sha256 == hashlib.sha256(content.encode()).hexdigest()
+    assert diagnostic.content_bytes == len(content.encode())
+    assert diagnostic.json_fenced is fenced
+    assert "secret-response-value" not in restored.model_dump_json()
+    assert "foreign-secret-key" not in restored.model_dump_json()
+
+
+def test_old_receipts_remain_readable_without_diagnostics():
+    from vuzol.providers.domain import ProviderResult
+
+    old = {"status": "failed", "usage": {"duration_ms": 1}, "adapter_version": "failure-receipt.v1"}
+    assert ProviderResult.model_validate(old).failure is None

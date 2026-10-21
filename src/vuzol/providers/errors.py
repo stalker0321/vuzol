@@ -4,7 +4,9 @@ from dataclasses import dataclass, replace
 
 from vuzol.providers.domain import (
     NormalizedUsage,
+    OutputDiagnostic,
     ProviderErrorCategory,
+    ProviderFailureDetails,
     ProviderResult,
     ProviderResultStatus,
 )
@@ -26,6 +28,18 @@ class ProviderFailure(Exception):
     # whether it was sent or its cost was measured. Defaults to unknown. This
     # does not waive account ownership or supervised-runtime cleanup checks.
     execution_completed: bool = False
+    diagnostic: OutputDiagnostic | None = None
+
+    def details(self) -> ProviderFailureDetails:
+        # Do not persist safe_summary: some adapters include response-derived
+        # paths there. The closed category and structural facts are sufficient.
+        return ProviderFailureDetails(
+            category=self.category,
+            retryable=self.retryable,
+            request_sent=self.request_sent,
+            execution_completed=self.execution_completed,
+            diagnostic=self.diagnostic,
+        )
 
     def with_receipt(
         self, usage: NormalizedUsage, provider_request_id: str | None = None
@@ -45,6 +59,7 @@ class ProviderFailure(Exception):
             usage=self.usage,
             provider_request_id=self.provider_request_id,
             adapter_version="failure-receipt.v1",
+            failure=self.details(),
         )
 
     def __str__(self) -> str:

@@ -85,6 +85,53 @@ async def test_restart_replays_received_result_without_resending(postgres_dsn, m
             assert await session.scalar(select(func.count()).select_from(UsageRecord)) == 1
 
 
+async def test_restart_preserves_failure_reason_and_diagnostics_without_resending(
+    postgres_dsn, monkeypatch
+):
+    from vuzol.leadership.model import LeadModelUnavailable
+    from vuzol.providers.domain import OutputDiagnostic
+
+    calls = []
+
+    class Invalid(_Transport):
+        async def execute(self, request, profile, cancellation):
+            calls.append(request)
+            raise ProviderFailure(
+                ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+                True,
+                True,
+                safe_summary="untrusted-secret-must-not-be-persisted",
+                execution_completed=True,
+                usage=NormalizedUsage(input_tokens=4435, output_tokens=2460, duration_ms=1),
+                diagnostic=OutputDiagnostic(
+                    stage="json_parse", content_sha256="a" * 64, content_bytes=8
+                ),
+            )
+
+    settings = _settings(monkeypatch, "lead-local")
+    async with _factory(postgres_dsn) as factory:
+        await _enable(factory, await _session(factory))
+        first = _worker(factory, settings, Invalid({}), owner="before")
+        claim = await _claim(factory, first, "before")
+        with pytest.raises(LeadModelUnavailable, match="lead_response_invalid"):
+            await first._infer(claim)
+        async with factory() as session:
+            phase = await session.scalar(select(LeadershipInference))
+            saved = phase.result
+            assert saved["failure"]["diagnostic"]["stage"] == "json_parse"
+            assert "untrusted-secret" not in str(saved)
+        await expire_claim(factory)
+        second = _worker(factory, settings, Invalid({}), owner="after")
+        assert await second.process_one()
+        assert len(calls) == 1
+        async with factory() as session:
+            phase = await session.scalar(select(LeadershipInference))
+            goal = await session.scalar(select(ManagedGoal))
+            assert phase.result == saved and phase.state == "received"
+            assert goal.waiting_reason == "lead_response_invalid"
+            assert await session.scalar(select(func.count()).select_from(UsageRecord)) == 1
+
+
 async def test_switch_during_turn_keeps_receipt_pin_then_new_turn_uses_new_choice(
     postgres_dsn,
     monkeypatch,

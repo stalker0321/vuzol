@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -119,6 +119,34 @@ class ProviderRequest(FrozenProviderModel):
         return self
 
 
+class OutputDiagnostic(FrozenProviderModel):
+    """Bounded structural evidence, never response text or exception messages."""
+
+    stage: Literal[
+        "event_stream",
+        "provider_stop",
+        "json_parse",
+        "non_object",
+        "schema_validation",
+        "empty_response",
+    ]
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_bytes: int = Field(ge=0)
+    finish_reason: Literal["stop", "length", "toolUse", "aborted", "error", "unknown"] = "unknown"
+    json_position: int | None = Field(default=None, ge=0)
+    # This path comes from the trusted schema, NOT the invalid instance/message.
+    schema_path: str | None = Field(default=None, max_length=500)
+    json_fenced: bool = False
+
+
+class ProviderFailureDetails(FrozenProviderModel):
+    category: ProviderErrorCategory
+    retryable: bool
+    request_sent: bool
+    execution_completed: bool
+    diagnostic: OutputDiagnostic | None = None
+
+
 class ProviderResult(FrozenProviderModel):
     schema_version: str = "provider-result.v1"
     status: ProviderResultStatus
@@ -130,6 +158,7 @@ class ProviderResult(FrozenProviderModel):
     finish_reason: str | None = Field(default=None, max_length=100)
     raw_result_reference: str | None = Field(default=None, max_length=500)
     adapter_version: str = Field(min_length=1, max_length=100)
+    failure: ProviderFailureDetails | None = None
 
 
 class EffectiveProfileState(FrozenProviderModel):

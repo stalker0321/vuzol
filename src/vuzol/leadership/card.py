@@ -39,8 +39,14 @@ _REASONS = {
     "lead_model_unavailable": "Обращение к модели не завершилось успешно. Работа не продолжена.",
     "lead_response_invalid": "Модель вернула ответ, который нельзя безопасно применить.",
     "goal_review_invalid": "Независимая проверка не вернула пригодного заключения.",
+    "goal_review_unavailable": "Не удалось выполнить независимую приёмку цели. Результат сохранён.",
 }
-_ERROR_REASONS = {"lead_model_unavailable", "lead_response_invalid", "goal_review_invalid"}
+_ERROR_REASONS = {
+    "lead_model_unavailable",
+    "lead_response_invalid",
+    "goal_review_invalid",
+    "goal_review_unavailable",
+}
 
 
 def literal_markdown(value: object) -> str:

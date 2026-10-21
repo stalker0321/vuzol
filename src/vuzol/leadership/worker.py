@@ -62,6 +62,7 @@ _MODEL_BLOCKERS = frozenset(
         "lead_context_limit",
         "goal_review_context_limit",
         "goal_review_invalid",
+        "goal_review_unavailable",
         "lead_inference_reconciliation",
     }
 )

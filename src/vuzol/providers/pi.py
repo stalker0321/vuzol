@@ -8,10 +8,11 @@ agent-level retries emit one ``agent_end`` per attempt before ``auto_retry_end``
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal, cast
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -23,6 +24,7 @@ from vuzol.providers.domain import (
     WHOLE_TURN_POLICY,
     EffectiveProfileState,
     NormalizedUsage,
+    OutputDiagnostic,
     ProviderErrorCategory,
     ProviderRequest,
     ProviderResult,
@@ -249,6 +251,7 @@ class PiCliAdapter:
                 execution_completed=True,
                 usage=receipt,
                 provider_request_id=receipt_id,
+                diagnostic=_output_diagnostic("event_stream", result.stdout),
             ) from None
         if decoded.retry_count:
             # Agent-level retries are visible in the stream; log them, never
@@ -278,6 +281,7 @@ class PiCliAdapter:
                 execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=decoded.response_id,
+                diagnostic=_output_diagnostic("provider_stop", decoded.text, stop_reason),
             )
         if stop_reason == "error":
             raise ProviderFailure(
@@ -288,6 +292,7 @@ class PiCliAdapter:
                 execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=decoded.response_id,
+                diagnostic=_output_diagnostic("provider_stop", decoded.text, stop_reason),
             )
         text: str | None = decoded.text
         structured: dict[str, Any] | None = None
@@ -297,7 +302,7 @@ class PiCliAdapter:
                 if not isinstance(decoded_json, dict):
                     raise ValueError("structured Pi response is not an object")
                 validator.validate(decoded_json)
-            except (json.JSONDecodeError, JsonSchemaValidationError, ValueError):
+            except (json.JSONDecodeError, JsonSchemaValidationError, ValueError) as error:
                 raise ProviderFailure(
                     ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
                     retryable=True,
@@ -306,6 +311,16 @@ class PiCliAdapter:
                     execution_completed=True,
                     usage=measured_usage,
                     provider_request_id=decoded.response_id,
+                    diagnostic=_output_diagnostic(
+                        "json_parse"
+                        if isinstance(error, json.JSONDecodeError)
+                        else "schema_validation"
+                        if isinstance(error, JsonSchemaValidationError)
+                        else "non_object",
+                        decoded.text,
+                        stop_reason,
+                        error=error,
+                    ),
                 ) from None
             structured = decoded_json
             text = None
@@ -318,6 +333,7 @@ class PiCliAdapter:
                 execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=decoded.response_id,
+                diagnostic=_output_diagnostic("empty_response", decoded.text, stop_reason),
             )
         return ProviderResult(
             status=ProviderResultStatus.SUCCEEDED,
@@ -333,6 +349,38 @@ class PiCliAdapter:
     async def health(self, profile: ProviderProfileConfig) -> EffectiveProfileState:
         del profile
         return EffectiveProfileState()
+
+
+def _output_diagnostic(
+    stage: Literal[
+        "event_stream",
+        "provider_stop",
+        "json_parse",
+        "non_object",
+        "schema_validation",
+        "empty_response",
+    ],
+    content: str,
+    finish_reason: str | None = None,
+    *,
+    error: Exception | None = None,
+) -> OutputDiagnostic:
+    raw = content.encode("utf-8", "replace")
+    return OutputDiagnostic(
+        stage=stage,
+        content_sha256=hashlib.sha256(raw).hexdigest(),
+        content_bytes=len(raw),
+        finish_reason=cast(Literal["stop", "length", "toolUse", "aborted", "error"], finish_reason)
+        if finish_reason in {"stop", "length", "toolUse", "aborted", "error"}
+        else "unknown",
+        json_position=error.pos if isinstance(error, json.JSONDecodeError) else None,
+        schema_path=(
+            "/".join(str(part) for part in error.absolute_schema_path)[:500]
+            if isinstance(error, JsonSchemaValidationError)
+            else None
+        ),
+        json_fenced=content.lstrip().startswith("```"),
+    )
 
 
 def _optional_int(value: object) -> int | None:

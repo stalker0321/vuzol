@@ -35,11 +35,13 @@ def anyio_backend():
 
 
 @pytest.mark.parametrize("reasoning_effort", [None, "high"])
+@pytest.mark.parametrize("invalid", [False, True])
 async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
     postgres_dsn,
     tmp_path,
     monkeypatch,
     reasoning_effort,
+    invalid,
 ):
     monkeypatch.delenv("VUZOL_TEST_DATABASE_DSN", raising=False)
     repository = tmp_path / "repositories" / PROJECT
@@ -114,7 +116,14 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             invocations.append(envelope)
             message = {
                 "role": "assistant",
-                "content": [{"type": "text", "text": '{"commands":[]}'}],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"commands":"private-invalid-value"}'
+                        if invalid
+                        else '{"commands":[]}',
+                    }
+                ],
                 "stopReason": "stop",
                 "responseId": "local-receipt",
                 "usage": {"input": 50, "output": 10, "cost": {"total": 0.01}},
@@ -159,12 +168,20 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             phase = await session.scalar(select(LeadershipInference))
             goal = await session.scalar(select(ManagedGoal))
             usage = await session.scalar(select(UsageRecord))
-            assert goal.waiting_reason == "model_idle"
+            assert goal.waiting_reason == ("lead_response_invalid" if invalid else "model_idle")
             assert process.status is ProcessStatus.EXITED
             assert process.outcome is ProcessOutcome.SUCCEEDED
             assert process.reaped_at is not None
             assert process.invocation_id == phase.id == usage.invocation_id
             assert phase.state == "received"
+            if invalid:
+                assert phase.result["failure"]["category"] == "invalid_structured_output"
+                assert (
+                    phase.result["failure"]["diagnostic"]["schema_path"]
+                    == "properties/commands/type"
+                )
+                assert "private-invalid-value" not in json.dumps(phase.result)
+                assert usage.outcome == "failed" and usage.input_tokens == 50
             assert process.runtime_metadata["account_id"] == "fixture-account-c"
             assert await session.scalar(select(func.count()).select_from(Task)) == 0
             assert await session.scalar(select(func.count()).select_from(ProviderAccountLease)) == 0

@@ -1,4 +1,8 @@
-"""Dynamic project lifecycle."""
+"""Project preferences and naming.
+
+Provisioning is imported from its concrete submodule: eagerly re-exporting it
+here loads Telegram ingress while its conversation dependencies are incomplete.
+"""
 
 from vuzol.projects.executor_preference import (
     ExecutorPreferenceView,
@@ -7,12 +11,10 @@ from vuzol.projects.executor_preference import (
     load_preference,
 )
 from vuzol.projects.naming import ProjectNamingController
-from vuzol.projects.provisioning import ProjectProvisioningService
 
 __all__ = [
     "ExecutorPreferenceView",
     "ProjectNamingController",
-    "ProjectProvisioningService",
     "available_workers",
     "format_preference_label",
     "load_preference",

@@ -58,8 +58,8 @@ class FakeRuntime:
                 ticket = await session.scalar(select(ProviderAccountLease))
                 assert row.runtime_metadata["account_lease_token"] == str(ticket.token)
         assert envelope.sandbox.empty_workspace
-        assert "--tools" in envelope.argv
-        assert envelope.argv[envelope.argv.index("--tools") + 1] == "read,grep,find,ls"
+        assert "--no-tools" in envelope.argv and "--tools" not in envelope.argv
+        assert "--no-context-files" in envelope.argv
         assert all(m.target != Path("/workspace") for m in envelope.sandbox.mounts)
         # Repeated startup while the owner is live must not clean its runtime.
         for _ in range(2):

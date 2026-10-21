@@ -1016,6 +1016,7 @@ def _require_provider_command(
     *,
     reasoning_effort: str | None = None,
     require_read_only: bool = False,
+    require_prompt_only: bool = False,
 ) -> None:
     effort = reasoning_effort if isinstance(reasoning_effort, str) else None
     modes = (True,) if require_read_only else (False, True)
@@ -1035,7 +1036,11 @@ def _require_provider_command(
             for read_only in modes
         }
     elif provider == "pi":
-        expected = {canonical_pi_argv(model, read_only=read_only) for read_only in modes}
+        expected = (
+            {canonical_pi_argv(model, read_only=True, prompt_only=True)}
+            if require_prompt_only
+            else {canonical_pi_argv(model, read_only=read_only) for read_only in modes}
+        )
     else:
         expected = None
     if expected is None or argv not in expected:

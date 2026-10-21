@@ -90,6 +90,11 @@ def test_canonical_pi_argv_forms() -> None:
     assert "--tools" not in write
     assert read_only[: len(write)] == write
     assert read_only[read_only.index("--tools") + 1] == "read,grep,find,ls"
+    snapshot = canonical_pi_argv("kimi-k3", read_only=True, prompt_only=True)
+    assert "--no-tools" in snapshot and "--tools" not in snapshot
+    assert "--no-extensions" in snapshot and "--no-context-files" in snapshot
+    with pytest.raises(ValueError, match="read-only"):
+        canonical_pi_argv("kimi-k3", prompt_only=True)
     with pytest.raises(ValueError, match="model"):
         canonical_pi_argv("  ")
 
@@ -192,6 +197,29 @@ async def test_adapter_validates_structured_output() -> None:
             request(output_json_schema=schema), profile(), CancellationContext()
         )
     assert error.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", [ProviderRole.LEAD, ProviderRole.REVIEWER])
+async def test_turn_inference_disables_tools_but_worktree_review_keeps_inspection(role) -> None:
+    for sandbox, prompt_only in (
+        ("lead-turn:" + str(uuid.uuid4()), True),
+        ("worktree:" + str(uuid.uuid4()), False),
+    ):
+        transport = Transport((FIXTURES / "print-json-text.jsonl").read_text())
+        await PiCliAdapter(transport).execute(
+            request(
+                role=role,
+                sandbox_reference=sandbox,
+                required_capabilities=frozenset({Capability.REPOSITORY_READ}),
+            ),
+            profile(),
+            CancellationContext(),
+        )
+        argv = transport.invocation.argv
+        assert ("--no-tools" in argv) is prompt_only
+        assert ("--tools" in argv) is not prompt_only
+        assert ("--system-prompt" in argv) is prompt_only
 
 
 @pytest.mark.anyio

@@ -174,6 +174,11 @@ use its question/owner controls. A default reviewer is also pinned on its first 
 token/money limits, lease renewal and stop fences remain independent. A timed-out call stays
 unknown in the ledger; an explicit owner resume starts a new turn, not a replay of that call.
 
+Pi leadership turns are snapshot-only structured inference: tools, extensions, skills and
+local context discovery are disabled and the trusted system prompt explains the empty
+workspace. The turn transport enforces that exact command. Worktree execution and
+worktree review retain their separate write/read-only tool policies.
+
 Legacy worker-family preferences remain readable for existing runs. A new executor choice
 or reset clears that legacy preference so it cannot unexpectedly reappear. The executor slot
 still concerns only sandbox coding/agent steps, not API/research executor steps. Other roles

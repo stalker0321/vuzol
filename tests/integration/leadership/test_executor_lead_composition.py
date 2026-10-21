@@ -97,7 +97,9 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             assert envelope.sandbox.empty_workspace
             assert envelope.sandbox.timeout_seconds == 180
             assert envelope.argv[envelope.argv.index("--model") + 1] == profile.model
-            assert envelope.argv[envelope.argv.index("--tools") + 1] == "read,grep,find,ls"
+            assert "--no-tools" in envelope.argv and "--tools" not in envelope.argv
+            assert "--no-context-files" in envelope.argv
+            assert "--system-prompt" in envelope.argv
             assert [mount.purpose for mount in envelope.sandbox.mounts] == ["provider-state"]
             body = json.loads(envelope.stdin)
             assert body["role"] == "lead"

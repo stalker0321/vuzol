@@ -145,6 +145,8 @@ def parse_lead_command(text: str | None) -> tuple[str, str] | None:
         "/lead_cancel": "cancel",
         "/lead_revoke": "revoke",
         "/lead_status": "status",
+        "/lead_goal": "goal",
+        "/lead_details": "details",
     }
     kind = kinds.get(command)
     if kind is None or len(parts) != 1:
@@ -171,10 +173,13 @@ def build_help_card(kind: TopicKind) -> str:
     if kind is TopicKind.PROJECT:
         lines.extend(
             (
-                "Опишите задачу текстом, голосом или приложите документ.",
-                "Ответьте на сообщение задачи, чтобы продолжить её.",
-                "<code>/model</code> — выбрать модели для ролей проекта.",
-                "<code>/plan</code> — показать текущий план.",
+                "Задача: текстом, голосом или документом.",
+                "Продолжение — ответом на сообщение задачи.",
+                "<code>/model</code> — модели ролей.",
+                "<code>/plan</code> — текущий план.",
+                "<code>/lead_status</code> — состояние цели.",
+                "<code>/lead_goal</code> — полное задание.",
+                "<code>/lead_details</code> — результат и детали.",
                 (
                     "<code>/source add python|node PACKAGE git|https URL PIN</code> — "
                     "доверить проекту точный внешний источник."

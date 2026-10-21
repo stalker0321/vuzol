@@ -29,6 +29,57 @@ When Telegram may have accepted a send but did not return a message ID, the item
 `ambiguous` and is never automatically reclaimed or resent. Reconciliation is operational work,
 not an in-memory restart flag.
 
+## Project-lead cards
+
+The lead's ordinary status card shows a short request preview, a human-readable
+state/reason, any open owner question, the recorded result and the next action.
+The complete request is not repeated on every state transition. These owner commands
+read the current project goal through the existing authorized `get_goal` boundary:
+
+- `/lead_status`: compact state card;
+- `/lead_goal`: full original request, scope and acceptance criteria, preserving
+  source indentation and embedded markup as literal text;
+- `/lead_details`: state plus goal/version, package, integration branch/commit,
+  work limits, criterion coverage and the last accepted owner answer.
+
+Reads do not start/resume work or change the goal version. They remain available to
+the owner when the lead feature is disabled. An allowed Telegram user is not
+automatically the owner of every goal. Questions retain the exact goal ID and
+question-version reply command; answering is not implicit approval or resume.
+
+`ГОТОВО` is green only for a completed goal whose current recorded result passes
+the existing evidence assessment. A commit, a completed package or a historical
+`completed` flag alone is insufficient. Active repair is not presented as a terminal
+error. Full details are available separately instead of showing internal enums in
+the ordinary state card. This projection does not introduce a new acceptance checker
+or re-run live Git validation; it reads the canonical recorded evidence.
+
+Cards use the existing safe CommonMark-to-Telegram-HTML renderer, not raw model HTML
+or Rich Messages. A successful mutation already queues its state card atomically
+with its receipt; Telegram ingress no longer queues a second success echo when
+that notice addresses the calling topic. A goal without that notification origin
+still gets a reply in the calling topic.
+Long formatted notices reuse the durable reply-part chain: only the first part is
+initially queued; a confirmed send admits the next part in the same fenced completion
+transaction. Restart resumes the chain. An ambiguous send admits no next part and is
+not automatically resent. Definite markup rejection uses the existing escaped plain
+fallback. Existing literal notices remain literal.
+
+Offline visual examples (working, ready, paused, question, error), with synthetic
+data and the production renderer:
+
+```bash
+PYTHONPATH=src python tests/preview_lead_cards.py /tmp/vuzol-lead-cards
+# Optional: --png uses an already-installed ImageMagick/Pango; installs nothing.
+```
+
+Open `index.html` locally. PNGs use host fonts, which may lack emoji glyphs; the
+status text still identifies every state. These are rendered layout previews, not
+screenshots from a live Telegram client, and generate no external messages.
+No schema migration, new formatter, execution engine, provider setting or feature
+flag is required. This change does not implement conversational `/think`/`/lead`
+modes or MCP; `/lead <goal>` retains its existing execution meaning.
+
 ## Ingress and affinity
 
 Polling first commits a raw receipt (`external_inbox.source=telegram_transport`) and a

@@ -1,4 +1,5 @@
 """Provider entrypoint and owner-facing goal card. No live provider call."""
+# ruff: noqa: RUF001
 
 from __future__ import annotations
 
@@ -242,11 +243,11 @@ async def test_feature_off_still_pauses_and_shows_the_goal_card(
         )
         assert status.status is IngressStatus.HANDLED
         text = await _drain(factory)
-        assert "Статус: paused" in text
-        assert "Блокер: owner_pause" in text
-        assert "Пакет: нет" in text
-        assert "Дальше: пауза" in text
-        assert "Результат: доказательств нет" in text
+        assert "⏸ <b>НА ПАУЗЕ · Руководитель</b>" in text
+        assert "Ты поставил работу на паузу" in text
+        assert "/lead_resume" in text
+        assert "Готовность пока не подтверждена" in text
+        assert "owner_pause" not in text and "Статус: paused" not in text
         async with factory() as session:
             goal = await session.scalar(select(ManagedGoal))
             tasks = await session.scalar(select(func.count()).select_from(Task))
@@ -290,8 +291,8 @@ async def test_owner_question_and_answer_bind_the_goal_revision(
         )
         assert asked.status == "waiting"
         question_text = await _drain(factory)
-        assert f"Вопрос: {question}" in question_text
-        assert "Версия:" in question_text
+        assert f"<b>Вопрос</b>\n{question}" in question_text
+        assert f"/lead_answer {goal_id} {version + 1}" in question_text
         stale = await _lead_service(factory).apply_human(
             Principal(OWNER, "telegram"),
             LeadCommand(
@@ -309,9 +310,12 @@ async def test_owner_question_and_answer_bind_the_goal_revision(
         )
         assert answered.status is IngressStatus.HANDLED
         card = await _drain(factory)
-        assert f"Ответ: {answer}" in card
-        assert "Статус:" in card
-        assert "Результат:" in card
+        assert "Твой ответ сохранён" in card
+        assert "В РАБОТЕ · Руководитель" in card
+        assert "<b>Результат</b>" in card
+        await TelegramIngressService(runtime, factory).accept_message(_message(53, "/lead_details"))
+        details = await _drain(factory)
+        assert f"<b>Твой последний ответ</b>\n\n<pre><code>{answer}\n</code></pre>" in details
         async with factory() as session:
             stored = await session.get(ManagedGoal, goal_id)
             assert stored is not None

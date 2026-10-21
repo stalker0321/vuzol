@@ -933,7 +933,8 @@ async def run_managed_goal_flow(
                 if not await delivery.deliver_one():
                     break
             assert any(
-                "Статус: completed" in text and "Результат: покрыто:" in text
+                "✅ <b>ГОТОВО · Руководитель</b>" in text
+                and "Подтверждено критериев: 1 из 1" in text
                 for _, _, text in client.sent
             )
             print("LEAD_TRACE")

@@ -686,14 +686,17 @@ async def _enqueue_owner_question(
         thread_id=goal.source_thread_id,
         key=f"lead:question:{goal.id}:{version}",
         text=render_question(question, version, goal_id=str(goal.id)),
+        markdown=True,
     )
 
 
 async def request_owner_recovery(session: AsyncSession, goal: ManagedGoal, reason: str) -> None:
+    from vuzol.leadership.card import reason_text
+
     question = (
         "Несколько ходов подряд нет нового результата и запуска работы. Уточните следующий шаг."
         if reason == "continuation_without_progress"
-        else f"Нужен следующий шаг ({reason}). Уточните поручение после устранения блокера."
+        else f"{reason_text(reason)} Уточни следующий шаг после устранения причины."
     )
     goal.wakeup_condition = {
         "kind": "owner",
@@ -725,12 +728,20 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
     package_line = None if package is None else f"{package.status.value} {str(package.id)[:8]}"
     return {
         "request": goal.original_request,
+        "scope": goal.scope_text,
+        "criteria": list(goal.criteria),
         "goal_id": str(goal.id),
         "package_line": package_line,
+        "package_title": None if package is None else package.title,
         "current_package_status": None if package is None else package.status.value,
+        "result_commit": None if package is None else package.integration_head_commit,
+        "completion_confirmed": assessment.satisfied,
         "next_operation": _next_operation(goal, package, question),
         "result_summary": result,
         "question": question,
+        "question_version": (goal.wakeup_condition or {}).get("asked_version")
+        if question
+        else None,
         "owner_answer": owner_answer_text(goal.constraints),
         "work_limits": goal.constraints.get("work_limits", {}),
         "covered": list(assessment.covered),
@@ -962,6 +973,7 @@ async def _store(
                     thread_id=outcome.goal.source_thread_id,
                     key=f"lead:state:{outcome.goal.id}:{outcome.goal.version}",
                     text=render_goal_card(await goal_card_view(session, outcome.goal, delegation)),
+                    markdown=True,
                 )
     await session.flush()
     return CommandResult(

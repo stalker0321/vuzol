@@ -168,18 +168,20 @@ def build_bundle(
                         )
         topics = TopicRegistry(document.topics, projects=projects)
         if settings.execution.reviewer_profile_id is not None:
+            from vuzol.providers.catalog import supported_profile
+
             reviewer = profiles.get(settings.execution.reviewer_profile_id)
             if (
                 not reviewer.enabled
-                or reviewer.provider != "grok"
-                or reviewer.launch_mode is not LaunchMode.CLI
+                or not supported_profile(reviewer)
                 or ProviderRole.REVIEWER not in reviewer.roles
-                or not reviewer.sandbox_required
+                or (reviewer.launch_mode is LaunchMode.CLI and not reviewer.sandbox_required)
                 or Capability.REPOSITORY_READ not in reviewer.capabilities
                 or "coding" not in reviewer.supported_task_types
             ):
                 raise RegistryError(
-                    "execution.reviewer_profile_id must be a sandboxed Grok CLI reviewer"
+                    "execution.reviewer_profile_id must be an enabled supported coding reviewer "
+                    "with repository_read and a sandbox for CLI execution"
                 )
         if settings.chat.enabled:
             assert settings.chat.profile_id is not None

@@ -145,7 +145,15 @@ def test_content_revision_is_stable_for_frozenset_fields() -> None:
 
 
 @pytest.mark.parametrize(
-    "invalid", [{"enabled": False}, {"roles": {"executor"}}, {"provider": "pi"}]
+    "invalid",
+    [
+        {"enabled": False},
+        {"roles": {"executor"}},
+        {"provider": "uninstalled"},
+        {"sandbox_required": False},
+        {"capabilities": set()},
+        {"supported_task_types": {"general"}},
+    ],
 )
 def test_configured_cli_reviewer_fails_closed(tmp_path, invalid):
     configured = settings(tmp_path, execution={"reviewer_profile_id": "grok-a"})
@@ -168,8 +176,43 @@ def test_configured_cli_reviewer_fails_closed(tmp_path, invalid):
     assert (
         build_bundle(RegistryDocument(profiles=(valid,)), configured).profiles.get("grok-a").enabled
     )
-    with pytest.raises(ConfigurationLoadError, match="sandboxed Grok CLI reviewer"):
+    with pytest.raises(ConfigurationLoadError, match=r"execution\.reviewer_profile_id"):
         build_bundle(RegistryDocument(profiles=(profile(**{**values, **invalid}),)), configured)
+
+
+@pytest.mark.parametrize("provider", ["codex", "grok", "kimi", "pi", "openai-compatible"])
+@pytest.mark.parametrize("execution_enabled", [False, True])
+def test_configured_reviewer_accepts_installed_transports(tmp_path, provider, execution_enabled):
+    api = provider == "openai-compatible"
+    reviewer = profile(
+        id="chosen-reviewer",
+        provider=provider,
+        model="selected-model",
+        launch_mode="api" if api else "cli",
+        api_base_url="https://provider.example/v1" if api else None,
+        credential_reference="env:PROFILE_KEY" if api else None,
+        credential_required=api,
+        runtime_identity=None if api else "reviewer",
+        state_directory=None if api else tmp_path / "account",
+        roles={"reviewer"},
+        supported_task_types={"coding"},
+        sandbox_required=not api,
+    )
+    configured = settings(
+        tmp_path,
+        execution={
+            "enabled": execution_enabled,
+            "reviewer_profile_id": reviewer.id,
+            "sandbox_seccomp_profile": tmp_path / "seccomp.json",
+            "sandbox_seccomp_profile_sha256": "a" * 64,
+        },
+    )
+    bundle = build_bundle(
+        RegistryDocument(profiles=(reviewer,)),
+        configured,
+        environment={"PROFILE_KEY": "fixture-only"},
+    )
+    assert bundle.profiles.get(reviewer.id) == reviewer
 
 
 def test_bundle_rejects_unknown_topic_project(tmp_path: Path) -> None:

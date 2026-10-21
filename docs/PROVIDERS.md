@@ -500,6 +500,15 @@ before claiming production readiness; this fix does not itself authorize or perf
 
 ### Historical registry examples
 
+Deployment preflight on 2026-10-21 found one remaining vendor-specific gate in
+`build_bundle`: the installation-default reviewer still required Grok, despite generic
+runtime dispatch. It now validates against the installed adapter catalog, retaining role,
+coding task type, repository-read and CLI sandbox requirements. Regression checks cover all
+four CLI transports and OpenAI-compatible API with execution both on and off; the corrected
+test fixture reproduced 8 failures/2 passes before the fix. The resulting complete unit run
+was **3404 passed, 1 skipped**, with three dependency deprecation warnings. This is separate
+from the independent HTTP-fix acceptance above.
+
 The checked-in executor registry (`deploy/registries.executor.toml`) and older local overlays
 include the following examples; actual deployment defaults must be inspected locally:
 

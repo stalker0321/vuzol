@@ -41,7 +41,9 @@ def _argv(profile, *, read_only=True):
         return canonical_kimi_argv(
             profile.model, reasoning_effort=profile.model_reasoning_effort, read_only=read_only
         )
-    return canonical_pi_argv(profile.model, read_only=read_only)
+    return canonical_pi_argv(
+        profile.model, reasoning_effort=profile.model_reasoning_effort, read_only=read_only
+    )
 
 
 @pytest.fixture

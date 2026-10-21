@@ -50,7 +50,11 @@ _logger = get_logger(__name__)
 
 
 def canonical_pi_argv(
-    model: str, *, read_only: bool = False, prompt_only: bool = False
+    model: str,
+    *,
+    reasoning_effort: str | None = None,
+    read_only: bool = False,
+    prompt_only: bool = False,
 ) -> tuple[str, ...]:
     """Return the only Pi command accepted by the production sandbox transport."""
 
@@ -68,6 +72,10 @@ def canonical_pi_argv(
         "--model",
         resolved,
     ]
+    if reasoning_effort is not None:
+        if reasoning_effort not in {"off", "minimal", "low", "medium", "high", "xhigh", "max"}:
+            raise ValueError("unsupported Pi reasoning effort")
+        args.extend(["--thinking", reasoning_effort])
     if prompt_only:
         if not read_only:
             raise ValueError("prompt-only Pi invocation must be read-only")
@@ -167,7 +175,12 @@ class PiCliAdapter:
             ),
         }
         invocation = CodexInvocation(
-            argv=canonical_pi_argv(profile.model, read_only=read_only, prompt_only=prompt_only),
+            argv=canonical_pi_argv(
+                profile.model,
+                reasoning_effort=profile.model_reasoning_effort,
+                read_only=read_only,
+                prompt_only=prompt_only,
+            ),
             stdin=json.dumps(envelope, ensure_ascii=False),
             runtime_identity=profile.runtime_identity,
             state_directory=str(profile.state_directory),

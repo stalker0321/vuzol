@@ -16,6 +16,7 @@ class LeadCommandName(StrEnum):
     GET_CAPABILITIES = "get_capabilities"
     GET_RESULT = "get_result"
     ENABLE_MANAGED_GOAL = "enable_managed_goal"
+    SET_WORK_LIMITS = "set_work_limits"
     PROPOSE_BATCH = "propose_batch"
     START_BATCH = "start_batch"
     REQUEST_REVISION = "request_revision"
@@ -54,6 +55,7 @@ READ_COMMANDS = frozenset(
 OWNER_ONLY_COMMANDS = frozenset(
     {
         LeadCommandName.ENABLE_MANAGED_GOAL,
+        LeadCommandName.SET_WORK_LIMITS,
         LeadCommandName.RESUME_GOAL,
         LeadCommandName.REVOKE_DELEGATION,
         LeadCommandName.ACCEPT_CRITERION,

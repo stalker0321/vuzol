@@ -83,6 +83,11 @@ Status: accepted (D1 writer, base 7f651d9 D0-PASS). Implements DELTA §D1.
 - Soft pause + intent fence (lead Q9): pause keeps leases, but
   `commit_step_outcome` rejects commits while `run.status == PAUSED`
   (`LeaseLost`), so correction fencing holds during pause.
+  The 2026-10-21 pilot exposed continued CLI work and fast-resume risk under this
+  contract. The owner approved strict pause and deployment on 2026-10-21
+  (“Да, строгая пауза; выкатывай”). This historical decision is superseded by
+  `../RECOVERY_POLICY.md`: revoke leases, stop supervised work, and refuse blind
+  resume of unknown mutations. Existing paused work is not automatically resumed.
 
 ## 6. REDO as a new attempt + transitions dead path
 

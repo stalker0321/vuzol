@@ -239,9 +239,7 @@ async def commit_step_outcome(
     if run.status in {RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.COMPLETED}:
         raise LeaseLost(f"parent run is terminal: {run.id}")
     if run.status is RunStatus.PAUSED:
-        # D1 correction fencing (lead Q9: soft pause + intent fence): a live
-        # lease does not authorize a commit while the run is paused. The
-        # lease itself is not revoked (soft pause); the commit path is.
+        # A paused run cannot authorize a late outcome, even for old persisted leases.
         raise LeaseLost(f"parent run is paused: {run.id}")
     if outcome.kind is OutcomeKind.SUCCEEDED:
         await transition_step(session, step, StepStatus.COMPLETED, actor_type="worker")

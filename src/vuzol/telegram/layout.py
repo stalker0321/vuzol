@@ -134,11 +134,11 @@ def parse_lead_command(text: str | None) -> tuple[str, str] | None:
         if not argument:
             return None
         return ("enable", argument)
-    if command == "/lead_answer":
+    if command in {"/lead_answer", "/lead_limits"}:
         argument = parts[1].strip() if len(parts) > 1 else ""
         if not argument:
             return None
-        return ("answer", argument)
+        return ("answer" if command == "/lead_answer" else "limits", argument)
     kinds = {
         "/lead_pause": "pause",
         "/lead_resume": "resume",

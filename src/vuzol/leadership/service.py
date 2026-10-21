@@ -210,6 +210,7 @@ class LeadershipCommandService:
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
         if goal.lifecycle == "paused" and name not in READ_COMMANDS | {
+            LeadCommandName.SET_WORK_LIMITS,
             LeadCommandName.RESUME_GOAL,
             LeadCommandName.CANCEL_GOAL,
             LeadCommandName.REVOKE_DELEGATION,
@@ -221,6 +222,14 @@ class LeadershipCommandService:
             if name in {LeadCommandName.GET_GOAL, LeadCommandName.GET_RESULT}:
                 body.update(await _goal_projection(uow.session, goal))
             return _Outcome(CommandStatus.APPLIED, None, body, goal)
+        if name is LeadCommandName.SET_WORK_LIMITS:
+            from vuzol.leadership.limits import parse_work_limits
+
+            limits = parse_work_limits(command.payload.get("work_limits"))
+            goal.constraints = {**goal.constraints, "work_limits": limits.model_dump()}
+            # Changing a grant never resumes work or answers an outstanding question.
+            _bump(goal, actor)
+            return _Outcome(CommandStatus.APPLIED, None, {"work_limits": limits.model_dump()}, goal)
         if name is LeadCommandName.PAUSE_GOAL:
             await _settle_children(uow.session, goal, actor, stop=False)
             return _transition(goal, actor, "paused", "owner_pause", CommandStatus.APPLIED)
@@ -337,6 +346,24 @@ class LeadershipCommandService:
                         repeat_limit=self._repeat_limit,
                     )
             except DomainError as error:
+                # The batch may have changed repeat counters before a later
+                # admission refusal. Savepoint rollback expires those ORM fields;
+                # reload explicitly before storing the durable refusal receipt.
+                await uow.session.refresh(goal)
+                if error.code in {"work_package_limit_reached", "work_item_limit_reached"}:
+                    question = (
+                        "Достигнут заданный владельцем лимит работы. "
+                        "Проверьте результат и явно измените лимит, если нужна доработка."
+                    )
+                    goal.wakeup_condition = {
+                        "kind": "owner",
+                        "question": question,
+                        "scope_revision": goal.scope_revision,
+                        "asked_version": goal.version + 1,
+                    }
+                    outcome = _transition(goal, actor, "waiting", error.code, CommandStatus.WAITING)
+                    await _enqueue_owner_question(uow.session, goal, question, goal.version)
+                    return outcome
                 return _Outcome(CommandStatus.DENIED, error.code, {}, goal)
             status = CommandStatus(str(produced.pop("status", CommandStatus.APPLIED.value)))
             reason = produced.pop("reason", None)
@@ -451,6 +478,9 @@ class LeadershipCommandService:
         scope = str(command.payload.get("scope") or request).strip()
         if not request or not scope:
             return _Outcome(CommandStatus.DENIED, "scope_required", {}, None)
+        from vuzol.leadership.limits import parse_work_limits
+
+        work_limits = parse_work_limits(command.payload.get("work_limits", {}))
         principal = f"agent:project-lead:{command.project_id}"
         delegation = GoalDelegation(
             project_id=command.project_id,
@@ -464,7 +494,7 @@ class LeadershipCommandService:
         uow.session.add(delegation)
         await uow.session.flush()
         default_branch = self._default_branches.get(command.project_id)
-        constraints: dict[str, Any] = {}
+        constraints: dict[str, Any] = {"work_limits": work_limits.model_dump()}
         if default_branch:
             constraints["project_default_branch"] = default_branch
         goal = ManagedGoal(
@@ -702,6 +732,7 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
         "result_summary": result,
         "question": question,
         "owner_answer": owner_answer_text(goal.constraints),
+        "work_limits": goal.constraints.get("work_limits", {}),
         "covered": list(assessment.covered),
         "missing": list(assessment.missing),
     }

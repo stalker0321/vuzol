@@ -48,6 +48,14 @@ def render_goal_card(view: Mapping[str, object]) -> str:
         line("Дальше", "next_operation"),
         line("Результат", "result_summary"),
     ]
+    limits = view.get("work_limits")
+    if isinstance(limits, dict) and any(value is not None for value in limits.values()):
+        packages = limits.get("max_packages")
+        items = limits.get("max_items_per_package")
+        rows.append(
+            f"Лимит: пакетов {packages if packages is not None else 'без ограничения'}, "
+            f"задач в пакете {items if items is not None else 'без ограничения'}"
+        )
     question = view.get("question")
     if isinstance(question, str) and question.strip():
         rows.append(f"Вопрос: {question.strip()}")

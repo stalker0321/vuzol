@@ -696,17 +696,7 @@ def _success_payload(
         }
         for check in system_checks
     ]
-    gate_payload: list[dict[str, Any]] = [
-        {
-            "name": gate.name,
-            "command_id": gate.command_id,
-            "argv": list(gate.argv),
-            "exit_code": gate.exit_code,
-            "duration_ms": gate.duration_ms,
-            "validation_image_digest": gate.validation_image_digest,
-        }
-        for gate in gates
-    ]
+    gate_payload = [gate.model_dump(mode="json") for gate in gates]
     # Approval envelope requires a non-empty gate list with exit_code 0.
     approval_gates: list[dict[str, Any]] = [
         {

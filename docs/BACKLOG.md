@@ -23,13 +23,16 @@ This inventory is not authorization to delete stored projects, results or grants
 | Memory and context assembly | Project memory and bounded invocation context | Reuse existing assemblers/artifact provenance | Chat turns, memory units, native CLI history | Measure before changing ceilings; do not conflate context with spending |
 | ChatGPT/MCP entry | Explicit durable submission and status lookup | Thin adapter to the same application | Principal/project authorization, stable request identity | Add later; no public endpoint or independent scheduler in the pilot fix |
 
-Next implementation slices after the pilot repair:
+Compact Telegram cards are implemented locally with authorized full-request/details
+reads and offline rendered working/ready/paused/question/failure examples. See
+`TELEGRAM.md`; deployment and live-client visual acceptance are separate.
 
-1. Compact Telegram cards with rendered working/ready/paused/question/failure examples.
-2. Persist `/lead` and `/think` per topic; Jev routes intent, not work assignments.
+Remaining implementation slices after the pilot repair:
+
+1. Persist `/lead` and `/think` per topic; Jev routes intent, not work assignments.
    Explicit changes go to the same lead in either mode. Read-only research may
    use inspection tools and bounded delegation, with inherited write restrictions.
-3. Minimal authenticated MCP submission/status/result adapter. Confirm hosting,
+2. Minimal authenticated MCP submission/status/result adapter. Confirm hosting,
    authentication and the actual ChatGPT client's support before exposing it.
    Per handoff §8.1, MCP, a future personal assistant and the project lead reuse
    the same application operations with server-enforced principal/project scope.
@@ -37,10 +40,10 @@ Next implementation slices after the pilot repair:
    already explicit request. Equivalent requests must pass identical admission,
    authorization and idempotency checks; similar separate requests stay separate.
    The MCP slice does not depend on first building the general inbox.
-4. Measure assembled input and native CLI history; support the owner's preferred
+3. Measure assembled input and native CLI history; support the owner's preferred
    250–500k ceiling where the selected model permits, with summaries and original
    artifact links. No newly imposed 16–32k product cap and no silent truncation.
-5. Remove confirmed obsolete mechanisms together with their configuration/docs;
+4. Remove confirmed obsolete mechanisms together with their configuration/docs;
    migrate dependent data explicitly. No DB reset or edited applied migration.
 
 Do not present these slices as shipped. Mode switches, research delegation and

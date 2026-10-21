@@ -4,6 +4,14 @@ This file records completed implementation changes, not plans or speculative ide
 
 ## Unreleased
 
+- replaced dense project-lead Telegram state dumps with compact, safely formatted
+  status/question/result cards; `/lead_goal` and `/lead_details` expose the full
+  source and canonical details through the same owner-authorized command boundary.
+  Completed-without-evidence is not green. Successful commands no longer duplicate
+  their durable state card. Long formatted notices reuse the existing sequential
+  delivery/fallback protocol without automatically resending ambiguous sends.
+  Added offline rendered previews and ingress/delivery regressions; no migration,
+  execution-policy change, provider call or production deployment is included;
 - moved the independent code reviewer off the shared DeepSeek planner profile onto a
   dedicated `openrouter-mimo-reviewer-prod` OpenRouter profile (`xiaomi/mimo-v2.5`,
   reasoning effort `low`, its own `VUZOL_OPENROUTER_REVIEWER_API_KEY` credential

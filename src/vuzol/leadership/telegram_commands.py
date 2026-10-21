@@ -1,17 +1,20 @@
 """Telegram text commands for an existing project-lead goal."""
+# ruff: noqa: RUF001
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.settings import Settings
-from vuzol.leadership.commands import LeadCommand
-from vuzol.leadership.persistence import CONTRACT_VERSION, ManagedGoal
+from vuzol.leadership.commands import CommandResult, LeadCommand
+from vuzol.leadership.persistence import CONTRACT_VERSION, LeadershipCommandReceipt, ManagedGoal
 from vuzol.leadership.service import LeadershipCommandService
+from vuzol.storage.models import TransactionalOutbox
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
 from vuzol.telegram.projections import enqueue_chat_notice
@@ -31,7 +34,7 @@ async def apply_telegram_lead(
     kind: str,
     argument: str,
 ) -> IngressResult:
-    """Apply one owner command. The notice is a second transaction."""
+    """Apply an owner command; mutations publish their card with the command receipt."""
 
     session_id = await _discussion_session(
         session_factory,
@@ -64,15 +67,43 @@ async def apply_telegram_lead(
         Principal(user_id=update.user_id, ingress_source="telegram"),
         command,
     )
-    notice = await _notice(session_factory, project_id, result.status, result.reason)
+    # A mutating command already enqueues its state card in the receipt transaction.
+    # Do not send a second copy. Replays consult the immutable receipt, not today's
+    # version; failed commands still need their existing separate error notice.
+    original_status = result.status
+    notice_result = result
+    if result.status == "duplicate" and result.receipt_id is not None:
+        async with session_factory() as session:
+            receipt = await session.get(LeadershipCommandReceipt, result.receipt_id)
+            if receipt is not None:
+                original_status = receipt.status
+                notice_result = replace(result, status=receipt.status, reason=receipt.reason)
+    if kind not in {"status", "goal", "details"} and original_status in {"applied", "waiting"}:
+        async with session_factory() as session:
+            state_notice = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key
+                    == f"lead:state:{result.goal_id}:{result.version}"
+                )
+            )
+            if (
+                state_notice is not None
+                and state_notice.payload.get("chat_id") == update.chat_id
+                and state_notice.payload.get("message_thread_id") == update.message_thread_id
+            ):
+                return IngressResult(status=IngressStatus.HANDLED, reason=result.status)
+    notice = await _notice(
+        session_factory, project_id, notice_result, kind=kind, user_id=update.user_id
+    )
     async with UnitOfWork(session_factory) as uow:
         assert uow.session is not None
         await enqueue_chat_notice(
             uow.session,
             chat_id=update.chat_id,
             thread_id=update.message_thread_id,
-            key=f"lead:notice:{update.update_id}",
+            key=f"lead:notice:{update.bot_id}:{update.update_id}",
             text=notice,
+            markdown=True,
         )
     return IngressResult(status=IngressStatus.HANDLED, reason=result.status)
 
@@ -121,6 +152,8 @@ def _command(
         "cancel": "cancel_goal",
         "revoke": "revoke_delegation",
         "status": "get_goal",
+        "goal": "get_goal",
+        "details": "get_goal",
         "answer": "answer_permission",
         "limits": "set_work_limits",
     }
@@ -169,29 +202,47 @@ def _command(
 async def _notice(
     session_factory: async_sessionmaker[AsyncSession],
     project_id: str,
-    status: str,
-    reason: str | None,
+    result: CommandResult,
+    *,
+    kind: str,
+    user_id: int,
 ) -> str:
-    from vuzol.leadership.card import render_goal_card
+    from vuzol.leadership.card import (
+        literal_markdown,
+        render_goal_card,
+        render_goal_contract,
+        render_goal_details,
+    )
     from vuzol.leadership.persistence import GoalDelegation
     from vuzol.leadership.service import goal_card_view
 
-    line = f"Команда: {status}" + (f" ({reason})" if reason else "")
+    if result.status not in {"applied", "waiting", "duplicate"}:
+        explanation = {
+            "outside_scope": "Эта команда доступна только владельцу цели в её проекте.",
+            "goal_not_found": "В этом проекте нет цели для этой команды.",
+            "feature_disabled": "Руководитель отключён в настройках.",
+            "question_version_mismatch": "Ответ относится к старому вопросу. Открой актуальный.",
+            "owner_decision_required": "Нужно явное решение владельца.",
+        }.get(result.reason or "", "Команду нельзя применить к текущему состоянию цели.")
+        return (
+            "🟡 **КОМАНДА НЕ ПРИМЕНЕНА · Руководитель**\n\n"
+            f"{explanation}\n\n"
+            "Актуальное состояние: /lead_status.\n\n"
+            f"*Код для диагностики: {literal_markdown(result.reason or result.status)}*"
+        )
     async with UnitOfWork(session_factory) as uow:
         assert uow.session is not None
-        goal = await uow.session.scalar(
-            select(ManagedGoal)
-            .where(ManagedGoal.project_id == project_id)
-            .order_by(ManagedGoal.created_at.desc())
-            .limit(1)
-        )
-        if goal is None:
-            return f"Руководитель\n{line}"
+        goal = await uow.session.get(ManagedGoal, result.goal_id) if result.goal_id else None
+        if goal is None or goal.project_id != project_id or goal.owner_user_id != user_id:
+            return "**Руководитель**\n\nНет доступной цели для этой команды."
         delegation = await uow.session.get(GoalDelegation, goal.delegation_id)
         if delegation is None:
-            return f"Руководитель\n{line}"
+            return "**Руководитель**\n\nРазрешение на доступ к цели недоступно."
         view = await goal_card_view(uow.session, goal, delegation)
-    return f"{render_goal_card(view)}\n{line}"
+    renderer = {"goal": render_goal_contract, "details": render_goal_details}.get(
+        kind, render_goal_card
+    )
+    return renderer(view)
 
 
 async def _discussion_session(

@@ -1,11 +1,21 @@
 """Goal card and provider response validation. No database and no provider call."""
+# ruff: noqa: RUF001
 
 import inspect
 
+import pytest
+from tests.unit.test_telegram_reply_chunks import visible
+
 from vuzol.cli import worker as worker_cli
-from vuzol.leadership.card import render_goal_card, render_question
+from vuzol.leadership.card import (
+    render_goal_card,
+    render_goal_contract,
+    render_goal_details,
+    render_question,
+)
 from vuzol.leadership.model import LeadModelUnavailable
 from vuzol.leadership.provider_model import parse_lead_response
+from vuzol.telegram.formatting import telegram_markdown_html, telegram_markdown_parts
 from vuzol.telegram.layout import parse_lead_command
 
 
@@ -14,25 +24,135 @@ def test_goal_card_names_status_blocker_package_next_and_result() -> None:
         {
             "lifecycle": "waiting",
             "waiting_reason": "owner",
-            "package_line": "running abcdef12",
+            "current_package_status": "running",
+            "package_title": "Отдельный вход",
             "next_operation": "ответ владельца",
             "result_summary": "доказательств нет",
             "question": "Нужен ли отдельный вход?",
         }
     )
     assert "Руководитель" in text
-    assert "Статус: waiting" in text
-    assert "Блокер: owner" in text
-    assert "Пакет: running abcdef12" in text
-    assert "Дальше: ответ владельца" in text
-    assert "Результат: доказательств нет" in text
-    assert "Вопрос: Нужен ли отдельный вход?" in text
+    rendered = telegram_markdown_html(text)
+    plain = visible(rendered)
+    assert "НУЖНО РЕШЕНИЕ" in plain
+    assert "Нужно твоё решение" in plain
+    assert "Пакет: Отдельный вход · в работе" in plain
+    assert "Дальше\nОтветь на вопрос" in plain
+    assert "Результат\nГотовность пока не подтверждена" in plain
+    assert "Вопрос\nНужен ли отдельный вход?" in plain
+    assert "<b>Вопрос</b>" in rendered
+    assert "waiting" not in plain and "owner" not in plain
 
 
 def test_question_notice_binds_the_version() -> None:
-    text = render_question("Нужен ли отдельный вход?", 4)
-    assert "Вопрос: Нужен ли отдельный вход?" in text
-    assert "Версия: 4" in text
+    goal_id = "12345678-1234-1234-1234-123456789012"
+    text = visible(
+        telegram_markdown_html(render_question("Нужен ли отдельный вход?", 4, goal_id=goal_id))
+    )
+    assert "Вопрос\nНужен ли отдельный вход?" in text
+    assert f"/lead_answer {goal_id} 4 <ответ>" in text
+    assert "не возобновляет работу на паузе" in text
+
+
+@pytest.mark.parametrize(
+    ("fields", "prefix"),
+    [
+        ({"lifecycle": "active", "current_package_status": "running"}, "⏳"),
+        ({"lifecycle": "active", "current_package_status": "failed"}, "⏳"),
+        ({"lifecycle": "paused", "waiting_reason": "owner_pause"}, "⏸"),
+        ({"lifecycle": "waiting", "waiting_reason": "owner"}, "🟡"),
+        ({"lifecycle": "waiting", "waiting_reason": "lead_model_unavailable"}, "🔴"),
+        ({"lifecycle": "cancelled"}, "⏹"),
+        (
+            {
+                "lifecycle": "completed",
+                "completion_confirmed": True,
+                "covered": ["a"],
+                "missing": [],
+            },
+            "✅",
+        ),
+        ({"lifecycle": "completed", "completion_confirmed": False}, "🟡"),
+        ({"lifecycle": "active", "current_package_status": "completed"}, "⏳"),
+        ({"lifecycle": "active", "current_package_status": "paused"}, "🟡"),
+    ],
+)
+def test_status_indicator_follows_goal_and_proof_not_commit_or_package(fields, prefix):
+    fields["result_commit"] = "a" * 40
+    text = visible(telegram_markdown_html(render_goal_card(fields)))
+    assert text.startswith(prefix)
+    if prefix != "✅":
+        assert "✅" not in text
+
+
+def test_long_goal_does_not_push_out_the_question_or_result():
+    request = "Подготовь исследование. " * 1000 + "КОНЕЦ_ЗАДАНИЯ"
+    view = {
+        "lifecycle": "waiting",
+        "waiting_reason": "owner",
+        "request": request,
+        "scope": request,
+        "question": "Сравнивать только доступные варианты?",
+        "goal_id": "12345678-1234-1234-1234-123456789012",
+        "question_version": 7,
+        "criteria": [{"id": "a", "description": "Полнота ответа"}],
+    }
+    card = visible(telegram_markdown_html(render_goal_card(view)))
+    assert len(card) < 1200
+    assert "КОНЕЦ_ЗАДАНИЯ" not in card and "…" in card
+    assert "Сравнивать только доступные варианты?" in card
+    assert "Результат" in card and "/lead_goal" in card and "/lead_details" in card
+    parts = telegram_markdown_parts(render_goal_contract(view))
+    assert len(parts) > 1
+    assert request in "".join(visible(body) for body, _ in parts)
+
+
+def test_untrusted_text_cannot_create_markup_or_links():
+    dangerous = (
+        "<b>ГОТОВО</b> [login](https://bad.invalid) **pass** `x` & ![x](https://bad.invalid)"
+    )
+    view = {
+        "request": dangerous,
+        "scope": dangerous,
+        "lifecycle": "waiting",
+        "question": dangerous,
+        "owner_answer": dangerous,
+        "criteria": [{"id": "a", "description": dangerous}],
+        "covered": [],
+        "missing": ["a"],
+    }
+    for markdown in (render_goal_card(view), render_goal_contract(view), render_goal_details(view)):
+        rendered = telegram_markdown_html(markdown)
+        assert "<a " not in rendered and "<img" not in rendered
+        assert "<b>ГОТОВО</b>" not in rendered
+        assert dangerous in visible(rendered)
+
+
+def test_full_source_preserves_indentation_blank_lines_and_embedded_fences():
+    source = "    indented\n\n\nline with trailing spaces   \n```\n<b>raw</b>\n````\n\tlast"
+    view = {"request": source, "scope": "different scope\n" + source, "owner_answer": source}
+    for markdown in (render_goal_contract(view), render_goal_details(view)):
+        rendered = telegram_markdown_html(markdown)
+        assert source in visible(rendered)
+        assert "<b>raw</b>" not in rendered
+
+
+def test_full_question_is_not_truncated_and_unknown_blockers_are_not_mislabelled():
+    question = "Важное ограничение & < > " * 200 + "ПОСЛЕДНИЙ ВОПРОС"
+    parts = telegram_markdown_parts(render_question(question, 11, goal_id="goal"))
+    assert question in "".join(visible(body) for body, _ in parts)
+    text = visible(
+        telegram_markdown_html(
+            render_goal_card(
+                {
+                    "lifecycle": "waiting",
+                    "waiting_reason": "new_internal_reason",
+                }
+            )
+        )
+    )
+    assert "нужно уточнить" in text.lower()
+    assert "new_internal_reason" not in text and "✅" not in text
 
 
 def test_lead_answer_is_a_command_and_enable_still_needs_text() -> None:
@@ -42,6 +162,9 @@ def test_lead_answer_is_a_command_and_enable_still_needs_text() -> None:
     )
     assert parse_lead_command("/lead_answer") is None
     assert parse_lead_command("/lead_status") == ("status", "")
+    assert parse_lead_command("/lead_goal@bot") == ("goal", "")
+    assert parse_lead_command("/lead_details") == ("details", "")
+    assert parse_lead_command("/lead_details unexpected") is None
     assert parse_lead_command("/lead") is None
 
 

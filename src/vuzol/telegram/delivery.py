@@ -329,12 +329,24 @@ async def prepare_delivery(
             html_body = str(item.payload["html"])
         except (KeyError, TypeError, ValueError) as error:
             raise PermanentDeliveryError("invalid_project_import_prompt") from error
+        parts: tuple[tuple[str, str], ...] = ()
+        part_index = 0
+        fallback = None
+        if item.payload.get("role") == "chat_notice" and "reply_parts" in item.payload:
+            parts = _stored_message_parts(item.payload["reply_parts"], "chat_notice_part_invalid")
+            part_index = item.payload.get("reply_part_index", 0)
+            if type(part_index) is not int or not 0 <= part_index < len(parts):
+                raise PermanentDeliveryError("chat_notice_part_invalid")
+            html_body, fallback = parts[part_index]
         return PreparedDelivery(
             DeliveryAction.SEND_HELP,
             chat_id=chat_id,
             thread_id=thread_id,
             html=html_body,
             message_role=str(item.payload["role"]),
+            fallback_html=fallback,
+            discussion_parts=parts,
+            discussion_part_index=part_index,
         )
     if item.payload.get("role") in {PROJECT_MODEL_PICKER_ROLE, PROJECT_MODEL_CONFIRM_ROLE}:
         return _prepare_project_model_message(item)
@@ -836,6 +848,21 @@ async def _resolve_status_dashboard_thread(
     return mapping.message_thread_id
 
 
+def _stored_message_parts(raw: object, category: str) -> tuple[tuple[str, str], ...]:
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(
+            not isinstance(part, list)
+            or len(part) != 2
+            or not all(isinstance(value, str) for value in part)
+            for part in raw
+        )
+    ):
+        raise PermanentDeliveryError(category)
+    return tuple((str(part[0]), str(part[1])) for part in raw)
+
+
 async def _prepare_discussion_reply(
     session: AsyncSession, item: TransactionalOutbox, *, rich_messages: bool = False
 ) -> PreparedDelivery:
@@ -858,18 +885,7 @@ async def _prepare_discussion_reply(
     if stored_parts is None:
         parts = telegram_markdown_parts(turn.content)
     else:
-        if (
-            not isinstance(stored_parts, list)
-            or not stored_parts
-            or any(
-                not isinstance(part, list)
-                or len(part) != 2
-                or not all(isinstance(value, str) for value in part)
-                for part in stored_parts
-            )
-        ):
-            raise PermanentDeliveryError("discussion_reply_part_invalid")
-        parts = tuple((str(part[0]), str(part[1])) for part in stored_parts)
+        parts = _stored_message_parts(stored_parts, "discussion_reply_part_invalid")
     if part_index >= len(parts):
         raise PermanentDeliveryError("discussion_reply_part_invalid")
     html_body, fallback_body = parts[part_index]
@@ -1667,6 +1683,9 @@ class TelegramDeliveryService:
                 item = await session.get(TransactionalOutbox, token.item_id)
                 assert item is not None
                 next_index = prepared.discussion_part_index + 1
+                prefix = (
+                    "chat_notice" if prepared.message_role == "chat_notice" else "discussion_reply"
+                )
                 # Next send becomes claimable ONLY after this confirmed part,
                 # in the same fenced transaction as complete_outbox_item.
                 await OutboxRepository(session).enqueue(
@@ -1674,7 +1693,7 @@ class TelegramDeliveryService:
                     operation_type="send_message",
                     entity_type=item.linked_entity_type,
                     entity_id=item.linked_entity_id,
-                    idempotency_key=f"discussion_reply:{item.linked_entity_id}:part:{next_index}",
+                    idempotency_key=f"{prefix}:{item.linked_entity_id}:part:{next_index}",
                     payload={
                         **item.payload,
                         "reply_part_index": next_index,

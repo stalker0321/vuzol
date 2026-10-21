@@ -1037,9 +1037,12 @@ def _require_provider_command(
         }
     elif provider == "pi":
         expected = (
-            {canonical_pi_argv(model, read_only=True, prompt_only=True)}
+            {canonical_pi_argv(model, reasoning_effort=effort, read_only=True, prompt_only=True)}
             if require_prompt_only
-            else {canonical_pi_argv(model, read_only=read_only) for read_only in modes}
+            else {
+                canonical_pi_argv(model, reasoning_effort=effort, read_only=read_only)
+                for read_only in modes
+            }
         )
     else:
         expected = None

@@ -276,6 +276,31 @@ version, scope, delegation, and feature fences are rechecked before launch and d
 
 ### Selecting today's models (configuration, not application code)
 
+The 2026-10-21 requested lead selection is **Muse Spark 1.3 Contributor / high**
+through the existing Pi → OpenCode Go account C. Its native Pi 1.0.3 catalog ID
+is `muse-spark-1.3-contributor`; the catalog maps `high` to the upstream `high`
+effort. This is an installation/profile choice, not a model name in application logic.
+The independent reviewer remains MiMo V2.6 Flash. Example overlay addition:
+
+```toml
+[[profiles]]
+id = "pi-opencode-go-c-muse"
+base_profile_id = "pi-opencode-go-c"
+model = "muse-spark-1.3-contributor"
+model_reasoning_effort = "high"
+routing_priority = 242
+```
+
+Set the installation's `VUZOL_PROJECT_LEAD__PROFILE_ID` to that profile, and use
+the existing model-matrix application API or `/model` to change any explicit
+project lead selection. Changing a default alone does not override a project pin.
+Pi now passes `model_reasoning_effort` as `--thinking`; both normal worktree and
+snapshot transports enforce that exact choice. Missing or different effort is
+not silently accepted by the sandbox boundary. Selecting another profile does
+not resume work, replace the reviewer, or rewrite old invocation receipts.
+
+The DeepSeek setup below records the preceding rollout, not a fixed dependency.
+
 The requested choices are DeepSeek `deepseek-v4.1-flash` for lead and MiMo
 `mimo-v2.6-flash` for review, both through Pi/OpenCode Go account C. These identifiers are
 choices for the local overlay, not constants in lead/review policy, and are not an attestation

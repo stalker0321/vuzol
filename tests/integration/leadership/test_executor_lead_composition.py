@@ -34,10 +34,12 @@ def anyio_backend():
     return "asyncio"
 
 
+@pytest.mark.parametrize("reasoning_effort", [None, "high"])
 async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
     postgres_dsn,
     tmp_path,
     monkeypatch,
+    reasoning_effort,
 ):
     monkeypatch.delenv("VUZOL_TEST_DATABASE_DSN", raising=False)
     repository = tmp_path / "repositories" / PROJECT
@@ -52,6 +54,7 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
         update={
             "id": "any-pi-model",
             "model": "arbitrary-model-not-hardcoded",
+            "model_reasoning_effort": reasoning_effort,
             "state_directory": state,
             "account_id": "fixture-account-c",
             "roles": frozenset({ProviderRole.LEAD, ProviderRole.REVIEWER, ProviderRole.EXECUTOR}),
@@ -97,6 +100,10 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             assert envelope.sandbox.empty_workspace
             assert envelope.sandbox.timeout_seconds == 180
             assert envelope.argv[envelope.argv.index("--model") + 1] == profile.model
+            if reasoning_effort is None:
+                assert "--thinking" not in envelope.argv
+            else:
+                assert envelope.argv[envelope.argv.index("--thinking") + 1] == reasoning_effort
             assert "--no-tools" in envelope.argv and "--tools" not in envelope.argv
             assert "--no-context-files" in envelope.argv
             assert "--system-prompt" in envelope.argv

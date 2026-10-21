@@ -100,6 +100,45 @@ def test_canonical_pi_argv_forms() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("effort", ["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("snapshot", [False, True])
+async def test_reasoning_choice_reaches_the_pinned_transport(effort, snapshot) -> None:
+    from vuzol.execution.codex import _require_provider_command
+
+    transport = Transport((FIXTURES / "print-json-text.jsonl").read_text())
+    chosen = profile().model_copy(update={"model_reasoning_effort": effort})
+    changes = (
+        {
+            "role": ProviderRole.LEAD,
+            "sandbox_reference": "lead-turn:test",
+            "required_capabilities": frozenset(),
+        }
+        if snapshot
+        else {}
+    )
+    await PiCliAdapter(transport).execute(request(**changes), chosen, CancellationContext())
+    argv = transport.invocation.argv
+    assert argv[argv.index("--thinking") + 1] == effort
+    _require_provider_command(
+        argv,
+        "pi",
+        chosen.model,
+        reasoning_effort=effort,
+        require_read_only=snapshot,
+        require_prompt_only=snapshot,
+    )
+    with pytest.raises(ValueError, match="canonical"):
+        _require_provider_command(
+            argv,
+            "pi",
+            chosen.model,
+            reasoning_effort=None,
+            require_read_only=snapshot,
+            require_prompt_only=snapshot,
+        )
+
+
+@pytest.mark.anyio
 async def test_adapter_parses_final_agent_end_and_keeps_prompt_on_stdin() -> None:
     transport = Transport((FIXTURES / "print-json-text.jsonl").read_text())
     result = await PiCliAdapter(transport).execute(request(), profile(), CancellationContext())

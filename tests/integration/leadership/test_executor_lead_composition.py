@@ -62,7 +62,9 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
         update={
             "settings": runtime.settings.model_copy(
                 update={
-                    "project_lead": ProjectLeadSettings(enabled=True, profile_id=profile.id),
+                    "project_lead": ProjectLeadSettings(
+                        enabled=True, profile_id=profile.id, inference_timeout_seconds=180
+                    ),
                     "execution": runtime.settings.execution.model_copy(
                         update={
                             "enabled": True,
@@ -93,6 +95,7 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             )
             assert "vuzol.task_id" not in envelope.ownership_labels
             assert envelope.sandbox.empty_workspace
+            assert envelope.sandbox.timeout_seconds == 180
             assert envelope.argv[envelope.argv.index("--model") + 1] == profile.model
             assert envelope.argv[envelope.argv.index("--tools") + 1] == "read,grep,find,ls"
             assert [mount.purpose for mount in envelope.sandbox.mounts] == ["provider-state"]

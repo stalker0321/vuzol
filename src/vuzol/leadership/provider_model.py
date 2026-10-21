@@ -136,11 +136,13 @@ class ProviderLeadModel:
         adapter: ProviderAdapter,
         *,
         limits: HardLimits | None = None,
+        timeout_seconds: int = 60,
     ) -> None:
         self._factory = session_factory
         self._profile = profile
         self._adapter = adapter
         self._limits = limits or HardLimits()
+        self._timeout_seconds = timeout_seconds
 
     async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
         invocation_id = snapshot.invocation_id or uuid.uuid4()
@@ -162,6 +164,7 @@ class ProviderLeadModel:
             update={
                 "max_input_tokens": input_tokens,
                 "max_output_tokens": output_tokens,
+                "timeout_seconds": self._timeout_seconds,
             }
         )
         result = await invoke(

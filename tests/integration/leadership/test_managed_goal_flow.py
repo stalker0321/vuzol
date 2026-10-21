@@ -976,6 +976,7 @@ def _provider_worker(factory, settings, *, owner, transport=None):
     class Transport:
         async def execute(self, request, profile, cancellation):
             del profile, cancellation
+            assert request.timeout_seconds == 180
             prompt = request.original_input
             if request.role is ProviderRole.REVIEWER:
                 body = json.loads(prompt.split("\n", 1)[1])
@@ -1042,7 +1043,11 @@ def _provider_worker(factory, settings, *, owner, transport=None):
     configured = settings.model_copy(
         update={
             "project_lead": settings.project_lead.model_copy(
-                update={"profile_id": "lead-local", "reviewer_profile_id": "goal-review"}
+                update={
+                    "profile_id": "lead-local",
+                    "reviewer_profile_id": "goal-review",
+                    "inference_timeout_seconds": 180,
+                }
             )
         }
     )

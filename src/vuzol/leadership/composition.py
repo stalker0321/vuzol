@@ -138,7 +138,11 @@ class _TurnModels:
             raise LeadModelUnavailable("lead_profile_unselected")
         profile, adapter = self._resolve(pins["lead"], "lead")
         return await ProviderLeadModel(
-            self._factory, profile, adapter, limits=self._settings.limits
+            self._factory,
+            profile,
+            adapter,
+            limits=self._settings.limits,
+            timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
         ).decide(snapshot)
 
     async def verify(self, goal_id: uuid.UUID, *, claim: TurnClaim) -> None:
@@ -150,6 +154,10 @@ class _TurnModels:
         profile, adapter = self._resolve(reviewer, "goal_reviewer")
         if lead is not None and reviewer.profile_id == lead.profile_id:
             raise LeadModelUnavailable("lead_profile_unselected")
-        await GoalVerifier(self._factory, profile, adapter, limits=self._settings.limits).verify(
-            goal_id, claim=claim
-        )
+        await GoalVerifier(
+            self._factory,
+            profile,
+            adapter,
+            limits=self._settings.limits,
+            timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
+        ).verify(goal_id, claim=claim)

@@ -169,6 +169,11 @@ lead and goal-reviewer assignments before inference. Changes affect new runs and
 not already-started work. Changing `/model` does not unpause a goal or resume a waiting goal:
 use its question/owner controls. A default reviewer is also pinned on its first review attempt.
 
+`VUZOL_PROJECT_LEAD__INFERENCE_TIMEOUT_SECONDS` bounds each lead/goal-review call
+(default 60 seconds, range 1–600), including CLI sandbox startup. It is provider-neutral;
+token/money limits, lease renewal and stop fences remain independent. A timed-out call stays
+unknown in the ledger; an explicit owner resume starts a new turn, not a replay of that call.
+
 Legacy worker-family preferences remain readable for existing runs. A new executor choice
 or reset clears that legacy preference so it cannot unexpectedly reappear. The executor slot
 still concerns only sandbox coding/agent steps, not API/research executor steps. Other roles

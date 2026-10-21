@@ -51,11 +51,13 @@ class GoalVerifier:
         adapter: ProviderAdapter,
         *,
         limits: HardLimits,
+        timeout_seconds: int = 60,
     ) -> None:
         self._factory = factory
         self._profile = profile
         self._adapter = adapter
         self._limits = limits
+        self._timeout_seconds = timeout_seconds
 
     async def verify(self, goal_id: uuid.UUID, *, claim: TurnClaim) -> None:
         async with self._factory() as session:
@@ -131,7 +133,7 @@ class GoalVerifier:
                 output_json_schema=strict_response_schema(GoalVerdict),
                 system_policy_revision="project-lead-policy.v1",
                 prompt_revision=GOAL_HEAD_CHECKER,
-                timeout_seconds=60,
+                timeout_seconds=self._timeout_seconds,
                 max_input_tokens=input_tokens,
                 max_output_tokens=output_tokens,
                 reserved_cost_units=Decimal(0),

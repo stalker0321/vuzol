@@ -17,6 +17,18 @@ def test_project_lead_is_off_unless_configured() -> None:
     assert Settings(environment="test").project_lead.repeat_limit == 2
     assert Settings(environment="test").project_lead.integration_branch_prefix == "vuzol-managed/"
     assert Settings(environment="test").project_lead.profile_id is None
+    assert ProjectLeadSettings().inference_timeout_seconds == 60
+
+
+@pytest.mark.parametrize("seconds", [0, -1, 601])
+def test_lead_inference_timeout_is_bounded(seconds: int) -> None:
+    with pytest.raises(ValueError):
+        ProjectLeadSettings(inference_timeout_seconds=seconds)
+
+
+def test_lead_inference_timeout_is_environment_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("VUZOL_PROJECT_LEAD__INFERENCE_TIMEOUT_SECONDS", "180")
+    assert Settings(environment="test").project_lead.inference_timeout_seconds == 180
 
 
 def test_agent_principal_cannot_be_an_owner_user_id() -> None:

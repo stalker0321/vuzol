@@ -30,6 +30,7 @@ class TurnInvocationContext:
     version: int
     fence_epoch: int
     scope_revision: int
+    conversational: bool = False
     enabled: Callable[[], bool] = lambda: True
 
 
@@ -46,7 +47,10 @@ async def invocation_current(session: AsyncSession, context: TurnInvocationConte
         goal is None
         or turn is None
         or turn.status != "claimed"
-        or goal.lifecycle != "active"
+        or (
+            goal.lifecycle != "active"
+            and not (context.conversational and goal.lifecycle in {"waiting", "paused"})
+        )
         or goal.project_id != context.project_id
         or goal.version != context.version
         or goal.fence_epoch != context.fence_epoch

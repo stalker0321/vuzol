@@ -3,6 +3,8 @@
 
 import json
 import uuid
+from datetime import UTC
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -148,3 +150,89 @@ async def conversation_goal_context(
         },
         ensure_ascii=False,
     )
+
+
+async def enqueue_owner_message(
+    uow: UnitOfWork,
+    *,
+    goal: ManagedGoal,
+    intake: TelegramIntakeMessage,
+    raw: str,
+    transcription: dict[str, Any] | None = None,
+) -> uuid.UUID:
+    """Caller locks the goal; source identity and reply address come from ingress."""
+    from vuzol.discussion.memory_service import DiscussionMemoryService
+    from vuzol.storage.models import TransactionalOutbox
+    from vuzol.storage.types import (
+        ConversationTurnRole,
+        ConversationTurnSource,
+        IntakeStatus,
+        InteractionMode,
+    )
+
+    assert uow.session is not None
+    key = f"lead:message:{intake.chat_id}:{intake.message_id}"
+    existing = await uow.session.scalar(
+        select(TransactionalOutbox).where(
+            TransactionalOutbox.destination == "project_lead",
+            TransactionalOutbox.idempotency_key == key,
+        )
+    )
+    if existing is not None:
+        intake.status = IntakeStatus.COMPLETED
+        return existing.id
+    if intake.user_id != goal.owner_user_id:
+        raise ValueError("lead_message_outside_scope")
+    session_id = await uow.discussions.active_session_id(
+        chat_id=intake.chat_id, message_thread_id=intake.message_thread_id
+    )
+    if session_id is None:
+        session_id = await uow.discussions.create_session(
+            project_id=goal.project_id,
+            chat_id=intake.chat_id,
+            message_thread_id=intake.message_thread_id,
+        )
+    discussion = await uow.discussions.get_session(session_id)
+    if discussion.project_id != goal.project_id:
+        raise ValueError("lead_message_outside_scope")
+    source_turn_id, _ = await DiscussionMemoryService(uow).append_turn(
+        session_id=session_id,
+        role=ConversationTurnRole.USER,
+        source=ConversationTurnSource.TELEGRAM_USER,
+        content=raw,
+        classifier_mode=InteractionMode.DISCUSSION,
+        intake_message_id=intake.id,
+    )
+    event_id = uuid.uuid4()
+    uow.session.add(
+        TransactionalOutbox(
+            id=event_id,
+            destination="project_lead",
+            operation_type="lead_wakeup",
+            linked_entity_type="managed_goal",
+            linked_entity_id=goal.id,
+            idempotency_key=key,
+            payload={
+                "goal_id": str(goal.id),
+                "wakeup_kind": "owner_message",
+                "source_event_id": str(event_id),
+                "intake_id": str(intake.id),
+                "received_at": intake.created_at.astimezone(UTC).isoformat(timespec="microseconds"),
+                "source_turn_id": str(source_turn_id),
+                "text": raw,
+                "attachments": intake.attachments,
+                "owner_user_id": intake.user_id,
+                "delegation_id": str(goal.delegation_id),
+                "goal_version": goal.version,
+                "scope_revision": goal.scope_revision,
+                "session_id": str(session_id),
+                "chat_id": intake.chat_id,
+                "message_thread_id": intake.message_thread_id,
+                "message_id": intake.message_id,
+                **({"transcription": transcription} if transcription is not None else {}),
+            },
+        )
+    )
+    intake.status = IntakeStatus.COMPLETED
+    await uow.session.flush()
+    return event_id

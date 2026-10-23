@@ -80,6 +80,9 @@ def authorize(
         return PolicyDecision(False, "denied", "delegation_expired")
     if delegation_policy_revision != POLICY_REVISION:
         return PolicyDecision(False, "denied", "policy_revision_mismatch")
-    if command.value not in delegation_actions or command.value not in DELEGATED_ACTIONS:
+    action = command.value
+    if command is LeadCommandName.AMEND_GOAL and "request_revision" in delegation_actions:
+        action = "request_revision"
+    if action not in delegation_actions or action not in DELEGATED_ACTIONS:
         return PolicyDecision(False, "denied", "action_not_delegated")
     return PolicyDecision(True, "applied")

@@ -31,6 +31,7 @@ class LeadSnapshot:
     waiting_reason: str | None
     completed_package_count: int = 0
     owner_answer: str | None = None
+    owner_event: dict[str, Any] | None = None
     invocation_id: uuid.UUID | None = None
     result_context: dict[str, Any] = field(default_factory=dict)
 
@@ -45,6 +46,7 @@ class LeadCommandDraft:
 @dataclass(frozen=True, slots=True)
 class LeadDecision:
     commands: tuple[LeadCommandDraft, ...] = ()
+    reply: str = ""
     profile_id: str = "unconfigured"
     usage: dict[str, Any] = field(default_factory=lambda: {"cost_known": False})
 
@@ -87,6 +89,7 @@ def decision_payload(decision: LeadDecision) -> dict[str, Any]:
             {"name": command.name, "payload": dict(command.payload), "reason": command.reason}
             for command in decision.commands
         ],
+        "reply": decision.reply,
         "profile_id": decision.profile_id,
         "usage": usage,
     }
@@ -119,6 +122,7 @@ def freeze_decision(
         )
     return {
         "commands": commands,
+        "reply": decision.reply,
         "profile_id": decision.profile_id,
         "usage": usage,
         "input_version": input_version,
@@ -148,6 +152,7 @@ def decision_from_payload(raw: Mapping[str, Any] | None) -> LeadDecision:
     usage = raw.get("usage")
     return LeadDecision(
         commands=tuple(commands),
+        reply=str(raw.get("reply") or ""),
         profile_id=str(raw.get("profile_id") or "unconfigured"),
         usage=dict(usage) if isinstance(usage, dict) else {"cost_known": False},
     )

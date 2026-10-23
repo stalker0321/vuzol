@@ -3,6 +3,7 @@
 import hashlib
 import html
 import uuid
+from datetime import UTC
 from typing import cast
 
 from sqlalchemy import func, select
@@ -189,6 +190,11 @@ class TelegramIngressService:
                 raise TelegramPolicyError("topic does not accept new tasks")
         except (TelegramPolicyError, RegistryError) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
+
+        if settings.project_lead.enabled and topic.kind is TopicKind.PROJECT:
+            routed = await self._accept_live_lead_message(update, topic)
+            if routed is not None:
+                return routed
 
         if (
             (settings.project_discussion_enabled or settings.chat.enabled)
@@ -553,6 +559,99 @@ class TelegramIngressService:
                 await uow.telegram_links.resolve_task(update.chat_id, update.reply_to_message_id)
                 is not None
             )
+
+    async def _accept_live_lead_message(
+        self, update: MessageUpdate, topic: TopicConfig
+    ) -> IngressResult | None:
+        from vuzol.leadership.chat import enqueue_owner_message
+        from vuzol.leadership.persistence import LIVE_GOAL_LIFECYCLES, ManagedGoal
+
+        voice = next((a for a in update.attachments if a.kind.value in {"voice", "audio"}), None)
+        if not update.text and voice is None:
+            return None
+        async with UnitOfWork(self._session_factory) as uow:
+            assert uow.session is not None
+            mapping = await uow.session.scalar(
+                select(TopicMapping).where(
+                    TopicMapping.chat_id == update.chat_id,
+                    TopicMapping.message_thread_id == update.message_thread_id,
+                )
+            )
+            mode = (
+                mapping.conversation_mode
+                if mapping is not None and mapping.conversation_mode_message_id is not None
+                else "lead"
+            )
+            if mode != "lead":
+                return None
+            goal = await uow.session.scalar(
+                select(ManagedGoal)
+                .where(
+                    ManagedGoal.project_id == topic.project_id,
+                    ManagedGoal.owner_user_id == update.user_id,
+                    ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
+                )
+                .with_for_update()
+            )
+            if goal is None:
+                return None
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            existing = await uow.session.scalar(
+                select(TelegramIntakeMessage).where(
+                    TelegramIntakeMessage.chat_id == update.chat_id,
+                    TelegramIntakeMessage.message_id == update.message_id,
+                )
+            )
+            if existing is not None:
+                await uow.inbox.mark_processed(
+                    inbox_id, entity_type="telegram_intake", entity_id=existing.id
+                )
+                return IngressResult(status=IngressStatus.DUPLICATE, intake_id=existing.id)
+            intake = TelegramIntakeMessage(
+                inbox_id=inbox_id,
+                chat_id=update.chat_id,
+                message_thread_id=update.message_thread_id,
+                message_id=update.message_id,
+                user_id=update.user_id,
+                original_text=update.text,
+                attachments=[a.model_dump(mode="json") for a in update.attachments],
+                affinity_kind="discussion",
+                status=IntakeStatus.AWAITING_INTERPRETATION,
+            )
+            intake_id = await uow.telegram_intake.add(intake)
+            if voice is None:
+                await enqueue_owner_message(uow, goal=goal, intake=intake, raw=update.text or "")
+            else:
+                await uow.outbox.enqueue(
+                    destination="telegram_file",
+                    operation_type="download_attachment",
+                    entity_type="telegram_intake",
+                    entity_id=intake_id,
+                    idempotency_key=f"telegram:lead-voice:{update.chat_id}:{update.message_id}",
+                    payload={
+                        "file_id": voice.file_id,
+                        "declared_size": voice.file_size,
+                        "media_type": voice.media_type,
+                        "filename": voice.filename,
+                        "kind": voice.kind.value,
+                        "lead_goal_id": str(goal.id),
+                        "intake_id": str(intake.id),
+                        "received_at": intake.created_at.astimezone(UTC).isoformat(
+                            timespec="microseconds"
+                        ),
+                    },
+                )
+            await uow.inbox.mark_processed(
+                inbox_id, entity_type="telegram_intake", entity_id=intake_id
+            )
+            return IngressResult(status=IngressStatus.HANDLED, intake_id=intake_id)
 
     async def _accept_discussion_message(
         self, update: MessageUpdate, topic: TopicConfig, *, validation_error: bool = False

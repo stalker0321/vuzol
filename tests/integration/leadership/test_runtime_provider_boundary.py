@@ -69,7 +69,9 @@ async def test_cli_composes_actual_http_provider_and_settles_its_reservation(
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": '{"commands":[]}'}, "finish_reason": "stop"}],
+                "choices": [
+                    {"message": {"content": '{"commands":[],"reply":""}'}, "finish_reason": "stop"}
+                ],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 4},
             },
             headers={"x-request-id": "fixture-request"},
@@ -115,7 +117,7 @@ async def test_cli_composes_actual_http_provider_and_settles_its_reservation(
 
 
 async def test_budget_refusal_never_reaches_transport(postgres_dsn, monkeypatch):
-    transport = _Transport({"commands": []})
+    transport = _Transport({"commands": [], "reply": ""})
     settings = _settings(monkeypatch, "lead-local")
     settings = settings.model_copy(
         update={"limits": settings.limits.model_copy(update={"daily_cost_units": 0})}

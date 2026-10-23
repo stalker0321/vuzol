@@ -222,6 +222,7 @@ class LeadershipCommandService:
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
         if goal.lifecycle == "paused" and name not in READ_COMMANDS | {
+            LeadCommandName.AMEND_GOAL,
             LeadCommandName.SET_WORK_LIMITS,
             LeadCommandName.RESUME_GOAL,
             LeadCommandName.CANCEL_GOAL,
@@ -234,6 +235,19 @@ class LeadershipCommandService:
             if name in {LeadCommandName.GET_GOAL, LeadCommandName.GET_RESULT}:
                 body.update(await _goal_projection(uow.session, goal))
             return _Outcome(CommandStatus.APPLIED, None, body, goal)
+        if name is LeadCommandName.PROPOSE_COMPLETION and (
+            goal.constraints.get("pending_amendment") or goal.constraints.get("queued_amendment")
+        ):
+            return _Outcome(CommandStatus.DENIED, "amendment_pending", {}, goal)
+        if name in {
+            LeadCommandName.START_BATCH,
+            LeadCommandName.PROPOSE_BATCH,
+            LeadCommandName.WAIT_FOR,
+        }:
+            if goal.lifecycle == "waiting":
+                return _Outcome(CommandStatus.DENIED, "goal_waiting", {}, goal)
+            if goal.constraints.get("pending_amendment"):
+                return _Outcome(CommandStatus.DENIED, "amendment_pending", {}, goal)
         if name is LeadCommandName.SET_WORK_LIMITS:
             from vuzol.leadership.limits import parse_work_limits
 
@@ -380,8 +394,23 @@ class LeadershipCommandService:
             status = CommandStatus(str(produced.pop("status", CommandStatus.APPLIED.value)))
             reason = produced.pop("reason", None)
             return _Outcome(status, None if reason is None else str(reason), produced, goal)
-        if name is LeadCommandName.REQUEST_REVISION:
-            return _Outcome(CommandStatus.UNSUPPORTED, "revision_unsupported", {}, goal)
+        if name is LeadCommandName.AMEND_GOAL:
+            from vuzol.leadership.amendments import store_amendment
+
+            amendment = await store_amendment(
+                uow.session, goal, delegation, command.payload, reason=command.reason
+            )
+            if amendment["inflight_policy"] == "cancel_current":
+                await _settle_children(uow.session, goal, actor, stop=True)
+            _bump(goal, actor)
+            await enqueue_goal_wakeup(
+                uow.session,
+                goal_id=goal.id,
+                package_id=goal.current_package_id,
+                idempotency_key=f"lead:amendment:{goal.id}:{goal.version}",
+                kind="amendment",
+            )
+            return _Outcome(CommandStatus.APPLIED, None, {"amendment": amendment}, goal)
         if name is LeadCommandName.PROPOSE_COMPLETION:
             assessment = await assess_completion(uow.session, goal, check_live_head=True)
             if assessment.satisfied:
@@ -529,7 +558,8 @@ class LeadershipCommandService:
 
         ingress = actor.ingress_source
         origin = RequestOrigin.model_validate(
-            command.payload.get("request_origin") or {
+            command.payload.get("request_origin")
+            or {
                 "channel": ingress if ingress in {"telegram", "cli"} else "api",
                 "display_name": "Telegram" if ingress == "telegram" else ingress,
             }
@@ -916,7 +946,9 @@ def _duplicate_or_conflict(
     command: LeadCommand,
     digest: str,
 ) -> CommandResult:
-    if existing.payload_hash != digest or existing.command_name != command.name:
+    if existing.payload_hash != digest or parse_command_name(
+        existing.command_name
+    ) != parse_command_name(command.name):
         return CommandResult(
             status=CommandStatus.DENIED.value,
             actor_kind=actor.kind.value,
@@ -1217,7 +1249,7 @@ async def _control_task(
     if (
         task is None
         or task.status in USER_TERMINAL_TASK_STATUSES
-        or task.status is TaskStatus.PAUSED
+        or (task.status is TaskStatus.PAUSED and not stop)
     ):
         return
     target = TaskStatus.CANCELLED if stop else TaskStatus.PAUSED

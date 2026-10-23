@@ -100,6 +100,22 @@ class LeadershipCommandService:
         claim: TurnClaim | None = None,
         uow: UnitOfWork | None = None,
     ) -> CommandResult:
+        async def store(
+            session: AsyncSession,
+            actor: Actor,
+            command: LeadCommand,
+            digest: str,
+            outcome: _Outcome,
+        ) -> CommandResult:
+            return await _store(
+                session,
+                actor,
+                command,
+                digest,
+                outcome,
+                source_wakeup_id=claim.wakeup_id if claim else None,
+            )
+
         name = parse_command_name(command.name)
         digest = payload_hash(command)
         async with AsyncExitStack() as stack:
@@ -108,7 +124,11 @@ class LeadershipCommandService:
             assert uow.session is not None
             # An enclosing intake transaction uses this same order before it
             # locks its discussion row. Keep project admission ahead of receipts.
-            if name in {LeadCommandName.ENABLE_MANAGED_GOAL, LeadCommandName.START_BATCH}:
+            if name in {
+                LeadCommandName.ENABLE_MANAGED_GOAL,
+                LeadCommandName.START_BATCH,
+                LeadCommandName.START_TASK,
+            }:
                 await lock_project_admission(uow.session, command.project_id)
             receipt_key = (
                 f"lead-command:{actor.kind.value}:{actor.subject}:{command.idempotency_key}"
@@ -120,7 +140,7 @@ class LeadershipCommandService:
             if existing is not None:
                 return _duplicate_or_conflict(existing, actor, command, digest)
             if name is None or command.contract_version != CONTRACT_VERSION:
-                return await _store(
+                return await store(
                     uow.session,
                     actor,
                     command,
@@ -128,7 +148,7 @@ class LeadershipCommandService:
                     _Outcome(CommandStatus.UNSUPPORTED, "unsupported_command", {}, None),
                 )
             if _FORBIDDEN_PAYLOAD_KEYS.intersection(command.payload):
-                return await _store(
+                return await store(
                     uow.session,
                     actor,
                     command,
@@ -153,7 +173,7 @@ class LeadershipCommandService:
             )
             decision = _decision(actor, name, command, goal, delegation, self._enabled)
             if not decision.allowed:
-                return await _store(
+                return await store(
                     uow.session,
                     actor,
                     command,
@@ -162,7 +182,7 @@ class LeadershipCommandService:
                 )
             version_problem = _version_problem(name, command, goal)
             if version_problem is not None:
-                return await _store(
+                return await store(
                     uow.session,
                     actor,
                     command,
@@ -172,8 +192,10 @@ class LeadershipCommandService:
             try:
                 outcome = await self._perform(uow, actor, name, command, goal, delegation)
             except DomainError as error:
+                if goal is not None:
+                    await uow.session.refresh(goal)
                 outcome = _Outcome(CommandStatus.DENIED, error.code, {}, goal)
-            return await _store(uow.session, actor, command, digest, outcome)
+            return await store(uow.session, actor, command, digest, outcome)
 
     async def apply_human(
         self, principal: Principal, command: LeadCommand, *, uow: UnitOfWork | None = None
@@ -223,6 +245,7 @@ class LeadershipCommandService:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
         if goal.lifecycle == "paused" and name not in READ_COMMANDS | {
             LeadCommandName.AMEND_GOAL,
+            LeadCommandName.CANCEL_TASK,
             LeadCommandName.SET_WORK_LIMITS,
             LeadCommandName.RESUME_GOAL,
             LeadCommandName.CANCEL_GOAL,
@@ -232,8 +255,15 @@ class LeadershipCommandService:
             return _Outcome(CommandStatus.DENIED, "goal_paused", {}, goal)
         if name in READ_COMMANDS:
             body = _view(name, goal, delegation)
-            if name in {LeadCommandName.GET_GOAL, LeadCommandName.GET_RESULT}:
+            if name in {
+                LeadCommandName.GET_GOAL,
+                LeadCommandName.GET_RESULT,
+                LeadCommandName.GET_PROJECT_STATE,
+            }:
+                from vuzol.leadership.tasks import task_context
+
                 body.update(await _goal_projection(uow.session, goal))
+                body["task_control"] = await task_context(uow.session, goal)
             return _Outcome(CommandStatus.APPLIED, None, body, goal)
         if name is LeadCommandName.PROPOSE_COMPLETION and (
             goal.constraints.get("pending_amendment") or goal.constraints.get("queued_amendment")
@@ -241,6 +271,7 @@ class LeadershipCommandService:
             return _Outcome(CommandStatus.DENIED, "amendment_pending", {}, goal)
         if name in {
             LeadCommandName.START_BATCH,
+            LeadCommandName.START_TASK,
             LeadCommandName.PROPOSE_BATCH,
             LeadCommandName.WAIT_FOR,
         }:
@@ -349,6 +380,13 @@ class LeadershipCommandService:
             goal.lease_until = None
             return _transition(goal, actor, "waiting", "wait_for", CommandStatus.WAITING)
         if name is LeadCommandName.PROPOSE_BATCH:
+            if goal.current_package_id:
+                current = await uow.session.get(WorkPackage, goal.current_package_id)
+                if current and current.status in {
+                    WorkPackageStatus.RUNNING,
+                    WorkPackageStatus.PAUSED,
+                }:
+                    raise DomainError("package_still_live")
             plan = _plan_draft(command.payload)
             goal.proposed_plan = command.payload["plan"]
             _bump(goal, actor)
@@ -358,7 +396,7 @@ class LeadershipCommandService:
                 {"version": goal.version, "title": plan.title, "items": len(plan.items)},
                 goal,
             )
-        if name is LeadCommandName.START_BATCH:
+        if name in {LeadCommandName.START_BATCH, LeadCommandName.START_TASK}:
             if self._batch_executor is None:
                 return _Outcome(CommandStatus.UNSUPPORTED, "batch_executor_unbound", {}, goal)
             try:
@@ -394,6 +432,26 @@ class LeadershipCommandService:
             status = CommandStatus(str(produced.pop("status", CommandStatus.APPLIED.value)))
             reason = produced.pop("reason", None)
             return _Outcome(status, None if reason is None else str(reason), produced, goal)
+        if name is LeadCommandName.CANCEL_TASK:
+            from vuzol.leadership.tasks import scoped_task
+
+            task = await scoped_task(uow.session, goal, command.payload.get("task_id"))
+            await _control_task(uow.session, task.id, actor, stop=True)
+            _bump(goal, actor)
+            return _Outcome(CommandStatus.APPLIED, None, {"task_id": str(task.id)}, goal)
+        if name is LeadCommandName.ACCEPT_RESULT:
+            from vuzol.leadership.tasks import accept_result
+
+            async with uow.session.begin_nested():
+                accepted = await accept_result(
+                    uow.session,
+                    goal,
+                    command.payload,
+                    actor_id=actor.subject,
+                    branch_prefix=self._branch_prefix,
+                )
+            _bump(goal, actor)
+            return _Outcome(CommandStatus.APPLIED, None, accepted, goal)
         if name is LeadCommandName.AMEND_GOAL:
             from vuzol.leadership.amendments import store_amendment
 
@@ -893,6 +951,7 @@ def _plan_draft(payload: Mapping[str, Any]) -> PlanDraft:
                 completion_criteria=tuple(str(value) for value in criteria),
                 allowed_scope=str(item.get("allowed_scope") or ""),
                 local_id=None if item.get("local_id") is None else str(item.get("local_id")),
+                dependencies=tuple(str(value) for value in item.get("dependencies", [])),
                 suggested_risk=RiskLevel.LOW,
                 estimated_complexity=EstimatedComplexity.SMALL,
             )
@@ -981,6 +1040,8 @@ async def _store(
     command: LeadCommand,
     digest: str,
     outcome: _Outcome,
+    *,
+    source_wakeup_id: uuid.UUID | None = None,
 ) -> CommandResult:
     goal_id = command.goal_id if outcome.goal is None else outcome.goal.id
     if outcome.result.get("goal_id"):
@@ -1002,6 +1063,10 @@ async def _store(
         reason=outcome.reason,
     )
     session.add(receipt)
+    await session.flush()
+    from vuzol.leadership.notices import command_notice
+
+    await command_notice(session, receipt, source_wakeup_id, outcome.goal)
     if outcome.goal is not None:
         if outcome.status is CommandStatus.WAITING and outcome.goal.wakeup_condition is None:
             await request_owner_recovery(session, outcome.goal, outcome.reason or "waiting")
@@ -1270,6 +1335,10 @@ async def _wait_already_satisfied(session: AsyncSession, condition: Mapping[str,
     package = await session.get(WorkPackage, package_id)
     if package is None:
         return False
+    if package.managed_goal_id is not None and package.status is WorkPackageStatus.RUNNING:
+        from vuzol.leadership.tasks import task_turn_ready
+
+        return await task_turn_ready(session, package)
     return package.status in {
         WorkPackageStatus.COMPLETED,
         WorkPackageStatus.PAUSED,

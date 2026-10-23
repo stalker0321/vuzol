@@ -38,7 +38,6 @@ from vuzol.interpretation.domain import (
 )
 from vuzol.leadership.persistence import GoalDelegation
 from vuzol.leadership.rules import delegation_is_expired
-from vuzol.leadership.wakeups import enqueue_goal_wakeup, terminal_wakeup_key
 from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
@@ -236,6 +235,7 @@ class WorkPackageSequencer:
             TaskStatus.FAILED,
             TaskStatus.BLOCKED,
             TaskStatus.QUOTA_EXHAUSTED,
+            TaskStatus.CANCELLED,
         }:
             raise DomainError("task_not_terminal")
         if (
@@ -255,6 +255,7 @@ class WorkPackageSequencer:
             TaskStatus.FAILED,
             TaskStatus.BLOCKED,
             TaskStatus.QUOTA_EXHAUSTED,
+            TaskStatus.CANCELLED,
         }:
             package.status = WorkPackageStatus.PAUSED
             from vuzol.storage.types import WorkPackagePauseReason
@@ -292,6 +293,16 @@ class WorkPackageSequencer:
 
         package.cursor_ordinal = link.ordinal + 1
         package.version += 1
+        if package.managed_goal_id is not None:
+            remaining = await self._uow.session.scalar(
+                select(PlanRevisionItem.id).where(
+                    PlanRevisionItem.plan_revision_id == revision.id,
+                    PlanRevisionItem.ordinal == package.cursor_ordinal,
+                )
+            )
+            if remaining is not None:
+                await self._projection(package.id, package.version, "item_finished")
+                return SequenceResult(package.id, package.version, None, package.cursor_ordinal)
         return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
 
     async def materialize_running(
@@ -306,7 +317,7 @@ class WorkPackageSequencer:
         if package.running_revision_id is None:
             raise DomainError("running_revision_missing")
         revision = await self._uow.work_packages.get_revision(package.running_revision_id)
-        if revision.id != package.head_revision_id:
+        if revision.id != package.head_revision_id or revision.id != package.approved_revision_id:
             raise DomainError("stale_revision")
         return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
 
@@ -390,6 +401,10 @@ class WorkPackageSequencer:
         )
         task = await self._uow.session.get(Task, task_record.id, with_for_update=True)
         assert task is not None
+        if package.managed_goal_id is not None:
+            from vuzol.leadership.tasks import spec_digest
+
+            task.spec_revision = spec_digest(task.task_draft)
         task.status = TaskStatus.INTERPRETED
         task.interpreter_profile = MATERIALIZER_PROFILE
         task.prompt_version = MATERIALIZER_PROMPT_VERSION
@@ -736,6 +751,10 @@ class WorkPackageSequencer:
         )
         task = await self._uow.session.get(Task, task_record.id, with_for_update=True)
         assert task is not None
+        if package.managed_goal_id is not None:
+            from vuzol.leadership.tasks import spec_digest
+
+            task.spec_revision = spec_digest(task.task_draft)
         task.status = TaskStatus.INTERPRETED
         task.interpreter_profile = MATERIALIZER_PROFILE
         task.prompt_version = MATERIALIZER_PROMPT_VERSION
@@ -1005,29 +1024,10 @@ class WorkPackageSequenceConsumer:
                     or item.linked_entity_type != "task"
                 ):
                     raise ValueError("invalid_sequence_item")
-                observed = await WorkPackageSequencer(uow).observe_terminal(
+                await WorkPackageSequencer(uow).observe_terminal(
                     task_id=item.linked_entity_id,
                     horizon_enabled=horizon_enabled(self._settings),
                 )
-                if observed is not None and observed.terminal_kind in {
-                    "completed",
-                    "blocked",
-                    "failed",
-                    "recovery_exhausted",
-                }:
-                    finished = await uow.work_packages.get_package(observed.package_id)
-                    if finished.managed_goal_id is not None and self._settings.project_lead.enabled:
-                        await enqueue_goal_wakeup(
-                            uow.session,
-                            goal_id=finished.managed_goal_id,
-                            idempotency_key=terminal_wakeup_key(
-                                finished.managed_goal_id,
-                                finished.id,
-                                observed.status_generation,
-                            ),
-                            package_id=finished.id,
-                            kind=observed.terminal_kind,
-                        )
                 await complete_outbox_item(uow.session, token)
         except (DomainError, ValueError) as error:
             category = str(error)

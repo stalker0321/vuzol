@@ -90,6 +90,10 @@ async def _complete_with_terminal_outbox(
         task.status = TaskStatus.COMPLETED
         task.version += 1
         await enqueue_terminal_task_projections(session, task)
+        # Sequencing is published by the workflow transition, not the projection.
+        from vuzol.workflows.lead_events import publish_task_event
+
+        await publish_task_event(session, task)
 
 
 async def test_default_off_composed_discussion_to_sequential_completion(

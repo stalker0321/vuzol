@@ -20,11 +20,12 @@ from vuzol.storage.models import (
     MaterializationLink,
     Run,
     Step,
+    Task,
     ValidationResult,
     WorkPackage,
     Worktree,
 )
-from vuzol.storage.types import StepStatus, WorkPackageStatus
+from vuzol.storage.types import IdempotencyClass, StepStatus, TaskStatus, WorkPackageStatus
 
 GOAL_HEAD_CHECKER = "goal_review_v2"
 PENDING_CHECKER = "goal_snapshot_v2"
@@ -305,20 +306,60 @@ def evidence_token(package: WorkPackage | None) -> str:
     return f"{package.id}:{package.integration_head_commit}"
 
 
-async def package_has_unknown_effects(session: AsyncSession, package_id: uuid.UUID) -> bool:
-    from vuzol.storage.models import Run
+# Explicit types: publication and installation can also be idempotent.
+# Cancellation never erases the unknown-effects history.
+_CONFINED_STEPS = frozenset(
+    {
+        "prepare_context",
+        "plan",
+        "prepare_worktree",
+        "execute_code",
+        "execute_agent",
+        "validate",
+        "review",
+        "build_static",
+    }
+)
 
-    found = await session.scalar(
-        select(Step.id)
-        .join(Run, Run.id == Step.run_id)
-        .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
+
+def unknown_effects_block_work(task: Task, run: Run, step: Step) -> bool:
+    if not step.unknown_effects:
+        return False
+    confined = (
+        task.status is TaskStatus.CANCELLED
+        and run.workflow_type in {"coding", "architecture"}
+        and step.step_type in _CONFINED_STEPS
+        and step.idempotency_class
+        in {
+            IdempotencyClass.READ_ONLY,
+            IdempotencyClass.ISOLATED_RETRYABLE,
+            IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+        }
+        and set(step.required_capabilities or []).issubset(
+            {
+                "repository_read",
+                "filesystem_write",
+                "code_edit",
+                "git",
+                "project_shell",
+            }
+        )
+    )
+    return not confined
+
+
+async def package_has_unknown_effects(session: AsyncSession, package_id: uuid.UUID) -> bool:
+    rows = await session.execute(
+        select(Task, Run, Step)
+        .join(Run, Run.task_id == Task.id)
+        .join(Step, Step.run_id == Run.id)
+        .join(MaterializationLink, MaterializationLink.task_id == Task.id)
         .where(
             MaterializationLink.work_package_id == package_id,
             Step.unknown_effects.is_(True),
         )
-        .limit(1)
     )
-    return found is not None
+    return any(unknown_effects_block_work(task, run, step) for task, run, step in rows)
 
 
 async def new_effect_blocker(

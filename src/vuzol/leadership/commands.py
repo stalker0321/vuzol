@@ -19,6 +19,9 @@ class LeadCommandName(StrEnum):
     SET_WORK_LIMITS = "set_work_limits"
     PROPOSE_BATCH = "propose_batch"
     START_BATCH = "start_batch"
+    START_TASK = "start_task"
+    CANCEL_TASK = "cancel_task"
+    ACCEPT_RESULT = "accept_result"
     AMEND_GOAL = "amend_goal"
     REQUEST_REVISION = "request_revision"
     REQUEST_PERMISSION = "request_permission"
@@ -75,6 +78,9 @@ DELEGATED_ACTIONS = frozenset(
         LeadCommandName.GET_RESULT.value,
         LeadCommandName.PROPOSE_BATCH.value,
         LeadCommandName.START_BATCH.value,
+        LeadCommandName.START_TASK.value,
+        LeadCommandName.CANCEL_TASK.value,
+        LeadCommandName.ACCEPT_RESULT.value,
         LeadCommandName.REQUEST_REVISION.value,
         LeadCommandName.AMEND_GOAL.value,
         LeadCommandName.REQUEST_PERMISSION.value,
@@ -145,6 +151,13 @@ def payload_hash(command: LeadCommand) -> str:
 
 def parse_command_name(name: str) -> LeadCommandName | None:
     try:
-        return LeadCommandName.AMEND_GOAL if name == "request_revision" else LeadCommandName(name)
+        return LeadCommandName(
+            {
+                "request_revision": "amend_goal",
+                "ask_owner": "request_permission",
+                "read_status": "get_project_state",
+                "propose_plan": "propose_batch",
+            }.get(name, name)
+        )
     except ValueError:
         return None

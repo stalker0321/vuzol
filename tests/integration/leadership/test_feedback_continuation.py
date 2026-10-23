@@ -174,7 +174,12 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
                     for step in context["steps"]
                 )
                 if context["proposed_plan"]["title"] == "Add the missing SECOND marker":
-                    commands = [{"name": "start_batch", "payload": {}}]
+                    commands = [
+                        {
+                            "name": "start_task",
+                            "payload": {"spec": context_of(request)["task_control"]["start_spec"]},
+                        }
+                    ]
                 else:
                     commands = [
                         {
@@ -206,7 +211,7 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
     )
     assert len(prompts) == 4
     assert [c["name"] for c in decisions[1]] == ["propose_batch"]
-    assert [c["name"] for c in decisions[2]] == ["start_batch"]
+    assert [c["name"] for c in decisions[2]] == ["start_task"]
     assert prompts[1]["criterion_reviews"][0]["explanation"] == reason
     assert prompts[-1]["criterion_reviews"][0]["verdict"] == "pass"
     assert prompts[1]["binding"]["result_commit"] != prompts[-1]["binding"]["result_commit"]
@@ -257,7 +262,16 @@ async def test_provider_can_propose_then_start_in_a_fresh_worker(postgres_dsn, m
                 draft = flow._start_decision().commands[0]
                 return response({"commands": [{"name": draft.name, "payload": draft.payload}]})
             assert context["proposed_plan"]["title"] == "Package A"
-            return response({"commands": [{"name": "start_batch", "payload": {}}]})
+            return response(
+                {
+                    "commands": [
+                        {
+                            "name": "start_task",
+                            "payload": {"spec": context_of(request)["task_control"]["start_spec"]},
+                        }
+                    ]
+                }
+            )
 
     settings, transport = _settings(monkeypatch, "lead-local"), Transport()
     async with flow._factory(postgres_dsn) as factory:
@@ -312,7 +326,16 @@ async def test_continuation_is_atomic_with_ack_and_replay_safe(postgres_dsn, mon
             if self.calls == 1:
                 return LeadDecision(commands=(flow._start_decision().commands[0],))
             return provider_model.parse_lead_response(
-                {"commands": [{"name": "start_batch", "payload": {}}]}
+                {
+                    "commands": [
+                        {
+                            "name": "start_task",
+                            "payload": {
+                                "spec": snapshot.result_context["task_control"]["start_spec"]
+                            },
+                        }
+                    ]
+                }
             )
 
     async with flow._factory(postgres_dsn) as factory:
@@ -373,7 +396,7 @@ async def test_continuation_is_atomic_with_ack_and_replay_safe(postgres_dsn, mon
             assert goal.version == 3
             assert [(r.command_name, r.expected_version) for r in receipts] == [
                 ("propose_batch", 1),
-                ("start_batch", 2),
+                ("start_task", 2),
             ]
             continuations = list(
                 await session.scalars(
@@ -399,7 +422,16 @@ async def test_reconciler_recovers_a_pre_fix_orphan_without_reopening_delivered_
         async def decide(self, snapshot):
             self.calls += 1
             return provider_model.parse_lead_response(
-                {"commands": [{"name": "start_batch", "payload": {}}]}
+                {
+                    "commands": [
+                        {
+                            "name": "start_task",
+                            "payload": {
+                                "spec": snapshot.result_context["task_control"]["start_spec"]
+                            },
+                        }
+                    ]
+                }
             )
 
     async def old_behavior(*args, **kwargs):

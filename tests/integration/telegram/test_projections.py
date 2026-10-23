@@ -668,7 +668,7 @@ def test_waiting_approval_projection_renders_package_action_outboxes(postgres_ds
     asyncio.run(scenario())
 
 
-def test_terminal_projections_sequence_work_package_observation_once(postgres_dsn: str) -> None:
+def test_terminal_sequencing_belongs_to_workflows_not_projections(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         linked_id, package_id = await _materialize_plan_item(factory, ordinal=1)
@@ -697,6 +697,23 @@ def test_terminal_projections_sequence_work_package_observation_once(postgres_ds
                 assert stored is not None
                 stored.status = TaskStatus.FAILED
                 await enqueue_terminal_task_projections(session, stored)
+
+        async with factory() as session:
+            projected = await session.scalar(
+                select(func.count())
+                .select_from(TransactionalOutbox)
+                .where(TransactionalOutbox.destination == "work_package_sequence")
+            )
+        # Telegram only projects. The workflow transaction publishes sequencing.
+        assert projected == 0
+        from vuzol.workflows.lead_events import publish_task_event
+
+        for _ in range(2):
+            for task_id in (plain_id, linked_id):
+                async with factory() as session, session.begin():
+                    stored = await session.get(Task, task_id)
+                    assert stored is not None
+                    await publish_task_event(session, stored)
 
         async with factory() as session:
             observations = (

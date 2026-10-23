@@ -2,7 +2,7 @@
 
 import json
 
-from vuzol.leadership.feedback import MAX_CONTEXT_BYTES, _plan, _put
+from vuzol.leadership.feedback import MAX_CONTEXT_BYTES, _plan, _put, _report
 
 
 def test_projection_is_allowlisted_and_limits_plan_items():
@@ -35,3 +35,19 @@ def test_global_context_budget_is_in_utf8_bytes_and_keeps_valid_json():
     assert len(encoded.encode()) <= MAX_CONTEXT_BYTES
     assert context["truncated"] is True
     assert json.loads(encoded)["binding"]["scope_revision"] == 1
+
+
+def test_report_reaches_lead_with_sources_and_explicit_omissions():
+    report = _report(
+        {
+            "summary": "Research complete",
+            "findings": ["finding"] * 6,
+            "sources": ["README.md:1"],
+            "limitations": ["No live access"],
+            "credential": "PRIVATE",
+        }
+    )
+    assert report["summary"] == "Research complete"
+    assert report["sources"] == ["README.md:1"]
+    assert report["omitted_findings"] == 2
+    assert "PRIVATE" not in json.dumps(report)

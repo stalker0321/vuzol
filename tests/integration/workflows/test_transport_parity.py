@@ -14,11 +14,11 @@ from tests.integration.workflows._test_runtime_helpers import (
     TransactionalOutbox,
     WorkflowControlConsumer,
     asyncio,
-    compile_workflow,
     materialize_run,
     seed_interpreted,
     simple_draft,
     storage,
+    stored_workflow,
 )
 from vuzol.storage.models import Event, TelegramControlAction
 from vuzol.workflows.application import Principal, TaskControlService
@@ -34,7 +34,7 @@ async def _live_task_id(
         await materialize_run(
             session,
             task_id=task_id,
-            workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+            workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
             configuration_revision="a" * 64,
             policy_revision="b" * 64,
             prompt_revision=None,

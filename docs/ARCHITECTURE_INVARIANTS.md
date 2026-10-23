@@ -123,3 +123,43 @@ These rules are non-negotiable unless explicitly changed through an ADR.
   approvals and grants are not rewritten. Historical `propose_batch` / `propose_plan`
   grants resolve to `request_plan`; their supplied plan is ignored. New grants use the
   new names. `request_revision` remains only an input alias of `amend_goal`.
+
+## Fixed executor (PR7)
+
+- New task dispatch materializes `fixed_executor.v1` with
+  `execution-contract.v2`. Complexity, topic workflow defaults and legacy planning
+  flags cannot select stages or create a `plan` step. The worker receives one task
+  contract and an explicit instruction to execute it without planning or expanding
+  scope. Legacy planning requests persist a deduplicated task event and wake the
+  project's live lead, including while waiting or paused; without a live goal the
+  task event remains durable. This signal does not call a planner or amend the task.
+- The shared executor stages are technical preflight/context, isolated worktree,
+  sandbox CLI execution, dependency preflight, validation and review. Change results
+  also prepare delivery artifacts before the existing immutable approval boundary.
+  Only the lead's `accept_result` authorizes managed delivery. Applier and static
+  publisher remain the consumers after approval. New chains do not publish previews
+  or invoke the legacy horizon acceptance handler.
+- Read-only/research work uses the same stages with `execute_agent` and a
+  `task-report.v1` output contract. Worktree mounts remain read-only; technical
+  installers skip report tasks. Validation requires unchanged Git state and a
+  nonempty report with findings, sources and limitations. Independent review sees
+  the complete hash-checked report and task outcomes. References supplied by a
+  worker are not server-verified retrieval. Approval binds the report through both
+  validation and review hashes and the lead's `accept_spec.report_hash`; accepting
+  it consumes the approval without Git apply or publication. Source-backed research
+  contracts retain their old meaning. Repository-only task contracts do not acquire
+  a web-research capability requirement.
+- Repair uses the existing fingerprinted scheduler. Dispatch freezes the recovery
+  policy in `Run.selected_route`; every subsequent outcome uses that policy.
+  Repairs across all runs of a task count toward its saved cap, including failed
+  or cancelled attempts. Changing settings or budget epochs cannot add attempts.
+  A failed v2 task cannot be rematerialized by the sequencer; new work requires a
+  lead decision on the plan. Existing safe operator recovery and fencing remain.
+- There is no DDL or rewrite of stored graphs. Stored coding v4, discussion-agent
+  and adaptive-worker-trial runs keep their steps, handlers, approvals and recovery
+  semantics. The task-level cap also counts historical repairs on the same task.
+  Old planner handlers, handoff, definitions and horizon machinery remain for PR8.
+  PR8 can remove the old registry/templates, per-task planning/tier producers and
+  handlers, planner handoff and horizon paths after its upgrade preflight. Preserve
+  the fixed factory (move it out of `compiler.py` if that module is removed), shared
+  execution constraints, acceptance evidence needed by apply, and historical data.

@@ -75,6 +75,11 @@ async def ensure_result_approval(
             expected_target_head = package.integration_base_commit
     envelope: dict[str, Any] = {
         "schema_version": RESULT_APPROVAL_SCHEMA,
+        **(
+            {"result_kind": "report", "report_hash": evidence["report_hash"]}
+            if approval_step.payload.get("result_kind") == "report"
+            else {}
+        ),
         "requested_action": "apply_result",
         "task_id": str(run.task_id),
         "run_id": str(run.id),
@@ -119,7 +124,10 @@ async def ensure_result_approval(
     }
     approval_step.external_idempotency_key = f"apply-result:{digest}"
     await session.flush()
-    covered_by_plan = await _plan_approval_covers_intermediate_result(session, run.task_id)
+    covered_by_plan = (
+        run.execution_contract_version != "execution-contract.v2"
+        and await _plan_approval_covers_intermediate_result(session, run.task_id)
+    )
     if covered_by_plan:
         approval.status = ApprovalStatus.APPROVED
         approval.decided_at = func.now()
@@ -311,6 +319,22 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
             "evidence_hash": review_evidence_hash,
         }
 
+    report_hash = manifest.get("report_hash")
+    if manifest.get("result_kind") == "report":
+        from vuzol.research.report import TaskReport
+
+        document = TaskReport.model_validate(
+            execute.result.get("structured_output") if execute and execute.result else None
+        ).model_dump(mode="json")
+        if (
+            envelope_hash(document) != report_hash
+            or manifest.get("report") != document
+            or review is None
+            or not isinstance(review.result, dict)
+            or review.result["structured_output"].get("report_hash") != report_hash
+        ):
+            raise ValueError("report evidence changed after validation/review")
+
     review_result = review.result if review and isinstance(review.result, dict) else {}
     execute_result = execute.result if execute and isinstance(execute.result, dict) else {}
     static_build_evidence: dict[str, Any] | None = None
@@ -373,6 +397,7 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
     return {
         "agent_checks": agent_checks,
         "gates": gates,
+        "report_hash": report_hash,
         "summary": summary[:2_000],
         "changed_files": tuple(
             str(path) for path in manifest.get("changed_files", []) if isinstance(path, str)

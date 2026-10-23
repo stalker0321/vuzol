@@ -12,6 +12,28 @@ import hashlib
 import re
 import uuid
 from dataclasses import dataclass, field
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+ReportText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4_000)
+]
+
+
+class TaskReport(BaseModel):
+    """Worker claims for read-only tasks; independent review checks their substance.
+
+    Sources are references, not a claim of server-verified retrieval. The existing
+    source-backed research contract remains distinct.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    summary: str = Field(min_length=1, max_length=4_000)
+    findings: list[ReportText] = Field(min_length=1, max_length=40)
+    sources: list[ReportText] = Field(min_length=1, max_length=40)
+    limitations: list[ReportText] = Field(max_length=20)
+
 
 RESEARCH_RESULT_SCHEMA = "research-result"
 RESEARCH_RESULT_SCHEMA_VERSION = "research-result.v1"

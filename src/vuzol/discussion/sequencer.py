@@ -396,6 +396,14 @@ class WorkPackageSequencer:
             or package.running_revision_id != revision.id
         ):
             raise DomainError("item_not_safely_retryable")
+        fixed_run = await self._uow.session.scalar(
+            select(Run.id).where(
+                Run.task_id == package.last_failure_task_id,
+                Run.execution_contract_version == "execution-contract.v2",
+            )
+        )
+        if fixed_run is not None:
+            raise DomainError("lead_revision_required")
         failed_step = await self._uow.session.scalar(
             select(Step)
             .join(Run, Run.id == Step.run_id)
@@ -977,7 +985,7 @@ def _coding_task_draft(
         ),
         suggested_complexity=complexity,
         suggested_risk=item.suggested_risk,
-        needs_planning=complexity is SuggestedComplexity.LARGE,
+        needs_planning=False,
         needs_clarification=False,
         normalized_title=item.summary[:120],
     )

@@ -934,7 +934,10 @@ def _estimated_input_tokens(task: Task, step: Step, run: Run) -> int:
         and context_tokens > 0
     ):
         characters += context_tokens * 4
-    _name, _version, schema = result_schema_for_step(step.step_type, task.task_draft)
+    draft = task.task_draft
+    if step.payload.get("result_kind") == "report":
+        draft = {**draft, "report_contract": "task-report.v1"}
+    _name, _version, schema = result_schema_for_step(step.step_type, draft)
     characters += schema_char_count(schema)
     characters += len(run.policy_revision) + len(run.prompt_revision or "")
     return max(1, (characters + 3) // 4)

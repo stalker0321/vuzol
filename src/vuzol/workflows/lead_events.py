@@ -1,9 +1,18 @@
 """Workflow-owned orchestration notifications, committed with state changes."""
 
+import uuid
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.storage.models import MaterializationLink, Step, Task, TransactionalOutbox, WorkPackage
+from vuzol.storage.models import (
+    Event,
+    MaterializationLink,
+    Step,
+    Task,
+    TransactionalOutbox,
+    WorkPackage,
+)
 from vuzol.storage.types import TaskStatus
 
 OBSERVED_TASK_STATUSES = frozenset(
@@ -109,3 +118,59 @@ async def _enqueue(session: AsyncSession, row: TransactionalOutbox) -> None:
     if existing is None:
         session.add(row)
         await session.flush()
+
+
+async def publish_planning_request(
+    session: AsyncSession, task: Task, interpretation_id: uuid.UUID
+) -> None:
+    """Retain legacy planning intent for the lead, without invoking a task planner."""
+    from vuzol.leadership.persistence import ManagedGoal
+
+    key = f"lead:planning-request:{interpretation_id}"
+    existing = await session.scalar(
+        select(Event.id).where(
+            Event.entity_type == "task",
+            Event.entity_id == task.id,
+            Event.event_type == "task.planning_requested",
+            Event.payload["interpretation_id"].as_string() == str(interpretation_id),
+        )
+    )
+    if existing is not None:
+        return
+    payload = {
+        "source_task_id": str(task.id),
+        "interpretation_id": str(interpretation_id),
+        "wakeup_kind": "planning_requested",
+    }
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type="task.planning_requested",
+            actor_type="workflow_manager",
+            payload=payload,
+        )
+    )
+    await session.flush()
+    goal = (
+        await session.scalar(
+            select(ManagedGoal).where(
+                ManagedGoal.project_id == task.project_id,
+                ManagedGoal.lifecycle.in_(("draft", "active", "waiting", "paused")),
+            )
+        )
+        if task.project_id
+        else None
+    )
+    if goal is not None:
+        await _enqueue(
+            session,
+            TransactionalOutbox(
+                destination="project_lead",
+                idempotency_key=key,
+                linked_entity_type="managed_goal",
+                linked_entity_id=goal.id,
+                operation_type="lead_wakeup",
+                payload={**payload, "goal_id": str(goal.id)},
+            ),
+        )

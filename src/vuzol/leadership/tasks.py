@@ -207,6 +207,10 @@ async def accept_result(
         raise DomainError("result_evidence_stale") from error
     if (
         payload.get("result_commit") != worktree.result_commit
+        or (
+            envelope.get("result_kind") == "report"
+            and payload.get("report_hash") != evidence["report_hash"]
+        )
         or envelope.get("result_commit") != worktree.result_commit
         or envelope.get("diff_hash") != worktree.diff_hash
         or envelope.get("base_commit") != worktree.base_commit
@@ -277,6 +281,17 @@ async def task_context(session: AsyncSession, goal: ManagedGoal) -> dict[str, An
         .order_by(Task.created_at.desc())
         .limit(10)
     )
+    tasks = rows.all()
+    report_hashes = {
+        run_id: digest
+        for run_id, digest in await session.execute(
+            select(Step.run_id, Step.payload["action_envelope"]["report_hash"].as_string()).where(
+                Step.run_id.in_([run.id for _task, run, _tree in tasks if run]),
+                Step.step_type == "approval",
+            )
+        )
+        if digest is not None
+    }
     context["tasks"] = [
         {
             "task_id": str(task.id),
@@ -291,9 +306,14 @@ async def task_context(session: AsyncSession, goal: ManagedGoal) -> dict[str, An
                 "plan_revision_id": str(package.running_revision_id),
                 "spec_revision": task.spec_revision,
                 "result_commit": tree.result_commit if tree else None,
+                **(
+                    {"report_hash": report_hashes[run.id]}
+                    if run and run.id in report_hashes
+                    else {}
+                ),
             },
         }
-        for task, run, tree in rows
+        for task, run, tree in tasks
     ]
     return context
 

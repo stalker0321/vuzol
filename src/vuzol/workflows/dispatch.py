@@ -7,11 +7,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
-from vuzol.interpretation.domain import TaskAction, TaskDraft, TaskType
+from vuzol.interpretation.domain import TaskAction, TaskDraft
 from vuzol.interpretation.planning import (
     PLANNING_TIER_EVENT,
     PlanningTier,
-    budget_mode_for_tier,
 )
 from vuzol.providers.readiness import configured_executor_preflight
 from vuzol.storage.leasing import (
@@ -29,7 +28,6 @@ from vuzol.storage.models import (
     Step,
     Task,
     TelegramIntakeMessage,
-    TopicMapping,
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
@@ -44,27 +42,11 @@ from vuzol.telegram.projections import (
     enqueue_task_status_projection,
 )
 from vuzol.workflows.compiler import compile_workflow
+from vuzol.workflows.recovery_policy import recovery_policy_from_settings
 from vuzol.workflows.service import materialize_run, start_run
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
 POLICY_REVISION = hashlib.sha256(b"step-06-workflow-policy-v1").hexdigest()
-WORKFLOW_ALIASES = {
-    "adaptive_task": None,
-    "coding_task": "coding.v4",
-    "simple_model_task": "simple_model.v1",
-    "research_task": "research.v1",
-    "infrastructure_task": "infrastructure.v1",
-}
-
-
-def configured_topic_workflow(default_workflow: str, task_type: TaskType) -> str | None:
-    configured = WORKFLOW_ALIASES.get(default_workflow, default_workflow)
-    if (
-        configured in {"coding.v1", "coding.v2", "coding.v3", "coding.v4"}
-        and task_type is not TaskType.CODING
-    ):
-        return None
-    return configured
 
 
 class WorkflowDispatchError(RuntimeError):
@@ -162,14 +144,13 @@ class WorkflowDispatcher:
             TaskAction.ANSWER_QUESTION,
             TaskAction.GENERAL_CONVERSATION,
         }:
-            configured = await self._configured_workflow(session, task, draft)
             tier = await self._planning_tier(session, task)
-            workflow = compile_workflow(
-                draft,
-                interpretation_id=interpretation.id,
-                configured_workflow=configured,
-                planning_tier=tier,
-            )
+            # Legacy planning requests become lead input, never executor steps.
+            if draft.needs_planning or tier in {PlanningTier.LIGHT, PlanningTier.STRONG}:
+                from vuzol.workflows.lead_events import publish_planning_request
+
+                await publish_planning_request(session, task, interpretation.id)
+            workflow = compile_workflow(draft, interpretation_id=interpretation.id)
             package_owned = (
                 await session.scalar(
                     select(MaterializationLink.id).where(MaterializationLink.task_id == task.id)
@@ -195,7 +176,7 @@ class WorkflowDispatcher:
                 policy_revision=POLICY_REVISION,
                 prompt_revision=interpretation.prompt_version,
                 automatic_start=automatic_start and readiness is None,
-                budget_mode=budget_mode_for_tier(tier) if tier is not None else "balanced",
+                recovery_policy=recovery_policy_from_settings(self._runtime.settings.workflow),
             )
             from vuzol.discussion.work_context import load_work_context
 
@@ -374,21 +355,6 @@ class WorkflowDispatcher:
             return PlanningTier(raw_tier)
         except ValueError:
             return None
-
-    async def _configured_workflow(
-        self, session: AsyncSession, task: Task, draft: TaskDraft
-    ) -> str | None:
-        if draft.action in {TaskAction.ANSWER_QUESTION, TaskAction.GENERAL_CONVERSATION}:
-            return "simple_model.v1"
-        topic = await session.scalar(
-            select(TopicMapping).where(
-                TopicMapping.chat_id == task.source_chat_id,
-                TopicMapping.message_thread_id == task.source_thread_id,
-            )
-        )
-        if topic is None:
-            return None
-        return configured_topic_workflow(topic.default_workflow, draft.task_type)
 
     async def _enqueue_task_projection(self, session: AsyncSession, task: Task, run: Run) -> None:
         intake = await session.scalar(

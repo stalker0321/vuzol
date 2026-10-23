@@ -834,3 +834,22 @@ async def test_independent_reviewer_rejects_invalid_structured_output() -> None:
             cancellation=CancellationContext(),
             lease=_lease(),
         )
+
+
+def test_report_review_uses_report_instructions_and_hash_checked_context() -> None:
+    content = '{"summary":"Read-only findings","sources":["README.md:1"]}'
+    context = (
+        ContextItem(
+            source="task_report",
+            reference="report:test:part-1-of-1",
+            content=content,
+            content_hash=hashlib.sha256(content.encode()).hexdigest(),
+        ),
+    )
+    request = _build_request_for_profile(
+        _api_profile(profile_id="reviewer", roles={ProviderRole.REVIEWER}), context
+    )
+    bundle = json.loads("".join(c.content for c in request.context if c.source != "task_report"))
+    assert "independent report reviewer" in bundle["instruction"]
+    assert "Do not require a code diff" in bundle["instruction"]
+    assert request.context[0] == context[0]

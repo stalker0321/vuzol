@@ -24,6 +24,7 @@ from vuzol.execution.commit_messages import (
     CommitMessageResolver,
     DatabaseCommitMessageResolver,
 )
+from vuzol.execution.domain import GitInspection
 from vuzol.execution.finalization import (
     MANDATORY_SECURITY_GATE,
     TRUSTED_GATE_COMMANDS,
@@ -115,8 +116,9 @@ class ResultValidationHandler:
         access: WorktreeAccessLease | None = None
         try:
             worktree, project, path = await self._load(request)
-            trusted = resolve_trusted_gates(project)
-            if project.validation_sandbox_profile is not None:
+            report = request.payload.get("result_kind") == "report"
+            trusted = () if report else resolve_trusted_gates(project)
+            if not report and project.validation_sandbox_profile is not None:
                 trusted = (MANDATORY_SECURITY_GATE, *trusted)
             if trusted:
                 access = await self._grant_access(path, project)
@@ -238,6 +240,9 @@ class ResultValidationHandler:
                 "validation_branch_mismatch",
                 "worktree branch differs from the prepared task branch",
             )
+
+        if request.payload.get("result_kind") == "report":
+            return await self._validate_report(request, worktree, path, inspection)
 
         is_finalized = False
         recovered = False
@@ -492,6 +497,54 @@ class ResultValidationHandler:
             gate_runs=gate_runs,
             suspicious=tuple(signal.model_dump(mode="json") for signal in suspicious),
         )
+
+    async def _validate_report(
+        self,
+        request: StepExecutionRequest,
+        worktree: Worktree,
+        path: Path,
+        inspection: GitInspection,
+    ) -> dict[str, Any]:
+        from vuzol.research.report import TaskReport
+        from vuzol.workflows.result_approval import envelope_hash
+
+        await self._git.require_clean_worktree(path)
+        if inspection.head != worktree.base_commit or inspection.changed_files:
+            raise ResultValidationError(
+                "validation_report_modified_repository", "read-only worker changed repository state"
+            )
+        async with self._factory() as session:
+            worker = await session.scalar(
+                select(Step)
+                .where(
+                    Step.run_id == request.run_id,
+                    Step.step_type == "execute_agent",
+                    Step.status == StepStatus.COMPLETED,
+                )
+                .order_by(Step.ordinal.desc())
+                .limit(1)
+            )
+        raw = worker.result.get("structured_output") if worker and worker.result else None
+        report = TaskReport.model_validate(raw).model_dump(mode="json")
+        evidence = _success_payload(
+            base_commit=worktree.base_commit,
+            result_commit=worktree.base_commit,
+            branch=inspection.branch,
+            changed_files=(),
+            diff_hash=inspection.diff_hash,
+            system_checks=[
+                SystemCheck("report-contract", "system:report-contract", 0, 0),
+                SystemCheck("read-only-worktree", "system:read-only-worktree", 0, 0),
+            ],
+            gates=(),
+        )
+        evidence["structured_output"].update(
+            result_kind="report",
+            report=report,
+            report_hash=envelope_hash(report),
+        )
+        evidence["implementation_summary"] = report["summary"]
+        return evidence
 
     def _gate_failure_result(self, failed: GateRun) -> dict[str, Any]:
         result: dict[str, Any] = {

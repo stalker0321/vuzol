@@ -332,7 +332,7 @@ def test_compatibility_corpus_reads_legacy_shapes() -> None:
     )
     assert legacy.task_summary == "Implement request"
     workflow = compile_workflow(legacy, interpretation_id=uuid.uuid4())
-    assert workflow.workflow_type == "coding"
+    assert workflow.workflow_type == "fixed_executor"
 
     modern = TaskDraft(
         action=TaskAction.CREATE_TASK,
@@ -345,7 +345,9 @@ def test_compatibility_corpus_reads_legacy_shapes() -> None:
         needs_clarification=False,
         normalized_title="Implement request",
     )
-    assert compile_workflow(modern, interpretation_id=uuid.uuid4()).version in {"1", "4"}
+    assert (
+        compile_workflow(modern, interpretation_id=uuid.uuid4()).workflow_type == "fixed_executor"
+    )
 
     # Legacy approval envelope without D2 revision fields passes through.
     import hashlib as _hashlib

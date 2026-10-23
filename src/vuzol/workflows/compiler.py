@@ -1,79 +1,120 @@
-"""Deterministic TaskDraft to materialized-workflow compiler."""
+"""Factory for the fixed executor chain; stored workflows are never recompiled."""
 
 import uuid
 
-from vuzol.interpretation.domain import TaskDraft, TaskType
-from vuzol.interpretation.planning import PlanningTier, tier_needs_planning
-from vuzol.storage.types import StepStatus
-from vuzol.workflows.definitions import WORKFLOW_REGISTRY
-from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow, WorkflowDefinitionError
+from vuzol.config import Capability
+from vuzol.interpretation.domain import TaskDraft, TaskOperation, TaskType
+from vuzol.storage.types import IdempotencyClass, QueueClass, RetryClass, StepStatus
+from vuzol.workflows.definitions import _step
+from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow
 
-TASK_WORKFLOWS = {
-    TaskType.CODING: "coding.v4",
-    TaskType.ARCHITECTURE: "architecture.v1",
-    TaskType.RESEARCH: "research.v1",
-    TaskType.INFRASTRUCTURE: "infrastructure.v1",
-    TaskType.FILE_PROCESSING: "simple_model.v1",
-    TaskType.GENERAL: "simple_model.v1",
-}
+EXECUTION_CONTRACT_VERSION = "execution-contract.v2"
 
 
-def compile_workflow(
-    draft: TaskDraft,
-    *,
-    interpretation_id: uuid.UUID,
-    configured_workflow: str | None = None,
-    planning_tier: PlanningTier | None = None,
-) -> MaterializedWorkflow:
-    stable_id = configured_workflow or TASK_WORKFLOWS[draft.task_type]
-    definition = WORKFLOW_REGISTRY.get(stable_id)
-    if definition is None or draft.task_type.value not in definition.task_types:
-        raise WorkflowDefinitionError(f"incompatible workflow: {stable_id}")
-
-    # J4: the persisted, code-owned tier is authoritative when supplied; the
-    # in-memory boolean stays the fallback for callers without a tier.
-    needs_planning = (
-        tier_needs_planning(planning_tier)
-        if planning_tier is not None
-        else bool(draft.needs_planning)
+def compile_workflow(draft: TaskDraft, *, interpretation_id: uuid.UUID) -> MaterializedWorkflow:
+    report = draft.task_type in {TaskType.ARCHITECTURE, TaskType.RESEARCH, TaskType.GENERAL} or (
+        draft.operation in {TaskOperation.INSPECT, TaskOperation.EXPLAIN, TaskOperation.MONITOR}
     )
-    flags = {
-        "needs_planning": needs_planning,
-        # Coding results always receive a cheap mechanical review. The review
-        # step re-evaluates risk from the measured diff and only invokes an
-        # independent model when the runtime facts require it.
-        "needs_review": draft.task_type is TaskType.CODING,
-    }
-    included = [
-        step for step in definition.steps if step.optional_flag is None or flags[step.optional_flag]
+    capabilities = {Capability.REPOSITORY_READ} if report else set()
+    if report:
+        if Capability.WEB_RESEARCH in draft.required_capabilities or (
+            draft.task_type is TaskType.RESEARCH and not draft.required_capabilities
+        ):
+            capabilities.add(Capability.WEB_RESEARCH)
+    else:
+        capabilities.update({Capability.CODE_EDIT, Capability.PROJECT_SHELL})
+    # Preflights are technical checks, never planning. Delivery remains behind
+    # the existing immutable result approval and its specialised consumers.
+    definitions = [
+        _step("interpret"),
+        _step(
+            "ensure_capabilities",
+            queue=QueueClass.PRIVILEGED,
+            capabilities=frozenset({Capability.HOST_ADMIN}),
+            idempotency=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+            timeout=1_800,
+        ),
+        _step("prepare_context", capabilities=frozenset({Capability.REPOSITORY_READ})),
+        _step(
+            "prepare_worktree",
+            queue=QueueClass.HEAVY,
+            capabilities=frozenset({Capability.GIT, Capability.FILESYSTEM_WRITE}),
+            idempotency=IdempotencyClass.ISOLATED_RETRYABLE,
+        ),
+        _step(
+            "execute_agent" if report else "execute_code",
+            queue=QueueClass.HEAVY,
+            capabilities=frozenset(capabilities),
+            retry=RetryClass.POLICY,
+            idempotency=IdempotencyClass.READ_ONLY
+            if report
+            else IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+            timeout=3_600,
+        ),
+        _step(
+            "ensure_dependencies",
+            queue=QueueClass.HEAVY,
+            capabilities=frozenset({Capability.PROJECT_SHELL, Capability.FILESYSTEM_WRITE}),
+            idempotency=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+            timeout=1_800,
+        ),
+        _step(
+            "validate",
+            queue=QueueClass.HEAVY,
+            capabilities=frozenset(
+                {Capability.REPOSITORY_READ} if report else {Capability.PROJECT_SHELL}
+            ),
+        ),
+        _step("review", retry=RetryClass.TRANSIENT, attempts=3),
     ]
-    ordinals = {step.key: index for index, step in enumerate(included)}
-    original = {step.key: step for step in definition.steps}
-
-    def resolved_predecessors(key: str) -> tuple[int, ...]:
-        resolved: set[int] = set()
-        pending = list(original[key].predecessors)
-        while pending:
-            predecessor = pending.pop()
-            if predecessor in ordinals:
-                resolved.add(ordinals[predecessor])
-            else:
-                pending.extend(original[predecessor].predecessors)
-        return tuple(sorted(resolved))
-
-    def payload_for(step_key: str, step_type: str) -> dict[str, str]:
-        if step_key == "interpret":
-            return {"interpretation_id": str(interpretation_id)}
-        if step_type == "approval" or step_key == "approve_result":
-            return {"requested_action": "apply_result"}
-        return {}
-
+    if not report:
+        definitions.extend(
+            [
+                _step(
+                    "produce_artifacts",
+                    queue=QueueClass.HEAVY,
+                    capabilities=frozenset({Capability.PROJECT_SHELL}),
+                    idempotency=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
+                ),
+                _step(
+                    "build_static",
+                    queue=QueueClass.HEAVY,
+                    capabilities=frozenset({Capability.PROJECT_SHELL}),
+                    retry=RetryClass.TRANSIENT,
+                    idempotency=IdempotencyClass.ISOLATED_RETRYABLE,
+                    attempts=2,
+                ),
+            ]
+        )
+    definitions.append(
+        _step(
+            "approve_result",
+            step_type="approval",
+            queue=QueueClass.PRIVILEGED,
+            capabilities=frozenset({Capability.GIT}),
+            idempotency=IdempotencyClass.IDEMPOTENT,
+            timeout=120,
+            attempts=2,
+        )
+    )
+    if not report:
+        definitions.append(
+            _step(
+                "publish_static",
+                capabilities=frozenset({Capability.FILESYSTEM_WRITE}),
+                retry=RetryClass.TRANSIENT,
+                idempotency=IdempotencyClass.IDEMPOTENT,
+                timeout=120,
+                attempts=3,
+            )
+        )
+    definitions.append(_step("finalize", queue=QueueClass.CONTROL))
     steps = tuple(
         MaterializedStep(
             ordinal=index,
             key=step.key,
             step_type=step.step_type,
-            predecessor_ordinals=resolved_predecessors(step.key),
+            predecessor_ordinals=(index - 1,) if index else (),
             queue_class=step.queue_class,
             capabilities=step.capabilities,
             retry_class=step.retry_class,
@@ -81,14 +122,13 @@ def compile_workflow(
             timeout_seconds=step.timeout_seconds,
             max_attempts=step.max_attempts,
             priority=step.priority,
-            status=StepStatus.COMPLETED if step.key == "interpret" else StepStatus.PENDING,
-            payload=payload_for(step.key, step.step_type),
+            status=StepStatus.COMPLETED if index == 0 else StepStatus.PENDING,
+            payload={
+                "result_kind": "report" if report else "change",
+                **({"interpretation_id": str(interpretation_id)} if index == 0 else {}),
+                **({"requested_action": "apply_result"} if step.step_type == "approval" else {}),
+            },
         )
-        for index, step in enumerate(included)
+        for index, step in enumerate(definitions)
     )
-    return MaterializedWorkflow(
-        workflow_type=definition.workflow_type,
-        version=definition.version,
-        interpretation_id=interpretation_id,
-        steps=steps,
-    )
+    return MaterializedWorkflow("fixed_executor", "1", interpretation_id, steps)

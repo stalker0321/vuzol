@@ -55,6 +55,7 @@ from vuzol.workflows.service import commit_step_outcome, materialize_run, start_
 from vuzol.workflows.worker import CompleteHandler, WorkflowWorker
 
 from ..storage.helpers import storage
+from .stored_workflows import stored_workflow
 
 __all__ = [
     "UTC",
@@ -110,6 +111,7 @@ __all__ = [
     "start_run",
     "start_step",
     "storage",
+    "stored_workflow",
     "timedelta",
     "update",
     "uuid",

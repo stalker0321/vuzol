@@ -11,7 +11,7 @@ from tests.integration.workflows._test_runtime_helpers import seed_interpreted, 
 from tests.unit.providers.test_pi_adapter import profile
 from vuzol.config import Capability, RegistryDocument, RuntimeConfiguration, Settings, build_bundle
 from vuzol.config.registries import ProfileRegistry, ProjectRegistry
-from vuzol.interpretation.domain import TaskType
+from vuzol.interpretation.domain import TaskOperation, TaskType
 from vuzol.projects.executor_preference import ensure_preference_row
 from vuzol.projects.model_matrix import MATRIX_KEY, set_assignment
 from vuzol.storage.models import (
@@ -94,7 +94,7 @@ def test_assigned_executor_is_checked_before_any_work(postgres_dsn, kind, compat
                 )
                 if not compatible:
                     blocked = next(s for s in steps if s.status is StepStatus.BLOCKED)
-                    assert blocked.step_type == "prepare_context"
+                    assert blocked.step_type == "ensure_capabilities"
                     assert blocked.failure_category == "executor_route_unavailable"
                     assert (
                         "assigned" in blocked.failure_summary
@@ -189,7 +189,11 @@ def test_matrix_executor_reaches_dispatch_without_legacy_worker_key(
             }
         )
         draft = simple_draft().model_copy(
-            update={"project_id": "vuzol", "task_type": TaskType.CODING}
+            update={
+                "project_id": "vuzol",
+                "task_type": TaskType.CODING,
+                "operation": TaskOperation.MODIFY,
+            }
         )
         task_id, interpretation_id = await seed_interpreted(factory, draft)
         try:

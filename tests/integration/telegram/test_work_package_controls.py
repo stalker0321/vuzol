@@ -204,14 +204,20 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
         task_count = await session.scalar(select(func.count()).select_from(Task))
     assert package is not None and package.status is WorkPackageStatus.RUNNING
     assert package.version == 3 and task_count == 1
-    assert await delivery.deliver_one()
-    async with factory() as session:
-        status_link = await session.scalar(
-            select(TelegramMessageLink).where(
-                TelegramMessageLink.work_package_id == result.package_id,
-                TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
+    # Callback acknowledgements and plan-card refreshes share this queue.
+    # Observe the durable status projection without relying on their order.
+    status_link = None
+    for _ in range(10):
+        assert await delivery.deliver_one()
+        async with factory() as session:
+            status_link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.work_package_id == result.package_id,
+                    TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
+                )
             )
-        )
+        if status_link is not None:
+            break
     assert status_link is not None and status_link.message_id == 700
     assert client.pinned == []
     await engine.dispose()

@@ -498,6 +498,8 @@ class CapabilityProvisioningHandler:
     ) -> StepOutcome:
         if cancellation.requested:
             return StepOutcome(kind=OutcomeKind.CANCELLED, result={}, category="cancelled")
+        if request.payload.get("result_kind") == "report":
+            return StepOutcome.succeeded({"status": "skipped", "reason": "read_only_report"})
         side_effect_started = False
         try:
             task, step, environment, approval, inventory = await self._load(request)

@@ -262,8 +262,9 @@ def test_validated_plan_is_included_in_executor_context(postgres_dsn: str, tmp_p
 
 
 @pytest.mark.postgresql
-def test_no_plan_execute_code_builds_empty_planner_context(
-    postgres_dsn: str, tmp_path: Path
+@pytest.mark.parametrize("fixed,report", [(False, False), (True, False), (True, True)])
+def test_no_plan_execute_code_builds_only_the_execution_contract(
+    postgres_dsn: str, tmp_path: Path, fixed: bool, report: bool
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -288,16 +289,30 @@ def test_no_plan_execute_code_builds_empty_planner_context(
             runtime_identity="cli-no-plan",
             state_directory=tmp_path / "cli-state-no-plan",
             sandbox_required=True,
-            capabilities=frozenset({Capability.CODE_EDIT, Capability.PROJECT_SHELL}),
+            capabilities=frozenset(
+                {Capability.REPOSITORY_READ}
+                if report
+                else {Capability.CODE_EDIT, Capability.PROJECT_SHELL}
+            ),
             roles=frozenset({ProviderRole.EXECUTOR}),
             supported_task_types=frozenset({"coding", "general"}),
         )
         settings, registries = bundle(tmp_path, configured)
+        step_type = "execute_agent" if report else "execute_code"
         task_id, run_id, step_ids = await seed_run_with_steps(
             factory,
-            steps=[("execute_code", StepStatus.QUEUED, None)],
+            steps=[(step_type, StepStatus.QUEUED, None)],
             task_draft={"task_type": "coding", "needs_planning": False},
         )
+        if fixed:
+            async with factory.begin() as session:
+                run = await session.get(Run, run_id)
+                assert run is not None
+                run.execution_contract_version = "execution-contract.v2"
+                if report:
+                    step = await session.get(Step, step_ids[step_type])
+                    assert step is not None
+                    step.payload = {**step.payload, "result_kind": "report"}
         worktrees = WorktreeService(tmp_path / "worktrees", LocalGit(), retention_days=3)
         async with factory.begin() as session:
             await synchronize_profiles(
@@ -313,7 +328,9 @@ def test_no_plan_execute_code_builds_empty_planner_context(
                     repository_path=repository,
                     default_branch="main",
                     allowed_capabilities=frozenset(
-                        {Capability.CODE_EDIT, Capability.PROJECT_SHELL, Capability.GIT}
+                        {Capability.REPOSITORY_READ, Capability.GIT}
+                        if report
+                        else {Capability.CODE_EDIT, Capability.PROJECT_SHELL, Capability.GIT}
                     ),
                     sandbox_profile="default",
                 ),
@@ -333,25 +350,39 @@ def test_no_plan_execute_code_builds_empty_planner_context(
                 owner="provider-worker",
                 lease_seconds=60,
                 candidate_limit=20,
-                step_types=frozenset({"execute_code"}),
+                step_types=frozenset({step_type}),
             )
         assert token is not None
         async with factory.begin() as session:
             await start_step(session, token)
         async with factory() as session:
-            step = await session.get(Step, step_ids["execute_code"])
+            step = await session.get(Step, step_ids[step_type])
             assert step is not None
             request = StepExecutionRequest(
                 task_id=task_id,
                 run_id=run_id,
                 step_id=step.id,
-                step_type="execute_code",
+                step_type=step_type,
                 payload=dict(step.payload),
                 timeout_seconds=step.timeout_seconds,
                 lease=token,
             )
         built, _profile_id, _reservation_id, _revision = await handler._build_request(request)
-        assert built.context == ()
+        if fixed:
+            assert "needs_planning" not in built.task_draft
+            assert [c.source for c in built.context] == ["system_executor_contract"]
+            assert "Do not plan" in built.context[0].content
+            assert built.role is ProviderRole.EXECUTOR
+            if report:
+                assert built.output_schema_version == "task-report.v1"
+                assert built.output_json_schema["required"] == [
+                    "summary",
+                    "findings",
+                    "sources",
+                    "limitations",
+                ]
+        else:
+            assert built.context == ()
         await engine.dispose()
 
     asyncio.run(scenario())

@@ -93,7 +93,7 @@ def test_chat_to_work_preserves_intent_or_clarifies_without_dispatch(postgres_ds
                 assert await WorkflowDispatcher(runtime, factory, owner="contract").process_one()
                 async with factory() as session:
                     run = await session.scalar(select(Run).where(Run.task_id == tasks[-1].id))
-                    assert run.workflow_type == "coding" and run.status.value == "created"
+                    assert run.workflow_type == "fixed_executor" and run.status.value == "created"
                     execute = await session.scalar(
                         select(Step).where(
                             Step.run_id == run.id,

@@ -23,7 +23,6 @@ from ._test_runtime_helpers import (
     build_status_card,
     claim_step,
     commit_step_outcome,
-    compile_workflow,
     materialize_run,
     pytest,
     seed_interpreted,
@@ -31,6 +30,7 @@ from ._test_runtime_helpers import (
     simple_draft,
     start_step,
     storage,
+    stored_workflow,
 )
 
 
@@ -81,7 +81,7 @@ def test_registered_worker_executes_simple_internal_test_handlers(postgres_dsn: 
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -158,7 +158,7 @@ def test_outcome_state_matrix(
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -199,7 +199,7 @@ def test_worker_normalizes_handler_exception(postgres_dsn: str) -> None:
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -240,7 +240,7 @@ def test_worker_shutdown_cancellation_records_uncertainty(postgres_dsn: str) -> 
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -289,7 +289,7 @@ def test_worker_shutdown_of_unknown_step_keeps_mutation_uncertain(postgres_dsn: 
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,

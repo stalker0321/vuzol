@@ -2,6 +2,7 @@
 
 import uuid
 from collections.abc import Mapping
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -61,6 +62,7 @@ async def materialize_run(
     prompt_revision: str | None,
     automatic_start: bool,
     budget_mode: str = "balanced",
+    recovery_policy: RecoveryPolicy = DEFAULT_RECOVERY_POLICY,
 ) -> Run:
     existing = await session.scalar(
         select(Run).where(Run.source_interpretation_id == workflow.interpretation_id)
@@ -92,6 +94,22 @@ async def materialize_run(
     binding = await execution_binding(session, task)
     if binding is not None:
         selected_route["managed_task"] = binding
+    from vuzol.workflows.compiler import EXECUTION_CONTRACT_VERSION
+
+    fixed = workflow.workflow_type == "fixed_executor"
+    if fixed:
+        previous = await session.scalar(
+            select(Run)
+            .where(
+                Run.task_id == task.id,
+                Run.execution_contract_version == EXECUTION_CONTRACT_VERSION,
+            )
+            .order_by(Run.created_at)
+            .limit(1)
+        )
+        selected_route["recovery_policy"] = (
+            previous.selected_route["recovery_policy"] if previous else asdict(recovery_policy)
+        )
     run = Run(
         task_id=task.id,
         source_interpretation_id=workflow.interpretation_id,
@@ -103,7 +121,7 @@ async def materialize_run(
         configuration_revision=configuration_revision,
         policy_revision=policy_revision,
         prompt_revision=prompt_revision,
-        execution_contract_version="execution-contract.v1",
+        execution_contract_version=EXECUTION_CONTRACT_VERSION if fixed else "execution-contract.v1",
     )
     session.add(run)
     await session.flush()
@@ -235,6 +253,8 @@ async def commit_step_outcome(
     if locked is None:
         raise LeaseLost(f"step lease lost: {token.step.id}")
     _locked_task, run, step = locked
+    if run.execution_contract_version == "execution-contract.v2":
+        policy = RecoveryPolicy(**run.selected_route["recovery_policy"])
     if (
         step.lease_owner != token.owner
         or step.lease_generation != token.generation
@@ -590,7 +610,7 @@ async def _schedule_bounded_repair(
         select(Step)
         .where(
             Step.run_id == run.id,
-            Step.step_type == "execute_code",
+            Step.step_type.in_(("execute_code", "execute_agent")),
             Step.status == StepStatus.COMPLETED,
         )
         .order_by(Step.ordinal.desc())
@@ -615,11 +635,16 @@ async def _schedule_bounded_repair(
             "predecessor_ordinals": [],
             "repair_for_ordinal": failed_step.ordinal,
         },
-        step_type="execute_code",
+        step_type=worker.step_type,
         queue_class=worker.queue_class,
         status=StepStatus.QUEUED,
         required_capabilities=list(worker.required_capabilities),
         payload={
+            **(
+                {"result_kind": worker.payload["result_kind"]}
+                if "result_kind" in worker.payload
+                else {}
+            ),
             "repair_for_step_id": str(failed_step.id),
             "repair_attempt": repair_count + 1,
             "repair_epoch": repair_epoch,
@@ -725,6 +750,11 @@ async def _resume_repaired_step(session: AsyncSession, run: Run, repair_step: St
             status=StepStatus.QUEUED,
             required_capabilities=list(validation.required_capabilities),
             payload={
+                **(
+                    {"result_kind": validation.payload["result_kind"]}
+                    if "result_kind" in validation.payload
+                    else {}
+                ),
                 "amend_repaired_result": True,
                 "resume_after_validation_step_id": str(target.id),
                 "repair_step_id": str(repair_step.id),
@@ -970,7 +1000,7 @@ async def _build_recovery_state(
         select(Step)
         .where(
             Step.run_id == run.id,
-            Step.step_type == "execute_code",
+            Step.step_type.in_(("execute_code", "execute_agent")),
             Step.status == StepStatus.COMPLETED,
         )
         .order_by(Step.ordinal.desc())
@@ -1001,8 +1031,11 @@ async def _build_recovery_state(
         await session.scalar(
             select(func.count())
             .select_from(Step)
+            .join(Run, Run.id == Step.run_id)
             .where(
-                Step.run_id == run.id,
+                Run.task_id == run.task_id
+                if run.execution_contract_version == "execution-contract.v2"
+                else Step.run_id == run.id,
                 Step.dependency_metadata["template_key"].as_string() == "repair_code",
             )
         )

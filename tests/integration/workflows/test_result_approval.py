@@ -29,9 +29,10 @@ from vuzol.storage.types import (
 )
 from vuzol.telegram.projections import build_approval_card, build_status_card
 from vuzol.workflows.controls import decide_result
-from vuzol.workflows.domain import OutcomeKind
+from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.result_approval import ensure_result_approval, envelope_hash
+from vuzol.workflows.service import commit_step_outcome
 
 from ..storage.helpers import storage
 
@@ -339,6 +340,23 @@ def test_retained_result_projection_and_approval_are_bound_to_one_envelope(
             assert persisted_worktree is not None
             assert persisted_worktree.delivery_state is WorktreeDeliveryState.APPLIED
             assert persisted_worktree.delivered_ref == "refs/heads/main"
+        async with factory.begin() as session:
+            await commit_step_outcome(session, lease, outcome)
+        async with factory.begin() as session:
+            finalize = await claim_step(
+                session,
+                owner="finalizer",
+                lease_seconds=60,
+                capabilities=frozenset(),
+                step_types=frozenset({"finalize"}),
+            )
+            assert finalize is not None
+            await start_step(session, finalize)
+            await commit_step_outcome(session, finalize, StepOutcome.succeeded())
+        async with factory() as session:
+            completed = await session.get(Run, run_id)
+            assert completed is not None and completed.status is RunStatus.COMPLETED
+            assert completed.workflow_type == "adaptive_worker_trial"
         await engine.dispose()
 
     asyncio.run(scenario())

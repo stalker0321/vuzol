@@ -128,6 +128,7 @@ class _AcceptPayload(_TaskPayload):
     plan_revision_id: str
     spec_revision: str
     result_commit: str
+    report_hash: str | None = None
 
 
 class _AcceptCommand(_Command):

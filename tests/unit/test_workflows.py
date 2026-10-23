@@ -27,7 +27,6 @@ from vuzol.storage.types import (
 from vuzol.workflows import WORKFLOW_DEFINITIONS, compile_workflow
 from vuzol.workflows import transitions as workflow_transitions
 from vuzol.workflows.definitions import validate_definition
-from vuzol.workflows.dispatch import configured_topic_workflow
 from vuzol.workflows.domain import StepOutcome, WorkflowDefinition, WorkflowDefinitionError
 from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.service import derive_task_status
@@ -86,79 +85,80 @@ def test_compiler_skips_disabled_planner() -> None:
         "review",
         "produce_artifacts",
         "build_static",
-        "publish_preview",
-        # D2 L1 REDO: the acceptance gate runs BEFORE the per-item approval.
-        "acceptance",
         "approve_result",
         "publish_static",
         "finalize",
     ]
     approve = next(step for step in without_optional.steps if step.key == "approve_result")
     assert approve.step_type == "approval"
-    assert approve.payload == {"requested_action": "apply_result"}
+    assert approve.payload == {"requested_action": "apply_result", "result_kind": "change"}
     assert without_optional.steps[1].predecessor_ordinals == (0,)
-    # D4: compiler reads draft.needs_planning; the dead plan step is reachable.
+    # Legacy planning hints cannot change the fixed executor chain.
     assert "plan" not in [step.key for step in without_optional.steps]
-    assert "plan" in [step.key for step in with_optional.steps]
+    assert without_optional.steps == with_optional.steps
     assert "review" in [step.key for step in with_optional.steps]
 
 
-def test_compiler_rejects_unknown_or_incompatible_workflow() -> None:
-    with pytest.raises(WorkflowDefinitionError, match="incompatible"):
-        compile_workflow(
-            draft(TaskType.RESEARCH),
-            interpretation_id=uuid.uuid4(),
-            configured_workflow="coding.v1",
-        )
+def test_factory_has_no_template_selection() -> None:
+    import inspect
+
+    assert set(inspect.signature(compile_workflow).parameters) == {"draft", "interpretation_id"}
 
 
-def test_architecture_workflow_uses_read_only_agent_without_delivery_gates() -> None:
-    workflow = compile_workflow(
-        draft(TaskType.ARCHITECTURE, planning=True),
-        interpretation_id=uuid.uuid4(),
-    )
-
-    assert workflow.workflow_type == "architecture"
-    # D4: planning=True makes the optional plan step reachable.
-    assert [step.step_type for step in workflow.steps] == [
+@pytest.mark.parametrize("task_type", [TaskType.ARCHITECTURE, TaskType.RESEARCH])
+def test_read_only_tasks_use_the_same_executor_stages(task_type: TaskType) -> None:
+    workflow = compile_workflow(draft(task_type, planning=True), interpretation_id=uuid.uuid4())
+    assert workflow.workflow_type == "fixed_executor"
+    assert [s.step_type for s in workflow.steps] == [
         "interpret",
-        "plan",
+        "ensure_capabilities",
         "prepare_context",
         "prepare_worktree",
         "execute_agent",
-        "format_result",
+        "ensure_dependencies",
+        "validate",
+        "review",
+        "approval",
         "finalize",
     ]
-    agent = next(step for step in workflow.steps if step.step_type == "execute_agent")
-    assert agent.capabilities == frozenset({Capability.REPOSITORY_READ})
+    agent = next(s for s in workflow.steps if s.step_type == "execute_agent")
+    assert Capability.REPOSITORY_READ in agent.capabilities
+    assert (Capability.WEB_RESEARCH in agent.capabilities) == (task_type is TaskType.RESEARCH)
     assert agent.idempotency_class is IdempotencyClass.READ_ONLY
+    assert agent.payload == {"result_kind": "report"}
 
 
-def test_project_topics_select_architecture_and_current_coding_workflow() -> None:
-    assert configured_topic_workflow("adaptive_task", TaskType.ARCHITECTURE) is None
-    assert configured_topic_workflow("coding_task", TaskType.ARCHITECTURE) is None
-    assert configured_topic_workflow("coding_task", TaskType.CODING) == "coding.v4"
-
-
-def test_legacy_coding_workflow_remains_available_without_artifact_production() -> None:
-    workflow = compile_workflow(
-        draft(),
-        interpretation_id=uuid.uuid4(),
-        configured_workflow="coding.v1",
+@pytest.mark.parametrize("web", [False, True])
+def test_research_capabilities_follow_the_task_contract(web: bool) -> None:
+    capabilities = {Capability.REPOSITORY_READ}
+    if web:
+        capabilities.add(Capability.WEB_RESEARCH)
+    task = draft(TaskType.RESEARCH).model_copy(
+        update={"required_capabilities": frozenset(capabilities)}
     )
+    workflow = compile_workflow(task, interpretation_id=uuid.uuid4())
+    agent = next(s for s in workflow.steps if s.step_type == "execute_agent")
+    assert agent.capabilities == capabilities
 
-    assert workflow.version == "1"
-    assert "produce_artifacts" not in [step.key for step in workflow.steps]
 
-
-def test_previous_coding_v2_remains_available_without_capability_installation() -> None:
-    workflow = compile_workflow(
-        draft(), interpretation_id=uuid.uuid4(), configured_workflow="coding.v2"
+@pytest.mark.parametrize("complexity", list(SuggestedComplexity))
+def test_size_does_not_change_stages(complexity: SuggestedComplexity) -> None:
+    identifier = uuid.uuid4()
+    expected = compile_workflow(draft(), interpretation_id=identifier)
+    actual = compile_workflow(
+        draft().model_copy(update={"suggested_complexity": complexity}),
+        interpretation_id=identifier,
     )
+    assert actual == expected
 
-    assert workflow.version == "2"
-    assert "produce_artifacts" in [step.key for step in workflow.steps]
-    assert "ensure_capabilities" not in [step.key for step in workflow.steps]
+
+@pytest.mark.parametrize("version", ["1", "2", "3", "4"])
+def test_legacy_definitions_remain_available_for_stored_runs(version: str) -> None:
+    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
+
+    definition = WORKFLOW_REGISTRY[f"coding.v{version}"]
+    assert definition.version == version
+    assert any(s.key == "plan" for s in definition.steps)
 
 
 def test_definition_validation_rejects_duplicate_and_missing_edges() -> None:
@@ -328,3 +328,50 @@ def test_coding_workflow_and_heavy_queue() -> None:
     assert exec_step.queue_class == QueueClass.HEAVY
     assert exec_step.idempotency_class == IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
     # This exercises the definition validation and step properties.
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("summary", " "),
+        ("findings", []),
+        ("sources", []),
+        ("sources", [" "]),
+        ("limitations", ["x" * 4_001]),
+    ],
+)
+def test_report_contract_rejects_missing_or_unbounded_evidence(field: str, value: object) -> None:
+    from vuzol.research.report import TaskReport
+
+    report = {
+        "summary": "Repository inspected",
+        "findings": ["Read README"],
+        "sources": ["README.md:1"],
+        "limitations": [],
+    }
+    report[field] = value
+    with pytest.raises(ValidationError):
+        TaskReport.model_validate(report)
+
+
+def test_lead_accept_result_preserves_report_hash() -> None:
+    from vuzol.leadership.provider_model import parse_lead_response
+
+    decision = parse_lead_response(
+        {
+            "commands": [
+                {
+                    "name": "accept_result",
+                    "payload": {
+                        "task_id": str(uuid.uuid4()),
+                        "scope_revision": 1,
+                        "plan_revision_id": str(uuid.uuid4()),
+                        "spec_revision": "a" * 64,
+                        "result_commit": "b" * 40,
+                        "report_hash": "c" * 64,
+                    },
+                }
+            ]
+        }
+    )
+    assert decision.commands[0].payload["report_hash"] == "c" * 64

@@ -8,6 +8,10 @@ from typing import Any
 def result_schema_for_step(
     step_type: str, task_draft: dict[str, object]
 ) -> tuple[str | None, str | None, dict[str, object] | None]:
+    if step_type == "execute_agent" and task_draft.get("report_contract") == "task-report.v1":
+        from vuzol.research.report import TaskReport
+
+        return "TaskReport", "task-report.v1", TaskReport.model_json_schema()
     if step_type == "execute_agent" and task_draft.get("discussion_agent_contract"):
         return (
             "DiscussionTextReply",

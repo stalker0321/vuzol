@@ -733,6 +733,7 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
         )
         from vuzol.telegram.projections import (
             PROJECT_STATUS_DASHBOARD_ROLE,
+            build_project_status_dashboard,
             enqueue_project_status_dashboard,
         )
 
@@ -830,6 +831,16 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
         # Double enqueue in one session (intake_ack + approval_card path) must not
         # insert two outbox rows with the same idempotency key.
         async with factory.begin() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.chat_id == chat_id,
+                    TelegramMessageLink.message_role == PROJECT_STATUS_DASHBOARD_ROLE,
+                )
+            )
+            assert link is not None
+            # Dashboard revisions are content hashes, not increasing counters.
+            # The next successful edit must persist even a numerically lower hash.
+            link.projection_revision = 2**31 - 1
             row = await session.get(Task, task_id)
             assert row is not None
             row.status = TaskStatus.COMPLETED
@@ -865,6 +876,18 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
             assert len(links) == 1
             assert links[0].message_id == 200
             assert links[0].message_thread_id == dashboard_thread
+            expected = await build_project_status_dashboard(session, chat_id)
+            assert links[0].projection_revision == expected.revision
+            again = await prepare_delivery(
+                session,
+                _outbox(
+                    payload={
+                        "role": PROJECT_STATUS_DASHBOARD_ROLE,
+                        "chat_id": chat_id,
+                    }
+                ),
+            )
+            assert again.action is DeliveryAction.NOOP
             assert links[0].task_id is None
         await engine.dispose()
 

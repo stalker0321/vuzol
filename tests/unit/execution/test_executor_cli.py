@@ -553,7 +553,8 @@ async def test_codex_envelope_and_lifecycle_mocks(
     assert b"SECRET" not in persisted["provider-diagnostics"]
     assert not staged_paths[0].exists() and not staged_paths[1].exists()
     await envf.fail_unknown(pid)
-    assert stored_process[0].status.value == "unknown"
+    assert stored_process[0].status.value == "exited"
+    assert stored_process[0].runtime_metadata["post_cleanup_evidence_error"] is True
     state_dir.chmod(0o700)
 
 
@@ -654,7 +655,7 @@ def test_pi_execution_boundary_accepts_only_canonical_runtime() -> None:
         _require_provider_command(snapshot, "pi", "kimi-k3")
     target, environment = _provider_state_runtime("pi")
     assert target == Path("/pi-home")
-    assert environment["PI_CODING_AGENT_DIR"] == "/pi-home"
+    assert environment["PI_CODING_AGENT_DIR"] == "/tmp/pi-home"  # noqa: S108
     with pytest.raises(ValueError, match="non-canonical"):
         _require_provider_command(("pi", "-p"), "pi", "kimi-k3")
     with pytest.raises(ValueError, match="non-canonical"):
@@ -711,6 +712,8 @@ async def test_executor_composes_enabled_runtime(
     settings.execution.reviewer_profile_id = "grok-a" if cli_review else None
     settings.limits.provider_call_input_tokens = 100_000
     settings.execution.require_preflight = True
+    settings.execution.journal_key_file = None
+    settings.execution.provider_parallelism = 2
     settings.execution.rootless_docker_socket = Path("/run/executor/docker.sock")
     settings.execution.sandbox_seccomp_profile = Path("/etc/vuzol/sandbox-seccomp.json")
     settings.execution.sandbox_seccomp_profile_sha256 = "a" * 64
@@ -736,7 +739,7 @@ async def test_executor_composes_enabled_runtime(
 
     monkeypatch.setattr(executor_cli, "get_runtime_configuration", lambda **_kwargs: runtime)
     monkeypatch.setattr(executor_cli, "configure_logging", lambda **_kwargs: None)
-    monkeypatch.setattr(executor_cli, "RootlessDockerRuntime", lambda _socket: sandbox)
+    monkeypatch.setattr(executor_cli, "RootlessDockerRuntime", lambda _socket, **_kw: sandbox)
     monkeypatch.setattr(executor_cli, "RootlessIdentityResolver", MagicMock())
     monkeypatch.setattr(
         executor_cli,
@@ -797,11 +800,13 @@ async def test_executor_composes_enabled_runtime(
     assert reviewer._factory is factory
     assert executor_cli.cli_adapter.call_count == 2
     executor_cli.ReadOnlyCliAdapter.assert_called_once()
-    provider_args = executor_cli.RoutedWorkflowWorker.call_args.kwargs
-    assert "plan" in provider_args["handlers"]
-    assert provider_args["queue_classes"] == frozenset(
-        {executor_cli.QueueClass.LIGHT, executor_cli.QueueClass.HEAVY}
-    )
+    provider_calls = executor_cli.RoutedWorkflowWorker.call_args_list
+    assert len(provider_calls) == 2
+    assert all("plan" in call.kwargs["handlers"] for call in provider_calls)
+    assert {call.kwargs["queue_classes"] for call in provider_calls} == {
+        frozenset({executor_cli.QueueClass.LIGHT}),
+        frozenset({executor_cli.QueueClass.HEAVY}),
+    }
     engine.dispose.assert_awaited_once()
 
 
@@ -819,6 +824,7 @@ async def test_executor_fails_closed_before_profile_sync_when_migration_head_ref
     settings.log_level = "INFO"
     settings.execution.enabled = True
     settings.execution.require_preflight = False
+    settings.execution.journal_key_file = None
     settings.execution.rootless_docker_socket = Path("/run/executor/docker.sock")
     settings.execution.sandbox_seccomp_profile = Path("/etc/vuzol/sandbox-seccomp.json")
     settings.execution.sandbox_seccomp_profile_sha256 = "a" * 64
@@ -888,6 +894,8 @@ async def test_executor_loop_stops_on_registered_signal(
             callbacks[signum] = callback
 
     processor = MagicMock()
+    processor.lanes.return_value = (processor,)
+    processor.recover_if_due = AsyncMock()
 
     async def process_one() -> bool:
         callbacks[signal.SIGTERM]()
@@ -913,6 +921,8 @@ async def test_executor_loop_forwards_explicit_limit_settings(
             callbacks[signum] = callback
 
     processor = MagicMock()
+    processor.lanes.return_value = (processor,)
+    processor.recover_if_due = AsyncMock()
 
     async def process_one() -> bool:
         callbacks[signal.SIGTERM]()

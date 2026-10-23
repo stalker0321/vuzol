@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
-from vuzol.config.models import LaunchMode, ProviderProfileConfig
+from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.providers.account_persistence import (
     account_slot_key as account_slot_key,
 )
@@ -36,7 +36,7 @@ from vuzol.providers.domain import (
     ProviderRequest,
     ProviderResult,
 )
-from vuzol.providers.errors import ProviderFailure
+from vuzol.providers.errors import ProviderFailure, ProviderNotStartedError
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.workflows.ports import CancellationContext
 
@@ -137,8 +137,14 @@ class AccountBoundAdapter:
                     except ProviderFailure as failure:
                         if not failure.request_sent or failure.execution_completed:
                             await self._release_if_confirmed(
-                                connection, backend_pid, execution, cancellation
+                                connection, backend_pid, execution, cancellation,
+                                settled=not failure.request_sent,
                             )
+                        raise
+                    except ProviderNotStartedError:
+                        await self._release_if_confirmed(
+                            connection, backend_pid, execution, cancellation, settled=True
+                        )
                         raise
                     if not await self._release_if_confirmed(
                         connection, backend_pid, execution, cancellation
@@ -181,9 +187,13 @@ class AccountBoundAdapter:
         backend_pid: object,
         execution: AccountExecution,
         cancellation: CancellationContext,
+        *,
+        settled: bool = False,
     ) -> bool:
         try:
-            if cancellation.requested or await self._slot_reserved(connection, execution.slot):
+            if (cancellation.requested and not settled) or await self._slot_reserved(
+                connection, execution.slot
+            ):
                 return False
             await self._assert_connection(connection, backend_pid)
             return await clear_account_ticket(
@@ -211,7 +221,19 @@ class AccountBoundAdapter:
     async def _claim(
         self, connection: AsyncConnection, request: ProviderRequest
     ) -> AccountExecution:
-        for slot in range(self._profile.concurrency_limit):
+        limit = self._profile.concurrency_limit
+        reserved = self._profile.control_reserved_slots
+        control = (
+            request.role is ProviderRole.LEAD
+            or request.output_schema_version == "discussion-text-reply.v2"
+            or (request.sandbox_reference or "").startswith("lead-turn:")
+        )
+        slots = (
+            (*range(limit - reserved, limit), *range(limit - reserved))
+            if control
+            else tuple(range(limit - reserved))
+        )
+        for slot in slots:
             acquired = await connection.scalar(
                 text("SELECT pg_try_advisory_lock(:key)"),
                 {"key": account_slot_key(self._account_id, slot)},

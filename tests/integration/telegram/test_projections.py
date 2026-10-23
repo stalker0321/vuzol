@@ -168,7 +168,7 @@ def test_completed_agent_result_is_rendered_in_project_topic(postgres_dsn: str) 
             card = await build_status_card(session, task.id)
             assert "<b>Сделано:</b>" in card.html
             assert "Use &lt;ports&gt; and adapters." in card.html
-            assert "Исполнитель: Codex Sol" in card.html
+            assert "Исполнитель: codex-a · Codex Sol" in card.html
             assert "Rewrite the service next" not in card.html
         await engine.dispose()
 
@@ -457,7 +457,7 @@ def test_terminal_history_report_shows_worker_preview_and_token_totals(postgres_
             assert "<b>#100001</b>" in report.html
             assert "Завершена успешно" in report.html
             assert "<b>Сделано:</b> Docs published" in report.html
-            assert "<b>Исполнитель:</b> Codex Sol" in report.html
+            assert "<b>Исполнитель:</b> codex-a · Codex Sol" in report.html
             assert 'href="https://preview.vuzol.local/docs"' in report.html
             assert "1,200" in report.html and "340" in report.html and "100" in report.html
             assert "Работа: <code>2 мин 5 с</code>" in report.html  # noqa: RUF001
@@ -893,10 +893,13 @@ def test_dashboard_resolves_executors_pins_and_subscription_limits(postgres_dsn:
             stored_good.executor_profile_id = "api"
             stored_good.result = {"model": "qwen3-max"}
 
+        from vuzol.providers.subscription_plan import reported_plan
+
         snapshot = SubscriptionLimitSnapshot(
             profile_id="codex-a",
             company="OpenAI",
             plan_label="Pro",
+            plan=reported_plan("codex", "pro", source="codex_usage", observed_at=datetime.now(UTC)),
             five_hour=LimitWindow(
                 remaining_percent=80,
                 reset_at=datetime.now(UTC) + timedelta(hours=3),
@@ -925,7 +928,7 @@ def test_dashboard_resolves_executors_pins_and_subscription_limits(postgres_dsn:
         assert "Grok Build" in dashboard.html
         assert "Qwen3 Max" in dashboard.html
         assert "Лимиты подписки" in dashboard.html
-        assert "OpenAI Pro" in dashboard.html
+        assert "OpenAI / Codex · Pro" in dashboard.html
         assert "Обновлено:" in dashboard.html
         await engine.dispose()
 

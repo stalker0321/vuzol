@@ -169,7 +169,7 @@ async def schedule_discussion_agent(
         conversation_route = conversation_route or await select_conversation_route(
             session, runtime, project_id=project_id, mode="think"
         )
-        conversation_route.validate_profile(runtime)
+        conversation_route.validate_profile(runtime, project_id=project_id)
     conversation_mode = conversation_route.conversation_mode if conversation_route else "think"
     if current_turn is not None:
         memory_pack = replace(
@@ -324,7 +324,7 @@ async def schedule_discussion_agent(
                 key="prepare_worktree",
                 step_type="prepare_worktree",
                 predecessor_ordinals=(),
-                queue_class=QueueClass.HEAVY,
+                queue_class=QueueClass.LIGHT,
                 capabilities=frozenset({Capability.GIT, Capability.FILESYSTEM_WRITE}),
                 retry_class=RetryClass.TRANSIENT,
                 idempotency_class=IdempotencyClass.ISOLATED_RETRYABLE,
@@ -337,7 +337,7 @@ async def schedule_discussion_agent(
                 key="execute_agent",
                 step_type="execute_agent",
                 predecessor_ordinals=(0,),
-                queue_class=QueueClass.HEAVY,
+                queue_class=QueueClass.LIGHT,
                 capabilities=frozenset({Capability.REPOSITORY_READ}),
                 retry_class=RetryClass.TRANSIENT,
                 idempotency_class=IdempotencyClass.READ_ONLY,

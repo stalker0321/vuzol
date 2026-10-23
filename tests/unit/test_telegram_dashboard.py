@@ -197,8 +197,15 @@ async def test_latest_step_model_prefers_concrete_slug() -> None:
     from vuzol.telegram.projections import _latest_step_model
 
     run = SimpleNamespace(id=uuid.uuid4())
-    step_generic = SimpleNamespace(result={"model": "codex"}, ordinal=1)
-    step_concrete = SimpleNamespace(result={"model": "gpt-5.6-sol"}, ordinal=2)
+    step_generic = SimpleNamespace(
+        result={"model": "codex"}, ordinal=1, status="completed", executor_profile_id="codex-a"
+    )
+    step_concrete = SimpleNamespace(
+        result={"model": "gpt-5.6-sol"},
+        ordinal=2,
+        status="completed",
+        executor_profile_id="codex-a",
+    )
     session = MagicMock()
     session.scalar = AsyncMock(return_value=run)
     session.scalars = AsyncMock(

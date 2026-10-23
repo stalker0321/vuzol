@@ -10,9 +10,12 @@ import stat
 import tarfile
 import time
 import uuid
+from collections.abc import Coroutine
 from pathlib import Path
+from typing import Any
 
 from vuzol.execution.domain import MountMode, ProcessEnvelope
+from vuzol.execution.journal import ExecutionJournal, InvocationJournal
 from vuzol.execution.paths import PathViolation
 from vuzol.providers.grok import (
     GROK_DIAGNOSTIC_FILE_MAX_BYTES,
@@ -27,9 +30,34 @@ class SandboxError(RuntimeError):
     """The external sandbox could not prove or preserve isolation."""
 
 
+class SandboxInterrupted(SandboxError):
+    """A stopped, drained runtime with partial output and proven cleanup."""
+
+    def __init__(self, result: CodexProcessResult) -> None:
+        reason = "timed out" if result.exit_code == 124 else "cancelled"
+        super().__init__(f"sandbox execution {reason}; runtime cleanup confirmed")
+        self.result = result
+
+
+async def drain_runtime_cleanup(operation: Coroutine[Any, Any, None]) -> None:
+    """Join owned resources despite repeated cancellation of the caller.
+
+    Cancellation authority is enforced by workflow fences, never by abandoning
+    a running Docker launcher halfway through its cleanup.
+    """
+    task = asyncio.create_task(operation)
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    task.result()
+
+
 class RootlessDockerRuntime:
-    def __init__(self, socket: Path) -> None:
+    def __init__(self, socket: Path, *, journal: ExecutionJournal | None = None) -> None:
         self._socket = socket
+        self._journal = journal
 
     async def preflight(self) -> None:
         if self._socket == Path("/var/run/docker.sock"):
@@ -60,18 +88,27 @@ class RootlessDockerRuntime:
     ) -> CodexProcessResult:
         name = envelope.container_name
         argv = docker_run_argv(self._socket, name, envelope)
+        journal = self._journal.open(envelope) if self._journal is not None else None
         started = time.monotonic()
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent"},
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent"},
+            )
+        except BaseException:
+            if journal is not None:
+                journal.close()
+            raise
         io: asyncio.Future[tuple[bytes, bytes, None, int]] | None = None
         io_tasks: list[asyncio.Task[bytes] | asyncio.Task[None] | asyncio.Task[int]] = []
         cancel_task: asyncio.Task[None] | None = None
         aborted = True
+        interrupted: SandboxError | None = None
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
         try:
             # Spawn owns cleanup immediately, including stdin failures/cancellation.
             # Drain output concurrently with input: either pipe may fill first.
@@ -83,10 +120,22 @@ class RootlessDockerRuntime:
 
             feed_task = asyncio.create_task(feed())
             stdout_task = asyncio.create_task(
-                _bounded_read(process.stdout, envelope.sandbox.output_bytes)
+                _bounded_read(
+                    process.stdout,
+                    envelope.sandbox.output_bytes,
+                    chunks=stdout_chunks,
+                    journal=journal,
+                    channel="stdout",
+                )
             )
             stderr_task = asyncio.create_task(
-                _bounded_read(process.stderr, envelope.sandbox.output_bytes)
+                _bounded_read(
+                    process.stderr,
+                    envelope.sandbox.output_bytes,
+                    chunks=stderr_chunks,
+                    journal=journal,
+                    channel="stderr",
+                )
             )
             wait_task = asyncio.create_task(process.wait())
             io_tasks.extend((stdout_task, stderr_task, feed_task, wait_task))
@@ -114,24 +163,72 @@ class RootlessDockerRuntime:
             return result
         except ArtifactOutputLimit as error:
             raise SandboxError("sandbox output limit exceeded") from error
+        except SandboxError as error:
+            interrupted = error
+            # Propagate only after finally has joined the launcher and removed
+            # the owned container. Failed cleanup still raises its own error.
+        except asyncio.CancelledError:
+            cancellation.request()
+            interrupted = SandboxError("sandbox execution cancelled after start")
         finally:
-            for task in (*io_tasks, io, cancel_task):
-                if task is not None and not task.done():
-                    task.cancel()
-            # Cleanup itself is awaited even when the owner cancels this run.
-            try:
-                if aborted or process.returncode is None:
-                    await self._stop_owned_container(name, envelope)
-            finally:
-                with contextlib.suppress(ProcessLookupError):
-                    if process.returncode is None:
-                        process.kill()
-                await process.wait()
-                await asyncio.gather(
-                    *(task for task in (*io_tasks, io, cancel_task) if task is not None),
-                    return_exceptions=True,
+
+            async def cleanup() -> None:
+                try:
+                    if aborted or process.returncode is None:
+                        await self._stop_owned_container(name, envelope)
+                finally:
+                    await drain_launcher()
+
+            async def drain_launcher() -> None:
+                cleanup_confirmed = False
+                try:
+                    # Allow readers to consume the final pipe tail after stop.
+                    # Never let a broken Docker launcher make cleanup unbounded.
+                    if aborted and io_tasks:
+                        with contextlib.suppress(TimeoutError):
+                            async with asyncio.timeout(2):
+                                await asyncio.gather(*io_tasks, return_exceptions=True)
+                    for task in (*io_tasks, io, cancel_task):
+                        if task is not None and not task.done():
+                            task.cancel()
+                    with contextlib.suppress(ProcessLookupError):
+                        if process.returncode is None:
+                            process.kill()
+                    await process.wait()
+                    await asyncio.gather(
+                        *(task for task in (*io_tasks, io, cancel_task) if task is not None),
+                        return_exceptions=True,
+                    )
+                    await self._remove_owned_container(name, envelope)
+                    cleanup_confirmed = True
+                finally:
+                    if journal is not None:
+                        # Disk failure must not prevent container removal or FD
+                        # closure. The original read/write failure still escapes.
+                        try:
+                            with contextlib.suppress(OSError, ValueError):
+                                journal.append(
+                                    "cleanup",
+                                    {
+                                        "confirmed": cleanup_confirmed,
+                                        "exit_code": process.returncode,
+                                        "interrupted": aborted,
+                                    },
+                                )
+                        finally:
+                            journal.close()
+
+            await drain_runtime_cleanup(cleanup())
+        if interrupted is not None:
+            raise SandboxInterrupted(
+                CodexProcessResult(
+                    exit_code=130 if cancellation.requested else 124,
+                    stdout=b"".join(stdout_chunks).decode("utf-8", "replace"),
+                    stderr=b"".join(stderr_chunks).decode("utf-8", "replace"),
+                    duration_ms=int((time.monotonic() - started) * 1000),
                 )
-                await self._remove_owned_container(name, envelope)
+            ) from interrupted
+        raise AssertionError("sandbox did not produce a result")
 
     async def _stage_grok_diagnostics(
         self, name: str, envelope: ProcessEnvelope, stdout: str
@@ -434,16 +531,25 @@ def validate_seccomp_profile(path: Path, expected_sha256: str) -> Path:
     return resolved
 
 
-async def _bounded_read(stream: asyncio.StreamReader | None, maximum: int) -> bytes:
+async def _bounded_read(
+    stream: asyncio.StreamReader | None,
+    maximum: int,
+    *,
+    chunks: list[bytes] | None = None,
+    journal: InvocationJournal | None = None,
+    channel: str = "stdout",
+) -> bytes:
     if stream is None:
         return b""
-    chunks: list[bytes] = []
+    chunks = [] if chunks is None else chunks
     total = 0
     while chunk := await stream.read(65_536):
         total += len(chunk)
         if total > maximum:
             raise ArtifactOutputLimit
         chunks.append(chunk)
+        if journal is not None:
+            journal.append(channel, chunk)
     return b"".join(chunks)
 
 
@@ -490,6 +596,16 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         arguments.extend(("--label", f"{key}={value}"))
     if spec.empty_workspace:
         arguments.extend(("--tmpfs", "/workspace:ro,nosuid,nodev,noexec,size=1048576,mode=0555"))
+    if envelope.argv[:1] in {("pi",), ("codex",), ("kimi",), ("grok",)}:
+        # Safe Chain generates an invocation-local interception CA even for
+        # ordinary python calls. Never make the checkout its writable home.
+        arguments.extend(
+            (
+                "--tmpfs",
+                "/opt/safe-chain/certs:rw,nosuid,nodev,noexec,size=1048576,"
+                f"uid={spec.uid},gid={spec.gid},mode=0700",
+            )
+        )
     for mount in spec.mounts:
         try:
             source = mount.source.resolve(strict=True)
@@ -520,5 +636,16 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
         for key, value in sorted(proxy_environment.items()):
             arguments.extend(("--env", f"{key}={value}"))
     arguments.append(spec.image)
-    arguments.extend(envelope.argv)
+    if spec.environment.get("PI_CODING_AGENT_DIR") == "/tmp/pi-home":  # noqa: S108
+        # A read-only seed and invocation-local tmpfs prevent shared-state writes.
+        initialize = (
+            "umask 077; mkdir -p /tmp/pi-home; "
+            "for name in auth.json models.json settings.json; do "
+            'if [ -f "/pi-home/$name" ]; then '
+            'cp "/pi-home/$name" "/tmp/pi-home/$name" || exit 70; fi; done; '
+            'exec "$@"'
+        )
+        arguments.extend(("/bin/sh", "-c", initialize, "vuzol-pi", *envelope.argv))
+    else:
+        arguments.extend(envelope.argv)
     return tuple(arguments)

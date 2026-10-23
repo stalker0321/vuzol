@@ -1260,6 +1260,7 @@ async def _prepare_project_status_dashboard(
         profile_models=profile_models,
         profile_efforts=profile_efforts,
         profile_providers=profile_providers,
+        subscription_profiles=profiles.items() if profiles is not None else None,
     )
     link = await session.scalar(
         select(TelegramMessageLink).where(
@@ -1622,8 +1623,13 @@ class TelegramDeliveryService:
                 link = await session.get(TelegramMessageLink, prepared.link_id)
                 if link is None:
                     raise LeaseLost(f"Telegram projection disappeared: {prepared.link_id}")
-                # A criterion page is another view of the same card revision.
-                if prepared.revision > link.projection_revision:
+                # Dashboard revisions are content identities, not ordered
+                # counters. Persist the exact successfully delivered hash.
+                # Other cards retain their monotonic stale-edit protection.
+                if (
+                    prepared.message_role == PROJECT_STATUS_DASHBOARD_ROLE
+                    or prepared.revision > link.projection_revision
+                ):
                     link.projection_revision = prepared.revision
                 # A task card changes roles in place (work -> approval ->
                 # result). Keep the callback target synchronized with the

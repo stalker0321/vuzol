@@ -263,6 +263,9 @@ def test_ast_no_call_diagnostic_with_pinned_allowlist() -> None:
     # and must be justified as supervised (timeout + bounded argv).
     pinned = {
         "cli/agent_certify.py",
+        # Fixed native OpenCode --version / console orgs, no model call;
+        # stripped env, 10/30s timeouts, shared owner lock, durable-token check.
+        "cli/opencode_usage_export.py",
         "execution/access.py",
         "execution/git.py",
         "execution/proxy_networks.py",

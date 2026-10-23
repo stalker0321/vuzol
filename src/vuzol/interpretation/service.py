@@ -1012,7 +1012,7 @@ class InterpretationPipeline:
                             session, self._runtime, project_id=project_id, mode="think"
                         )
                     )
-                    conversation_route.validate_profile(self._runtime)
+                    conversation_route.validate_profile(self._runtime, project_id=project_id)
                 except (ValueError, ExecutorPreferenceError) as error:
                     await enqueue_chat_notice(
                         session,

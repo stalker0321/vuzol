@@ -12,6 +12,10 @@ from vuzol.providers.domain import (
 )
 
 
+class ProviderNotStartedError(ValueError):
+    """Trusted transport proved that no provider process could have started."""
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderFailure(Exception):
     category: ProviderErrorCategory

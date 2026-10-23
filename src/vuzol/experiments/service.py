@@ -204,6 +204,7 @@ async def seed_trial(
     # D1 L2: version the spec separately from the mutating task_draft.
     await snapshot_task_spec(session, task)
     run.selected_route = {
+        **run.selected_route,
         "schema_version": "step09a-route.v1",
         "experiment_id": request.experiment_id,
         "experiment_task_id": request.task_id,

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from vuzol.providers.subscription_plan import reported_plan
+
 from ._test_subscription_limits_helpers import (
     UTC,
     Any,
@@ -54,16 +56,19 @@ def test_format_subscription_limits_html() -> None:
         ),
         observed_at=datetime(2026, 7, 16, tzinfo=UTC),
         ok=True,
+        plan=reported_plan(
+            "codex", "plus", source="codex_usage", observed_at=datetime(2026, 7, 16, tzinfo=UTC)
+        ),
     )
     lines = format_subscription_limits_html((snap,), html_escape=telegram_html)
     joined = "\n".join(lines)
     assert "OpenAI" in lines[0]
     assert "Plus" in lines[0]
     assert "5h" not in joined
-    assert "неделя" in joined
-    assert "[███████░░░]" in joined
-    assert "28% осталось" in joined
-    assert "сброс 19.07 12:00 UTC" in joined
+    assert "7d" in joined
+    assert "28%" in joined
+    assert "19.07 14:00" in joined
+    assert all(word not in joined for word in ("осталось", "сброс", "UTC", "Тариф:", "░", "█"))
     assert len(lines) == 2
     assert snap.fingerprint()
 
@@ -97,9 +102,9 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
         ok=True,
     )
     both_lines = "\n".join(format_subscription_limits_html((both,), html_escape=telegram_html))
-    assert "5 ч" in both_lines
-    assert "неделя" in both_lines
-    assert "50% осталось" in both_lines
+    assert "5h" in both_lines
+    assert "7d" in both_lines
+    assert "50%" in both_lines
     no_windows = SubscriptionLimitSnapshot(
         profile_id="codex",
         company="OpenAI",
@@ -117,7 +122,10 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
 @pytest.mark.parametrize(
     ("detail", "expected"),
     [
-        ("auth.json unreadable", "Нужно обновить авторизацию профиля."),
+        (
+            "auth.json unreadable",
+            "Авторизация недоступна сборщику: проверьте путь, доступ и формат.",
+        ),
         ("usage endpoint failed", "Провайдер не ответил. Повторите /update позже."),
         ("billing unavailable", "Провайдер не отдаёт данные лимитов."),
         ("limits_snapshot_unreadable", "Снимок лимитов не читается."),
@@ -195,7 +203,7 @@ def test_unsupported_provider_and_exception_path(
     (tmp_path / "w").mkdir()
     snap = collect_profile_limits(other)
     assert snap.ok is False
-    assert "unsupported" in snap.detail
+    assert snap.detail == "collector_not_supported"
 
     profile = _cli_profile("codex-b", "codex", tmp_path / "c")
     (tmp_path / "c").mkdir()
@@ -253,7 +261,10 @@ def test_edge_auth_token_and_log_paths(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    assert _latest_grok_billing_from_logs(nested) == {"config": {"creditUsagePercent": 1}}
+    assert _latest_grok_billing_from_logs(nested) == {
+        "config": {"creditUsagePercent": 1},
+        "_vuzol_observed_at": None,
+    }
 
     observed = datetime(2026, 7, 16, tzinfo=UTC)
     assert _parse_reset({"reset_at": "not-int", "end": "2026-07-17T00:00:00Z"}, observed)
@@ -485,6 +496,6 @@ async def test_dashboard_loads_limits_from_db_not_filesystem() -> None:
         card = await build_project_status_dashboard(session, chat_id=1)
     load_mock.assert_awaited_once()
     assert "Лимиты подписки" in card.html
-    assert "28% осталось" in card.html
+    assert "28%" in card.html
     assert "OpenAI" in card.html
     assert "auth.json" not in card.html

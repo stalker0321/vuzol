@@ -240,7 +240,7 @@ class ExecutionEnvelopeFactory:
                 SandboxMount(
                     source=state_path,
                     target=state_target,
-                    mode=MountMode.READ_WRITE,
+                    mode=MountMode.READ_ONLY if profile.provider == "pi" else MountMode.READ_WRITE,
                     purpose="provider-state",
                 )
             )
@@ -308,6 +308,8 @@ class ExecutionEnvelopeFactory:
                 termination_stage=TerminationStage.NONE,
                 runtime_metadata={
                     **(account_execution.runtime_metadata if account_execution is not None else {}),
+                    "executor_model": profile.model,
+                    "executor_reasoning_effort": profile.model_reasoning_effort,
                     "configured_deadline_seconds": spec.timeout_seconds,
                     "cancellation_classification": None,
                     "cancellation_initiator": None,
@@ -633,6 +635,26 @@ class ExecutionEnvelopeFactory:
         result: CodexProcessResult,
         artifacts: ArtifactStore,
     ) -> None:
+        # Runtime settlement is a separate durable fact, not contingent on the
+        # artifact filesystem, parsers or secret filtering succeeding.
+        async with self._factory.begin() as session:
+            process = await session.get(SupervisedProcess, process_id, with_for_update=True)
+            if process is None:
+                raise LookupError("supervised process disappeared")
+            if process.task_id is None or process.run_id is None or process.step_id is None:
+                raise ValueError("task sandbox process lacks fenced task identity")
+            process.runtime_metadata = {
+                **process.runtime_metadata,
+                "launcher_drained": True,
+                "cleanup_confirmed": True,
+            }
+            process.exit_code = result.exit_code
+            process.outcome = (
+                ProcessOutcome.SUCCEEDED if result.exit_code == 0 else ProcessOutcome.FAILED
+            )
+            process.status = ProcessStatus.EXITED
+            process.ended_at = func.now()
+            process.reaped_at = func.now()
         async with self._factory.begin() as session:
             process = await session.get(SupervisedProcess, process_id, with_for_update=True)
             if process is None:
@@ -810,6 +832,16 @@ class ExecutionEnvelopeFactory:
             process = await session.get(SupervisedProcess, process_id, with_for_update=True)
             if process is None:
                 raise LookupError("supervised process disappeared")
+            if (
+                process.status is ProcessStatus.EXITED
+                and process.runtime_metadata.get("launcher_drained") is True
+                and process.runtime_metadata.get("cleanup_confirmed") is True
+            ):
+                process.runtime_metadata = {
+                    **process.runtime_metadata,
+                    "post_cleanup_evidence_error": True,
+                }
+                return
             process.status = ProcessStatus.UNKNOWN
             process.outcome = ProcessOutcome.UNKNOWN
             process.ended_at = func.now()
@@ -838,7 +870,12 @@ class SandboxCodexTransport:
     async def run(
         self, invocation: CodexInvocation, cancellation: CancellationContext
     ) -> CodexProcessResult:
-        targets = await self._envelopes.proxy_targets(invocation)
+        from vuzol.providers.errors import ProviderNotStartedError
+
+        try:
+            targets = await self._envelopes.proxy_targets(invocation)
+        except (ValueError, LookupError) as error:
+            raise ProviderNotStartedError("provider preparation rejected before launch") from error
         proxy_lease: ProxyServiceLease | None = None
         process_id: uuid.UUID | None = None
         primary: BaseException | None = None
@@ -864,7 +901,13 @@ class SandboxCodexTransport:
             )
             container_name = f"vuzol-{str(envelope.step_id)[:12]}-{envelope.lease_generation}"
             await self._envelopes.mark_running(process_id, container_name)
-            result = await self._run_monitored(envelope, cancellation, proxy_lease)
+            from vuzol.execution.sandbox import SandboxInterrupted
+
+            try:
+                result = await self._run_monitored(envelope, cancellation, proxy_lease)
+            except SandboxInterrupted as interrupted:
+                # Partial output is still evidence. Cleanup already completed.
+                result = interrupted.result
             if proxy_lease is not None:
                 assert self._proxy is not None
                 await self._proxy.cleanup(proxy_lease)
@@ -874,6 +917,12 @@ class SandboxCodexTransport:
             return result
         except BaseException as error:
             primary = error
+            if process_id is None and isinstance(error, ValueError | LookupError):
+                if proxy_lease is not None:
+                    assert self._proxy is not None
+                    await self._proxy.cleanup(proxy_lease)
+                    proxy_lease = None
+                raise ProviderNotStartedError(str(error)) from error
             if process_id is not None:
                 # The workflow deadline can cancel this transport at the same instant as
                 # the sandbox deadline.  CancelledError is not a RuntimeError, so limiting
@@ -901,6 +950,8 @@ class SandboxCodexTransport:
         cancellation: CancellationContext,
         proxy_lease: ProxyServiceLease | None,
     ) -> CodexProcessResult:
+        from vuzol.execution.sandbox import drain_runtime_cleanup
+
         run_task = asyncio.create_task(self._runtime.run(envelope, cancellation))
         if proxy_lease is None:
             return await run_task
@@ -915,12 +966,29 @@ class SandboxCodexTransport:
                 await asyncio.gather(run_task, return_exceptions=True)
                 raise RuntimeError("controlled proxy exited during sandbox execution")
             return await run_task
+        except asyncio.CancelledError:
+            cancellation.request()
+            if not run_task.done():
+                run_task.cancel()
+
+            async def drain_cancelled_run() -> None:
+                await asyncio.gather(run_task, return_exceptions=True)
+
+            await drain_runtime_cleanup(drain_cancelled_run())
+            # The concrete runtime can return a typed, cleanup-proven partial
+            # receipt. Do not discard it because the outer workflow was fenced.
+            # A raw cancellation/cleanup failure remains uncertain and escapes.
+            return run_task.result()
         finally:
             if not run_task.done():
                 run_task.cancel()
             if not proxy_task.done():
                 proxy_task.cancel()
-            await asyncio.gather(run_task, proxy_task, return_exceptions=True)
+
+            async def drain_monitors() -> None:
+                await asyncio.gather(run_task, proxy_task, return_exceptions=True)
+
+            await drain_runtime_cleanup(drain_monitors())
 
 
 def _require_invocation_identity(invocation: CodexInvocation) -> None:
@@ -1074,7 +1142,7 @@ def _provider_state_runtime(provider: str) -> tuple[Path, dict[str, str]]:
     if provider == "pi":
         return Path("/pi-home"), {
             "HOME": "/tmp/home",  # noqa: S108 - container-scoped bounded tmpfs
-            "PI_CODING_AGENT_DIR": "/pi-home",
+            "PI_CODING_AGENT_DIR": "/tmp/pi-home",  # noqa: S108
         }
     raise ValueError("sandbox rejected an unsupported CLI provider")
 

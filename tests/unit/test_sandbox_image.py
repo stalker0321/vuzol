@@ -18,7 +18,9 @@ def test_sandbox_image_installs_tls_ca_bundle() -> None:
 def test_sandbox_image_contains_minimal_grok_iteration_tools() -> None:
     content = DOCKERFILE.read_text()
     assert "--no-install-recommends ca-certificates curl git make" in content
-    assert "python3" not in content
+    # Local Python checks are advertised by the agent runtime contract. Shims
+    # alone cannot implement that capability; keep a real interpreter behind them.
+    assert "python3 python-is-python3" in content
 
 
 def test_sandbox_image_pins_and_verifies_grok_binary() -> None:

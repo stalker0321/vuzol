@@ -14,7 +14,7 @@ import pytest
 from tests.unit.workflows import test_runtime_preview as runtime_fixture
 from tests.unit.workflows.test_static_publish import _handler as static_handler
 from vuzol.app import preview_gateway
-from vuzol.execution.sandbox import RootlessDockerRuntime
+from vuzol.execution.sandbox import RootlessDockerRuntime, SandboxInterrupted
 from vuzol.ops.static_publish import StaticSite, publish, rollback
 from vuzol.workflows import runtime_preview
 from vuzol.workflows.domain import OutcomeKind
@@ -94,8 +94,9 @@ async def test_sandbox_cancel_during_stdin_must_cleanup_spawned_container(tmp_pa
     process.wait = AsyncMock()
     process.stdin.drain = AsyncMock(side_effect=asyncio.CancelledError())
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(SandboxInterrupted) as stopped:
         await runtime.run(envelope(tmp_path), CancellationContext())
+    assert stopped.value.result.exit_code == 130
     assert runtime._stop_owned_container.await_count == 1, (
         "docker run was spawned but cancellation during stdin.drain escaped before cleanup try"
     )

@@ -143,7 +143,9 @@ async def test_native_review_adapter_uses_canonical_read_only_envelope(envelope_
     mounts = {mount.purpose: mount for mount in envelope.sandbox.mounts}
     assert mounts["task-worktree"].mode is MountMode.READ_ONLY
     assert mounts["worktree-git-metadata"].mode is MountMode.READ_ONLY
-    assert mounts["provider-state"].mode is MountMode.READ_WRITE
+    assert mounts["provider-state"].mode is (
+        MountMode.READ_ONLY if c.profile.provider == "pi" else MountMode.READ_WRITE
+    )
     assert mounts["provider-state"].source == c.profile.state_directory
     assert mounts["provider-state"].target == Path(f"/{c.profile.provider}-home")
     assert envelope.sandbox.network_disabled
@@ -256,6 +258,8 @@ async def test_process_records_optional_account_metadata_without_overwriting_run
     finally:
         accounts._execution.reset(token)
     expected = {
+        "executor_model": c.profile.model,
+        "executor_reasoning_effort": c.profile.model_reasoning_effort,
         "configured_deadline_seconds": envelope.sandbox.timeout_seconds,
         "cancellation_classification": None,
         "cancellation_initiator": None,

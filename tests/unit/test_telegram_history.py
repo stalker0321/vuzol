@@ -137,7 +137,7 @@ async def test_worker_label_uses_execution_model_not_planner() -> None:
     session = MagicMock()
     session.scalar = AsyncMock(return_value=step)
 
-    assert await _task_worker_label(session, uuid4()) == "Codex Sol"
+    assert await _task_worker_label(session, uuid4()) == "codex-a · Codex Sol"
 
 
 @pytest.mark.anyio
@@ -480,7 +480,7 @@ async def test_build_and_enqueue_history_report() -> None:
     assert "Bill Buddy" in report.html
     assert "Задача:</b> Build a responsive landing page for Bill Buddy" in report.html
     assert "Сделано:</b> Landing page implemented" in report.html
-    assert "Исполнитель:</b> Codex Sol" in report.html
+    assert "Исполнитель:</b> codex-a · Codex Sol" in report.html
     assert "Landing page implemented" in report.html
     assert "1,000" in report.html
     assert "200" in report.html

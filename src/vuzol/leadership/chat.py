@@ -112,6 +112,8 @@ async def conversation_goal_context(
     session: AsyncSession, *, project_id: str, user_id: int, chat_id: int, thread_id: int
 ) -> str:
     """A scoped, identity-free state snapshot for either read-only interlocutor."""
+    from vuzol.leadership.execution_view import execution_snapshot
+
     goal = await session.scalar(
         select(ManagedGoal)
         .where(
@@ -142,6 +144,7 @@ async def conversation_goal_context(
             "result_context": await result_context(session, goal, package),
             "package_id": str(package.id) if package else None,
             "package_status": package.status.value if package else None,
+            "execution": await execution_snapshot(session, goal.current_package_id),
         },
         ensure_ascii=False,
     )

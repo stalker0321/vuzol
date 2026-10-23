@@ -176,7 +176,7 @@ async def test_rootless_runtime_external_task_cancellation_always_cleans(
     task = asyncio.create_task(runtime.run(envelope(tmp_path), CancellationContext()))
     await asyncio.sleep(0.1)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(SandboxError, match="cleanup confirmed"):
         await task
     runtime._stop_owned_container.assert_awaited_once()
     runtime._remove_owned_container.assert_awaited_once()

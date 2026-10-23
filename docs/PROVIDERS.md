@@ -15,6 +15,15 @@ Provider profiles are configured in the TOML registry. Common fields include:
 - explicit `fallback_profile_ids`;
 - conservative cost and quota accounting values.
 
+The subscription dashboard discovers enabled CLI profiles from this registry,
+not a separate list of Codex/Grok names. Profiles sharing an explicit `account_id`
+share one subscription row. `subscription_limits_visible=false` hides a retired
+subscription from collection/display only; it does not disable execution or
+invalidate pinned execution revisions. Hide all aliases to hide a shared account.
+Missing/unsupported/stale measurements remain unknown, never synthetic 100%.
+Currently numeric collection supports Codex and Grok, not Pi/OpenCode. Saved
+observations older than 15 minutes and undated Grok log entries are not quota evidence.
+
 API profiles require a credential-free HTTPS `api_base_url`. Credentials remain scoped references,
 such as `env:VUZOL_OPENAI_EXECUTOR_API_KEY`; only the selected adapter resolves its reference.
 

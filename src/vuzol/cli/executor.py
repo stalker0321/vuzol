@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -29,6 +30,7 @@ from vuzol.execution.domain import ProcessEnvelope, SandboxSpec
 from vuzol.execution.finalization import TrustedGateRunner, WorkerFinalizer
 from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
+from vuzol.execution.journal import ExecutionJournal
 from vuzol.execution.proxy_service import ProxyServiceManager
 from vuzol.execution.reconciliation import ProxyStartupReconciler, TurnStartupReconciler
 from vuzol.execution.result_validation import ResultValidationHandler
@@ -67,6 +69,10 @@ VALIDATION_IMAGE_PREFLIGHT_COMMANDS: tuple[tuple[str, ...], ...] = (
 )
 
 
+class ExecutorLane(Protocol):
+    async def process_one(self) -> bool: ...
+
+
 class ExecutorChain:
     def __init__(
         self,
@@ -75,6 +81,10 @@ class ExecutorChain:
         reviews: WorkflowWorker | None = None,
         lead: ProjectLeadWorker | None = None,
         recovery: Callable[[], Awaitable[None]] | None = None,
+        *,
+        control: ExecutorLane | None = None,
+        control_worktrees: ExecutorLane | None = None,
+        provider_parallelism: int = 1,
     ) -> None:
         self._worktrees = worktrees
         self._providers = providers
@@ -82,6 +92,29 @@ class ExecutorChain:
         self._lead = lead
         self._recovery = recovery
         self._next_recovery = time.monotonic() + 30
+        self._control = control
+        self._control_worktrees = control_worktrees
+        self._provider_parallelism = provider_parallelism
+
+    def lanes(self) -> tuple[ExecutorLane, ...]:
+        """Long provider turns must not occupy the lead/control event loop."""
+        return tuple(
+            worker
+            for worker in (
+                self._lead,
+                self._reviews,
+                self._control_worktrees,
+                self._control,
+                self._worktrees,
+                *([self._providers] * self._provider_parallelism),
+            )
+            if worker is not None
+        )
+
+    async def recover_if_due(self) -> None:
+        if self._recovery is not None and time.monotonic() >= self._next_recovery:
+            await self._recovery()
+            self._next_recovery = time.monotonic() + 30
 
     async def process_one(self) -> bool:
         if self._recovery is not None and time.monotonic() >= self._next_recovery:
@@ -109,7 +142,14 @@ async def run() -> None:
     if seccomp_profile is None or seccomp_digest is None:
         raise RuntimeError("execution worker has no pinned sandbox seccomp profile")
     validate_seccomp_profile(seccomp_profile, seccomp_digest)
-    sandbox_runtime = RootlessDockerRuntime(settings.execution.rootless_docker_socket)
+    journal = (
+        ExecutionJournal(settings.execution.journal_root, settings.execution.journal_key_file)
+        if settings.execution.journal_key_file is not None
+        else None
+    )
+    sandbox_runtime = RootlessDockerRuntime(
+        settings.execution.rootless_docker_socket, journal=journal
+    )
     if settings.execution.require_preflight:
         await sandbox_runtime.preflight()
         await _preflight_validation_images(
@@ -336,7 +376,22 @@ async def run() -> None:
             registries=runtime.registries,
             owner=f"{owner}:provider",
             handlers={**executor_provider_handlers(provider_handler), "plan": provider_handler},
-            queue_classes=frozenset({QueueClass.HEAVY, QueueClass.LIGHT}),
+            queue_classes=frozenset({QueueClass.HEAVY}),
+        )
+        control_worker = RoutedWorkflowWorker(
+            settings,
+            factory,
+            registries=runtime.registries,
+            owner=f"{owner}:conversation",
+            handlers={**executor_provider_handlers(provider_handler), "plan": provider_handler},
+            queue_classes=frozenset({QueueClass.LIGHT}),
+        )
+        control_worktree_worker = WorkflowWorker(
+            settings,
+            factory,
+            owner=f"{owner}:conversation-worktree",
+            handlers={"prepare_worktree": worktree_handler},
+            queue_classes=frozenset({QueueClass.LIGHT}),
         )
         reviewer_id = settings.execution.reviewer_profile_id
         reviewer = IndependentModelReviewer(
@@ -387,7 +442,14 @@ async def run() -> None:
 
         await _run_loop(
             ExecutorChain(
-                worktree_worker, provider_worker, review_worker, lead_worker, recover_cli_resources
+                worktree_worker,
+                provider_worker,
+                review_worker,
+                lead_worker,
+                recover_cli_resources,
+                control=control_worker,
+                control_worktrees=control_worktree_worker,
+                provider_parallelism=settings.execution.provider_parallelism,
             ),
             settings.workflow.poll_interval_seconds,
             session_factory=factory,
@@ -444,6 +506,7 @@ async def _refresh_subscription_limits_tick(
                 grok_limit_source=settings.source,
                 grok_limit_snapshot_file=settings.snapshot_file,
                 grok_limit_snapshot_max_age=timedelta(seconds=settings.snapshot_max_age_seconds),
+                opencode_snapshots=settings.opencode_snapshots,
             )
             if force_chat_ids:
                 chats: list[int] = force_chat_ids
@@ -498,24 +561,39 @@ async def _run_loop(
     get_logger(__name__).info("executor ready", extra={"event": "executor.ready"})
     limit_refresh_seconds = 120.0
     last_limit_refresh = -limit_refresh_seconds  # refresh once on startup
-    while not stop.is_set():
-        worked = await processor.process_one()
-        now = time.monotonic()
-        due_periodic = now - last_limit_refresh >= limit_refresh_seconds
-        if session_factory is not None and registries is not None:
-            assert subscription_limit_settings is not None
-            forced = await _refresh_subscription_limits_tick(
-                session_factory,
-                registries,
-                due_periodic=due_periodic,
-                settings=subscription_limit_settings,
-            )
-            if forced or due_periodic:
-                last_limit_refresh = now
-            worked = worked or forced
-        if not worked:
+
+    async def run_lane(lane: ExecutorLane) -> None:
+        while not stop.is_set():
+            worked = await lane.process_one()
+            if not worked:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=poll_interval)
+
+    lanes = [asyncio.create_task(run_lane(lane)) for lane in processor.lanes()]
+    try:
+        while not stop.is_set():
+            for task in lanes:
+                if task.done():
+                    task.result()  # A failed lane must fail visibly, not silently disappear.
+            await processor.recover_if_due()
+            now = time.monotonic()
+            due_periodic = now - last_limit_refresh >= limit_refresh_seconds
+            if session_factory is not None and registries is not None:
+                assert subscription_limit_settings is not None
+                await _refresh_subscription_limits_tick(
+                    session_factory,
+                    registries,
+                    due_periodic=due_periodic,
+                    settings=subscription_limit_settings,
+                )
+                if due_periodic:
+                    last_limit_refresh = now
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval)
+    finally:
+        for task in lanes:
+            task.cancel()
+        await asyncio.gather(*lanes, return_exceptions=True)
     get_logger(__name__).info("executor stopped", extra={"event": "executor.stopped"})
 
 

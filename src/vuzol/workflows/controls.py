@@ -546,6 +546,10 @@ async def resume_task(
         await _continue_paused_step(session, task, run, continuable[0], actor_id=actor_id)
     await activate_ready_steps(session, run)
     target = derive_task_status(await _steps(session, run.id), run.status)
+    if target is TaskStatus.BLOCKED:
+        # Resuming an owner pause is not permission to retry an unrelated
+        # unresolved blocker. Restore its run projection without losing cause.
+        await transition_run(session, run, RunStatus.BLOCKED, actor_type="user", actor_id=actor_id)
     await transition_task(session, task, target, actor_type="user", actor_id=actor_id)
     await _enqueue_telegram_projection(session, task, run)
 

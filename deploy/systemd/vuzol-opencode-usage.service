@@ -1,0 +1,31 @@
+[Unit]
+Description=Vuzol OpenCode usage export and serialized CLI OAuth maintenance
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=vodkolyan
+Group=vodkolyan
+WorkingDirectory=/opt/vuzol/releases/t138
+Environment=PYTHONPATH=/opt/vuzol/releases/t138/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/vuzol/releases/t137-r2/.venv/bin/python -m vuzol.cli.opencode_usage_export --config /etc/vuzol/opencode-usage-c.json
+TimeoutStartSec=50
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/vodkolyan/.opencode-profiles/3 /var/lib/vuzol/usage-export/opencode-c
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+StandardOutput=journal
+StandardError=journal
+

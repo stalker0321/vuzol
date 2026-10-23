@@ -9,6 +9,7 @@ from vuzol.execution.git import GitError
 from vuzol.execution.repo_snapshot import (
     build_snapshot,
     cleanup_snapshot,
+    is_snapshot_path,
     read_repo,
     safe_repo_path,
     snapshot_path,
@@ -35,7 +36,10 @@ async def test_snapshot_reads_exact_commit_denies_writes_and_cleans(repository):
     commit = git(repository, "rev-parse", "HEAD")
     (repository / "known.txt").write_text("uncommitted")
     invocation_id = uuid.uuid4()
-    root = await build_snapshot(repository, commit, invocation_id)
+    worktrees = repository.parent / f"worktrees-{invocation_id}"
+    worktrees.mkdir()
+    root = await build_snapshot(repository, commit, invocation_id, worktrees)
+    assert root == snapshot_path(invocation_id, worktrees)
     try:
         assert (root / "known.txt").read_text() == "committed\n"
         assert not (root / ".git").exists()
@@ -48,9 +52,9 @@ async def test_snapshot_reads_exact_commit_denies_writes_and_cleans(repository):
         assert observed["truncated"] == ["known.txt"]
         assert (repository / "known.txt").read_text() == "uncommitted"
     finally:
-        cleanup_snapshot(invocation_id)
+        cleanup_snapshot(root)
     assert not root.exists()
-    cleanup_snapshot(invocation_id)
+    cleanup_snapshot(root)
 
 
 @pytest.mark.parametrize(
@@ -65,15 +69,30 @@ def test_repo_paths_cannot_escape(value):
 async def test_committed_symlink_and_existing_root_are_rejected(repository, tmp_path):
     commit = git(repository, "rev-parse", "HEAD")
     invocation_id = uuid.uuid4()
-    snapshot_path(invocation_id).symlink_to(tmp_path, target_is_directory=True)
+    worktrees = tmp_path / "worktrees"
+    target = snapshot_path(invocation_id, worktrees)
+    target.parent.mkdir(parents=True)  # also creates the worktree root
+    target.symlink_to(tmp_path, target_is_directory=True)
     try:
         with pytest.raises(FileExistsError):
-            await build_snapshot(repository, commit, invocation_id)
+            await build_snapshot(repository, commit, invocation_id, worktrees)
     finally:
-        snapshot_path(invocation_id).unlink()
+        target.unlink()
     (repository / "escape").symlink_to("/etc/passwd")
     git(repository, "add", ".")
     git(repository, "commit", "-m", "symlink")
     with pytest.raises(GitError, match="regular files"):
-        await build_snapshot(repository, git(repository, "rev-parse", "HEAD"), invocation_id)
-    assert not snapshot_path(invocation_id).exists()
+        await build_snapshot(
+            repository, git(repository, "rev-parse", "HEAD"), invocation_id, worktrees
+        )
+    assert not target.exists()
+
+
+def test_snapshot_lives_under_the_shared_worktree_root_not_private_tmp(tmp_path):
+    # The executor has PrivateTmp; rootless Docker only sees the worktree root.
+    invocation_id = uuid.uuid4()
+    path = snapshot_path(invocation_id, tmp_path)
+    assert path.parent == tmp_path / ".planner-snapshots"
+    assert is_snapshot_path(path, invocation_id)
+    assert not is_snapshot_path(path, uuid.uuid4())
+    assert not is_snapshot_path(tmp_path / f"vuzol-planner-{invocation_id}", invocation_id)

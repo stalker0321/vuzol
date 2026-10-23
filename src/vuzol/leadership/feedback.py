@@ -63,6 +63,19 @@ def _plan(raw: object) -> dict[str, Any] | None:
     }
 
 
+def _report(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or not isinstance(raw.get("sources"), list):
+        return None
+    return {
+        **_fields(raw, ("summary",)),
+        **{key: _strings(raw.get(key)) for key in ("findings", "sources", "limitations")},
+        **{
+            f"omitted_{key}": _omitted(raw.get(key))
+            for key in ("findings", "sources", "limitations")
+        },
+    }
+
+
 def _put(context: dict[str, Any], key: str, value: object) -> None:
     """Omit whole sections explicitly, never emit broken/truncated JSON."""
     candidate = {**context, key: value}
@@ -199,7 +212,7 @@ async def result_context(
                 MaterializationLink.work_package_id == package.id,
                 MaterializationLink.plan_revision_id == revision_id,
                 or_(
-                    Step.step_type.in_(("execute_code", "review", "validate")),
+                    Step.step_type.in_(("execute_code", "execute_agent", "review", "validate")),
                     Step.failure_category.is_not(None),
                 ),
             )
@@ -265,6 +278,8 @@ async def result_context(
                         "unknown_effects": row.unknown_effects,
                     },
                     "review": review,
+                    "report": _report(structured.get("report", structured)),
+                    "report_hash": _text(structured.get("report_hash"), 64),
                 },
             ],
         )

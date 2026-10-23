@@ -93,31 +93,12 @@ def test_budget_mapping_and_policy_version() -> None:
     assert tier_needs_planning(PlanningTier.STRONG) is True
 
 
-def test_compiler_uses_code_owned_tier_over_draft_boolean() -> None:
+def test_compiler_ignores_legacy_planning_boolean() -> None:
     interpretation_id = uuid.uuid4()
-    direct = compile_workflow(
-        _draft(needs_planning=True),
-        interpretation_id=interpretation_id,
-        planning_tier=PlanningTier.DIRECT,
-    )
-    assert "plan" not in [step.key for step in direct.steps]
-
-    light = compile_workflow(
-        _draft(needs_planning=False),
-        interpretation_id=interpretation_id,
-        planning_tier=PlanningTier.LIGHT,
-    )
-    strong = compile_workflow(
-        _draft(needs_planning=False),
-        interpretation_id=interpretation_id,
-        planning_tier=PlanningTier.STRONG,
-    )
-    assert "plan" in [step.key for step in light.steps]
-    assert "plan" in [step.key for step in strong.steps]
-
-    # No tier supplied: legacy in-memory boolean still decides.
-    fallback = compile_workflow(_draft(needs_planning=True), interpretation_id=interpretation_id)
-    assert "plan" in [step.key for step in fallback.steps]
+    direct = compile_workflow(_draft(needs_planning=False), interpretation_id=interpretation_id)
+    legacy = compile_workflow(_draft(needs_planning=True), interpretation_id=interpretation_id)
+    assert direct == legacy
+    assert "plan" not in [step.key for step in legacy.steps]
 
 
 def test_plan_step_evidence_reaches_worker_context() -> None:

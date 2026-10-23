@@ -751,7 +751,8 @@ async def recover_unsent_cli_review(
         or worktree.delivery_state is not WorktreeDeliveryState.WORKTREE_RETAINED
         or worktree.result_commit is None
         or not any(
-            s.step_type == "execute_code" and s.status is StepStatus.COMPLETED for s in steps
+            s.step_type in {"execute_code", "execute_agent"} and s.status is StepStatus.COMPLETED
+            for s in steps
         )
         or not any(s.step_type == "validate" and s.status is StepStatus.COMPLETED for s in steps)
         or any(

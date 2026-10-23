@@ -64,6 +64,15 @@ class ResultApplyHandler:
             )
         try:
             approval_id, envelope, worktree = await self._load(request)
+            if envelope.get("result_kind") == "report":
+                await self._accept_report(request, approval_id, envelope)
+                return StepOutcome.succeeded(
+                    {
+                        "approval_id": str(approval_id),
+                        "report_hash": envelope["report_hash"],
+                        "delivery_state": "report_accepted",
+                    }
+                )
             project = self._registries.projects.get(worktree.project_id)
             if not project.enabled:
                 raise ValueError("project is disabled; approved result cannot be applied")
@@ -203,8 +212,51 @@ class ResultApplyHandler:
             # applies and legacy packages pass through unchanged.
             from vuzol.workflows.acceptance import promotion_gate
 
-            await promotion_gate(session, task_id=request.task_id, envelope=envelope)
+            if envelope.get("result_kind") != "report":
+                await promotion_gate(session, task_id=request.task_id, envelope=envelope)
             return approval_id, envelope, worktree
+
+    async def _accept_report(
+        self, request: StepExecutionRequest, approval_id: uuid.UUID, envelope: dict[str, Any]
+    ) -> None:
+        from vuzol.workflows.locking import lock_task_run_step
+        from vuzol.workflows.result_approval import _validation_evidence
+
+        async with self._factory.begin() as session:
+            locked = await lock_task_run_step(session, request.step_id)
+            if locked is None:
+                raise LeaseLost("report acceptance step disappeared")
+            _task, run, step = locked
+            if (
+                step.lease_owner != request.lease.owner
+                or step.lease_generation != request.lease.generation
+                or step.status not in {StepStatus.LEASED, StepStatus.RUNNING}
+            ):
+                raise LeaseLost("report acceptance lease changed")
+            approval = await session.get(Approval, approval_id, with_for_update=True)
+            if approval is None or approval.status not in {
+                ApprovalStatus.APPROVED,
+                ApprovalStatus.CONSUMED,
+            }:
+                raise ValueError("report approval changed")
+            if verified_envelope(step, approval) != envelope:
+                raise ValueError("report approval envelope changed")
+            worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
+            steps = list(await session.scalars(select(Step).where(Step.run_id == run.id)))
+            if worktree is None:
+                raise ValueError("report worktree missing")
+            evidence = _validation_evidence({s.ordinal: s for s in steps}, worktree)
+            if any(
+                envelope.get(k) != evidence[k]
+                for k in (
+                    "validation_evidence_hash",
+                    "review_evidence_hash",
+                    "report_hash",
+                )
+            ):
+                raise ValueError("report evidence changed")
+            approval.status = ApprovalStatus.CONSUMED
+            approval.consumed_at = approval.consumed_at or datetime.now(UTC)
 
     async def _record_intent(
         self,

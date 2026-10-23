@@ -370,12 +370,18 @@ async def run() -> None:
             handlers=worktree_handlers,
             queue_classes=frozenset({QueueClass.HEAVY}),
         )
+        # `plan` is retained solely for already materialized legacy runs. New
+        # executor contracts use execute_code/execute_agent and never call it.
+        legacy_provider_handlers = {
+            **executor_provider_handlers(provider_handler),
+            "plan": provider_handler,
+        }
         provider_worker = RoutedWorkflowWorker(
             settings,
             factory,
             registries=runtime.registries,
             owner=f"{owner}:provider",
-            handlers={**executor_provider_handlers(provider_handler), "plan": provider_handler},
+            handlers=legacy_provider_handlers,
             queue_classes=frozenset({QueueClass.HEAVY}),
         )
         control_worker = RoutedWorkflowWorker(
@@ -383,7 +389,7 @@ async def run() -> None:
             factory,
             registries=runtime.registries,
             owner=f"{owner}:conversation",
-            handlers={**executor_provider_handlers(provider_handler), "plan": provider_handler},
+            handlers=legacy_provider_handlers,
             queue_classes=frozenset({QueueClass.LIGHT}),
         )
         control_worktree_worker = WorkflowWorker(

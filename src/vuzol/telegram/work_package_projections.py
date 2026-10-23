@@ -840,6 +840,15 @@ async def _package_retry_available(session: AsyncSession, package: WorkPackage) 
     )
     if expected_status is None:
         return False
+    if expected_status is StepStatus.FAILED and await session.scalar(
+        select(Run.id)
+        .where(
+            Run.task_id == package.last_failure_task_id,
+            Run.execution_contract_version == "execution-contract.v2",
+        )
+        .limit(1)
+    ):
+        return False
     step = await session.scalar(
         select(Step)
         .join(Run, Run.id == Step.run_id)

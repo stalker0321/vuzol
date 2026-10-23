@@ -1279,11 +1279,15 @@ class ProviderStepHandler:
                 )
                 if worktree is None:
                     raise LookupError("agent execution requires a prepared worktree")
-                plan_step = await session.scalar(
-                    select(Step)
-                    .where(Step.run_id == run.id, Step.step_type == "plan")
-                    .order_by(Step.ordinal.desc(), Step.id.desc())
-                    .limit(1)
+                plan_step = (
+                    None
+                    if run.execution_contract_version == "execution-contract.v2"
+                    else await session.scalar(
+                        select(Step)
+                        .where(Step.run_id == run.id, Step.step_type == "plan")
+                        .order_by(Step.ordinal.desc(), Step.id.desc())
+                        .limit(1)
+                    )
                 )
                 context = load_planner_context_for_run(
                     plan_step,
@@ -1294,7 +1298,7 @@ class ProviderStepHandler:
                     if task.project_id is not None
                     else None
                 )
-                if delivery is not None:
+                if delivery is not None and step.payload.get("result_kind") != "report":
                     context = (*context, delivery)
                 repair = repair_context_item(step)
                 if repair is not None:
@@ -1419,8 +1423,33 @@ class ProviderStepHandler:
                         document_text_chars = sum(
                             len(d["text"]) for d in prepared.get("documents", [])
                         )
+            worker_draft = task.task_draft
+            if run.execution_contract_version == "execution-contract.v2":
+                worker_draft = {k: v for k, v in task.task_draft.items() if k != "needs_planning"}
+                instruction = (
+                    "Execute exactly this task contract from the approved plan. "
+                    "Do not plan, decompose the goal, create follow-up tasks or expand scope. "
+                    "If the contract cannot be executed, report the blocker to the lead. "
+                    "Do not apply, publish or deploy results."
+                )
+                if step.payload.get("result_kind") == "report":
+                    worker_draft = {**worker_draft, "report_contract": "task-report.v1"}
+                    instruction += (
+                        " Return a TaskReport with summary, findings, sources and limitations. "
+                        "Cite repository paths/lines or retrieved URLs, distinguish evidence "
+                        "from assumptions, and address every requested outcome. Do not edit files."
+                    )
+                context = (
+                    *context,
+                    ContextItem(
+                        source="system_executor_contract",
+                        reference="execution-contract.v2",
+                        content=instruction,
+                        content_hash=hashlib.sha256(instruction.encode()).hexdigest(),
+                    ),
+                )
             output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
-                step.step_type, task.task_draft
+                step.step_type, worker_draft
             )
             reasoning_max_tokens = step.payload.get("reasoning_max_tokens")
             if reasoning_max_tokens is not None and (
@@ -1443,7 +1472,7 @@ class ProviderStepHandler:
                     original_input_reference=original_reference,
                     original_input=original_input,
                     document_text_chars=document_text_chars,
-                    task_draft=task.task_draft,
+                    task_draft=worker_draft,
                     context=context,
                     system_policy_revision=run.policy_revision,
                     prompt_revision=run.prompt_revision or "provider-step-v1",
@@ -1516,10 +1545,10 @@ async def _consumer_steps(
 
 
 def repair_context_item(step: Step) -> ContextItem | None:
-    """Expose only bounded, system-produced repair evidence to a coding worker."""
+    """Expose only bounded, system-produced repair evidence to the worker."""
 
     raw = step.payload.get("repair_context")
-    if not isinstance(raw, dict) or step.step_type != "execute_code":
+    if not isinstance(raw, dict) or step.step_type not in {"execute_code", "execute_agent"}:
         return None
     allowed = {
         key: raw.get(key)
@@ -1529,8 +1558,11 @@ def repair_context_item(step: Step) -> ContextItem | None:
     content = json.dumps(
         {
             "instruction": (
-                "Repair the existing worktree so the reported local validation/review findings "
-                "pass. Keep the original task scope; do not replace or bypass trusted gates."
+                "Revise the report to address the validation/review findings. Keep the original "
+                "task scope, cite sources and disclose limitations. Do not edit repository files."
+                if step.step_type == "execute_agent"
+                else "Repair the existing worktree so the local validation/review findings pass. "
+                "Keep the original task scope; do not replace or bypass trusted gates."
             ),
             "evidence": allowed,
         },

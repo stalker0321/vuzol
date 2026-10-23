@@ -1,4 +1,4 @@
-"""J4 service-level dispatcher test: tier drives workflow and run budget mode."""
+"""Legacy planning tiers become lead events without changing executor stages."""
 
 from __future__ import annotations
 
@@ -29,15 +29,15 @@ pytestmark = pytest.mark.postgresql
 
 
 @pytest.mark.parametrize(
-    ("tier", "expected_budget", "expected_plan"),
+    ("tier", "expected_event"),
     [
-        (PlanningTier.DIRECT, "cheap", False),
-        (PlanningTier.LIGHT, "balanced", True),
-        (PlanningTier.STRONG, "strong", True),
+        (PlanningTier.DIRECT, False),
+        (PlanningTier.LIGHT, True),
+        (PlanningTier.STRONG, True),
     ],
 )
-def test_dispatcher_materializes_tier_specific_workflow_and_budget(
-    postgres_dsn: str, tier: PlanningTier, expected_budget: str, expected_plan: bool
+def test_legacy_tier_becomes_lead_event_with_fixed_workflow(
+    postgres_dsn: str, tier: PlanningTier, expected_event: bool
 ) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
@@ -81,7 +81,8 @@ def test_dispatcher_materializes_tier_specific_workflow_and_budget(
         async with factory() as session:
             run = await session.scalar(select(Run).where(Run.task_id == task_id))
             assert run is not None
-            assert run.budget_mode == expected_budget
+            assert run.budget_mode == "balanced"
+            assert run.execution_contract_version == "execution-contract.v2"
             steps = tuple(
                 (
                     await session.scalars(
@@ -90,10 +91,16 @@ def test_dispatcher_materializes_tier_specific_workflow_and_budget(
                 ).all()
             )
             plan_present = any(step.step_type == "plan" for step in steps)
-            assert plan_present is expected_plan
-            if expected_plan:
-                plan_step = next(step for step in steps if step.step_type == "plan")
-                assert plan_step.required_capabilities == []
+            assert plan_present is False
+            events = list(
+                await session.scalars(
+                    select(Event).where(
+                        Event.entity_id == task_id,
+                        Event.event_type == "task.planning_requested",
+                    )
+                )
+            )
+            assert bool(events) is expected_event
         await engine.dispose()
 
     asyncio.run(scenario())

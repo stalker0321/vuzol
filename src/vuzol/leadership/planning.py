@@ -54,7 +54,7 @@ from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, DeliveryStatus, Wor
 from vuzol.storage.unit_of_work import UnitOfWork
 
 PROMPT_REVISION = "project-planner.v1"
-PLAN_EVENTS = {"plan_requested", "plan_ready", "plan_failed"}
+PLAN_EVENTS = {"plan_requested", "plan_ready", "plan_failed", "planning_requested"}
 
 
 class _PlanItem(_Payload):

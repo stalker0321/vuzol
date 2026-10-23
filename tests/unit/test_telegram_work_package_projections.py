@@ -167,7 +167,9 @@ async def test_package_retry_covers_pause_and_step_safety_edges(
     pause_reason: WorkPackagePauseReason, step: object, expected: bool
 ) -> None:
     session = cast(AsyncSession, cast(Any, AsyncMock()))
-    cast(AsyncMock, session.scalar).return_value = step
+    cast(AsyncMock, session.scalar).side_effect = (
+        [None, step] if pause_reason is WorkPackagePauseReason.ITEM_FAILED else [step]
+    )
     package = cast(
         WorkPackage,
         cast(

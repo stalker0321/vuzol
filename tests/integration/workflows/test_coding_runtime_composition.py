@@ -1,4 +1,4 @@
-"""Real coding-v4 lifecycle; only model editing is replaced by a local fixture.
+"""Fixed change/report chains and stored coding-v4 with real lifecycle handlers.
 
 No production DB, model calls, Telegram writes or external publication. The
 fixture is deliberately docs-only: trusted sandbox gates have separate tests.
@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 
 from tests.integration.storage.helpers import storage
 from tests.integration.workflows._test_runtime_helpers import planned_coding_draft, seed_interpreted
+from tests.integration.workflows.stored_workflows import stored_workflow
 from vuzol.cli.applier import applier_handlers
 from vuzol.cli.static_publisher_worker import publisher_handlers
 from vuzol.config import (
@@ -37,8 +38,10 @@ from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.result_validation import ResultValidationHandler
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
+from vuzol.interpretation.domain import TaskOperation, TaskType
 from vuzol.projects.dependency_provisioning import DependencyProvisioningHandler
 from vuzol.review import ResultReviewHandler
+from vuzol.review.domain import ReviewVerdict, ReviewVerdictKind
 from vuzol.storage.models import (
     Approval,
     ProjectEnvironmentRevision,
@@ -69,8 +72,9 @@ from vuzol.workflows.worker import BASE_INTERNAL_HANDLERS, WorkflowWorker
 pytestmark = pytest.mark.postgresql
 
 
-def test_coding_v4_real_handlers_wait_for_approval_then_finish(
-    postgres_dsn: str, tmp_path: Path
+@pytest.mark.parametrize("kind", ["fixed", "coding.v4", "report"])
+def test_real_handlers_wait_for_approval_then_finish(
+    postgres_dsn: str, tmp_path: Path, kind: str
 ) -> None:
     repository = tmp_path / "repositories" / "vuzol"
     repository.mkdir(parents=True)
@@ -136,18 +140,24 @@ def test_coding_v4_real_handlers_wait_for_approval_then_finish(
                 "suggested_risk": RiskLevel.LOW,
             }
         )
+        if kind == "report":
+            draft = draft.model_copy(
+                update={"task_type": TaskType.RESEARCH, "operation": TaskOperation.INSPECT}
+            )
         task_id, interpretation_id = await seed_interpreted(factory, draft)
         async with factory.begin() as session:
             task = await session.get(Task, task_id)
             assert task is not None
-            task.task_type = "coding"
+            task.task_type = draft.task_type.value
             task.project_id = "vuzol"
             task.source_thread_id = 10
             task.risk = RiskLevel.LOW
             run = await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(draft, interpretation_id=interpretation_id),
+                workflow=(stored_workflow if kind == "coding.v4" else compile_workflow)(
+                    draft, interpretation_id=interpretation_id
+                ),
                 configuration_revision=runtime.registries.revision,
                 policy_revision="b" * 64,
                 prompt_revision="fixture",
@@ -188,8 +198,40 @@ def test_coding_v4_real_handlers_wait_for_approval_then_finish(
                         select(Worktree).where(Worktree.run_id == request.run_id)
                     )
                     assert wt is not None
+                    if kind == "report":
+                        return StepOutcome.succeeded(
+                            {
+                                "structured_output": {
+                                    "summary": "Repository contains the initial README.",
+                                    "findings": ["README starts with Before."],
+                                    "sources": ["README.md:1"],
+                                    "limitations": [],
+                                }
+                            }
+                        )
                     Path(wt.path, "README.md").write_text("# After\n\nRequested fixture change.\n")
                 return StepOutcome.succeeded({"implementation_summary": "Updated fixture docs."})
+
+        class ReportReviewer:
+            async def review(self, **kwargs: Any) -> ReviewVerdict:
+                from vuzol.review.partitions import verify_chunk_receipts
+
+                assert kind == "report"
+                verify_chunk_receipts(kwargs["work_context"])
+                assert kwargs["work_context"][0].source == "task_report"
+                assert "README.md:1" in kwargs["work_context"][0].content
+                assert kwargs["inspection"].changed_files == ()
+                return ReviewVerdict(
+                    verdict=ReviewVerdictKind.PASSED,
+                    review_kind="independent",
+                    risk="low",
+                    base_commit=kwargs["base_commit"],
+                    result_commit=kwargs["result_commit"],
+                    diff_hash=kwargs["diff_hash"],
+                    changed_files=(),
+                    findings=(),
+                    summary="Report matches the task and sources.",
+                )
 
         artifacts = ArtifactStore(settings.artifact_root, max_bytes=1_000_000, retention_days=1)
         internal = WorkflowWorker(
@@ -198,7 +240,12 @@ def test_coding_v4_real_handlers_wait_for_approval_then_finish(
             owner="common",
             handlers={
                 **BASE_INTERNAL_HANDLERS,
-                "review": ResultReviewHandler(factory, git, worktree_root=settings.worktree_root),
+                "review": ResultReviewHandler(
+                    factory,
+                    git,
+                    worktree_root=settings.worktree_root,
+                    independent_reviewer=ReportReviewer(),
+                ),
             },
         )
         heavy = WorkflowWorker(
@@ -211,6 +258,7 @@ def test_coding_v4_real_handlers_wait_for_approval_then_finish(
                     factory, runtime.registries, worktrees, owner="fixture", settings=settings
                 ),
                 "execute_code": FixtureModel(),
+                "execute_agent": FixtureModel(),
                 "ensure_dependencies": DependencyProvisioningHandler(
                     factory,
                     settings.dependency_provisioning,
@@ -275,16 +323,42 @@ def test_coding_v4_real_handlers_wait_for_approval_then_finish(
                 approval = await session.scalar(select(Approval))
                 assert approval is not None and approval.status is ApprovalStatus.PENDING
                 approval_id = approval.id
-                assert all(s.status is StepStatus.COMPLETED for s in steps if s.ordinal < 12)
-                assert steps[12].status is StepStatus.WAITING_APPROVAL
-                assert steps[13].status is StepStatus.PENDING
-                assert steps[10].result == {"status": "skipped", "reason": "not_configured"}
-                env = await session.scalar(select(ProjectEnvironmentRevision))
-                assert (
-                    env is not None
-                    and env.source == "detected"
-                    and env.contract["components"] == {}
+                boundary = next(s for s in steps if s.step_type == "approval")
+                assert all(
+                    s.status is StepStatus.COMPLETED for s in steps if s.ordinal < boundary.ordinal
                 )
+                assert boundary.status is StepStatus.WAITING_APPROVAL
+                assert all(
+                    s.status is StepStatus.PENDING for s in steps if s.ordinal > boundary.ordinal
+                )
+                if kind == "report":
+                    assert boundary.payload["action_envelope"]["report_hash"]
+                    from vuzol.workflows.result_approval import _validation_evidence
+
+                    report_step = next(s for s in steps if s.step_type == "execute_agent")
+                    original_result = report_step.result
+                    report_step.result = {
+                        "structured_output": {
+                            **original_result["structured_output"],
+                            "summary": "Changed after review",
+                        }
+                    }
+                    tree = await session.scalar(select(Worktree).where(Worktree.run_id == run_id))
+                    assert tree is not None
+                    with pytest.raises(ValueError, match="report evidence changed"):
+                        _validation_evidence({s.ordinal: s for s in steps}, tree)
+                    report_step.result = original_result
+                else:
+                    env = await session.scalar(select(ProjectEnvironmentRevision))
+                    assert (
+                        env is not None
+                        and env.source == "detected"
+                        and env.contract["components"] == {}
+                    )
+                if kind != "coding.v4":
+                    assert all(
+                        s.step_type not in {"plan", "acceptance", "publish_preview"} for s in steps
+                    )
                 assert "start" not in (await build_status_card(session, task_id)).buttons
             assert await git.resolve_commit(repository, "main") == base
             assert not settings.static_site_root.exists()
@@ -309,8 +383,12 @@ def test_coding_v4_real_handlers_wait_for_approval_then_finish(
                 card = await build_status_card(session, task_id)
                 assert f"Завершение ({step_status_label(StepStatus.COMPLETED)})" in card.html
                 assert not card.buttons
-            assert await git.resolve_commit(repository, "main") != base
-            assert (repository / "README.md").read_text().startswith("# After")
+            if kind == "report":
+                assert await git.resolve_commit(repository, "main") == base
+                assert (repository / "README.md").read_text() == "# Before\n"
+            else:
+                assert await git.resolve_commit(repository, "main") != base
+                assert (repository / "README.md").read_text().startswith("# After")
             assert not settings.static_site_root.exists()
         finally:
             await registry.close()

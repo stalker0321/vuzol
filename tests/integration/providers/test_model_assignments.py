@@ -21,6 +21,7 @@ from tests.integration.providers._test_routing_helpers import profile
 from tests.integration.storage.helpers import seed_task_run_step, storage
 from tests.integration.telegram.helpers import telegram_runtime
 from tests.integration.workflows._test_runtime_helpers import planned_coding_draft, seed_interpreted
+from tests.integration.workflows.stored_workflows import stored_workflow
 from vuzol.cli import executor
 from vuzol.config import Capability, ProviderRole, ScopedSecretResolver
 from vuzol.config.registries import ProfileRegistry
@@ -55,7 +56,6 @@ from vuzol.telegram.adapter import control_update
 from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.domain import ControlUpdate, IngressStatus, MessageUpdate
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.service import materialize_run
 
@@ -188,7 +188,8 @@ async def _assign(factory, runtime, profile_id, *, slot="planner_light"):
 async def _materialize(factory, runtime):
     draft = planned_coding_draft()
     task_id, interpretation_id = await seed_interpreted(factory, draft)
-    workflow = compile_workflow(draft, interpretation_id=interpretation_id)
+    # Persist the historical planner DAG: new tasks never invoke this handler.
+    workflow = stored_workflow(draft, interpretation_id=interpretation_id)
     async with factory.begin() as session:
         task = await session.get(Task, task_id)
         task.project_id, task.task_type = "vuzol", "coding"
@@ -590,7 +591,9 @@ async def test_api_reviewer_pin_survives_restart_and_changed_default(
         await engine.dispose()
 
 
-async def test_auto_planner_uses_available_cli_when_host_owns_planning(postgres_dsn, runtime):
+async def test_stored_auto_planner_uses_available_cli_when_host_owns_planning(
+    postgres_dsn, runtime
+):
     chosen = runtime.registries.profiles.get("cli-choice").model_copy(
         update={"fallback_profile_ids": ()}
     )

@@ -28,7 +28,6 @@ from ._test_runtime_helpers import (
     cancel_task,
     claim_step,
     commit_step_outcome,
-    compile_workflow,
     func,
     materialize_run,
     pause_task,
@@ -41,6 +40,7 @@ from ._test_runtime_helpers import (
     start_run,
     start_step,
     storage,
+    stored_workflow,
     uuid,
 )
 
@@ -50,7 +50,7 @@ def test_materialized_workflow_reaches_completion(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         task_id, interpretation_id = await seed_interpreted(factory)
-        workflow = compile_workflow(simple_draft(), interpretation_id=interpretation_id)
+        workflow = stored_workflow(simple_draft(), interpretation_id=interpretation_id)
         async with factory.begin() as session:
             run = await materialize_run(
                 session,
@@ -95,7 +95,7 @@ def test_capability_preflight_advances_without_reversing_task_status(
             run = await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(draft, interpretation_id=interpretation_id),
+                workflow=stored_workflow(draft, interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision="capability-preflight-v1",
@@ -135,7 +135,7 @@ def test_capability_preflight_advances_without_reversing_task_status(
 
 @pytest.mark.postgresql
 @pytest.mark.skip(
-    reason="per-task planner is temporarily disabled in compile_workflow "
+    reason="per-task planner is temporarily disabled in stored_workflow "
     "(docs/BACKLOG.md, 'Revisit planner architecture'); re-enable with the planner"
 )
 def test_completed_plan_enqueues_system_trace(postgres_dsn: str) -> None:
@@ -147,7 +147,7 @@ def test_completed_plan_enqueues_system_trace(postgres_dsn: str) -> None:
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(draft, interpretation_id=interpretation_id),
+                workflow=stored_workflow(draft, interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision="trace-v1",
@@ -200,7 +200,7 @@ def test_pause_resume_and_cancel_are_persisted(postgres_dsn: str) -> None:
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -254,7 +254,7 @@ def test_owner_can_pause_blocked_work_without_clearing_its_blocker(postgres_dsn:
                 run = await materialize_run(
                     session,
                     task_id=task_id,
-                    workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                    workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                     configuration_revision="a" * 64,
                     policy_revision="b" * 64,
                     prompt_revision=None,
@@ -297,7 +297,7 @@ def test_stale_task_version_rejects_control(postgres_dsn: str) -> None:
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -338,7 +338,7 @@ def test_task_control_service_pause_inspect_and_retry(postgres_dsn: str) -> None
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -391,7 +391,7 @@ def test_workflow_control_outbox_applies_cancel(postgres_dsn: str) -> None:
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -442,7 +442,7 @@ def test_control_consumer_start_pause_resume_and_reject(postgres_dsn: str) -> No
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -517,7 +517,7 @@ def test_dispatcher_applies_control_and_rejects_semantic_approval(postgres_dsn: 
             await materialize_run(
                 session,
                 task_id=target_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=target_interpretation),
+                workflow=stored_workflow(simple_draft(), interpretation_id=target_interpretation),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -561,7 +561,7 @@ def test_continuation_resumes_awaiting_step(postgres_dsn: str) -> None:
             run = await materialize_run(
                 session,
                 task_id=target_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=target_interpretation),
+                workflow=stored_workflow(simple_draft(), interpretation_id=target_interpretation),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -641,7 +641,7 @@ def test_explicit_retry_requeues_only_safe_blocked_step(
             run = await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -719,7 +719,7 @@ def test_manual_start_is_idempotent_and_heartbeat_uses_database_time(
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         task_id, interpretation_id = await seed_interpreted(factory)
-        workflow = compile_workflow(simple_draft(), interpretation_id=interpretation_id)
+        workflow = stored_workflow(simple_draft(), interpretation_id=interpretation_id)
         async with factory.begin() as session:
             run = await materialize_run(
                 session,

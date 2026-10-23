@@ -12,7 +12,6 @@ from ._test_runtime_helpers import (
     TaskStatus,
     asyncio,
     claim_step,
-    compile_workflow,
     func,
     materialize_run,
     pytest,
@@ -22,6 +21,7 @@ from ._test_runtime_helpers import (
     simple_draft,
     start_step,
     storage,
+    stored_workflow,
     timedelta,
     update,
 )
@@ -36,7 +36,7 @@ def test_recovery_requeues_safe_and_blocks_unknown(postgres_dsn: str) -> None:
             await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -92,7 +92,7 @@ def test_recovery_fails_safe_step_when_attempts_are_exhausted(postgres_dsn: str)
             run = await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,
@@ -141,7 +141,7 @@ def test_recovery_requeues_leased_only_even_when_attempts_exhausted(
             run = await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                 configuration_revision="a" * 64,
                 policy_revision="b" * 64,
                 prompt_revision=None,

@@ -34,6 +34,7 @@ def _request() -> StepExecutionRequest:
             run_id=uuid.uuid4(),
             step_id=uuid.uuid4(),
             lease=SimpleNamespace(owner="worker", generation=1),
+            payload={},
         ),
     )
 

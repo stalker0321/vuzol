@@ -220,7 +220,10 @@ async def test_final_item_approval_is_rendered_as_package_result(
     await engine.dispose()
 
 
-async def test_failed_internal_step_retry_materializes_a_fresh_task(postgres_dsn: str) -> None:
+@pytest.mark.parametrize("fixed", [False, True])
+async def test_failed_internal_step_retry_materializes_only_legacy_tasks(
+    postgres_dsn: str, fixed: bool
+) -> None:
     engine, factory = storage(postgres_dsn)
     created = await _approved(factory)
     async with UnitOfWork(factory) as uow:
@@ -240,6 +243,9 @@ async def test_failed_internal_step_retry_materializes_a_fresh_task(postgres_dsn
             task_id=task.id,
             workflow_type="coding",
             workflow_version="1",
+            execution_contract_version="execution-contract.v2"
+            if fixed
+            else "execution-contract.v1",
             status=RunStatus.FAILED,
             selected_route={},
             budget_mode="balanced",
@@ -272,7 +278,29 @@ async def test_failed_internal_step_retry_materializes_a_fresh_task(postgres_dsn
     async with factory() as session:
         card = await build_work_package_action_card(session, created.package_id)
     labels = {label for row in card.callback_buttons for label, _callback_data in row}
-    assert "Повторить" in labels
+    assert ("Повторить" in labels) is (not fixed)
+    if fixed:
+        from vuzol.discussion.domain import DomainError
+
+        async with UnitOfWork(factory) as uow:
+            with pytest.raises(DomainError, match="lead_revision_required"):
+                await WorkPackageSequencer(uow).retry_failed_item(
+                    package_id=created.package_id,
+                    revision_number=1,
+                    h8=created.content_hash[:8],
+                    expected_status_generation=paused.status_generation,
+                    user_id=42,
+                )
+        async with factory() as session:
+            link = await session.scalar(
+                select(MaterializationLink).where(
+                    MaterializationLink.work_package_id == created.package_id,
+                    MaterializationLink.ordinal == 1,
+                )
+            )
+            assert link is not None and link.task_id == first.task_id
+        await engine.dispose()
+        return
     async with UnitOfWork(factory) as uow:
         retried = await WorkPackageSequencer(uow).retry_failed_item(
             package_id=created.package_id,

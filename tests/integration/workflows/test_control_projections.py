@@ -7,9 +7,9 @@ from sqlalchemy import func, select
 
 from tests.integration.storage.helpers import storage
 from tests.integration.workflows._test_runtime_helpers import seed_interpreted, simple_draft
+from tests.integration.workflows.stored_workflows import stored_workflow
 from vuzol.storage.models import Task, TransactionalOutbox
 from vuzol.workflows.application import Principal, apply_task_command
-from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.service import materialize_run
 
 pytestmark = pytest.mark.postgresql
@@ -31,7 +31,7 @@ def test_control_projects_new_revision_but_duplicate_does_not(
                 await materialize_run(
                     session,
                     task_id=task_id,
-                    workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                    workflow=stored_workflow(simple_draft(), interpretation_id=interpretation_id),
                     configuration_revision="a" * 64,
                     policy_revision="b" * 64,
                     prompt_revision="fixture",

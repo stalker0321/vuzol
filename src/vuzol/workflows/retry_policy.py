@@ -108,7 +108,7 @@ def current_retry_target(steps: tuple[Step, ...]) -> Step | None:
                 child.dependency_metadata if isinstance(child.dependency_metadata, dict) else {}
             )
             if (
-                child.step_type == "execute_code"
+                child.step_type in {"execute_code", "execute_agent"}
                 and child.run_id == parent.run_id
                 and payload.get("repair_for_step_id") == str(parent.id)
                 and parent_payload.get("repair_scheduled_step_id") == str(child.id)

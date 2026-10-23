@@ -1144,11 +1144,16 @@ def test_quoted_or_negated_command_never_materializes_code_edit(
             assert run is not None
             steps = (await session.scalars(select(Step).where(Step.run_id == run.id))).all()
             assert steps
+            # Preparation and acceptance are host-owned. The worker itself
+            # receives a read-only contract in the same fixed chain.
             for step in steps:
-                assert not forbidden.intersection(step.required_capabilities)
+                if step.step_type == "execute_agent":
+                    assert not forbidden.intersection(step.required_capabilities)
+                    assert step.payload["result_kind"] == "report"
             step_types = {step.step_type for step in steps}
             assert "execute_code" not in step_types
-            assert "prepare_worktree" not in step_types
+            assert "prepare_worktree" in step_types
+            assert {"validate", "review"} <= step_types
         await engine.dispose()
 
     asyncio.run(scenario())

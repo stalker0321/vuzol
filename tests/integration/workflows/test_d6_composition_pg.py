@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import select
 
 from tests.integration.storage.helpers import seed_task_run_step, storage
+from tests.integration.workflows.stored_workflows import stored_workflow
 from vuzol.config import LaunchMode
 from vuzol.config.models import Capability, CostClass, ProviderProfileConfig
 from vuzol.config.settings import HardLimits
@@ -56,7 +57,8 @@ from vuzol.storage.types import (
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.workflows.controls import decide_result
-from vuzol.workflows.domain import OutcomeKind
+from vuzol.workflows.domain import OutcomeKind, StepOutcome
+from vuzol.workflows.service import materialize_run
 from vuzol.workflows.worker import CompleteHandler, WorkflowWorker
 
 from ._test_runtime_helpers import (
@@ -179,11 +181,22 @@ async def _drain(factory: object, handlers: dict[str, CompleteHandler], *, limit
     return processed
 
 
-def test_research_plan_reaches_verified_goal(postgres_dsn: str) -> None:
+def test_stored_research_plan_reaches_verified_goal(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         task_id, interpretation_id = await seed_interpreted(factory, _research_draft())
-        await _dispatch(factory, task_id, interpretation_id)
+        # Retain the historical research handler path. New report contracts use
+        # the real Git/validation/review/apply chain in test_coding_runtime_composition.
+        async with factory.begin() as session:
+            await materialize_run(
+                session,
+                task_id=task_id,
+                workflow=stored_workflow(_research_draft(), interpretation_id=interpretation_id),
+                configuration_revision="a" * 64,
+                policy_revision="b" * 64,
+                prompt_revision=None,
+                automatic_start=True,
+            )
         assert await _drain(factory, RESEARCH_HANDLERS) >= 3
         async with factory() as session:
             task = await session.get(Task, task_id)
@@ -251,6 +264,13 @@ def test_coding_plan_survives_worker_crash_and_applies(postgres_dsn: str, tmp_pa
         inspection = await git.inspect(result_wt, base)
         identity, _remote = await git.repository_identity(repository)
 
+        class BuildHandler(CompleteHandler):
+            async def execute(self, request, cancellation):
+                return StepOutcome.succeeded(
+                    {"status": "built", "source_commit": result_commit, "artifact_hash": "d" * 64}
+                )
+
+        handlers = {**CODING_HANDLERS, "build_static": BuildHandler()}
         task_id, interpretation_id = await seed_interpreted(factory, _coding_draft())
         await _dispatch(factory, task_id, interpretation_id)
 
@@ -380,7 +400,7 @@ def test_coding_plan_survives_worker_crash_and_applies(postgres_dsn: str, tmp_pa
                 if approval is not None and approval.status is StepStatus.WAITING_APPROVAL:
                     worker_ready = True
                     break
-            if not await _drain(factory, CODING_HANDLERS, limit=1):
+            if not await _drain(factory, handlers, limit=1):
                 break
         assert worker_ready, "approval gate was never reached"
         assert crashed_key in CODING_HANDLERS
@@ -492,7 +512,7 @@ def test_coding_plan_survives_worker_crash_and_applies(postgres_dsn: str, tmp_pa
             assert worktree.delivered_ref == "refs/heads/main"
         assert _git(repository, "rev-parse", "main") == result_commit
 
-        assert await _drain(factory, CODING_HANDLERS) >= 1
+        assert await _drain(factory, handlers) >= 1
         async with factory() as session:
             task = await session.get(Task, task_id)
             assert task is not None and task.status is TaskStatus.COMPLETED

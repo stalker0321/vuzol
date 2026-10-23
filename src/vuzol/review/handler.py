@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import uuid
 from contextlib import suppress
@@ -171,7 +173,19 @@ class ResultReviewHandler:
                 summary=verdict.summary[:500],
                 unknown_effects=False,
             )
-        return StepOutcome.succeeded(verdict.as_step_result())
+        result = verdict.as_step_result()
+        if request.payload.get("result_kind") == "report":
+            async with self._factory() as session:
+                step = await session.get(Step, request.step_id)
+                if step is None:
+                    raise LookupError("report review step disappeared")
+                validation = await self._require_validate_predecessor(session, step)
+                if not isinstance(validation.result, dict):
+                    raise ValueError("report validation evidence disappeared")
+                result["structured_output"]["report_hash"] = validation.result["structured_output"][
+                    "report_hash"
+                ]
+        return StepOutcome.succeeded(result)
 
     async def _review(
         self, request: StepExecutionRequest, cancellation: CancellationContext
@@ -244,6 +258,48 @@ class ResultReviewHandler:
             ).get("chat_work_spec_revision")
             if getattr(task, "ingress_source", None) == "chat_work" or spec_pin is not None:
                 work_context = await load_work_context(session, task, expected_revision=spec_pin)
+            report = request.payload.get("result_kind") == "report"
+            if report:
+                from vuzol.research.report import TaskReport
+                from vuzol.workflows.result_approval import envelope_hash
+
+                worker = await session.scalar(
+                    select(Step)
+                    .where(
+                        Step.run_id == run.id,
+                        Step.step_type == "execute_agent",
+                        Step.status == StepStatus.COMPLETED,
+                    )
+                    .order_by(Step.ordinal.desc())
+                    .limit(1)
+                )
+                raw = worker.result.get("structured_output") if worker and worker.result else None
+                document = TaskReport.model_validate(raw).model_dump(mode="json")
+                digest = envelope_hash(document)
+                if structured.get("report_hash") != digest or structured.get("report") != document:
+                    raise ValueError("report changed after validation")
+                encoded = json.dumps(
+                    document, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                )
+                report_chunks = tuple(
+                    ContextItem(
+                        source="task_report",
+                        reference=f"report:{worker.id if worker else ''}:{offset}",
+                        content=encoded[offset : offset + 20_000],
+                        content_hash=hashlib.sha256(
+                            encoded[offset : offset + 20_000].encode()
+                        ).hexdigest(),
+                    )
+                    for offset in range(0, len(encoded), 20_000)
+                )
+                batch = (*work_context, *report_chunks)
+                work_context = tuple(
+                    item.model_copy(
+                        update={"reference": f"{item.reference}:part-{index}-of-{len(batch)}"}
+                    )
+                    for index, item in enumerate(batch, start=1)
+                )
+
             from vuzol.storage.models import MaterializationLink, WorkPackage
             from vuzol.workflows.acceptance import (
                 exit_criterion_specs,
@@ -288,6 +344,8 @@ class ResultReviewHandler:
             raise ValueError("worktree HEAD does not match the retained result commit")
         if inspection.branch != branch:
             raise ValueError("worktree branch does not match the prepared task branch")
+        if report and (inspection.head != base_commit or inspection.changed_files):
+            raise ValueError("read-only report changed repository state")
         risk = runtime_risk(risk, inspection)
 
         findings = (
@@ -314,7 +372,7 @@ class ResultReviewHandler:
         # A mechanical pass cannot prove a goal criterion. Retrying that pass
         # would stop at acceptance with the same missing evidence.
         needs_criterion_review = bool(unproven_criteria)
-        if requires_independent_level or needs_criterion_review:
+        if report or requires_independent_level or needs_criterion_review:
             if self._independent is None:
                 if needs_criterion_review:
                     names = ", ".join(unproven_criteria)

@@ -27,8 +27,6 @@ from vuzol.experiments.domain import (
 )
 from vuzol.experiments.export import joint_export, pricing_comparable
 from vuzol.experiments.policy import classify_execution_strategy
-from vuzol.experiments.shadow import load_shadow_records, record_shadow_decision
-from vuzol.experiments.snapshot import PolicySnapshot
 
 __all__ = [
     "DECISION_SCHEMA",
@@ -44,7 +42,6 @@ __all__ = [
     "ExecutionStrategy",
     "ExperimentArm",
     "PlannedRun",
-    "PolicySnapshot",
     "ReasonCode",
     "ReviewOutcome",
     "TaskClassification",
@@ -60,8 +57,6 @@ __all__ = [
     "classify_execution_strategy",
     "interpret_output",
     "joint_export",
-    "load_shadow_records",
     "plan_cohort",
     "pricing_comparable",
-    "record_shadow_decision",
 ]

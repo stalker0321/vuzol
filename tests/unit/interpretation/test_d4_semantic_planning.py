@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -16,7 +14,6 @@ from vuzol.discussion.domain import (
     validate_plan_dependencies,
 )
 from vuzol.experiments import decision as repair_triage
-from vuzol.experiments import target_selection
 from vuzol.interpretation import decisions as semantic_decisions
 from vuzol.interpretation.discussion import (
     ControlOverride,
@@ -204,51 +201,19 @@ def test_semantic_hints_never_grant_capabilities() -> None:
     }
 
 
-def test_jev_second_kind_cross_rejects_and_corpus_labels() -> None:
-    fingerprint = "a" * 64
-    ref = "artifact:build-log:sha256:" + "b" * 64
-    target_ok = {
+def test_repair_triage_rejects_other_decision_kinds() -> None:
+    other_kind = {
         "schema": "decision.v2",
         "decision_kind": "target_selection",
         "state_revision": 3,
         "choice": "select",
         "candidate_id": "auth-fix",
-        "evidence_refs": [ref],
+        "evidence_refs": ["artifact:build-log:sha256:" + "b" * 64],
         "reason_code": "clear_match",
         "abstain": False,
-        "input_fingerprint": fingerprint,
+        "input_fingerprint": "a" * 64,
     }
-    decision, repaired = target_selection.interpret_output(target_ok)
-    assert not repaired
-    assert decision.candidate_id == "auth-fix"
-
-    repair_payload = {
-        "schema": "decision.v1",
-        "decision_kind": "repair_triage",
-        "state_revision": 3,
-        "choice": "repair",
-        "evidence_refs": [ref],
-        "reason_code": "known_local_failure",
-        "abstain": False,
-        "input_fingerprint": fingerprint,
-    }
-    # Cross-kind: v1 payload rejected by v2 parser and vice versa.
-    with pytest.raises(target_selection.TargetDecisionInvalid):
-        target_selection.interpret_output(repair_payload)
     with pytest.raises(repair_triage.DecisionInvalid):
-        repair_triage.interpret_output(target_ok)
-
-    corpus_path = (
-        Path(__file__).resolve().parents[3]
-        / "tests"
-        / "fixtures"
-        / "experiments"
-        / "decision-corpus.v2.json"
-    )
-    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
-    labels = {case.get("label") for case in corpus["cases"]}
-    assert {"wrong-target", "correction", "ambiguous"} <= labels
-    assert corpus["decision_kind"] == "target_selection"
-
-    # No auto-promotion concept: whitelist default-off for both modules.
+        repair_triage.interpret_output(other_kind)
+    # No auto-promotion concept: the whitelist is default-off.
     assert not repair_triage.WhitelistGate().allows("repair_triage")

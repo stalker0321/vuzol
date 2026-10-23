@@ -32,7 +32,6 @@ from vuzol.experiments.corpus import (
     load_corpus_manifest,
 )
 from vuzol.experiments.export import joint_export, pricing_comparable
-from vuzol.experiments.snapshot import PolicySnapshot
 
 from ._test_experiments_helpers import (
     ContextManifest,
@@ -168,29 +167,6 @@ def test_cohort_order_is_randomized_but_reproducible() -> None:
 
 
 # --- Snapshot ---
-
-
-def test_policy_snapshot_is_immutable_and_hash_pinned() -> None:
-    values = {
-        "snapshot_id": "snap-1",
-        "policy_revision": "policy-v1",
-        "configuration_revision": "config-abc",
-        "profiles": (
-            {"profile_id": "worker", "provider": "test", "model": "m", "roles": ["executor"]},
-        ),
-        "pricing": ({"pricing_revision": "trial-v1", "configured_cost_per_call": Decimal("0.01")},),
-        "prompt_versions": {"worker": "step09a-worker-v2"},
-        "tool_versions": {"git": "2.43.0"},
-        "environment": {"sandbox": "v1"},
-        "cache_policy": "cold-measured",
-        "created_at": "2026-09-28T00:00:00Z",
-    }
-    snapshot = PolicySnapshot.model_validate(values)
-    assert snapshot.snapshot_hash == PolicySnapshot.model_validate(values).snapshot_hash
-    assert snapshot.pricing_for("trial-v1") is not None
-    assert snapshot.pricing_for("other") is None
-    with pytest.raises(ValidationError):
-        snapshot.policy_revision = "mutated"
 
 
 # --- Analysis ---

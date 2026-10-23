@@ -16,7 +16,6 @@ from vuzol.context.decision_binding import (
 )
 from vuzol.experiments.canary import CanaryPolicy
 from vuzol.experiments.decision import WhitelistGate
-from vuzol.experiments.decision_eval import load_decision_accounting
 from vuzol.interpretation.decision_chain import LATE_DECISION_EVENT, record_late_decision
 from vuzol.storage.models import Event, Run, Task, UsageRecord, WorkPackage
 
@@ -43,25 +42,6 @@ def _usage(
         pricing_revision="test",
         currency="USD",
     )
-
-
-async def test_accounting_includes_retries_and_purposes(postgres_dsn: str) -> None:
-    engine, factory = storage(postgres_dsn)
-    async with factory.begin() as session:
-        session.add(_usage(purpose="intake", attempt_kind="initial", cost="0.010"))
-        session.add(_usage(purpose="intake", attempt_kind="retry", cost="0.020"))
-        session.add(_usage(purpose="target_resolution", attempt_kind="initial", cost="0.005"))
-
-    async with factory() as session:
-        accounting = await load_decision_accounting(session)
-    assert accounting.total_calls == 3
-    assert accounting.total_cost_units == Decimal("0.035")
-    assert accounting.retry_calls == 1
-    assert accounting.retry_cost_units == Decimal("0.020")
-    by_purpose = {row[0]: (row[1], row[2]) for row in accounting.by_purpose}
-    assert by_purpose["intake"] == (Decimal("0.030"), 2)
-    assert by_purpose["target_resolution"] == (Decimal("0.005"), 1)
-    await engine.dispose()
 
 
 async def test_late_result_after_switch_off_does_not_change_state(postgres_dsn: str) -> None:

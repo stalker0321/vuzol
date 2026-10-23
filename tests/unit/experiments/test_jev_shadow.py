@@ -5,8 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -25,7 +23,6 @@ from vuzol.experiments.decision import (
     interpret_output,
     verify_evidence_link,
 )
-from vuzol.experiments.shadow import EVENT_TYPE, report_routes
 from vuzol.workflows.recovery_policy import RecoveryAction, RecoveryState, decide_recovery
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -99,8 +96,6 @@ def test_schema_rejects_invalid_and_repairs_once() -> None:
 def test_no_permission_promotion_or_probability_concepts() -> None:
     sources = [
         (ROOT / "src/vuzol/experiments/decision.py").read_text(),
-        (ROOT / "src/vuzol/experiments/target_selection.py").read_text(),
-        (ROOT / "src/vuzol/experiments/shadow.py").read_text(),
     ]
     for source in sources:
         lowered = source.lower()
@@ -248,11 +243,7 @@ def test_rules_transitions_pinned_and_shadow_imports_nothing_operational() -> No
         )
         is RecoveryAction.RETRY
     )
-    for module in (
-        "vuzol.experiments.decision",
-        "vuzol.experiments.target_selection",
-        "vuzol.experiments.shadow",
-    ):
+    for module in ("vuzol.experiments.decision",):
         source = (ROOT / ("src/" + module.replace(".", "/") + ".py")).read_text()
         assert "workflows.service" not in source
         assert "workflows.transitions" not in source
@@ -276,50 +267,4 @@ def test_whitelist_gate_default_off() -> None:
 # --- Shadow records ---
 
 
-@pytest.mark.anyio
-async def test_shadow_record_payload_shape() -> None:
-    from vuzol.experiments.shadow import ENTITY_TYPE, load_shadow_records, record_shadow_decision
-
-    decision, _ = interpret_output(_payload())
-    session = MagicMock()
-    session.add = MagicMock()
-    session.flush = AsyncMock()
-    await record_shadow_decision(session, decision, correlation_id="exp-1", rules_action="repair")
-    event = session.add.call_args.args[0]
-    assert event.event_type == EVENT_TYPE
-    assert event.entity_type == ENTITY_TYPE
-    assert event.correlation_id == "exp-1"
-    assert event.payload["decision_sha256"] == decision.decision_hash
-    assert event.payload["rules_action"] == "repair"
-    assert event.payload["agrees_with_rules"] is True
-    assert event.payload["decision"]["choice"] == "repair"
-
-    row = SimpleNamespace(payload={"decision": {"choice": "repair"}})
-    session.scalars = AsyncMock(return_value=[row])
-    loaded = await load_shadow_records(session, "exp-1")
-    assert loaded[0]["decision"]["choice"] == "repair"
-
-
 # --- Route report ---
-
-
-def test_route_report_compares_total_cost_deterministically() -> None:
-    report = report_routes(
-        (
-            ("rules", True, "0.010", "0.004"),
-            ("rules", False, "0.010", "0.000"),
-            ("cheap", True, "0.004", "0.002"),
-            ("cheap", True, "0.004", "0.002"),
-            ("strong", True, "0.020", "0.001"),
-            ("strong", True, "0.020", "0.001"),
-        )
-    )
-    assert report["schema_version"] == "jev-route-report.v1"
-    assert report["routes"]["rules"]["n"] == 2
-    assert report["routes"]["rules"]["successes"] == 1
-    assert report["routes"]["cheap"]["c_success"] == "0.006000"
-    assert report["routes"]["strong"]["c_success"] == "0.021000"
-    assert report["inconclusive"] is False
-    failed_only = report_routes((("rules", False, "0.010", "0.000"),))
-    assert failed_only["inconclusive"] is True
-    assert failed_only["routes"]["rules"]["c_success"] is None

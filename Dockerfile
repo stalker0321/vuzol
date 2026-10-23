@@ -23,11 +23,11 @@ RUN groupadd --system --gid 10001 vuzol \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md alembic.ini ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --extra mcp --no-install-project
 
 COPY src ./src
 COPY alembic ./alembic
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra mcp
 
 ENV PATH="/app/.venv/bin:$PATH"
 

@@ -1,0 +1,41 @@
+# Managed by deploy/production. Do not add drop-ins; edit this file and redeploy.
+[Unit]
+Description=Vuzol trusted publication workflow worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vuzol-publisher
+Group=vuzol-publisher
+SupplementaryGroups=vuzol-executor
+EnvironmentFile=/etc/vuzol/executor-t091.env
+EnvironmentFile=/etc/vuzol/t107-control.env
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/srv/vuzol/repositories /srv/vuzol/worktrees /srv/vuzol/artifacts /etc/vuzol /var/lib/vuzol/registry
+ReadWritePaths=/srv/vuzol/sites/test.hryshyn.dev /srv/vuzol/sites/hryshyn.dev
+EnvironmentFile=/etc/vuzol/t108-review.env
+EnvironmentFile=/etc/vuzol/t117-proxy.env
+EnvironmentFile=/etc/vuzol/t124-proxy.env
+EnvironmentFile=/etc/vuzol/t129-model-roles.env
+EnvironmentFile=/etc/vuzol/t131-inference-timeout.env
+EnvironmentFile=/etc/vuzol/t133-lead.env
+WorkingDirectory=/opt/vuzol/current
+ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.static_publisher_worker
+
+[Install]
+WantedBy=multi-user.target

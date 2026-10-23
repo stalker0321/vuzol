@@ -1,0 +1,209 @@
+# Production containers. Run only through deploy/production/vuzol-compose, which
+# supplies /srv/vuzol/.env (secrets) and /opt/vuzol/current.env (VUZOL_IMAGE).
+# Host-side services (executor, applier, publisher) are systemd units in ./systemd.
+name: repo
+
+x-dsn: &dsn ${VUZOL_DATABASE_DSN:-postgresql+psycopg://vuzol:vuzol-local-only@postgres:5432/vuzol}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-roles: &roles
+  VUZOL_DATABASE_DSN_REFERENCE: env:VUZOL_DATABASE_DSN
+  VUZOL_ENVIRONMENT: development
+  VUZOL_SERVICE_NAME: vuzol
+  VUZOL_REGISTRY_FILE: /app/config/registries.toml
+  VUZOL_REGISTRY_OVERLAY_FILE: /app/config/account-profiles.toml
+  VUZOL_CHAT__ENABLED: "true"
+  VUZOL_CHAT__PROFILE_ID: codex-a
+  VUZOL_CHAT__RICH_MESSAGES: "true"
+  VUZOL_CHAT__MEMORY_ENABLED: "true"
+  VUZOL_EXECUTION__REVIEWER_PROFILE_ID: pi-opencode-go-c-mimo
+  VUZOL_INTERPRETATION__AUTOMATIC_EXECUTION_ENABLED: "false"
+  VUZOL_PROJECT_LEAD__PROFILE_ID: pi-opencode-go-c-muse
+  VUZOL_PROJECT_LEAD__REVIEWER_PROFILE_ID: pi-opencode-go-c-mimo
+  VUZOL_PROJECT_LEAD__INFERENCE_TIMEOUT_SECONDS: "180"
+
+x-app: &app
+  image: ${VUZOL_IMAGE:?set by vuzol-compose}
+  pull_policy: never
+  init: true
+  restart: unless-stopped
+  user: "1000:10001"
+  logging: *logging
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-registry: &registry
+  type: bind
+  source: /etc/vuzol/registries-t091.toml
+  target: /app/config/registries.toml
+  read_only: true
+
+x-accounts: &accounts
+  type: bind
+  source: /var/lib/vuzol/registry/account-profiles.toml
+  target: /app/config/account-profiles.toml
+  read_only: true
+
+services:
+  postgres:
+    image: postgres:16.13-bookworm
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_DB: vuzol
+      POSTGRES_USER: vuzol
+      POSTGRES_PASSWORD: ${VUZOL_POSTGRES_PASSWORD:-vuzol-local-only}
+    ports:
+      - 127.0.0.1:5433:5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U vuzol -d vuzol]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  telegram-ingress:
+    <<: *app
+    command: [vuzol-telegram]
+    environment:
+      <<: *roles
+      VUZOL_DATABASE_DSN: *dsn
+      VUZOL_TELEGRAM_BOT_TOKEN: ${VUZOL_TELEGRAM_BOT_TOKEN:?}
+      VUZOL_TELEGRAM_BOT_TOKEN_REFERENCE: env:VUZOL_TELEGRAM_BOT_TOKEN
+      VUZOL_ALLOWED_CHAT_IDS: ${VUZOL_ALLOWED_CHAT_IDS:?}
+      VUZOL_ALLOWED_USER_IDS: ${VUZOL_ALLOWED_USER_IDS:?}
+      VUZOL_EXECUTION__ENABLED: "false"
+      VUZOL_PROJECT_LEAD__ENABLED: "true"
+    volumes:
+      - *registry
+      - *accounts
+      - /srv/vuzol/repositories:/srv/vuzol/repositories
+      - /srv/vuzol/worktrees:/srv/vuzol/worktrees
+
+  telegram-delivery:
+    <<: *app
+    command: [vuzol-telegram-delivery]
+    environment:
+      <<: *roles
+      VUZOL_DATABASE_DSN: *dsn
+      VUZOL_TELEGRAM_BOT_TOKEN: ${VUZOL_TELEGRAM_BOT_TOKEN:?}
+      VUZOL_TELEGRAM_BOT_TOKEN_REFERENCE: env:VUZOL_TELEGRAM_BOT_TOKEN
+      VUZOL_ALLOWED_CHAT_IDS: ${VUZOL_ALLOWED_CHAT_IDS:?}
+      VUZOL_ALLOWED_USER_IDS: ${VUZOL_ALLOWED_USER_IDS:?}
+      VUZOL_EXECUTION__ENABLED: "false"
+      VUZOL_ARTIFACT_DELIVERY_UID: "1000"
+    volumes:
+      - *registry
+      - *accounts
+      - /srv/vuzol/repositories:/srv/vuzol/repositories
+      - /srv/vuzol/worktrees:/srv/vuzol/worktrees
+      - /srv/vuzol/artifacts:/srv/vuzol/artifacts:ro
+
+  interpreter:
+    <<: *app
+    command: [vuzol-interpreter]
+    env_file:
+      - /etc/vuzol/jev-runtime.env
+    environment:
+      <<: *roles
+      VUZOL_TELEGRAM_BOT_TOKEN_REFERENCE: env:VUZOL_TELEGRAM_BOT_TOKEN
+      VUZOL_EXECUTION__ENABLED: "false"
+      VUZOL_INTERPRETATION__PROFILE_ID: jev-intake-prod
+      VUZOL_INTERPRETATION__FALLBACK_PROFILE_IDS: "[]"
+      VUZOL_INTERPRETATION__MANUAL_PROJECT_CREATION: "true"
+      VUZOL_OPENAI_INTERPRETER_API_KEY: ${VUZOL_OPENAI_INTERPRETER_API_KEY:-}
+      VUZOL_OPENAI_TRANSCRIPTION_API_KEY: ${VUZOL_OPENAI_TRANSCRIPTION_API_KEY:-}
+      VUZOL_OPENROUTER_INTERPRETER_API_KEY: ${VUZOL_OPENROUTER_INTERPRETER_API_KEY:-}
+      VUZOL_JEV_CANARY_PERCENT: "100"
+      VUZOL_JEV_ENABLED_KINDS: '["intake"]'
+      VUZOL_PROJECT_DISCUSSION_ENABLED: "true"
+      VUZOL_SECRET_FILE_ROOT: /run/vuzol-secrets
+    volumes:
+      - *registry
+      - *accounts
+      - /var/lib/vuzol/secrets/jev-openrouter.key:/run/vuzol-secrets/jev-openrouter.key:ro
+      - /srv/vuzol/repositories:/srv/vuzol/repositories:ro
+
+  memory-writer:
+    <<: *app
+    command: [vuzol-memory-writer]
+    environment:
+      <<: *roles
+      VUZOL_DATABASE_DSN: *dsn
+      VUZOL_EXECUTION__ENABLED: "false"
+    volumes:
+      - *registry
+      - *accounts
+      - /srv/vuzol/repositories:/srv/vuzol/repositories:ro
+
+  # Control-plane worker. It never talks to Docker: coding runs in the host
+  # executor's rootless daemon, so no Docker socket is mounted here.
+  worker:
+    <<: *app
+    command: [vuzol-worker]
+    environment:
+      <<: *roles
+      VUZOL_DATABASE_DSN: *dsn
+      VUZOL_OPENAI_EXECUTOR_API_KEY: ${VUZOL_OPENAI_EXECUTOR_API_KEY:-}
+      VUZOL_EXECUTION__ENABLED: "true"
+      VUZOL_EXECUTION__SANDBOX_SECCOMP_PROFILE: /etc/vuzol/sandbox-seccomp.json
+      VUZOL_EXECUTION__SANDBOX_SECCOMP_PROFILE_SHA256: bdbf16ca9391fc73e7f7f75d910dce7718c81009fb205fb04529021adaec4efa
+      VUZOL_PROJECT_DISCUSSION_ENABLED: "true"
+      VUZOL_PROJECT_LEAD__ENABLED: "true"
+    volumes:
+      - *registry
+      - *accounts
+      - /srv/vuzol/repositories:/srv/vuzol/repositories
+      - /srv/vuzol/worktrees:/srv/vuzol/worktrees
+      - /etc/vuzol/sandbox-seccomp.json:/etc/vuzol/sandbox-seccomp.json:ro
+
+  # Public MCP endpoint, reverse-proxied by Caddy at https://vuzol.hryshyn.dev/mcp.
+  mcp:
+    <<: *app
+    container_name: vuzol-mcp
+    user: "10001:10001"
+    group_add: ["984"]
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - vuzol.cli.mcp
+      - --config
+      - /app/mcp.json
+      - --host
+      - 0.0.0.0
+    environment:
+      VUZOL_DATABASE_DSN: *dsn
+      VUZOL_DATABASE_DSN_REFERENCE: env:VUZOL_DATABASE_DSN
+      VUZOL_ENVIRONMENT: production
+      VUZOL_LOG_LEVEL: INFO
+      VUZOL_ALLOWED_CHAT_IDS: ${VUZOL_ALLOWED_CHAT_IDS:?}
+      VUZOL_ALLOWED_USER_IDS: ${VUZOL_ALLOWED_USER_IDS:?}
+      VUZOL_PROJECT_LEAD__ENABLED: "true"
+      VUZOL_REGISTRY_FILE: /app/config/registries.toml
+      VUZOL_REGISTRY_OVERLAY_FILE: /app/config/account-profiles.toml
+    ports:
+      - 127.0.0.1:8093:8093
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - /etc/vuzol/mcp.json:/app/mcp.json:ro
+      - *registry
+      - *accounts
+      - /srv/vuzol/repositories:/srv/vuzol/repositories:ro
+
+volumes:
+  postgres-data:
+    name: repo_postgres-data
+    external: true

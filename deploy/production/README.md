@@ -28,6 +28,17 @@ commit. Migrations are not downgraded, so they must stay compatible with the pre
 - No systemd drop-ins and no extra compose overlays: change these files and redeploy.
   `deploy.sh` refuses to run if drop-ins exist.
 - Secrets stay in `/srv/vuzol/.env` and `/etc/vuzol/*.env`; they are referenced, never committed.
+- Account profiles live in `/var/lib/vuzol/registry/account-profiles.toml`
+  (`vodkolyan:vuzol-executor 0640`). Edit it in place and keep that group: host services
+  cannot read it otherwise and crash-loop. Containers bind-mount it by inode, so after an
+  editor replaces the file they keep the old copy until recreated. Validate before restarting:
+  `sudo vuzol-compose run --rm --no-deps -T worker python -c "from vuzol.config import
+  get_runtime_configuration as g; g(validate_profile_credentials=False)"`, then recreate the
+  containers and restart the host services.
+- A Codex account for Vuzol gets its own state directory
+  `/var/lib/vuzol-provider-state/<id>` (owner `110000`, mode `0710`, ACL
+  `u:vuzol-executor:--x`, `auth.json` `110000:vuzol-executor 0640`) and a unique
+  `runtime_identity`; a home directory such as `~/.codex-c` is not readable by the executor.
 
 ## Not cleaned up yet
 

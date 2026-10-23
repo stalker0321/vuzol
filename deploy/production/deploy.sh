@@ -8,7 +8,7 @@ REPO=${VUZOL_SOURCE_REPO:-/srv/vuzol/repo}
 UV=${UV:-/usr/local/bin/uv}
 RELEASES=/opt/vuzol/releases
 UNITS="vuzol-executor.service vuzol-applier.service vuzol-static-publisher-worker.service"
-KEEP=5
+KEEP=3
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 [ $# = 1 ] || { echo "usage: $0 <commit>" >&2; exit 1; }
@@ -68,6 +68,9 @@ done
 
 ls -1dt "$RELEASES"/*/.installed | tail -n +$((KEEP + 1)) | while read -r marker; do
   old=$(dirname "$marker")
-  [ "$(readlink -f /opt/vuzol/current)" = "$old" ] || rm -rf "$old"
+  [ "$(readlink -f /opt/vuzol/current)" = "$old" ] && continue
+  rm -rf "$old"
+  docker rmi "vuzol:$(basename "$old")" >/dev/null 2>&1 || true
 done
+docker image prune -f >/dev/null
 echo "== deployed $SHA"

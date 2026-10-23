@@ -3,6 +3,18 @@
 This file records agreed follow-up work that is important but intentionally
 deferred. Completed work belongs in `CHANGELOG.md`.
 
+## Known defects — 2026-10-23
+
+- `tests/integration/interpretation/test_conversation_entrypoint.py` fails on `main`: the
+  `RootlessDockerRuntime` stub predates the `journal=` argument, and after fixing the stub the
+  executor still does not claim `prepare_worktree`. Overlaps the lead rework (PR 2–4).
+- `tests/integration/test_secret_scan.py::test_secret_scanner_rejects_fixture` fails on `main`.
+- Full suite without Docker tests is at 89.4% coverage against the 90% gate.
+- Sandbox containers can outlive their step: two exited `sandbox-container` containers with no
+  matching run were found in the executor's rootless Docker after 44 hours.
+- The integration test database must not use an unbounded tmpfs: WAL filled it and Postgres
+  stopped mid-run. `vuzol-test-db` now runs with `size=1g` and `max_wal_size=128MB`.
+
 ## Product consolidation — 2026-10-21
 
 Direction: `ASTRA_PRODUCT_CONSOLIDATION_HANDOFF.md` (owner-provided, separate

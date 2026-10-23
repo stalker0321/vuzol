@@ -358,7 +358,7 @@ async def test_crash_after_first_command_resumes_from_receipts(postgres_dsn, mon
     async def crash_after_commit(self, principal, source, command, **kwargs):
         nonlocal crashed
         result = await original(self, principal, source, command, **kwargs)
-        if not crashed and command.name == "propose_batch":
+        if not crashed and command.name == "request_plan":
             crashed = True
             raise RuntimeError("after first command commit")
         return result
@@ -369,14 +369,15 @@ async def test_crash_after_first_command_resumes_from_receipts(postgres_dsn, mon
         worker = _worker(factory, StartModel())
         with pytest.raises(RuntimeError, match="after first command commit"):
             await worker.process_one()
+        await worker.process_one()  # queued planner defers until the interrupted lead ack
         await worker.process_one()
         async with factory() as session:
-            assert (await session.get(ManagedGoal, goal_id)).version == 2
+            assert (await session.get(ManagedGoal, goal_id)).version == 3
         assert await _package_count(factory) == 1
         await worker.process_one()
         await worker.process_one()
         async with factory() as session:
-            assert (await session.get(ManagedGoal, goal_id)).version == 3
+            assert (await session.get(ManagedGoal, goal_id)).version == 4
             rows = list(
                 await session.scalars(
                     select(LeadershipCommandReceipt).where(
@@ -384,14 +385,18 @@ async def test_crash_after_first_command_resumes_from_receipts(postgres_dsn, mon
                     )
                 )
             )
-            assert sorted(row.command_name for row in rows) == ["propose_batch", "start_task"]
-            assert sorted(row.expected_version for row in rows) == [1, 2]
+            assert sorted(row.command_name for row in rows) == [
+                "request_plan",
+                "request_plan",
+                "start_task",
+            ]
+            assert sorted(row.expected_version for row in rows) == [1, 2, 3]
             turns = list(
                 await session.scalars(select(LeadershipTurn).order_by(LeadershipTurn.created_at))
             )
             assert [
                 item["expected_version"] for turn in turns for item in turn.decision["commands"]
-            ] == [1, 2]
+            ] == [1, 2, 3]
         assert await _package_count(factory) == 1
 
 
@@ -416,9 +421,13 @@ async def test_slow_inference_renews_both_leases(postgres_dsn):
             repository_paths={PROJECT: __import__("pathlib").Path(__file__).resolve().parents[3]},
         )
         assert await worker.process_one()
-        assert await _package_count(factory) == 1
+        assert await _package_count(factory) == 0
         async with factory() as session:
             assert (await session.scalar(select(ManagedGoal))).lease_epoch == 1
+        from tests.integration.leadership.planning_helpers import run_planner
+
+        assert await run_planner(factory)
+        assert await _package_count(factory) == 1
 
 
 async def test_old_evidence_does_not_cover_changed_contract_or_result(
@@ -544,12 +553,17 @@ async def test_amendment_finishes_current_contract_and_stops_next_item(
 
     class TwoItems:
         async def decide(self, snapshot):
-            decision = _start_decision()
-            plan = decision.commands[0].payload["plan"]
+            return _start_decision()
+
+        @property
+        def planner_plan(self):
+            from tests.integration.leadership.planning_helpers import fixture_plan
+
+            plan = fixture_plan()
             plan["items"].append(
                 {**plan["items"][0], "local_id": "second", "summary": "Second marker"}
             )
-            return decision
+            return plan
 
     class Reply:
         async def decide(self, snapshot):
@@ -690,12 +704,17 @@ async def test_queued_amendment_waits_for_package_without_stopping_dispatch(post
 
     class TwoItems:
         async def decide(self, snapshot):
-            decision = _start_decision()
-            plan = decision.commands[0].payload["plan"]
+            return _start_decision()
+
+        @property
+        def planner_plan(self):
+            from tests.integration.leadership.planning_helpers import fixture_plan
+
+            plan = fixture_plan()
             plan["items"].append(
                 {**plan["items"][0], "local_id": "second", "summary": "Second marker"}
             )
-            return decision
+            return plan
 
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
@@ -823,7 +842,7 @@ async def test_executing_lead_cancels_paused_task_using_legacy_delegation(postgr
             delegation = await session.scalar(select(GoalDelegation))
             delegation.allowed_actions = [
                 action for action in delegation.allowed_actions if action != "amend_goal"
-            ]
+            ] + ["request_revision"]
         await owner_message(factory, tmp_path)
         model = Amend()
         worker = _worker(factory, model)

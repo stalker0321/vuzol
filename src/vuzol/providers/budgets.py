@@ -444,6 +444,7 @@ def accounting_for_profile(
 
 _STEP_PURPOSE = {
     "plan": "planning",
+    "planner": "planning",
     "execute_model": "coding",
     "execute_code": "coding",
     "execute_agent": "coding",

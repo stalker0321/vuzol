@@ -148,7 +148,7 @@ async def test_ack_retry_does_not_repeat_mutations(postgres_dsn: str) -> None:
             count = await session.scalar(
                 select(func.count())
                 .select_from(LeadershipCommandReceipt)
-                .where(LeadershipCommandReceipt.command_name == "propose_batch")
+                .where(LeadershipCommandReceipt.command_name == "request_plan")
             )
         assert (after, count) == (before, 1), (
             f"retry mutated goal: versions {before}->{after}, proposals={count}"
@@ -266,7 +266,7 @@ async def test_late_response_after_lease_takeover(postgres_dsn: str) -> None:
             proposals = await session.scalar(
                 select(func.count())
                 .select_from(LeadershipCommandReceipt)
-                .where(LeadershipCommandReceipt.command_name == "propose_batch")
+                .where(LeadershipCommandReceipt.command_name == "request_plan")
             )
             assert goal is not None and goal.lease_epoch == 2
             assert proposals == 0

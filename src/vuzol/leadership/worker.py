@@ -38,6 +38,7 @@ from vuzol.leadership.persistence import (
     LeadershipTurn,
     ManagedGoal,
 )
+from vuzol.leadership.planning import PLAN_EVENTS, publish_outcome
 from vuzol.leadership.rules import delegation_is_expired
 from vuzol.leadership.service import LeadershipCommandService, request_owner_recovery
 from vuzol.leadership.verification import GoalVerification
@@ -146,6 +147,7 @@ class ProjectLeadWorker:
                 return
             saved = await self._save_decision(goal_id, wakeup_id, decision, claim=claim)
             if not saved:
+                await self._planner_lost(claim)
                 async with self._factory.begin() as session:
                     turn = await _turn(session, goal_id, wakeup_id)
                     if turn.status == "lost" and turn.lease_epoch == claim.lease_epoch:
@@ -159,12 +161,25 @@ class ProjectLeadWorker:
             )
             return
         if not await self._saved_decision_admissible(goal_id, wakeup_id, claim=claim):
+            await self._planner_lost(claim)
             await self._park(goal_id, wakeup_id, token, reason=None, bump=False, claim=claim)
             return
         await self._apply_if_current(
             goal_id=goal_id, wakeup_id=wakeup_id, decision=LeadDecision(), claim=claim
         )
         await self._ack(goal_id, wakeup_id, token, claim=claim)
+
+    async def _planner_lost(self, claim: TurnClaim) -> None:
+        async with self._factory.begin() as session:
+            item = await session.get(TransactionalOutbox, claim.wakeup_id)
+            goal = await session.get(ManagedGoal, claim.goal_id, with_for_update=True)
+            if (
+                item
+                and goal
+                and item.payload.get("wakeup_kind") == "plan_requested"
+                and goal.lifecycle not in _TERMINAL_GOAL
+            ):
+                await publish_outcome(session, goal, item.id, reason="planner_scope_changed")
 
     async def _infer(self, claim: TurnClaim) -> LeadDecision:
         async with self._factory() as session:
@@ -173,7 +188,10 @@ class ProjectLeadWorker:
             if goal is None:
                 raise LeadModelUnavailable("goal_missing")
             item = await session.get(TransactionalOutbox, claim.wakeup_id)
-            conversational = item is not None and item.payload.get("wakeup_kind") == "owner_message"
+            conversational = item is not None and item.payload.get("wakeup_kind") in {
+                "owner_message",
+                *PLAN_EVENTS,
+            }
             context = TurnInvocationContext(
                 claim=claim,
                 turn_id=turn.id,
@@ -206,6 +224,7 @@ class ProjectLeadWorker:
                 await self._complete(uow.session, token)
                 return None
             owner_event = item.payload.get("wakeup_kind") == "owner_message"
+            planning_event = item.payload.get("wakeup_kind") in PLAN_EVENTS
             if not owner_event and item.payload.get("task_id"):
                 from vuzol.storage.models import Step, Task
                 from vuzol.storage.types import TaskStatus
@@ -281,6 +300,16 @@ class ProjectLeadWorker:
                     LeadershipTurn.wakeup_id == wakeup_id,
                 )
             )
+            # A control can supersede an unclaimed outcome. Once a turn has a
+            # decision, its own receipts may have advanced the goal version;
+            # preserve the normal receipt/fence replay path in that case.
+            if (
+                turn is None
+                and item.payload.get("wakeup_kind") in {"plan_ready", "plan_failed"}
+                and item.payload.get("goal_version") != goal.version
+            ):
+                await self._complete(uow.session, token)
+                return None
             now = datetime.now(UTC)
             if goal.lifecycle in _TERMINAL_GOAL:
                 if turn is not None and turn.status in {"claimed", "responded"}:
@@ -304,6 +333,10 @@ class ProjectLeadWorker:
                     )
                 ):
                     turn.status = "lost"
+                    if item.payload.get("wakeup_kind") == "plan_requested":
+                        await publish_outcome(
+                            uow.session, goal, item.id, reason="planner_scope_changed"
+                        )
                     await self._complete(uow.session, token)
                     return None
                 if _lease_current(goal, turn, self._owner, now):
@@ -355,17 +388,24 @@ class ProjectLeadWorker:
                     await WorkPackageSequencer(uow).observe_terminal(task_id=task.id)
             await apply_pending_amendment(uow.session, goal)
             if goal.constraints.get("pending_amendment") and not owner_event:
+                if item.payload.get("wakeup_kind") == "plan_requested":
+                    await publish_outcome(uow.session, goal, item.id, reason="amendment_pending")
                 await self._complete(uow.session, token)
                 return None
-            if not owner_event and (
-                goal.lifecycle == "paused"
-                or (
-                    goal.lifecycle == "waiting" and not await _waiting_exit_ready(uow.session, goal)
+            if (
+                not owner_event
+                and not planning_event
+                and (
+                    goal.lifecycle == "paused"
+                    or (
+                        goal.lifecycle == "waiting"
+                        and not await _waiting_exit_ready(uow.session, goal)
+                    )
                 )
             ):
                 await self._complete(uow.session, token)
                 return None
-            if goal.lifecycle == "waiting" and not owner_event:
+            if goal.lifecycle == "waiting" and not owner_event and not planning_event:
                 goal.lifecycle = "active"
                 goal.waiting_reason = None
                 goal.wakeup_condition = None
@@ -641,6 +681,10 @@ class ProjectLeadWorker:
                 "request_revision",
                 "cancel_goal",
                 "propose_completion",
+                "request_plan",
+                "revise_plan",
+                "propose_batch",
+                "propose_plan",
             }:
                 return
 
@@ -662,7 +706,13 @@ class ProjectLeadWorker:
             ):
                 item = await session.get(TransactionalOutbox, wakeup_id)
                 if item is None or item.payload.get("wakeup_kind") != "owner_message":
-                    await continue_if_idle(session, goal, repeat_limit=self._repeat_limit)
+                    await continue_if_idle(
+                        session,
+                        goal,
+                        repeat_limit=self._repeat_limit,
+                        count_pending=item is not None
+                        and item.payload.get("wakeup_kind") == "plan_requested",
+                    )
                 goal.lease_owner = None
                 goal.lease_until = None
 

@@ -365,23 +365,28 @@ async def test_crash_between_commands_keeps_pins_and_replays_remaining_commands(
     postgres_dsn,
     monkeypatch,
 ):
-    from tests.integration.leadership.test_managed_goal_flow import _start_decision
+    from tests.integration.leadership.planning_helpers import fixture_plan, seed_plan
+    from tests.integration.leadership.test_plan_revisions import start
 
-    from vuzol.leadership.model import decision_payload
-    from vuzol.storage.models import WorkPackage
+    from vuzol.storage.models import Task, WorkPackage
 
     settings = _settings(monkeypatch, "lead-local")
-    transport = _Transport(
-        {
-            "commands": [
-                *decision_payload(_start_decision())["commands"],
-                {"name": "read_status", "payload": {}},
-            ]
-        }
-    )
+    profiles = ProfileRegistry((_profile().model_copy(update={"context_limit": 16000}),))
     async with _factory(postgres_dsn) as factory:
-        await _enable(factory, await _session(factory))
-        first = _worker(factory, settings, transport, owner="same-owner")
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": fixture_plan()})
+        assert (await start(factory, goal_id)).status == "applied"
+        async with factory() as session:
+            task_id = str((await session.scalar(select(Task))).id)
+        transport = _Transport(
+            {
+                "commands": [
+                    {"name": "cancel_task", "payload": {"task_id": task_id}},
+                    {"name": "read_status", "payload": {}},
+                ]
+            }
+        )
+        first = _worker(factory, settings, transport, owner="same-owner", profiles=profiles)
         original = first._applied_receipt
         count = 0
 
@@ -400,8 +405,13 @@ async def test_crash_between_commands_keeps_pins_and_replays_remaining_commands(
             goal = await session.scalar(select(ManagedGoal))
             assert turn.status == "responded" and turn.model_assignments is not None
             assert goal.version > turn.goal_version
-        second = _worker(factory, settings, transport, owner="same-owner")
-        await second.process_one()
+            turn_id = turn.id
+        second = _worker(factory, settings, transport, owner="same-owner", profiles=profiles)
+        for _ in range(4):
+            await second.process_one()
+            async with factory() as session:
+                if (await session.get(LeadershipTurn, turn_id)).status == "applied":
+                    break
         assert len(transport.requests) == 1
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(WorkPackage)) == 1

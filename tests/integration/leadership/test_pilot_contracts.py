@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy import select
+from tests.integration.leadership.planning_helpers import fixture_plan, run_planner
 from tests.integration.leadership.test_lead_review_regressions import StartModel
 from tests.integration.leadership.test_managed_goal_flow import (
     OWNER,
@@ -80,13 +81,17 @@ async def test_package_ceiling_survives_failure_restart_and_receipt_replay(postg
         result, start = await owner_command(
             factory,
             goal_id,
-            "propose_batch",
-            {
-                "plan": _plan("Package B", "Write the second marker", ["marker-b"], "SECOND.txt"),
-            },
+            "request_plan",
+            {"goal": "Package B", "constraints": []},
         )
-        assert result.status == "waiting"
-        assert result.reason == "work_package_limit_reached"
+        assert result.status == "applied"
+        assert await run_planner(
+            factory, _plan("Package B", "Write second", ["marker-b"], "SECOND.txt")
+        )
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.waiting_reason == "work_package_limit_reached"
+            version = goal.version
         assert await _package_count(factory) == 1
         restarted = _lead_service(factory, with_executor=True)
         replay = await restarted.apply_human(Principal(OWNER, "telegram"), start)
@@ -98,7 +103,7 @@ async def test_package_ceiling_survives_failure_restart_and_receipt_replay(postg
             replace(
                 limit_command,
                 idempotency_key="agent-unlimited",
-                expected_version=result.version,
+                expected_version=version,
                 payload={"work_limits": {}},
             ),
         )
@@ -132,11 +137,16 @@ async def test_item_limit_blocks_before_package_creation(postgres_dsn):
                 "work_limits": {"max_items_per_package": 1},
             },
         )
-        decision = await StartModel().decide(None)
-        payload = decision.commands[0].payload
-        payload["plan"]["items"].append({**payload["plan"]["items"][0], "local_id": "second"})
-        result, _ = await owner_command(factory, goal_id, "propose_batch", payload)
-        assert result.status == "waiting" and result.reason == "work_item_limit_reached"
+        planned = fixture_plan()
+        planned["items"].append({**planned["items"][0], "local_id": "second"})
+        result, _ = await owner_command(
+            factory, goal_id, "request_plan", {"goal": "Two items", "constraints": []}
+        )
+        assert result.status == "applied"
+        assert await run_planner(factory, planned)
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.waiting_reason == "work_item_limit_reached"
         assert await _package_count(factory) == 0
 
 
@@ -149,12 +159,21 @@ async def test_batch_refusal_after_local_mutation_is_a_durable_receipt(postgres_
 
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
-        decision = await StartModel().decide(None)
         monkeypatch.setattr(WorkPackageService, "create_draft", refuse)
         result, command = await owner_command(
-            factory, goal_id, "propose_batch", decision.commands[0].payload
+            factory, goal_id, "request_plan", {"goal": "Marker", "constraints": []}
         )
-        assert result.status == "denied" and result.reason == "fixture_admission_refused"
+        assert result.status == "applied"
+        assert await run_planner(factory)
+        from vuzol.storage.models import TransactionalOutbox
+
+        async with factory() as session:
+            failure = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.payload["wakeup_kind"].as_string() == "plan_failed",
+                )
+            )
+            assert failure.payload["reason"] == "fixture_admission_refused"
         replay = await _lead_service(factory, with_executor=True).apply_human(
             Principal(OWNER, "telegram"),
             command,

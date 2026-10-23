@@ -97,3 +97,29 @@ These rules are non-negotiable unless explicitly changed through an ADR.
   An unavailable legacy repository is represented by a null source commit; new
   proposals require a server-resolved commit. Malformed legacy proposals are marked
   invalid and cannot execute. There is no schema or Alembic change.
+
+## Managed strong planning (PR6)
+
+- `request_plan` and `revise_plan` queue a planning turn on `project_lead`.
+  The turn pins the project's `planner_strong` assignment and uses inference phase
+  `planner`, with the shared budget reservation, frozen request and durable receipt.
+  A stored receipt is replayed; an uncertain send is never paid again automatically.
+  `plan_ready` / `plan_failed` is delivered to the lead on a subsequent turn.
+- Planner output creates a PR5 draft, never an approval or a permission. The server
+  prepends the immutable materialized prefix and rechecks scope, revision generation
+  and repository head before publishing. Dispatch cannot start while planning is pending.
+  Failure preserves the goal's lifecycle, produces a reasoned lead event and topic notice,
+  and permits a later request. Existing work ceilings still require the owner's decision.
+- CLI planning reads a regular-file-only export of the frozen commit, without `.git`,
+  mounted read-only at `/workspace`. The repository itself is not mounted. Exports reject
+  path escapes, symlinks and submodules and are capped at 64 MiB / 20,000 archive entries.
+  Files/directories are also host read-only. API planning receives bounded `read_repo`
+  context from the same commit, including a manifest and explicit truncation markers.
+- Snapshot names depend only on the durable invocation UUID under `/tmp`. Process intent
+  commits before the export is created. Normal cleanup removes the export only after
+  runtime cleanup; startup reconciliation uses the saved process envelope to retry cleanup.
+  A failed cleanup retains both its process ownership record and snapshot.
+- Alembic `a6c9e2107b32` extends only the inference phase CHECK. Existing plans, receipts,
+  approvals and grants are not rewritten. Historical `propose_batch` / `propose_plan`
+  grants resolve to `request_plan`; their supplied plan is ignored. New grants use the
+  new names. `request_revision` remains only an input alias of `amend_goal`.

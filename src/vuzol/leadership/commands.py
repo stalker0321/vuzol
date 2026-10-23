@@ -18,6 +18,8 @@ class LeadCommandName(StrEnum):
     ENABLE_MANAGED_GOAL = "enable_managed_goal"
     SET_WORK_LIMITS = "set_work_limits"
     PROPOSE_BATCH = "propose_batch"
+    REQUEST_PLAN = "request_plan"
+    REVISE_PLAN = "revise_plan"
     START_BATCH = "start_batch"
     START_TASK = "start_task"
     CANCEL_TASK = "cancel_task"
@@ -77,6 +79,8 @@ DELEGATED_ACTIONS = frozenset(
         LeadCommandName.GET_CAPABILITIES.value,
         LeadCommandName.GET_RESULT.value,
         LeadCommandName.PROPOSE_BATCH.value,
+        LeadCommandName.REQUEST_PLAN.value,
+        LeadCommandName.REVISE_PLAN.value,
         LeadCommandName.START_BATCH.value,
         LeadCommandName.START_TASK.value,
         LeadCommandName.CANCEL_TASK.value,
@@ -156,7 +160,8 @@ def parse_command_name(name: str) -> LeadCommandName | None:
                 "request_revision": "amend_goal",
                 "ask_owner": "request_permission",
                 "read_status": "get_project_state",
-                "propose_plan": "propose_batch",
+                "propose_plan": "request_plan",
+                "propose_batch": "request_plan",
             }.get(name, name)
         )
     except ValueError:

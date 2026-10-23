@@ -224,7 +224,9 @@ class LeadershipInference(TimestampMixin, Base):
 
     __tablename__ = "leadership_inferences"
     __table_args__ = (
-        CheckConstraint("phase IN ('lead', 'goal_review')", name="leadership_inference_phase"),
+        CheckConstraint(
+            "phase IN ('lead', 'goal_review', 'planner')", name="leadership_inference_phase"
+        ),
         CheckConstraint(
             "state IN ('sending', 'received', 'unknown', 'not_sent')",
             name="leadership_inference_state",

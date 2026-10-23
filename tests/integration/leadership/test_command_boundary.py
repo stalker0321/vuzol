@@ -132,7 +132,10 @@ async def test_human_and_agent_share_one_boundary_and_audit(postgres_dsn: str) -
         assert delegation is not None
         assert delegation.owner_user_id == OWNER
         assert delegation.agent_principal_id == principal
-        assert set(delegation.allowed_actions) == set(DELEGATED_ACTIONS)
+        assert set(delegation.allowed_actions) == set(DELEGATED_ACTIONS) - {
+            "propose_batch",
+            "request_revision",
+        }
         assert delegation.environments == ["isolated"]
         assert "accept_criterion" not in delegation.allowed_actions
 
@@ -149,7 +152,7 @@ async def test_denied_paths_leave_no_effect(postgres_dsn: str) -> None:
             principal,
             "worker",
             _mutation(
-                "propose_batch",
+                "request_plan",
                 opened.goal_id,
                 1,
                 "other-project",
@@ -247,7 +250,7 @@ async def test_revocation_stale_version_retry_and_key_collision(postgres_dsn: st
             principal,
             "worker",
             _mutation(
-                "propose_batch",
+                "request_plan",
                 goal_id,
                 3,
                 "after-revoke",

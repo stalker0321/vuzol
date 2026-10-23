@@ -63,12 +63,17 @@ async def command(factory, goal_id, name, payload, *, key=None):
 
 
 class TwoItems:
-    async def decide(self, snapshot):
-        decision = _start_decision()
-        plan = decision.commands[0].payload["plan"]
+    @property
+    def planner_plan(self):
+        from tests.integration.leadership.planning_helpers import fixture_plan
+
+        plan = fixture_plan()
         plan["items"][0]["local_id"] = "first"
         plan["items"].append({**plan["items"][0], "local_id": "second", "dependencies": ["first"]})
-        return decision
+        return plan
+
+    async def decide(self, snapshot):
+        return _start_decision()
 
 
 async def test_each_item_needs_lead_dispatch_and_old_events_are_harmless(postgres_dsn):

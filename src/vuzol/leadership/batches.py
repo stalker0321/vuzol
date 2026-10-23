@@ -31,6 +31,9 @@ async def propose_plan(
     plan: PlanDraft,
     *,
     repository_path: Path | None,
+    expected_source_commit: str | None = None,
+    planner_profile: str | None = None,
+    prompt_version: str | None = None,
 ) -> dict[str, Any]:
     assert uow.session is not None
     current = (
@@ -51,6 +54,8 @@ async def propose_plan(
             raise DomainError("source_repository_unavailable") from error
     if commit is None:
         raise DomainError("source_repository_unavailable")
+    if expected_source_commit is not None and commit != expected_source_commit:
+        raise DomainError("planner_head_changed")
     service = WorkPackageService(uow)
     if current is not None and current.status in {
         WorkPackageStatus.DRAFT,
@@ -66,6 +71,8 @@ async def propose_plan(
             created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
             actor_type="agent",
             source_repo_commit=commit,
+            planner_profile=planner_profile,
+            prompt_version=prompt_version,
         )
     else:
         await check_batch_limits(uow.session, goal, items=len(plan.items))
@@ -77,6 +84,8 @@ async def propose_plan(
             actor_type="agent",
             managed_goal_id=goal.id,
             source_repo_commit=commit,
+            planner_profile=planner_profile,
+            prompt_version=prompt_version,
         )
         goal.current_package_id = result.package_id
     revision = await uow.session.get(PlanRevision, result.revision_id)

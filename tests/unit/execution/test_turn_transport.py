@@ -453,3 +453,68 @@ async def test_turn_binding_cannot_mix_workflow_ids(setup):
     envelope, _, _ = await setup.transport._prepare(await invocation(setup), setup.context)
     with pytest.raises(ValueError, match="cannot carry workflow"):
         ProcessEnvelope.model_validate({**envelope.model_dump(), "task_id": uuid.uuid4()})
+
+
+@pytest.mark.parametrize("adapter,provider", [(CodexCliAdapter, "codex"), (PiCliAdapter, "pi")])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+async def test_planner_reads_commit_from_readonly_mount_and_recovery_cleans(
+    setup, tmp_path, adapter, provider, cleanup_failure
+):
+    import subprocess
+
+    from vuzol.execution.domain import MountMode
+    from vuzol.execution.reconciliation import recovered_turn_binding
+    from vuzol.execution.repo_snapshot import snapshot_path
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args]).decode().strip()
+
+    git("init", "-b", "main")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    (repository / "known.txt").write_text("snapshot source")
+    git("add", ".")
+    git("commit", "-m", "source")
+    commit = git("rev-parse", "HEAD")
+    (repository / "known.txt").write_text("dirty worktree")
+    configured = setup.profile.model_copy(
+        update={"provider": provider, "roles": frozenset({ProviderRole.PLANNER})}
+    )
+    setup.registries.profiles.get = lambda key: configured
+    setup.registries.projects.get("project").repository_path = repository
+    setup.phase.profile_revision = content_revision(configured)
+    setup.phase.phase = "planner"
+    req = setup.request.model_copy(
+        update={"role": ProviderRole.PLANNER, "task_draft": {"source_repo_commit": commit}}
+    )
+    setup.phase.request = req.model_dump(mode="json")
+    capture = Capture()
+    with pytest.raises(Captured):
+        await adapter(capture).execute(req, configured, CancellationContext())
+    original_run = setup.runtime.run
+
+    async def read_snapshot(envelope, cancellation):
+        mount = next(m for m in envelope.sandbox.mounts if m.target == Path("/workspace"))
+        assert mount.mode is MountMode.READ_ONLY
+        assert (mount.source / "known.txt").read_text() == "snapshot source"
+        assert not (mount.source / ".git").exists()
+        argv = docker_run_argv(Path("/unused/docker.sock"), envelope.container_name, envelope)
+        assert any(str(mount.source) in arg and "readonly" in arg for arg in argv)
+        return await original_run(envelope, cancellation)
+
+    setup.runtime.run = read_snapshot
+    if cleanup_failure:
+        setup.runtime.cleanup.side_effect = RuntimeError("cleanup failed")
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await setup.transport.run(capture.invocation, CancellationContext())
+        assert snapshot_path(req.task_id).exists()
+        _, envelope = recovered_turn_binding(setup.store.process, enabled=lambda: True)
+        setup.runtime.cleanup.side_effect = None
+        await turn_transport.cleanup_turn_runtime(setup.runtime, None, envelope)
+    else:
+        await setup.transport.run(capture.invocation, CancellationContext())
+    assert not snapshot_path(req.task_id).exists()
+    assert (repository / "known.txt").read_text() == "dirty worktree"

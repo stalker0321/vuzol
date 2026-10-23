@@ -30,6 +30,7 @@ from vuzol.execution.domain import (
 from vuzol.execution.egress import AllowedConnectTarget, compile_proxy_allowlist
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceManager
+from vuzol.execution.repo_snapshot import build_snapshot, cleanup_snapshot, snapshot_path
 from vuzol.leadership.invocation_context import (
     TurnInvocationContext,
     current_turn,
@@ -99,6 +100,13 @@ class TurnSandboxTransport:
         assert binding is not None
         result: CodexProcessResult | None = None
         try:
+            if not envelope.sandbox.empty_workspace:
+                async with self._factory() as session:
+                    phase = await session.get(LeadershipInference, binding.invocation_id)
+                    assert phase is not None
+                    commit = phase.request["task_draft"]["source_repo_commit"]
+                project = self._registries.projects.get(context.project_id)
+                await build_snapshot(project.repository_path, commit, binding.invocation_id)
             if targets:
                 assert self._proxy is not None
                 lease = await self._proxy.create(
@@ -185,7 +193,11 @@ class TurnSandboxTransport:
             ):
                 raise ValueError("turn inference has no matching durable send intent")
             profile = self._registries.profiles.get(phase.profile_id)
-            expected_role = ProviderRole.LEAD if phase.phase == "lead" else ProviderRole.REVIEWER
+            expected_role = {
+                "lead": ProviderRole.LEAD,
+                "goal_review": ProviderRole.REVIEWER,
+                "planner": ProviderRole.PLANNER,
+            }[phase.phase]
             if (
                 not profile.enabled
                 or profile.launch_mode is not LaunchMode.CLI
@@ -202,7 +214,7 @@ class TurnSandboxTransport:
                 profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
                 require_read_only=True,
-                require_prompt_only=profile.provider == "pi",
+                require_prompt_only=profile.provider == "pi" and phase.phase != "planner",
             )
             # Verify the adapter forwarded the frozen phase input, not a different prompt.
             body = json.loads(invocation.stdin)
@@ -254,8 +266,20 @@ class TurnSandboxTransport:
                 seccomp_profile=seccomp,
                 seccomp_profile_sha256=digest,
                 working_directory=Path("/workspace"),
-                empty_workspace=True,
+                empty_workspace=phase.phase != "planner",
                 mounts=(
+                    *(
+                        (
+                            SandboxMount(
+                                source=snapshot_path(phase.id),
+                                target=Path("/workspace"),
+                                mode=MountMode.READ_ONLY,
+                                purpose="planner-snapshot",
+                            ),
+                        )
+                        if phase.phase == "planner"
+                        else ()
+                    ),
                     SandboxMount(
                         source=state_path,
                         target=state_target,
@@ -403,6 +427,7 @@ def context_payload(context: TurnInvocationContext) -> dict[str, str | int]:
         "version": context.version,
         "fence_epoch": context.fence_epoch,
         "scope_revision": context.scope_revision,
+        "conversational": context.conversational,
     }
 
 
@@ -420,6 +445,32 @@ async def cleanup_turn_runtime(
         if cleanup is None:
             raise RuntimeError("turn sandbox cleanup is unavailable")
         await cleanup(envelope)
+    if not envelope.sandbox.empty_workspace:
+        if not valid_turn_workspace(envelope):
+            raise ValueError("invalid planner snapshot cleanup binding")
+        cleanup_snapshot(envelope.turn_binding.invocation_id)
+
+
+def valid_turn_workspace(envelope: ProcessEnvelope) -> bool:
+    if envelope.sandbox.empty_workspace:
+        return True
+    binding = envelope.turn_binding
+    workspace = [
+        m
+        for m in envelope.sandbox.mounts
+        if m.target == Path("/workspace") or Path("/workspace") in m.target.parents
+    ]
+    return (
+        binding is not None
+        and len(workspace) == 1
+        and workspace[0]
+        == SandboxMount(
+            source=snapshot_path(binding.invocation_id),
+            target=Path("/workspace"),
+            mode=MountMode.READ_ONLY,
+            purpose="planner-snapshot",
+        )
+    )
 
 
 async def finish_cleanup(operation: Coroutine[Any, Any, None]) -> None:

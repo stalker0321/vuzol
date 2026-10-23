@@ -79,3 +79,22 @@ def test_scope_and_repository_are_hashed():
     digest = canonical_plan_hash(body)
     assert canonical_plan_hash({**body, "scope_revision": 2}) != digest
     assert canonical_plan_hash({**body, "source_repo_commit": "b" * 40}) != digest
+
+
+def test_lead_schema_requests_planner_and_cannot_supply_plan_or_batch_commands():
+    from vuzol.leadership.model import LeadModelUnavailable
+    from vuzol.leadership.provider_model import parse_lead_response
+
+    request = {
+        "name": "request_plan",
+        "payload": {"goal": "Import", "constraints": ["src/importer.py"]},
+    }
+    assert parse_lead_response({"commands": [request]}).commands[0].name == "request_plan"
+    for commands in (
+        [request, request],
+        [request, {"name": "read_status", "payload": {}}],
+        [{"name": "propose_batch", "payload": {"plan": {"title": "Import", "items": [item()]}}}],
+        [{"name": "request_plan", "payload": {**request["payload"], "plan": {}}}],
+    ):
+        with pytest.raises(LeadModelUnavailable, match="lead_response_invalid"):
+            parse_lead_response({"commands": commands})

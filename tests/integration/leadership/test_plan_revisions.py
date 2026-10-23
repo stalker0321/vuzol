@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import pytest
 from sqlalchemy import func, select
+from tests.integration.leadership.planning_helpers import seed_plan
 from tests.integration.leadership.test_managed_goal_flow import (
     OWNER,
     TEST_REPOSITORY_ROOT,
@@ -105,7 +106,7 @@ async def test_owner_gate_cannot_be_bypassed_and_approval_wakes_once(postgres_ds
             plan["items"][0]["suggested_risk"] = "high"
         if kind == "large":
             plan["items"][0]["estimated_complexity"] = "large"
-        proposed = await command(factory, goal_id, "propose_batch", {"plan": plan})
+        proposed = await seed_plan(factory, goal_id, {"plan": plan})
         assert proposed.status == "applied", proposed
         assert proposed.result["owner_approval_required"]
         async with UnitOfWork(factory) as uow:
@@ -172,9 +173,7 @@ async def test_owner_gate_cannot_be_bypassed_and_approval_wakes_once(postgres_ds
 async def test_stale_approval_fails_closed(postgres_dsn, field, value):
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
-        assert (
-            await command(factory, goal_id, "propose_batch", {"plan": plan_items()})
-        ).status == "applied"
+        assert (await seed_plan(factory, goal_id, {"plan": plan_items()})).status == "applied"
         approval = (await approval_command(factory, goal_id)).model_copy(update={field: value})
         with pytest.raises(DomainError, match="stale_revision"):
             await PackageControlIngress(
@@ -188,9 +187,7 @@ async def test_future_revision_keeps_materialized_contracts_and_accumulated_base
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         plan = plan_items(3)
-        assert (
-            await command(factory, goal_id, "propose_batch", {"plan": plan})
-        ).status == "applied"
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
         old_approval = await approval_command(factory, goal_id)
         await approve_plan(factory, goal_id)
         assert (await start(factory, goal_id)).status == "applied"
@@ -217,12 +214,10 @@ async def test_future_revision_keeps_materialized_contracts_and_accumulated_base
         for ordinal in (0, 1):
             changed = deepcopy(plan)
             changed["items"][ordinal]["allowed_scope"] = "other.py"
-            refused = await command(factory, goal_id, "propose_batch", {"plan": changed})
+            refused = await seed_plan(factory, goal_id, {"plan": changed})
             assert refused.reason == "revision_conflict"
         plan["items"][2]["goal"] = "Finish the future import"
-        assert (
-            await command(factory, goal_id, "propose_batch", {"plan": plan})
-        ).status == "applied"
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
         with pytest.raises(DomainError, match=r"stale_generation|stale_revision"):
             await PackageControlIngress(
                 factory, enabled=True, authorized_user_ids=frozenset({OWNER})
@@ -271,9 +266,7 @@ async def test_legacy_conversion_is_idempotent_and_preserves_lifecycle(postgres_
 async def test_start_spec_is_bound_to_the_persisted_revision(postgres_dsn, field, value):
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
-        assert (
-            await command(factory, goal_id, "propose_batch", {"plan": plan_items(1)})
-        ).status == "applied"
+        assert (await seed_plan(factory, goal_id, {"plan": plan_items(1)})).status == "applied"
         async with factory() as session:
             goal = await session.get(ManagedGoal, goal_id)
             context = await task_context(session, goal)
@@ -295,12 +288,10 @@ async def test_replanning_before_approval_invalidates_the_old_card(postgres_dsn)
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         plan = plan_items()
-        assert (
-            await command(factory, goal_id, "propose_batch", {"plan": plan})
-        ).status == "applied"
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
         old = await approval_command(factory, goal_id)
         plan["items"][1]["allowed_scope"] = "src/new_importer.py"
-        revised = await command(factory, goal_id, "propose_batch", {"plan": plan})
+        revised = await seed_plan(factory, goal_id, {"plan": plan})
         assert revised.status == "applied", revised
         ingress = PackageControlIngress(
             factory, enabled=True, authorized_user_ids=frozenset({OWNER})
@@ -339,7 +330,7 @@ async def test_legacy_conversion_preserves_materialized_history(postgres_dsn, ne
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         raw = plan_items(1)
-        assert (await command(factory, goal_id, "propose_batch", {"plan": raw})).status == "applied"
+        assert (await seed_plan(factory, goal_id, {"plan": raw})).status == "applied"
         assert (await start(factory, goal_id)).status == "applied"
         async with UnitOfWork(factory) as uow:
             goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
@@ -375,14 +366,10 @@ async def test_paused_goal_can_revise_and_approve_without_resuming(postgres_dsn)
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         plan = plan_items()
-        assert (
-            await command(factory, goal_id, "propose_batch", {"plan": plan})
-        ).status == "applied"
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
         assert (await control(factory, goal_id, "pause_goal")).status == "applied"
         plan["items"][1]["goal"] = "Changed future goal"
-        assert (
-            await command(factory, goal_id, "propose_batch", {"plan": plan})
-        ).status == "applied"
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
         await approve_plan(factory, goal_id)
         assert (await start(factory, goal_id)).reason == "goal_paused"
         async with factory() as session:

@@ -136,3 +136,37 @@ async def reject_saved_commands(
             _Outcome(CommandStatus.STALE, reason, {}, goal),
             source_wakeup_id=wakeup_id,
         )
+
+
+async def planner_failure_notice(
+    session: AsyncSession, goal: ManagedGoal, key: str, reason: str
+) -> None:
+    from vuzol.storage.models import ProjectDiscussionSession
+
+    topic = await session.get(ProjectDiscussionSession, goal.discussion_session_id)
+    if topic is None:
+        return
+    reasons = {
+        "planner_budget_exceeded": "достигнут лимит бюджета или параллельных вызовов",
+        "planner_quota_exhausted": "исчерпана квота модели",
+        "planner_rate_limited": "достигнут лимит запросов модели",
+        "planner_profile_unselected": "профиль планировщика недоступен",
+        "planner_head_changed": "исходный commit изменился во время планирования",
+        "planner_scope_changed": "цель изменилась во время планирования",
+        "planner_invalid_output": "модель вернула некорректный план",
+        "planner_output_truncated": "ответ модели был обрезан",
+        "current_task_unfinished": "текущая задача ещё не завершена",
+        "source_repository_unavailable": "не удалось безопасно прочитать исходный commit",
+        "planner_context_limit": "контекст превышает лимит планировщика",
+        "planner_revision_changed": "ревизия плана изменилась во время планирования",
+        "planner_invalid_structured_output": "модель вернула некорректный ответ",
+        "amendment_pending": "изменение цели ещё ожидает завершения текущей работы",
+    }
+    detail = reasons.get(reason, "планировщик не смог подготовить план")
+    await enqueue_chat_notice(
+        session,
+        chat_id=topic.chat_id,
+        thread_id=topic.message_thread_id,
+        key=f"{key}:notice",
+        text=f"План не подготовлен: {detail} ({reason}). Лид может повторить запрос позже.",
+    )

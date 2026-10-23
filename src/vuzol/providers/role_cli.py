@@ -20,7 +20,7 @@ class RoleBoundCliAdapter:
         cancellation: CancellationContext,
     ) -> ProviderResult:
         if current_turn.get() is not None:
-            if request.role not in {ProviderRole.LEAD, ProviderRole.REVIEWER}:
+            if request.role not in {ProviderRole.LEAD, ProviderRole.REVIEWER, ProviderRole.PLANNER}:
                 raise ValueError("unsupported role within a leadership turn")
             adapter = self._turn
         elif request.role in {ProviderRole.PLANNER, ProviderRole.REVIEWER}:

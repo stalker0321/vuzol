@@ -301,3 +301,11 @@ def test_native_cli_cached_input_tokens_alias_preserves_accounting():
     assert _usage_int({"cached_input_tokens": 700000}, "cached_tokens") == 700000
     assert _usage_int({"cached_tokens": 0, "cached_input_tokens": 21}, "cached_tokens") == 0
     assert _usage_int({"cached_input_tokens": None}, "cached_tokens") is None
+
+
+def test_only_readers_skip_the_git_repository_check() -> None:
+    # The planner reads a commit snapshot without .git; writers keep Codex's check.
+    from vuzol.providers.codex import canonical_codex_argv
+
+    assert "--skip-git-repo-check" in canonical_codex_argv(model="gpt-6.1-sol", read_only=True)
+    assert "--skip-git-repo-check" not in canonical_codex_argv(model="gpt-6.1-sol")

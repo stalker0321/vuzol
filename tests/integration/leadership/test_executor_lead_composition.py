@@ -119,9 +119,9 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"commands":"private-invalid-value"}'
+                        "text": '{"commands":"private-invalid-value","reply":""}'
                         if invalid
-                        else '{"commands":[]}',
+                        else '{"commands":[],"reply":""}',
                     }
                 ],
                 "stopReason": "stop",

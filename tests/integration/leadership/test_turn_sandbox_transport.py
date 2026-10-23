@@ -73,7 +73,7 @@ class FakeRuntime:
                 report.decisions[0].classification
                 is ReconciliationClassification.PRESERVED_ACTIVE_LEASE
             )
-        payload = json.dumps({"commands": []})
+        payload = json.dumps({"commands": [], "reply": ""})
         message = {
             "role": "assistant",
             "content": [{"type": "text", "text": payload}],

@@ -94,6 +94,17 @@ class WorkPackageSequencer:
     def __init__(self, uow: UnitOfWork) -> None:
         self._uow = uow
 
+    async def _lock_managed_goal(self, package_id: uuid.UUID) -> None:
+        from vuzol.leadership.persistence import ManagedGoal
+        from vuzol.storage.models import WorkPackage
+
+        assert self._uow.session is not None
+        goal_id = await self._uow.session.scalar(
+            select(WorkPackage.managed_goal_id).where(WorkPackage.id == package_id)
+        )
+        if goal_id is not None:
+            await self._uow.session.get(ManagedGoal, goal_id, with_for_update=True)
+
     async def start(
         self,
         *,
@@ -108,6 +119,7 @@ class WorkPackageSequencer:
         delegation_id: uuid.UUID | None = None,
         accountable_owner_user_id: int | None = None,
     ) -> SequenceResult:
+        await self._lock_managed_goal(package_id)
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         require_generation(package.version, expected_status_generation)
         control_transition_target(package.status, PackageControlAction.START)
@@ -201,6 +213,13 @@ class WorkPackageSequencer:
         """Consume terminal evidence once; duplicate observations are harmless."""
 
         assert self._uow.session is not None
+        package_id = await self._uow.session.scalar(
+            select(MaterializationLink.work_package_id).where(
+                MaterializationLink.task_id == task_id
+            )
+        )
+        if package_id is not None:
+            await self._lock_managed_goal(package_id)
         link = await self._uow.session.scalar(
             select(MaterializationLink)
             .where(MaterializationLink.task_id == task_id)
@@ -280,6 +299,7 @@ class WorkPackageSequencer:
     ) -> SequenceResult:
         """Materialize the fenced cursor after an explicit skip/recovery transition."""
 
+        await self._lock_managed_goal(package_id)
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         if package.status is not WorkPackageStatus.RUNNING:
             raise DomainError("invalid_transition")
@@ -305,6 +325,7 @@ class WorkPackageSequencer:
         from vuzol.workflows.retry_policy import failed_item_is_rematerializable
 
         assert self._uow.session is not None
+        await self._lock_managed_goal(package_id)
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         require_generation(package.version, expected_status_generation)
         revision = await self._fenced_approved_revision(
@@ -543,6 +564,18 @@ class WorkPackageSequencer:
 
         assert isinstance(package, WorkPackage)
         assert self._uow.session is not None
+        if package.managed_goal_id is not None:
+            from vuzol.leadership.persistence import ManagedGoal
+
+            goal = await self._uow.session.get(ManagedGoal, package.managed_goal_id)
+            if goal is not None and goal.constraints.get("pending_amendment"):
+                return SequenceResult(
+                    package.id,
+                    package.version,
+                    None,
+                    package.cursor_ordinal,
+                    terminal_kind="blocked",
+                )
         # D0 pinned semantics: an active package reads its pinned contract.
         # Pre-D0 rows (NULL) fall back to the passed admission flag.
         if getattr(package, "execution_contract_version", None) is not None:
@@ -666,6 +699,7 @@ class WorkPackageSequencer:
         accountable_user_id = revision.approved_by_user_id
         if accountable_user_id is None:
             from datetime import UTC, datetime
+
             if revision.approved_by_delegation_id is None:
                 raise DomainError("approval_provenance_missing")
             delegation = await self._uow.session.get(
@@ -975,16 +1009,14 @@ class WorkPackageSequenceConsumer:
                     task_id=item.linked_entity_id,
                     horizon_enabled=horizon_enabled(self._settings),
                 )
-                if (
-                    observed is not None
-                    and observed.terminal_kind
-                    in {"completed", "blocked", "failed", "recovery_exhausted"}
-                ):
+                if observed is not None and observed.terminal_kind in {
+                    "completed",
+                    "blocked",
+                    "failed",
+                    "recovery_exhausted",
+                }:
                     finished = await uow.work_packages.get_package(observed.package_id)
-                    if (
-                        finished.managed_goal_id is not None
-                        and self._settings.project_lead.enabled
-                    ):
+                    if finished.managed_goal_id is not None and self._settings.project_lead.enabled:
                         await enqueue_goal_wakeup(
                             uow.session,
                             goal_id=finished.managed_goal_id,

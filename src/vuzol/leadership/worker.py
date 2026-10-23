@@ -9,10 +9,11 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, literal, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.leadership.actor import server_agent_principal
+from vuzol.leadership.amendments import apply_pending_amendment
 from vuzol.leadership.batches import execute_batch
 from vuzol.leadership.card import owner_answer_text
 from vuzol.leadership.commands import CommandStatus, LeadCommand
@@ -48,10 +49,10 @@ from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, defer_outbox_item
 from vuzol.storage.models import Event, TransactionalOutbox, WorkPackage
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.storage.types import WorkPackagePauseReason, WorkPackageStatus
+from vuzol.storage.types import DeliveryStatus, WorkPackagePauseReason, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
-_TERMINAL_GOAL = frozenset({"paused", "cancelled", "completed"})
+_TERMINAL_GOAL = frozenset({"cancelled", "completed"})
 _MODEL_BLOCKERS = frozenset(
     {
         "lead_model_unconfigured",
@@ -169,6 +170,8 @@ class ProjectLeadWorker:
             turn = await _turn(session, claim.goal_id, claim.wakeup_id)
             if goal is None:
                 raise LeadModelUnavailable("goal_missing")
+            item = await session.get(TransactionalOutbox, claim.wakeup_id)
+            conversational = item is not None and item.payload.get("wakeup_kind") == "owner_message"
             context = TurnInvocationContext(
                 claim=claim,
                 turn_id=turn.id,
@@ -177,10 +180,11 @@ class ProjectLeadWorker:
                 fence_epoch=turn.fence_epoch,
                 scope_revision=turn.scope_revision,
                 enabled=self._enabled,
+                conversational=conversational,
             )
         token = current_turn.set(context)
         try:
-            if self._verifier is not None:
+            if self._verifier is not None and not conversational:
                 await self._verifier.verify(claim.goal_id, claim=claim)
             snapshot = await self._snapshot(claim.goal_id, wakeup_id=claim.wakeup_id)
             return await self._model.decide(snapshot)
@@ -198,6 +202,44 @@ class ProjectLeadWorker:
             goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
             if goal is None:
                 await self._complete(uow.session, token)
+                return None
+            owner_event = item.payload.get("wakeup_kind") == "owner_message"
+            # Intake order also includes voices still being transcribed. Telegram
+            # message ids are only ordered within a chat, not across the project.
+            received_at = (
+                item.payload["received_at"]
+                if owner_event
+                else item.created_at.astimezone(UTC).isoformat(timespec="microseconds")
+            )
+            source_id = item.payload["intake_id"] if owner_event else str(item.id)
+            earlier = await uow.session.scalar(
+                select(TransactionalOutbox.id)
+                .where(
+                    or_(
+                        and_(
+                            TransactionalOutbox.destination == "project_lead",
+                            TransactionalOutbox.linked_entity_id == goal.id,
+                            TransactionalOutbox.payload["wakeup_kind"].as_string()
+                            == "owner_message",
+                        ),
+                        and_(
+                            TransactionalOutbox.destination == "telegram_file",
+                            TransactionalOutbox.payload["lead_goal_id"].as_string() == str(goal.id),
+                        ),
+                    ),
+                    TransactionalOutbox.status.in_(
+                        (DeliveryStatus.PENDING, DeliveryStatus.LEASED, DeliveryStatus.AMBIGUOUS)
+                    ),
+                    tuple_(
+                        TransactionalOutbox.payload["received_at"].as_string(),
+                        TransactionalOutbox.payload["intake_id"].as_string(),
+                    )
+                    < tuple_(literal(received_at), literal(source_id)),
+                )
+                .limit(1)
+            )
+            if earlier is not None:
+                await self._defer_in_session(uow.session, token, "lead_event_order")
                 return None
             wakeup_id = item.id
             turn = await uow.session.scalar(
@@ -235,10 +277,9 @@ class ProjectLeadWorker:
                     goal.lease_until = now + timedelta(seconds=self._lease_seconds)
                     return prepared(turn.status)
                 held_by_other = (
-                    goal.lease_owner not in {None, self._owner}
+                    goal.lease_owner is not None
                     and goal.lease_until is not None
                     and goal.lease_until > now
-                    and goal.lease_epoch == turn.lease_epoch
                 )
                 if held_by_other:
                     await self._defer_in_session(uow.session, token, "lead_lease_held")
@@ -260,17 +301,6 @@ class ProjectLeadWorker:
             if turn is not None:
                 await self._complete(uow.session, token)
                 return None
-            if goal.lifecycle in _TERMINAL_GOAL or (
-                goal.lifecycle == "waiting" and not await _waiting_exit_ready(uow.session, goal)
-            ):
-                await self._complete(uow.session, token)
-                return None
-            if goal.lifecycle == "waiting":
-                goal.lifecycle = "active"
-                goal.waiting_reason = None
-                goal.wakeup_condition = None
-                goal.version += 1
-                goal.fence_epoch += 1
             if (
                 goal.lease_owner is not None
                 and goal.lease_until is not None
@@ -278,6 +308,24 @@ class ProjectLeadWorker:
             ):
                 await self._defer_in_session(uow.session, token, "lead_lease_held")
                 return None
+            await apply_pending_amendment(uow.session, goal)
+            if goal.constraints.get("pending_amendment") and not owner_event:
+                await self._complete(uow.session, token)
+                return None
+            if not owner_event and (
+                goal.lifecycle == "paused"
+                or (
+                    goal.lifecycle == "waiting" and not await _waiting_exit_ready(uow.session, goal)
+                )
+            ):
+                await self._complete(uow.session, token)
+                return None
+            if goal.lifecycle == "waiting" and not owner_event:
+                goal.lifecycle = "active"
+                goal.waiting_reason = None
+                goal.wakeup_condition = None
+                goal.version += 1
+                goal.fence_epoch += 1
             goal.lease_epoch += 1
             goal.lease_owner = self._owner
             goal.lease_until = now + timedelta(seconds=self._lease_seconds)
@@ -321,6 +369,12 @@ class ProjectLeadWorker:
                     WorkPackage.status == WorkPackageStatus.COMPLETED,
                 )
             )
+            item = await uow.session.get(TransactionalOutbox, wakeup_id) if wakeup_id else None
+            owner_event = (
+                dict(item.payload)
+                if item is not None and item.payload.get("wakeup_kind") == "owner_message"
+                else None
+            )
             return LeadSnapshot(
                 goal_id=goal.id,
                 project_id=goal.project_id,
@@ -339,10 +393,13 @@ class ProjectLeadWorker:
                 waiting_reason=goal.waiting_reason,
                 completed_package_count=int(completed or 0),
                 owner_answer=owner_answer_text(goal.constraints),
+                owner_event=owner_event,
                 invocation_id=wakeup_id,
                 result_context={
                     **await result_context(uow.session, goal, package),
                     "work_limits": goal.constraints.get("work_limits", {}),
+                    "pending_amendment": goal.constraints.get("pending_amendment"),
+                    "queued_amendment": goal.constraints.get("queued_amendment"),
                 },
             )
 
@@ -357,7 +414,12 @@ class ProjectLeadWorker:
             turn = await _turn(uow.session, goal_id, wakeup_id)
             if goal is None or turn.status != "claimed":
                 return False
-            if not await claim_current(uow.session, goal, claim, turn):
+            if (
+                not await claim_current(uow.session, goal, claim, turn)
+                or goal.version != turn.goal_version
+                or goal.fence_epoch != turn.fence_epoch
+                or goal.scope_revision != turn.scope_revision
+            ):
                 # Controls may clear the goal lease. Never overwrite a replacement turn.
                 if (
                     turn.lease_epoch == claim.lease_epoch
@@ -378,6 +440,39 @@ class ProjectLeadWorker:
                 input_scope=turn.scope_revision,
                 input_lease_epoch=turn.lease_epoch,
             )
+            item = await uow.session.get(TransactionalOutbox, wakeup_id)
+            if (
+                item is not None
+                and item.payload.get("wakeup_kind") == "owner_message"
+                and decision.reply.strip()
+            ):
+                from vuzol.discussion.memory_service import DiscussionMemoryService
+                from vuzol.storage.types import (
+                    ConversationTurnRole,
+                    ConversationTurnSource,
+                    InteractionMode,
+                )
+
+                reply_session_id = uuid.UUID(item.payload["session_id"])
+                reply_id, _ = await DiscussionMemoryService(uow).append_turn(
+                    session_id=reply_session_id,
+                    role=ConversationTurnRole.ASSISTANT,
+                    source=ConversationTurnSource.MODEL,
+                    content=decision.reply,
+                    classifier_mode=InteractionMode.DISCUSSION,
+                )
+                await uow.outbox.enqueue(
+                    destination="telegram",
+                    operation_type="send_message",
+                    entity_type="conversation_turn",
+                    entity_id=reply_id,
+                    idempotency_key=f"lead:reply:{wakeup_id}",
+                    payload={
+                        "role": "discussion_reply",
+                        "session_id": str(reply_session_id),
+                        "source_turn_id": item.payload["source_turn_id"],
+                    },
+                )
             return True
 
     async def _saved_decision_admissible(
@@ -445,7 +540,12 @@ class ProjectLeadWorker:
         if frozen is None:
             return
         project_id, commands = frozen
+        async with self._factory() as session:
+            item = await session.get(TransactionalOutbox, wakeup_id)
+            owner_event = item is not None and item.payload.get("wakeup_kind") == "owner_message"
         if not commands:
+            if owner_event:
+                return
             await self._mark_waiting(goal_id, "model_idle", claim=claim)
             return
         service = self._service()
@@ -481,10 +581,15 @@ class ProjectLeadWorker:
                 CommandStatus.STALE.value,
                 CommandStatus.UNSUPPORTED.value,
             }:
-                await self._mark_waiting(goal_id, result.reason or "command_rejected", claim=claim)
+                if not owner_event:
+                    await self._mark_waiting(
+                        goal_id, result.reason or "command_rejected", claim=claim
+                    )
                 return
             if result.status == CommandStatus.WAITING.value or command["name"] in {
                 "pause_goal",
+                "amend_goal",
+                "request_revision",
                 "cancel_goal",
                 "propose_completion",
             }:
@@ -506,7 +611,9 @@ class ProjectLeadWorker:
                 and goal.lease_owner == claim.owner
                 and goal.lease_epoch == claim.lease_epoch
             ):
-                await continue_if_idle(session, goal, repeat_limit=self._repeat_limit)
+                item = await session.get(TransactionalOutbox, wakeup_id)
+                if item is None or item.payload.get("wakeup_kind") != "owner_message":
+                    await continue_if_idle(session, goal, repeat_limit=self._repeat_limit)
                 goal.lease_owner = None
                 goal.lease_until = None
 
@@ -534,8 +641,9 @@ class ProjectLeadWorker:
                     await self._complete(uow.session, token)
                 return
             if goal is not None and goal.lifecycle not in {"cancelled", "completed"}:
-                goal.lifecycle = "waiting"
-                goal.waiting_reason = reason
+                if goal.lifecycle != "paused":
+                    goal.lifecycle = "waiting"
+                    goal.waiting_reason = reason
                 goal.lease_owner = None
                 goal.lease_until = None
                 goal.version += 1
@@ -622,7 +730,7 @@ class ProjectLeadWorker:
         goals = (
             await session.scalars(
                 select(ManagedGoal)
-                .where(ManagedGoal.lifecycle.in_(("active", "waiting")))
+                .where(ManagedGoal.lifecycle.in_(("active", "waiting", "paused")))
                 .with_for_update()
             )
         ).all()
@@ -632,6 +740,21 @@ class ProjectLeadWorker:
                 and goal.lease_until is not None
                 and goal.lease_until > now
             ):
+                continue
+            if goal.constraints.get("pending_amendment") or goal.constraints.get(
+                "queued_amendment"
+            ):
+                if await apply_pending_amendment(session, goal):
+                    await enqueue_goal_wakeup(
+                        session,
+                        goal_id=goal.id,
+                        package_id=goal.current_package_id,
+                        idempotency_key=f"lead:amended:{goal.id}:{goal.scope_revision}",
+                        kind="amended",
+                    )
+                if goal.constraints.get("pending_amendment"):
+                    continue
+            if goal.lifecycle == "paused":
                 continue
             if goal.lifecycle == "waiting" and not await _waiting_exit_ready(session, goal):
                 continue

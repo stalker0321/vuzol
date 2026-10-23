@@ -493,3 +493,355 @@ async def test_enable_does_not_take_over_a_legacy_package(postgres_dsn):
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
             assert (await session.get(WorkPackage, package_id)).status is WorkPackageStatus.DRAFT
+
+
+async def amendment_command(
+    factory, goal_id, event_id, *, policy="finish_current", name="amend_goal"
+):
+    async with factory() as session:
+        goal = await session.get(ManagedGoal, goal_id)
+        version = goal.version
+    return LeadCommand(
+        name=name,
+        project_id=PROJECT,
+        goal_id=goal_id,
+        expected_version=version,
+        idempotency_key=f"amend:{event_id}:{policy}",
+        reason="Owner changed the scope",
+        payload={
+            "scope": "README only",
+            "criteria": [{"id": "readme", "description": "README updated"}],
+            "source_event_id": str(event_id),
+            "inflight_policy": policy,
+        },
+    )
+
+
+@pytest.mark.parametrize("alias", ["amend_goal", "request_revision"])
+async def test_amendment_finishes_current_contract_and_stops_next_item(
+    postgres_dsn, tmp_path, alias
+):
+    from tests.integration.leadership.test_lead_surface import owner_message
+    from tests.integration.leadership.test_managed_goal_flow import _start_decision
+
+    from vuzol.discussion.sequencer import WorkPackageSequencer
+    from vuzol.leadership.actor import server_agent_principal
+    from vuzol.storage.unit_of_work import UnitOfWork
+
+    class TwoItems:
+        async def decide(self, snapshot):
+            decision = _start_decision()
+            plan = decision.commands[0].payload["plan"]
+            plan["items"].append({**plan["items"][0], "summary": "Second marker"})
+            return decision
+
+    class Reply:
+        async def decide(self, snapshot):
+            return LeadDecision(reply="Scope updated")
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, TwoItems()).process_one()
+        event = await owner_message(factory, tmp_path)
+        command = await amendment_command(factory, goal_id, event.id, name=alias)
+        service = _lead_service(factory)
+        result = await service.apply_agent(server_agent_principal(PROJECT), "worker", command)
+        assert result.status == "applied"
+        assert (
+            await service.apply_agent(
+                server_agent_principal(PROJECT),
+                "worker",
+                replace(
+                    command, name="request_revision" if alias == "amend_goal" else "amend_goal"
+                ),
+            )
+        ).status == "duplicate"
+        stale = await service.apply_agent(
+            server_agent_principal(PROJECT),
+            "worker",
+            replace(command, idempotency_key="stale-amendment"),
+        )
+        assert stale.status == "stale"
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            task = await session.scalar(select(Task))
+            task_id, original_spec = task.id, task.task_draft
+            assert goal.scope_revision == 1
+            assert goal.scope_text == "marker files only"
+            assert goal.constraints["pending_amendment"]["base_version"] == command.expected_version
+        await _worker(factory, Reply()).process_one()
+        async with UnitOfWork(factory) as uow:
+            task = await uow.session.get(Task, task_id)
+            task.status = TaskStatus.COMPLETED
+            observed = await WorkPackageSequencer(uow).observe_terminal(task_id=task.id)
+            assert observed.task_id is None
+            assert await uow.session.scalar(select(func.count()).select_from(Task)) == 1
+        await _worker(factory, Reply()).process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            task = await session.get(Task, task_id)
+            package = await session.get(WorkPackage, goal.current_package_id)
+            assert task.task_draft == original_spec
+            assert goal.original_request == "ship the marker"
+            assert goal.scope_text == "README only" and goal.scope_revision == 2
+            assert goal.version > command.expected_version and goal.fence_epoch > 1
+            assert goal.proposed_plan is None
+            assert "pending_amendment" not in goal.constraints
+            assert package.status is WorkPackageStatus.STOPPED
+            assert package.approved_revision_id is None
+            assert await session.scalar(select(func.count()).select_from(Task)) == 1
+
+
+async def test_amendment_on_paused_goal_does_not_resume_it(postgres_dsn, tmp_path):
+    from tests.integration.leadership.test_lead_surface import owner_message
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await control(factory, goal_id, "pause_goal")
+        event = await owner_message(factory, tmp_path)
+        command = await amendment_command(factory, goal_id, event.id)
+        result = await _lead_service(factory).apply_human(Principal(OWNER, "telegram"), command)
+        assert result.status == "applied"
+
+        class Reply:
+            async def decide(self, snapshot):
+                assert snapshot.lifecycle == "paused" and snapshot.scope_revision == 2
+                return LeadDecision(reply="Остаётся на паузе")
+
+        worker = _worker(factory, Reply())
+        for _ in range(3):
+            await worker.process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "paused" and goal.scope_revision == 2
+            assert await session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+async def test_cancel_amendment_preserves_unknown_effects(postgres_dsn, tmp_path):
+    from tests.integration.leadership.test_lead_surface import owner_message
+    from tests.integration.storage.helpers import seed_task_run_step
+
+    from vuzol.leadership.actor import server_agent_principal
+    from vuzol.leadership.amendments import apply_pending_amendment
+    from vuzol.storage.models import MaterializationLink, Run, Step
+    from vuzol.storage.types import StepStatus
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
+        # Put a real running step on the materialized task, so cancellation uses
+        # controls.cancel_task and records unknown effects rather than a mock.
+        _, run_id, step_record = await seed_task_run_step(factory, step_status=StepStatus.RUNNING)
+        async with factory.begin() as session:
+            link = await session.scalar(select(MaterializationLink))
+            run = await session.get(Run, run_id)
+            run.task_id = link.task_id
+            task = await session.get(Task, link.task_id)
+            task.status = TaskStatus.EXECUTING
+        event = await owner_message(factory, tmp_path)
+        command = await amendment_command(factory, goal_id, event.id, policy="cancel_current")
+        result = await _lead_service(factory).apply_agent(
+            server_agent_principal(PROJECT), "worker", command
+        )
+        assert result.status == "applied"
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id, with_for_update=True)
+            step = await session.get(Step, step_record.id)
+            assert step.status is StepStatus.CANCELLED and step.unknown_effects
+            assert not await apply_pending_amendment(session, goal)
+            assert goal.scope_revision == 1
+            assert goal.constraints["pending_amendment"]["inflight_policy"] == "cancel_current"
+            step.unknown_effects = False  # Simulate authoritative effect reconciliation.
+            await session.flush()
+            assert await apply_pending_amendment(session, goal)
+            assert goal.scope_revision == 2
+
+
+async def test_queued_amendment_waits_for_package_without_stopping_dispatch(postgres_dsn, tmp_path):
+    from tests.integration.leadership.test_lead_surface import owner_message
+    from tests.integration.leadership.test_managed_goal_flow import _start_decision
+
+    from vuzol.discussion.sequencer import WorkPackageSequencer
+    from vuzol.leadership.amendments import apply_pending_amendment
+    from vuzol.storage.unit_of_work import UnitOfWork
+
+    class TwoItems:
+        async def decide(self, snapshot):
+            decision = _start_decision()
+            plan = decision.commands[0].payload["plan"]
+            plan["items"].append({**plan["items"][0], "summary": "Second marker"})
+            return decision
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, TwoItems()).process_one()
+        event = await owner_message(factory, tmp_path)
+        command = await amendment_command(factory, goal_id, event.id, policy="queue")
+        assert (
+            await _lead_service(factory).apply_human(Principal(OWNER, "telegram"), command)
+        ).status == "applied"
+        async with UnitOfWork(factory) as uow:
+            session = uow.session
+            goal = await session.get(ManagedGoal, goal_id, with_for_update=True)
+            package = await session.get(WorkPackage, goal.current_package_id)
+            assert not goal.constraints.get("pending_amendment")
+            assert not await apply_pending_amendment(session, goal)
+            assert package.status is WorkPackageStatus.RUNNING
+            task = await session.scalar(select(Task))
+            task.status = TaskStatus.COMPLETED
+            sequencer = WorkPackageSequencer(uow)
+            next_item = await sequencer.observe_terminal(task_id=task.id)
+            assert next_item.task_id is not None and next_item.task_id != task.id
+            assert await session.scalar(select(func.count()).select_from(Task)) == 2
+            assert not await apply_pending_amendment(session, goal)
+            second_task = await session.get(Task, next_item.task_id)
+            second_task.status = TaskStatus.COMPLETED
+            await sequencer.observe_terminal(task_id=second_task.id)
+            await session.flush()
+            assert package.status is WorkPackageStatus.COMPLETED
+            assert await apply_pending_amendment(session, goal)
+            assert goal.scope_revision == 2
+
+
+async def test_amendment_requires_owner_source_and_current_grant(postgres_dsn, tmp_path):
+    from tests.integration.leadership.test_lead_surface import owner_message
+
+    from vuzol.leadership.actor import server_agent_principal
+    from vuzol.leadership.persistence import GoalDelegation
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        event = await owner_message(factory, tmp_path)
+        command = await amendment_command(factory, goal_id, event.id)
+        service = _lead_service(factory)
+        for index, patch in enumerate(
+            (
+                {"source_event_id": str(uuid.uuid4())},
+                {"owner_user_id": OWNER},
+            )
+        ):
+            result = await service.apply_agent(
+                server_agent_principal(PROJECT),
+                "worker",
+                replace(
+                    command,
+                    idempotency_key=f"bad-source:{index}",
+                    payload={**command.payload, **patch},
+                ),
+            )
+            assert result.status == "denied"
+        async with factory.begin() as session:
+            delegation = await session.scalar(select(GoalDelegation))
+            delegation.revoked_at = datetime.now(UTC)
+        result = await service.apply_agent(server_agent_principal(PROJECT), "worker", command)
+        assert result.status == "denied" and result.reason == "delegation_revoked"
+
+
+async def test_executing_lead_cancels_paused_task_using_legacy_delegation(postgres_dsn, tmp_path):
+    from tests.integration.leadership.test_lead_surface import owner_message
+
+    from vuzol.leadership.model import LeadCommandDraft
+    from vuzol.leadership.persistence import GoalDelegation
+
+    class Amend:
+        calls = 0
+
+        async def decide(self, snapshot):
+            self.calls += 1
+            return LeadDecision(
+                reply="Cancelling the current task; the goal stays paused.",
+                commands=(
+                    LeadCommandDraft(
+                        name="amend_goal",
+                        reason="Owner changed scope",
+                        payload={
+                            "scope": "README only",
+                            "criteria": [{"id": "readme", "description": "README updated"}],
+                            "source_event_id": snapshot.owner_event["source_event_id"],
+                            "inflight_policy": "cancel_current",
+                        },
+                    ),
+                ),
+            )
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
+        await control(factory, goal_id, "pause_goal")
+        async with factory.begin() as session:
+            delegation = await session.scalar(select(GoalDelegation))
+            delegation.allowed_actions = [
+                action for action in delegation.allowed_actions if action != "amend_goal"
+            ]
+        await owner_message(factory, tmp_path)
+        model = Amend()
+        worker = _worker(factory, model)
+        assert await worker.process_one()
+        assert await worker.process_one()
+        assert model.calls == 1
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "paused" and goal.scope_revision == 2
+            assert goal.original_request == "ship the marker"
+            assert goal.constraints["last_amendment"]["inflight_policy"] == "cancel_current"
+            assert "pending_amendment" not in goal.constraints
+            tasks = list(await session.scalars(select(Task)))
+            assert len(tasks) == 1 and tasks[0].status is TaskStatus.CANCELLED
+
+
+@pytest.mark.parametrize("missing_action", ["cancel_goal", "request_revision"])
+async def test_amendment_cannot_expand_a_restricted_legacy_grant(
+    postgres_dsn, tmp_path, missing_action
+):
+    from tests.integration.leadership.test_lead_surface import owner_message
+
+    from vuzol.leadership.actor import server_agent_principal
+    from vuzol.leadership.persistence import GoalDelegation
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        event = await owner_message(factory, tmp_path)
+        async with factory.begin() as session:
+            delegation = await session.scalar(select(GoalDelegation))
+            delegation.allowed_actions = [
+                action
+                for action in delegation.allowed_actions
+                if action not in {"amend_goal", missing_action}
+            ]
+        command = await amendment_command(factory, goal_id, event.id, policy="cancel_current")
+        result = await _lead_service(factory).apply_agent(
+            server_agent_principal(PROJECT), "worker", command
+        )
+        assert result.status == "denied" and result.reason == "action_not_delegated"
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.scope_revision == 1 and "pending_amendment" not in goal.constraints
+
+
+@pytest.mark.parametrize("policy", ["finish_current", "queue"])
+async def test_pending_amendment_cannot_complete_the_old_goal(postgres_dsn, tmp_path, policy):
+    from tests.integration.leadership.test_lead_surface import owner_message
+
+    from vuzol.leadership.actor import server_agent_principal
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        event = await owner_message(factory, tmp_path)
+        command = await amendment_command(factory, goal_id, event.id, policy=policy)
+        service = _lead_service(factory)
+        assert (
+            await service.apply_human(Principal(OWNER, "telegram"), command)
+        ).status == "applied"
+        result = await service.apply_agent(
+            server_agent_principal(PROJECT),
+            "worker",
+            LeadCommand(
+                name="propose_completion",
+                project_id=PROJECT,
+                goal_id=goal_id,
+                expected_version=command.expected_version + 1,
+                idempotency_key="complete-old-scope",
+                payload={},
+            ),
+        )
+        assert result.status == "denied" and result.reason == "amendment_pending"

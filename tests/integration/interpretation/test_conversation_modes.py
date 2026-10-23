@@ -248,17 +248,20 @@ def test_explicit_work_goes_to_lead_once_and_switch_does_not_resume(postgres_dsn
             assert paused.status == "applied"
             await ingress.accept_message(turn("/lead", 1103))
             await ingress.accept_message(turn("Теперь добавь фильтр.", 1104))
-            assert await classify(runtime, factory, "execute_request")
+            # A live goal hears the owner: the message is a lead event, not a new goal.
+            assert not await classify(runtime, factory, "execute_request")
             async with factory() as session:
                 goal = (await session.scalars(select(ManagedGoal))).one()
                 assert goal.lifecycle == "paused" and goal.version == paused.version
                 assert await session.scalar(select(func.count()).select_from(Task)) == 0
-                denied = await session.scalar(
-                    select(LeadershipCommandReceipt).where(
-                        LeadershipCommandReceipt.reason == "goal_already_live"
+                event = await session.scalar(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.destination == "project_lead",
+                        TransactionalOutbox.linked_entity_id == goal_id,
+                        TransactionalOutbox.payload["wakeup_kind"].as_string() == "owner_message",
                     )
                 )
-                assert denied is not None
+                assert event is not None and event.payload["text"] == "Теперь добавь фильтр."
         finally:
             await engine.dispose()
 

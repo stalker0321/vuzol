@@ -1376,6 +1376,31 @@ class InterpretationPipeline:
                 duration_ms=result.duration_ms,
                 provider_request_id=result.provider_request_id,
             )
+        if transcript is not None and item.payload.get("lead_goal_id"):
+            from vuzol.leadership.chat import enqueue_owner_message
+            from vuzol.leadership.persistence import ManagedGoal
+
+            async with UnitOfWork(self._factory) as uow:
+                assert uow.session is not None
+                goal = await uow.session.get(
+                    ManagedGoal, uuid.UUID(item.payload["lead_goal_id"]), with_for_update=True
+                )
+                current_intake = await uow.session.get(TelegramIntakeMessage, intake.id)
+                if goal is None or current_intake is None:
+                    raise PermanentPipelineError("lead_voice_goal_missing")
+                await enqueue_owner_message(
+                    uow,
+                    goal=goal,
+                    intake=current_intake,
+                    raw="\n".join(filter(None, (intake.original_text, transcript))),
+                    transcription={
+                        "text": transcript,
+                        "uncertain": uncertain,
+                        "content_uri": reference,
+                    },
+                )
+                await complete_outbox_item(uow.session, token)
+            return
         async with self._factory.begin() as session:
             if task_id is not None:
                 task = await session.get(Task, task_id, with_for_update=True)
@@ -1756,6 +1781,17 @@ class InterpretationPipeline:
                         ),
                     )
                     intake.status = IntakeStatus.NEEDS_CLARIFICATION
+            if item is not None and item.payload.get("lead_goal_id"):
+                intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
+                if intake is not None:
+                    intake.status = IntakeStatus.NEEDS_CLARIFICATION
+                    await enqueue_chat_notice(
+                        session,
+                        chat_id=intake.chat_id,
+                        thread_id=intake.message_thread_id,
+                        key=f"lead:voice-failed:{intake.id}",
+                        text="Не удалось расшифровать сообщение. Пришлите его текстом.",  # noqa: RUF001
+                    )
             if item is not None and item.linked_entity_type == "project_naming":
                 naming = await session.get(
                     ProjectNamingRequest,

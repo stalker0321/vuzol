@@ -19,6 +19,7 @@ class LeadCommandName(StrEnum):
     SET_WORK_LIMITS = "set_work_limits"
     PROPOSE_BATCH = "propose_batch"
     START_BATCH = "start_batch"
+    AMEND_GOAL = "amend_goal"
     REQUEST_REVISION = "request_revision"
     REQUEST_PERMISSION = "request_permission"
     WAIT_FOR = "wait_for"
@@ -75,6 +76,7 @@ DELEGATED_ACTIONS = frozenset(
         LeadCommandName.PROPOSE_BATCH.value,
         LeadCommandName.START_BATCH.value,
         LeadCommandName.REQUEST_REVISION.value,
+        LeadCommandName.AMEND_GOAL.value,
         LeadCommandName.REQUEST_PERMISSION.value,
         LeadCommandName.WAIT_FOR.value,
         LeadCommandName.PROPOSE_COMPLETION.value,
@@ -128,7 +130,8 @@ def payload_hash(command: LeadCommand) -> str:
         else command.payload
     )
     body = {
-        "command": command.name,
+        # Preserve hashes of receipts issued under the original input name.
+        "command": "request_revision" if command.name == "amend_goal" else command.name,
         "contract_version": command.contract_version,
         "expected_version": command.expected_version,
         "goal_id": None if command.goal_id is None else str(command.goal_id),
@@ -142,6 +145,6 @@ def payload_hash(command: LeadCommand) -> str:
 
 def parse_command_name(name: str) -> LeadCommandName | None:
     try:
-        return LeadCommandName(name)
+        return LeadCommandName.AMEND_GOAL if name == "request_revision" else LeadCommandName(name)
     except ValueError:
         return None

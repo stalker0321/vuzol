@@ -379,7 +379,7 @@ async def test_crash_after_first_command_resumes_from_receipts(postgres_dsn, mon
                     )
                 )
             )
-            assert sorted(row.command_name for row in rows) == ["propose_batch", "start_batch"]
+            assert sorted(row.command_name for row in rows) == ["propose_batch", "start_task"]
             assert sorted(row.expected_version for row in rows) == [1, 2]
             turn = await session.scalar(select(LeadershipTurn))
             assert [item["expected_version"] for item in turn.decision["commands"]] == [1, 2]
@@ -533,6 +533,9 @@ async def test_amendment_finishes_current_contract_and_stops_next_item(
             decision = _start_decision()
             plan = decision.commands[0].payload["plan"]
             plan["items"].append({**plan["items"][0], "summary": "Second marker"})
+            from vuzol.leadership.tasks import spec_digest
+
+            decision.commands[1].payload["spec"]["plan_hash"] = spec_digest(plan)
             return decision
 
     class Reply:
@@ -631,7 +634,9 @@ async def test_cancel_amendment_preserves_unknown_effects(postgres_dsn, tmp_path
         await _worker(factory, StartModel()).process_one()
         # Put a real running step on the materialized task, so cancellation uses
         # controls.cancel_task and records unknown effects rather than a mock.
-        _, run_id, step_record = await seed_task_run_step(factory, step_status=StepStatus.RUNNING)
+        _, run_id, step_record = await seed_task_run_step(
+            factory, step_status=StepStatus.RUNNING, step_type="approval"
+        )
         async with factory.begin() as session:
             link = await session.scalar(select(MaterializationLink))
             run = await session.get(Run, run_id)
@@ -670,6 +675,9 @@ async def test_queued_amendment_waits_for_package_without_stopping_dispatch(post
             decision = _start_decision()
             plan = decision.commands[0].payload["plan"]
             plan["items"].append({**plan["items"][0], "summary": "Second marker"})
+            from vuzol.leadership.tasks import spec_digest
+
+            decision.commands[1].payload["spec"]["plan_hash"] = spec_digest(plan)
             return decision
 
     async with _factory(postgres_dsn) as factory:
@@ -691,10 +699,31 @@ async def test_queued_amendment_waits_for_package_without_stopping_dispatch(post
             task.status = TaskStatus.COMPLETED
             sequencer = WorkPackageSequencer(uow)
             next_item = await sequencer.observe_terminal(task_id=task.id)
-            assert next_item.task_id is not None and next_item.task_id != task.id
+            assert next_item.task_id is None
+            assert await session.scalar(select(func.count()).select_from(Task)) == 1
+            # The lead must explicitly dispatch the next item, even for queue amendments.
+            from vuzol.leadership.actor import Actor, server_agent_principal
+            from vuzol.leadership.batches import execute_batch
+            from vuzol.leadership.persistence import GoalDelegation
+            from vuzol.leadership.tasks import task_context
+
+            context = await task_context(session, goal)
+            produced = await execute_batch(
+                uow,
+                actor=Actor.agent(server_agent_principal(PROJECT), "worker"),
+                goal=goal,
+                delegation=await session.get(GoalDelegation, goal.delegation_id),
+                command=LeadCommand(
+                    name="start_task",
+                    project_id=PROJECT,
+                    idempotency_key="next",
+                    payload={"spec": context["start_spec"]},
+                ),
+                repeat_limit=2,
+            )
             assert await session.scalar(select(func.count()).select_from(Task)) == 2
             assert not await apply_pending_amendment(session, goal)
-            second_task = await session.get(Task, next_item.task_id)
+            second_task = await session.get(Task, uuid.UUID(produced["task_id"]))
             second_task.status = TaskStatus.COMPLETED
             await sequencer.observe_terminal(task_id=second_task.id)
             await session.flush()

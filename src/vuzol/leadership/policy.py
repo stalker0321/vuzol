@@ -80,9 +80,24 @@ def authorize(
         return PolicyDecision(False, "denied", "delegation_expired")
     if delegation_policy_revision != POLICY_REVISION:
         return PolicyDecision(False, "denied", "policy_revision_mismatch")
+    delegation_actions = delegation_actions | frozenset(
+        {
+            "propose_plan": "propose_batch",
+            "ask_owner": "request_permission",
+            "read_status": "get_project_state",
+        }.get(value, value)
+        for value in delegation_actions
+    )
     action = command.value
     if command is LeadCommandName.AMEND_GOAL and "request_revision" in delegation_actions:
         action = "request_revision"
+    equivalent = {
+        "start_task": "start_batch",
+        "cancel_task": "cancel_goal",
+        "accept_result": "apply_integration",
+    }
+    if action not in delegation_actions and action in equivalent:
+        action = equivalent[action]
     if action not in delegation_actions or action not in DELEGATED_ACTIONS:
         return PolicyDecision(False, "denied", "action_not_delegated")
     return PolicyDecision(True, "applied")

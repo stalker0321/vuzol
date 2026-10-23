@@ -87,6 +87,11 @@ async def materialize_run(
             "reasoning_effort": preference.reasoning_effort,
             "revision": preference.revision,
         }
+    from vuzol.leadership.tasks import execution_binding
+
+    binding = await execution_binding(session, task)
+    if binding is not None:
+        selected_route["managed_task"] = binding
     run = Run(
         task_id=task.id,
         source_interpretation_id=workflow.interpretation_id,
@@ -368,6 +373,10 @@ async def commit_step_outcome(
         await finalize_if_complete(session, run)
     task = await session.scalar(select(Task).where(Task.id == run.task_id).with_for_update())
     assert task is not None
+    if step.step_type == "review":
+        from vuzol.workflows.lead_events import publish_review_event
+
+        await publish_review_event(session, task, step)
     if step.step_type == "plan":
         enqueue_planner_trace(session, task=task, step=step)
     target = derive_task_status(await _steps_for_run(session, run.id), run.status)

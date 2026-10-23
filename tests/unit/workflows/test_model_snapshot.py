@@ -29,7 +29,8 @@ async def test_new_run_keeps_independent_assignment_snapshot(legacy):
     )
     task = Task(id=uuid.uuid4(), project_id="project", status=TaskStatus.INTERPRETED, version=1)
     session = AsyncMock()
-    session.scalar.side_effect = [None, task]
+    # Existing run, the task, then no plan link: not a managed-goal task.
+    session.scalar.side_effect = [None, task, None]
     session.get.return_value = preference
     session.add = MagicMock()
     workflow = MaterializedWorkflow("adaptive", "1", uuid.uuid4(), ())

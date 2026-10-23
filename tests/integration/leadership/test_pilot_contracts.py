@@ -71,6 +71,11 @@ async def test_package_ceiling_survives_failure_restart_and_receipt_replay(postg
         async with factory.begin() as session:
             package = await session.scalar(select(WorkPackage))
             package.status = WorkPackageStatus.STOPPED
+            from vuzol.storage.models import Task
+            from vuzol.storage.types import TaskStatus
+
+            task = await session.scalar(select(Task))
+            task.status = TaskStatus.FAILED
         await owner_command(
             factory,
             goal_id,

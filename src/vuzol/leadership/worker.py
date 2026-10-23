@@ -1,4 +1,4 @@
-"""One leased project-lead turn. The sequencer still owns the running package."""
+"""One leased project-lead turn with explicit task dispatch and acceptance."""
 
 from __future__ import annotations
 
@@ -43,13 +43,12 @@ from vuzol.leadership.verification import GoalVerification
 from vuzol.leadership.wakeups import (
     enabled_wakeup_key,
     enqueue_goal_wakeup,
-    terminal_wakeup_key,
 )
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, defer_outbox_item
 from vuzol.storage.models import Event, TransactionalOutbox, WorkPackage
 from vuzol.storage.records import OutboxLeaseToken
-from vuzol.storage.types import DeliveryStatus, WorkPackagePauseReason, WorkPackageStatus
+from vuzol.storage.types import DeliveryStatus, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
 _TERMINAL_GOAL = frozenset({"cancelled", "completed"})
@@ -204,6 +203,34 @@ class ProjectLeadWorker:
                 await self._complete(uow.session, token)
                 return None
             owner_event = item.payload.get("wakeup_kind") == "owner_message"
+            if not owner_event and item.payload.get("task_id"):
+                from vuzol.storage.models import Step, Task
+                from vuzol.storage.types import TaskStatus
+
+                task = await uow.session.get(Task, uuid.UUID(item.payload["task_id"]))
+                stale = task is None or item.payload.get("package_id") != str(
+                    goal.current_package_id
+                )
+                if item.payload.get("step_id"):
+                    step = await uow.session.get(Step, uuid.UUID(item.payload["step_id"]))
+                    stale = (
+                        stale
+                        or step is None
+                        or step.lease_generation != item.payload.get("generation")
+                        or step.version != item.payload.get("step_version")
+                    )
+                    stale = stale or (
+                        task is not None
+                        and task.status
+                        not in {TaskStatus.EXECUTING, TaskStatus.REVIEWING, TaskStatus.VALIDATING}
+                    )
+                else:
+                    stale = stale or (
+                        task is not None and task.version != item.payload.get("generation")
+                    )
+                if stale:
+                    await self._complete(uow.session, token)
+                    return None
             # Intake order also includes voices still being transcribed. Telegram
             # message ids are only ordered within a chat, not across the project.
             received_at = (
@@ -308,6 +335,18 @@ class ProjectLeadWorker:
             ):
                 await self._defer_in_session(uow.session, token, "lead_lease_held")
                 return None
+            if not owner_event and item.payload.get("task_id"):
+                from vuzol.discussion.sequencer import WorkPackageSequencer
+                from vuzol.storage.models import Task
+                from vuzol.workflows.lead_events import OBSERVED_TASK_STATUSES
+
+                task = await uow.session.get(Task, uuid.UUID(item.payload["task_id"]))
+                if (
+                    task is not None
+                    and task.status in OBSERVED_TASK_STATUSES
+                    and task.status.value != "waiting_approval"
+                ):
+                    await WorkPackageSequencer(uow).observe_terminal(task_id=task.id)
             await apply_pending_amendment(uow.session, goal)
             if goal.constraints.get("pending_amendment") and not owner_event:
                 await self._complete(uow.session, token)
@@ -375,6 +414,8 @@ class ProjectLeadWorker:
                 if item is not None and item.payload.get("wakeup_kind") == "owner_message"
                 else None
             )
+            from vuzol.leadership.tasks import task_context
+
             return LeadSnapshot(
                 goal_id=goal.id,
                 project_id=goal.project_id,
@@ -398,6 +439,8 @@ class ProjectLeadWorker:
                 result_context={
                     **await result_context(uow.session, goal, package),
                     "work_limits": goal.constraints.get("work_limits", {}),
+                    "task_control": await task_context(uow.session, goal),
+                    "event": dict(item.payload) if item is not None else None,
                     "pending_amendment": goal.constraints.get("pending_amendment"),
                     "queued_amendment": goal.constraints.get("queued_amendment"),
                 },
@@ -671,6 +714,12 @@ class ProjectLeadWorker:
             turn = await _turn(uow.session, goal_id, wakeup_id)
             if goal is None or not await claim_current(uow.session, goal, claim, turn):
                 raise LeaseLost("project lead park claim expired")
+            if isinstance(turn.decision, dict):
+                from vuzol.leadership.notices import reject_saved_commands
+
+                await reject_saved_commands(
+                    uow.session, goal, wakeup_id, turn.decision, "decision_stale"
+                )
             turn.status = "lost"
             if goal is not None and goal.lease_owner == self._owner:
                 goal.lease_owner = None
@@ -756,8 +805,6 @@ class ProjectLeadWorker:
                     continue
             if goal.lifecycle == "paused":
                 continue
-            if goal.lifecycle == "waiting" and not await _waiting_exit_ready(session, goal):
-                continue
             if goal.current_package_id is None:
                 if goal.lifecycle != "active":
                     continue
@@ -770,16 +817,21 @@ class ProjectLeadWorker:
                 )
                 await continue_if_idle(session, goal, repeat_limit=self._repeat_limit)
                 continue
-            package = await session.get(WorkPackage, goal.current_package_id)
-            kind = _terminal_kind(package) if package is not None else None
-            if package is not None and kind is not None:
-                await enqueue_goal_wakeup(
-                    session,
-                    goal_id=goal.id,
-                    idempotency_key=terminal_wakeup_key(goal.id, package.id, package.version),
-                    package_id=package.id,
-                    kind=kind,
+            from vuzol.storage.models import MaterializationLink, Task
+            from vuzol.workflows.lead_events import publish_task_event
+
+            tasks = await session.scalars(
+                select(Task)
+                .join(
+                    MaterializationLink,
+                    MaterializationLink.task_id == Task.id,
                 )
+                .where(MaterializationLink.work_package_id == goal.current_package_id)
+            )
+            for task in tasks:
+                # Same keys as the state transaction: recovery cannot create a
+                # second ordinary notification for an already consumed event.
+                await publish_task_event(session, task)
             await continue_if_idle(session, goal, repeat_limit=self._repeat_limit)
 
     def _service(self) -> LeadershipCommandService:
@@ -831,6 +883,12 @@ class ProjectLeadWorker:
             turn = await _turn(uow.session, goal_id, wakeup_id)
             if goal is None or not await claim_current(uow.session, goal, claim, turn):
                 raise LeaseLost("project lead lost claim expired")
+            if isinstance(turn.decision, dict):
+                from vuzol.leadership.notices import reject_saved_commands
+
+                await reject_saved_commands(
+                    uow.session, goal, wakeup_id, turn.decision, "decision_stale"
+                )
             turn.status = "lost"
             if goal is not None and goal.lease_owner == self._owner:
                 goal.lease_owner = None
@@ -881,20 +939,6 @@ async def _command_receipt(
     )
 
 
-def _terminal_kind(package: WorkPackage) -> str | None:
-    if package.status is WorkPackageStatus.COMPLETED:
-        return "completed"
-    if package.status in {WorkPackageStatus.STOPPED, WorkPackageStatus.DISCARDED}:
-        return package.status.value
-    if package.status is not WorkPackageStatus.PAUSED:
-        return None
-    if package.pause_reason is WorkPackagePauseReason.ITEM_FAILED:
-        return "failed"
-    if package.pause_reason is WorkPackagePauseReason.ITEM_BLOCKED:
-        return "blocked"
-    return None
-
-
 async def _waiting_exit_ready(session: AsyncSession, goal: ManagedGoal) -> bool:
     condition = goal.wakeup_condition if isinstance(goal.wakeup_condition, dict) else {}
     if condition.get("kind") != "package":
@@ -906,6 +950,10 @@ async def _waiting_exit_ready(session: AsyncSession, goal: ManagedGoal) -> bool:
     package = await session.get(WorkPackage, package_id)
     if package is None:
         return False
+    if package.managed_goal_id is not None and package.status is WorkPackageStatus.RUNNING:
+        from vuzol.leadership.tasks import task_turn_ready
+
+        return await task_turn_ready(session, package)
     return package.status in {
         WorkPackageStatus.COMPLETED,
         WorkPackageStatus.PAUSED,

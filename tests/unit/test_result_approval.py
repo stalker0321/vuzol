@@ -552,14 +552,31 @@ async def test_plan_approval_covers_every_intermediate_result(
     count: int,
     expected: bool,
 ) -> None:
-    link = SimpleNamespace(ordinal=ordinal, plan_revision_id=uuid.uuid4())
+    link = SimpleNamespace(
+        ordinal=ordinal, plan_revision_id=uuid.uuid4(), work_package_id=uuid.uuid4()
+    )
     result = MagicMock()
     result.scalar_one_or_none.return_value = link
     session = MagicMock()
     session.execute = AsyncMock(return_value=result)
     session.scalar = AsyncMock(return_value=count)
+    session.get = AsyncMock(return_value=SimpleNamespace(managed_goal_id=None))
 
     assert await _plan_approval_covers_intermediate_result(session, uuid.uuid4()) is expected
+
+
+@pytest.mark.anyio
+async def test_plan_approval_never_covers_a_managed_goal_result() -> None:
+    link = SimpleNamespace(ordinal=1, plan_revision_id=uuid.uuid4(), work_package_id=uuid.uuid4())
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = link
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.scalar = AsyncMock(return_value=3)
+    session.get = AsyncMock(return_value=SimpleNamespace(managed_goal_id=uuid.uuid4()))
+
+    # The lead accepts every managed result explicitly with accept_result.
+    assert not await _plan_approval_covers_intermediate_result(session, uuid.uuid4())
 
 
 @pytest.mark.anyio

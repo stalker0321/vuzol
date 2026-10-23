@@ -301,6 +301,9 @@ async def transition_task(
     await _event(
         session, task.id, "task", previous.value, target.value, actor_type, actor_id, payload
     )
+    from vuzol.workflows.lead_events import publish_task_event
+
+    await publish_task_event(session, task)
 
 
 async def transition_run(

@@ -98,6 +98,8 @@ def _plan(title: str, summary: str, criteria: list[str], scope: str) -> dict[str
                 "expected_outcome": summary,
                 "completion_criteria": criteria,
                 "allowed_scope": scope,
+                "local_id": None,
+                "dependencies": [],
             }
         ],
     }
@@ -118,7 +120,20 @@ def _start_decision() -> LeadDecision:
                 "plan": _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")
             },
         ),
-        LeadCommandDraft(name="start_batch", payload={}),
+        LeadCommandDraft(
+            name="start_task",
+            payload={
+                "spec": {
+                    "ordinal": 1,
+                    "scope_revision": 1,
+                    "plan_hash": __import__(
+                        "vuzol.leadership.tasks", fromlist=["spec_digest"]
+                    ).spec_digest(
+                        _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")
+                    ),
+                }
+            },
+        ),
         usage={"cost_known": True, "cost_amount": 0},
     )
 
@@ -701,6 +716,33 @@ class _GoalModel:
         )
 
 
+async def accept_current_result(factory):
+    from vuzol.leadership.actor import server_agent_principal
+    from vuzol.leadership.tasks import task_context
+
+    async with factory() as session:
+        goal = await session.scalar(select(ManagedGoal))
+        context = await task_context(session, goal)
+        ready = [task for task in context["tasks"] if task["status"] == "waiting_approval"]
+        assert len(ready) == 1
+        spec = ready[0]["accept_spec"]
+        version, goal_id = goal.version, goal.id
+    result = await _lead_service(factory).apply_agent(
+        server_agent_principal(PROJECT),
+        "worker",
+        LeadCommand(
+            name="accept_result",
+            project_id=PROJECT,
+            goal_id=goal_id,
+            expected_version=version,
+            idempotency_key=f"accept:{spec['task_id']}",
+            payload=spec,
+        ),
+    )
+    assert result.status == "applied", result
+    return result
+
+
 async def _drain(workers: tuple[Any, ...], limit: int = 80) -> None:
     for _ in range(limit):
         if not any([await worker.process_one() for worker in workers]):
@@ -798,6 +840,8 @@ async def run_managed_goal_flow(
             first = _provider_worker(factory, settings, owner="lead-1")
             assert await first.process_one()
             await _drain(background)
+            await accept_current_result(factory)
+            await _drain(background)
             if control_before_apply is not None:
                 from vuzol.storage.models import Effect
                 from vuzol.storage.types import TaskStatus
@@ -834,7 +878,7 @@ async def run_managed_goal_flow(
                 approved = await session.scalar(
                     select(func.count())
                     .select_from(Event)
-                    .where(Event.event_type == "result.auto_approved_by_managed_integration")
+                    .where(Event.event_type == "result.accepted_by_lead")
                 )
                 assert approved == 1
 
@@ -866,17 +910,31 @@ async def run_managed_goal_flow(
                 assert child["processed"] is True
                 trace["restart"] = "separate Python process; fresh composition and DB engine"
             else:
-                assert await resumed.process_one()
+                for _ in range(10):
+                    assert await resumed.process_one()
+                    async with factory() as session:
+                        if await session.scalar(
+                            select(func.count())
+                            .select_from(LeadershipTurn)
+                            .where(LeadershipTurn.owner == "lead-2")
+                        ):
+                            break
             if split_corrective_turn:
                 assert await _package_count(factory) == 1
                 resumed = _provider_worker(factory, settings, owner="lead-2-continuation")
                 assert await resumed.process_one()
             assert await _package_count(factory) == 2
-            assert not await resumed.process_one()
+            # Earlier review/approval events may still be queued; stale events
+            # are consumed without starting work or repeating model inference.
+            for _ in range(10):
+                if not await resumed.process_one():
+                    break
             assert await _package_count(factory) == 2
             await _drain(background)
+            await accept_current_result(factory)
+            await _drain(background)
             closer = _provider_worker(factory, settings, owner="lead-3")
-            for _ in range(3):
+            for _ in range(15):
                 async with factory() as session:
                     goal = await session.scalar(select(ManagedGoal))
                     if goal is not None and goal.lifecycle == "completed":
@@ -951,7 +1009,7 @@ import os
 import sys
 from pathlib import Path
 from tests.integration.leadership.test_managed_goal_flow import (
-    _factory, _provider_worker, _runtime,
+    _factory, _provider_worker, _runtime, _package_count,
 )
 
 async def main():
@@ -959,7 +1017,11 @@ async def main():
     runtime = _runtime(Path(root), Path(repository), lead=True)
     async with _factory(dsn) as factory:
         worker = _provider_worker(factory, runtime.settings, owner="lead-restarted-process")
-        processed = await worker.process_one()
+        processed = False
+        for _ in range(15):
+            processed = await worker.process_one() or processed
+            if await _package_count(factory) == 2:
+                break
     print("LEAD_RESTART " + json.dumps({"pid": os.getpid(), "processed": processed}))
 
 asyncio.run(main())
@@ -1014,7 +1076,18 @@ def _provider_worker(factory, settings, *, owner, transport=None):
                 payload = {
                     "commands": [
                         {"name": "propose_batch", "payload": {"plan": plan}},
-                        {"name": "start_batch", "payload": {}},
+                        {
+                            "name": "start_task",
+                            "payload": {
+                                "spec": {
+                                    "ordinal": 1,
+                                    "scope_revision": 1,
+                                    "plan_hash": __import__(
+                                        "vuzol.leadership.tasks", fromlist=["spec_digest"]
+                                    ).spec_digest(plan),
+                                }
+                            },
+                        },
                     ]
                 }
             return ProviderResult(

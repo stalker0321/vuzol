@@ -9,9 +9,6 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.config.settings import get_settings
-from vuzol.leadership.persistence import GoalDelegation, ManagedGoal
-from vuzol.leadership.rules import delegation_is_expired, integration_branch_rejection
 from vuzol.storage.models import (
     Approval,
     Event,
@@ -123,18 +120,11 @@ async def ensure_result_approval(
     approval_step.external_idempotency_key = f"apply-result:{digest}"
     await session.flush()
     covered_by_plan = await _plan_approval_covers_intermediate_result(session, run.task_id)
-    covered_by_goal = False
-    if not covered_by_plan:
-        covered_by_goal = await _managed_integration_may_approve(session, run.task_id)
-    if covered_by_plan or covered_by_goal:
+    if covered_by_plan:
         approval.status = ApprovalStatus.APPROVED
         approval.decided_at = func.now()
-        actor_id = "approved_plan" if covered_by_plan else "managed_integration"
-        event_type = (
-            "result.auto_approved_by_plan"
-            if covered_by_plan
-            else "result.auto_approved_by_managed_integration"
-        )
+        actor_id = "approved_plan"
+        event_type = "result.auto_approved_by_plan"
         await transition_step(
             session,
             approval_step,
@@ -167,6 +157,9 @@ async def _plan_approval_covers_intermediate_result(
     ).scalar_one_or_none()
     if link is None:
         return False
+    package = await session.get(WorkPackage, link.work_package_id)
+    if package is not None and package.managed_goal_id is not None:
+        return False
     item_count = await session.scalar(
         select(func.count())
         .select_from(PlanRevisionItem)
@@ -178,56 +171,6 @@ async def _plan_approval_covers_intermediate_result(
     # planning/review, but must not silently turn an approved chain into a set
     # of per-item approvals.
     return link.ordinal < int(item_count or 0)
-
-
-async def _managed_integration_may_approve(session: AsyncSession, task_id: uuid.UUID) -> bool:
-    """Auto-accept only the final item onto the goal's managed branch."""
-
-    try:
-        settings = get_settings()
-    except ValueError:
-        return False
-    if not settings.project_lead.enabled:
-        return False
-    link = await session.scalar(
-        select(MaterializationLink).where(MaterializationLink.task_id == task_id)
-    )
-    if link is None:
-        return False
-    package = await session.get(WorkPackage, link.work_package_id)
-    if package is None or package.managed_goal_id is None:
-        return False
-    item_count = await session.scalar(
-        select(func.count())
-        .select_from(PlanRevisionItem)
-        .where(PlanRevisionItem.plan_revision_id == link.plan_revision_id)
-    )
-    if link.ordinal != int(item_count or 0):
-        return False
-    goal = await session.get(ManagedGoal, package.managed_goal_id)
-    if goal is None or goal.lifecycle in {"paused", "cancelled", "completed"}:
-        return False
-    delegation = await session.get(GoalDelegation, goal.delegation_id)
-    if delegation is None or delegation.revoked_at is not None:
-        return False
-    if delegation_is_expired(delegation.expires_at, now=datetime.now(UTC)):
-        return False
-    if "apply_integration" not in {str(action) for action in delegation.allowed_actions}:
-        return False
-    if package.integration_branch != goal.integration_branch:
-        return False
-    if package.integration_target_branch != goal.integration_branch:
-        return False
-    default_branch = goal.constraints.get("project_default_branch")
-    default = default_branch if isinstance(default_branch, str) and default_branch else None
-    return (
-        integration_branch_rejection(
-            goal.integration_branch,
-            prefix=settings.project_lead.integration_branch_prefix,
-            default_branch=default,
-        )
-        is None
-    )
 
 
 def verified_envelope(step: Step, approval: Approval) -> dict[str, Any]:

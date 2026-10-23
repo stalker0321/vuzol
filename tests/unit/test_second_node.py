@@ -123,7 +123,7 @@ def test_migration_chain_has_single_head() -> None:
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
     # Role assignment, supervised turn calls and account admission share one chain.
-    assert heads == ["e8b5a61fa505"]  # pragma: allowlist secret - migration identifier
+    assert heads == ["f4b8c2d91a06"]  # pragma: allowlist secret - migration identifier
     seen: set[str] = set()
     revision: str | None = heads[0]
     while revision is not None:

@@ -24,7 +24,10 @@ async def continue_if_idle(session: AsyncSession, goal: ManagedGoal, *, repeat_l
         and package.managed_goal_id == goal.id
         and package.status is WorkPackageStatus.RUNNING
     ):
-        return  # The sequencer owns this job, including its terminal notification.
+        from vuzol.leadership.tasks import task_turn_ready
+
+        if not await task_turn_ready(session, package):
+            return
     outstanding = await session.scalar(
         select(TransactionalOutbox.id)
         .where(

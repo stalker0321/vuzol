@@ -115,10 +115,8 @@ def _decision(*commands: LeadCommandDraft, usage: dict[str, Any] | None = None) 
 def _start_decision() -> LeadDecision:
     return _decision(
         LeadCommandDraft(
-            name="propose_batch",
-            payload={
-                "plan": _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")
-            },
+            name="request_plan",
+            payload={"goal": "Write the first marker", "constraints": ["MARKER.txt"]},
         ),
         usage={"cost_known": True, "cost_amount": 0},
     )
@@ -188,7 +186,18 @@ def _worker(
     repeat_limit: int = 2,
     owner: str = "lead-test",
 ) -> ProjectLeadWorker:
-    return ProjectLeadWorker(
+    class LifecycleWorker(ProjectLeadWorker):
+        async def process_one(self):
+            from tests.integration.leadership.planning_helpers import run_planner
+
+            if await run_planner(factory, getattr(model, "planner_plan", None)):
+                return True
+            worked = await super().process_one()
+            if worked:
+                await run_planner(factory, getattr(model, "planner_plan", None))
+            return worked
+
+    return LifecycleWorker(
         factory,
         owner=owner,
         model=model,
@@ -342,7 +351,7 @@ async def test_crash_before_model_then_applies_once(postgres_dsn: str) -> None:
             turn = await session.scalar(select(LeadershipTurn))
             goal = await session.scalar(select(ManagedGoal))
             assert turn is not None and turn.lease_epoch == 1
-            assert goal is not None and goal.lease_epoch == 1
+            assert goal is not None and goal.lease_epoch == 2
             assert turn.usage == {"cost_known": False}
 
 
@@ -382,6 +391,9 @@ async def test_crash_after_response_applies_on_resume(postgres_dsn: str) -> None
         assert await _package_count(factory) == 0
         assert await worker.process_one()
         assert model.calls == 1
+        from tests.integration.leadership.planning_helpers import run_planner
+
+        assert await run_planner(factory)
         assert await _package_count(factory) == 1
 
 
@@ -418,9 +430,13 @@ async def test_crash_before_ack_retries_the_same_commands(postgres_dsn: str) -> 
         )
         with pytest.raises(RuntimeError, match="crash-before-ack"):
             await worker.process_one()
-        assert await _package_count(factory) == 1
-        assert await worker.process_one()
+        assert await _package_count(factory) == 0  # request queued, planner has not run
+        assert await worker.process_one()  # queued planner defers behind the live lead lease
+        assert await worker.process_one()  # replay the lead acknowledgement
         assert model.calls == 1
+        from tests.integration.leadership.planning_helpers import run_planner
+
+        assert await run_planner(factory)
         assert await _package_count(factory) == 1
         async with factory() as session:
             turn = await session.scalar(select(LeadershipTurn))
@@ -478,19 +494,12 @@ async def test_start_cannot_recreate_a_stopped_plan(postgres_dsn: str) -> None:
         goal_id = await _enable(factory, session_id)
         service = _lead_service(factory, repeat_limit=1, with_executor=True)
         principal = f"agent:project-lead:{PROJECT}"
-        proposed = await service.apply_agent(
-            principal,
-            "worker",
-            LeadCommand(
-                name="propose_batch",
-                project_id=PROJECT,
-                goal_id=goal_id,
-                expected_version=1,
-                idempotency_key="propose-repeat",
-                payload={
-                    "plan": _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")
-                },
-            ),
+        from tests.integration.leadership.planning_helpers import seed_plan
+
+        proposed = await seed_plan(
+            factory,
+            goal_id,
+            {"plan": _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")},
         )
         assert proposed.status == "applied"
         started = await service.apply_agent(
@@ -1022,6 +1031,7 @@ asyncio.run(main())
 
 
 def _provider_worker(factory, settings, *, owner, transport=None):
+    from tests.integration.leadership.planning_helpers import pin_planner, planner_profile
     from tests.integration.leadership.test_lead_surface import _profile
 
     from vuzol.config.models import ProviderRole
@@ -1034,7 +1044,17 @@ def _provider_worker(factory, settings, *, owner, transport=None):
             del profile, cancellation
             assert request.timeout_seconds == 180
             prompt = request.original_input
-            if request.role is ProviderRole.REVIEWER:
+            if request.role is ProviderRole.PLANNER:
+                second = request.task_draft["previous_revision"] is not None
+                payload = {
+                    "plan": _plan(
+                        "Package B" if second else "Package A",
+                        "Write the second marker" if second else "Write the first marker",
+                        ["requested-outcome"] if second else ["marker-a"],
+                        "SECOND.txt" if second else "MARKER.txt",
+                    )
+                }
+            elif request.role is ProviderRole.REVIEWER:
                 body = json.loads(prompt.split("\n", 1)[1])
                 files = body["files"]
                 passed = (
@@ -1078,7 +1098,10 @@ def _provider_worker(factory, settings, *, owner, transport=None):
                 )
                 payload = {
                     "commands": [
-                        {"name": "propose_batch", "payload": {"plan": plan}},
+                        {
+                            "name": "request_plan",
+                            "payload": {"goal": plan["title"], "constraints": []},
+                        },
                     ]
                 }
             return ProviderResult(
@@ -1096,6 +1119,7 @@ def _provider_worker(factory, settings, *, owner, transport=None):
     profiles = ProfileRegistry(
         (
             _profile().model_copy(update={"context_limit": 16000}),
+            planner_profile(),
             _profile().model_copy(
                 update={
                     "id": "goal-review",
@@ -1116,7 +1140,7 @@ def _provider_worker(factory, settings, *, owner, transport=None):
             )
         }
     )
-    return build_project_lead_worker(
+    worker = build_project_lead_worker(
         factory,
         settings=configured,
         profiles=profiles,
@@ -1125,7 +1149,31 @@ def _provider_worker(factory, settings, *, owner, transport=None):
         repository_paths={PROJECT: TEST_REPOSITORY_ROOT},
         adapter=transport if transport is not None else Transport(),
         reviewer_adapter=transport if transport is not None else Transport(),
+        planner_adapter=transport if transport is not None else Transport(),
     )
+
+    original_process = worker.process_one
+
+    async def process_with_planner():
+        from vuzol.storage.models import TransactionalOutbox
+        from vuzol.storage.types import DeliveryStatus
+
+        await pin_planner(factory)
+        worked = await original_process()
+        async with factory() as session:
+            pending = await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.destination == "project_lead",
+                    TransactionalOutbox.payload["wakeup_kind"].as_string() == "plan_requested",
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                )
+            )
+        if worked and pending:
+            await original_process()
+        return worked
+
+    worker.process_one = process_with_planner
+    return worker
 
 
 def _workflow_workers(

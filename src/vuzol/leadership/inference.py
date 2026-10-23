@@ -46,6 +46,8 @@ _logger = get_logger(__name__)
 
 
 def _failure_reason(failure: ProviderFailureDetails | None, purpose: str) -> str:
+    if purpose == "planning":
+        return "planner_" + (failure.category.value if failure else "unavailable")
     review = purpose == "project_goal_review"
     if failure is not None and failure.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT:
         return "goal_review_invalid" if review else "lead_response_invalid"
@@ -86,7 +88,7 @@ async def invoke(
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
-    phase = "goal_review" if purpose == "project_goal_review" else "lead"
+    phase = {"project_goal_review": "goal_review", "planning": "planner"}.get(purpose, "lead")
     estimate = estimate_reservation(
         profile, input_tokens=request.max_input_tokens, output_tokens=request.max_output_tokens
     )
@@ -109,7 +111,7 @@ async def invoke(
                         or prior.profile_revision != content_revision(profile)
                     ):
                         raise LeadModelUnavailable("lead_inference_reconciliation")
-                    if prior.state == "received" and prior.result is not None:
+                    if prior.state in {"received", "not_sent"} and prior.result is not None:
                         replay = ProviderResult.model_validate(prior.result)
                         if replay.status is not ProviderResultStatus.SUCCEEDED:
                             raise LeadModelUnavailable(_failure_reason(replay.failure, purpose))
@@ -163,7 +165,9 @@ async def invoke(
                     )
                 )
     except BudgetExceeded as error:
-        raise LeadModelUnavailable("lead_budget_exceeded") from error
+        raise LeadModelUnavailable(
+            "planner_budget_exceeded" if phase == "planner" else "lead_budget_exceeded"
+        ) from error
     request = request.model_copy(
         update={
             "reserved_cost_units": estimate.cost_units,

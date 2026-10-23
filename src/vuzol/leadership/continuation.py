@@ -12,7 +12,9 @@ from vuzol.storage.models import Event, TransactionalOutbox, WorkPackage
 from vuzol.storage.types import DeliveryStatus, WorkPackageStatus
 
 
-async def continue_if_idle(session: AsyncSession, goal: ManagedGoal, *, repeat_limit: int) -> None:
+async def continue_if_idle(
+    session: AsyncSession, goal: ManagedGoal, *, repeat_limit: int, count_pending: bool = False
+) -> None:
     """Caller holds the goal lock; ack and continuation commit or roll back together."""
     if goal.lifecycle != "active" or goal.wakeup_condition is not None:
         return
@@ -37,7 +39,7 @@ async def continue_if_idle(session: AsyncSession, goal: ManagedGoal, *, repeat_l
         )
         .limit(1)
     )
-    if outstanding is not None:
+    if outstanding is not None and not count_pending:
         return
     key = continuation_wakeup_key(goal.id, goal.version)
     existing = await session.scalar(
@@ -79,6 +81,8 @@ async def continue_if_idle(session: AsyncSession, goal: ManagedGoal, *, repeat_l
                 payload={"reason": goal.waiting_reason, "version": goal.version},
             )
         )
+        return
+    if outstanding is not None:
         return
     await enqueue_goal_wakeup(
         session,

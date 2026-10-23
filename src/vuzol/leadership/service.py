@@ -129,7 +129,8 @@ class LeadershipCommandService:
             # locks its discussion row. Keep project admission ahead of receipts.
             if name in {
                 LeadCommandName.ENABLE_MANAGED_GOAL,
-                LeadCommandName.PROPOSE_BATCH,
+                LeadCommandName.REQUEST_PLAN,
+                LeadCommandName.REVISE_PLAN,
                 LeadCommandName.START_BATCH,
                 LeadCommandName.START_TASK,
             }:
@@ -194,7 +195,9 @@ class LeadershipCommandService:
                     _Outcome(CommandStatus.STALE, version_problem, {}, goal),
                 )
             try:
-                outcome = await self._perform(uow, actor, name, command, goal, delegation)
+                outcome = await self._perform(
+                    uow, actor, name, command, goal, delegation, claim=claim
+                )
             except DomainError as error:
                 if goal is not None:
                     await uow.session.refresh(goal)
@@ -256,6 +259,8 @@ class LeadershipCommandService:
         command: LeadCommand,
         goal: ManagedGoal | None,
         delegation: GoalDelegation | None,
+        *,
+        claim: TurnClaim | None = None,
     ) -> _Outcome:
         assert uow.session is not None
         if name is LeadCommandName.ENABLE_MANAGED_GOAL:
@@ -265,7 +270,8 @@ class LeadershipCommandService:
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
         if goal.lifecycle == "paused" and name not in READ_COMMANDS | {
-            LeadCommandName.PROPOSE_BATCH,
+            LeadCommandName.REQUEST_PLAN,
+            LeadCommandName.REVISE_PLAN,
             LeadCommandName.AMEND_GOAL,
             LeadCommandName.CANCEL_TASK,
             LeadCommandName.SET_WORK_LIMITS,
@@ -294,13 +300,27 @@ class LeadershipCommandService:
         if name in {
             LeadCommandName.START_BATCH,
             LeadCommandName.START_TASK,
-            LeadCommandName.PROPOSE_BATCH,
+            LeadCommandName.REQUEST_PLAN,
+            LeadCommandName.REVISE_PLAN,
             LeadCommandName.WAIT_FOR,
         }:
-            if goal.lifecycle == "waiting" and not (
-                name is LeadCommandName.PROPOSE_BATCH and goal.waiting_reason == "plan_approval"
-            ):
-                return _Outcome(CommandStatus.DENIED, "goal_waiting", {}, goal)
+            if goal.lifecycle == "waiting":
+                planning = name in {LeadCommandName.REQUEST_PLAN, LeadCommandName.REVISE_PLAN}
+                from vuzol.storage.models import TransactionalOutbox
+
+                source = (
+                    await uow.session.get(TransactionalOutbox, claim.wakeup_id) if claim else None
+                )
+                permitted = planning and (
+                    goal.waiting_reason == "plan_approval"
+                    or actor.kind is ActorKind.HUMAN
+                    or (
+                        source is not None
+                        and source.payload.get("wakeup_kind") in {"owner_message", "plan_requested"}
+                    )
+                )
+                if not permitted:
+                    return _Outcome(CommandStatus.DENIED, "goal_waiting", {}, goal)
             if goal.constraints.get("pending_amendment"):
                 return _Outcome(CommandStatus.DENIED, "amendment_pending", {}, goal)
         if name is LeadCommandName.SET_WORK_LIMITS:
@@ -403,19 +423,34 @@ class LeadershipCommandService:
             goal.lease_owner = None
             goal.lease_until = None
             return _transition(goal, actor, "waiting", "wait_for", CommandStatus.WAITING)
-        if name is LeadCommandName.PROPOSE_BATCH:
-            from vuzol.leadership.batches import propose_plan
+        if name in {LeadCommandName.REQUEST_PLAN, LeadCommandName.REVISE_PLAN}:
+            from vuzol.leadership.planning import apply_outcome, queue_request
+            from vuzol.storage.models import TransactionalOutbox
 
-            async with uow.session.begin_nested():
-                result = await propose_plan(
+            source = await uow.session.get(TransactionalOutbox, claim.wakeup_id) if claim else None
+            if source is not None and source.payload.get("wakeup_kind") == "plan_requested":
+                assert claim is not None
+                result = await apply_outcome(
                     uow,
                     goal,
-                    _plan_draft(command.payload),
-                    repository_path=self._repository_paths.get(goal.project_id),
+                    claim,
+                    repository=self._repository_paths.get(goal.project_id),
                 )
+            else:
+                result = await queue_request(uow.session, goal, command)
+                if source is not None and source.payload.get("wakeup_kind") == "owner_message":
+                    requested = await uow.session.get(
+                        TransactionalOutbox, uuid.UUID(result["planner_request_id"])
+                    )
+                    assert requested is not None
+                    requested.payload = {**requested.payload, "owner_corrections": source.payload}
             _bump(goal, actor)
             return _Outcome(CommandStatus.APPLIED, None, {"version": goal.version, **result}, goal)
         if name in {LeadCommandName.START_BATCH, LeadCommandName.START_TASK}:
+            from vuzol.leadership.planning import pending_request
+
+            if await pending_request(uow.session, goal):
+                raise DomainError("planner_request_pending")
             if self._batch_executor is None:
                 return _Outcome(CommandStatus.UNSUPPORTED, "batch_executor_unbound", {}, goal)
             async with uow.session.begin_nested():
@@ -584,7 +619,7 @@ class LeadershipCommandService:
             owner_user_id=actor.user_id,
             agent_principal_id=principal,
             policy_revision=POLICY_REVISION,
-            allowed_actions=sorted(DELEGATED_ACTIONS),
+            allowed_actions=sorted(DELEGATED_ACTIONS - {"propose_batch", "request_revision"}),
             integration_branch=branch,
             environments=["isolated"],
         )
@@ -664,6 +699,10 @@ def _decision(
         policy_revision = delegation.policy_revision
         delegation_project = delegation.project_id
         delegation_principal = delegation.agent_principal_id
+    if command.name in {"propose_batch", "propose_plan"} and not actions.intersection(
+        {"propose_batch", "propose_plan"}
+    ):
+        return PolicyDecision(False, "denied", "action_not_delegated")
     return authorize(
         actor,
         name,

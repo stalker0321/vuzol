@@ -537,12 +537,16 @@ class TurnStartupReconciler:
 def recovered_turn_binding(
     process: SupervisedProcess, *, enabled: Callable[[], bool]
 ) -> tuple[TurnInvocationContext, ProcessEnvelope]:
+    from vuzol.execution.turn_transport import valid_turn_workspace
+
     payload = process.runtime_metadata["turn_context"]
     for key in ("lease_epoch", "outbox_generation", "version", "fence_epoch", "scope_revision"):
         if type(payload[key]) is not int or payload[key] < 1:
             raise ValueError("malformed recovered turn fencing identity")
     if not isinstance(payload["owner"], str) or not payload["owner"]:
         raise ValueError("missing turn launch owner")
+    if type(payload.get("conversational", False)) is not bool:
+        raise ValueError("malformed recovered turn conversational binding")
     context = TurnInvocationContext(
         claim=TurnClaim(
             goal_id=uuid.UUID(payload["goal_id"]),
@@ -556,6 +560,7 @@ def recovered_turn_binding(
         version=payload["version"],
         fence_epoch=payload["fence_epoch"],
         scope_revision=payload["scope_revision"],
+        conversational=payload.get("conversational", False),
         enabled=enabled,
     )
     envelope = ProcessEnvelope.model_validate(
@@ -574,7 +579,7 @@ def recovered_turn_binding(
         or envelope.container_name != process.container_id
         or envelope.sandbox.stable_hash != process.sandbox_spec_hash
         or list(envelope.argv) != process.command_envelope.get("argv")
-        or not envelope.sandbox.empty_workspace
+        or not valid_turn_workspace(envelope)
         or any(
             value is not None
             for value in (process.task_id, process.run_id, process.step_id, process.worktree_id)

@@ -82,7 +82,8 @@ def authorize(
         return PolicyDecision(False, "denied", "policy_revision_mismatch")
     delegation_actions = delegation_actions | frozenset(
         {
-            "propose_plan": "propose_batch",
+            "propose_plan": "request_plan",
+            "propose_batch": "request_plan",
             "ask_owner": "request_permission",
             "read_status": "get_project_state",
         }.get(value, value)
@@ -95,6 +96,7 @@ def authorize(
         "start_task": "start_batch",
         "cancel_task": "cancel_goal",
         "accept_result": "apply_integration",
+        "revise_plan": "request_plan",
     }
     if action not in delegation_actions and action in equivalent:
         action = equivalent[action]

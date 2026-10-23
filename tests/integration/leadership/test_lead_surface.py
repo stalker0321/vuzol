@@ -215,7 +215,7 @@ async def _drain(factory: object) -> str:
         retry_min_seconds=0,
         retry_max_seconds=1,
     )
-    for _ in range(8):
+    for _ in range(32):
         if not await delivery.deliver_one():
             break
     return "\n".join(text for _, _, text in client.sent)

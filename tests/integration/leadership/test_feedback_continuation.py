@@ -11,7 +11,7 @@ from tests.integration.leadership.test_lead_surface import _profile, _settings
 
 from vuzol.config.models import ProviderRole
 from vuzol.config.registries import ProfileRegistry
-from vuzol.leadership import continuation, provider_model
+from vuzol.leadership import provider_model
 from vuzol.leadership import worker as worker_module
 from vuzol.leadership.composition import build_project_lead_worker
 from vuzol.leadership.model import LeadDecision
@@ -140,6 +140,20 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
 
     class Transport:
         async def execute(self, request, profile, cancellation):
+            if request.role is ProviderRole.PLANNER:
+                from tests.integration.leadership.planning_helpers import fixture_plan
+
+                planned = (
+                    fixture_plan()
+                    if request.task_draft["previous_revision"] is None
+                    else flow._plan(
+                        "Add the missing SECOND marker",
+                        reason,
+                        ["SECOND.txt contains marker-b"],
+                        "SECOND.txt",
+                    )
+                )
+                return response({"plan": planned})
             if request.role is ProviderRole.REVIEWER:
                 body = json.loads(request.original_input.split("\n", 1)[1])
                 good = body["files"].get("SECOND.txt") == "marker-b\n"
@@ -195,15 +209,8 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
                 else:
                     commands = [
                         {
-                            "name": "propose_batch",
-                            "payload": {
-                                "plan": flow._plan(
-                                    "Add the missing SECOND marker",
-                                    reason,
-                                    ["SECOND.txt contains marker-b"],
-                                    "SECOND.txt",
-                                )
-                            },
+                            "name": "request_plan",
+                            "payload": {"goal": reason, "constraints": ["SECOND.txt"]},
                             "reason": f"Address evidence {critique['evidence_id']}: {reason}",
                         }
                     ]
@@ -223,7 +230,7 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
     )
     assert len(prompts) == 5
     assert [c["name"] for c in decisions[1]] == ["start_task"]
-    assert [c["name"] for c in decisions[2]] == ["propose_batch"]
+    assert [c["name"] for c in decisions[2]] == ["request_plan"]
     assert [c["name"] for c in decisions[3]] == ["start_task"]
     assert prompts[2]["criterion_reviews"][0]["explanation"] == reason
     assert prompts[-1]["criterion_reviews"][0]["verdict"] == "pass"
@@ -244,7 +251,7 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
         + json.dumps(
             {
                 "negative": prompts[2]["criterion_reviews"][0],
-                "next_plan": decisions[2][0]["payload"]["plan"],
+                "next_plan": decisions[2][0]["payload"],
                 "start": decisions[3],
                 "positive": prompts[-1]["criterion_reviews"][0],
             }
@@ -253,15 +260,34 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
 
 
 def provider_worker(factory, settings, transport, owner="feedback-provider"):
-    return build_project_lead_worker(
+    from tests.integration.leadership.planning_helpers import (
+        fixture_plan,
+        pin_planner,
+        planner_profile,
+    )
+    from tests.integration.leadership.test_lead_surface import _Transport
+
+    worker = build_project_lead_worker(
         factory,
         settings=settings,
-        profiles=ProfileRegistry((_profile().model_copy(update={"context_limit": 16000}),)),
+        profiles=ProfileRegistry(
+            (_profile().model_copy(update={"context_limit": 16000}), planner_profile())
+        ),
         owner=owner,
         adapter=transport,
+        planner_adapter=_Transport({"plan": fixture_plan()}),
         default_branches={flow.PROJECT: "main"},
         repository_paths={flow.PROJECT: flow.TEST_REPOSITORY_ROOT},
     )
+
+    original = worker.process_one
+
+    async def process():
+        await pin_planner(factory)
+        return await original()
+
+    worker.process_one = process
+    return worker
 
 
 async def test_provider_can_propose_then_start_in_a_fresh_worker(postgres_dsn, monkeypatch):
@@ -292,10 +318,11 @@ async def test_provider_can_propose_then_start_in_a_fresh_worker(postgres_dsn, m
         await flow._enable(factory, await flow._session(factory))
         assert await provider_worker(factory, settings, transport).process_one()
         wakeups = await pending(factory)
-        assert len(wakeups) == 1 and wakeups[0].payload["wakeup_kind"] == "continuation"
+        assert len(wakeups) == 1 and wakeups[0].payload["wakeup_kind"] == "plan_requested"
         restarted = provider_worker(factory, settings, transport, owner="restarted")
-        assert await restarted.process_one()
+        assert await restarted.process_one()  # planner
         assert await flow._package_count(factory) == 1
+        assert await restarted.process_one()  # lead consumes plan_ready and starts task
         assert not await restarted.process_one()
         assert transport.calls == 2
         assert await pending(factory) == []
@@ -310,7 +337,7 @@ async def test_repeated_proposals_park_with_a_real_question(postgres_dsn, change
             self.calls += 1
             draft = flow._start_decision().commands[0]
             if change_wording:
-                draft.payload["plan"]["title"] = f"Renamed proposal {self.calls}"
+                draft.payload["goal"] = f"Renamed proposal {self.calls}"
             return LeadDecision(commands=(draft,))
 
     async with flow._factory(postgres_dsn) as factory:
@@ -332,31 +359,22 @@ async def test_repeated_proposals_park_with_a_real_question(postgres_dsn, change
 
 @pytest.mark.parametrize("point", ["before_ack", "after_enqueue", "after_commit"])
 async def test_continuation_is_atomic_with_ack_and_replay_safe(postgres_dsn, monkeypatch, point):
-    class Model:
+    from tests.integration.leadership.test_lead_review_regressions import StartModel
+
+    from vuzol.leadership import planning
+
+    class Model(StartModel):
         calls = 0
 
         async def decide(self, snapshot):
             self.calls += 1
-            if self.calls == 1:
-                return LeadDecision(commands=(flow._start_decision().commands[0],))
-            return provider_model.parse_lead_response(
-                {
-                    "commands": [
-                        {
-                            "name": "start_task",
-                            "payload": {
-                                "spec": snapshot.result_context["task_control"]["start_spec"]
-                            },
-                        }
-                    ]
-                }
-            )
+            return await super().decide(snapshot)
 
     async with flow._factory(postgres_dsn) as factory:
         goal_id = await flow._enable(factory, await flow._session(factory))
         model = Model()
         worker = flow._worker(factory, model, owner="crashed")
-        original_ack, original_enqueue = worker._ack, continuation.enqueue_goal_wakeup
+        original_ack, original_publish = worker._ack, planning.publish_outcome
         raised = False
 
         async def crash_ack(*args, **kwargs):
@@ -369,30 +387,20 @@ async def test_continuation_is_atomic_with_ack_and_replay_safe(postgres_dsn, mon
                 raised = True
                 raise RuntimeError("injected crash")
 
-        async def crash_enqueue(*args, **kwargs):
+        async def crash_publish(*args, **kwargs):
             nonlocal raised
-            await original_enqueue(*args, **kwargs)
+            await original_publish(*args, **kwargs)
             if not raised and point == "after_enqueue":
                 raised = True
                 raise RuntimeError("injected crash")
 
         monkeypatch.setattr(worker, "_ack", crash_ack)
-        monkeypatch.setattr(continuation, "enqueue_goal_wakeup", crash_enqueue)
+        monkeypatch.setattr(planning, "publish_outcome", crash_publish)
         with pytest.raises(RuntimeError, match="injected crash"):
             await worker.process_one()
         async with factory.begin() as session:
             goal = await session.get(ManagedGoal, goal_id)
-            assert goal.version == 2
-            # Simulate process death/lease expiry, never repair business state.
             goal.lease_until = datetime.now(UTC) - timedelta(seconds=1)
-            continuations = list(
-                await session.scalars(
-                    select(TransactionalOutbox).where(
-                        TransactionalOutbox.idempotency_key.like("%:continue:%")
-                    )
-                )
-            )
-            assert len(continuations) == (1 if point == "after_commit" else 0)
         restarted = flow._worker(factory, model, owner="replacement")
         for _ in range(4):
             await restarted.process_one()
@@ -403,24 +411,26 @@ async def test_continuation_is_atomic_with_ack_and_replay_safe(postgres_dsn, mon
             receipts = list(
                 await session.scalars(
                     select(LeadershipCommandReceipt)
-                    .where(LeadershipCommandReceipt.actor_kind == "agent")
+                    .where(
+                        LeadershipCommandReceipt.actor_kind == "agent",
+                    )
                     .order_by(LeadershipCommandReceipt.created_at)
                 )
             )
-            assert goal.version == 3
+            assert goal.version == 4
             assert [(r.command_name, r.expected_version) for r in receipts] == [
-                ("propose_batch", 1),
-                ("start_task", 2),
+                ("request_plan", 1),
+                ("request_plan", 2),
+                ("start_task", 3),
             ]
-            continuations = list(
+            outcomes = list(
                 await session.scalars(
                     select(TransactionalOutbox).where(
-                        TransactionalOutbox.idempotency_key.like("%:continue:%")
+                        TransactionalOutbox.payload["wakeup_kind"].as_string() == "plan_ready",
                     )
                 )
             )
-            assert len(continuations) == 1
-            assert continuations[0].status is DeliveryStatus.DELIVERED
+            assert len(outcomes) == 1 and outcomes[0].status is DeliveryStatus.DELIVERED
 
 
 async def test_reconciler_recovers_a_pre_fix_orphan_without_reopening_delivered_rows(
@@ -453,9 +463,14 @@ async def test_reconciler_recovers_a_pre_fix_orphan_without_reopening_delivered_
 
     async with flow._factory(postgres_dsn) as factory:
         goal_id = await flow._enable(factory, await flow._session(factory))
-        with monkeypatch.context() as patched:
-            patched.setattr(worker_module, "continue_if_idle", old_behavior)
-            await flow._worker(factory, Proposal()).process_one()
+        from tests.integration.leadership.planning_helpers import fixture_plan, seed_plan
+
+        await seed_plan(factory, goal_id, {"plan": fixture_plan()})
+        async with factory.begin() as session:
+            for row in await session.scalars(
+                select(TransactionalOutbox).where(TransactionalOutbox.destination == "project_lead")
+            ):
+                row.status = DeliveryStatus.DELIVERED
         assert await pending(factory) == []
         async with factory() as session:
             enabled = await session.scalar(

@@ -49,6 +49,8 @@ class LeadDecision:
     reply: str = ""
     profile_id: str = "unconfigured"
     usage: dict[str, Any] = field(default_factory=lambda: {"cost_known": False})
+    # Server-owned planner outcome, never parsed from lead model output.
+    planning_outcome: dict[str, Any] | None = None
 
 
 class LeadModel(Protocol):
@@ -129,6 +131,7 @@ def freeze_decision(
         "input_fence": input_fence,
         "input_scope": input_scope,
         "input_lease_epoch": input_lease_epoch,
+        "planning_outcome": decision.planning_outcome,
     }
 
 

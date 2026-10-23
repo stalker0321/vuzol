@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config.models import ProviderProfileConfig, ProviderRole
+from vuzol.config.models import ProviderProfileConfig
 from vuzol.config.registries import ProfileRegistry
 from vuzol.config.revision import content_revision
 from vuzol.config.settings import Settings
@@ -19,7 +19,7 @@ from vuzol.leadership.persistence import LeadershipTurn
 from vuzol.leadership.provider_model import ProviderLeadModel
 from vuzol.leadership.verification import GoalVerifier
 from vuzol.leadership.worker import ProjectLeadWorker
-from vuzol.projects.model_matrix import ModelAssignment, assignment_snapshot
+from vuzol.projects.model_matrix import SLOT_ROLES, ModelAssignment, assignment_snapshot
 from vuzol.providers.catalog import supported_profile
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
@@ -37,11 +37,19 @@ def build_project_lead_worker(
     adapter: ProviderAdapter | None = None,
     adapter_registry: AdapterRegistry | None = None,
     reviewer_adapter: ProviderAdapter | None = None,
+    planner_adapter: ProviderAdapter | None = None,
 ) -> ProjectLeadWorker:
     """The worker entrypoint. Callers substitute the adapter, not the model."""
 
     selection = _TurnModels(
-        session_factory, settings, profiles, adapter, adapter_registry, reviewer_adapter
+        session_factory,
+        settings,
+        profiles,
+        adapter,
+        adapter_registry,
+        reviewer_adapter,
+        planner_adapter,
+        repository_paths,
     )
     return ProjectLeadWorker(
         session_factory,
@@ -68,10 +76,17 @@ class _TurnModels:
         adapter: ProviderAdapter | None,
         registry: AdapterRegistry | None,
         reviewer_adapter: ProviderAdapter | None,
+        planner_adapter: ProviderAdapter | None,
+        repository_paths: Mapping[str, Path] | None,
     ) -> None:
         self._factory, self._settings, self._profiles = factory, settings, profiles
         self._registry = registry
-        self._injected = {"lead": adapter, "goal_reviewer": reviewer_adapter}
+        self._injected = {
+            "lead": adapter,
+            "goal_reviewer": reviewer_adapter,
+            "planner_strong": planner_adapter,
+        }
+        self._repositories = dict(repository_paths or {})
 
     async def _pins(self) -> dict[str, ModelAssignment]:
         context = current_turn.get()
@@ -91,6 +106,7 @@ class _TurnModels:
                 for slot, default in (
                     ("lead", self._settings.project_lead.profile_id),
                     ("goal_reviewer", self._settings.project_lead.reviewer_profile_id),
+                    ("planner_strong", None),
                 ):
                     if slot in choices:
                         pins[slot] = choices[slot]
@@ -116,7 +132,7 @@ class _TurnModels:
     ) -> tuple[ProviderProfileConfig, ProviderAdapter]:
         try:
             profile = self._profiles.get(pin.profile_id)
-            role = ProviderRole.LEAD if slot == "lead" else ProviderRole.REVIEWER
+            role = SLOT_ROLES[slot]
             if (
                 not profile.enabled
                 or role not in profile.roles
@@ -136,6 +152,25 @@ class _TurnModels:
             raise LeadModelUnavailable("lead_profile_unselected") from error
 
     async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
+        if (snapshot.result_context.get("event") or {}).get("wakeup_kind") == "plan_requested":
+            from vuzol.leadership.planning import generate_plan, outcome_decision
+
+            try:
+                pins = await self._pins()
+                if "planner_strong" not in pins:
+                    raise LeadModelUnavailable("planner_profile_unselected")
+                profile, adapter = self._resolve(pins["planner_strong"], "planner_strong")
+            except LeadModelUnavailable:
+                return outcome_decision(snapshot, {"reason": "planner_profile_unselected"})
+            return await generate_plan(
+                self._factory,
+                snapshot,
+                profile,
+                adapter,
+                repository=self._repositories.get(snapshot.project_id),
+                limits=self._settings.limits,
+                timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
+            )
         pins = await self._pins()
         if "lead" not in pins:
             raise LeadModelUnavailable("lead_profile_unselected")

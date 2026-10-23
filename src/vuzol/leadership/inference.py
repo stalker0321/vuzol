@@ -203,7 +203,10 @@ async def invoke(
                 "phase": phase,
                 "profile_id": profile.id,
                 "category": "timeout" if isinstance(error, TimeoutError) else "unknown",
+                # Without the type the operator cannot tell a bad pin from a crash.
+                "error_type": type(error).__name__,
             },
+            exc_info=error,
         )
         raise LeadModelUnavailable(_failure_reason(None, purpose)) from error
     finally:

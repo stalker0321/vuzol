@@ -15,9 +15,26 @@ MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_SNAPSHOT_FILES = 20000
 
 
-def snapshot_path(invocation_id: uuid.UUID) -> Path:
+SNAPSHOT_DIR_NAME = ".planner-snapshots"
+
+
+def snapshot_root(worktree_root: Path) -> Path:
+    # Not /tmp: the executor runs with PrivateTmp and rootless Docker would not
+    # see it. The worktree root is already shared with the sandbox runtime.
+    return worktree_root / SNAPSHOT_DIR_NAME
+
+
+def snapshot_path(invocation_id: uuid.UUID, worktree_root: Path) -> Path:
     # Stable across executor restarts; never derive a host path from model output.
-    return Path("/tmp") / f"vuzol-planner-{invocation_id}"  # noqa: S108 - exclusive mkdir
+    return snapshot_root(worktree_root) / f"vuzol-planner-{invocation_id}"
+
+
+def is_snapshot_path(path: Path, invocation_id: uuid.UUID) -> bool:
+    return (
+        path.is_absolute()
+        and path.name == f"vuzol-planner-{invocation_id}"
+        and path.parent.name == SNAPSHOT_DIR_NAME
+    )
 
 
 def safe_repo_path(value: str) -> PurePosixPath:
@@ -55,9 +72,15 @@ async def commit_files(repository: Path, commit: str) -> dict[str, bytes]:
     return files
 
 
-async def build_snapshot(repository: Path, commit: str, invocation_id: uuid.UUID) -> Path:
+async def build_snapshot(
+    repository: Path, commit: str, invocation_id: uuid.UUID, worktree_root: Path
+) -> Path:
     files = await commit_files(repository, commit)
-    root = snapshot_path(invocation_id)
+    parent = snapshot_root(worktree_root)
+    parent.mkdir(mode=0o700, exist_ok=True)
+    if parent.is_symlink():
+        raise ValueError("planner snapshot root is a symlink")
+    root = snapshot_path(invocation_id, worktree_root)
     root.mkdir(mode=0o700)  # Never reuse or follow an existing directory/symlink.
     try:
         for name, content in files.items():
@@ -72,12 +95,11 @@ async def build_snapshot(repository: Path, commit: str, invocation_id: uuid.UUID
         root.chmod(0o555)
         return root
     except BaseException:
-        cleanup_snapshot(invocation_id)
+        cleanup_snapshot(root)
         raise
 
 
-def cleanup_snapshot(invocation_id: uuid.UUID) -> None:
-    root = snapshot_path(invocation_id)
+def cleanup_snapshot(root: Path) -> None:
     if root.is_symlink():
         raise ValueError("planner snapshot root is a symlink")
     if not root.exists():

@@ -30,7 +30,12 @@ from vuzol.execution.domain import (
 from vuzol.execution.egress import AllowedConnectTarget, compile_proxy_allowlist
 from vuzol.execution.ports import SandboxRuntime
 from vuzol.execution.proxy_service import ProxyServiceManager
-from vuzol.execution.repo_snapshot import build_snapshot, cleanup_snapshot, snapshot_path
+from vuzol.execution.repo_snapshot import (
+    build_snapshot,
+    cleanup_snapshot,
+    is_snapshot_path,
+    snapshot_path,
+)
 from vuzol.leadership.invocation_context import (
     TurnInvocationContext,
     current_turn,
@@ -106,7 +111,12 @@ class TurnSandboxTransport:
                     assert phase is not None
                     commit = phase.request["task_draft"]["source_repo_commit"]
                 project = self._registries.projects.get(context.project_id)
-                await build_snapshot(project.repository_path, commit, binding.invocation_id)
+                await build_snapshot(
+                    project.repository_path,
+                    commit,
+                    binding.invocation_id,
+                    self._settings.worktree_root,
+                )
             if targets:
                 assert self._proxy is not None
                 lease = await self._proxy.create(
@@ -271,7 +281,7 @@ class TurnSandboxTransport:
                     *(
                         (
                             SandboxMount(
-                                source=snapshot_path(phase.id),
+                                source=snapshot_path(phase.id, self._settings.worktree_root),
                                 target=Path("/workspace"),
                                 mode=MountMode.READ_ONLY,
                                 purpose="planner-snapshot",
@@ -448,7 +458,8 @@ async def cleanup_turn_runtime(
     if not envelope.sandbox.empty_workspace:
         if not valid_turn_workspace(envelope):
             raise ValueError("invalid planner snapshot cleanup binding")
-        cleanup_snapshot(envelope.turn_binding.invocation_id)
+        (mount,) = (m for m in envelope.sandbox.mounts if m.purpose == "planner-snapshot")
+        cleanup_snapshot(mount.source)
 
 
 def valid_turn_workspace(envelope: ProcessEnvelope) -> bool:
@@ -463,13 +474,10 @@ def valid_turn_workspace(envelope: ProcessEnvelope) -> bool:
     return (
         binding is not None
         and len(workspace) == 1
-        and workspace[0]
-        == SandboxMount(
-            source=snapshot_path(binding.invocation_id),
-            target=Path("/workspace"),
-            mode=MountMode.READ_ONLY,
-            purpose="planner-snapshot",
-        )
+        and workspace[0].target == Path("/workspace")
+        and workspace[0].mode is MountMode.READ_ONLY
+        and workspace[0].purpose == "planner-snapshot"
+        and is_snapshot_path(workspace[0].source, binding.invocation_id)
     )
 
 

@@ -30,11 +30,7 @@ class WorktreeAccessError(RuntimeError):
 async def grant_artifact_read(path: Path, *, delivery_uid: int) -> None:
     """Grant one existing delivery identity read-only access to one owned file."""
     metadata = os.lstat(path)
-    if (
-        delivery_uid <= 0
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-    ):
+    if delivery_uid <= 0 or not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
         raise WorktreeAccessError("candidate artifact read grant is unsafe")
     command = Path("/usr/bin/setfacl")
     _require_trusted_command(command)

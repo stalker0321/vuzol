@@ -160,11 +160,13 @@ def setup(tmp_path, monkeypatch):
         sandboxes=SimpleNamespace(get=lambda key: sandbox),
     )
     seccomp_path, digest = _seccomp_profile(tmp_path)
+    (tmp_path / "worktrees").mkdir(exist_ok=True)
     settings = SimpleNamespace(
+        worktree_root=tmp_path / "worktrees",
         execution=SimpleNamespace(
             sandbox_seccomp_profile=seccomp_path,
             sandbox_seccomp_profile_sha256=digest,
-        )
+        ),
     )
     transport = TurnSandboxTransport(runtime, store, settings, registries)
     monkeypatch.setattr(turn_transport, "invocation_current", AsyncMock(return_value=True))
@@ -510,11 +512,11 @@ async def test_planner_reads_commit_from_readonly_mount_and_recovery_cleans(
         setup.runtime.cleanup.side_effect = RuntimeError("cleanup failed")
         with pytest.raises(RuntimeError, match="cleanup failed"):
             await setup.transport.run(capture.invocation, CancellationContext())
-        assert snapshot_path(req.task_id).exists()
+        assert snapshot_path(req.task_id, tmp_path / "worktrees").exists()
         _, envelope = recovered_turn_binding(setup.store.process, enabled=lambda: True)
         setup.runtime.cleanup.side_effect = None
         await turn_transport.cleanup_turn_runtime(setup.runtime, None, envelope)
     else:
         await setup.transport.run(capture.invocation, CancellationContext())
-    assert not snapshot_path(req.task_id).exists()
+    assert not snapshot_path(req.task_id, tmp_path / "worktrees").exists()
     assert (repository / "known.txt").read_text() == "dirty worktree"

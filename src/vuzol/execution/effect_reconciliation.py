@@ -129,9 +129,7 @@ class EffectReconciler:
                 async with self._factory() as scan_session:
                     effect_ids = tuple(
                         effect.id
-                        for effect in await active_effects(
-                            scan_session, limit=self._batch_size
-                        )
+                        for effect in await active_effects(scan_session, limit=self._batch_size)
                     )
                 decisions: list[EffectReconciliationDecision] = []
                 for effect_id in effect_ids:
@@ -139,9 +137,7 @@ class EffectReconciler:
                         decision = await self._reconcile_one(session, effect_id)
                     if decision is not None:
                         decisions.append(decision)
-                return EffectReconciliationReport(
-                    lock_acquired=True, decisions=tuple(decisions)
-                )
+                return EffectReconciliationReport(lock_acquired=True, decisions=tuple(decisions))
             finally:
                 try:
                     await lock_session.execute(

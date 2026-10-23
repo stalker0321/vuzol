@@ -43,9 +43,7 @@ def test_observation_taxonomy_is_fail_closed() -> None:
         is EffectObservation.NOT_APPLIED
     )
     assert (
-        classify_effect_observation(
-            observed_ref=None, result_commit=result, expected_head=expected
-        )
+        classify_effect_observation(observed_ref=None, result_commit=result, expected_head=expected)
         is EffectObservation.UNCERTAIN
     )
     assert (

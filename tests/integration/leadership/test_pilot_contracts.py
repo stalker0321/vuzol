@@ -66,6 +66,7 @@ async def test_package_ceiling_survives_failure_restart_and_receipt_replay(postg
         )
         assert result.status == "applied"
         await _worker(factory, StartModel()).process_one()
+        await _worker(factory, StartModel()).process_one()
         assert await _package_count(factory) == 1
         # Fault injection: an unsuccessful package still consumes its admission.
         async with factory.begin() as session:
@@ -76,7 +77,7 @@ async def test_package_ceiling_survives_failure_restart_and_receipt_replay(postg
 
             task = await session.scalar(select(Task))
             task.status = TaskStatus.FAILED
-        await owner_command(
+        result, start = await owner_command(
             factory,
             goal_id,
             "propose_batch",
@@ -84,7 +85,6 @@ async def test_package_ceiling_survives_failure_restart_and_receipt_replay(postg
                 "plan": _plan("Package B", "Write the second marker", ["marker-b"], "SECOND.txt"),
             },
         )
-        result, start = await owner_command(factory, goal_id, "start_batch", {})
         assert result.status == "waiting"
         assert result.reason == "work_package_limit_reached"
         assert await _package_count(factory) == 1
@@ -134,11 +134,8 @@ async def test_item_limit_blocks_before_package_creation(postgres_dsn):
         )
         decision = await StartModel().decide(None)
         payload = decision.commands[0].payload
-        payload["plan"]["items"] *= 2
-        assert (await owner_command(factory, goal_id, "propose_batch", payload))[
-            0
-        ].status == "applied"
-        result, _ = await owner_command(factory, goal_id, "start_batch", {})
+        payload["plan"]["items"].append({**payload["plan"]["items"][0], "local_id": "second"})
+        result, _ = await owner_command(factory, goal_id, "propose_batch", payload)
         assert result.status == "waiting" and result.reason == "work_item_limit_reached"
         assert await _package_count(factory) == 0
 
@@ -153,9 +150,10 @@ async def test_batch_refusal_after_local_mutation_is_a_durable_receipt(postgres_
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         decision = await StartModel().decide(None)
-        await owner_command(factory, goal_id, "propose_batch", decision.commands[0].payload)
         monkeypatch.setattr(WorkPackageService, "create_draft", refuse)
-        result, command = await owner_command(factory, goal_id, "start_batch", {})
+        result, command = await owner_command(
+            factory, goal_id, "propose_batch", decision.commands[0].payload
+        )
         assert result.status == "denied" and result.reason == "fixture_admission_refused"
         replay = await _lead_service(factory, with_executor=True).apply_human(
             Principal(OWNER, "telegram"),

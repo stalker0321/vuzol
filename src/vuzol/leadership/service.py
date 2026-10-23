@@ -8,12 +8,13 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.discussion.domain import DomainError, PlanDraft, PlanItemDraft
+from vuzol.discussion.domain import DomainError, PlanDraft
 from vuzol.leadership.actor import Actor, ActorKind, ActorRejected
 from vuzol.leadership.commands import (
     DELEGATED_ACTIONS,
@@ -44,7 +45,7 @@ from vuzol.leadership.policy import (
 )
 from vuzol.leadership.wakeups import enabled_wakeup_key, enqueue_goal_wakeup, resume_wakeup_key
 from vuzol.storage.models import Event, WorkPackage
-from vuzol.storage.types import EstimatedComplexity, RiskLevel, WorkPackageStatus
+from vuzol.storage.types import WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.workflows.application import Principal
 
@@ -84,6 +85,7 @@ class LeadershipCommandService:
         repeat_limit: int = 2,
         default_branches: Mapping[str, str] | None = None,
         batch_executor: BatchExecutor | None = None,
+        repository_paths: Mapping[str, Path] | None = None,
     ) -> None:
         self._factory = session_factory
         self._enabled = enabled
@@ -91,6 +93,7 @@ class LeadershipCommandService:
         self._repeat_limit = repeat_limit
         self._default_branches = dict(default_branches or {})
         self._batch_executor = batch_executor
+        self._repository_paths = dict(repository_paths or {})
 
     async def apply(
         self,
@@ -126,6 +129,7 @@ class LeadershipCommandService:
             # locks its discussion row. Keep project admission ahead of receipts.
             if name in {
                 LeadCommandName.ENABLE_MANAGED_GOAL,
+                LeadCommandName.PROPOSE_BATCH,
                 LeadCommandName.START_BATCH,
                 LeadCommandName.START_TASK,
             }:
@@ -194,7 +198,24 @@ class LeadershipCommandService:
             except DomainError as error:
                 if goal is not None:
                     await uow.session.refresh(goal)
-                outcome = _Outcome(CommandStatus.DENIED, error.code, {}, goal)
+                if goal is not None and error.code in {
+                    "work_package_limit_reached",
+                    "work_item_limit_reached",
+                }:
+                    question = (
+                        "Достигнут заданный владельцем лимит работы. "
+                        "Проверьте результат и явно измените лимит, если нужна доработка."
+                    )
+                    goal.wakeup_condition = {
+                        "kind": "owner",
+                        "question": question,
+                        "scope_revision": goal.scope_revision,
+                        "asked_version": goal.version + 1,
+                    }
+                    outcome = _transition(goal, actor, "waiting", error.code, CommandStatus.WAITING)
+                    await _enqueue_owner_question(uow.session, goal, question, goal.version)
+                else:
+                    outcome = _Outcome(CommandStatus.DENIED, error.code, {}, goal)
             return await store(uow.session, actor, command, digest, outcome)
 
     async def apply_human(
@@ -244,6 +265,7 @@ class LeadershipCommandService:
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
         if goal.lifecycle == "paused" and name not in READ_COMMANDS | {
+            LeadCommandName.PROPOSE_BATCH,
             LeadCommandName.AMEND_GOAL,
             LeadCommandName.CANCEL_TASK,
             LeadCommandName.SET_WORK_LIMITS,
@@ -275,7 +297,9 @@ class LeadershipCommandService:
             LeadCommandName.PROPOSE_BATCH,
             LeadCommandName.WAIT_FOR,
         }:
-            if goal.lifecycle == "waiting":
+            if goal.lifecycle == "waiting" and not (
+                name is LeadCommandName.PROPOSE_BATCH and goal.waiting_reason == "plan_approval"
+            ):
                 return _Outcome(CommandStatus.DENIED, "goal_waiting", {}, goal)
             if goal.constraints.get("pending_amendment"):
                 return _Outcome(CommandStatus.DENIED, "amendment_pending", {}, goal)
@@ -380,55 +404,29 @@ class LeadershipCommandService:
             goal.lease_until = None
             return _transition(goal, actor, "waiting", "wait_for", CommandStatus.WAITING)
         if name is LeadCommandName.PROPOSE_BATCH:
-            if goal.current_package_id:
-                current = await uow.session.get(WorkPackage, goal.current_package_id)
-                if current and current.status in {
-                    WorkPackageStatus.RUNNING,
-                    WorkPackageStatus.PAUSED,
-                }:
-                    raise DomainError("package_still_live")
-            plan = _plan_draft(command.payload)
-            goal.proposed_plan = command.payload["plan"]
+            from vuzol.leadership.batches import propose_plan
+
+            async with uow.session.begin_nested():
+                result = await propose_plan(
+                    uow,
+                    goal,
+                    _plan_draft(command.payload),
+                    repository_path=self._repository_paths.get(goal.project_id),
+                )
             _bump(goal, actor)
-            return _Outcome(
-                CommandStatus.APPLIED,
-                None,
-                {"version": goal.version, "title": plan.title, "items": len(plan.items)},
-                goal,
-            )
+            return _Outcome(CommandStatus.APPLIED, None, {"version": goal.version, **result}, goal)
         if name in {LeadCommandName.START_BATCH, LeadCommandName.START_TASK}:
             if self._batch_executor is None:
                 return _Outcome(CommandStatus.UNSUPPORTED, "batch_executor_unbound", {}, goal)
-            try:
-                async with uow.session.begin_nested():
-                    produced = await self._batch_executor(
-                        uow,
-                        actor=actor,
-                        goal=goal,
-                        delegation=delegation,
-                        command=command,
-                        repeat_limit=self._repeat_limit,
-                    )
-            except DomainError as error:
-                # The batch may have changed repeat counters before a later
-                # admission refusal. Savepoint rollback expires those ORM fields;
-                # reload explicitly before storing the durable refusal receipt.
-                await uow.session.refresh(goal)
-                if error.code in {"work_package_limit_reached", "work_item_limit_reached"}:
-                    question = (
-                        "Достигнут заданный владельцем лимит работы. "
-                        "Проверьте результат и явно измените лимит, если нужна доработка."
-                    )
-                    goal.wakeup_condition = {
-                        "kind": "owner",
-                        "question": question,
-                        "scope_revision": goal.scope_revision,
-                        "asked_version": goal.version + 1,
-                    }
-                    outcome = _transition(goal, actor, "waiting", error.code, CommandStatus.WAITING)
-                    await _enqueue_owner_question(uow.session, goal, question, goal.version)
-                    return outcome
-                return _Outcome(CommandStatus.DENIED, error.code, {}, goal)
+            async with uow.session.begin_nested():
+                produced = await self._batch_executor(
+                    uow,
+                    actor=actor,
+                    goal=goal,
+                    delegation=delegation,
+                    command=command,
+                    repeat_limit=self._repeat_limit,
+                )
             status = CommandStatus(str(produced.pop("status", CommandStatus.APPLIED.value)))
             reason = produced.pop("reason", None)
             return _Outcome(status, None if reason is None else str(reason), produced, goal)
@@ -872,10 +870,6 @@ def _next_operation(goal: ManagedGoal, package: WorkPackage | None, question: st
         return "пауза"
     if package is not None:
         return f"пакет {package.status.value}"
-    plan = goal.proposed_plan if isinstance(goal.proposed_plan, dict) else None
-    title = None if plan is None else plan.get("title")
-    if isinstance(title, str) and title.strip():
-        return title.strip()
     return "решение руководителя"
 
 
@@ -936,27 +930,23 @@ def _plan_draft(payload: Mapping[str, Any]) -> PlanDraft:
     items_raw = raw.get("items")
     if not isinstance(items_raw, list):
         raise DomainError("plan_required")
-    items: list[PlanItemDraft] = []
+    # Reuse the revision parser; scope/commit bindings are supplied by server.
+    from vuzol.discussion.service import _plan_from_revision_body
+
     for item in items_raw:
-        if not isinstance(item, dict):
-            raise DomainError("invalid_plan")
-        criteria = item.get("completion_criteria")
-        if not isinstance(criteria, list):
-            raise DomainError("invalid_plan")
-        items.append(
-            PlanItemDraft(
-                summary=str(item.get("summary") or ""),
-                goal=str(item.get("goal") or ""),
-                expected_outcome=str(item.get("expected_outcome") or ""),
-                completion_criteria=tuple(str(value) for value in criteria),
-                allowed_scope=str(item.get("allowed_scope") or ""),
-                local_id=None if item.get("local_id") is None else str(item.get("local_id")),
-                dependencies=tuple(str(value) for value in item.get("dependencies", [])),
-                suggested_risk=RiskLevel.LOW,
-                estimated_complexity=EstimatedComplexity.SMALL,
-            )
-        )
-    return PlanDraft(title=str(raw.get("title") or ""), items=tuple(items))
+        if not isinstance(item, dict) or not isinstance(item.get("local_id"), str):
+            raise DomainError("invalid_plan", "stable local_id is required")
+        for field in ("summary", "goal", "expected_outcome", "allowed_scope"):
+            if not isinstance(item.get(field), str) or not item[field].strip():
+                raise DomainError("invalid_plan", f"{field} must be a non-empty string")
+        for field in ("needs_approval", "derived"):
+            if field in item and not isinstance(item[field], bool):
+                raise DomainError("invalid_plan", f"{field} must be boolean")
+        for field in ("completion_criteria", "dependencies", "out_of_scope", "trusted_checks"):
+            values = item.get(field, [] if field in {"out_of_scope", "trusted_checks"} else None)
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise DomainError("invalid_plan", f"{field} must be a list of strings")
+    return _plan_from_revision_body(raw)
 
 
 async def _lock_goal(session: AsyncSession, command: LeadCommand) -> ManagedGoal | None:

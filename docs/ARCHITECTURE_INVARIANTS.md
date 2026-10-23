@@ -69,3 +69,31 @@ These rules are non-negotiable unless explicitly changed through an ADR.
 46. Vector search, graph storage, formal durable runtimes, and web dashboards require measured justification.
 47. An implementation step must not silently implement later roadmap items.
 48. Cost, token, attempt, duration, storage, and concurrency limits are enforceable policy, not advisory metadata.
+
+## Managed plan revisions (PR5)
+
+- The executable plan is the work package's head revision and its immutable items.
+  `managed_goals.proposed_plan` is retained only as legacy data. A proposal persists
+  a draft before any task can start. Its hash includes the server's scope revision
+  and repository commit; `start_task` binds the revision ID, hash, scope and ordinal.
+- Item contracts require stable local IDs, goals, concrete scope, expected results,
+  acceptance checks and explicit dependencies. New revisions store a stable
+  topological order. Materialization checks completed dependencies, including an
+  unchanged completed prefix from an earlier revision.
+- Multi-item, large, elevated-risk, explicitly gated and environment-changing plans
+  require the goal owner's exact revision/hash/scope approval. Delegation can approve
+  only a single low-risk item. Plan approval never grants deployment, installation,
+  protected-ref or host permissions (invariants 14–18, 30, 35–36 still apply).
+  A managed approval queues one durable lead wakeup; only the lead dispatches tasks.
+- Rolling revisions require dispatch stopped and the current task settled. All
+  materialized contracts, including the cursor item, remain immutable. Reapproval
+  preserves the managed integration branch, base and accumulated head. Owner pause
+  remains a pause through revision and approval.
+- Legacy conversion runs under the goal lock on its next lead wakeup. It creates
+  a draft only for an unmaterialized proposal, assigns deterministic `legacy-N`
+  IDs where absent, and commits the revision pointer and an idempotency marker
+  together. Existing materialized history and terminal goals are not rewritten;
+  the old JSON is retained. Paused goals remain paused, and no approval is inherited.
+  An unavailable legacy repository is represented by a null source commit; new
+  proposals require a server-resolved commit. Malformed legacy proposals are marked
+  invalid and cannot execute. There is no schema or Alembic change.

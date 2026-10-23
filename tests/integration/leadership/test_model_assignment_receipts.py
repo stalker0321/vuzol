@@ -60,6 +60,7 @@ def _worker(factory, settings, transport, *, owner, profiles=None):
         profiles=profiles or ProfileRegistry((_profile(),)),
         owner=owner,
         adapter=transport,
+        repository_paths={"vuzol": __import__("pathlib").Path(__file__).resolve().parents[3]},
     )
 
 
@@ -370,7 +371,14 @@ async def test_crash_between_commands_keeps_pins_and_replays_remaining_commands(
     from vuzol.storage.models import WorkPackage
 
     settings = _settings(monkeypatch, "lead-local")
-    transport = _Transport({"commands": decision_payload(_start_decision())["commands"]})
+    transport = _Transport(
+        {
+            "commands": [
+                *decision_payload(_start_decision())["commands"],
+                {"name": "read_status", "payload": {}},
+            ]
+        }
+    )
     async with _factory(postgres_dsn) as factory:
         await _enable(factory, await _session(factory))
         first = _worker(factory, settings, transport, owner="same-owner")

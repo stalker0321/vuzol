@@ -267,10 +267,11 @@ async def build_work_package_plan_card(
             )
         ).all()
     )
-    page_count = max(1, math.ceil(len(items) / PLAN_PAGE_SIZE))
+    page_size = 2 if package.managed_goal_id is not None else PLAN_PAGE_SIZE
+    page_count = max(1, math.ceil(len(items) / page_size))
     if page > page_count:
         raise WorkPackageProjectionError("page_out_of_range")
-    visible = items[(page - 1) * PLAN_PAGE_SIZE : page * PLAN_PAGE_SIZE]
+    visible = items[(page - 1) * page_size : page * page_size]
     status = {
         WorkPackageStatus.DRAFT: "Plan approval",
         WorkPackageStatus.APPROVED: "Queued",
@@ -382,8 +383,9 @@ async def build_work_package_plan_card(
             "",
         ]
     else:
+        title = package.title[:100] if package.managed_goal_id else package.title
         lines = [
-            f"<b>{telegram_html(package.title)}</b>",
+            f"<b>{telegram_html(title)}</b>",
             f"Статус: <b>{status}</b> · версия плана {revision.revision_number}",
             "",
         ]
@@ -548,7 +550,26 @@ async def build_work_package_plan_card(
         and not package_result_complete
         and package_delivery_failure is None
     ):
-        lines.extend(f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible)
+        if package.managed_goal_id is not None:
+            lines.append(
+                f"Ревизия {revision.revision_number} · {revision.content_hash[:8]} · "
+                f"scope {revision.immutable_body.get('scope_revision', 'legacy')}"
+            )
+            for item in visible:
+                lines.extend(
+                    (
+                        f"<b>{item.ordinal}.</b> {telegram_html(item.goal[:60])}",
+                        f"Файлы/область: {telegram_html(item.allowed_scope[:60])}",
+                        f"Результат: {telegram_html(item.expected_outcome[:60])}",
+                        f"Проверка: {telegram_html('; '.join(item.completion_criteria)[:60])}",
+                        f"Риск: {item.suggested_risk.value} · "
+                        f"Сложность: {item.estimated_complexity.value}",
+                    )
+                )
+        else:
+            lines.extend(
+                f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible
+            )
         if page == page_count:
             environment_lines = _environment_delta_lines(revision.immutable_body)
             if environment_lines:

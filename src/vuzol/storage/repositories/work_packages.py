@@ -103,6 +103,10 @@ class WorkPackageRepository:
                         WorkItemDraft.local_id == local_id,
                     )
                 )
+            if row is not None and local_id is not None and row.local_id != local_id:
+                from vuzol.discussion.domain import DomainError
+
+                raise DomainError("revision_conflict", "local_id cannot rename a stable item")
             if row is None:
                 row = WorkItemDraft(work_package_id=package_id, local_id=local_id)
                 self._session.add(row)

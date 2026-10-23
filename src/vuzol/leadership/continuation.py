@@ -50,7 +50,8 @@ async def continue_if_idle(session: AsyncSession, goal: ManagedGoal, *, repeat_l
     progress = {
         "scope_revision": goal.scope_revision,
         "package_id": str(package.id) if package else None,
-        "package_version": package.version if package else None,
+        "running_revision_id": str(package.running_revision_id) if package else None,
+        "cursor_ordinal": package.cursor_ordinal if package else None,
         "head": package.integration_head_commit if package else None,
         "owner_answer_version": answer.get("version"),
     }

@@ -37,8 +37,10 @@ async def fixture(factory, tmp_path, *, managed=False):
     if managed:
         await _enable(factory, await _session(factory))
         await _worker(factory, StartModel()).process_one()
+        await _worker(factory, StartModel()).process_one()
         async with factory() as session:
             task_id = await session.scalar(select(Task.id))
+            assert task_id is not None
         request = await request_for(factory, task_id)
     else:
         request = await request_for(factory)

@@ -83,7 +83,11 @@ async def test_valid_proposal_only_response_has_a_continuation(postgres_dsn):
 
         async def decide(self, snapshot):
             self.calls += 1
-            return accepted if self.calls == 1 else flow._start_decision()
+            if self.calls == 1:
+                return accepted
+            from tests.integration.leadership.test_lead_review_regressions import StartModel
+
+            return await StartModel().decide(snapshot)
 
     async with flow._factory(postgres_dsn) as factory:
         goal_id = await flow._enable(factory, await flow._session(factory))
@@ -94,7 +98,8 @@ async def test_valid_proposal_only_response_has_a_continuation(postgres_dsn):
             await worker.process_one()
         async with factory() as session:
             goal = await session.get(ManagedGoal, goal_id)
-            assert goal.proposed_plan is not None
+            assert goal.current_package_id is not None
+            assert goal.proposed_plan is None
             state = goal.lifecycle
         assert model.calls > 1 or state != "active" or await flow._package_count(factory) > 0
         assert model.calls == 2
@@ -162,18 +167,25 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
                     {"name": draft.name, "payload": draft.payload}
                     for draft in flow._start_decision().commands
                 ]
+            elif context["package"]["status"] == "draft":
+                commands = [
+                    {
+                        "name": "start_task",
+                        "payload": {"spec": context["task_control"]["start_spec"]},
+                    }
+                ]
             elif context["criterion_reviews"][0]["verdict"] == "pass":
                 commands = [{"name": "propose_completion", "payload": {}}]
             else:
                 critique = context["criterion_reviews"][0]
                 assert critique["explanation"] == reason
                 assert critique["result_commit"] == context["binding"]["result_commit"]
-                assert context["executed_plan"]["plan"]["title"] == "Package A"
+                assert context["plan"]["plan"]["title"] == "Package A"
                 assert any(
                     step["implementation_summary"] == "Wrote the marker."
                     for step in context["steps"]
                 )
-                if context["proposed_plan"]["title"] == "Add the missing SECOND marker":
+                if context["plan"]["plan"]["title"] == "Add the missing SECOND marker":
                     commands = [
                         {
                             "name": "start_task",
@@ -209,12 +221,13 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
     await flow.run_managed_goal_flow(
         postgres_dsn, tmp_path, monkeypatch, split_corrective_turn=True
     )
-    assert len(prompts) == 4
-    assert [c["name"] for c in decisions[1]] == ["propose_batch"]
-    assert [c["name"] for c in decisions[2]] == ["start_task"]
-    assert prompts[1]["criterion_reviews"][0]["explanation"] == reason
+    assert len(prompts) == 5
+    assert [c["name"] for c in decisions[1]] == ["start_task"]
+    assert [c["name"] for c in decisions[2]] == ["propose_batch"]
+    assert [c["name"] for c in decisions[3]] == ["start_task"]
+    assert prompts[2]["criterion_reviews"][0]["explanation"] == reason
     assert prompts[-1]["criterion_reviews"][0]["verdict"] == "pass"
-    assert prompts[1]["binding"]["result_commit"] != prompts[-1]["binding"]["result_commit"]
+    assert prompts[2]["binding"]["result_commit"] != prompts[-1]["binding"]["result_commit"]
     async with flow._factory(postgres_dsn) as factory, factory() as session:
         assert (
             await session.scalar(
@@ -230,9 +243,9 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
         "FEEDBACK_TRACE "
         + json.dumps(
             {
-                "negative": prompts[1]["criterion_reviews"][0],
-                "next_plan": decisions[1][0]["payload"]["plan"],
-                "start": decisions[2],
+                "negative": prompts[2]["criterion_reviews"][0],
+                "next_plan": decisions[2][0]["payload"]["plan"],
+                "start": decisions[3],
                 "positive": prompts[-1]["criterion_reviews"][0],
             }
         )
@@ -247,6 +260,7 @@ def provider_worker(factory, settings, transport, owner="feedback-provider"):
         owner=owner,
         adapter=transport,
         default_branches={flow.PROJECT: "main"},
+        repository_paths={flow.PROJECT: flow.TEST_REPOSITORY_ROOT},
     )
 
 
@@ -258,10 +272,10 @@ async def test_provider_can_propose_then_start_in_a_fresh_worker(postgres_dsn, m
             self.calls += 1
             context = context_of(request)
             if self.calls == 1:
-                assert context["proposed_plan"] is None
+                assert context.get("plan") is None
                 draft = flow._start_decision().commands[0]
                 return response({"commands": [{"name": draft.name, "payload": draft.payload}]})
-            assert context["proposed_plan"]["title"] == "Package A"
+            assert context["plan"]["plan"]["title"] == "Package A"
             return response(
                 {
                     "commands": [
@@ -306,7 +320,7 @@ async def test_repeated_proposals_park_with_a_real_question(postgres_dsn, change
         for _ in range(8):
             await worker.process_one()
         assert model.calls == 3
-        assert await flow._package_count(factory) == 0
+        assert await flow._package_count(factory) == 1
         assert await pending(factory) == []
         async with factory() as session:
             goal = await session.get(ManagedGoal, goal_id)
@@ -495,7 +509,7 @@ async def test_queued_continuation_obeys_owner_stop(postgres_dsn, command):
         for _ in range(3):
             await worker.process_one()
         assert model.calls == 1
-        assert await flow._package_count(factory) == 0
+        assert await flow._package_count(factory) == 1
         assert await pending(factory) == []
 
 

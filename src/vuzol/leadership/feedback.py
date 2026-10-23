@@ -49,7 +49,10 @@ def _plan(raw: object) -> dict[str, Any] | None:
         "title": _text(raw.get("title"), 240),
         "items": [
             {
-                **_fields(item, ("summary", "goal", "expected_outcome", "allowed_scope")),
+                **_fields(
+                    item, ("local_id", "summary", "goal", "expected_outcome", "allowed_scope")
+                ),
+                "dependencies": _strings(item.get("dependencies")),
                 "completion_criteria": _strings(item.get("completion_criteria")),
                 "omitted_criteria": _omitted(item.get("completion_criteria")),
             }
@@ -155,15 +158,14 @@ async def result_context(
         context["truncated"] |= matched > MAX_ROWS
     context["stale_evidence_count"] = total - matched
     context["evidence_binding"] = "current" if head is not None else "no_current_completed_head"
-    _put(context, "proposed_plan", _plan(goal.proposed_plan))
     if package is None:
         return context
-    revision_id = package.running_revision_id or package.head_revision_id
+    revision_id = package.head_revision_id
     revision = await session.get(PlanRevision, revision_id) if revision_id else None
     if revision is not None and revision.work_package_id == package.id:
         _put(
             context,
-            "executed_plan",
+            "plan",
             {
                 "revision_id": str(revision.id),
                 "content_hash": revision.content_hash,

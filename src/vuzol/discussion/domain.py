@@ -232,13 +232,24 @@ class PlanDraft:
         if len(item_ids) != len(set(item_ids)):
             raise DomainError("invalid_plan", "item_id values must be unique")
         validate_plan_dependencies(self.items)
+        # The sequencer is ordinal-based. Persist a stable topological order so
+        # every dependency precedes its consumer, including forward references.
+        pending = list(self.items)
+        ordered: list[PlanItemDraft] = []
+        done: set[str] = set()
+        while pending:
+            item = next(item for item in pending if set(item.dependencies) <= done)
+            pending.remove(item)
+            ordered.append(item)
+            if item.local_id is not None:
+                done.add(item.local_id)
+        object.__setattr__(self, "items", tuple(ordered))
 
 
 def validate_plan_dependencies(items: tuple[PlanItemDraft, ...]) -> None:
     """Deterministically reject bad plan dependency graphs (D4 W6/W7).
 
-    Unknown dependency targets and cycles fail closed. Execution order stays
-    ordinal-based; this only validates the declared graph.
+    Unknown dependency targets and cycles fail closed before ordering.
     """
 
     known = {item.local_id for item in items if item.local_id is not None}
@@ -247,9 +258,7 @@ def validate_plan_dependencies(items: tuple[PlanItemDraft, ...]) -> None:
             if dependency not in known:
                 raise DomainError("invalid_plan", f"unknown plan dependency: {dependency}")
     edges: dict[str, tuple[str, ...]] = {
-        item.local_id: tuple(item.dependencies)
-        for item in items
-        if item.local_id is not None
+        item.local_id: tuple(item.dependencies) for item in items if item.local_id is not None
     }
     visiting: set[str] = set()
     visited: set[str] = set()

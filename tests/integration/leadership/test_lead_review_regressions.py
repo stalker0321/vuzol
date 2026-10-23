@@ -78,13 +78,24 @@ async def control(factory: object, goal_id: uuid.UUID, name: str) -> object:
 
 class StartModel:
     async def decide(self, snapshot: object) -> LeadDecision:
-        del snapshot
+        if snapshot is not None and snapshot.current_package_status == "draft":
+            from vuzol.leadership.model import LeadCommandDraft
+
+            return LeadDecision(
+                commands=(
+                    LeadCommandDraft(
+                        name="start_task",
+                        payload={"spec": snapshot.result_context["task_control"]["start_spec"]},
+                    ),
+                )
+            )
         return _start_decision()
 
 
 async def test_pause_propagates_to_running_package(postgres_dsn: str) -> None:
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
         await _worker(factory, StartModel()).process_one()
         assert (await control(factory, goal_id, "pause_goal")).status == "applied"  # type: ignore[attr-defined]
         async with factory() as session:
@@ -203,6 +214,7 @@ async def _assert_outcome_wakes(postgres_dsn: str, reason: WorkPackagePauseReaso
     async with _factory(postgres_dsn) as factory:
         await _enable(factory, await _session(factory))
         await _worker(factory, StartModel()).process_one()
+        await _worker(factory, StartModel()).process_one()
         await _pause_for_outcome(factory, reason)
         model = Noted()
         worker = _worker(factory, model, owner="wake")
@@ -263,6 +275,7 @@ async def test_late_response_after_lease_takeover(postgres_dsn: str) -> None:
 async def test_revoke_before_effect_intent_records_nothing(postgres_dsn: str) -> None:
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
         await _worker(factory, StartModel()).process_one()
         async with factory() as session:
             link = await session.scalar(select(MaterializationLink))

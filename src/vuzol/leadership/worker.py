@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import cast
 
 from sqlalchemy import and_, func, literal, or_, select, tuple_
@@ -82,6 +83,7 @@ class ProjectLeadWorker:
         repeat_limit: int = 2,
         branch_prefix: str = "vuzol-managed/",
         default_branches: Mapping[str, str] | None = None,
+        repository_paths: Mapping[str, Path] | None = None,
         verifier: GoalVerification | None = None,
     ) -> None:
         self._factory = session_factory
@@ -92,6 +94,7 @@ class ProjectLeadWorker:
         self._repeat_limit = repeat_limit
         self._branch_prefix = branch_prefix
         self._default_branches = dict(default_branches or {})
+        self._repository_paths = dict(repository_paths or {})
         self._verifier = verifier
 
     async def process_one(self) -> bool:
@@ -268,6 +271,9 @@ class ProjectLeadWorker:
             if earlier is not None:
                 await self._defer_in_session(uow.session, token, "lead_event_order")
                 return None
+            from vuzol.leadership.legacy_plans import convert_legacy_plan
+
+            await convert_legacy_plan(uow, goal, self._repository_paths.get(goal.project_id))
             wakeup_id = item.id
             turn = await uow.session.scalar(
                 select(LeadershipTurn).where(
@@ -842,6 +848,7 @@ class ProjectLeadWorker:
             repeat_limit=self._repeat_limit,
             default_branches=self._default_branches,
             batch_executor=execute_batch,
+            repository_paths=self._repository_paths,
         )
 
     async def _release_outbox(self, token: OutboxLeaseToken) -> None:

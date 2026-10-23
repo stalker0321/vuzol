@@ -32,6 +32,7 @@ from vuzol.discussion.domain import (
 )
 from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled
 from vuzol.discussion.memory_writer import OUTCOME_OPERATION, enqueue_memory_extraction
+from vuzol.leadership.persistence import ManagedGoal
 from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
     AcceptanceEvidence,
@@ -94,6 +95,8 @@ class WorkPackageService:
         lifetime_budget: dict[str, object] | None = None,
         deadline: datetime | None = None,
         owner: str | None = None,
+        managed_goal_id: uuid.UUID | None = None,
+        source_repo_commit: str | None = None,
     ) -> RevisionResult:
         discussion = await self._uow.discussions.get_session(session_id, for_update=True)
         if discussion.project_id != project_id:
@@ -112,6 +115,7 @@ class WorkPackageService:
             project_id=project_id,
             status=WorkPackageStatus.DRAFT,
             title=plan.title.strip(),
+            managed_goal_id=managed_goal_id,
         )
         if goal is not None and goal.strip():
             package.goal = goal.strip()
@@ -139,6 +143,7 @@ class WorkPackageService:
             actor_type=actor_type,
             planner_profile=planner_profile,
             prompt_version=prompt_version,
+            source_repo_commit=source_repo_commit,
         )
         package.intent_revision = result.content_hash
         discussion.active_work_package_id = package_id
@@ -171,7 +176,9 @@ class WorkPackageService:
         horizon_enabled: bool = False,
         expected_intent_revision: str | None = None,
         _allow_stopped: bool = False,
+        source_repo_commit: str | None = None,
     ) -> RevisionResult:
+        await self._lock_managed_goal(package_id)
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         if not (_allow_stopped and package.status is WorkPackageStatus.STOPPED):
             require_mutable(package.status)
@@ -188,6 +195,23 @@ class WorkPackageService:
         previous = await self._uow.work_packages.get_head_revision(package)
         if previous is None:
             raise DomainError("revision_not_found")
+        if package.managed_goal_id is not None:
+            if package.status is WorkPackageStatus.RUNNING:
+                raise DomainError("dispatch_must_stop")
+            if package.cursor_ordinal is not None:
+                await self._require_future_only_revision(package, previous, plan)
+            assert self._uow.session is not None
+            active = await self._uow.session.scalar(
+                select(Task.id)
+                .join(MaterializationLink, MaterializationLink.task_id == Task.id)
+                .where(
+                    MaterializationLink.work_package_id == package.id,
+                    Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
+                )
+                .limit(1)
+            )
+            if active is not None:
+                raise DomainError("current_task_unfinished")
         # D1 pinned guard (lead decision): the history guard reads the pinned
         # contract, not the live flag. Pre-D0 rows (NULL) fall back to the
         # passed admission flag for compatibility.
@@ -216,6 +240,7 @@ class WorkPackageService:
             planner_profile=planner_profile,
             prompt_version=prompt_version,
             parent=previous,
+            source_repo_commit=source_repo_commit,
         )
         # D1 intent pointer: the current revision's content hash becomes the
         # fence value for the next correction/replan.
@@ -361,8 +386,15 @@ class WorkPackageService:
                 .order_by(PlanRevisionItem.ordinal)
             )
         ).all()
+        materialized = set(
+            await self._uow.session.scalars(
+                select(MaterializationLink.work_item_draft_id).where(
+                    MaterializationLink.work_package_id == package.id
+                )
+            )
+        )
         for prev in prev_items:
-            if prev.ordinal >= package.cursor_ordinal:
+            if prev.ordinal >= package.cursor_ordinal and prev.item_id not in materialized:
                 continue
             index = prev.ordinal - 1
             if index >= len(plan.items) or item_ids[index] != prev.item_id:
@@ -456,17 +488,27 @@ class WorkPackageService:
         h8: str,
         expected_status_generation: int,
         user_id: int,
+        content_hash: str | None = None,
+        scope_revision: int | None = None,
     ) -> int:
+        goal = await self._lock_managed_goal(package_id)
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         require_generation(package.version, expected_status_generation)
-        if package.status is WorkPackageStatus.APPROVED:
-            revision = await self._fenced_revision(package_id, revision_number, h8)
-            if package.approved_revision_id == revision.id:
-                return package.version
+        revision = await self._fenced_revision(package_id, revision_number, h8)
+        if goal is not None:
+            self._require_managed_revision(goal, package, revision)
+            if user_id != goal.owner_user_id:
+                raise DomainError("control_unauthorized")
+            if content_hash != revision.content_hash or scope_revision != goal.scope_revision:
+                raise DomainError("stale_revision")
+        if (
+            package.status is WorkPackageStatus.APPROVED
+            and package.approved_revision_id == revision.id
+        ):
+            return package.version
         if package.status is not WorkPackageStatus.DRAFT:
             raise DomainError("invalid_transition")
         control_transition_target(package.status, PackageControlAction.APPROVE)
-        revision = await self._fenced_revision(package_id, revision_number, h8)
         if package.head_revision_id != revision.id or revision.state is not PlanRevisionState.DRAFT:
             raise DomainError("stale_revision")
         revision.state = PlanRevisionState.APPROVED
@@ -480,14 +522,12 @@ class WorkPackageService:
             approved_by_user_id=user_id,
         )
         package.approved_revision_id = revision.id
-        # Every accepted revision starts from the then-current project target.
-        # Old integration refs remain immutable evidence but cannot leak changes
-        # into a replanned package execution.
-        package.integration_branch = None
-        package.integration_target_branch = None
-        package.integration_base_commit = None
-        package.integration_head_commit = None
-        package.preview_url = None
+        if package.managed_goal_id is None:
+            package.integration_branch = None
+            package.integration_target_branch = None
+            package.integration_base_commit = None
+            package.integration_head_commit = None
+            package.preview_url = None
         package.status = WorkPackageStatus.APPROVED
         package.version += 1
         # D2 L4 correction barrier: approving a (re)planned revision expires
@@ -508,6 +548,22 @@ class WorkPackageService:
                 "approved_by_user_id": user_id,
             },
         )
+        if goal is not None:
+            from vuzol.leadership.wakeups import enqueue_goal_wakeup
+
+            if goal.lifecycle == "waiting" and goal.waiting_reason == "plan_approval":
+                goal.lifecycle = "active"
+                goal.waiting_reason = None
+                goal.wakeup_condition = None
+            goal.version += 1
+            goal.fence_epoch += 1
+            await enqueue_goal_wakeup(
+                self._uow.session,
+                goal_id=goal.id,
+                package_id=package.id,
+                idempotency_key=f"lead:plan-approved:{revision.id}:{revision.content_hash}:{goal.scope_revision}",
+                kind="plan_approved",
+            )
         return package.version
 
     async def bind_delegated_approval(
@@ -521,6 +577,7 @@ class WorkPackageService:
     ) -> int:
         """Approve a plan as the server, citing the delegation rather than a user."""
 
+        goal = await self._lock_managed_goal(package_id)
         package = await self._uow.work_packages.get_package(package_id, for_update=True)
         require_generation(package.version, expected_status_generation)
         if package.status is not WorkPackageStatus.DRAFT:
@@ -528,16 +585,32 @@ class WorkPackageService:
         revision = await self._fenced_revision(package_id, revision_number, h8)
         if package.head_revision_id != revision.id or revision.state is not PlanRevisionState.DRAFT:
             raise DomainError("stale_revision")
+        from vuzol.leadership.batches import owner_approval_required
+        from vuzol.leadership.persistence import POLICY_REVISION, GoalDelegation
+        from vuzol.leadership.rules import delegation_is_expired
+
+        assert self._uow.session is not None
+        delegation = await self._uow.session.get(GoalDelegation, delegation_id)
+        if (
+            goal is None
+            or delegation is None
+            or goal.delegation_id != delegation.id
+            or (
+                delegation.revoked_at is not None
+                or delegation.policy_revision != POLICY_REVISION
+                or delegation_is_expired(delegation.expires_at, now=datetime.now(UTC))
+                or not {"start_task", "start_batch"}.intersection(delegation.allowed_actions)
+            )
+        ):
+            raise DomainError("delegation_inactive")
+        self._require_managed_revision(goal, package, revision)
+        if owner_approval_required(revision):
+            raise DomainError("owner_plan_approval_required")
         revision.state = PlanRevisionState.APPROVED
         revision.approved_at = datetime.now(UTC)
         revision.approved_by_user_id = None
         revision.approved_by_delegation_id = delegation_id
         package.approved_revision_id = revision.id
-        package.integration_branch = None
-        package.integration_target_branch = None
-        package.integration_base_commit = None
-        package.integration_head_commit = None
-        package.preview_url = None
         package.status = WorkPackageStatus.APPROVED
         package.version += 1
         await self._expire_pending_approvals(package.id)
@@ -557,6 +630,31 @@ class WorkPackageService:
             },
         )
         return package.version
+
+    async def _lock_managed_goal(self, package_id: uuid.UUID) -> ManagedGoal | None:
+        assert self._uow.session is not None
+        goal_id = await self._uow.session.scalar(
+            select(WorkPackage.managed_goal_id).where(WorkPackage.id == package_id)
+        )
+        return (
+            await self._uow.session.get(ManagedGoal, goal_id, with_for_update=True)
+            if goal_id
+            else None
+        )
+
+    @staticmethod
+    def _require_managed_revision(
+        goal: ManagedGoal, package: WorkPackage, revision: PlanRevision
+    ) -> None:
+        if (
+            goal.current_package_id != package.id
+            or goal.lifecycle in {"completed", "cancelled"}
+            or goal.constraints.get("pending_amendment")
+            or revision.immutable_body.get("scope_revision", goal.scope_revision)
+            != goal.scope_revision
+            or canonical_plan_hash(revision.immutable_body) != revision.content_hash
+        ):
+            raise DomainError("stale_revision")
 
     async def discard(
         self,
@@ -1463,9 +1561,22 @@ class WorkPackageService:
         planner_profile: str | None,
         prompt_version: str | None,
         parent: PlanRevision | None = None,
+        source_repo_commit: str | None = None,
     ) -> RevisionResult:
         item_ids = await self._uow.work_packages.resolve_item_identities(package.id, plan.items)
         body = canonical_plan_body(plan, item_ids)
+        if package.managed_goal_id is not None:
+            from vuzol.leadership.persistence import ManagedGoal
+
+            assert self._uow.session is not None
+            managed_goal = await self._uow.session.get(ManagedGoal, package.managed_goal_id)
+            assert managed_goal is not None
+            body["scope_revision"] = managed_goal.scope_revision
+            body["source_repo_commit"] = (
+                source_repo_commit
+                or package.integration_head_commit
+                or (parent.immutable_body.get("source_repo_commit") if parent else None)
+            )
         content_hash = canonical_plan_hash(body)
         revision = PlanRevision(
             work_package_id=package.id,
@@ -1621,7 +1732,7 @@ def _plan_from_revision_body(body: dict[str, object]) -> PlanDraft:
                 raise DomainError("invalid_plan")
             drafts.append(
                 PlanItemDraft(
-                    item_id=uuid.UUID(str(raw["item_id"])),
+                    item_id=uuid.UUID(str(raw["item_id"])) if raw.get("item_id") else None,
                     local_id=raw_local_id,
                     summary=str(raw["summary"]),
                     goal=str(raw["goal"]),
@@ -1631,9 +1742,14 @@ def _plan_from_revision_body(body: dict[str, object]) -> PlanDraft:
                     out_of_scope=tuple(str(value) for value in raw.get("out_of_scope", [])),
                     dependencies=tuple(str(value) for value in raw.get("dependencies", [])),
                     trusted_checks=tuple(str(value) for value in raw.get("trusted_checks", [])),
-                    suggested_risk=RiskLevel(str(raw["suggested_risk"])),
-                    needs_approval=bool(raw["needs_approval"]),
-                    estimated_complexity=EstimatedComplexity(str(raw["estimated_complexity"])),
+                    suggested_risk=RiskLevel(str(raw.get("suggested_risk", "low"))),
+                    needs_approval=bool(raw.get("needs_approval", False)),
+                    estimated_complexity=EstimatedComplexity(
+                        str(raw.get("estimated_complexity", "medium"))
+                    ),
+                    derived=bool(raw.get("derived", True)),
+                    source_turn_ref=raw.get("source_turn_ref"),
+                    source_spec_revision=raw.get("source_spec_revision"),
                 )
             )
     except (KeyError, TypeError, ValueError) as error:

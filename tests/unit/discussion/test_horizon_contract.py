@@ -852,6 +852,7 @@ def _revise_uow(package: WorkPackage, *, item_ids: tuple[uuid.UUID, ...]) -> Mag
     scalars_result = MagicMock()
     scalars_result.all = MagicMock(return_value=[prev])
     uow.session = MagicMock()
+    uow.session.scalar = AsyncMock(return_value=None)
     uow.session.scalars = AsyncMock(return_value=scalars_result)
     uow.work_packages.add_revision = AsyncMock()
     uow.work_packages.add_revision_item = AsyncMock()

@@ -54,6 +54,7 @@ from vuzol.storage.models import (
     Step,
     Task,
     TransactionalOutbox,
+    WorkItemDraft,
 )
 from vuzol.storage.types import (
     EstimatedComplexity,
@@ -85,6 +86,78 @@ def _same_plan_item(left: PlanRevisionItem, right: PlanRevisionItem) -> bool:
     from vuzol.discussion.domain import item_contract_hash_of
 
     return item_contract_hash_of(left) == item_contract_hash_of(right)
+
+
+async def first_unfinished_ordinal(
+    session: AsyncSession, package_id: uuid.UUID, revision: PlanRevision
+) -> int:
+    """Carry an unchanged, completed prefix across plan revisions."""
+
+    current_items = tuple(
+        (
+            await session.scalars(
+                select(PlanRevisionItem)
+                .where(
+                    PlanRevisionItem.work_package_id == package_id,
+                    PlanRevisionItem.plan_revision_id == revision.id,
+                )
+                .order_by(PlanRevisionItem.ordinal)
+            )
+        ).all()
+    )
+    for item in current_items:
+        completed_predecessors = tuple(
+            (
+                await session.scalars(
+                    select(PlanRevisionItem)
+                    .join(
+                        MaterializationLink,
+                        MaterializationLink.plan_revision_item_id == PlanRevisionItem.id,
+                    )
+                    .join(Task, Task.id == MaterializationLink.task_id)
+                    .where(
+                        MaterializationLink.work_package_id == package_id,
+                        MaterializationLink.plan_revision_id != revision.id,
+                        MaterializationLink.work_item_draft_id == item.item_id,
+                        Task.status == TaskStatus.COMPLETED,
+                    )
+                )
+            ).all()
+        )
+        if not any(_same_plan_item(item, previous) for previous in completed_predecessors):
+            return item.ordinal
+    return len(current_items) + 1
+
+
+async def check_item_dependencies(
+    session: AsyncSession, package_id: uuid.UUID, item: PlanRevisionItem
+) -> None:
+    for local_id in item.dependencies:
+        dependency = await session.scalar(
+            select(PlanRevisionItem)
+            .join(WorkItemDraft, WorkItemDraft.id == PlanRevisionItem.item_id)
+            .where(
+                PlanRevisionItem.plan_revision_id == item.plan_revision_id,
+                WorkItemDraft.local_id == local_id,
+            )
+        )
+        if dependency is None:
+            raise DomainError("dependencies_unfinished")
+        completed = await session.scalars(
+            select(PlanRevisionItem)
+            .join(
+                MaterializationLink,
+                MaterializationLink.plan_revision_item_id == PlanRevisionItem.id,
+            )
+            .join(Task, Task.id == MaterializationLink.task_id)
+            .where(
+                MaterializationLink.work_package_id == package_id,
+                MaterializationLink.work_item_draft_id == dependency.item_id,
+                Task.status == TaskStatus.COMPLETED,
+            )
+        )
+        if not any(_same_plan_item(dependency, previous) for previous in completed):
+            raise DomainError("dependencies_unfinished")
 
 
 class WorkPackageSequencer:
@@ -128,10 +201,22 @@ class WorkPackageSequencer:
         if package.approved_revision_id != revision.id or package.head_revision_id != revision.id:
             raise DomainError("approval_binding_mismatch")
 
+        assert self._uow.session is not None
+        if package.managed_goal_id is not None:
+            from vuzol.discussion.service import WorkPackageService
+            from vuzol.leadership.persistence import ManagedGoal
+
+            goal = await self._uow.session.get(ManagedGoal, package.managed_goal_id)
+            assert goal is not None
+            WorkPackageService._require_managed_revision(goal, package, revision)
+            if actor_type != "agent" or goal.lifecycle != "active":
+                raise DomainError("lead_dispatch_required")
         previous = package.status
         package.status = WorkPackageStatus.RUNNING
         package.running_revision_id = revision.id
-        package.cursor_ordinal = await self._first_unfinished_ordinal(package.id, revision)
+        package.cursor_ordinal = await first_unfinished_ordinal(
+            self._uow.session, package.id, revision
+        )
         package.pause_reason = None
         package.last_failure_task_id = None
         package.version += 1
@@ -166,45 +251,6 @@ class WorkPackageSequencer:
             payload=start_payload,
         )
         return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
-
-    async def _first_unfinished_ordinal(self, package_id: uuid.UUID, revision: PlanRevision) -> int:
-        """Carry an unchanged, completed prefix across plan revisions."""
-
-        assert self._uow.session is not None
-        current_items = tuple(
-            (
-                await self._uow.session.scalars(
-                    select(PlanRevisionItem)
-                    .where(
-                        PlanRevisionItem.work_package_id == package_id,
-                        PlanRevisionItem.plan_revision_id == revision.id,
-                    )
-                    .order_by(PlanRevisionItem.ordinal)
-                )
-            ).all()
-        )
-        for item in current_items:
-            completed_predecessors = tuple(
-                (
-                    await self._uow.session.scalars(
-                        select(PlanRevisionItem)
-                        .join(
-                            MaterializationLink,
-                            MaterializationLink.plan_revision_item_id == PlanRevisionItem.id,
-                        )
-                        .join(Task, Task.id == MaterializationLink.task_id)
-                        .where(
-                            MaterializationLink.work_package_id == package_id,
-                            MaterializationLink.plan_revision_id != revision.id,
-                            MaterializationLink.work_item_draft_id == item.item_id,
-                            Task.status == TaskStatus.COMPLETED,
-                        )
-                    )
-                ).all()
-            )
-            if not any(_same_plan_item(item, previous) for previous in completed_predecessors):
-                return item.ordinal
-        return len(current_items) + 1
 
     async def observe_terminal(
         self, *, task_id: uuid.UUID, horizon_enabled: bool = False
@@ -703,6 +749,8 @@ class WorkPackageSequencer:
             )
             await self._projection(package.id, package.version, "waiting_approval")
             return SequenceResult(package.id, package.version, None, ordinal)
+
+        await check_item_dependencies(self._uow.session, package.id, item)
 
         if (package.horizon_phase or "").startswith("item_approved:"):
             # Approved marker is single-use: clear it as the item materializes.

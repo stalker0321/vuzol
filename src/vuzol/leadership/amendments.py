@@ -155,10 +155,10 @@ async def apply_pending_amendment(session: AsyncSession, goal: ManagedGoal) -> b
     constraints.pop("queued_amendment", None)
     constraints.pop("paused_children", None)
     constraints["last_amendment"] = amendment
+    constraints.setdefault("legacy_plan_revision_v1", {"status": "superseded"})
     goal.constraints = constraints
     goal.scope_text = amendment["scope"]
     goal.criteria = amendment["criteria"]
-    goal.proposed_plan = None
     goal.scope_revision += 1
     goal.version += 1
     goal.fence_epoch += 1

@@ -301,12 +301,12 @@ def test_materialize_order_independent_of_row_order() -> None:
     forward_body = canonical_plan_body(forward, (uuid.uuid4(), uuid.uuid4()))
     backward_body = canonical_plan_body(backward, (uuid.uuid4(), uuid.uuid4()))
     assert [row["local_id"] for row in forward_body["items"]] == ["a", "b"]
-    assert [row["local_id"] for row in backward_body["items"]] == ["b", "a"]
+    assert [row["local_id"] for row in backward_body["items"]] == ["a", "b"]
     assert [row["ordinal"] for row in forward_body["items"]] == [1, 2]
     assert [row["ordinal"] for row in backward_body["items"]] == [1, 2]
     # Dependencies resolve by stable local_id, never by row position.
     assert forward_body["items"][1]["dependencies"] == ["a"]
-    assert backward_body["items"][0]["dependencies"] == ["a"]
+    assert backward_body["items"][1]["dependencies"] == ["a"]
 
 
 def test_shared_recovery_budget_single_ledger() -> None:

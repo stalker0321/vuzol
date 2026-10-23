@@ -23,7 +23,9 @@ def parse_work_limits(raw: object) -> WorkLimits:
         raise DomainError("invalid_work_limits") from error
 
 
-async def check_batch_limits(session: AsyncSession, goal: ManagedGoal, *, items: int) -> None:
+async def check_batch_limits(
+    session: AsyncSession, goal: ManagedGoal, *, items: int, admitting: bool = True
+) -> None:
     limits = parse_work_limits(goal.constraints.get("work_limits", {}))
     if limits.max_items_per_package is not None and items > limits.max_items_per_package:
         raise DomainError("work_item_limit_reached")
@@ -35,5 +37,5 @@ async def check_batch_limits(session: AsyncSession, goal: ManagedGoal, *, items:
             .select_from(WorkPackage)
             .where(WorkPackage.managed_goal_id == goal.id)
         )
-        if int(used or 0) >= limits.max_packages:
+        if int(used or 0) + int(admitting) > limits.max_packages:
             raise DomainError("work_package_limit_reached")

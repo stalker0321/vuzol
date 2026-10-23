@@ -55,6 +55,8 @@ class AuthoritativeControlCommand(FrozenModel):
     package_id: uuid.UUID
     plan_revision_number: int = Field(ge=1)
     h8: str = Field(pattern=r"^[0-9a-f]{8}$")
+    content_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    scope_revision: int | None = Field(default=None, ge=1)
     expected_status_generation: int = Field(ge=1)
     user_id: int
     item_ordinal: int | None = Field(default=None, ge=1, le=20)
@@ -322,8 +324,13 @@ class PackageControlIngress:
                 )
                 if project_id is not None:
                     await lock_project_admission(uow.session, project_id)
+                managed_goal = await WorkPackageService(uow)._lock_managed_goal(command.package_id)
                 watched = await uow.work_packages.get_package(command.package_id, for_update=True)
-                if await legacy_package_is_fenced(uow.session, watched):
+                if await legacy_package_is_fenced(uow.session, watched) and not (
+                    command.action is PackageControlAction.APPROVE
+                    and managed_goal is not None
+                    and managed_goal.current_package_id == watched.id
+                ):
                     outcome = {
                         "code": PackageControlResultCode.QUEUED.value,
                         "status_generation": watched.version,
@@ -345,16 +352,22 @@ class PackageControlIngress:
                     h8=command.h8,
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
+                    content_hash=command.content_hash,
+                    scope_revision=command.scope_revision,
                 )
-                sequence = await WorkPackageSequencer(uow).start(
-                    package_id=command.package_id,
-                    revision_number=command.plan_revision_number,
-                    h8=command.h8,
-                    expected_status_generation=approved_generation,
-                    user_id=command.user_id,
-                    horizon_enabled=self._horizon_enabled,
-                )
-                generation = sequence.status_generation
+                package = await uow.work_packages.get_package(command.package_id)
+                if package.managed_goal_id is not None:
+                    generation = approved_generation
+                else:
+                    sequence = await WorkPackageSequencer(uow).start(
+                        package_id=command.package_id,
+                        revision_number=command.plan_revision_number,
+                        h8=command.h8,
+                        expected_status_generation=approved_generation,
+                        user_id=command.user_id,
+                        horizon_enabled=self._horizon_enabled,
+                    )
+                    generation = sequence.status_generation
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.DISCARD:

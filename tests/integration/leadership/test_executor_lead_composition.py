@@ -148,7 +148,7 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
 
     monkeypatch.setattr(executor, "get_runtime_configuration", lambda **kwargs: runtime)
     monkeypatch.setattr(executor, "resolve_database_dsn", lambda settings: SecretStr(postgres_dsn))
-    monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda socket: DockerBoundary())
+    monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda socket, **kw: DockerBoundary())
     monkeypatch.setattr(executor, "WorktreeAccessManager", AccessBoundary)
     monkeypatch.setattr(executor, "_refresh_subscription_limits_tick", AsyncMock())
 

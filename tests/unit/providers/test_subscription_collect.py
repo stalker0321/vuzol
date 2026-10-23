@@ -99,6 +99,7 @@ def test_collect_grok_from_local_billing_log(tmp_path: Path) -> None:
     logs = state / "logs"
     logs.mkdir(parents=True)
     line = {
+        "ts": "2026-07-16T00:00:00Z",
         "msg": "billing: fetched credits config",
         "ctx": {
             "subscriptionTier": "SuperGrok",
@@ -293,6 +294,7 @@ def test_host_grok_billing_logs_matched_by_jwt_subject(
 
     billing_line = json.dumps(
         {
+            "ts": "2026-07-16T00:00:00Z",
             "msg": "billing: fetched credits config",
             "ctx": {
                 "subscriptionTier": "SuperGrok",
@@ -324,6 +326,7 @@ def test_host_grok_billing_logs_matched_by_jwt_subject(
         + json.dumps(
             {
                 "msg": "shell.turn.inference_failed",
+                "ts": "2026-07-16T00:00:00Z",
                 "ctx": {
                     "message": (
                         "subscription:free-usage-exhausted: tokens (actual/limit): 532378/500000"
@@ -523,6 +526,7 @@ def test_s1c_legacy_default_ignores_snapshot(
     logs = state / "logs"
     logs.mkdir(parents=True)
     line = {
+        "ts": "2026-07-16T00:00:00Z",
         "msg": "billing: fetched credits config",
         "ctx": {
             "subscriptionTier": "SuperGrok",
@@ -703,7 +707,7 @@ def test_s1c_subscription_profiles_snapshot_allows_grok_without_state(
     from vuzol.providers.subscription_limits import subscription_profiles
 
     grok = _grok_profile_no_state("grok-sub-a")
-    assert subscription_profiles((grok,), grok_limit_source="legacy") == ()
+    assert subscription_profiles((grok,), grok_limit_source="legacy") == (grok,)
     assert [
         p.id for p in subscription_profiles((grok,), grok_limit_source="snapshot_required")
     ] == ["grok-sub-a"]

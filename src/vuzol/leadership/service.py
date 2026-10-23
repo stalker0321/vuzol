@@ -525,6 +525,16 @@ class LeadershipCommandService:
         )
         uow.session.add(goal)
         await uow.session.flush()
+        from vuzol.leadership.provenance import RequestOrigin, record_incoming_request
+
+        ingress = actor.ingress_source
+        origin = RequestOrigin.model_validate(
+            command.payload.get("request_origin") or {
+                "channel": ingress if ingress in {"telegram", "cli"} else "api",
+                "display_name": "Telegram" if ingress == "telegram" else ingress,
+            }
+        )
+        await record_incoming_request(uow.session, goal, origin)
         await enqueue_goal_wakeup(
             uow.session,
             goal_id=goal.id,
@@ -721,6 +731,7 @@ async def request_owner_recovery(session: AsyncSession, goal: ManagedGoal, reaso
 
 async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str, Any]:
     from vuzol.leadership.card import open_question, owner_answer_text
+    from vuzol.leadership.execution_view import execution_snapshot
 
     package = None
     if goal.current_package_id is not None:
@@ -746,6 +757,7 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
         "package_line": package_line,
         "package_title": None if package is None else package.title,
         "current_package_status": None if package is None else package.status.value,
+        "execution": await execution_snapshot(session, goal.current_package_id),
         "result_commit": None if package is None else package.integration_head_commit,
         "completion_confirmed": assessment.satisfied,
         "next_operation": _next_operation(goal, package, question),

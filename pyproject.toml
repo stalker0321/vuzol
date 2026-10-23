@@ -24,7 +24,11 @@ dependencies = [
   "uvicorn>=0.35,<1",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.30,<2", "PyJWT[crypto]>=2.10,<3"]
+
 [project.scripts]
+vuzol-mcp = "vuzol.cli.mcp:main"
 vuzol-app = "vuzol.cli.app:main"
 vuzol-worker = "vuzol.cli.worker:main"
 vuzol-telegram = "vuzol.cli.telegram:main"

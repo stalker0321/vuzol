@@ -151,6 +151,27 @@ def render_goal_card(view: Mapping[str, object]) -> str:
         next_step = "Сейчас от тебя ничего не требуется."
 
     rows = [heading, f"**{_preview(view.get('request')) or 'Текущая цель'}**", explanation]
+    execution = view.get("execution")
+    if isinstance(execution, list) and execution:
+        lines = []
+        for item in execution[:4]:
+            if not isinstance(item, dict):
+                continue
+            state = item.get("task_status")
+            icon = "⏸" if state == "paused" else "🔴" if state == "failed" else "🔹"
+            detail = f"{icon} {state} · {item.get('step') or 'ожидание следующего шага'}"
+            if item.get("profile"):
+                detail += f" · {item['profile']}"
+                if item.get("account") and item["account"] != item["profile"]:
+                    detail += f" · аккаунт {item['account']}"
+                detail += f" · {item.get('model') or 'модель неизвестна'}"
+            if item.get("elapsed_seconds") is not None:
+                detail += f" · {item['elapsed_seconds']} с"
+            if item.get("runtime_state_known") is False:
+                detail += " · исход runtime неизвестен, нужна сверка"
+            lines.append(literal_markdown(detail))
+        if lines:
+            rows.append("**Исполнение · снимок состояния**\n" + "\n".join(lines))
     if isinstance(question, str) and question.strip():
         rows.append("**Вопрос**\n" + literal_markdown(question.strip()))
         version = view.get("question_version")

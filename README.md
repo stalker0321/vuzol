@@ -200,6 +200,7 @@ tests/              unit and integration test suites
 
 ## Documentation
 
+- [Documentation map: current guides and historical plans](docs/README.md)
 - [Configuration](docs/CONFIGURATION.md)
 - [Telegram workspace](docs/TELEGRAM.md)
 - [Voice and semantic interpretation](docs/INTERPRETATION.md)

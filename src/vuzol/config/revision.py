@@ -9,7 +9,12 @@ from typing import Any
 
 from pydantic import AnyUrl, BaseModel, ConfigDict
 
-from vuzol.config.models import ProjectConfig, ProviderProfileConfig, SandboxProfileConfig
+from vuzol.config.models import (
+    ProjectConfig,
+    ProviderProfileConfig,
+    RegistryDocument,
+    SandboxProfileConfig,
+)
 
 
 def content_revision(value: BaseModel | Mapping[str, Any]) -> str:
@@ -21,6 +26,32 @@ def content_revision(value: BaseModel | Mapping[str, Any]) -> str:
 
     if isinstance(value, BaseModel):
         raw: object = value.model_dump(mode="python")
+        if isinstance(value, RegistryDocument) and not value.accounts:
+            assert isinstance(raw, dict)
+            raw.pop("accounts", None)
+            for profile in raw.get("profiles", ()):
+                if profile.get("account") is None:
+                    profile.pop("account", None)
+        if isinstance(value, ProviderProfileConfig):
+            assert isinstance(raw, dict)
+            raw.pop("subscription_limits_visible", None)
+            if value.account is None:
+                raw.pop("account", None)  # Preserve all existing frozen profile revisions.
+            else:
+                account = raw["account"]
+                assert isinstance(account, dict)
+                for field in (
+                    "subscription_limits_visible",
+                    "quota_collector",
+                    "quota_scope_id",
+                    "quota_oauth",
+                ):
+                    account.pop(field, None)
+        # An absent reservation retains the pre-control-lane profile identity.
+        # Nonzero reservations are policy changes and do invalidate old pins.
+        if isinstance(value, ProviderProfileConfig) and value.control_reserved_slots == 0:
+            assert isinstance(raw, dict)
+            raw.pop("control_reserved_slots", None)
     else:
         raw = dict(value)
     payload = json.dumps(

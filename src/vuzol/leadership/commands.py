@@ -119,12 +119,20 @@ class CommandResult:
 
 
 def payload_hash(command: LeadCommand) -> str:
+    # Provenance describes the first accepted ingress, not the work's semantic
+    # identity. Keep retries compatible with older receipts (before provenance)
+    # and with a renamed OAuth client. Different work still conflicts.
+    payload = (
+        {key: value for key, value in command.payload.items() if key != "request_origin"}
+        if command.name == LeadCommandName.ENABLE_MANAGED_GOAL.value
+        else command.payload
+    )
     body = {
         "command": command.name,
         "contract_version": command.contract_version,
         "expected_version": command.expected_version,
         "goal_id": None if command.goal_id is None else str(command.goal_id),
-        "payload": command.payload,
+        "payload": payload,
         "project_id": command.project_id,
         "reason": command.reason,
     }

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from vuzol.config.accounts import normalize_accounts
 from vuzol.config.models import (
     Capability,
     LaunchMode,
@@ -40,10 +41,12 @@ def load_document(path: Path) -> RegistryDocument:
         else:
             with path.open("rb") as config_file:
                 raw = tomllib.load(config_file)
-        return RegistryDocument.model_validate(_resolve_profile_inheritance(raw))
+        return RegistryDocument.model_validate(
+            normalize_accounts(_resolve_profile_inheritance(raw))
+        )
     except ConfigurationLoadError:
         raise
-    except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError, ValidationError) as error:
+    except (OSError, ValueError, ValidationError) as error:
         raise ConfigurationLoadError(f"invalid registry file {path}: {error}") from error
 
 
@@ -96,6 +99,7 @@ def merge_documents(base: RegistryDocument, overlay: RegistryDocument) -> Regist
     """Merge an append-only dynamic project/topic overlay into static configuration."""
 
     return RegistryDocument(
+        accounts=(*base.accounts, *overlay.accounts),
         projects=(*base.projects, *overlay.projects),
         profiles=(*base.profiles, *overlay.profiles),
         topics=(*base.topics, *overlay.topics),
@@ -138,6 +142,8 @@ def build_bundle(
     """Validate cross-references, paths, fallbacks, and required secrets."""
 
     try:
+        if len({account.id for account in document.accounts}) != len(document.accounts):
+            raise RegistryError("duplicate account descriptor across registries")
         projects = ProjectRegistry(document.projects, repository_root=settings.repository_root)
         profiles = ProfileRegistry(document.profiles)
         sandboxes = SandboxRegistry(document.sandboxes)

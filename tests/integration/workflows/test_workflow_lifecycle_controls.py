@@ -245,6 +245,50 @@ def test_pause_resume_and_cancel_are_persisted(postgres_dsn: str) -> None:
 
 
 @pytest.mark.postgresql
+def test_owner_can_pause_blocked_work_without_clearing_its_blocker(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        try:
+            task_id, interpretation_id = await seed_interpreted(factory)
+            async with factory.begin() as session:
+                run = await materialize_run(
+                    session,
+                    task_id=task_id,
+                    workflow=compile_workflow(simple_draft(), interpretation_id=interpretation_id),
+                    configuration_revision="a" * 64,
+                    policy_revision="b" * 64,
+                    prompt_revision=None,
+                    automatic_start=True,
+                )
+                step = await session.scalar(
+                    select(Step).where(Step.run_id == run.id, Step.status == StepStatus.QUEUED)
+                )
+                task = await session.get(Task, task_id)
+                run.status = RunStatus.BLOCKED
+                task.status = TaskStatus.BLOCKED
+                step.status = StepStatus.BLOCKED
+                step.failure_category = "project_pin_unresolved"
+                run_id, step_id = run.id, step.id
+            async with factory.begin() as session:
+                await pause_task(session, task_id, actor_id="1")
+            async with factory() as session:
+                assert (await session.get(Task, task_id)).status is TaskStatus.PAUSED
+                assert (await session.get(Run, run_id)).status is RunStatus.PAUSED
+            async with factory.begin() as session:
+                await resume_task(session, task_id, actor_id="1")
+            async with factory() as session:
+                assert (await session.get(Task, task_id)).status is TaskStatus.BLOCKED
+                assert (await session.get(Run, run_id)).status is RunStatus.BLOCKED
+                step = await session.get(Step, step_id)
+                assert step.status is StepStatus.BLOCKED
+                assert step.failure_category == "project_pin_unresolved"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
 def test_stale_task_version_rejects_control(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

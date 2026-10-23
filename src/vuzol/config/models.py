@@ -298,11 +298,118 @@ class OpenRouterProviderRouting(FrozenModel):
         return self
 
 
+class OpenCodeUsageOAuthConfig(FrozenModel):
+    """Read-only meter credential, NOT an inference credential or account slot.
+
+    OpenCode owns refresh/write-back. The collector only follows this exact
+    record; desktop active-account changes must never select another identity.
+    """
+
+    store_path: Path
+    store_format: Literal["credential_v2", "account_v1"] = "credential_v2"
+    credential_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.-]+$", max_length=160)
+    account_id: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$", max_length=60)
+    org_id: str = Field(pattern=r"^[a-zA-Z0-9_.-]+$", max_length=60)
+    refresh_owner: Literal["opencode_cli"] = "opencode_cli"
+
+    @property
+    def scope_id(self) -> str:
+        return f"opencode:organization:{self.org_id}:account:{self.account_id}"
+
+    @model_validator(mode="after")
+    def validate_store(self) -> "OpenCodeUsageOAuthConfig":
+        path = self.store_path
+        # This is an explicitly selected read-only source, not the runtime's
+        # writable canonical state. Do not force an auth migration merely to
+        # measure an existing operator-owned login. ACL checks happen on read.
+        if not path.is_absolute() or path.name != "opencode.db":
+            raise ValueError("usage OAuth requires an explicit absolute opencode.db path")
+        if (self.store_format == "credential_v2") != (self.credential_id is not None):
+            raise ValueError(
+                "credential_v2 requires credential_id; account_v1 uses account_id only"
+            )
+        return self
+
+
+class AccountConfig(FrozenModel):
+    """Operator-owned account facts, compiled into existing runtime profiles.
+
+    No credentials or model choices belong here. Legacy inline profiles remain
+    valid; adopting a descriptor is an explicit migration, never an ID rewrite.
+    """
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$", max_length=100)
+    service: str = Field(pattern=r"^[a-z][a-z0-9_-]*$", max_length=100)
+    provider: str
+    launch_mode: LaunchMode
+    auth_method: Literal["static_api_key", "cli_oauth", "none"]
+    auth_owner: Literal["operator", "serialized_cli"] = "operator"
+    state_directory: Path | None = None
+    runtime_identity: str | None = None
+    credential_reference: str | None = Field(default=None, pattern=r"^(env|file):.+$")
+    credential_required: bool = False
+    api_base_url: HttpUrl | None = None
+    runtime_network: NetworkPolicy = NetworkPolicy()
+    concurrency_limit: int = Field(default=1, ge=1, le=100)
+    control_reserved_slots: int = Field(default=0, ge=0, le=99)
+    lifecycle: Literal["enabled", "draining", "retired"] = "enabled"
+    quota_collector: Literal["none", "opencode_go", "codex", "grok"] = "none"
+    # This describes the configured meter, not independently verified workspace
+    # identity. Never present an account-wide meter as per-model allowances.
+    quota_scope_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9:_.-]+$", max_length=160)
+    quota_oauth: OpenCodeUsageOAuthConfig | None = None
+    subscription_limits_visible: bool = True
+
+    @model_validator(mode="after")
+    def validate_account(self) -> "AccountConfig":
+        if self.control_reserved_slots >= self.concurrency_limit:
+            raise ValueError("account must leave a worker slot")
+        if self.launch_mode is LaunchMode.CLI:
+            if self.state_directory is None or self.runtime_identity is None:
+                raise ValueError("CLI account requires state_directory and runtime_identity")
+            if not self.state_directory.is_absolute():
+                raise ValueError("account state path must be absolute")
+            path = self.state_directory.resolve()
+            if path == Path("/") or any(
+                path.is_relative_to(root) for root in (Path("/home"), Path("/root"), Path("/Users"))
+            ):
+                raise ValueError("canonical account state must be outside personal homes")
+        if self.auth_method == "cli_oauth":
+            if self.auth_owner != "serialized_cli" or self.concurrency_limit != 1:
+                raise ValueError("CLI OAuth requires one serialized refresh owner")
+            if self.provider == "pi":
+                raise ValueError("Pi tmpfs OAuth rotation has no supported canonical refresh owner")
+        if self.quota_collector == "opencode_go":
+            if (self.service, self.provider, self.launch_mode, self.auth_method) != (
+                "opencode-go",
+                "pi",
+                LaunchMode.CLI,
+                "static_api_key",
+            ):
+                raise ValueError(
+                    "Go usage currently supports explicit Pi Go static-key bindings only"
+                )
+            if self.quota_scope_id is None:
+                raise ValueError("Go usage requires an explicit quota_scope_id")
+        if self.quota_oauth is not None:
+            if self.quota_collector != "opencode_go":
+                raise ValueError("usage OAuth is only supported by the Go collector")
+            if self.quota_scope_id != self.quota_oauth.scope_id:
+                raise ValueError("OAuth quota scope must identify the configured account and org")
+        if self.quota_collector in {"codex", "grok"} and (
+            self.provider != self.quota_collector or self.launch_mode is not LaunchMode.CLI
+        ):
+            raise ValueError("quota collector does not match CLI runtime binding")
+        return self
+
+
 class ProviderProfileConfig(FrozenModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
     # Operator-assigned, non-secret account identity, independent of model/role.
     # None preserves the default of isolated CLI profiles.
     account_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$", max_length=100)
+    # Compiled descriptor, not another editable source of account settings.
+    account: AccountConfig | None = None
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
     # Optional reasoning effort for models that expose it. CLI profiles forward
@@ -326,6 +433,7 @@ class ProviderProfileConfig(FrozenModel):
     credential_required: bool = True
     capabilities: frozenset[Capability]
     concurrency_limit: int = Field(ge=1, le=100)
+    control_reserved_slots: int = Field(default=0, ge=0, le=99)
     context_limit: int | None = Field(default=None, ge=1)
     output_limit: int | None = Field(default=None, ge=1)
     cost_class: CostClass
@@ -340,6 +448,9 @@ class ProviderProfileConfig(FrozenModel):
     minimum_unknown_usage_cost: float = Field(default=0.01, gt=0)
     runtime_identity: str | None = Field(default=None, min_length=1, max_length=100)
     state_directory: Path | None = None
+    # Dashboard/collector visibility only; retiring a subscription must not
+    # silently disable or reroute execution profiles.
+    subscription_limits_visible: bool = True
     runtime_network: NetworkPolicy = NetworkPolicy()
     agent_runtime_contract: AgentRuntimeContract | None = None
     enabled: bool = True
@@ -358,10 +469,25 @@ class ProviderProfileConfig(FrozenModel):
             self.state_directory.resolve() if self.state_directory is not None else None,
             self.runtime_identity,
             self.concurrency_limit,
+            self.control_reserved_slots,
+            self.account.model_copy(
+                update={
+                    "quota_oauth": None,
+                    "quota_scope_id": None,
+                    "quota_collector": "none",
+                    "subscription_limits_visible": True,
+                }
+            )
+            if self.account
+            else None,
         )
 
     @model_validator(mode="after")
     def validate_credential_reference(self) -> "ProviderProfileConfig":
+        if self.account is not None and self.account_id != self.account.id:
+            raise ValueError("compiled account identity mismatch")
+        if self.control_reserved_slots >= self.concurrency_limit:
+            raise ValueError("control_reserved_slots must leave at least one worker slot")
         if self.enabled and self.credential_required and self.credential_reference is None:
             raise ValueError("enabled profile requires a credential reference")
         if self.api_base_url is not None:
@@ -454,6 +580,7 @@ class TopicConfig(FrozenModel):
 
 
 class RegistryDocument(FrozenModel):
+    accounts: tuple[AccountConfig, ...] = ()
     projects: tuple[ProjectConfig, ...] = ()
     profiles: tuple[ProviderProfileConfig, ...] = ()
     topics: tuple[TopicConfig, ...] = ()

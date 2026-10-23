@@ -40,6 +40,23 @@ class DiskPressureSettings(BaseModel):
         return value
 
 
+class OpenCodeSnapshotBinding(BaseModel):
+    """Usage-only transport; never changes execution profile revisions."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    account_id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$", max_length=100)
+    scope_id: str = Field(min_length=1, max_length=160)
+    path: Path
+
+    @field_validator("path")
+    @classmethod
+    def absolute_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("usage snapshot path must be absolute")
+        return value
+
+
 class SubscriptionLimitSettings(BaseModel):
     """Grok dashboard limit source (S1d wiring; default preserves legacy host collect).
 
@@ -53,6 +70,17 @@ class SubscriptionLimitSettings(BaseModel):
     source: Literal["legacy", "snapshot_required"] = "legacy"
     snapshot_file: Path | None = None
     snapshot_max_age_seconds: int = Field(default=900, ge=1, le=86_400)
+    opencode_snapshots: tuple[OpenCodeSnapshotBinding, ...] = ()
+
+    @field_validator("opencode_snapshots")
+    @classmethod
+    def unique_meters(
+        cls, value: tuple[OpenCodeSnapshotBinding, ...]
+    ) -> tuple[OpenCodeSnapshotBinding, ...]:
+        for field in ("account_id", "scope_id", "path"):
+            if len({getattr(item, field) for item in value}) != len(value):
+                raise ValueError("duplicate OpenCode snapshot binding")
+        return value
 
     @model_validator(mode="after")
     def require_absolute_snapshot_when_required(self) -> "SubscriptionLimitSettings":
@@ -406,6 +434,9 @@ class ExecutionSettings(BaseModel):
     rootless_docker_socket: Path = Path("/run/user/1000/docker.sock")
     require_preflight: bool = True
     cleanup_interval_seconds: int = Field(default=300, ge=10, le=86_400)
+    journal_root: Path = Path("/srv/vuzol/runtime-journal")
+    journal_key_file: Path | None = None
+    provider_parallelism: int = Field(default=2, ge=1, le=16)
     recovery_batch_size: int = Field(default=50, ge=1, le=1000)
     proxy_image: str | None = Field(
         default=None,
@@ -653,6 +684,7 @@ class Settings(BaseSettings):
             self.capability_provisioning.toolchain_root,
             self.capability_provisioning.download_cache_root,
             self.dependency_provisioning.environment_root,
+            *((self.execution.journal_root,) if self.execution.journal_key_file else ()),
         )
         resolved = tuple(root.resolve() for root in roots)
         for index, root in enumerate(resolved):

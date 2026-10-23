@@ -12,22 +12,25 @@ marks the profile as unavailable.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig
+from vuzol.config.settings import OpenCodeSnapshotBinding
 from vuzol.providers.grok_limit_snapshot import (
     CODE_BINDING_MISMATCH,
     CODE_SNAPSHOT_INVALID,
@@ -38,10 +41,14 @@ from vuzol.providers.grok_limit_snapshot import (
     GrokLimitEntry,
     load_grok_limit_entry,
 )
+from vuzol.providers.opencode_usage import GoUsage
+from vuzol.providers.quota import QuotaWindow
+from vuzol.providers.subscription_plan import SubscriptionPlan, reported_plan
 from vuzol.storage.models import SubscriptionLimitSnapshotRow
 
 # Outbox destination claimed by the executor (provider-state ACL for auth/logs).
 SUBSCRIPTION_LIMITS_DESTINATION = "subscription_limits"
+_GO_USAGE_SOURCES = ("opencode_go_usage_v1", "opencode_go_oauth_v1")
 
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 GROK_BILLING_URLS = (
@@ -61,7 +68,7 @@ GROK_LIMIT_SOURCE_SNAPSHOT_REQUIRED: Final = "snapshot_required"
 CODE_LIMITS_SOURCE_UNKNOWN: Final = "limits_source_unknown"
 _SAFE_UNAVAILABLE_DETAILS: Final = {
     "state_directory missing": "Профиль не настроен на сервере.",
-    "auth.json unreadable": "Нужно обновить авторизацию профиля.",
+    "auth.json unreadable": "Авторизация недоступна сборщику: проверьте путь, доступ и формат.",
     "usage endpoint failed": "Провайдер не ответил. Повторите /update позже.",
     "billing unavailable": "Провайдер не отдаёт данные лимитов.",
     "billing shape unknown": "Формат ответа провайдера изменился.",
@@ -71,6 +78,43 @@ _SAFE_UNAVAILABLE_DETAILS: Final = {
     CODE_SNAPSHOT_UNBOUND: "Профиль не найден в снимке лимитов.",
     CODE_BINDING_MISMATCH: "Привязка профиля не совпадает.",
     CODE_LIMITS_SOURCE_UNKNOWN: "Источник лимитов настроен неверно.",
+    "limits_not_collected": "Остаток неизвестен: данные ещё не получены.",
+    "collector_not_supported": "Остаток неизвестен: для этого провайдера сборщик не подключён.",
+    "limits_stale": "Остаток неизвестен: данные старше 15 минут. Повторите /update.",
+    "billing timestamp unknown": "Остаток неизвестен: у записи провайдера нет времени измерения.",
+    "auth_unreadable": "Авторизация недоступна сборщику. Нужна проверка доступа оператора.",
+    "auth_permissions": "Небезопасные права файла авторизации.",
+    "auth_invalid": "Файл авторизации повреждён или не поддерживается.",
+    "auth_method_unsupported": "Этот способ авторизации не поддерживается сборщиком Go.",
+    "auth_expired": (
+        "OAuth истёк. Обновление — через OpenCode CLI; сборщик сам токены не обновляет."
+    ),
+    "auth_identity_mismatch": (
+        "OAuth account/org не совпадает с привязкой. Оператору нужно проверить настройку."
+    ),
+    "auth_issuer_mismatch": "OAuth выдан другим сервером. Запрос с этим токеном не отправлен.",
+    "auth_store_unsupported": "Версия OAuth-хранилища не соответствует настройке.",
+    "auth_store_migrated": (
+        "OpenCode мигрировал хранилище. Нужна явная привязка к новой записи OAuth."
+    ),
+    "auth_store_busy": "OAuth-хранилище занято. Сборщик повторит чтение на следующем обновлении.",
+    "auth_store_changed": "OAuth изменился во время чтения. Повтор — на следующем обновлении.",
+    "auth_refresh_busy": "OpenCode занят; обновление авторизации ожидает завершения CLI.",
+    "auth_refresh_failed": "OpenCode не обновил авторизацию. Нужна проверка входа.",
+    "auth_refresh_scope_invalid": "В хранилище несколько аккаунтов. Автообновление остановлено.",
+    "auth_cli_version_changed": "Версия OpenCode изменилась. Нужна проверка автообновления.",
+    "auth_refresh_owner_changed": "Настройка владельца OAuth изменилась. Нужна проверка.",
+    "reauth_required": "Авторизация отклонена. Требуется повторный вход владельца.",
+    "go_entitlement_missing": "Сервер не подтвердил подписку Go для этого подключения.",
+    "usage_permission_denied": "Нет доступа к usage; наличие подписки не установлено.",
+    "usage_rate_limited": "Сборщик получил HTTP 429; повтор после ожидания провайдера.",
+    "usage_timeout": "Время чтения лимитов истекло.",
+    "usage_unavailable": "Сервис лимитов временно недоступен.",
+    "usage_schema_invalid": "Формат usage изменился; остаток неизвестен.",
+    "usage_oversized": "Ответ usage превышает безопасный размер.",
+    "usage_clock_skew": "Время ответа usage некорректно; остаток неизвестен.",
+    "usage_stale": "Ответ usage устарел; остаток неизвестен.",
+    "usage_redirect_denied": "Перенаправление usage отклонено; секрет не пересылался.",
 }
 
 
@@ -90,21 +134,23 @@ class SubscriptionLimitSnapshot:
     plan_label: str
     five_hour: LimitWindow
     weekly: LimitWindow
-    observed_at: datetime
+    observed_at: datetime | None
     ok: bool
     detail: str = ""
+    windows: tuple[QuotaWindow, ...] = ()
+    attempted_at: datetime | None = None
+    source: str = ""
+    quota_scope_id: str | None = None
+    use_balance: bool | None = None
+    plan: SubscriptionPlan | None = None
 
     def fingerprint(self) -> str:
-        five = self.five_hour.remaining_percent
-        five_reset = self.five_hour.reset_at.isoformat() if self.five_hour.reset_at else ""
-        week = self.weekly.remaining_percent
-        week_reset = self.weekly.reset_at.isoformat() if self.weekly.reset_at else ""
-        # Include observed_at so /update re-edits the dashboard even when % is unchanged.
-        observed = self.observed_at.isoformat() if self.observed_at is not None else ""
-        return (
-            f"{self.profile_id}:{self.company}:{self.plan_label}:"
-            f"{five}:{five_reset}:{week}:{week_reset}:{self.ok}:{self.detail}:{observed}"
-        )
+        # Include every window and measurement time, but not a cache-read attempt.
+        raw = asdict(self)
+        raw.pop("attempted_at", None)
+        raw["windows"] = [window.model_dump(mode="json") for window in self.windows]
+        raw["plan"] = self.plan.model_dump(mode="json") if self.plan else None
+        return json.dumps(raw, sort_keys=True, default=str)
 
 
 def subscription_profiles(
@@ -112,26 +158,112 @@ def subscription_profiles(
     *,
     grok_limit_source: str = GROK_LIMIT_SOURCE_LEGACY,
 ) -> tuple[ProviderProfileConfig, ...]:
-    """Enabled CLI subscription identities for limit collection.
+    """Discover visible enabled CLI accounts, including unsupported collectors.
 
-    Legacy (default) requires ``state_directory`` for Codex and Grok.
-    ``snapshot_required`` still requires ``state_directory`` for Codex, but Grok
-    profiles may omit it (snapshot lookup is by ``profile.id`` only).
+    A missing state directory is a visible configuration error, not a missing
+    subscription. Multiple model profiles of one explicit account share a row.
     """
 
+    del grok_limit_source  # Discovery is independent of how limits are collected.
+    configured = tuple(profiles)
+    # Keep legacy display order, but explicit descriptors choose a deterministic
+    # representative independently of profile/model declaration order.
+    profiles = (
+        *(profile for profile in configured if profile.account is None),
+        *sorted(
+            (profile for profile in configured if profile.account is not None),
+            key=lambda profile: (profile.account_id or profile.id, profile.id),
+        ),
+    )
     selected: list[ProviderProfileConfig] = []
+    seen: set[str] = set()
     for profile in profiles:
-        if not profile.enabled or profile.launch_mode is not LaunchMode.CLI:
+        if (
+            not profile.enabled
+            or not profile.subscription_limits_visible
+            or profile.launch_mode is not LaunchMode.CLI
+        ):
             continue
-        if profile.provider == "codex":
-            if profile.state_directory is None:
-                continue
+        account = profile.account_id or profile.id
+        if account not in seen:
             selected.append(profile)
-        elif profile.provider == "grok":
-            if grok_limit_source == GROK_LIMIT_SOURCE_LEGACY and profile.state_directory is None:
-                continue
-            selected.append(profile)
+            seen.add(account)
     return tuple(selected)
+
+
+def subscription_inventory(
+    profiles: Sequence[ProviderProfileConfig],
+    snapshots: Sequence[SubscriptionLimitSnapshot],
+    *,
+    now: datetime | None = None,
+) -> tuple[SubscriptionLimitSnapshot, ...]:
+    """Reconcile stored observations against today's account inventory.
+
+    Disabled/deleted/hidden profiles cannot leave ghost dashboard rows. Unknown
+    and stale data never turn into full/zero remaining quota.
+    """
+    observed = now or datetime.now(UTC)
+    visible = {
+        profile.id: profile
+        for profile in profiles
+        if profile.enabled
+        and profile.subscription_limits_visible
+        and profile.launch_mode is LaunchMode.CLI
+    }
+    by_account: dict[str, list[SubscriptionLimitSnapshot]] = {}
+    for snap in snapshots:
+        profile = visible.get(snap.profile_id)
+        if profile is not None:
+            if (
+                profile.account is not None
+                and snap.quota_scope_id != profile.account.quota_scope_id
+            ):
+                continue  # A changed meter binding cannot inherit another scope's observation.
+            if (
+                profile.account
+                and profile.account.quota_oauth
+                and snap.source != "opencode_go_oauth_v1"
+            ):
+                continue  # Legacy key observations are not verified OAuth-org evidence.
+            by_account.setdefault(profile.account_id or profile.id, []).append(snap)
+    result = []
+    for profile in subscription_profiles(profiles):
+        account = profile.account_id or profile.id
+        candidates = by_account.get(account, [])
+        latest = (
+            max(candidates, key=lambda item: _utc(item.attempted_at or item.observed_at))
+            if candidates
+            else None
+        )
+        if latest is None:
+            latest = _unavailable(profile, observed, "limits_not_collected")
+        elif latest.ok and (
+            observed - _utc(latest.observed_at) > timedelta(minutes=15)
+            or _utc(latest.observed_at) > observed + timedelta(minutes=2)
+        ):
+            latest = replace(
+                latest,
+                ok=False,
+                windows=(),
+                detail="limits_stale",
+                five_hour=LimitWindow(None, None, available=False),
+                weekly=LimitWindow(None, None, available=False),
+            )
+        if latest.plan is not None:
+            stale = (
+                not -timedelta(minutes=2)
+                <= observed - _utc(latest.plan.observed_at)
+                <= timedelta(minutes=15)
+            )
+            latest = replace(latest, plan=latest.plan.model_copy(update={"stale": stale}))
+        result.append(replace(latest, profile_id=account))
+    return tuple(result)
+
+
+def _utc(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.min.replace(tzinfo=UTC)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 async def collect_subscription_limits(
@@ -141,21 +273,27 @@ async def collect_subscription_limits(
     grok_limit_source: str = GROK_LIMIT_SOURCE_LEGACY,
     grok_limit_snapshot_file: Path | None = None,
     grok_limit_snapshot_max_age: timedelta | None = None,
+    opencode_snapshots: tuple[OpenCodeSnapshotBinding, ...] = (),
 ) -> tuple[SubscriptionLimitSnapshot, ...]:
     """Fetch limit snapshots for every configured subscription profile."""
 
     observed = now or datetime.now(UTC)
     selected = subscription_profiles(profiles, grok_limit_source=grok_limit_source)
-    return tuple(
-        collect_profile_limits(
-            profile,
-            now=observed,
-            grok_limit_source=grok_limit_source,
-            grok_limit_snapshot_file=grok_limit_snapshot_file,
-            grok_limit_snapshot_max_age=grok_limit_snapshot_max_age,
-        )
-        for profile in selected
-    )
+    semaphore = asyncio.Semaphore(4)
+
+    async def collect(profile: ProviderProfileConfig) -> SubscriptionLimitSnapshot:
+        async with semaphore:
+            return await asyncio.to_thread(
+                collect_profile_limits,
+                profile,
+                now=observed,
+                grok_limit_source=grok_limit_source,
+                grok_limit_snapshot_file=grok_limit_snapshot_file,
+                grok_limit_snapshot_max_age=grok_limit_snapshot_max_age,
+                opencode_snapshots=opencode_snapshots,
+            )
+
+    return tuple(await asyncio.gather(*(collect(profile) for profile in selected)))
 
 
 async def persist_subscription_limits(
@@ -188,16 +326,34 @@ async def persist_subscription_limits(
                     snap.five_hour.reset_at.isoformat() if snap.five_hour.reset_at else None
                 ),
                 "available": snap.five_hour.available,
+                "window_seconds": snap.five_hour.window_seconds,
                 "detail": snap.five_hour.detail,
             },
             "weekly": {
                 "remaining_percent": snap.weekly.remaining_percent,
                 "reset_at": snap.weekly.reset_at.isoformat() if snap.weekly.reset_at else None,
                 "available": snap.weekly.available,
+                "window_seconds": snap.weekly.window_seconds,
                 "detail": snap.weekly.detail,
             },
         }
-        row.observed_at = snap.observed_at
+        if snap.source:
+            row.payload.update(
+                {
+                    "schema_version": 2,
+                    "windows": [window.model_dump(mode="json") for window in snap.windows],
+                    "attempted_at": snap.attempted_at.isoformat() if snap.attempted_at else None,
+                    "source": snap.source,
+                    "quota_scope_id": snap.quota_scope_id,
+                    "use_balance": snap.use_balance,
+                    "measurement_available": snap.ok,
+                }
+            )
+        if snap.plan is not None:
+            row.payload["plan"] = snap.plan.model_dump(mode="json")
+        # Existing SQL column is NOT NULL. v2 explicitly distinguishes a failed
+        # attempt with no measurement; loader restores None, not a fresh quota.
+        row.observed_at = snap.observed_at or snap.attempted_at or datetime.now(UTC)
     await session.flush()
 
 
@@ -217,19 +373,47 @@ async def load_subscription_limits(
     )
     snapshots: list[SubscriptionLimitSnapshot] = []
     for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        five_payload = payload.get("five_hour", {})
+        week_payload = payload.get("weekly", {})
         five = LimitWindow(
             remaining_percent=row.five_hour_remaining_percent,
             reset_at=row.five_hour_reset_at,
             available=row.five_hour_remaining_percent is not None,
+            window_seconds=five_payload.get("window_seconds")
+            if isinstance(five_payload, dict)
+            else None,
         )
         weekly = LimitWindow(
             remaining_percent=row.weekly_remaining_percent,
             reset_at=row.weekly_reset_at,
             available=row.weekly_remaining_percent is not None or row.weekly_reset_at is not None,
+            window_seconds=week_payload.get("window_seconds")
+            if isinstance(week_payload, dict)
+            else None,
         )
         if not row.ok:
             five = LimitWindow(None, None, available=False, detail=row.detail or "unavailable")
             weekly = LimitWindow(None, None, available=False, detail=row.detail or "unavailable")
+        invalid_windows = False
+        try:
+            windows = tuple(
+                QuotaWindow.model_validate(value) for value in payload.get("windows", [])
+            )
+            if payload.get("source") in _GO_USAGE_SOURCES and row.ok:
+                if {window.id for window in windows} != {"rolling", "weekly", "monthly"} or len(
+                    windows
+                ) != 3:
+                    raise ValueError("invalid quota windows")
+                if any(window.scope_id != payload.get("quota_scope_id") for window in windows):
+                    raise ValueError("invalid quota scope")
+        except (ValueError, TypeError):
+            invalid_windows = True
+            windows = ()
+        try:
+            plan = SubscriptionPlan.model_validate(payload["plan"]) if "plan" in payload else None
+        except (ValueError, TypeError):
+            plan = None  # Invalid plan evidence must not poison another account's quota.
         snapshots.append(
             SubscriptionLimitSnapshot(
                 profile_id=row.profile_id,
@@ -237,9 +421,17 @@ async def load_subscription_limits(
                 plan_label=row.plan_label,
                 five_hour=five,
                 weekly=weekly,
-                observed_at=row.observed_at,
-                ok=row.ok,
-                detail=row.detail or "",
+                observed_at=None
+                if payload.get("measurement_available") is False
+                else row.observed_at,
+                ok=row.ok and not invalid_windows,
+                detail="usage_schema_invalid" if invalid_windows else row.detail or "",
+                windows=windows,
+                attempted_at=_parse_datetime(payload.get("attempted_at")),
+                source=payload.get("source", ""),
+                quota_scope_id=payload.get("quota_scope_id"),
+                use_balance=payload.get("use_balance"),
+                plan=plan,
             )
         )
     return tuple(snapshots)
@@ -252,6 +444,7 @@ async def refresh_and_store_subscription_limits(
     grok_limit_source: str = GROK_LIMIT_SOURCE_LEGACY,
     grok_limit_snapshot_file: Path | None = None,
     grok_limit_snapshot_max_age: timedelta | None = None,
+    opencode_snapshots: tuple[OpenCodeSnapshotBinding, ...] = (),
 ) -> tuple[SubscriptionLimitSnapshot, ...]:
     """Collect limits (legacy host and/or Grok snapshot) and persist for delivery."""
 
@@ -260,6 +453,7 @@ async def refresh_and_store_subscription_limits(
         grok_limit_source=grok_limit_source,
         grok_limit_snapshot_file=grok_limit_snapshot_file,
         grok_limit_snapshot_max_age=grok_limit_snapshot_max_age,
+        opencode_snapshots=opencode_snapshots,
     )
     await persist_subscription_limits(session, snapshots)
     return snapshots
@@ -272,6 +466,7 @@ def collect_profile_limits(
     grok_limit_source: str = GROK_LIMIT_SOURCE_LEGACY,
     grok_limit_snapshot_file: Path | None = None,
     grok_limit_snapshot_max_age: timedelta | None = None,
+    opencode_snapshots: tuple[OpenCodeSnapshotBinding, ...] = (),
 ) -> SubscriptionLimitSnapshot:
     """Collect one profile's limits.
 
@@ -283,6 +478,27 @@ def collect_profile_limits(
 
     observed = now or datetime.now(UTC)
     try:
+        binding = next(
+            (b for b in opencode_snapshots if b.account_id == (profile.account_id or profile.id)),
+            None,
+        )
+        if binding is not None:
+            from vuzol.providers.opencode_snapshot import load_usage_snapshot
+
+            usage = load_usage_snapshot(binding, profile=profile, now=observed)
+            return _go_snapshot(profile, usage, oauth=True, scope_id=binding.scope_id)
+        if profile.account is not None and profile.account.quota_collector == "opencode_go":
+            from vuzol.providers.opencode_usage import go_usage_collector
+
+            usage = go_usage_collector.collect(profile.account)
+            return _go_snapshot(
+                profile,
+                usage,
+                oauth=profile.account.quota_oauth is not None,
+                scope_id=profile.account.quota_scope_id,
+            )
+        if profile.account is not None and profile.account.quota_collector == "none":
+            return _unavailable(profile, observed, "collector_not_supported")
         if profile.provider == "codex":
             if profile.state_directory is None:
                 return _unavailable(profile, observed, "state_directory missing")
@@ -297,7 +513,45 @@ def collect_profile_limits(
             )
     except Exception as error:  # pragma: no cover - defensive boundary
         return _unavailable(profile, observed, type(error).__name__)
-    return _unavailable(profile, observed, f"unsupported provider {profile.provider}")
+    return _unavailable(profile, observed, "collector_not_supported")
+
+
+def _go_snapshot(
+    profile: ProviderProfileConfig,
+    usage: GoUsage,
+    *,
+    oauth: bool,
+    scope_id: str | None,
+) -> SubscriptionLimitSnapshot:
+    plan = None
+    if not usage.detail and usage.observed_at is not None:
+        plan = reported_plan(
+            "opencode", "go", source="opencode_go_usage", observed_at=usage.observed_at
+        )
+    elif usage.detail == "go_entitlement_missing" and usage.entitlement_observed_at:
+        plan = SubscriptionPlan(
+            service="opencode",
+            status="not_entitled",
+            source="opencode_go_usage",
+            observed_at=usage.entitlement_observed_at,
+        )
+    empty = LimitWindow(None, None, available=False)
+    return SubscriptionLimitSnapshot(
+        profile_id=profile.id,
+        company="OpenCode",
+        plan_label=plan.label if plan else "тариф неизвестен",
+        five_hour=empty,
+        weekly=empty,
+        observed_at=usage.observed_at,
+        ok=not usage.detail,
+        detail=usage.detail,
+        windows=usage.windows,
+        attempted_at=usage.attempted_at,
+        source="opencode_go_oauth_v1" if oauth else "opencode_go_usage_v1",
+        quota_scope_id=scope_id,
+        use_balance=usage.use_balance,
+        plan=plan,
+    )
 
 
 def _collect_grok_with_source(
@@ -395,18 +649,40 @@ def format_subscription_limits_html(
         return ["Нет подключённых профилей подписки."]
     lines: list[str] = []
     for snap in snapshots:
+        # Pre-evidence rows may contain the old fabricated Plus/Super defaults.
+        # Keep their storage compatible, but never advertise them as verified.
+        plan_label = snap.plan.label if snap.plan else "тариф неизвестен"
+        if snap.plan and snap.plan.stale:
+            plan_label += " (данные устарели)"
+        company = "OpenAI / Codex" if snap.plan and snap.plan.service == "codex" else snap.company
         title = (
-            f"• <b>{html_escape(snap.company)} {html_escape(snap.plan_label)}</b> · "
+            f"• <b>{html_escape(company)} · {html_escape(plan_label)}</b> · "
             f"<code>{html_escape(snap.profile_id)}</code>"
         )
+        if lines:
+            lines.append("")
         lines.append(title)
         if not snap.ok:
             detail = html_escape(_safe_unavailable_detail(snap.detail))
             lines.append(f"  ⚠️ {detail}")
             continue
-        long_window_label = "24 ч" if snap.weekly.window_seconds == 24 * 3600 else "неделя"
+        if snap.source in _GO_USAGE_SOURCES:
+            labels = {"rolling": "5h", "weekly": "7d", "monthly": "1mo"}
+            for window in snap.windows:
+                remaining = f"{window.remaining_percent:g}"
+                line = f"  <b>{labels[window.id]}</b> · {remaining}%"
+                if window.status == "rate-limited":
+                    line += " ⛔"
+                line += f" · <i>{_format_reset(window.reset_at)}</i>"
+                lines.append(line)
+            if snap.use_balance:
+                lines.append(
+                    "  ⚠️ Провайдер сообщает включённый платный перерасход. Вузол его не менял."
+                )
+            continue
+        long_window_label = "1d" if snap.weekly.window_seconds == 24 * 3600 else "7d"
         window_lines = (
-            *_format_window_block("5 ч", snap.five_hour, html_escape),
+            *_format_window_block("5h", snap.five_hour, html_escape),
             *_format_window_block(long_window_label, snap.weekly, html_escape),
         )
         if not window_lines:
@@ -443,22 +719,16 @@ def _format_window_block(
 
     if not window.available or window.remaining_percent is None:
         return ()
-    bar = progress_bar(window.remaining_percent)
-    # Monospace bar so cells stay aligned in Telegram HTML.
-    line = (
-        f"  <b>{html_escape(label)}</b>  "
-        f"<code>{html_escape(bar)}</code>  "
-        f"{html_escape(f'{window.remaining_percent}% осталось')}"
-    )
+    line = f"  <b>{html_escape(label)}</b> · {window.remaining_percent}%"
     if window.reset_at is None:
         return (line,)
-    reset = f"сброс {_format_reset(window.reset_at)}"
+    reset = _format_reset(window.reset_at)
     return (f"{line} · <i>{html_escape(reset)}</i>",)
 
 
 def _format_reset(when: datetime) -> str:
-    local = when.astimezone(UTC)
-    return local.strftime("%d.%m %H:%M UTC")
+    local = _utc(when).astimezone(ZoneInfo("Europe/Amsterdam"))
+    return local.strftime("%d.%m %H:%M")
 
 
 def _unavailable(
@@ -480,14 +750,14 @@ def _unavailable(
 
 def _company_and_default_plan(provider: str) -> tuple[str, str]:
     if provider == "codex":
-        return "OpenAI", "Plus"
+        return "OpenAI", "тариф неизвестен"
     if provider == "grok":
-        return "xAI", "Super"
-    return provider, "—"
+        return "xAI", "тариф неизвестен"
+    return provider, "тариф неизвестен"
 
 
 def _collect_codex(profile: ProviderProfileConfig, observed: datetime) -> SubscriptionLimitSnapshot:
-    company, default_plan = _company_and_default_plan("codex")
+    company, _default_plan = _company_and_default_plan("codex")
     auth_path = Path(profile.state_directory) / "auth.json"  # type: ignore[arg-type]
     token = _codex_access_token(auth_path)
     if token is None:
@@ -502,24 +772,26 @@ def _collect_codex(profile: ProviderProfileConfig, observed: datetime) -> Subscr
     )
     if payload is None:
         return _unavailable(profile, observed, "usage endpoint failed")
-    plan = str(payload.get("plan_type") or default_plan).strip()
-    plan_label = _human_plan("codex", plan)
+    plan = reported_plan(
+        "codex", payload.get("plan_type"), source="codex_usage", observed_at=observed
+    )
     raw_rate = payload.get("rate_limit")
     rate: dict[str, Any] = raw_rate if isinstance(raw_rate, dict) else {}
     five, weekly = _windows_from_codex_rate_limit(rate, observed)
     return SubscriptionLimitSnapshot(
         profile_id=profile.id,
         company=company,
-        plan_label=plan_label,
+        plan_label=plan.label,
         five_hour=five,
         weekly=weekly,
         observed_at=observed,
         ok=True,
+        plan=plan,
     )
 
 
 def _collect_grok(profile: ProviderProfileConfig, observed: datetime) -> SubscriptionLimitSnapshot:
-    company, default_plan = _company_and_default_plan("grok")
+    company, _default_plan = _company_and_default_plan("grok")
     state = Path(profile.state_directory)  # type: ignore[arg-type]
     token = _grok_access_token(state)
     payload = None
@@ -539,18 +811,24 @@ def _collect_grok(profile: ProviderProfileConfig, observed: datetime) -> Subscri
             payload = None
     if payload is None:
         payload = _latest_grok_billing_from_logs(state)
+        if payload is not None:
+            measured_at = _parse_datetime(payload.get("_vuzol_observed_at"))
+            if measured_at is None:
+                return _unavailable(profile, observed, "billing timestamp unknown")
+            if not -timedelta(minutes=1) <= observed - measured_at <= timedelta(minutes=15):
+                return _unavailable(profile, measured_at, "limits_stale")
+            observed = measured_at
     if payload is None:
         return _unavailable(profile, observed, "billing unavailable")
     config = payload.get("config") if isinstance(payload.get("config"), dict) else payload
     if not isinstance(config, dict):
         return _unavailable(profile, observed, "billing shape unknown")
-    tier = str(
+    tier = (
         payload.get("subscriptionTier")
         or payload.get("subscription_tier")
         or config.get("subscriptionTier")
-        or default_plan
     )
-    plan_label = _human_plan("grok", tier)
+    plan = reported_plan("grok", tier, source="grok_billing", observed_at=observed)
     weekly = _weekly_from_grok_config(config, observed)
     five = LimitWindow(
         remaining_percent=None,
@@ -567,11 +845,12 @@ def _collect_grok(profile: ProviderProfileConfig, observed: datetime) -> Subscri
     return SubscriptionLimitSnapshot(
         profile_id=profile.id,
         company=company,
-        plan_label=plan_label,
+        plan_label=plan.label,
         five_hour=five,
         weekly=weekly,
         observed_at=observed,
         ok=True,
+        plan=plan,
     )
 
 
@@ -586,7 +865,7 @@ def _human_plan(provider: str, raw: str) -> str:
             "team": "Team",
             "enterprise": "Enterprise",
         }
-        return mapping.get(lowered, value.title() if value else "Plus")
+        return mapping.get(lowered, value.title() if value else "тариф неизвестен")
     mapping = {
         "supergrok": "Super",
         "super": "Super",
@@ -596,7 +875,7 @@ def _human_plan(provider: str, raw: str) -> str:
         "xpremium": "Premium",
         "xbasic": "Basic",
     }
-    return mapping.get(lowered, value or "Super")
+    return mapping.get(lowered, value or "тариф неизвестен")
 
 
 def _windows_from_codex_rate_limit(
@@ -926,6 +1205,13 @@ def _billing_ctx_from_log_file(path: Path) -> dict[str, Any] | None:
         return None
     text = raw.decode("utf-8", errors="ignore")
     for line in reversed(text.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            event = {}
+        if not isinstance(event, dict):
+            event = {}
+        measured_at = event.get("ts") or event.get("timestamp") or event.get("time")
         exhausted = re.search(
             r"tokens \(actual/limit\):\s*(\d+)\s*/\s*(\d+)",
             line,
@@ -935,6 +1221,7 @@ def _billing_ctx_from_log_file(path: Path) -> dict[str, Any] | None:
             actual, limit = (int(value) for value in exhausted.groups())
             if limit > 0:
                 return {
+                    "_vuzol_observed_at": measured_at,
                     "subscriptionTier": "free",
                     "config": {
                         "creditUsagePercent": actual * 100.0 / limit,
@@ -943,13 +1230,9 @@ def _billing_ctx_from_log_file(path: Path) -> dict[str, Any] | None:
                 }
         if "billing: fetched credits config" not in line:
             continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        ctx = payload.get("ctx")
+        ctx = event.get("ctx")
         if isinstance(ctx, dict):
-            return ctx
+            return {**ctx, "_vuzol_observed_at": measured_at}
     return None
 
 

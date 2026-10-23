@@ -47,7 +47,8 @@ async def test_dashboard_includes_updated_timestamp() -> None:
         session, chat_id=-100, subscription_snapshots=(snap,)
     )
     assert "Лимиты подписки" in card.html
-    assert "Обновлено: 16.07 22:30 UTC" in card.html
+    assert "Обновлено: 17.07 00:30" in card.html
+    assert "UTC" not in card.html
 
     # Naive timestamps are treated as UTC.
     naive = SubscriptionLimitSnapshot(
@@ -62,7 +63,7 @@ async def test_dashboard_includes_updated_timestamp() -> None:
     card2 = await build_project_status_dashboard(
         session, chat_id=-100, subscription_snapshots=(naive,)
     )
-    assert "Обновлено: 16.07 12:00 UTC" in card2.html
+    assert "Обновлено: 16.07 14:00" in card2.html
 
 
 @pytest.mark.anyio
@@ -228,6 +229,7 @@ async def test_refresh_subscription_limits_tick_force(
         "grok_limit_source": "legacy",
         "grok_limit_snapshot_file": None,
         "grok_limit_snapshot_max_age": timedelta(seconds=900),
+        "opencode_snapshots": (),
     }
     enqueue.assert_awaited_once()
     assert enqueue.await_args is not None

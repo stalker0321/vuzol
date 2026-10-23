@@ -362,7 +362,7 @@ async def test_frozen_run_reaches_selected_native_transport_through_host_entrypo
     monkeypatch.setattr(WorktreeAccessManager, "grant", grant)
     monkeypatch.setattr(executor, "get_runtime_configuration", lambda **kwargs: runtime)
     monkeypatch.setattr(executor, "resolve_database_dsn", lambda settings: SecretStr(postgres_dsn))
-    monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda socket: DockerBoundary())
+    monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda socket, **kw: DockerBoundary())
 
     async def one_iteration(processor, *args, **kwargs):
         assert await processor.process_one()

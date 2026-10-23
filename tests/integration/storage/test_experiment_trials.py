@@ -19,6 +19,7 @@ from vuzol.config import (
     Settings,
     build_bundle,
 )
+from vuzol.config.revision import content_revision
 from vuzol.experiments.domain import (
     BoundedLevel,
     ContextEntry,
@@ -34,7 +35,7 @@ from vuzol.experiments.domain import (
 )
 from vuzol.experiments.service import TrialSeedRequest, seed_trial
 from vuzol.experiments.telemetry import load_trials, record_trial
-from vuzol.storage.models import Run, Step, Task
+from vuzol.storage.models import ProjectExecutorPreference, Run, Step, Task
 from vuzol.storage.types import RunStatus, StepStatus
 
 from .helpers import storage
@@ -155,6 +156,18 @@ def test_trial_seed_uses_existing_workflow_records_and_profile_pin(
             context_manifest=context,
         )
         async with factory.begin() as session:
+            assignment = {
+                "profile_id": profile.id,
+                "model": profile.model,
+                "reasoning_effort": profile.model_reasoning_effort,
+                "content_revision": content_revision(profile),
+            }
+            session.add(
+                ProjectExecutorPreference(
+                    project_id="vuzol", mode="auto", model_assignments={"executor": assignment}
+                )
+            )
+            await session.flush()
             seeded = await seed_trial(session, registries, request)
         async with factory() as session:
             task = await session.get(Task, seeded.task_uuid)
@@ -170,6 +183,7 @@ def test_trial_seed_uses_existing_workflow_records_and_profile_pin(
             )
             assert run is not None and run.status is RunStatus.RUNNING
             assert run.selected_route["trusted_profile_id"] == profile.id
+            assert run.selected_route["project_model_assignments"]["executor"] == assignment
             assert [step.step_type for step in steps] == [
                 "interpret",
                 "prepare_worktree",

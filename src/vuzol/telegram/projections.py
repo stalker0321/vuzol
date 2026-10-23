@@ -11,15 +11,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import ProviderProfileConfig
+from vuzol.execution.identity import step_execution_identity
 from vuzol.projects.executor_preference import format_preference_label, load_preference
 from vuzol.providers.subscription_limits import (
     SubscriptionLimitSnapshot,
     format_subscription_limits_html,
     load_subscription_limits,
+    subscription_inventory,
 )
 from vuzol.storage.models import (
     Approval,
@@ -476,6 +478,8 @@ async def build_project_status_dashboard(
                 profile_providers=profile_providers,
                 model=step_model,
             )
+            if profile_id:
+                model = f"{profile_id} · {model}"
             # Before an executor step is claimed, surface the durable project /model pin.
             if model == "ещё не назначен" and task.project_id is not None:
                 preference = await load_preference(session, task.project_id)
@@ -497,19 +501,27 @@ async def build_project_status_dashboard(
     # collected by the executor process; optional live collection is test-only.
     if subscription_snapshots is None:
         subscription_snapshots = await load_subscription_limits(session)
-    del subscription_profiles  # reserved for tests / offline collectors
+    if subscription_profiles is not None:
+        subscription_snapshots = subscription_inventory(
+            subscription_profiles, subscription_snapshots
+        )
     if subscription_snapshots:
         if lines[-1]:
             lines.append("")
-        lines.append("<b>Лимиты подписки</b>")
+        lines.append("<b>Лимиты подписки · доступно %</b>")
         lines.extend(
             format_subscription_limits_html(subscription_snapshots, html_escape=telegram_html)
         )
-        updated_at = max((snap.observed_at for snap in subscription_snapshots), default=None)
+        updated_at = max(
+            (snap.observed_at for snap in subscription_snapshots if snap.observed_at is not None),
+            default=None,
+        )
         if updated_at is not None:
             if updated_at.tzinfo is None:
                 updated_at = updated_at.replace(tzinfo=UTC)
-            stamp = updated_at.astimezone(UTC).strftime("%d.%m %H:%M UTC")
+            from zoneinfo import ZoneInfo
+
+            stamp = updated_at.astimezone(ZoneInfo("Europe/Amsterdam")).strftime("%d.%m %H:%M")
             lines.append("")
             lines.append(f"<i>Обновлено: {telegram_html(stamp)}</i>")
 
@@ -528,16 +540,13 @@ async def _active_executor_profile(session: AsyncSession, task_id: uuid.UUID) ->
     )
     if run is None:
         return None
-    trusted = run.selected_route.get("trusted_profile_id")
-    if isinstance(trusted, str) and trusted:
-        return trusted
     steps = list(
         (
             await session.scalars(
                 select(Step)
                 .where(
                     Step.run_id == run.id,
-                    Step.step_type.in_(_ACTIVE_PROVIDER_STEPS),
+                    Step.step_type.in_(_WORKER_STEP_TYPES),
                     Step.executor_profile_id.is_not(None),
                 )
                 .order_by(Step.ordinal.desc())
@@ -550,6 +559,9 @@ async def _active_executor_profile(session: AsyncSession, task_id: uuid.UUID) ->
     for step in steps:
         if step.executor_profile_id:
             return step.executor_profile_id
+    trusted = run.selected_route.get("trusted_profile_id")
+    if isinstance(trusted, str) and trusted:
+        return trusted
     return None
 
 
@@ -567,20 +579,19 @@ async def _latest_step_model(session: AsyncSession, task_id: uuid.UUID) -> str |
                 select(Step)
                 .where(
                     Step.run_id == run.id,
-                    Step.step_type.in_(_ACTIVE_PROVIDER_STEPS),
-                    Step.result.is_not(None),
+                    Step.step_type.in_(_WORKER_STEP_TYPES),
+                    Step.executor_profile_id.is_not(None),
                 )
                 .order_by(Step.ordinal.desc())
             )
         ).all()
     )
-    for step in steps:
-        result = step.result
-        if not isinstance(result, dict):
-            continue
-        raw = result.get("model")
-        if isinstance(raw, str) and raw.strip() and raw.strip().lower() not in {"codex", "auto"}:
-            return raw.strip()
+    active = next(
+        (step for step in steps if step.status in {StepStatus.LEASED, StepStatus.RUNNING}),
+        steps[0] if steps else None,
+    )
+    if active is not None:
+        return (await step_execution_identity(session, active)).model
     return None
 
 
@@ -1257,15 +1268,27 @@ def task_progress_report(
 async def _task_worker_label(session: AsyncSession, task_id: uuid.UUID) -> str | None:
     """Return the actual execution worker model, excluding planners and reviewers."""
 
+    latest_run = (
+        select(Run.id)
+        .where(Run.task_id == task_id)
+        .order_by(Run.created_at.desc(), Run.id.desc())
+        .limit(1)
+        .correlate(None)
+        .scalar_subquery()
+    )
     step = await session.scalar(
         select(Step)
         .join(Run, Step.run_id == Run.id)
         .where(
             Run.task_id == task_id,
+            Run.id == latest_run,
             Step.step_type.in_(_WORKER_STEP_TYPES),
             Step.executor_profile_id.is_not(None),
         )
-        .order_by(Run.created_at.desc(), Step.ordinal.desc())
+        .order_by(
+            case((Step.status.in_((StepStatus.RUNNING, StepStatus.LEASED)), 0), else_=1),
+            Step.ordinal.desc(),
+        )
         .limit(1)
     )
     if step is None:
@@ -1273,13 +1296,18 @@ async def _task_worker_label(session: AsyncSession, task_id: uuid.UUID) -> str |
     profile_id = getattr(step, "executor_profile_id", None)
     if not isinstance(profile_id, str) or not profile_id:
         return None
-    raw_result = getattr(step, "result", None)
-    result = raw_result if isinstance(raw_result, dict) else {}
-    model = result.get("model") if isinstance(result.get("model"), str) else None
-    return format_executor_model(
-        model,
-        profile_id=profile_id,
+    identity = await step_execution_identity(session, step)
+    label = (
+        format_executor_model(identity.model, effort=identity.effort, profile_id=profile_id)
+        if identity.model
+        else "модель неизвестна"
     )
+    account = (
+        f" · аккаунт {identity.account_id}"
+        if identity.account_id and identity.account_id != profile_id
+        else ""
+    )
+    return f"{profile_id}{account} · {label}"
 
 
 async def _history_token_totals(session: AsyncSession, task_id: uuid.UUID) -> tuple[int, int, int]:

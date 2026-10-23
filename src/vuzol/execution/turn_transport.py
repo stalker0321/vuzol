@@ -89,7 +89,12 @@ class TurnSandboxTransport:
         context: TurnInvocationContext,
         connection: AsyncConnection,
     ) -> CodexProcessResult:
-        envelope, targets, process_id = await self._prepare(invocation, context)
+        from vuzol.providers.errors import ProviderNotStartedError
+
+        try:
+            envelope, targets, process_id = await self._prepare(invocation, context)
+        except (ValueError, LookupError) as error:
+            raise ProviderNotStartedError(str(error)) from error
         binding = envelope.turn_binding
         assert binding is not None
         result: CodexProcessResult | None = None
@@ -254,7 +259,9 @@ class TurnSandboxTransport:
                     SandboxMount(
                         source=state_path,
                         target=state_target,
-                        mode=MountMode.READ_WRITE,
+                        mode=MountMode.READ_ONLY
+                        if profile.provider == "pi"
+                        else MountMode.READ_WRITE,
                         purpose="provider-state",
                     ),
                 ),
@@ -295,6 +302,8 @@ class TurnSandboxTransport:
                 raise ValueError("turn inference requires account admission")
             metadata = {
                 **({} if account is None else account.runtime_metadata),
+                "executor_model": profile.model,
+                "executor_reasoning_effort": profile.model_reasoning_effort,
                 "turn_context": context_payload(context),
                 "runtime_envelope": envelope.model_dump(mode="json", exclude={"stdin"}),
                 "proxy_required": networked,

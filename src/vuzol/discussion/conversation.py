@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config import RegistryError, RuntimeConfiguration
-from vuzol.config.models import ProviderProfileConfig, ProviderRole
+from vuzol.config.models import ProviderProfileConfig, ProviderRole, SandboxNetworkMode
 from vuzol.config.revision import content_revision
 from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.model_matrix import ModelAssignment, assignment_profile, assignment_snapshot
@@ -54,12 +54,29 @@ class ConversationRoute(BaseModel):
             "profile_revision": self.assignment.content_revision,
         }
 
-    def validate_profile(self, runtime: RuntimeConfiguration) -> ProviderProfileConfig:
+    def validate_profile(
+        self, runtime: RuntimeConfiguration, *, project_id: str | None = None
+    ) -> ProviderProfileConfig:
         if self.conversation_mode == "lead" and not runtime.settings.project_lead.enabled:
             raise ExecutorPreferenceError("project lead is disabled")
         profile = assignment_profile(self.assignment, runtime.registries, self.conversation_mode)
         if not conversation_compatible(profile, self.role):
             raise ExecutorPreferenceError("selected model has no sandboxed read-only chat adapter")
+        if project_id is not None:
+            from vuzol.execution.egress import compile_proxy_allowlist
+
+            project = runtime.registries.projects.get(project_id)
+            sandbox = runtime.registries.sandboxes.get(project.sandbox_profile)
+            if sandbox.network_mode is SandboxNetworkMode.HTTPS_PROXY:
+                allowed = {(t.hostname, t.port) for t in compile_proxy_allowlist(project.network)}
+                if any(
+                    (t.hostname, t.port) not in allowed
+                    for t in compile_proxy_allowlist(profile.runtime_network)
+                ):
+                    raise ExecutorPreferenceError(
+                        "selected model needs network access not allowed for this project; "
+                        "select a compatible model with /model"
+                    )
         return profile
 
 
@@ -95,7 +112,7 @@ async def select_conversation_route(
             content_revision=content_revision(profile),
         )
     route = ConversationRoute(conversation_mode=mode, assignment=assignment)
-    route.validate_profile(runtime)
+    route.validate_profile(runtime, project_id=project_id)
     return route
 
 

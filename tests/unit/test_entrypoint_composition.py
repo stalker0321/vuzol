@@ -314,6 +314,8 @@ def test_worker_main_composes_runtime_and_handles_stop(
     assert calls["recovery_batch_size"] == 100
     assert calls["disposed"] is True
     assert ("review" in calls["workflow_handlers"]) is not cli_review
+    # The applier is the only acceptance consumer; a second one raced it.
+    assert "acceptance" not in calls["workflow_handlers"]
     if review_mode == "api":
         reviewer = worker_cli.ResultReviewHandler.call_args.kwargs["independent_reviewer"]
         assert reviewer._input_token_limit == settings.limits.provider_call_input_tokens
@@ -430,6 +432,7 @@ async def test_applier_composes_narrow_control_and_privileged_worker(
     migration_head.assert_awaited()
     controls.process_one.assert_awaited_once()
     worker.process_one.assert_awaited_once()
+    assert "acceptance" in worker_constructor.call_args.kwargs["handlers"]
     capability_handler = worker_constructor.call_args.kwargs["handlers"]["ensure_capabilities"]
     assert capability_handler._apply_access_check is not None
     assert capability_handler._apply_access_check.__name__ == "require_apply_access"

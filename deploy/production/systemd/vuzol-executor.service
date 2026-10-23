@@ -1,0 +1,57 @@
+# Managed by deploy/production. Do not add drop-ins; edit this file and redeploy.
+[Unit]
+Description=Vuzol isolated coding executor
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vuzol-executor
+Group=vuzol-executor
+StateDirectory=vuzol-proxy-runtime vuzol/dependency-environments
+StateDirectoryMode=0700
+ExecStartPre=/bin/sh -c " set -e;  SOCKET=\"$${VUZOL_EXECUTION__ROOTLESS_DOCKER_SOCKET:-}\";  if [ -z \"$$SOCKET\" ]; then SOCKET=\"/run/user/$$(id -u)/docker.sock\"; fi;  echo \"vuzol-executor: waiting for rootless Docker socket at $$SOCKET\";  for i in $$(seq 1 150); do [ -S \"$$SOCKET\" ] && exit 0; sleep 0.2; done;  echo 'timeout waiting for rootless docker socket' >&2; exit 1  "
+TimeoutStartSec=60
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadWritePaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /var/lib/vuzol-provider-state /var/lib/vuzol/dependency-environments
+ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol /var/lib/vuzol/toolchains
+EnvironmentFile=/etc/vuzol/executor-t091.env
+Environment=VUZOL_CHAT__RICH_MESSAGES=true
+Environment=VUZOL_CHAT__MEMORY_ENABLED=true
+EnvironmentFile=/etc/vuzol/t108-review.env
+Environment=VUZOL_ARTIFACT_DELIVERY_UID=1000
+Environment=VUZOL_CAPABILITY_PROVISIONING__ENABLED=true
+Environment=VUZOL_DEPENDENCY_PROVISIONING__ENABLED=true
+EnvironmentFile=/etc/vuzol/t109c-provisioning.env
+EnvironmentFile=/etc/vuzol/t110-executor-route.env
+EnvironmentFile=/etc/vuzol/t117-proxy.env
+EnvironmentFile=/etc/vuzol/t124-proxy.env
+EnvironmentFile=/etc/vuzol/t129-model-roles.env
+EnvironmentFile=/etc/vuzol/t131-inference-timeout.env
+EnvironmentFile=/etc/vuzol/t133-lead.env
+Environment=VUZOL_EXECUTION__JOURNAL_KEY_FILE=/etc/vuzol/execution-journal.key
+Environment=VUZOL_EXECUTION__JOURNAL_ROOT=/srv/vuzol/runtime-journal
+ReadWritePaths=/srv/vuzol/runtime-journal
+Environment=VUZOL_EXECUTION__PROVIDER_PARALLELISM=2
+WorkingDirectory=/opt/vuzol/current
+EnvironmentFile=/etc/vuzol/t138-usage.env
+ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.executor
+Environment=VUZOL_TELEGRAM_DOGFOOD__ENABLED=true
+Environment="VUZOL_TELEGRAM_DOGFOOD__ALLOWED_PROJECT_IDS=[\"vuzol-dogfood\"]"
+
+[Install]
+WantedBy=multi-user.target

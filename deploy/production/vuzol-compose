@@ -1,0 +1,8 @@
+#!/bin/sh
+# docker compose for the production containers of the current release.
+set -eu
+exec docker compose -p repo \
+  -f /opt/vuzol/current/deploy/production/compose.yaml \
+  --env-file /srv/vuzol/.env \
+  --env-file /opt/vuzol/current.env \
+  "$@"

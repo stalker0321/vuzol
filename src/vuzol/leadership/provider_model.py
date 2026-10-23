@@ -23,7 +23,7 @@ from vuzol.leadership.persistence import POLICY_REVISION
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v4"
+PROMPT_REVISION = "project-lead-prompt.v5"
 LEDGER_PURPOSE = "project_lead"
 _COMMANDS = (
     "amend_goal",
@@ -50,7 +50,12 @@ class _PlanItem(_Payload):
     expected_outcome: str = Field(min_length=1)
     completion_criteria: list[str] = Field(min_length=1)
     allowed_scope: str = Field(min_length=1)
-    local_id: str | None = None
+    local_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
+    out_of_scope: list[str] = Field(default_factory=list)
+    trusted_checks: list[str] = Field(default_factory=list)
+    suggested_risk: Literal["low", "medium", "high", "privileged"] = "low"
+    needs_approval: bool = False
+    estimated_complexity: Literal["small", "medium", "large"] = "medium"
     dependencies: list[str] = Field(default_factory=list)
 
 
@@ -106,6 +111,7 @@ class _TaskSpec(_Payload):
     ordinal: int = Field(ge=1)
     scope_revision: int = Field(ge=1)
     plan_hash: str = Field(min_length=64, max_length=64)
+    plan_revision_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
 
 
 class _StartPayload(_Payload):
@@ -308,7 +314,11 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "Give workers concrete files/scope, changes, outcomes and checks. "
         "Use stable local_id and dependencies in plan items. Propose a plan first; "
         "on the next turn copy task_control.start_spec to start_task {spec:...}. "
-        "You must start EACH item explicitly, only when no task is executing.",
+        "You must start EACH item explicitly, only when no task is executing. "
+        "Multi-item, large or elevated-risk plans await the owner approving that exact revision. "
+        "Never turn a required approval into a low-risk classification. "
+        "Revisions require dispatch stopped and the current task finished; preserve all "
+        "materialized items and their local_id, changing only future work.",
         "Copy task_control.tasks[].accept_spec to accept_result only in waiting_approval. "
         "Review during repair is informational: all checks must finish for the exact commit. "
         "Acceptance permits the applier on the delegated integration branch; goal completion "

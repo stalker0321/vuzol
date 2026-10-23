@@ -98,7 +98,7 @@ def _plan(title: str, summary: str, criteria: list[str], scope: str) -> dict[str
                 "expected_outcome": summary,
                 "completion_criteria": criteria,
                 "allowed_scope": scope,
-                "local_id": None,
+                "local_id": "work",
                 "dependencies": [],
             }
         ],
@@ -118,20 +118,6 @@ def _start_decision() -> LeadDecision:
             name="propose_batch",
             payload={
                 "plan": _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")
-            },
-        ),
-        LeadCommandDraft(
-            name="start_task",
-            payload={
-                "spec": {
-                    "ordinal": 1,
-                    "scope_revision": 1,
-                    "plan_hash": __import__(
-                        "vuzol.leadership.tasks", fromlist=["spec_digest"]
-                    ).spec_digest(
-                        _plan("Package A", "Write the first marker", ["marker-a"], "MARKER.txt")
-                    ),
-                }
             },
         ),
         usage={"cost_known": True, "cost_amount": 0},
@@ -159,6 +145,7 @@ def _lead_service(
         enabled=enabled,
         repeat_limit=repeat_limit,
         default_branches={PROJECT: "main"},
+        repository_paths={PROJECT: TEST_REPOSITORY_ROOT},
         batch_executor=execute_batch if with_executor else None,
     )
 
@@ -209,6 +196,7 @@ def _worker(
         lease_seconds=30,
         repeat_limit=repeat_limit,
         default_branches={PROJECT: "main"},
+        repository_paths={PROJECT: TEST_REPOSITORY_ROOT},
     )
 
 
@@ -387,6 +375,7 @@ async def test_crash_after_response_applies_on_resume(postgres_dsn: str) -> None
             enabled=lambda: True,
             lease_seconds=30,
             default_branches={PROJECT: "main"},
+            repository_paths={PROJECT: TEST_REPOSITORY_ROOT},
         )
         with pytest.raises(RuntimeError, match="crash-after-response"):
             await worker.process_one()
@@ -425,6 +414,7 @@ async def test_crash_before_ack_retries_the_same_commands(postgres_dsn: str) -> 
             enabled=lambda: True,
             lease_seconds=30,
             default_branches={PROJECT: "main"},
+            repository_paths={PROJECT: TEST_REPOSITORY_ROOT},
         )
         with pytest.raises(RuntimeError, match="crash-before-ack"):
             await worker.process_one()
@@ -458,7 +448,9 @@ async def test_second_wakeup_waits_then_sees_the_live_package(postgres_dsn: str)
                             kind="extra",
                         )
                     self.nested = await holder["worker"].process_one()
-                return _start_decision()
+                from tests.integration.leadership.test_lead_review_regressions import StartModel
+
+                return await StartModel().decide(snapshot)
 
         model = Racing()
         worker = _worker(factory, model, owner="lead-race")
@@ -472,15 +464,15 @@ async def test_second_wakeup_waits_then_sees_the_live_package(postgres_dsn: str)
         async with factory() as session:
             from vuzol.leadership.persistence import LeadershipCommandReceipt
 
-            reason = await session.scalar(
-                select(LeadershipCommandReceipt.reason).where(
-                    LeadershipCommandReceipt.reason == "package_still_live"
+            receipt = await session.scalar(
+                select(LeadershipCommandReceipt).where(
+                    LeadershipCommandReceipt.command_name == "start_task"
                 )
             )
-            assert reason == "package_still_live"
+            assert receipt.status == "applied"
 
 
-async def test_repeat_without_new_evidence_asks_the_owner(postgres_dsn: str) -> None:
+async def test_start_cannot_recreate_a_stopped_plan(postgres_dsn: str) -> None:
     async with _factory(postgres_dsn) as factory:
         session_id = await _session(factory)
         goal_id = await _enable(factory, session_id)
@@ -544,8 +536,8 @@ async def test_repeat_without_new_evidence_asks_the_owner(postgres_dsn: str) -> 
                 payload={},
             ),
         )
-        assert again.status == "waiting"
-        assert again.reason == "repeat_without_new_evidence"
+        assert again.status == "denied"
+        assert again.reason == "package_still_live"
         assert await _package_count(factory) == 1
 
 
@@ -839,6 +831,7 @@ async def run_managed_goal_flow(
 
             first = _provider_worker(factory, settings, owner="lead-1")
             assert await first.process_one()
+            assert await first.process_one()
             await _drain(background)
             await accept_current_result(factory)
             await _drain(background)
@@ -920,7 +913,7 @@ async def run_managed_goal_flow(
                         ):
                             break
             if split_corrective_turn:
-                assert await _package_count(factory) == 1
+                assert await _package_count(factory) == 2
                 resumed = _provider_worker(factory, settings, owner="lead-2-continuation")
                 assert await resumed.process_one()
             assert await _package_count(factory) == 2
@@ -1065,6 +1058,16 @@ def _provider_worker(factory, settings, *, owner, transport=None):
                 }
             elif "completed_packages: 2" in prompt:
                 payload = {"commands": [{"name": "propose_completion", "payload": {}}]}
+            elif "package: draft" in prompt:
+                context = json.loads(prompt.split("result_context: ", 1)[1])
+                payload = {
+                    "commands": [
+                        {
+                            "name": "start_task",
+                            "payload": {"spec": context["task_control"]["start_spec"]},
+                        }
+                    ]
+                }
             else:
                 second = "package: completed" in prompt
                 plan = _plan(
@@ -1076,18 +1079,6 @@ def _provider_worker(factory, settings, *, owner, transport=None):
                 payload = {
                     "commands": [
                         {"name": "propose_batch", "payload": {"plan": plan}},
-                        {
-                            "name": "start_task",
-                            "payload": {
-                                "spec": {
-                                    "ordinal": 1,
-                                    "scope_revision": 1,
-                                    "plan_hash": __import__(
-                                        "vuzol.leadership.tasks", fromlist=["spec_digest"]
-                                    ).spec_digest(plan),
-                                }
-                            },
-                        },
                     ]
                 }
             return ProviderResult(
@@ -1131,6 +1122,7 @@ def _provider_worker(factory, settings, *, owner, transport=None):
         profiles=profiles,
         owner=owner,
         default_branches={PROJECT: "main"},
+        repository_paths={PROJECT: TEST_REPOSITORY_ROOT},
         adapter=transport if transport is not None else Transport(),
         reviewer_adapter=transport if transport is not None else Transport(),
     )

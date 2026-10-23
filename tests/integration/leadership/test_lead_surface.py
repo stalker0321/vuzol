@@ -421,6 +421,7 @@ async def test_owner_turn_reaches_executing_lead_and_preserves_lifecycle(
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         await _worker(factory, StartModel()).process_one()
+        await _worker(factory, StartModel()).process_one()
         if lifecycle == "paused":
             await control(factory, goal_id, "pause_goal")
         elif lifecycle == "waiting":

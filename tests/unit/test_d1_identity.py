@@ -105,6 +105,7 @@ def _revise_uow(package: MagicMock, *, item_ids: tuple[uuid.UUID, ...]) -> Magic
     scalars_result = MagicMock()
     scalars_result.all = MagicMock(return_value=[prev])
     uow.session = MagicMock()
+    uow.session.scalar = AsyncMock(return_value=None)
     uow.session.scalars = AsyncMock(return_value=scalars_result)
     uow.work_packages.add_revision = AsyncMock()
     uow.work_packages.add_revision_item = AsyncMock()
@@ -120,6 +121,7 @@ def _running_package(*, cursor: int | None = 1) -> MagicMock:
 
     package = MagicMock()
     package.status = WorkPackageStatus.RUNNING
+    package.managed_goal_id = None
     package.version = 3
     package.cursor_ordinal = cursor
     package.goal = "ship it"
@@ -271,9 +273,7 @@ async def test_d1_task_command_records_outcome_receipt() -> None:
         payload={},
     )
     session = MagicMock()
-    receipt = TaskCommandResult(
-        task_id=action.task_id, version=4, status="paused", applied=True
-    )
+    receipt = TaskCommandResult(task_id=action.task_id, version=4, status="paused", applied=True)
     consumer = WorkflowControlConsumer.__new__(WorkflowControlConsumer)
     with patch(
         "vuzol.workflows.application.apply_task_command",
@@ -320,12 +320,9 @@ async def test_d1_duplicate_without_version_is_noop_without_receipt() -> None:
     ):
         await pause_task(session, task.id, actor_id="7")
     events = [call.args[0] for call in session.add.call_args_list]
-    assert any(
-        getattr(event, "event_type", "") == "workflow.control_noop" for event in events
-    )
+    assert any(getattr(event, "event_type", "") == "workflow.control_noop" for event in events)
     # _noop writes an event only — never a payload outcome receipt
     assert not any(
-        isinstance(getattr(event, "payload", None), dict)
-        and "outcome" in event.payload
+        isinstance(getattr(event, "payload", None), dict) and "outcome" in event.payload
         for event in events
     )

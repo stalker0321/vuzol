@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,6 +33,7 @@ def build_project_lead_worker(
     profiles: ProfileRegistry,
     owner: str,
     default_branches: Mapping[str, str] | None = None,
+    repository_paths: Mapping[str, Path] | None = None,
     adapter: ProviderAdapter | None = None,
     adapter_registry: AdapterRegistry | None = None,
     reviewer_adapter: ProviderAdapter | None = None,
@@ -50,6 +52,7 @@ def build_project_lead_worker(
         repeat_limit=settings.project_lead.repeat_limit,
         branch_prefix=settings.project_lead.integration_branch_prefix,
         default_branches=default_branches,
+        repository_paths=repository_paths,
         verifier=selection,
     )
 

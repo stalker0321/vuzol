@@ -55,6 +55,7 @@ async def test_resume_restores_the_existing_package_and_pending_task(postgres_ds
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         await _worker(factory, StartModel()).process_one()
+        await _worker(factory, StartModel()).process_one()
         async with factory() as session:
             original = await session.scalar(select(Task))
             previous = original.status
@@ -74,6 +75,7 @@ async def test_resume_restores_the_existing_package_and_pending_task(postgres_ds
 async def test_resume_cannot_restore_a_revoked_grant(postgres_dsn):
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
         await _worker(factory, StartModel()).process_one()
         await control(factory, goal_id, "revoke_delegation")
         result = await control(factory, goal_id, "resume_goal")
@@ -288,6 +290,7 @@ async def test_pending_dispatch_does_not_restart_a_paused_goal(postgres_dsn, tmp
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         await _worker(factory, StartModel()).process_one()
+        await _worker(factory, StartModel()).process_one()
         await control(factory, goal_id, "pause_goal")
         dispatcher = WorkflowDispatcher(runtime, factory, owner="paused-dispatch")
         assert await dispatcher.process_one()
@@ -366,9 +369,11 @@ async def test_crash_after_first_command_resumes_from_receipts(postgres_dsn, mon
         worker = _worker(factory, StartModel())
         with pytest.raises(RuntimeError, match="after first command commit"):
             await worker.process_one()
+        await worker.process_one()
         async with factory() as session:
             assert (await session.get(ManagedGoal, goal_id)).version == 2
-        assert await _package_count(factory) == 0
+        assert await _package_count(factory) == 1
+        await worker.process_one()
         await worker.process_one()
         async with factory() as session:
             assert (await session.get(ManagedGoal, goal_id)).version == 3
@@ -381,8 +386,12 @@ async def test_crash_after_first_command_resumes_from_receipts(postgres_dsn, mon
             )
             assert sorted(row.command_name for row in rows) == ["propose_batch", "start_task"]
             assert sorted(row.expected_version for row in rows) == [1, 2]
-            turn = await session.scalar(select(LeadershipTurn))
-            assert [item["expected_version"] for item in turn.decision["commands"]] == [1, 2]
+            turns = list(
+                await session.scalars(select(LeadershipTurn).order_by(LeadershipTurn.created_at))
+            )
+            assert [
+                item["expected_version"] for turn in turns for item in turn.decision["commands"]
+            ] == [1, 2]
         assert await _package_count(factory) == 1
 
 
@@ -399,7 +408,12 @@ async def test_slow_inference_renews_both_leases(postgres_dsn):
                 return await StartModel().decide(snapshot)
 
         worker = ProjectLeadWorker(
-            factory, owner="slow", model=Slow(), enabled=lambda: True, lease_seconds=1
+            factory,
+            owner="slow",
+            model=Slow(),
+            enabled=lambda: True,
+            lease_seconds=1,
+            repository_paths={PROJECT: __import__("pathlib").Path(__file__).resolve().parents[3]},
         )
         assert await worker.process_one()
         assert await _package_count(factory) == 1
@@ -532,10 +546,9 @@ async def test_amendment_finishes_current_contract_and_stops_next_item(
         async def decide(self, snapshot):
             decision = _start_decision()
             plan = decision.commands[0].payload["plan"]
-            plan["items"].append({**plan["items"][0], "summary": "Second marker"})
-            from vuzol.leadership.tasks import spec_digest
-
-            decision.commands[1].payload["spec"]["plan_hash"] = spec_digest(plan)
+            plan["items"].append(
+                {**plan["items"][0], "local_id": "second", "summary": "Second marker"}
+            )
             return decision
 
     class Reply:
@@ -545,6 +558,10 @@ async def test_amendment_finishes_current_contract_and_stops_next_item(
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         await _worker(factory, TwoItems()).process_one()
+        from tests.integration.leadership.test_plan_revisions import approve_plan, start
+
+        await approve_plan(factory, goal_id)
+        assert (await start(factory, goal_id)).status == "applied"
         event = await owner_message(factory, tmp_path)
         command = await amendment_command(factory, goal_id, event.id, name=alias)
         service = _lead_service(factory)
@@ -632,6 +649,7 @@ async def test_cancel_amendment_preserves_unknown_effects(postgres_dsn, tmp_path
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         await _worker(factory, StartModel()).process_one()
+        await _worker(factory, StartModel()).process_one()
         # Put a real running step on the materialized task, so cancellation uses
         # controls.cancel_task and records unknown effects rather than a mock.
         _, run_id, step_record = await seed_task_run_step(
@@ -674,15 +692,18 @@ async def test_queued_amendment_waits_for_package_without_stopping_dispatch(post
         async def decide(self, snapshot):
             decision = _start_decision()
             plan = decision.commands[0].payload["plan"]
-            plan["items"].append({**plan["items"][0], "summary": "Second marker"})
-            from vuzol.leadership.tasks import spec_digest
-
-            decision.commands[1].payload["spec"]["plan_hash"] = spec_digest(plan)
+            plan["items"].append(
+                {**plan["items"][0], "local_id": "second", "summary": "Second marker"}
+            )
             return decision
 
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         await _worker(factory, TwoItems()).process_one()
+        from tests.integration.leadership.test_plan_revisions import approve_plan, start
+
+        await approve_plan(factory, goal_id)
+        assert (await start(factory, goal_id)).status == "applied"
         event = await owner_message(factory, tmp_path)
         command = await amendment_command(factory, goal_id, event.id, policy="queue")
         assert (
@@ -795,6 +816,7 @@ async def test_executing_lead_cancels_paused_task_using_legacy_delegation(postgr
 
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
         await _worker(factory, StartModel()).process_one()
         await control(factory, goal_id, "pause_goal")
         async with factory.begin() as session:

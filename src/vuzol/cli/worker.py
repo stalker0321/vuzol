@@ -144,6 +144,9 @@ async def run() -> None:
                     settings=settings,
                     profiles=runtime.registries.profiles,
                     owner=f"{owner}:project-lead",
+                    repository_paths={
+                        p.id: p.repository_path for p in runtime.registries.projects.items()
+                    },
                     default_branches={
                         project.id: project.default_branch
                         for project in runtime.registries.projects.items()

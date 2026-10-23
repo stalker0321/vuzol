@@ -427,6 +427,9 @@ async def run() -> None:
                 default_branches={
                     p.id: p.default_branch for p in runtime.registries.projects.items()
                 },
+                repository_paths={
+                    p.id: p.repository_path for p in runtime.registries.projects.items()
+                },
                 adapter_registry=adapter_registry,
             )
             if settings.project_lead.enabled

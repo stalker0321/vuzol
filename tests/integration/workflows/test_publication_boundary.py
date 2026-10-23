@@ -116,8 +116,10 @@ async def test_managed_stop_wins_before_new_publication(postgres_dsn, action):
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         await _worker(factory, StartModel()).process_one()
+        await _worker(factory, StartModel()).process_one()
         async with factory() as session:
             task_id = await session.scalar(select(Task.id))
+            assert task_id is not None
         request = await request_for(factory, task_id)
         await control(factory, goal_id, action)
         with pytest.raises(PublicationDenied):

@@ -18,6 +18,7 @@ from vuzol.storage.models import (
     Approval,
     Event,
     MaterializationLink,
+    PlanRevision,
     Run,
     Step,
     Task,
@@ -35,18 +36,38 @@ def spec_digest(spec: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def check_start_spec(
-    goal: ManagedGoal, package: WorkPackage | None, payload: dict[str, Any]
-) -> None:
-    spec = payload.get("spec")
+async def start_spec(
+    session: AsyncSession, goal: ManagedGoal, package: WorkPackage | None
+) -> dict[str, Any] | None:
+    if package is None or package.head_revision_id is None:
+        return None
+    revision = await session.get(PlanRevision, package.head_revision_id)
+    if revision is None:
+        return None
+    from vuzol.discussion.sequencer import first_unfinished_ordinal
+
     ordinal = (
-        package.cursor_ordinal if package and package.status is WorkPackageStatus.RUNNING else 1
+        package.cursor_ordinal
+        if package.status is WorkPackageStatus.RUNNING
+        else await first_unfinished_ordinal(session, package.id, revision)
     )
-    if not isinstance(spec, dict) or spec != {
-        "plan_hash": spec_digest(goal.proposed_plan or {}),
-        "scope_revision": goal.scope_revision,
+    return {
+        "plan_revision_id": str(revision.id),
+        "plan_hash": revision.content_hash,
+        "scope_revision": revision.immutable_body.get("scope_revision", goal.scope_revision),
         "ordinal": ordinal,
-    }:
+    }
+
+
+async def check_start_spec(
+    session: AsyncSession, goal: ManagedGoal, package: WorkPackage | None, payload: dict[str, Any]
+) -> None:
+    expected = await start_spec(session, goal, package)
+    if (
+        expected is None
+        or payload.get("spec") != expected
+        or expected["scope_revision"] != goal.scope_revision
+    ):
         raise DomainError("task_spec_stale")
 
 
@@ -233,16 +254,20 @@ async def task_context(session: AsyncSession, goal: ManagedGoal) -> dict[str, An
         await session.get(WorkPackage, goal.current_package_id) if goal.current_package_id else None
     )
     context: dict[str, Any] = {
-        "start_spec": {
-            "plan_hash": spec_digest(goal.proposed_plan or {}),
-            "scope_revision": goal.scope_revision,
-            "ordinal": package.cursor_ordinal
-            if package and package.status is WorkPackageStatus.RUNNING
-            else 1,
-        },
+        "start_spec": await start_spec(session, goal, package),
     }
     if package is None:
         return context
+    revision = (
+        await session.get(PlanRevision, package.head_revision_id)
+        if package.head_revision_id
+        else None
+    )
+    if revision is not None and context["start_spec"] is not None:
+        ordinal = context["start_spec"]["ordinal"]
+        context["next_item"] = next(
+            (item for item in revision.immutable_body["items"] if item["ordinal"] == ordinal), None
+        )
     rows = await session.execute(
         select(Task, Run, Worktree)
         .join(MaterializationLink, MaterializationLink.task_id == Task.id)

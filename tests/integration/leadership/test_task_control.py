@@ -23,7 +23,7 @@ from vuzol.leadership.actor import server_agent_principal
 from vuzol.leadership.commands import LeadCommand
 from vuzol.leadership.model import LeadCommandDraft, LeadDecision
 from vuzol.leadership.persistence import ManagedGoal
-from vuzol.leadership.tasks import spec_digest, task_context
+from vuzol.leadership.tasks import task_context
 from vuzol.storage.models import (
     MaterializationLink,
     Run,
@@ -68,7 +68,6 @@ class TwoItems:
         plan = decision.commands[0].payload["plan"]
         plan["items"][0]["local_id"] = "first"
         plan["items"].append({**plan["items"][0], "local_id": "second", "dependencies": ["first"]})
-        decision.commands[1].payload["spec"]["plan_hash"] = spec_digest(plan)
         return decision
 
 
@@ -76,6 +75,10 @@ async def test_each_item_needs_lead_dispatch_and_old_events_are_harmless(postgre
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         await _worker(factory, TwoItems()).process_one()
+        from tests.integration.leadership.test_plan_revisions import approve_plan, start
+
+        await approve_plan(factory, goal_id)
+        assert (await start(factory, goal_id)).status == "applied"
         async with UnitOfWork(factory) as uow:
             first = await uow.session.scalar(select(Task))
             first_id = first.id
@@ -115,6 +118,7 @@ async def test_live_pause_cancel_amendment_recovers_on_next_tick(
 ):
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
         await _worker(factory, StartModel()).process_one()
         _, run_id, record = await seed_task_run_step(
             factory,
@@ -157,6 +161,7 @@ async def test_owner_gets_receipt_bound_followup_without_inference_retry(
 ):
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
         await _worker(factory, StartModel()).process_one()
         await control(factory, goal_id, "pause_goal")
         await owner_message(factory, tmp_path)
@@ -208,6 +213,7 @@ async def test_quota_event_and_reconciliation_share_one_key(postgres_dsn):
 
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
         await _worker(factory, StartModel()).process_one()
         async with factory.begin() as session:
             task = await session.scalar(select(Task))
@@ -271,6 +277,7 @@ async def test_acceptance_waits_for_repair_binds_commit_and_runs_applier_once(
     monkeypatch.setattr(LocalGit, "apply_result", counting_apply)
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+        await _worker(factory, StartModel()).process_one()
         await _worker(factory, StartModel()).process_one()
         git = LocalGit()
         workers = (

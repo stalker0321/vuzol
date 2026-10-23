@@ -509,6 +509,8 @@ class TelegramControlService:
                         package_id=callback.package_id,
                         plan_revision_number=callback.revision_number,
                         h8=callback.h8,
+                        content_hash=revision.content_hash,
+                        scope_revision=revision.immutable_body.get("scope_revision"),
                         expected_status_generation=generation,
                         user_id=update.user_id,
                         item_ordinal=callback.ordinal,

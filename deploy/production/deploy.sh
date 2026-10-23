@@ -52,8 +52,9 @@ install -m 0755 "$REL/deploy/production/vuzol-compose" /usr/local/bin/vuzol-comp
 install -m 0644 "$REL"/deploy/production/systemd/*.service "$REL"/deploy/production/systemd/*.timer \
   /etc/systemd/system/
 systemctl daemon-reload
-systemctl restart $UNITS
+/usr/local/bin/vuzol-compose up -d --remove-orphans --wait postgres
 /usr/local/bin/vuzol-compose up -d --remove-orphans
+systemctl restart $UNITS
 
 echo "== verifying"
 sleep 10

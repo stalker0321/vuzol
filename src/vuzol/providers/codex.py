@@ -66,6 +66,10 @@ def canonical_codex_argv(
         "--ignore-user-config",
         "--ignore-rules",
     ]
+    if read_only:
+        # Readers may get a commit snapshot without .git (the planner), and
+        # --ignore-user-config drops any trust entry. Writers keep the check.
+        args.append("--skip-git-repo-check")
     resolved_model = (model or "").strip()
     if resolved_model and resolved_model.lower() not in {"codex", "auto"}:
         args.extend(["--model", resolved_model])

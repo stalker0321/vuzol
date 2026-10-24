@@ -116,6 +116,21 @@ async def accept_result(
     branch_prefix: str,
 ) -> dict[str, Any]:
     task = await scoped_task(session, goal, payload.get("task_id"))
+    accepted = await session.scalar(
+        select(Event.payload).where(
+            Event.entity_type == "task",
+            Event.entity_id == task.id,
+            Event.event_type == "result.accepted_by_lead",
+        )
+    )
+    if accepted is not None:
+        # Live pilot: the lead repeated accept_result after the task finished; a
+        # refusal parked the goal as if it needed the owner. Accepting is done.
+        return {
+            "task_id": str(task.id),
+            "approval_id": accepted.get("approval_id"),
+            "already_accepted": True,
+        }
     if task.status is not TaskStatus.WAITING_APPROVAL:
         raise DomainError("result_not_ready")
     run = await session.scalar(

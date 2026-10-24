@@ -377,4 +377,9 @@ async def test_acceptance_waits_for_repair_binds_commit_and_runs_applier_once(
                 assert (await session.scalar(select(Worktree))).result_commit == spec[
                     "result_commit"
                 ]
+            # The lead asking again after the task finished is a no-op success.
+            again = await command(factory, goal_id, "accept_result", spec, key="accept-again")
+            assert again.status == "applied"
+            await _drain(workers)
+            assert len(applied) == 1
         assert await git.resolve_commit(repository, "main") == base

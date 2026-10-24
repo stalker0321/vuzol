@@ -168,7 +168,8 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             phase = await session.scalar(select(LeadershipInference))
             goal = await session.scalar(select(ManagedGoal))
             usage = await session.scalar(select(UsageRecord))
-            assert goal.waiting_reason == ("lead_response_invalid" if invalid else "model_idle")
+            # A malformed answer gets one fresh turn before the goal parks.
+            assert goal.waiting_reason == (None if invalid else "model_idle")
             assert process.status is ProcessStatus.EXITED
             assert process.outcome is ProcessOutcome.SUCCEEDED
             assert process.reaped_at is not None

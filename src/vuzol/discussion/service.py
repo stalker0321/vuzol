@@ -475,9 +475,8 @@ class WorkPackageService:
                     },
                 }
 
-            if goal.lifecycle == "draft" or (
-                goal.lifecycle == "waiting" and goal.waiting_reason == "plan_approval"
-            ):
+            # The owner's approval answers whatever the goal was waiting on.
+            if goal.lifecycle in {"draft", "waiting"}:
                 goal.lifecycle = "active"
                 goal.waiting_reason = None
                 goal.wakeup_condition = None

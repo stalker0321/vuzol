@@ -12,7 +12,7 @@ from html import unescape
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.leadership.text import owner_text, short_owner_text
+from vuzol.leadership.text import owner_sentence, owner_text
 from vuzol.storage.models import (
     Approval,
     MaterializationLink,
@@ -244,6 +244,11 @@ def _environment_delta_lines(body: dict[str, object]) -> tuple[str, ...]:
     return tuple(lines)
 
 
+# Planner fields are prose; pick the sentence that answers the card line.
+_FILES_SENTENCE = (r"измен|менять|правит|edit|modif", r"\w+\.\w{1,5}\b|\w+/")
+_WARNING_SENTENCE = (r"заглуш|NotImplemented|\bstub\b", r"блокир|невозможн|риск")
+
+
 async def build_work_package_plan_card(
     session: AsyncSession,
     package_id: uuid.UUID,
@@ -351,8 +356,8 @@ async def build_work_package_plan_card(
     else:
         title = owner_text(package.title)
         lines = [
-            f"<b>{telegram_html(title)}</b>",
-            f"<b>{status}</b>",
+            f"📋 <b>{telegram_html(title)}</b>",
+            ("🟡 " if package.status is WorkPackageStatus.DRAFT else "") + f"<b>{status}</b>",
             "",
         ]
     if _action_card and package.status is WorkPackageStatus.PAUSED:
@@ -518,25 +523,28 @@ async def build_work_package_plan_card(
     ):
         if package.managed_goal_id is not None:
             for item in visible:
+                check = (item.trusted_checks or item.completion_criteria or [""])[0]
                 lines.extend(
                     (
-                        f"<b>{item.ordinal}.</b> {telegram_html(owner_text(item.summary))}",
-                        f"Файлы/область: {telegram_html(short_owner_text(item.allowed_scope))}",
-                        "Проверка: "
-                        + telegram_html(short_owner_text("; ".join(item.completion_criteria))),
+                        f"<b>{item.ordinal}. {telegram_html(owner_text(item.summary))}</b>",
+                        "🎯 <b>Результат:</b> "
+                        + telegram_html(owner_sentence(item.expected_outcome)),
+                        "📂 <b>Файлы:</b> "
+                        + telegram_html(owner_sentence(item.allowed_scope, prefer=_FILES_SENTENCE)),
+                        f"🔍 <b>Проверка:</b> {telegram_html(owner_sentence(check))}",
                     )
                 )
-                warning = next(
-                    (
-                        sentence.strip()
-                        for text in (item.summary, item.goal, item.expected_outcome)
-                        for sentence in re.split(r"[.;]\s+", text)
-                        if any(
-                            word in sentence.lower()
-                            for word in ("заглуш", "риск", "блокир", "stub")
-                        )
-                    ),
-                    None,
+                # The planner's own finding (a stub, a blocker) beats generic risk text.
+                warning = (
+                    owner_sentence(
+                        " ".join((item.summary, item.goal, item.expected_outcome)),
+                        prefer=_WARNING_SENTENCE,
+                    )
+                    if any(
+                        re.search(pattern, " ".join((item.summary, item.goal)), re.I)
+                        for pattern in _WARNING_SENTENCE
+                    )
+                    else None
                 )
                 warning = warning or {
                     "medium": "Есть риск, который нужно учесть перед запуском.",
@@ -544,7 +552,7 @@ async def build_work_package_plan_card(
                     "privileged": "Потребуются дополнительные разрешения.",
                 }.get(item.suggested_risk.value)
                 if warning:
-                    lines.append("Важно: " + telegram_html(short_owner_text(warning)))
+                    lines.append("⚠️ <b>Важно:</b> " + telegram_html(warning))
                 lines.append("")
         else:
             lines.extend(

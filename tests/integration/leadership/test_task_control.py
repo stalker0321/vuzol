@@ -382,4 +382,28 @@ async def test_acceptance_waits_for_repair_binds_commit_and_runs_applier_once(
             assert again.status == "applied"
             await _drain(workers)
             assert len(applied) == 1
+            # A later plan the owner rejects does not hide the finished result.
+            from vuzol.leadership.evidence import _current_head
+
+            async with factory.begin() as session:
+                goal = await session.get(ManagedGoal, goal_id)
+                package = await session.get(WorkPackage, goal.current_package_id)
+                package.status = WorkPackageStatus.COMPLETED  # as the sequencer would
+                done = await _current_head(session, goal)
+                assert done is not None
+                session.add(
+                    WorkPackage(
+                        session_id=goal.discussion_session_id,
+                        project_id=PROJECT,
+                        title="Rejected follow-up",
+                        status=WorkPackageStatus.DISCARDED,
+                        managed_goal_id=goal.id,
+                    )
+                )
+                await session.flush()
+                rejected = await session.scalar(
+                    select(WorkPackage.id).where(WorkPackage.title == "Rejected follow-up")
+                )
+                goal.current_package_id = rejected
+                assert await _current_head(session, goal) == done
         assert await git.resolve_commit(repository, "main") == base

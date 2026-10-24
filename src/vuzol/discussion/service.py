@@ -583,6 +583,29 @@ class WorkPackageService:
             new_state=WorkPackageStatus.DISCARDED.value,
             payload={"revision_id": str(revision.id), "discarded_by_user_id": user_id},
         )
+        if package.managed_goal_id is not None:
+            assert self._uow.session is not None
+            goal = await self._uow.session.get(
+                ManagedGoal, package.managed_goal_id, with_for_update=True
+            )
+            if goal is not None and goal.lifecycle not in {"completed", "cancelled"}:
+                from vuzol.leadership.wakeups import enqueue_goal_wakeup
+
+                # Live pilot: a rejected plan left the goal waiting for its approval
+                # and the lead was never told. The owner's "no" is the lead's event.
+                if goal.lifecycle == "waiting" and goal.waiting_reason == "plan_approval":
+                    goal.lifecycle = "active"
+                    goal.waiting_reason = None
+                    goal.wakeup_condition = None
+                goal.version += 1
+                goal.fence_epoch += 1
+                await enqueue_goal_wakeup(
+                    self._uow.session,
+                    goal_id=goal.id,
+                    package_id=package.id,
+                    idempotency_key=f"lead:plan-discarded:{revision.id}:{goal.scope_revision}",
+                    kind="plan_discarded",
+                )
         await self._sync_attention(package)
         return package.version
 

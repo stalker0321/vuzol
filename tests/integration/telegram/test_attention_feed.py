@@ -276,6 +276,17 @@ async def test_plan_decision_resolves_or_supersedes_attention(postgres_dsn, topi
         await drain(factory, client, topics)
         assert any("решено: Нужно одобрить план работы." in body for _, _, body in client.edited)
         assert len([m for m in client.sent if m[1] == 7]) == (2 if action == "replace" else 1)
+        if action == "discard":
+            # The owner's "no" wakes the lead instead of leaving the goal waiting.
+            async with factory() as session:
+                goal = await session.get(ManagedGoal, goal_id)
+                assert goal.lifecycle == "active" and goal.waiting_reason is None
+                assert await session.scalar(
+                    select(TransactionalOutbox.id).where(
+                        TransactionalOutbox.destination == "project_lead",
+                        TransactionalOutbox.payload["wakeup_kind"].astext == "plan_discarded",
+                    )
+                )
 
 
 @pytest.mark.parametrize(

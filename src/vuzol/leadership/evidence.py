@@ -219,6 +219,22 @@ async def _current_head(
         else None
     )
     if (
+        package is not None
+        and package.status in {WorkPackageStatus.DISCARDED, WorkPackageStatus.STOPPED}
+        and package.integration_head_commit in {None, package.integration_base_commit}
+    ):
+        # A rejected or never-run plan produced nothing; the goal's result is still
+        # the newest completed package on its branch (live pilot, 2026-10-24).
+        package = await session.scalar(
+            select(WorkPackage)
+            .where(
+                WorkPackage.managed_goal_id == goal.id,
+                WorkPackage.status == WorkPackageStatus.COMPLETED,
+            )
+            .order_by(WorkPackage.created_at.desc())
+            .limit(1)
+        )
+    if (
         package is None
         or package.managed_goal_id != goal.id
         or package.status is not WorkPackageStatus.COMPLETED

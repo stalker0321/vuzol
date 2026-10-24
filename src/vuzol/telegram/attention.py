@@ -257,18 +257,25 @@ async def _pending_owner_plan(
 ) -> tuple[WorkPackage, str] | None:
     from vuzol.leadership.batches import owner_approval_required
     from vuzol.storage.models import PlanRevision
+    from vuzol.storage.types import PlanRevisionState
 
     if goal.lifecycle in {"completed", "cancelled"} or goal.current_package_id is None:
         return None
     package = await session.get(WorkPackage, goal.current_package_id)
+    # A goal pause also pauses its draft package; the revision state is what
+    # tells whether the owner still has to decide.
     if (
         package is None
-        or package.status is not WorkPackageStatus.DRAFT
+        or package.status not in {WorkPackageStatus.DRAFT, WorkPackageStatus.PAUSED}
         or package.head_revision_id is None
     ):
         return None
     revision = await session.get(PlanRevision, package.head_revision_id)
-    if revision is None or not owner_approval_required(revision):
+    if (
+        revision is None
+        or revision.state is not PlanRevisionState.DRAFT
+        or not owner_approval_required(revision)
+    ):
         return None
     return package, str(revision.id)
 

@@ -149,12 +149,20 @@ def test_lead_conversation_through_executor_entrypoint(
         monkeypatch.setattr(WorktreeAccessManager, "preflight", AsyncMock())
         monkeypatch.setattr(executor, "get_runtime_configuration", lambda **kwargs: runtime)
         monkeypatch.setattr(executor, "resolve_database_dsn", lambda _: SecretStr(postgres_dsn))
-        monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda _: DockerBoundary())
+        monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda *_a, **_k: DockerBoundary())
         monkeypatch.setattr(executor, "_refresh_subscription_limits_tick", AsyncMock())
 
         async def two_iterations(processor, *args, **kwargs):
-            assert await processor.process_one()  # real prepare_worktree
-            assert await processor.process_one()  # real routing/handler/adapter/envelope
+            # Production runs each lane in its own loop (_run_loop); conversation
+            # steps live in the light control lanes, not in process_one().
+            async def any_lane():
+                for lane in processor.lanes():
+                    if await lane.process_one():
+                        return True
+                return False
+
+            assert await any_lane()  # real prepare_worktree
+            assert await any_lane()  # real routing/handler/adapter/envelope
 
         monkeypatch.setattr(executor, "_run_loop", two_iterations)
         monkeypatch.setattr(worker, "get_runtime_configuration", lambda **kwargs: runtime)

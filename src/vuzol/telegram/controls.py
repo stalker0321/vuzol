@@ -515,8 +515,7 @@ class TelegramControlService:
     async def _accept_work_package(self, update: WorkPackageControlUpdate) -> IngressResult:
         try:
             authorize(self._runtime.settings, chat_id=update.chat_id, user_id=update.user_id)
-            if not self._runtime.settings.project_discussion_enabled:
-                raise TelegramPolicyError("project discussion is disabled")
+            settings = self._runtime.settings
             callback = parse_work_package_callback(update.callback_data)
             async with UnitOfWork(self._session_factory) as uow:
                 binding = await uow.telegram_links.resolve_work_package_control(
@@ -527,6 +526,11 @@ class TelegramControlService:
                 package_id, revision_id, generation, message_role = binding
                 revision = await uow.work_packages.get_revision(revision_id)
                 package = await uow.work_packages.get_package(package_id)
+                # The lead's plan cards use these controls too; only legacy
+                # discussion packages depend on the discussion feature flag.
+                managed = package.managed_goal_id is not None and settings.project_lead.enabled
+                if not managed and not settings.project_discussion_enabled:
+                    raise TelegramPolicyError("project discussion is disabled")
                 if (
                     callback.package_id != package_id
                     or revision.work_package_id != package_id

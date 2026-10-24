@@ -45,7 +45,13 @@ def runtime(tmp_path, monkeypatch):
     repo.mkdir(parents=True)
     base = _runtime(tmp_path, repo, lead=True)
     yield base.model_copy(
-        update={"settings": base.settings.model_copy(update={"allowed_user_ids": (OWNER, 99)})}
+        update={
+            "settings": base.settings.model_copy(
+                # Production runs the lead with the legacy discussion flag off; the
+                # lead's plan buttons must not depend on it.
+                update={"allowed_user_ids": (OWNER, 99), "project_discussion_enabled": False}
+            )
+        }
     )
     get_settings.cache_clear()
 

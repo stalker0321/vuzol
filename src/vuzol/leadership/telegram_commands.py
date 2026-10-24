@@ -16,7 +16,7 @@ from vuzol.leadership.persistence import CONTRACT_VERSION, LeadershipCommandRece
 from vuzol.leadership.service import LeadershipCommandService
 from vuzol.storage.models import TransactionalOutbox
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram.domain import IngressResult, IngressStatus, MessageUpdate
+from vuzol.telegram.domain import ControlUpdate, IngressResult, IngressStatus, MessageUpdate
 from vuzol.telegram.projections import enqueue_chat_notice
 from vuzol.workflows.application import Principal
 
@@ -78,7 +78,10 @@ async def apply_telegram_lead(
             if receipt is not None:
                 original_status = receipt.status
                 notice_result = replace(result, status=receipt.status, reason=receipt.reason)
-    if kind not in {"status", "goal", "details"} and original_status in {"applied", "waiting"}:
+    if kind not in {"status", "goal", "details", "debug"} and original_status in {
+        "applied",
+        "waiting",
+    }:
         async with session_factory() as session:
             state_notice = await session.scalar(
                 select(TransactionalOutbox).where(
@@ -97,13 +100,31 @@ async def apply_telegram_lead(
     )
     async with UnitOfWork(session_factory) as uow:
         assert uow.session is not None
+        status_goal = await uow.session.get(ManagedGoal, result.goal_id) if result.goal_id else None
+        key = f"lead:{'debug' if kind == 'debug' else 'notice'}:{update.bot_id}:{update.update_id}"
+        if kind == "status" and status_goal and original_status == "applied":
+            key = f"lead:state:{status_goal.id}:{result.version}"
+            if (status_goal.source_chat_id, status_goal.source_thread_id) != (
+                update.chat_id,
+                update.message_thread_id,
+            ):
+                key += f":{update.chat_id}:{update.message_thread_id}"
         await enqueue_chat_notice(
             uow.session,
             chat_id=update.chat_id,
             thread_id=update.message_thread_id,
-            key=f"lead:notice:{update.bot_id}:{update.update_id}",
+            key=key,
             text=notice,
             markdown=True,
+            projection_role=(
+                f"ls:{result.goal_id.hex}"
+                if kind == "status" and result.goal_id and original_status == "applied"
+                else None
+            ),
+            revision=result.version or 0,
+            callback_buttons=goal_status_buttons(status_goal)
+            if kind == "status" and status_goal
+            else (),
         )
     return IngressResult(status=IngressStatus.HANDLED, reason=result.status)
 
@@ -154,6 +175,7 @@ def _command(
         "status": "get_goal",
         "goal": "get_goal",
         "details": "get_goal",
+        "debug": "get_goal",
         "answer": "answer_permission",
         "limits": "set_work_limits",
     }
@@ -208,9 +230,9 @@ async def _notice(
     user_id: int,
 ) -> str:
     from vuzol.leadership.card import (
-        literal_markdown,
         render_goal_card,
         render_goal_contract,
+        render_goal_debug,
         render_goal_details,
     )
     from vuzol.leadership.persistence import GoalDelegation
@@ -227,8 +249,7 @@ async def _notice(
         return (
             "🟡 **КОМАНДА НЕ ПРИМЕНЕНА · Руководитель**\n\n"
             f"{explanation}\n\n"
-            "Актуальное состояние: /lead_status.\n\n"
-            f"*Код для диагностики: {literal_markdown(result.reason or result.status)}*"
+            "Открой текущее состояние цели."
         )
     async with UnitOfWork(session_factory) as uow:
         assert uow.session is not None
@@ -239,9 +260,11 @@ async def _notice(
         if delegation is None:
             return "**Руководитель**\n\nРазрешение на доступ к цели недоступно."
         view = await goal_card_view(uow.session, goal, delegation)
-    renderer = {"goal": render_goal_contract, "details": render_goal_details}.get(
-        kind, render_goal_card
-    )
+    renderer = {
+        "goal": render_goal_contract,
+        "details": render_goal_details,
+        "debug": render_goal_debug,
+    }.get(kind, render_goal_card)
     return renderer(view)
 
 
@@ -279,3 +302,174 @@ async def _live_goal(
         if goal is None:
             return None, None
         return goal.id, goal.version
+
+
+def question_options(question: str, supplied: object = None) -> list[str]:
+    import re
+
+    from vuzol.leadership.text import owner_text
+
+    if isinstance(supplied, list):
+        options = [owner_text(value) for value in supplied if isinstance(value, str)]
+        if options and all(0 < len(value) <= 60 for value in options) and len(options) <= 6:
+            return list(dict.fromkeys(options))
+    if re.search(r"\bли\b", question, re.I) and question.rstrip().endswith("?"):
+        return ["Да", "Нет"]
+    return []
+
+
+def question_buttons(goal: ManagedGoal) -> tuple[tuple[tuple[str, str], ...], ...]:
+    condition = goal.wakeup_condition or {}
+    options = condition.get("options", [])
+    return tuple(
+        tuple(
+            (label, f"v1:lq:{condition['asked_version']}:{index}")
+            for index, label in list(enumerate(options))[offset : offset + 2]
+        )
+        for offset in range(0, len(options), 2)
+    )
+
+
+async def answer_question_message(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    project_id: str,
+    chat_id: int,
+    thread_id: int,
+    message_id: int,
+    user_id: int,
+    key: str,
+    answer: str = "",
+    question_version: int | None = None,
+    option: int | None = None,
+) -> IngressResult | None:
+    """Resolve the delivered question, then use the same fenced owner command as /lead_answer."""
+    from vuzol.storage.models import TelegramMessageLink
+
+    async with UnitOfWork(session_factory) as uow:
+        assert uow.session is not None
+        link = await uow.session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.chat_id == chat_id,
+                TelegramMessageLink.message_thread_id == thread_id,
+                TelegramMessageLink.message_id == message_id,
+                TelegramMessageLink.message_role.startswith("lq:"),
+            )
+        )
+        if link is None:
+            return None
+        _, target, version_text = link.message_role.split(":")
+        version = int(version_text)
+        goal = await uow.session.get(ManagedGoal, uuid.UUID(target), with_for_update=True)
+        if goal is None or goal.project_id != project_id or goal.owner_user_id != user_id:
+            return IngressResult(status=IngressStatus.REJECTED, reason="outside_scope")
+        if question_version is not None and question_version != version:
+            return IngressResult(status=IngressStatus.REJECTED, reason="question_version_mismatch")
+        if option is not None:
+            notice = await uow.session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key == f"lead:question:{goal.id}:{version}"
+                )
+            )
+            buttons = [
+                button
+                for row in (notice.payload.get("callback_buttons", []) if notice else [])
+                for button in row
+            ]
+            if not 0 <= option < len(buttons):
+                return IngressResult(status=IngressStatus.REJECTED, reason="answer_required")
+            answer = buttons[option][0]
+        receipt = await uow.session.scalar(
+            select(LeadershipCommandReceipt).where(
+                LeadershipCommandReceipt.actor_kind == "human",
+                LeadershipCommandReceipt.actor_subject == str(user_id),
+                LeadershipCommandReceipt.idempotency_key == key,
+            )
+        )
+        result = await LeadershipCommandService(
+            session_factory,
+            enabled=settings.project_lead.enabled,
+        ).apply_human(
+            Principal(user_id=user_id, ingress_source="telegram"),
+            LeadCommand(
+                name="answer_permission",
+                project_id=project_id,
+                goal_id=goal.id,
+                expected_version=receipt.expected_version if receipt else goal.version,
+                idempotency_key=key,
+                payload={"answer": answer, "question_version": version},
+            ),
+            uow=uow,
+        )
+        accepted = result.status in {"applied", "duplicate"}
+        if not accepted:
+            await enqueue_chat_notice(
+                uow.session,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                key=f"lead:answer-rejected:{key}",
+                text=(
+                    "Этот вопрос уже закрыт или изменился. "
+                    "Ответь на актуальное сообщение с вопросом."
+                ),
+            )
+        return IngressResult(
+            status=IngressStatus.HANDLED if accepted else IngressStatus.REJECTED,
+            reason=result.reason or result.status,
+        )
+
+
+def goal_status_buttons(goal: ManagedGoal) -> tuple[tuple[tuple[str, str], ...], ...]:
+    if goal.lifecycle != "paused":
+        return ()
+    return (
+        (
+            ("▶️ Продолжить", f"v1:lg:{goal.version}:resume"),
+            ("❌ Отменить", f"v1:lg:{goal.version}:cancel"),
+        ),
+    )
+
+
+async def apply_goal_button(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    project_id: str,
+    update: ControlUpdate,
+) -> IngressResult:
+    from vuzol.storage.models import TelegramMessageLink
+
+    async with UnitOfWork(session_factory) as uow:
+        assert uow.session is not None
+        link = await uow.session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.chat_id == update.chat_id,
+                TelegramMessageLink.message_thread_id == update.message_thread_id,
+                TelegramMessageLink.message_id == update.message_id,
+                TelegramMessageLink.message_role.startswith("ls:"),
+            )
+        )
+        if link is None or update.goal_version is None:
+            return IngressResult(status=IngressStatus.REJECTED, reason="control_binding_missing")
+        result = await LeadershipCommandService(
+            session_factory,
+            enabled=settings.project_lead.enabled,
+        ).apply_human(
+            Principal(user_id=update.user_id, ingress_source="telegram"),
+            LeadCommand(
+                name="resume_goal" if update.action_kind == "lead_resume" else "cancel_goal",
+                project_id=project_id,
+                goal_id=uuid.UUID(link.message_role.removeprefix("ls:")),
+                expected_version=update.goal_version,
+                idempotency_key=f"telegram:lead-control:{update.callback_query_id}",
+                payload={},
+            ),
+            uow=uow,
+        )
+        return IngressResult(
+            status=IngressStatus.HANDLED
+            if result.status in {"applied", "duplicate"}
+            else IngressStatus.REJECTED,
+            reason=result.reason or result.status,
+        )

@@ -1,0 +1,414 @@
+"""Owner decisions through real Telegram delivery bindings and command fences."""
+# ruff: noqa: RUF001
+
+import re
+from dataclasses import replace
+
+import pytest
+from sqlalchemy import select
+from tests.integration.leadership.test_lead_review_regressions import control
+from tests.integration.leadership.test_lead_surface import _message
+from tests.integration.leadership.test_managed_goal_flow import (
+    CHAT,
+    OWNER,
+    PROJECT,
+    THREAD,
+    _enable,
+    _factory,
+    _runtime,
+    _session,
+)
+from tests.integration.leadership.test_plan_revisions import plan_items
+from tests.integration.leadership.test_readable_cards import drain
+from tests.integration.leadership.test_task_control import command
+
+from vuzol.config.settings import get_settings
+from vuzol.leadership.persistence import ManagedGoal
+from vuzol.storage.models import TelegramMessageLink, TransactionalOutbox, WorkPackage
+from vuzol.storage.types import WorkPackageStatus
+from vuzol.telegram.adapter import _callback_answer
+from vuzol.telegram.controls import TelegramControlService
+from vuzol.telegram.domain import ControlUpdate, IngressStatus, WorkPackageControlUpdate
+from vuzol.telegram.ingress import TelegramIngressService
+from vuzol.telegram.projections import FakeTelegramClient, enqueue_chat_notice
+from vuzol.telegram.work_package_projections import build_work_package_plan_card
+from vuzol.telegram.work_packages import encode_work_package_callback, parse_work_package_callback
+
+pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
+
+
+@pytest.fixture
+def runtime(tmp_path, monkeypatch):
+    monkeypatch.delenv("VUZOL_TEST_DATABASE_DSN", raising=False)
+    get_settings.cache_clear()
+    repo = tmp_path / "repositories" / PROJECT
+    repo.mkdir(parents=True)
+    base = _runtime(tmp_path, repo, lead=True)
+    yield base.model_copy(
+        update={"settings": base.settings.model_copy(update={"allowed_user_ids": (OWNER, 99)})}
+    )
+    get_settings.cache_clear()
+
+
+async def question_link(factory, goal_id, version):
+    async with factory() as session:
+        return await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.message_role == f"lq:{goal_id.hex}:{version}"
+            )
+        )
+
+
+@pytest.mark.parametrize("via", ["reply", "button"])
+async def test_question_answer_uses_delivered_version_and_does_not_resume_pause(
+    postgres_dsn, runtime, via
+):
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        asked = await command(
+            factory, goal_id, "ask_owner", {"question": "Нужен ли отдельный вход?"}
+        )
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        link = await question_link(factory, goal_id, asked.version)
+        assert link is not None
+        assert sum("Нужен ли отдельный вход?" in body for _, _, body in client.sent) == 1
+        keyboard = next(keys for keys in client.sent_keyboards if keys)
+        assert [label for row in keyboard for label, _ in row] == ["Да", "Нет"]
+        assert all(len(data.encode()) <= 64 for row in keyboard for _, data in row)
+        await control(factory, goal_id, "pause_goal")
+        if via == "reply":
+            update = _message(900, "Да").model_copy(update={"reply_to_message_id": link.message_id})
+            handler = TelegramIngressService(runtime, factory).accept_message
+        else:
+            update = ControlUpdate(
+                bot_id="test",
+                update_id=900,
+                callback_query_id="answer-choice",
+                chat_id=CHAT,
+                message_thread_id=THREAD,
+                message_id=link.message_id,
+                user_id=OWNER,
+                action_kind="lead_answer",
+                question_version=asked.version,
+                answer_option=0,
+            )
+            handler = TelegramControlService(runtime, factory).accept
+        refused = await handler(update.model_copy(update={"user_id": 99}))
+        assert refused.status is IngressStatus.REJECTED
+        assert (await handler(update)).status is IngressStatus.HANDLED
+        assert (await handler(update)).reason == "duplicate"
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "paused"
+            assert goal.constraints["owner_answer"]["question_version"] == asked.version
+            assert goal.constraints["owner_answer"]["answer"] == "Да"
+            assert not await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key == f"lead:message:{CHAT}:900"
+                )
+            )
+
+
+async def test_old_reply_and_old_button_do_not_answer_replacement_question(postgres_dsn, runtime):
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        first = await command(
+            factory, goal_id, "ask_owner", {"question": "Нужен ли отдельный вход?"}
+        )
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        link = await question_link(factory, goal_id, first.version)
+        second = await command(
+            factory,
+            goal_id,
+            "ask_owner",
+            {"question": "Какие разделы оставить?", "options": ["Все", "Только главную"]},
+        )
+        await drain(factory, client)
+        reply = _message(901, "Да").model_copy(update={"reply_to_message_id": link.message_id})
+        assert (
+            await TelegramIngressService(runtime, factory).accept_message(reply)
+        ).status is IngressStatus.REJECTED
+        clicked = await TelegramControlService(runtime, factory).accept(
+            ControlUpdate(
+                bot_id="test",
+                update_id=902,
+                callback_query_id="old-choice",
+                chat_id=CHAT,
+                message_thread_id=THREAD,
+                message_id=link.message_id,
+                user_id=OWNER,
+                action_kind="lead_answer",
+                question_version=first.version,
+                answer_option=0,
+            )
+        )
+        assert clicked.status is IngressStatus.REJECTED
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.wakeup_condition["asked_version"] == second.version
+            assert "owner_answer" not in goal.constraints
+
+
+@pytest.mark.parametrize("decision", ["✅ Запускай", "❌ Отменить"])
+async def test_plan_is_the_only_approval_decision_and_change_reply_keeps_context(
+    postgres_dsn, runtime, decision
+):
+    from tests.integration.leadership.planning_helpers import seed_plan
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        plan = plan_items(1)
+        summary = (
+            "Добавить проверку входных данных и понятное сообщение об ошибке; "
+            "функция пока является заглушкой."
+        )
+        plan["title"] = "Проверка входных данных"
+        plan["items"][0].update(
+            summary=summary,
+            allowed_scope="src/importer.py",
+            completion_criteria=["Тесты проверяют корректный ввод и ошибку."],
+            suggested_risk="high",
+        )
+        await seed_plan(factory, goal_id, {"plan": plan})
+        asked = await command(
+            factory,
+            goal_id,
+            "ask_owner",
+            {"question": f"Утвердить план {goal_id}, hash {'a' * 64} и запуск?"},
+        )
+        assert asked.status == "waiting"
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.waiting_reason == "plan_approval"
+            assert goal.wakeup_condition["kind"] == "plan_approval"
+            assert not await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("lead:question:%")
+                )
+            )
+            card = await build_work_package_plan_card(session, goal.current_package_id)
+            assert summary in card.html and "Важно:" in card.html
+            assert not re.search(
+                r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{40,64}", card.html
+            )
+            assert all(
+                word not in card.html
+                for word in ("Plan approval", "Ревизия", "scope", "версия", "high")
+            )
+            assert [label for row in card.callback_buttons for label, _ in row] == [
+                "✅ Запускай",
+                "✏️ Изменить",
+                "❌ Отменить",
+            ]
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.work_package_id == card.package_id,
+                    TelegramMessageLink.message_role == "work_package_plan",
+                )
+            )
+        callbacks = {label: data for row in card.callback_buttons for label, data in row}
+        update = WorkPackageControlUpdate(
+            bot_id="test",
+            update_id=910,
+            callback_query_id="change",
+            callback_data=callbacks["✏️ Изменить"],
+            chat_id=CHAT,
+            message_thread_id=THREAD,
+            message_id=link.message_id,
+            user_id=OWNER,
+        )
+        controls = TelegramControlService(runtime, factory)
+        assert (
+            await controls.accept(update.model_copy(update={"user_id": 99}))
+        ).status is IngressStatus.REJECTED
+        changed = await controls.accept(update)
+        assert changed.reason == "change_plan"
+        assert "Ответь на карточку плана" in _callback_answer(changed)[0]
+        ingress = TelegramIngressService(runtime, factory)
+        await ingress.accept_message(
+            _message(911, "Добавь тест пустого ввода").model_copy(
+                update={"reply_to_message_id": link.message_id}
+            )
+        )
+        await ingress.accept_message(_message(912, "Да, запускай"))
+        async with factory() as session:
+            event = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key == f"lead:message:{CHAT}:911"
+                )
+            )
+            assert event.payload["reply_context"]["message_id"] == link.message_id
+            assert event.payload["reply_context"]["plan_revision_id"] == str(card.revision_id)
+            assert event.payload["reply_context"]["plan"]["items"][0]["summary"] == summary
+            assert (
+                await session.get(WorkPackage, card.package_id)
+            ).status is WorkPackageStatus.DRAFT
+        for label in ("✅ Запускай", "✏️ Изменить", "❌ Отменить"):
+            original = parse_work_package_callback(callbacks[label])
+            stale = encode_work_package_callback(
+                replace(original, revision_number=original.revision_number + 1)
+            )
+            assert (
+                await controls.accept(
+                    update.model_copy(update={"callback_data": stale, "callback_query_id": label})
+                )
+            ).status is IngressStatus.REJECTED
+        approved = await controls.accept(
+            update.model_copy(
+                update={"callback_data": callbacks[decision], "callback_query_id": "decision"}
+            )
+        )
+        assert approved.status is IngressStatus.HANDLED
+        async with factory() as session:
+            expected = (
+                WorkPackageStatus.APPROVED
+                if decision == "✅ Запускай"
+                else WorkPackageStatus.DISCARDED
+            )
+            assert (await session.get(WorkPackage, card.package_id)).status is expected
+
+
+async def test_status_edits_one_message_and_pause_button_is_fenced(postgres_dsn, runtime):
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        assert len(client.sent) == 1
+        await control(factory, goal_id, "pause_goal")
+        await drain(factory, client)
+        assert len(client.sent) == 1 and len(client.edited) == 1
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.message_role == f"ls:{goal_id.hex}"
+                )
+            )
+            version = goal.version
+        assert client.edited[0][1] == link.message_id
+        button = ControlUpdate(
+            bot_id="test",
+            update_id=930,
+            callback_query_id="resume",
+            chat_id=CHAT,
+            message_thread_id=THREAD,
+            message_id=link.message_id,
+            user_id=OWNER,
+            action_kind="lead_resume",
+            goal_version=version,
+        )
+        controls = TelegramControlService(runtime, factory)
+        assert (
+            await controls.accept(button.model_copy(update={"user_id": 99}))
+        ).status is IngressStatus.REJECTED
+        assert (await controls.accept(button)).status is IngressStatus.HANDLED
+        assert (
+            await controls.accept(button.model_copy(update={"callback_query_id": "stale-resume"}))
+        ).status is IngressStatus.REJECTED
+        await drain(factory, client)
+        assert len(client.sent) == 1
+        assert {message_id for _, message_id, _ in client.edited} == {link.message_id}
+        await command(factory, goal_id, "ask_owner", {"question": "Как назвать раздел?"})
+        await drain(factory, client)
+        assert len(client.sent) == 2
+        await control(factory, goal_id, "cancel_goal")
+        await drain(factory, client)
+        assert len(client.sent) == 3 and "ОТМЕНЕНО" in client.sent[-1][2]
+
+
+async def test_notice_identifier_guard_at_outbox_boundary(postgres_dsn):
+    async with _factory(postgres_dsn) as factory:
+        async with factory.begin() as session:
+            await enqueue_chat_notice(
+                session,
+                chat_id=CHAT,
+                thread_id=THREAD,
+                key="lead:test-notice",
+                text=f"Готово <b> & {'a' * 40} {'B' * 64} 12345678-1234-1234-1234-123456789012",
+            )
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        assert client.sent[0][2] == "Готово &lt;b&gt; &amp;   "
+
+
+async def test_lead_reply_guard_and_question_do_not_duplicate_owner_decisions(
+    postgres_dsn, runtime, tmp_path
+):
+    from tests.integration.leadership.test_lead_surface import owner_message
+    from tests.integration.leadership.test_managed_goal_flow import _worker
+
+    from vuzol.leadership.model import LeadCommandDraft, LeadDecision
+
+    class Reply:
+        async def decide(self, snapshot):
+            if snapshot.owner_event:
+                return LeadDecision(
+                    reply=f"Проверю <код> {snapshot.goal_id} {'a' * 40} {'B' * 64}."
+                )
+            return LeadDecision()
+
+    class Ask:
+        async def decide(self, snapshot):
+            return LeadDecision(
+                reply="Нужен ли отдельный вход?",
+                commands=(
+                    LeadCommandDraft(
+                        name="ask_owner", payload={"question": "Нужен ли отдельный вход?"}
+                    ),
+                ),
+            )
+
+    async with _factory(postgres_dsn) as factory:
+        await _enable(factory, await _session(factory))
+        await _worker(factory, Reply()).process_one()
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        await owner_message(factory, tmp_path, 950, "Проверь код")
+        await _worker(factory, Reply()).process_one()
+        await drain(factory, client)
+        reply = next(body for _, _, body in client.sent if "Проверю" in body)
+        assert "&lt;код&gt;" in reply and "<код>" not in reply
+        assert not re.search(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{40,64}", reply)
+        await owner_message(factory, tmp_path, 951, "Уточни следующий шаг")
+        await _worker(factory, Ask()).process_one()
+        await drain(factory, client)
+        assert sum("Нужен ли отдельный вход?" in body for _, _, body in client.sent) == 1
+
+
+async def test_live_status_serializes_delivery_and_quarantines_unknown_send(postgres_dsn):
+    from telegram.error import RetryAfter, TimedOut
+    from tests.integration.telegram.test_delivery import service as delivery_service
+
+    from vuzol.storage.types import DeliveryStatus
+    from vuzol.telegram.delivery import prepare_delivery
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await control(factory, goal_id, "pause_goal")
+        async with factory() as session:
+            rows = list(
+                await session.scalars(
+                    select(TransactionalOutbox)
+                    .where(TransactionalOutbox.idempotency_key.like("lead:state:%"))
+                    .order_by(TransactionalOutbox.payload["revision"].as_integer())
+                )
+            )
+            with pytest.raises(RetryAfter):
+                await prepare_delivery(session, rows[1], None)
+        client = FakeTelegramClient(fail=TimedOut("lost response"))
+        worker = delivery_service(factory, client)
+        assert await worker.deliver_one()
+        await drain(factory, FakeTelegramClient())
+        async with factory() as session:
+            first, second = (
+                await session.get(TransactionalOutbox, rows[0].id),
+                await session.get(TransactionalOutbox, rows[1].id),
+            )
+            assert first.status is DeliveryStatus.AMBIGUOUS
+            assert second.status is DeliveryStatus.DEAD_LETTER
+            assert second.last_error_category == "lead_projection_ambiguous"

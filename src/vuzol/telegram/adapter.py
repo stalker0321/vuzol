@@ -111,6 +111,8 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
         if result.reason == "item_not_safely_retryable":
             return "Повтор недоступен для текущего состояния задачи.", True
         return "Действие уже недоступно. Обновите карточку.", True
+    if result is not None and result.reason == "change_plan":
+        return "Ответь на карточку плана: что нужно изменить?", True
     if result is not None and result.reason == "continue_discussion":
         return "Напишите следующим сообщением, что хотите обсудить.", False
     if result is not None and result.reason == "request_replan":
@@ -460,6 +462,43 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
             task_id=retry_task_id,
             expected_task_version=version,
             retry_step_ordinal=ordinal,
+        )
+    if len(parts) == 4 and parts[:2] == ["v1", "lg"] and parts[3] in {"resume", "cancel"}:
+        try:
+            version = int(parts[2])
+            if version < 1 or len(query.data.encode()) > 64:
+                return None
+        except ValueError:
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+            message_id=message_id,
+            action_kind=f"lead_{parts[3]}",
+            goal_version=version,
+        )
+    if len(parts) == 4 and parts[:2] == ["v1", "lq"]:
+        try:
+            version, option = int(parts[2]), int(parts[3])
+            if version < 1 or not 0 <= option < 6 or len(query.data.encode()) > 64:
+                return None
+        except ValueError:
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+            message_id=message_id,
+            action_kind="lead_answer",
+            question_version=version,
+            answer_option=option,
         )
     if query.data.startswith("v1:wp:"):
         return WorkPackageControlUpdate(

@@ -370,12 +370,19 @@ class LeadershipCommandService:
             question = str(command.payload.get("question") or "").strip()
             if not question:
                 return _Outcome(CommandStatus.DENIED, "question_required", {}, goal)
+            from vuzol.leadership.telegram_commands import question_options
+            from vuzol.leadership.text import is_plan_approval_question
+
+            if goal.waiting_reason == "plan_approval" and is_plan_approval_question(question):
+                # The plan card is the only approval decision. Keep its wait/fence intact.
+                return _Outcome(CommandStatus.WAITING, "plan_approval", {}, goal)
             asked_version = goal.version + 1
             goal.wakeup_condition = {
                 "kind": "owner",
                 "question": question,
                 "scope_revision": goal.scope_revision,
                 "asked_version": asked_version,
+                "options": question_options(question, command.payload.get("options")),
             }
             outcome = _transition(goal, actor, "waiting", "owner", CommandStatus.WAITING)
             await _enqueue_owner_question(uow.session, goal, question, asked_version)
@@ -821,10 +828,42 @@ async def _answer_permission(
     return outcome
 
 
+async def enqueue_goal_status(session: AsyncSession, goal: ManagedGoal) -> None:
+    from vuzol.leadership.card import render_goal_card
+    from vuzol.leadership.telegram_commands import goal_status_buttons
+    from vuzol.telegram.projections import enqueue_chat_notice
+
+    delegation = await session.get(GoalDelegation, goal.delegation_id)
+    if delegation is None:
+        return
+    text = render_goal_card(await goal_card_view(session, goal, delegation))
+    await enqueue_chat_notice(
+        session,
+        chat_id=goal.source_chat_id,
+        thread_id=goal.source_thread_id,
+        key=f"lead:state:{goal.id}:{goal.version}",
+        text=text,
+        markdown=True,
+        projection_role=f"ls:{goal.id.hex}",
+        revision=goal.version,
+        callback_buttons=goal_status_buttons(goal),
+    )
+    if goal.lifecycle in {"completed", "cancelled"}:
+        await enqueue_chat_notice(
+            session,
+            chat_id=goal.source_chat_id,
+            thread_id=goal.source_thread_id,
+            key=f"lead:finished:{goal.id}",
+            text=text,
+            markdown=True,
+        )
+
+
 async def _enqueue_owner_question(
     session: AsyncSession, goal: ManagedGoal, question: str, version: int
 ) -> None:
     from vuzol.leadership.card import render_question
+    from vuzol.leadership.telegram_commands import question_buttons
     from vuzol.telegram.projections import enqueue_chat_notice
 
     await enqueue_chat_notice(
@@ -832,9 +871,13 @@ async def _enqueue_owner_question(
         chat_id=goal.source_chat_id,
         thread_id=goal.source_thread_id,
         key=f"lead:question:{goal.id}:{version}",
-        text=render_question(question, version, goal_id=str(goal.id)),
+        text=render_question(question, version, has_options=bool(question_buttons(goal))),
         markdown=True,
+        projection_role=f"lq:{goal.id.hex}:{version}",
+        revision=version,
+        callback_buttons=question_buttons(goal),
     )
+    await enqueue_goal_status(session, goal)
 
 
 async def request_owner_recovery(session: AsyncSession, goal: ManagedGoal, reason: str) -> None:
@@ -874,6 +917,27 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
     else:
         result = "доказательств нет"
     package_line = None if package is None else f"{package.status.value} {str(package.id)[:8]}"
+    from vuzol.storage.models import MaterializationLink, PlanRevisionItem, Task
+
+    progress = []
+    if package is not None:
+        rows = await session.execute(
+            select(PlanRevisionItem.summary, Task.status)
+            .outerjoin(
+                MaterializationLink,
+                (
+                    (MaterializationLink.plan_revision_id == PlanRevisionItem.plan_revision_id)
+                    & (MaterializationLink.ordinal == PlanRevisionItem.ordinal)
+                ),
+            )
+            .outerjoin(Task, Task.id == MaterializationLink.task_id)
+            .where(PlanRevisionItem.plan_revision_id == package.head_revision_id)
+            .order_by(PlanRevisionItem.ordinal)
+        )
+        progress = [
+            {"summary": summary, "status": status.value if status else "planned"}
+            for summary, status in rows
+        ]
     return {
         "request": goal.original_request,
         "scope": goal.scope_text,
@@ -883,6 +947,7 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
         "package_title": None if package is None else package.title,
         "current_package_status": None if package is None else package.status.value,
         "execution": await execution_snapshot(session, goal.current_package_id),
+        "progress": progress,
         "result_commit": None if package is None else package.integration_head_commit,
         "completion_confirmed": assessment.satisfied,
         "next_operation": _next_operation(goal, package, question),
@@ -1112,19 +1177,7 @@ async def _store(
             CommandStatus.APPLIED,
             CommandStatus.WAITING,
         } and command.name not in {item.value for item in READ_COMMANDS}:
-            from vuzol.leadership.card import render_goal_card
-            from vuzol.telegram.projections import enqueue_chat_notice
-
-            delegation = await session.get(GoalDelegation, outcome.goal.delegation_id)
-            if delegation is not None:
-                await enqueue_chat_notice(
-                    session,
-                    chat_id=outcome.goal.source_chat_id,
-                    thread_id=outcome.goal.source_thread_id,
-                    key=f"lead:state:{outcome.goal.id}:{outcome.goal.version}",
-                    text=render_goal_card(await goal_card_view(session, outcome.goal, delegation)),
-                    markdown=True,
-                )
+            await enqueue_goal_status(session, outcome.goal)
     await session.flush()
     return CommandResult(
         status=outcome.status.value,

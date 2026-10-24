@@ -51,8 +51,8 @@ def test_environment_delta_projection_is_compact_and_escaped() -> None:
     assert "+ API &lt;service&gt; · Node &amp; HTTP 22" in lines
     assert "+ worker · Python" in lines
     assert "- legacy-web" in lines
-    assert "Approval: System service" in lines
-    assert "Setup: API token" in lines
+    assert "Нужно разрешение: System service" in lines
+    assert "Нужна настройка: API token" in lines
 
 
 @pytest.mark.parametrize(

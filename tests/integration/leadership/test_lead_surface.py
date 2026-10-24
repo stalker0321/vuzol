@@ -63,7 +63,7 @@ def _profile() -> ProviderProfileConfig:
         credential_reference="env:VUZOL_UNUSED_LEAD_TOKEN",
         capabilities=frozenset({Capability.REPOSITORY_READ}),
         concurrency_limit=1,
-        context_limit=4000,
+        context_limit=8000,  # Room for the owner-facing language and button instructions.
         output_limit=1000,
         cost_class=CostClass.CHEAP,
         roles=frozenset({ProviderRole.LEAD}),
@@ -218,7 +218,7 @@ async def _drain(factory: object) -> str:
     for _ in range(32):
         if not await delivery.deliver_one():
             break
-    return "\n".join(text for _, _, text in client.sent)
+    return "\n".join(text for _, _, text in [*client.sent, *client.edited])
 
 
 async def test_feature_off_still_pauses_and_shows_the_goal_card(
@@ -247,8 +247,8 @@ async def test_feature_off_still_pauses_and_shows_the_goal_card(
         text = await _drain(factory)
         assert "⏸ <b>НА ПАУЗЕ · Руководитель</b>" in text
         assert "Ты поставил работу на паузу" in text
-        assert "/lead_resume" in text
-        assert "Готовность пока не подтверждена" in text
+        assert "разреши продолжить работу" in text
+        assert "✅" not in text
         assert "owner_pause" not in text and "Статус: paused" not in text
         async with factory() as session:
             goal = await session.scalar(select(ManagedGoal))
@@ -293,8 +293,8 @@ async def test_owner_question_and_answer_bind_the_goal_revision(
         )
         assert asked.status == "waiting"
         question_text = await _drain(factory)
-        assert f"<b>Вопрос</b>\n{question}" in question_text
-        assert f"/lead_answer {goal_id} {version + 1}" in question_text
+        assert question in question_text and "ВОПРОС · Руководитель" in question_text
+        assert "/lead_answer" not in question_text and str(goal_id) not in question_text
         stale = await _lead_service(factory).apply_human(
             Principal(OWNER, "telegram"),
             LeadCommand(
@@ -312,9 +312,9 @@ async def test_owner_question_and_answer_bind_the_goal_revision(
         )
         assert answered.status is IngressStatus.HANDLED
         card = await _drain(factory)
-        assert "Твой ответ сохранён" in card
+        assert "Сейчас от тебя ничего не требуется." in card
         assert "В РАБОТЕ · Руководитель" in card
-        assert "<b>Результат</b>" in card
+        assert "Готовлю план работы." in card
         await TelegramIngressService(runtime, factory).accept_message(_message(53, "/lead_details"))
         details = await _drain(factory)
         assert f"<b>Твой последний ответ</b>\n\n<pre><code>{answer}\n</code></pre>" in details

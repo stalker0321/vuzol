@@ -529,13 +529,24 @@ class ProjectLeadWorker:
                 input_scope=turn.scope_revision,
                 input_lease_epoch=turn.lease_epoch,
             )
+            from vuzol.leadership.text import is_plan_approval_question
+
             item = await uow.session.get(TransactionalOutbox, wakeup_id)
             if (
                 item is not None
                 and item.payload.get("wakeup_kind") == "owner_message"
                 and decision.reply.strip()
+                and not any(
+                    command.name in {"ask_owner", "request_permission"}
+                    for command in decision.commands
+                )
+                and not (
+                    goal.waiting_reason == "plan_approval"
+                    and is_plan_approval_question(decision.reply)
+                )
             ):
                 from vuzol.discussion.memory_service import DiscussionMemoryService
+                from vuzol.leadership.text import owner_text
                 from vuzol.storage.types import (
                     ConversationTurnRole,
                     ConversationTurnSource,
@@ -547,7 +558,7 @@ class ProjectLeadWorker:
                     session_id=reply_session_id,
                     role=ConversationTurnRole.ASSISTANT,
                     source=ConversationTurnSource.MODEL,
-                    content=decision.reply,
+                    content=owner_text(decision.reply),
                     classifier_mode=InteractionMode.DISCUSSION,
                 )
                 await uow.outbox.enqueue(
@@ -787,6 +798,9 @@ class ProjectLeadWorker:
                 goal.version += 1
                 goal.fence_epoch += 1
                 _system_event(uow.session, goal, reason)
+                from vuzol.leadership.service import enqueue_goal_status
+
+                await enqueue_goal_status(uow.session, goal)
             await self._complete(uow.session, token)
 
     async def _mark_waiting(self, goal_id: uuid.UUID, reason: str, *, claim: TurnClaim) -> None:

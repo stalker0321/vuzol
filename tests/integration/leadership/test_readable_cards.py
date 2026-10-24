@@ -47,7 +47,7 @@ async def test_short_state_and_lossless_full_goal_are_distinct_authorized_reads(
         card = client.sent[0][2]
         assert "<b>В РАБОТЕ · Руководитель</b>" in card
         assert len(visible(card)) < 1000 and "ФИНАЛ" not in visible(card)
-        assert "/lead_goal" in card and "/lead_details" in card
+        assert "Сейчас от тебя ничего не требуется." in card
         assert client.rich_sent == [], "short system cards should use ordinary HTML"
         await ingress.accept_message(_message(701, "/lead " + request))
         await drain(factory, client)
@@ -56,8 +56,8 @@ async def test_short_state_and_lossless_full_goal_are_distinct_authorized_reads(
         await ingress.accept_message(_message(702, "/lead_pause"))
         before = len(client.sent)
         await drain(factory, client)
-        assert len(client.sent) == before + 1
-        assert "НА ПАУЗЕ" in client.sent[-1][2]
+        assert len(client.sent) == before
+        assert "НА ПАУЗЕ" in client.edited[-1][2]
         async with factory() as session:
             goal = await session.scalar(select(ManagedGoal))
             version, goal_id = goal.version, goal.id
@@ -91,6 +91,10 @@ async def test_short_state_and_lossless_full_goal_are_distinct_authorized_reads(
         assert len(client.sent) == count
         await reader.accept_message(_message(704, "/lead_details"))
         await drain(factory, client)
+        assert "Что можно сделать:" in client.sent[-1][2]
+        assert str(goal_id) not in client.sent[-1][2]
+        await reader.accept_message(_message(705, "/lead_debug"))
+        await drain(factory, client)
         assert "Технические подробности" in client.sent[-1][2]
         assert str(goal_id) in client.sent[-1][2]
         async with factory() as session:
@@ -116,13 +120,15 @@ async def test_an_allowed_telegram_user_cannot_read_another_owners_goal(
         await ingress.accept_message(_message(711, "/lead private-contract-canary"))
         await drain(factory, FakeTelegramClient())
         client = FakeTelegramClient()
-        for index, command in enumerate(("/lead_status", "/lead_goal", "/lead_details"), 712):
+        for index, command in enumerate(
+            ("/lead_status", "/lead_goal", "/lead_details", "/lead_debug"), 712
+        ):
             reply = await ingress.accept_message(
                 _message(index, command).model_copy(update={"user_id": 99})
             )
             assert reply.reason == "denied"
         await drain(factory, client)
-        assert len(client.sent) == 3
+        assert len(client.sent) == 4
         assert all("private-contract-canary" not in body for _, _, body in client.sent)
         assert all("КОМАНДА НЕ ПРИМЕНЕНА" in body for _, _, body in client.sent)
 
@@ -142,12 +148,13 @@ async def test_completed_status_without_evidence_never_becomes_green(
         async with factory.begin() as session:
             goal = await session.scalar(select(ManagedGoal))
             goal.lifecycle = "completed"
+            goal.version += 1
         await ingress.accept_message(_message(722, "/lead_status"))
         client = FakeTelegramClient()
         await drain(factory, client)
-        assert len(client.sent) == 1
-        assert client.sent[0][2].startswith("🟡")
-        assert "НУЖНА ПРОВЕРКА" in client.sent[0][2] and "✅" not in client.sent[0][2]
+        assert not client.sent and len(client.edited) == 1
+        assert client.edited[0][2].startswith("🟡")
+        assert "НУЖНА ПРОВЕРКА" in client.edited[0][2] and "✅" not in client.edited[0][2]
 
 
 async def test_command_without_an_origin_notice_still_replies_to_its_caller(

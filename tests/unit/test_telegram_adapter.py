@@ -523,3 +523,38 @@ def test_task_controls_and_package_controls_share_one_card() -> None:
     )
     assert markup is not None
     assert tuple(row[0].text for row in markup.inline_keyboard) == ("Пауза", "Изменить")
+
+
+@pytest.mark.parametrize(
+    "data,action",
+    [
+        ("v1:lq:36:1", "lead_answer"),
+        ("v1:lg:36:resume", "lead_resume"),
+        ("v1:lg:36:cancel", "lead_cancel"),
+    ],
+)
+def test_lead_buttons_keep_message_and_version_binding(data, action):
+    converted = control_update(_callback(data), "main")
+    assert isinstance(converted, ControlUpdate)
+    assert converted.action_kind == action
+    assert converted.message_id is not None
+    if action == "lead_answer":
+        assert converted.question_version == 36 and converted.answer_option == 1
+    else:
+        assert converted.goal_version == 36
+    assert len(data.encode()) <= 64
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "v1:lq:0:1",
+        "v1:lq:36:6",
+        "v1:lq:x:0",
+        "v1:lg:0:resume",
+        "v1:lg:36:approve",
+        "v1:lq:" + "1" * 65 + ":0",
+    ],
+)
+def test_lead_buttons_reject_malformed_payloads(data):
+    assert control_update(_callback(data), "main") is None

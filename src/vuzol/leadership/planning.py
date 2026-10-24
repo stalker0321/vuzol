@@ -53,7 +53,7 @@ from vuzol.storage.models import (
 from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, DeliveryStatus, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
-PROMPT_REVISION = "project-planner.v1"
+PROMPT_REVISION = "project-planner.v2"
 PLAN_EVENTS = {"plan_requested", "plan_ready", "plan_failed", "planning_requested"}
 
 
@@ -319,6 +319,11 @@ async def _request(
     prompt = (
         "Write concrete future task contracts for flash-model workers. "
         "Return only the plan object. "
+        "Write title, summary, allowed_scope and completion_criteria in plain Russian, "
+        "without ids, hashes, versions, command names or internal orchestration terms "
+        "(start_task, ordinal, scope_revision, package, revision). Keep summaries within 240 "
+        "characters, scope and checks concise. Flag blockers and risks explicitly in summary "
+        "(for example a stub function) and suggested_risk; do not hide them in technical fields. "
         "Read code at source_repo_commit: CLI /workspace is a read-only snapshot without .git; "
         "API read_repo context contains bounded reads with explicit truncation. "
         "Every task needs stable local_id, files/area in allowed_scope, a concrete goal, "

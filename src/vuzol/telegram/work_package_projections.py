@@ -1,15 +1,18 @@
 """PostgreSQL-backed plan and item-detail Telegram projections."""
+# ruff: noqa: RUF001
 
 from __future__ import annotations
 
 import math
+import re
 import uuid
 from dataclasses import dataclass
+from html import unescape
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.projects.executor_preference import format_preference_label, load_preference
+from vuzol.leadership.text import owner_text, short_owner_text
 from vuzol.storage.models import (
     Approval,
     MaterializationLink,
@@ -213,8 +216,8 @@ def _environment_delta_lines(body: dict[str, object]) -> tuple[str, ...]:
         for component in components[:12]:
             if not isinstance(component, dict):
                 continue
-            label = telegram_html(component.get("label", component.get("key", "Component")))
-            technology = telegram_html(component.get("technology", "unspecified"))
+            label = telegram_html(component.get("label", component.get("key", "Компонент")))
+            technology = telegram_html(component.get("technology", "не указано"))
             version = component.get("version")
             suffix = f" {telegram_html(version)}" if isinstance(version, str) and version else ""
             lines.append(f"+ {label} · {technology}{suffix}")
@@ -228,16 +231,16 @@ def _environment_delta_lines(body: dict[str, object]) -> tuple[str, ...]:
         for capability in capabilities:
             if not isinstance(capability, dict):
                 continue
-            label = str(capability.get("label", capability.get("key", "capability")))
+            label = str(capability.get("label", capability.get("key", "возможность")))
             provisioning = capability.get("provisioning")
             if provisioning == "external_setup":
                 external.append(label)
             elif provisioning == "approval_required":
                 privileged.append(label)
         if privileged:
-            lines.append("Approval: " + telegram_html(", ".join(privileged[:6])))
+            lines.append("Нужно разрешение: " + telegram_html(", ".join(privileged[:6])))
         if external:
-            lines.append("Setup: " + telegram_html(", ".join(external[:6])))
+            lines.append("Нужна настройка: " + telegram_html(", ".join(external[:6])))
     return tuple(lines)
 
 
@@ -273,13 +276,13 @@ async def build_work_package_plan_card(
         raise WorkPackageProjectionError("page_out_of_range")
     visible = items[(page - 1) * page_size : page * page_size]
     status = {
-        WorkPackageStatus.DRAFT: "Plan approval",
-        WorkPackageStatus.APPROVED: "Queued",
-        WorkPackageStatus.RUNNING: "Working",
-        WorkPackageStatus.PAUSED: "Paused",
-        WorkPackageStatus.COMPLETED: "Done",
-        WorkPackageStatus.STOPPED: "Stopped",
-        WorkPackageStatus.DISCARDED: "Cancelled",
+        WorkPackageStatus.DRAFT: "Нужно одобрить план",
+        WorkPackageStatus.APPROVED: "Готов к запуску",
+        WorkPackageStatus.RUNNING: "В работе",
+        WorkPackageStatus.PAUSED: "На паузе",
+        WorkPackageStatus.COMPLETED: "Готово",
+        WorkPackageStatus.STOPPED: "Остановлено",
+        WorkPackageStatus.DISCARDED: "Отменено",
     }[package.status]
     if package.goal:
         # D2 L5: horizon packages render through the frozen status mapping,
@@ -291,9 +294,8 @@ async def build_work_package_plan_card(
         and discussion.active_work_package_id != package.id
     )
     if released:
-        status = "Ready"
+        status = "Готов к новой задаче"
     progress = None
-    worker = None
     current_task_status = None
     if package.status in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}:
         ordinal = package.cursor_ordinal or 1
@@ -305,31 +307,6 @@ async def build_work_package_plan_card(
                 MaterializationLink.ordinal == ordinal,
             )
             .limit(1)
-        )
-        executor_profile_id = await session.scalar(
-            select(Step.executor_profile_id)
-            .join(Run, Run.id == Step.run_id)
-            .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
-            .where(
-                MaterializationLink.plan_revision_id == revision.id,
-                MaterializationLink.ordinal == ordinal,
-                Step.executor_profile_id.is_not(None),
-            )
-            .order_by(Run.created_at.desc(), Step.ordinal.desc())
-            .limit(1)
-        )
-        route = await session.scalar(
-            select(Run.selected_route)
-            .join(MaterializationLink, MaterializationLink.task_id == Run.task_id)
-            .where(
-                MaterializationLink.plan_revision_id == revision.id,
-                MaterializationLink.ordinal == ordinal,
-            )
-            .order_by(Run.created_at.desc())
-            .limit(1)
-        )
-        worker = _route_provider_label(
-            {"profile_id": executor_profile_id} if executor_profile_id is not None else route
         )
         progress = f"{ordinal}/{len(items)}"
         if current_task_status is TaskStatus.WAITING_APPROVAL:
@@ -347,29 +324,18 @@ async def build_work_package_plan_card(
                 .limit(1)
             )
             approval_statuses: dict[str | None, str] = {
-                "install_capabilities": "Tool installation approval",
-                "install_dependencies": "Dependency installation approval",
+                "install_capabilities": "Нужно разрешить установку инструментов",
+                "install_dependencies": "Нужно разрешить установку зависимостей",
             }
-            status = approval_statuses.get(requested_action, "Result approval")
+            status = approval_statuses.get(requested_action, "Нужно принять результат")
     if _status_card or _action_card:
-        preference = await load_preference(session, discussion.project_id)
-        if package.status is WorkPackageStatus.PAUSED and preference.worker_key is not None:
-            worker = preference.worker_key.value.title()
-        if worker is None:
-            worker = (
-                format_preference_label(preference)
-                if preference.model is not None
-                else "Auto"
-                if preference.worker_key is None
-                else preference.worker_key.value.title()
-            )
         current_item = (
             next((item for item in items if item.ordinal == (package.cursor_ordinal or 1)), None)
             if package.status in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}
             else None
         )
         title = (
-            "Send a new task"
+            "Можно дать новое поручение"
             if released
             else current_item.summary
             if current_item is not None
@@ -378,15 +344,15 @@ async def build_work_package_plan_card(
         if progress is not None:
             title = f"{progress} · {title}"
         lines = [
-            f"<b>{status} | {telegram_html(worker)}</b>",
-            telegram_html(title),
+            f"<b>{status}</b>",
+            telegram_html(owner_text(title)),
             "",
         ]
     else:
-        title = package.title[:100] if package.managed_goal_id else package.title
+        title = owner_text(package.title)
         lines = [
             f"<b>{telegram_html(title)}</b>",
-            f"Статус: <b>{status}</b> · версия плана {revision.revision_number}",
+            f"<b>{status}</b>",
             "",
         ]
     if _action_card and package.status is WorkPackageStatus.PAUSED:
@@ -414,12 +380,12 @@ async def build_work_package_plan_card(
         }.get(reason_key, "причина неизвестна")
         current = "не определён" if package.cursor_ordinal is None else str(package.cursor_ordinal)
         if failed_step is not None and failed_step.failure_category == "environment_setup_required":
-            lines[0] = f"<b>Needs setup | {telegram_html(worker)}</b>"
+            lines[0] = "<b>Нужна настройка</b>"
             lines.extend(
                 (
                     "Для продолжения не хватает возможности окружения.",
-                    telegram_html(failed_step.failure_summary or "Environment setup is required"),
-                    f"Пункт {current} сохранён; после настройки его можно повторить.",  # noqa: RUF001
+                    telegram_html(failed_step.failure_summary or "Нужно настроить окружение"),
+                    f"Пункт {current} сохранён; после настройки его можно повторить.",
                     "",
                 )
             )
@@ -481,23 +447,23 @@ async def build_work_package_plan_card(
             lines = []
             lines.extend(
                 (
-                    "<b>Plan completed · approval required</b>",
+                    "<b>План выполнен · нужно принять результат</b>",
                     *(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items),
                     "",
-                    "Все пункты и настроенные проверки завершены.",  # noqa: RUF001
+                    "Все пункты и настроенные проверки завершены.",
                 )
             )
             if token_line is not None:
                 lines.extend((token_line, ""))
             if package.preview_url is not None:
                 preview = telegram_html(package.preview_url)
-                lines.extend((f'<b>Preview:</b> <a href="{preview}">{preview}</a>', ""))
+                lines.extend((f'<b>Предпросмотр:</b> <a href="{preview}">{preview}</a>', ""))
             lines.extend(("Применить итоговый результат плана?", ""))
     if package_result_complete:
         lines = []
         lines.extend(
             (
-                "<b>Plan approved · deployed</b>",
+                "<b>Результат принят и применён</b>",
                 *(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items),
                 "",
                 "Итоговый результат принят и применён.",
@@ -522,18 +488,18 @@ async def build_work_package_plan_card(
         )
         if isinstance(production_url, str) and production_url:
             production = telegram_html(production_url)
-            lines.extend((f'<b>Production:</b> <a href="{production}">{production}</a>', ""))
+            lines.extend((f'<b>Опубликовано:</b> <a href="{production}">{production}</a>', ""))
     if package_delivery_failure is not None:
-        lines = ["<b>Plan completed · delivery failed</b>"]
+        lines = ["<b>План выполнен · не удалось применить результат</b>"]
         lines.extend(f"✅ {item.ordinal}. {telegram_html(item.summary)}" for item in items)
         lines.append("")
         if package.preview_url is not None:
             preview = telegram_html(package.preview_url)
-            lines.extend((f'<b>Preview:</b> <a href="{preview}">{preview}</a>', ""))
+            lines.extend((f'<b>Предпросмотр:</b> <a href="{preview}">{preview}</a>', ""))
         lines.extend(
             (
-                "<b>Production apply failed</b>",
-                telegram_html(package_delivery_failure.failure_summary or "unknown failure"),
+                "<b>Не удалось применить результат</b>",
+                telegram_html(package_delivery_failure.failure_summary or "Причина уточняется"),
                 "",
             )
         )
@@ -551,21 +517,35 @@ async def build_work_package_plan_card(
         and package_delivery_failure is None
     ):
         if package.managed_goal_id is not None:
-            lines.append(
-                f"Ревизия {revision.revision_number} · {revision.content_hash[:8]} · "
-                f"scope {revision.immutable_body.get('scope_revision', 'legacy')}"
-            )
             for item in visible:
                 lines.extend(
                     (
-                        f"<b>{item.ordinal}.</b> {telegram_html(item.goal[:60])}",
-                        f"Файлы/область: {telegram_html(item.allowed_scope[:60])}",
-                        f"Результат: {telegram_html(item.expected_outcome[:60])}",
-                        f"Проверка: {telegram_html('; '.join(item.completion_criteria)[:60])}",
-                        f"Риск: {item.suggested_risk.value} · "
-                        f"Сложность: {item.estimated_complexity.value}",
+                        f"<b>{item.ordinal}.</b> {telegram_html(owner_text(item.summary))}",
+                        f"Файлы/область: {telegram_html(short_owner_text(item.allowed_scope))}",
+                        "Проверка: "
+                        + telegram_html(short_owner_text("; ".join(item.completion_criteria))),
                     )
                 )
+                warning = next(
+                    (
+                        sentence.strip()
+                        for text in (item.summary, item.goal, item.expected_outcome)
+                        for sentence in re.split(r"[.;]\s+", text)
+                        if any(
+                            word in sentence.lower()
+                            for word in ("заглуш", "риск", "блокир", "stub")
+                        )
+                    ),
+                    None,
+                )
+                warning = warning or {
+                    "medium": "Есть риск, который нужно учесть перед запуском.",
+                    "high": "Планировщик отметил высокий риск.",
+                    "privileged": "Потребуются дополнительные разрешения.",
+                }.get(item.suggested_risk.value)
+                if warning:
+                    lines.append("Важно: " + telegram_html(short_owner_text(warning)))
+                lines.append("")
         else:
             lines.extend(
                 f"<b>{item.ordinal}.</b> {telegram_html(item.summary)}" for item in visible
@@ -573,14 +553,15 @@ async def build_work_package_plan_card(
         if page == page_count:
             environment_lines = _environment_delta_lines(revision.immutable_body)
             if environment_lines:
-                lines.extend(("", "<b>Stack</b>", *environment_lines))
+                lines.extend(("", "<b>Окружение</b>", *environment_lines))
     if not _status_card and page_count > 1:
         lines.extend(("", f"Страница {page}/{page_count}"))
-    html = "\n".join(lines)
-    if len(html) > TELEGRAM_TEXT_LIMIT:
+    html = owner_text("\n".join(lines))
+    visible_text = unescape(re.sub(r"<[^>]*>", "", html))
+    if len(visible_text.encode("utf-16-le")) // 2 > TELEGRAM_TEXT_LIMIT:
         raise WorkPackageProjectionError("plan_card_too_long")
     buttons: list[tuple[tuple[str, str], ...]] = []
-    if not _status_card:
+    if not _status_card and package.managed_goal_id is None:
         for offset in range(0, len(visible), 4):
             buttons.append(
                 tuple(
@@ -626,9 +607,17 @@ async def build_work_package_plan_card(
         )
     elif not _status_card and package.status is WorkPackageStatus.DRAFT:
         controls.append(
-            ("Принять план", _callback(WorkPackageCallbackKind.APPROVE, package, revision))
+            ("✅ Запускай", _callback(WorkPackageCallbackKind.APPROVE, package, revision))
         )
-        controls.append(("Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision)))
+        controls.append(
+            (
+                "✏️ Изменить",
+                _callback(WorkPackageCallbackKind.CONTINUE_DISCUSSION, package, revision),
+            )
+        )
+        controls.append(
+            ("❌ Отменить", _callback(WorkPackageCallbackKind.DISCARD, package, revision))
+        )
     elif not _status_card and package.status is WorkPackageStatus.RUNNING:
         if package.horizon_phase == "evaluating":
             # D2 ACCEPT UI: the package waits for the acceptance decision.
@@ -691,7 +680,12 @@ async def build_work_package_plan_card(
         )
     if controls:
         buttons.append(tuple(controls))
-    if not _status_card and not package_result_complete and package_delivery_failure is None:
+    if (
+        not _status_card
+        and not package_result_complete
+        and package_delivery_failure is None
+        and package.status is not WorkPackageStatus.DRAFT
+    ):
         buttons.append(
             (
                 (
@@ -787,7 +781,7 @@ async def _horizon_display_status(
     Revives ``horizon_status`` as the display source of truth for packages
     with a goal: ``evaluating`` while acceptance is pending, ``succeeded``
     once accepted. A COMPLETED horizon package with unsettled effects shows
-    "Accepted" (verdict recorded, receipts pending) instead of "Done".
+    "Результат принят" (verdict recorded, receipts pending) instead of "Готово".
     """
 
     from vuzol.discussion.horizon import horizon_status
@@ -796,9 +790,9 @@ async def _horizon_display_status(
 
     code = horizon_status(package.status, package.horizon_phase, package.accepted_at is not None)
     if code == "evaluating":
-        return "Evaluating"
+        return "Проверяю результат"
     if code in {"waiting_approval", "waiting_resource", "waiting_input"}:
-        return "Waiting"
+        return "Ожидание решения"
     if code == "succeeded":
         task_ids = (
             await session.scalars(
@@ -821,8 +815,8 @@ async def _horizon_display_status(
                         )
                     )
                     if pending is not None:
-                        return "Accepted"
-        return "Done"
+                        return "Результат принят"
+        return "Готово"
     if code in {"draft", "ready", "running", "paused", "failed", "cancelled"}:
         return fallback
     return fallback
@@ -909,7 +903,9 @@ async def build_work_package_detail_card(
             f"<b>Область</b>\n{telegram_html(item.allowed_scope)}",
         )
     )
-    if len(html) > TELEGRAM_TEXT_LIMIT:
+    html = owner_text(html)
+    visible_text = unescape(re.sub(r"<[^>]*>", "", html))
+    if len(visible_text.encode("utf-16-le")) // 2 > TELEGRAM_TEXT_LIMIT:
         raise WorkPackageProjectionError("detail_card_too_long")
     buttons: list[tuple[str, str]] = []
     if package.status in {WorkPackageStatus.DRAFT, WorkPackageStatus.APPROVED}:

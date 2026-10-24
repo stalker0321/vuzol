@@ -117,7 +117,7 @@ async def test_plan_projection_is_pg_reconstructable_and_fenced(postgres_dsn: st
 
     assert "Plan &lt;unsafe&gt;" in first.html and "Step &lt;1&gt;" in first.html
     assert "Step &lt;9&gt;" in second.html and first.status_generation == 1
-    assert status.html.startswith("<b>Plan approval | Auto</b>\nPlan &lt;unsafe&gt;")
+    assert status.html.startswith("<b>Нужно одобрить план</b>\nPlan &lt;unsafe&gt;")
     callbacks = [
         parse_work_package_callback(data) for row in first.callback_buttons for _, data in row
     ]
@@ -146,10 +146,10 @@ async def test_plan_projection_separates_stack_delta_from_work_items(
         )
     async with factory() as session:
         card = await build_work_package_plan_card(session, result.package_id, page=2)
-    assert "<b>Stack</b>" in card.html
+    assert "<b>Окружение</b>" in card.html
     assert "+ Public API · Flask" in card.html
     assert "- django" in card.html
-    assert "Setup: Cloud account" in card.html
+    assert "Нужна настройка: Cloud account" in card.html
     await engine.dispose()
 
 
@@ -168,7 +168,7 @@ async def test_discarded_plan_releases_topic_and_status_becomes_ready(
         )
     async with factory() as session:
         status = await build_work_package_status_card(session, package_id)
-    assert status.html.startswith("<b>Ready | Auto</b>\nSend a new task")
+    assert status.html.startswith("<b>Готов к новой задаче</b>\nМожно дать новое поручение")  # noqa: RUF001
     await engine.dispose()
 
 

@@ -126,7 +126,7 @@ async def test_owner_gate_cannot_be_bypassed_and_approval_wakes_once(postgres_ds
                 )
             card = await build_work_package_plan_card(uow.session, package.id)
             assert "src/importer.py" in card.html
-            assert "Import writes one marker" in card.html
+            assert plan["items"][0]["summary"] in card.html
         assert (await start(factory, goal_id)).status == "denied"
         ingress = PackageControlIngress(
             factory, enabled=True, authorized_user_ids=frozenset({OWNER})

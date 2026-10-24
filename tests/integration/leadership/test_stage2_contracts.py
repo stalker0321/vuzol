@@ -651,6 +651,37 @@ async def test_amendment_on_paused_goal_does_not_resume_it(postgres_dsn, tmp_pat
             assert await session.scalar(select(func.count()).select_from(Task)) == 0
 
 
+async def test_amendment_releases_a_wait_that_belonged_to_the_old_scope(postgres_dsn, tmp_path):
+    # Live pilot: the goal waited for approval of the old plan; the amendment
+    # stopped that plan, so the wait could never end and the lead never ran.
+    from tests.integration.leadership.test_lead_surface import owner_message
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            goal.lifecycle, goal.waiting_reason = "waiting", "plan_approval"
+            goal.wakeup_condition = {"kind": "plan_approval", "revision_id": str(uuid.uuid4())}
+        event = await owner_message(factory, tmp_path)
+        command = await amendment_command(factory, goal_id, event.id)
+        result = await _lead_service(factory).apply_human(Principal(OWNER, "telegram"), command)
+        assert result.status == "applied"
+        seen = []
+
+        class Replan:
+            async def decide(self, snapshot):
+                seen.append((snapshot.lifecycle, snapshot.scope_revision))
+                return LeadDecision(reply="Запрошу новый план")
+
+        worker = _worker(factory, Replan())
+        for _ in range(4):
+            await worker.process_one()
+        assert ("active", 2) in seen
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.scope_revision == 2 and goal.waiting_reason != "plan_approval"
+
+
 async def test_cancel_amendment_preserves_unknown_effects(postgres_dsn, tmp_path):
     from tests.integration.leadership.test_lead_surface import owner_message
     from tests.integration.storage.helpers import seed_task_run_step

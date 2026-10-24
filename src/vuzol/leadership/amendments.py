@@ -159,6 +159,13 @@ async def apply_pending_amendment(session: AsyncSession, goal: ManagedGoal) -> b
     goal.constraints = constraints
     goal.scope_text = amendment["scope"]
     goal.criteria = amendment["criteria"]
+    if goal.lifecycle == "waiting":
+        # Every wait belonged to the old scope (a plan approval, a question, a
+        # package): none can be satisfied now, so the lead must take a turn.
+        # A paused goal stays paused.
+        goal.lifecycle = "active"
+        goal.waiting_reason = None
+        goal.wakeup_condition = None
     goal.scope_revision += 1
     goal.version += 1
     goal.fence_epoch += 1

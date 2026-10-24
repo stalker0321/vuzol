@@ -815,12 +815,23 @@ class ProjectLeadWorker:
                 return
             if not await claim_current(uow.session, goal, claim):
                 raise LeaseLost("project lead idle claim expired")
+            from vuzol.telegram.attention import pending_owner_plan
+
+            pending = (
+                await pending_owner_plan(uow.session, goal) if reason == "model_idle" else None
+            )
             goal.lifecycle = "waiting"
-            goal.waiting_reason = reason
             goal.lease_owner = None
             goal.lease_until = None
             goal.version += 1
             goal.fence_epoch += 1
+            if pending is not None:
+                # An idle lead with a plan on the owner's card is waiting for that
+                # decision, not stuck: no recovery prompt for the owner.
+                goal.waiting_reason = "plan_approval"
+                goal.wakeup_condition = {"kind": "plan_approval", "revision_id": pending[1]}
+                return
+            goal.waiting_reason = reason
             await request_owner_recovery(uow.session, goal, reason)
 
     async def _renew_claim(self, claim: TurnClaim) -> None:

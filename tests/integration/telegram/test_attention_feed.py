@@ -503,3 +503,43 @@ async def test_pending_owner_plan_survives_pause_and_a_lead_wait_for(postgres_ds
         await drain(factory, client, topics)
         assert not any("решено" in body for _, _, body in client.edited)
         assert len([m for m in client.sent if m[1] == 7]) == 1
+
+
+async def test_idle_lead_with_a_plan_on_the_owner_card_waits_for_approval(postgres_dsn, topics):
+    # Live pilot: after plan_ready the lead returned no commands and the goal showed
+    # "model_idle" with a recovery prompt, although it was waiting for the owner.
+    from tests.integration.leadership.planning_helpers import seed_plan
+    from tests.integration.leadership.test_managed_goal_flow import _worker
+    from vuzol.leadership.model import LeadDecision
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await seed(factory)
+        plan = plan_items(1)
+        plan["items"][0]["suggested_risk"] = "high"
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            goal.lifecycle, goal.waiting_reason, goal.wakeup_condition = "active", None, None
+            await enqueue_goal_status(session, goal)
+
+        class Idle:
+            async def decide(self, snapshot):
+                return LeadDecision(reply="Жду одобрения плана")
+
+        from vuzol.leadership.wakeups import enqueue_goal_wakeup
+
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            await enqueue_goal_wakeup(
+                session,
+                goal_id=goal_id,
+                package_id=goal.current_package_id,
+                idempotency_key="idle-test",
+                kind="resume",
+            )
+        worker = _worker(factory, Idle())
+        for _ in range(3):
+            await worker.process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert (goal.lifecycle, goal.waiting_reason) == ("waiting", "plan_approval")

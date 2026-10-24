@@ -245,7 +245,11 @@ def _environment_delta_lines(body: dict[str, object]) -> tuple[str, ...]:
 
 
 # Planner fields are prose; pick the sentence that answers the card line.
-_FILES_SENTENCE = (r"измен|менять|правит|edit|modif", r"\w+\.\w{1,5}\b|\w+/")
+_PATH = r"(?:\w+\.\w{1,5}\b|\w+/)"
+_CHANGE = r"(?:измен|меня|правит|edit|modif)"
+# A sentence naming files and a change first: "основную ветку менять нельзя"
+# mentions a change but no file.
+_FILES_SENTENCE = (rf"(?=.*{_PATH})(?=.*{_CHANGE})", _PATH, _CHANGE)
 _WARNING_SENTENCE = (r"заглуш|NotImplemented|\bstub\b", r"блокир|невозможн|риск")
 
 

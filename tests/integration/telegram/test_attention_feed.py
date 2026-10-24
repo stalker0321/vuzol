@@ -459,17 +459,36 @@ async def test_pending_owner_plan_survives_pause_and_a_lead_wait_for(postgres_ds
         plan = plan_items(1)
         plan["items"][0]["suggested_risk"] = "high"
         assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
-        client = FakeTelegramClient()
         async with factory.begin() as session:
-            goal = await session.get(ManagedGoal, goal_id)
-            goal.lifecycle, goal.waiting_reason = "paused", "owner_pause"
-            await sync_goal_attention(session, goal)
+            await enqueue_goal_status(session, await session.get(ManagedGoal, goal_id))
+        client = FakeTelegramClient()
         await drain(factory, client, topics)
+        assert len([m for m in client.sent if m[1] == 7]) == 1
+        # The real pause path also pauses the draft package.
+        assert (await command(factory, goal_id, "pause_goal", {})).status == "applied"
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            package = await session.get(WorkPackage, goal.current_package_id)
+            assert package.status.value == "paused"
+            version, package_id = goal.version, goal.current_package_id
+        resumed = await _lead_service(factory).apply_human(
+            Principal(OWNER, "telegram"),
+            LeadCommand(
+                name="resume_goal",
+                project_id=PROJECT,
+                goal_id=goal_id,
+                expected_version=version,
+                idempotency_key="resume-attention",
+                payload={},
+            ),
+        )
+        assert resumed.status == "applied"
+        await drain(factory, client, topics)
+        assert not any("решено" in body for _, _, body in client.edited)
         assert len([m for m in client.sent if m[1] == 7]) == 1
         async with factory.begin() as session:
             goal = await session.get(ManagedGoal, goal_id)
             goal.lifecycle, goal.waiting_reason, goal.wakeup_condition = "active", None, None
-            package_id = goal.current_package_id
         result = await command(
             factory,
             goal_id,

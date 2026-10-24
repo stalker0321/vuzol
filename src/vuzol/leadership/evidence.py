@@ -343,7 +343,8 @@ def unknown_effects_block_work(task: Task, run: Run, step: Step) -> bool:
         return False
     confined = (
         task.status is TaskStatus.CANCELLED
-        and run.workflow_type in {"coding", "architecture"}
+        # fixed_executor is the lead's task workflow (live pilot 2026-10-24).
+        and run.workflow_type in {"coding", "architecture", "fixed_executor"}
         and step.step_type in _CONFINED_STEPS
         and step.idempotency_class
         in {

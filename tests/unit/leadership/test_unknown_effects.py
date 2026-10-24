@@ -21,9 +21,10 @@ from vuzol.storage.types import IdempotencyClass, TaskStatus
     ],
 )
 @pytest.mark.parametrize("status", [TaskStatus.CANCELLED, TaskStatus.PAUSED, TaskStatus.COMPLETED])
-def test_only_cancelled_confined_work_is_nonblocking(step_type, status):
+@pytest.mark.parametrize("workflow", ["coding", "architecture", "fixed_executor"])
+def test_only_cancelled_confined_work_is_nonblocking(step_type, status, workflow):
     task = Task(status=status)
-    run = Run(workflow_type="coding")
+    run = Run(workflow_type=workflow)
     step = Step(
         step_type=step_type,
         unknown_effects=True,

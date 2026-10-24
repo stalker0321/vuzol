@@ -107,7 +107,8 @@ async def run() -> None:
                 settings,
                 factory,
                 owner=f"{owner}:work-package-sequence",
-                enabled=settings.project_discussion_enabled,
+                # Managed (lead) packages are sequenced whenever the lead is on.
+                enabled=settings.project_discussion_enabled or settings.project_lead.enabled,
             ),
         ]
         model_roles = frozenset(

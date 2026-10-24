@@ -23,7 +23,7 @@ SYSTEM_PINNED_TOPIC_ORDER: tuple[TopicKind, ...] = (
 SYSTEM_TOPIC_DISPLAY_NAMES: dict[TopicKind, str] = {
     TopicKind.CHANGELOG: "История",
     TopicKind.TASK_DASHBOARD: "Статус проектов",
-    TopicKind.APPROVALS: "Апрувы",
+    TopicKind.APPROVALS: "🔔 Внимание",
     TopicKind.INBOX: "Новый проект",
     TopicKind.SYSTEM: "Система",
 }
@@ -196,7 +196,15 @@ def build_help_card(kind: TopicKind) -> str:
     elif kind is TopicKind.TASK_DASHBOARD:
         lines.append("<code>/update</code> — обновить статусы проектов и лимиты.")
     elif kind is TopicKind.APPROVALS:
-        lines.append("Проверьте описание результата и тестов, затем выберите действие кнопкой.")
+        lines.extend(
+            (
+                "Здесь собраны проекты, которым нужно твоё внимание.",
+                "🟡 — нужно решение; 🔴 — срочно нужно внимание; ✅ — готово или решено.",
+                "Нажми «Открыть», чтобы перейти к вопросу, плану или результату в проекте.",
+                "Проектные топики можно отключить от уведомлений. Завершение приходит без звука.",
+                "Для отдельных задач здесь по-прежнему появляются карточки принятия результата.",
+            )
+        )
     elif kind is TopicKind.CHANGELOG:
         lines.append("Здесь сохраняются результаты завершённых задач по всем проектам.")
     else:

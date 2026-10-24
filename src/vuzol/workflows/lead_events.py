@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.storage.models import (
     Event,
     MaterializationLink,
+    Run,
     Step,
     Task,
     TransactionalOutbox,
@@ -28,14 +29,47 @@ OBSERVED_TASK_STATUSES = frozenset(
 
 
 async def publish_task_event(session: AsyncSession, task: Task) -> None:
-    if task.status not in OBSERVED_TASK_STATUSES:
-        return
     link = await session.scalar(
         select(MaterializationLink).where(
             MaterializationLink.task_id == task.id,
         )
     )
     if link is None:
+        return
+    package = await session.get(WorkPackage, link.work_package_id)
+    if package is not None and package.managed_goal_id is not None:
+        from vuzol.leadership.persistence import ManagedGoal
+        from vuzol.telegram.attention import ATTENTION_REASONS, sync_attention
+
+        goal = await session.get(ManagedGoal, package.managed_goal_id)
+        if goal is not None:
+            reason: str | None = (
+                task.status.value if task.status.value in ATTENTION_REASONS else None
+            )
+            if task.status is TaskStatus.COMPLETED or goal.lifecycle in {"completed", "cancelled"}:
+                reason = None
+            if (
+                reason == "blocked"
+                and (
+                    await session.scalar(
+                        select(Step.id)
+                        .join(Run, Step.run_id == Run.id)
+                        .where(Run.task_id == task.id, Step.unknown_effects.is_(True))
+                        .limit(1)
+                    )
+                )
+                is not None
+            ):
+                reason = "unknown_effects_open"
+            await sync_attention(
+                session,
+                goal,
+                reason,
+                scope=f"task:{task.id}",
+                version=task.version,
+                target={"task_id": str(task.id), "message_role": "task_status"},
+            )
+    if task.status not in OBSERVED_TASK_STATUSES:
         return
     if task.status is not TaskStatus.WAITING_APPROVAL:
         await _enqueue(
@@ -53,7 +87,6 @@ async def publish_task_event(session: AsyncSession, task: Task) -> None:
                 },
             ),
         )
-    package = await session.get(WorkPackage, link.work_package_id)
     if package is None or package.managed_goal_id is None:
         return
     kind = (

@@ -831,12 +831,15 @@ async def _answer_permission(
 async def enqueue_goal_status(session: AsyncSession, goal: ManagedGoal) -> None:
     from vuzol.leadership.card import render_goal_card
     from vuzol.leadership.telegram_commands import goal_status_buttons
+    from vuzol.telegram.attention import sync_goal_attention
     from vuzol.telegram.projections import enqueue_chat_notice
 
     delegation = await session.get(GoalDelegation, goal.delegation_id)
     if delegation is None:
         return
-    text = render_goal_card(await goal_card_view(session, goal, delegation))
+    view = await goal_card_view(session, goal, delegation)
+    text = render_goal_card(view)
+    await sync_goal_attention(session, goal, completion_confirmed=view["completion_confirmed"])
     await enqueue_chat_notice(
         session,
         chat_id=goal.source_chat_id,
@@ -1162,6 +1165,14 @@ async def _store(
 
     await command_notice(session, receipt, source_wakeup_id, outcome.goal)
     if outcome.goal is not None:
+        if outcome.status is CommandStatus.APPLIED and command.name in {
+            "resume_goal",
+            "answer_permission",
+            "amend_goal",
+        }:
+            from vuzol.telegram.attention import sync_attention
+
+            await sync_attention(session, outcome.goal, None, scope="planner")
         if outcome.status is CommandStatus.WAITING and outcome.goal.wakeup_condition is None:
             await request_owner_recovery(session, outcome.goal, outcome.reason or "waiting")
         _event(

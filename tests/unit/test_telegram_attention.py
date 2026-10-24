@@ -1,6 +1,16 @@
 """Unit tests for the attention notification policy (WP09, no-spam)."""
 
-from vuzol.telegram.attention import AttentionEvent, should_notify
+# ruff: noqa: RUF001
+
+import pytest
+
+from vuzol.telegram.attention import (
+    ATTENTION_REASONS,
+    AttentionEvent,
+    attention_text,
+    project_message_url,
+    should_notify,
+)
 
 
 def test_completion_is_visible() -> None:
@@ -43,3 +53,48 @@ def test_policy_covers_every_event() -> None:
         AttentionEvent.STATE_UNCHANGED,
         AttentionEvent.DUPLICATE_DELIVERY,
     }
+
+
+@pytest.mark.parametrize(
+    ("reason", "icon"),
+    [
+        ("plan_approval", "🟡"),
+        ("owner", "🟡"),
+        ("waiting_approval", "🟡"),
+        ("some_new_owner_reason", "🟡"),
+        ("failed", "🔴"),
+        ("blocked", "🔴"),
+        ("unknown_effects_open", "🔴"),
+        ("quota_exhausted", "🔴"),
+        ("lead_budget_exceeded", "🔴"),
+        ("lead_model_unavailable", "🔴"),
+        ("planner_provider_unavailable", "🔴"),
+        ("planner_timeout", "🔴"),
+        ("delegation_expired", "🔴"),
+        ("delegation_revoked", "🔴"),
+        ("completed", "✅"),
+    ],
+)
+def test_attention_reason_levels_and_resolved_text(reason, icon):
+    text = attention_text(reason, "Сайт школы")
+    assert text.startswith(f"{icon} Сайт школы\n")
+    assert len(text.splitlines()) == 2
+    assert reason not in text
+    assert attention_text(reason, "Сайт школы", resolved=True) == (
+        "✅ Сайт школы\nрешено: " + text.splitlines()[1]
+    )
+
+
+def test_attention_never_displays_internal_identifiers_or_model_text():
+    identifier = "a1234567-b123-c123-d123-e12345678901"
+    commit = "f" * 40
+    for reason in (*ATTENTION_REASONS, identifier):
+        text = attention_text(reason, f"Сайт <школы> {identifier} {commit}")
+        assert identifier not in text and commit not in text
+        assert "&lt;школы&gt;" in text
+        assert reason not in text
+
+
+def test_supergroup_message_and_thread_links():
+    assert project_message_url(-1001234567890, 17, 321) == "https://t.me/c/1234567890/17/321"
+    assert project_message_url(-1001234567890, 17) == "https://t.me/c/1234567890/17"

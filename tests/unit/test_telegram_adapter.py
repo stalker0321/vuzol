@@ -558,3 +558,38 @@ def test_lead_buttons_keep_message_and_version_binding(data, action):
 )
 def test_lead_buttons_reject_malformed_payloads(data):
     assert control_update(_callback(data), "main") is None
+
+
+def test_attention_url_button_and_silent_project_send():
+    async def scenario():
+        bot = AsyncMock()
+        bot.send_message.return_value = SimpleNamespace(message_id=17)
+        client = PythonTelegramClient(bot)
+        url = "https://t.me/c/1234567890/10/99"
+        await client.send_message(
+            chat_id=-1001234567890,
+            thread_id=7,
+            html="Нужно решение",
+            callback_buttons=((("Открыть", url),),),
+            disable_notification=False,
+        )
+        button = bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+        assert button.url == url and button.callback_data is None
+        assert bot.send_message.await_args.kwargs["disable_notification"] is False
+        await client.send_message(
+            chat_id=-1001234567890,
+            thread_id=10,
+            html="Статус",
+            disable_notification=True,
+        )
+        assert bot.send_message.await_args.kwargs["disable_notification"] is True
+        bot.do_api_request.return_value = {"message_id": 18}
+        await client.send_rich_message(
+            chat_id=-1001234567890,
+            thread_id=10,
+            html="Ответ",
+            disable_notification=True,
+        )
+        assert bot.do_api_request.await_args.kwargs["api_kwargs"]["disable_notification"] is True
+
+    asyncio.run(scenario())

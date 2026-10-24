@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1375,6 +1376,29 @@ def test_approval_card_requires_topic_registry(postgres_dsn: str) -> None:
             ),
             "approval_topic_missing",
         )
+        from vuzol.config import TopicConfig, TopicKind, TopicRegistry
+        from vuzol.config.registries import ProjectRegistry
+
+        topics = TopicRegistry(
+            (
+                TopicConfig(
+                    chat_id=-100,
+                    message_thread_id=7,
+                    kind=TopicKind.APPROVALS,
+                    default_workflow="simple_model_task",
+                ),
+            ),
+            projects=ProjectRegistry((), repository_root=Path.cwd()),
+        )
+        async with factory() as session:
+            item = _outbox(
+                linked_entity_type="telegram_intake",
+                linked_entity_id=intake_id,
+                payload={"role": "approval_card"},
+            )
+            prepared = await prepare_delivery(session, item, topics)
+            assert prepared.thread_id == 7 and prepared.message_role == "approval_card"
+            assert prepared.disable_notification is False
         await engine.dispose()
 
     asyncio.run(scenario())

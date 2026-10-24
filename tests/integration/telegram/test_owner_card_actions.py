@@ -232,6 +232,7 @@ class _LengthLimitedTelegram(FakeTelegramClient):
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
         callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
+        disable_notification: bool = False,
     ) -> int:
         if len(html) > TELEGRAM_TEXT_LIMIT:
             raise BadRequest("message is too long")
@@ -243,6 +244,7 @@ class _LengthLimitedTelegram(FakeTelegramClient):
             task_id=task_id,
             approval_id=approval_id,
             callback_buttons=callback_buttons,
+            disable_notification=disable_notification,
         )
 
     async def edit_message(
@@ -460,6 +462,7 @@ async def test_long_criterion_card_is_delivered_page_by_page(postgres_dsn, tmp_p
         client = _LengthLimitedTelegram(next_message_id=77)
         await _deliver(factory, runtime, task_id, client)
         assert len(client.sent) == 1
+        assert client.sent_silent == [True]
         async with factory() as session:
             item = await session.scalar(
                 select(TransactionalOutbox).where(

@@ -2296,7 +2296,14 @@ class TelegramClient(Protocol):
         self, *, chat_id: int, thread_id: int | None, content: bytes, filename: str, caption: str
     ) -> int: ...
 
-    async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int: ...
+    async def send_rich_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        html: str,
+        disable_notification: bool = False,
+    ) -> int: ...
 
     async def edit_rich_message(self, *, chat_id: int, message_id: int, html: str) -> None: ...
 
@@ -2310,6 +2317,7 @@ class TelegramClient(Protocol):
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
         callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
+        disable_notification: bool = False,
     ) -> int: ...
 
     async def edit_message(
@@ -2348,6 +2356,8 @@ class FakeTelegramClient:
     edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
     deleted: list[tuple[int, int]] = field(default_factory=list, init=False)
     pinned: list[tuple[int, int]] = field(default_factory=list, init=False)
+    sent_silent: list[bool] = field(default_factory=list, init=False)
+    rich_sent_silent: list[bool] = field(default_factory=list, init=False)
     rich_sent: list[tuple[int, int | None, str]] = field(default_factory=list, init=False)
     rich_edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
     sent_keyboards: list[tuple[tuple[tuple[str, str], ...], ...]] = field(
@@ -2367,10 +2377,18 @@ class FakeTelegramClient:
         self.next_message_id += 1
         return message_id
 
-    async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int:
+    async def send_rich_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        html: str,
+        disable_notification: bool = False,
+    ) -> int:
         if self.fail:
             raise self.fail
         self.rich_sent.append((chat_id, thread_id, html))
+        self.rich_sent_silent.append(disable_notification)
         message_id = self.next_message_id
         self.next_message_id += 1
         return message_id
@@ -2390,11 +2408,13 @@ class FakeTelegramClient:
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
         callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
+        disable_notification: bool = False,
     ) -> int:
         del buttons, task_id, approval_id
         if self.fail:
             raise self.fail
         self.sent.append((chat_id, thread_id, html))
+        self.sent_silent.append(disable_notification)
         self.sent_keyboards.append(callback_buttons)
         message_id = self.next_message_id
         self.next_message_id += 1

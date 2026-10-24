@@ -408,6 +408,9 @@ class ProjectLeadWorker:
             if goal.lifecycle == "waiting" and not owner_event and not planning_event:
                 goal.lifecycle = "active"
                 goal.waiting_reason = None
+                from vuzol.telegram.attention import sync_goal_attention
+
+                await sync_goal_attention(uow.session, goal)
                 goal.wakeup_condition = None
                 goal.version += 1
                 goal.fence_epoch += 1
@@ -845,6 +848,8 @@ class ProjectLeadWorker:
         await defer_outbox_item(session, token, delay_seconds=0, reason=reason)
 
     async def _reconcile(self, session: AsyncSession) -> None:
+        from vuzol.telegram.attention import sync_goal_attention
+
         now = datetime.now(UTC)
         goals = (
             await session.scalars(
@@ -854,6 +859,7 @@ class ProjectLeadWorker:
             )
         ).all()
         for goal in goals:
+            await sync_goal_attention(session, goal)
             if (
                 goal.lease_owner is not None
                 and goal.lease_until is not None

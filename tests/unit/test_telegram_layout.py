@@ -40,7 +40,7 @@ def test_system_pin_order_is_history_status_approvals_inbox() -> None:
     assert [SYSTEM_TOPIC_DISPLAY_NAMES[kind] for kind in SYSTEM_PINNED_TOPIC_ORDER] == [
         "История",
         "Статус проектов",
-        "Апрувы",
+        "🔔 Внимание",
         "Новый проект",
     ]
     assert system_pin_rank(TopicKind.INBOX) == 3
@@ -55,7 +55,7 @@ def test_system_display_names_override_registry_text() -> None:
         display_name="Whatever local ops typed",
         default_workflow="simple_model_task",
     )
-    assert effective_display_name(topic) == "Апрувы"
+    assert effective_display_name(topic) == "🔔 Внимание"
 
 
 def test_project_display_name_is_project_owned() -> None:

@@ -164,4 +164,6 @@ async def planner_failure_notice(
         thread_id=topic.message_thread_id,
         key=f"{key}:notice",
         text=f"План не подготовлен: {detail}. Руководитель может повторить запрос позже.",
+        projection_role=f"lp:{uuid.uuid5(goal.id, key).hex}",
+        revision=1,
     )

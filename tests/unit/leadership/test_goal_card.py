@@ -167,6 +167,7 @@ def test_lead_answer_is_a_command_and_enable_still_needs_text() -> None:
     assert parse_lead_command("/lead_debug") == ("debug", "")
     assert parse_lead_command("/lead_details unexpected") is None
     assert parse_lead_command("/lead") is None
+    assert parse_lead_command("/lead@bot обсудим идею") == ("message", "обсудим идею")
 
 
 def test_provider_response_rejects_an_owner_waiver() -> None:

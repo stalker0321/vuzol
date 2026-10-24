@@ -170,7 +170,7 @@ class TelegramIngressService:
                     raise TelegramPolicyError("project topic is disabled")
                 return await self._handle_conversation_mode(update, topic, conversation_mode)
             lead = parse_lead_command(update.text)
-            if lead is not None and lead[0] == "enable" and not settings.project_lead.enabled:
+            if lead is not None and lead[0] == "message" and not settings.project_lead.enabled:
                 # New goals stay on the legacy path. Existing goals keep pause,
                 # cancel, status, and an answer to a question already asked.
                 lead = None
@@ -179,6 +179,16 @@ class TelegramIngressService:
                     raise TelegramPolicyError("/lead is only available in a project topic")
                 if not topic.enabled:
                     raise TelegramPolicyError("project topic is disabled")
+                if lead[0] == "message":
+                    from vuzol.leadership.telegram_commands import normalize_lead_message
+
+                    try:
+                        text, limits = normalize_lead_message(lead[1])
+                    except ValueError as error:
+                        return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
+                    return await self._accept_lead_text(
+                        update, topic, text=text, mode="lead", work_limits=limits
+                    )
                 return await self._handle_lead_command(update, topic, lead)
             if is_source_command(update.text):
                 if topic.kind is not TopicKind.PROJECT or topic.project_id is None:
@@ -190,6 +200,28 @@ class TelegramIngressService:
                 raise TelegramPolicyError("topic does not accept new tasks")
         except (TelegramPolicyError, RegistryError) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
+
+        if (
+            settings.project_lead.enabled
+            and topic.kind is TopicKind.PROJECT
+            and update.text
+            and not update.attachments
+        ):
+            async with self._session_factory() as session:
+                mapping = await session.scalar(
+                    select(TopicMapping).where(
+                        TopicMapping.chat_id == update.chat_id,
+                        TopicMapping.message_thread_id == update.message_thread_id,
+                    )
+                )
+                if (
+                    mapping is not None
+                    and mapping.conversation_mode == "think"
+                    and (mapping.conversation_mode_message_id is not None)
+                ):
+                    return await self._accept_lead_text(
+                        update, topic, text=update.text, mode="think"
+                    )
 
         if topic.project_id and update.reply_to_message_id and update.text:
             from vuzol.leadership.telegram_commands import answer_question_message
@@ -209,6 +241,8 @@ class TelegramIngressService:
                 return answered
 
         if settings.project_lead.enabled and topic.kind is TopicKind.PROJECT:
+            if update.text and not update.attachments:
+                return await self._accept_lead_text(update, topic, text=update.text)
             routed = await self._accept_live_lead_message(update, topic)
             if routed is not None:
                 return routed
@@ -575,6 +609,133 @@ class TelegramIngressService:
             return (
                 await uow.telegram_links.resolve_task(update.chat_id, update.reply_to_message_id)
                 is not None
+            )
+
+    async def _accept_lead_text(
+        self,
+        update: MessageUpdate,
+        topic: TopicConfig,
+        *,
+        text: str,
+        mode: ConversationMode | None = None,
+        work_limits: dict[str, int] | None = None,
+    ) -> IngressResult:
+        try:
+            return await self._record_lead_text(
+                update, topic, text=text, mode=mode, work_limits=work_limits
+            )
+        except (PermissionError, ValueError) as error:
+            return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
+
+    async def _record_lead_text(
+        self,
+        update: MessageUpdate,
+        topic: TopicConfig,
+        *,
+        text: str,
+        mode: ConversationMode | None,
+        work_limits: dict[str, int] | None,
+    ) -> IngressResult:
+        from vuzol.leadership.events import ProjectEventService
+        from vuzol.leadership.fence import lock_project_admission
+        from vuzol.leadership.provenance import RequestOrigin
+        from vuzol.workflows.application import Principal
+
+        assert topic.project_id is not None
+        async with UnitOfWork(self._session_factory) as uow:
+            assert uow.session is not None
+            await lock_project_admission(uow.session, topic.project_id)
+            inbox_id, created = await uow.inbox.receive_once(
+                source="telegram",
+                consumer=f"bot:{update.bot_id}",
+                external_event_id=str(update.update_id),
+                payload_hash=update_hash(update),
+            )
+            if not created:
+                return IngressResult(status=IngressStatus.DUPLICATE)
+            existing = await uow.session.scalar(
+                select(TelegramIntakeMessage).where(
+                    TelegramIntakeMessage.chat_id == update.chat_id,
+                    TelegramIntakeMessage.message_id == update.message_id,
+                )
+            )
+            if existing is not None:
+                await uow.inbox.mark_processed(
+                    inbox_id,
+                    entity_type="telegram_intake",
+                    entity_id=existing.id,
+                )
+                return IngressResult(status=IngressStatus.DUPLICATE, intake_id=existing.id)
+            await uow.topics.upsert(
+                TopicMapping(
+                    chat_id=update.chat_id,
+                    message_thread_id=update.message_thread_id,
+                    topic_kind=topic.kind.value,
+                    project_id=topic.project_id,
+                    accepts_new_tasks=topic.accepts_new_tasks,
+                    default_workflow=topic.default_workflow,
+                    enabled=topic.enabled,
+                )
+            )
+            mapping = await uow.session.scalar(
+                select(TopicMapping).where(
+                    TopicMapping.chat_id == update.chat_id,
+                    TopicMapping.message_thread_id == update.message_thread_id,
+                )
+            )
+            frozen_mode = mode or (
+                cast(ConversationMode, mapping.conversation_mode)
+                if mapping and mapping.conversation_mode_message_id is not None
+                else "lead"
+            )
+            session_id = await uow.discussions.active_session_id(
+                chat_id=update.chat_id,
+                message_thread_id=update.message_thread_id,
+            )
+            if session_id is None:
+                session_id = await uow.discussions.create_session(
+                    project_id=topic.project_id,
+                    chat_id=update.chat_id,
+                    message_thread_id=update.message_thread_id,
+                )
+            intake = TelegramIntakeMessage(
+                inbox_id=inbox_id,
+                chat_id=update.chat_id,
+                message_thread_id=update.message_thread_id,
+                message_id=update.message_id,
+                user_id=update.user_id,
+                original_text=update.text,
+                attachments=[a.model_dump(mode="json") for a in update.attachments],
+                affinity_kind="discussion",
+                status=IntakeStatus.AWAITING_INTERPRETATION,
+            )
+            intake_id = await uow.telegram_intake.add(intake)
+            receipt = await ProjectEventService(self._runtime).submit_event(
+                uow,
+                Principal(user_id=update.user_id, ingress_source="telegram"),
+                project_id=topic.project_id,
+                session_id=session_id,
+                idempotency_key=f"lead:message:{update.chat_id}:{update.message_id}",
+                text=text,
+                mode=frozen_mode,
+                work_limits=work_limits,
+                intake=intake,
+                reply_to_message_id=update.reply_to_message_id,
+                origin=RequestOrigin(channel="telegram", display_name="Telegram"),
+            )
+            await uow.inbox.mark_processed(
+                inbox_id,
+                entity_type="telegram_intake",
+                entity_id=intake_id,
+            )
+            return IngressResult(
+                status=IngressStatus.HANDLED
+                if receipt.status == "accepted"
+                else IngressStatus.DUPLICATE
+                if receipt.status == "duplicate"
+                else IngressStatus.REJECTED,
+                intake_id=intake_id,
+                reason=receipt.reason,
             )
 
     async def _accept_live_lead_message(
@@ -1088,6 +1249,14 @@ class TelegramIngressService:
                 and update.message_id <= mapping.conversation_mode_message_id
             ):
                 notice = "Это старое переключение; текущий собеседник не изменён."
+            elif self._runtime.settings.project_lead.enabled:
+                mapping.conversation_mode = mode
+                mapping.conversation_mode_message_id = update.message_id
+                notice = (
+                    "Режим обсуждения: отвечаю на вопросы без запуска работы."
+                    if mode == "think"
+                    else "Режим руководителя: обсудим запрос и подготовим план для одобрения."
+                )
             else:
                 try:
                     route = await select_conversation_route(

@@ -71,13 +71,14 @@ def test_cli_conversation_does_not_require_architecture(
                 assert mapping.conversation_mode_message_id == 1101
                 item = await session.scalar(
                     select(TransactionalOutbox).where(
-                        TransactionalOutbox.destination == "discussion_classify"
+                        TransactionalOutbox.destination == "project_lead"
                     )
                 )
-                assert "conversation_route_error" not in item.payload
-                assert item.payload["conversation_route"]["assignment"]["profile_id"] == profile_id
+                assert item.payload["mode"] == mode
+                assert item.payload["wakeup_kind"] == "owner_message"
+                assert "conversation_route" not in item.payload
                 assert await session.scalar(select(func.count()).select_from(Task)) == 0
-                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
+                assert (await session.scalar(select(ManagedGoal))).lifecycle == "draft"
         finally:
             await engine.dispose()
 
@@ -95,13 +96,12 @@ def test_default_lead_discussion_has_a_route_without_an_explicit_switch(postgres
             async with factory() as session:
                 item = await session.scalar(
                     select(TransactionalOutbox).where(
-                        TransactionalOutbox.destination == "discussion_classify"
+                        TransactionalOutbox.destination == "project_lead"
                     )
                 )
-                assert "conversation_route_error" not in item.payload
-                route = item.payload["conversation_route"]
-                assert route["conversation_mode"] == "lead"
-                assert route["assignment"]["profile_id"] == "lead-only"
+                assert item.payload["mode"] == "lead"
+                assert item.payload["wakeup_kind"] == "owner_message"
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
         finally:
             await engine.dispose()
 

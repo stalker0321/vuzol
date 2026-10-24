@@ -514,8 +514,6 @@ class InterpretationPipeline:
     async def _process_chat(self, token: OutboxLeaseToken) -> None:
         """One Jev intake, then either a hidden RO answer or ordinary approved work."""
 
-        if not isinstance(self._interpreter, JevDecisionsInterpreter):
-            raise InterpreterUnavailable("chat_requires_jev_intake")
         try:
             # Leave headroom for classification/persistence inside the existing
             # outbox lease; a large set cannot occupy it indefinitely.
@@ -529,6 +527,37 @@ class InterpretationPipeline:
             raise DocumentError("document_parser_limit") from None
         if prepared is None:
             return
+        if self._runtime.settings.project_lead.enabled:
+            from vuzol.leadership.events import ProjectEventService
+            from vuzol.leadership.provenance import RequestOrigin
+            from vuzol.workflows.application import Principal
+
+            async with UnitOfWork(self._factory) as uow:
+                assert uow.session is not None
+                item = await uow.session.get(TransactionalOutbox, token.item_id)
+                assert item is not None
+                intake = await uow.session.get(TelegramIntakeMessage, item.linked_entity_id)
+                if intake is None or intake.affinity_kind != "discussion" or not prepared["turn"]:
+                    raise PermanentPipelineError("chat_intake_invalid")
+                await ProjectEventService(self._runtime).submit_event(
+                    uow,
+                    Principal(user_id=intake.user_id, ingress_source="telegram"),
+                    project_id=_required_string(item.payload, "project_id"),
+                    session_id=_required_uuid(item.payload, "discussion_session_id"),
+                    idempotency_key=f"lead:message:{intake.chat_id}:{intake.message_id}",
+                    text=str(prepared["turn"]),
+                    intake=intake,
+                    mode="think"
+                    if (item.payload.get("conversation_route") or {}).get("conversation_mode")
+                    == "think"
+                    else "lead",
+                    reply_to_message_id=item.payload.get("reply_to_message_id"),
+                    origin=RequestOrigin(channel="telegram", display_name="Telegram"),
+                )
+                await complete_outbox_item(uow.session, token)
+            return
+        if not isinstance(self._interpreter, JevDecisionsInterpreter):
+            raise InterpreterUnavailable("chat_requires_jev_intake")
         async with self._factory() as session:
             item = await session.get(TransactionalOutbox, token.item_id)
             assert item is not None
@@ -893,22 +922,6 @@ class InterpretationPipeline:
                         text=policy.draft.clarification_question
                         or "Уточни запрос; ничего не запущено.",
                     )
-                elif self._runtime.settings.project_lead.enabled:
-                    from vuzol.leadership.chat import admit_chat_work
-
-                    await admit_chat_work(
-                        uow,
-                        self._factory,
-                        self._runtime,
-                        intake=current_intake,
-                        project_id=project_id,
-                        session_id=session_id,
-                        source_turn_id=user_turn_id,
-                        raw=raw,
-                        draft=policy.draft,
-                        work_context=work_context,
-                    )
-                    current_intake.affinity_kind = "managed_goal"
                 else:
                     created = await uow.tasks.create(
                         user_id=intake.user_id,

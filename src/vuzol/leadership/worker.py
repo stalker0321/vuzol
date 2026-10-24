@@ -152,7 +152,10 @@ class ProjectLeadWorker:
                 await self._planner_lost(claim)
                 async with self._factory.begin() as session:
                     turn = await _turn(session, goal_id, wakeup_id)
-                    if turn.status == "lost" and turn.lease_epoch == claim.lease_epoch:
+                    goal = await session.get(ManagedGoal, goal_id)
+                    if await self._defer_terminal_owner_input(session, goal, turn, token):
+                        return
+                    elif turn.status == "lost" and turn.lease_epoch == claim.lease_epoch:
                         await self._complete(session, token)
                     else:
                         await self._defer_in_session(session, token, "lead_lease_lost")
@@ -222,11 +225,64 @@ class ProjectLeadWorker:
                 await self._complete(uow.session, token)
                 return None
             goal_id = _goal_id(item)
+            from vuzol.leadership.fence import lock_project_admission
+
+            project_id = await uow.session.scalar(
+                select(ManagedGoal.project_id).where(ManagedGoal.id == goal_id)
+            )
+            if project_id is not None:
+                await lock_project_admission(uow.session, project_id)
             goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
             if goal is None:
                 await self._complete(uow.session, token)
                 return None
             owner_event = item.payload.get("wakeup_kind") == "owner_message"
+            if owner_event and goal.lifecycle in _TERMINAL_GOAL:
+                previous_turn = await uow.session.scalar(
+                    select(LeadershipTurn).where(
+                        LeadershipTurn.goal_id == goal.id,
+                        LeadershipTurn.wakeup_id == item.id,
+                    )
+                )
+                # A saved response already consumed the message (including crash-before-ack).
+                # Unprocessed owner input belongs to a new/live conversation; task results do not.
+                if previous_turn is None or previous_turn.decision is None:
+                    from vuzol.leadership.events import live_or_draft
+                    from vuzol.storage.models import ProjectDiscussionSession
+
+                    discussion = await uow.session.get(
+                        ProjectDiscussionSession, uuid.UUID(item.payload["session_id"])
+                    )
+                    assert discussion is not None
+                    old_id = goal.id
+                    goal = await live_or_draft(
+                        uow.session,
+                        project_id=goal.project_id,
+                        owner_user_id=goal.owner_user_id,
+                        discussion=discussion,
+                        text=item.payload["text"],
+                        scope=item.payload.get("request_scope", item.payload["text"]),
+                        criteria=item.payload.get("request_criteria", []),
+                        constraints={
+                            "work_limits": item.payload.get("request_work_limits", {}),
+                            "request_origin": item.payload.get("request_origin"),
+                            "project_default_branch": goal.constraints.get(
+                                "project_default_branch", "main"
+                            ),
+                        },
+                        branch_prefix=self._branch_prefix,
+                    )
+                    item.linked_entity_id = goal.id
+                    item.payload = {
+                        **item.payload,
+                        "previous_goal_id": str(old_id),
+                        "goal_id": str(goal.id),
+                        "goal_version": goal.version,
+                        "scope_revision": goal.scope_revision,
+                        "delegation_id": str(goal.delegation_id),
+                    }
+                    if previous_turn is not None:
+                        previous_turn.status = "superseded"
             planning_event = item.payload.get("wakeup_kind") in {*PLAN_EVENTS, "planning_requested"}
             if not owner_event and item.payload.get("task_id"):
                 from vuzol.storage.models import Step, Task
@@ -409,7 +465,9 @@ class ProjectLeadWorker:
                 await self._complete(uow.session, token)
                 return None
             if goal.lifecycle == "waiting" and not owner_event and not planning_event:
-                goal.lifecycle = "active"
+                from vuzol.leadership.persistence import has_owner_mandate
+
+                goal.lifecycle = "active" if has_owner_mandate(goal) else "draft"
                 goal.waiting_reason = None
                 from vuzol.telegram.attention import sync_goal_attention
 
@@ -467,6 +525,29 @@ class ProjectLeadWorker:
                 else None
             )
             from vuzol.leadership.tasks import task_context
+            from vuzol.storage.models import ConversationTurn
+
+            history = []
+            if owner_event is not None:
+                source_turn = await uow.session.get(
+                    ConversationTurn, uuid.UUID(owner_event["source_turn_id"])
+                )
+                if source_turn is not None:
+                    prior_turns = list(
+                        await uow.session.scalars(
+                            select(ConversationTurn)
+                            .where(
+                                ConversationTurn.session_id == source_turn.session_id,
+                                ConversationTurn.ordinal < source_turn.ordinal,
+                            )
+                            .order_by(ConversationTurn.ordinal.desc())
+                            .limit(8)
+                        )
+                    )
+                    history = [
+                        {"role": t.role.value, "text": t.content[:2000]}
+                        for t in reversed(prior_turns)
+                    ]
 
             return LeadSnapshot(
                 goal_id=goal.id,
@@ -492,6 +573,7 @@ class ProjectLeadWorker:
                 result_context={
                     **await result_context(uow.session, goal, package),
                     "work_limits": goal.constraints.get("work_limits", {}),
+                    "conversation": history,
                     "task_control": await task_context(uow.session, goal),
                     "event": dict(item.payload) if item is not None else None,
                     "pending_amendment": goal.constraints.get("pending_amendment"),
@@ -543,9 +625,12 @@ class ProjectLeadWorker:
                 item is not None
                 and item.payload.get("wakeup_kind") == "owner_message"
                 and decision.reply.strip()
-                and not any(
-                    command.name in {"ask_owner", "request_permission"}
-                    for command in decision.commands
+                and (
+                    item.payload.get("mode") == "think"
+                    or not any(
+                        command.name in {"ask_owner", "request_permission"}
+                        for command in decision.commands
+                    )
                 )
                 and not (
                     goal.waiting_reason == "plan_approval"
@@ -734,6 +819,24 @@ class ProjectLeadWorker:
                 goal.lease_owner = None
                 goal.lease_until = None
 
+    async def _defer_terminal_owner_input(
+        self,
+        session: AsyncSession,
+        goal: ManagedGoal | None,
+        turn: LeadershipTurn,
+        token: OutboxLeaseToken,
+    ) -> bool:
+        if goal is None or goal.lifecycle not in _TERMINAL_GOAL or turn.decision is not None:
+            return False
+        item = await session.get(TransactionalOutbox, token.item_id)
+        if item is None or item.payload.get("wakeup_kind") != "owner_message":
+            return False
+        # Completion can fence either the provider or response persistence. In
+        # both cases the unanswered input must reach the next live conversation.
+        turn.status = "lost"
+        await self._defer_in_session(session, token, "lead_goal_finished")
+        return True
+
     async def _park_unconfigured(
         self,
         goal_id: uuid.UUID,
@@ -747,6 +850,8 @@ class ProjectLeadWorker:
             assert uow.session is not None
             goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
             turn = await _turn(uow.session, goal_id, wakeup_id)
+            if await self._defer_terminal_owner_input(uow.session, goal, turn, token):
+                return
             if goal is None or not await claim_current(uow.session, goal, claim, turn):
                 if (
                     goal is not None
@@ -869,7 +974,7 @@ class ProjectLeadWorker:
         goals = (
             await session.scalars(
                 select(ManagedGoal)
-                .where(ManagedGoal.lifecycle.in_(("active", "waiting", "paused")))
+                .where(ManagedGoal.lifecycle.in_(("draft", "active", "waiting", "paused")))
                 .with_for_update()
             )
         ).all()

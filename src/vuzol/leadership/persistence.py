@@ -250,6 +250,13 @@ class LeadershipInference(TimestampMixin, Base):
     )
 
 
+def has_owner_mandate(goal: ManagedGoal) -> bool:
+    """Legacy owner-enabled goals retain their grant; text drafts require plan approval."""
+    return not goal.constraints.get("mandate_required") or (
+        (goal.constraints.get("owner_mandate") or {}).get("scope_revision") == goal.scope_revision
+    )
+
+
 def current_request(goal: ManagedGoal) -> str:
     """What the goal asks for now: after an owner amendment the amended scope is the goal
     and the first wording is history (live pilot 2026-10-24: lead, reviewer and cards

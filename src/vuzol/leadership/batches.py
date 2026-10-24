@@ -15,7 +15,7 @@ from vuzol.leadership.actor import Actor
 from vuzol.leadership.commands import CommandStatus, LeadCommand
 from vuzol.leadership.evidence import evidence_token, package_has_unknown_effects
 from vuzol.leadership.limits import check_batch_limits
-from vuzol.leadership.persistence import GoalDelegation, ManagedGoal
+from vuzol.leadership.persistence import GoalDelegation, ManagedGoal, has_owner_mandate
 from vuzol.storage.models import PlanRevision, Task, WorkPackage
 from vuzol.storage.types import (
     USER_TERMINAL_TASK_STATUSES,
@@ -90,7 +90,8 @@ async def propose_plan(
         goal.current_package_id = result.package_id
     revision = await uow.session.get(PlanRevision, result.revision_id)
     assert revision is not None
-    if owner_approval_required(revision) and goal.lifecycle != "paused":
+    approval_required = not has_owner_mandate(goal) or owner_approval_required(revision)
+    if approval_required and goal.lifecycle != "paused":
         goal.lifecycle = "waiting"
         goal.waiting_reason = "plan_approval"
         goal.wakeup_condition = {"kind": "plan_approval", "revision_id": str(revision.id)}
@@ -110,7 +111,7 @@ async def propose_plan(
         "scope_revision": goal.scope_revision,
         "title": plan.title,
         "items": len(plan.items),
-        "owner_approval_required": owner_approval_required(revision),
+        "owner_approval_required": approval_required,
     }
 
 
@@ -139,6 +140,8 @@ async def execute_batch(
 ) -> dict[str, Any]:
     """Start exactly one item of the stored revision; payload cannot approve it."""
     assert uow.session is not None
+    if not has_owner_mandate(goal):
+        raise DomainError("owner_mandate_required")
     package = (
         await uow.session.get(WorkPackage, goal.current_package_id)
         if goal.current_package_id

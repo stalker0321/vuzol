@@ -27,7 +27,6 @@ from vuzol.storage.types import (
     EditSessionStatus,
     PlanRevisionCreatedBy,
     PlanRevisionState,
-    WorkPackagePauseReason,
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -68,11 +67,14 @@ def _runtime(tmp_path: Path) -> RuntimeConfiguration:
 
 async def _seed(
     factory: async_sessionmaker[AsyncSession],
+    *,
+    session_id: uuid.UUID | None = None,
 ) -> tuple[RevisionResult, uuid.UUID]:
     async with UnitOfWork(factory) as uow:
-        session_id = await uow.discussions.create_session(
-            project_id="vuzol", chat_id=-100, message_thread_id=10
-        )
+        if session_id is None:
+            session_id = await uow.discussions.create_session(
+                project_id="vuzol", chat_id=-100, message_thread_id=10
+            )
         result = await WorkPackageService(uow).create_draft(
             session_id=session_id,
             project_id="vuzol",
@@ -420,11 +422,15 @@ async def test_non_mutating_detail_edit_continue_and_clear_lifecycle(
     await engine.dispose()
 
 
-async def test_replan_button_waits_for_real_instruction_and_routes_next_turn(
+async def test_replan_button_emits_lead_event_without_arming_legacy_planner(
     postgres_dsn: str, tmp_path: Path
 ) -> None:
     engine, factory = storage(postgres_dsn)
-    result, _ = await _seed(factory)
+    from tests.integration.leadership.test_managed_goal_flow import _enable, _session
+
+    session_id = await _session(factory)
+    goal_id = await _enable(factory, session_id)
+    result, _ = await _seed(factory, session_id=session_id)
     async with factory.begin() as session:
         package = await session.get(WorkPackage, result.package_id, with_for_update=True)
         revision = await session.get(PlanRevision, result.revision_id, with_for_update=True)
@@ -438,6 +444,9 @@ async def test_replan_button_waits_for_real_instruction_and_routes_next_turn(
         package.cursor_ordinal = 1
         package.version = 3
 
+    async with factory.begin() as session:
+        package = await session.get(WorkPackage, result.package_id)
+        package.managed_goal_id = goal_id
     client = FakeTelegramClient(next_message_id=901)
     delivery = TelegramDeliveryService(
         factory,
@@ -448,7 +457,20 @@ async def test_replan_button_waits_for_real_instruction_and_routes_next_turn(
         retry_min_seconds=1,
         retry_max_seconds=10,
     )
-    assert await delivery.deliver_one()
+    from vuzol.storage.models import TelegramMessageLink
+
+    for _ in range(10):
+        if not await delivery.deliver_one():
+            break
+    async with factory() as session:
+        link = await session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.work_package_id == result.package_id,
+                TelegramMessageLink.message_role == "work_package_plan",
+            )
+        )
+        assert link is not None
+        plan_message_id = link.message_id
     runtime = _runtime(tmp_path)
     overrides = ContinueDiscussionOverrides()
     controls = TelegramControlService(runtime, factory, overrides)
@@ -468,7 +490,7 @@ async def test_replan_button_waits_for_real_instruction_and_routes_next_turn(
             callback_query_id="wp-replan-real",
             callback_data=callback,
             chat_id=-100,
-            message_id=901,
+            message_id=plan_message_id,
             message_thread_id=10,
             user_id=42,
         )
@@ -505,8 +527,16 @@ async def test_replan_button_waits_for_real_instruction_and_routes_next_turn(
             .order_by(TransactionalOutbox.created_at.desc())
             .limit(1)
         )
-    assert package is not None and package.status is WorkPackageStatus.PAUSED
-    assert package.pause_reason is WorkPackagePauseReason.REPLAN_REQUIRED
+    assert package is not None and package.status is WorkPackageStatus.RUNNING
+    assert package.pause_reason is None
     assert len(revisions) == 1
-    assert classify is not None and classify.payload["control_override"] == "replan"
+    assert classify is not None and classify.payload.get("control_override") is None
+    async with factory() as session:
+        event = await session.scalar(
+            select(TransactionalOutbox).where(
+                TransactionalOutbox.destination == "project_lead",
+                TransactionalOutbox.payload["wakeup_kind"].as_string() == "planning_requested",
+            )
+        )
+        assert event is not None and event.payload["package_id"] == str(result.package_id)
     await engine.dispose()

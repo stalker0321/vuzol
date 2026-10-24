@@ -23,7 +23,6 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled, unmet_exit_criteria
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.review.domain import ExitCriterionSpec
 from vuzol.storage.models import (
@@ -49,6 +48,25 @@ from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
 ACCEPTANCE_EVIDENCE_SCHEMA = "acceptance-evidence.v1"
 ACCEPTANCE_STEP_TYPE = "acceptance"
+
+
+def unmet_exit_criteria(exit_criteria: object, satisfied: frozenset[str]) -> tuple[str, ...]:
+    """Return the criteria ids that are not backed by retained evidence.
+
+    An empty/missing criteria list is *not* success: it is reported as unmet
+    (``("__no_exit_criteria__",)``) so an empty queue cannot mark a horizon done.
+    """
+
+    if not isinstance(exit_criteria, list) or not exit_criteria:
+        return ("__no_exit_criteria__",)
+    unmet: list[str] = []
+    for entry in exit_criteria:
+        if not isinstance(entry, dict):
+            continue
+        criterion_id = entry.get("criterion_id")
+        if isinstance(criterion_id, str) and criterion_id not in satisfied:
+            unmet.append(criterion_id)
+    return tuple(unmet)
 
 
 def _canonical_json(payload: object) -> str:
@@ -552,10 +570,12 @@ async def promotion_gate(
     if package is None:
         return
     if getattr(package, "execution_contract_version", None) is not None:
-        pinned = pinned_horizon_enabled(package, fallback=False)
+        pinned = package.execution_contract_version == "horizon-v1:enabled"
     else:
         return
-    if not pinned or not is_horizon(package.goal, package.exit_criteria):
+    if not pinned or not (
+        bool(package.goal and package.goal.strip()) or bool(package.exit_criteria)
+    ):
         return
     target = envelope.get("target_branch")
     if not isinstance(target, str) or target != package.integration_target_branch:
@@ -737,10 +757,12 @@ class AcceptanceGateHandler:
             if package is None:
                 raise LookupError("acceptance package is missing")
             if getattr(package, "execution_contract_version", None) is not None:
-                pinned = pinned_horizon_enabled(package, fallback=False)
+                pinned = package.execution_contract_version == "horizon-v1:enabled"
             else:
                 return None, "legacy package: acceptance pass-through"
-            if not pinned or not is_horizon(package.goal, package.exit_criteria):
+            if not pinned or not (
+                bool(package.goal and package.goal.strip()) or bool(package.exit_criteria)
+            ):
                 return None, "non-horizon package: acceptance pass-through"
             item_count = await session.scalar(
                 select(func.count())

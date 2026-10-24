@@ -157,7 +157,7 @@ class ExecutionEnvelopeFactory:
                 if not isinstance(slot, str) or assignment.profile_id != profile.id:
                     raise ValueError("CLI model assignment does not match its claim")
                 profile = assignment_profile(assignment, self._registries, slot)
-            if step.step_type in {"plan", "review"} or "project_model_assignment" in payload:
+            if step.step_type in {"review"} or "project_model_assignment" in payload:
                 # Reviews use the registered profile, including provider-native
                 # model IDs. Claim overrides must agree, not select another model.
                 if (
@@ -173,7 +173,7 @@ class ExecutionEnvelopeFactory:
                 profile.provider,
                 profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
-                require_read_only=step.step_type in {"execute_agent", "plan", "review"},
+                require_read_only=step.step_type in {"execute_agent", "review"},
             )
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)
@@ -196,7 +196,7 @@ class ExecutionEnvelopeFactory:
                     target=Path("/workspace"),
                     mode=(
                         MountMode.READ_ONLY
-                        if step.step_type in {"execute_agent", "plan", "review"}
+                        if step.step_type in {"execute_agent", "review"}
                         else MountMode.READ_WRITE
                     ),
                     purpose="task-worktree",

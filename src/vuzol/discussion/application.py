@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from enum import StrEnum
 
 from pydantic import Field
@@ -16,15 +15,12 @@ from vuzol.discussion.domain import (
     PlanDraft,
     canonical_plan_body,
 )
-from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled
 from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.interpretation.discussion import (
     DiscussionInterpretation,
     DiscussionInterpretRequest,
-    PlanRequestIntent,
     enforce_discussion_policy,
-    plan_draft_from_interpretation,
 )
 from vuzol.interpretation.domain import FrozenModel
 from vuzol.leadership.fence import legacy_package_is_fenced
@@ -32,7 +28,6 @@ from vuzol.storage.models import TelegramControlAction
 from vuzol.storage.types import (
     ControlActionStatus,
     InteractionMode,
-    PlanRevisionCreatedBy,
     WorkPackagePauseReason,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -62,10 +57,6 @@ class AuthoritativeControlCommand(FrozenModel):
     item_ordinal: int | None = Field(default=None, ge=1, le=20)
     source: PackageControlSource
     external_idempotency_key: str = Field(min_length=1, max_length=255)
-    # D2 SET_GOAL payload (control layer, not an external channel): only the
-    # goal text travels here; criteria/budget ride the draft/create path.
-    goal: str | None = Field(default=None, max_length=2000)
-    exit_criteria: list[dict[str, object]] | None = None
 
 
 class PackageControlResult(FrozenModel):
@@ -84,41 +75,9 @@ class DiscussionPlanApplicationService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         enabled: bool,
-        horizon_enabled: bool = False,
     ) -> None:
         self._factory = session_factory
         self._enabled = enabled
-        self._horizon_enabled = horizon_enabled
-
-    async def apply_plan_request(
-        self,
-        *,
-        session_id: uuid.UUID,
-        request: DiscussionInterpretRequest,
-        interpretation: DiscussionInterpretation,
-        planner_profile: str | None = None,
-    ) -> RevisionResult:
-        self._require_enabled()
-        result = enforce_discussion_policy(request, interpretation)
-        if (
-            result.interaction_mode is not InteractionMode.PLAN_REQUEST
-            or result.plan_request is None
-            or not result.should_mutate_plan
-        ):
-            raise DomainError("plan_mutation_not_authorized")
-        plan = plan_draft_from_interpretation(result)
-        intent = result.plan_request.intent
-        async with UnitOfWork(self._factory) as uow:
-            return await apply_plan_request_in_uow(
-                uow,
-                session_id=session_id,
-                request=request,
-                result=result,
-                planner_profile=planner_profile,
-                plan=plan,
-                intent=intent,
-                horizon_enabled=self._horizon_enabled,
-            )
 
     async def apply_item_edit(
         self,
@@ -163,7 +122,6 @@ class DiscussionPlanApplicationService:
                 expected_session_generation=context.session_generation,
                 replacement=replacement,
                 user_id=request.user_id,
-                horizon_enabled=self._horizon_enabled,
             )
             await enqueue_plan_projection(uow, revision_result)
             return revision_result
@@ -171,85 +129,6 @@ class DiscussionPlanApplicationService:
     def _require_enabled(self) -> None:
         if not self._enabled:
             raise DomainError("project_discussion_disabled")
-
-
-async def apply_plan_request_in_uow(
-    uow: UnitOfWork,
-    *,
-    session_id: uuid.UUID,
-    request: DiscussionInterpretRequest,
-    result: DiscussionInterpretation,
-    planner_profile: str | None = None,
-    plan: PlanDraft | None = None,
-    intent: PlanRequestIntent | None = None,
-    horizon_enabled: bool = False,
-    goal: str | None = None,
-    exit_criteria: list[dict[str, object]] | None = None,
-    lifetime_budget: dict[str, object] | None = None,
-    deadline: datetime | None = None,
-    owner: str | None = None,
-) -> RevisionResult:
-    """Materialize an already policy-fenced plan in the caller's transaction."""
-
-    if result.plan_request is None or not result.should_mutate_plan:
-        raise DomainError("plan_mutation_not_authorized")
-    effective_plan = plan or plan_draft_from_interpretation(result)
-    effective_intent = intent or result.plan_request.intent
-    service = WorkPackageService(uow)
-    if effective_intent is PlanRequestIntent.CREATE_DRAFT:
-        revision_result = await service.create_draft(
-            session_id=session_id,
-            project_id=request.project_id,
-            plan=effective_plan,
-            created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
-            actor_type="planner_model",
-            planner_profile=planner_profile,
-            prompt_version=result.prompt_version,
-            # D2 goal path: the interpreter may supply goal/criteria/budget;
-            # otherwise the package stays non-horizon until SET_GOAL.
-            goal=goal,
-            exit_criteria=exit_criteria,
-            lifetime_budget=lifetime_budget,
-            deadline=deadline,
-            owner=owner,
-        )
-        await enqueue_plan_projection(uow, revision_result)
-        return revision_result
-    if effective_intent is PlanRequestIntent.EDIT_ITEM:
-        raise DomainError("edit_session_required")
-    snapshot = request.plan_snapshot
-    if snapshot is None:
-        raise DomainError("stale_revision")
-    if (
-        result.plan_request.base_revision_id != snapshot.revision_id
-        or result.plan_request.base_revision_hash != snapshot.revision_hash
-    ):
-        raise DomainError("stale_revision")
-    package = await uow.work_packages.get_package(snapshot.package_id, for_update=True)
-    if package.session_id != session_id or package.project_id != request.project_id:
-        raise DomainError("package_context_mismatch")
-    try:
-        revision = await uow.work_packages.get_fenced_revision(
-            package_id=snapshot.package_id,
-            revision_number=snapshot.revision_number,
-            h8=snapshot.revision_hash[:8],
-        )
-    except LookupError as error:
-        raise DomainError("stale_revision") from error
-    if revision.id != snapshot.revision_id or package.head_revision_id != revision.id:
-        raise DomainError("stale_revision")
-    revision_result = await service.revise_draft(
-        package_id=snapshot.package_id,
-        expected_status_generation=snapshot.status_generation,
-        plan=effective_plan,
-        created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
-        actor_type="planner_model",
-        planner_profile=planner_profile,
-        prompt_version=result.prompt_version,
-        horizon_enabled=horizon_enabled,
-    )
-    await enqueue_plan_projection(uow, revision_result)
-    return revision_result
 
 
 async def enqueue_plan_projection(uow: UnitOfWork, result: RevisionResult) -> None:
@@ -280,12 +159,10 @@ class PackageControlIngress:
         *,
         enabled: bool,
         authorized_user_ids: frozenset[int],
-        horizon_enabled: bool = False,
     ) -> None:
         self._factory = session_factory
         self._enabled = enabled
         self._authorized_user_ids = authorized_user_ids
-        self._horizon_enabled = horizon_enabled
 
     async def apply(self, command: AuthoritativeControlCommand) -> PackageControlResult:
         if not self._enabled:
@@ -365,7 +242,6 @@ class PackageControlIngress:
                         h8=command.h8,
                         expected_status_generation=approved_generation,
                         user_id=command.user_id,
-                        horizon_enabled=self._horizon_enabled,
                     )
                     generation = sequence.status_generation
                 code = PackageControlResultCode.APPLIED
@@ -387,7 +263,6 @@ class PackageControlIngress:
                     h8=command.h8,
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
-                    horizon_enabled=self._horizon_enabled,
                 )
                 revision_id = None
                 generation = sequence.status_generation
@@ -421,26 +296,7 @@ class PackageControlIngress:
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
                 )
-                await WorkPackageSequencer(uow).materialize_running(
-                    package_id=command.package_id, horizon_enabled=self._horizon_enabled
-                )
-                code = PackageControlResultCode.APPLIED
-                revision_id = None
-            elif command.action is PackageControlAction.APPROVE_ITEM:
-                if command.item_ordinal is None:
-                    raise DomainError("ordinal_missing")
-                generation = await service.approve_waiting_item(
-                    package_id=command.package_id,
-                    revision_number=command.plan_revision_number,
-                    h8=command.h8,
-                    expected_status_generation=command.expected_status_generation,
-                    ordinal=command.item_ordinal,
-                    user_id=command.user_id,
-                    horizon_enabled=self._horizon_enabled,
-                )
-                await WorkPackageSequencer(uow).materialize_running(
-                    package_id=command.package_id, horizon_enabled=self._horizon_enabled
-                )
+                await WorkPackageSequencer(uow).materialize_running(package_id=command.package_id)
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.STOP_PACKAGE:
@@ -464,103 +320,31 @@ class PackageControlIngress:
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
             elif command.action is PackageControlAction.RESTART_PACKAGE:
-                resume_package = await uow.work_packages.get_package(command.package_id)
-                # D0 pinned semantics: restart is a transition of the active
-                # package, not a re-admission — read the pinned contract when
-                # present; only pre-D0 rows (NULL) use the live flag.
-                if getattr(resume_package, "execution_contract_version", None) is not None:
-                    _resume_flag = pinned_horizon_enabled(
-                        resume_package, fallback=bool(self._horizon_enabled)
-                    )
-                else:
-                    _resume_flag = bool(self._horizon_enabled)
-                horizon_resume = _resume_flag and is_horizon(
-                    resume_package.goal, resume_package.exit_criteria
-                )
                 restart = await service.restart_plan(
                     package_id=command.package_id,
                     revision_number=command.plan_revision_number,
                     h8=command.h8,
                     expected_status_generation=command.expected_status_generation,
                     user_id=command.user_id,
-                    horizon_enabled=horizon_resume,
                 )
                 restarted_revision = await uow.work_packages.get_revision(restart.revision_id)
-                if horizon_resume:
-                    # Continued horizon is already APPROVED on the same
-                    # revision: resume directly without re-approve.
-                    approved_generation = restart.status_generation
-                else:
-                    approved_generation = await service.approve(
-                        package_id=command.package_id,
-                        revision_number=restarted_revision.revision_number,
-                        h8=restarted_revision.content_hash[:8],
-                        expected_status_generation=restart.status_generation,
-                        user_id=command.user_id,
-                    )
+                approved_generation = await service.approve(
+                    package_id=command.package_id,
+                    revision_number=restarted_revision.revision_number,
+                    h8=restarted_revision.content_hash[:8],
+                    expected_status_generation=restart.status_generation,
+                    user_id=command.user_id,
+                )
                 sequence = await WorkPackageSequencer(uow).start(
                     package_id=command.package_id,
                     revision_number=restarted_revision.revision_number,
                     h8=restarted_revision.content_hash[:8],
                     expected_status_generation=approved_generation,
                     user_id=command.user_id,
-                    horizon_enabled=self._horizon_enabled,
                 )
                 generation = sequence.status_generation
                 revision_id = restarted_revision.id
                 code = PackageControlResultCode.APPLIED
-            elif command.action is PackageControlAction.ACCEPT_PACKAGE:
-                # D2 ACCEPT UI: production caller for record_acceptance. The
-                # latest evidence for the current head is resolved here; a
-                # missing evidence row fails closed (no silent accept).
-                from vuzol.workflows.acceptance import find_evidence
-
-                accept_package = await uow.work_packages.get_package(command.package_id)
-                accept_evidence = await find_evidence(
-                    uow.session,
-                    package_id=command.package_id,
-                    integration_base_head=None,
-                    result_commit=accept_package.integration_head_commit,
-                )
-                if accept_evidence is None or accept_evidence.artifact_id is None:
-                    raise DomainError("acceptance_evidence_missing")
-                generation = await service.record_acceptance(
-                    package_id=command.package_id,
-                    revision_number=command.plan_revision_number,
-                    h8=command.h8,
-                    expected_status_generation=command.expected_status_generation,
-                    accepted=True,
-                    artifact_id=accept_evidence.artifact_id,
-                    user_id=command.user_id,
-                    horizon_enabled=self._horizon_enabled,
-                )
-                code = PackageControlResultCode.APPLIED
-                revision_id = None
-            elif command.action is PackageControlAction.REJECT_PACKAGE:
-                generation = await service.record_acceptance(
-                    package_id=command.package_id,
-                    revision_number=command.plan_revision_number,
-                    h8=command.h8,
-                    expected_status_generation=command.expected_status_generation,
-                    accepted=False,
-                    artifact_id=None,
-                    user_id=command.user_id,
-                    horizon_enabled=self._horizon_enabled,
-                )
-                code = PackageControlResultCode.APPLIED
-                revision_id = None
-            elif command.action is PackageControlAction.SET_GOAL:
-                generation = await service.set_package_goal(
-                    package_id=command.package_id,
-                    revision_number=command.plan_revision_number,
-                    h8=command.h8,
-                    expected_status_generation=command.expected_status_generation,
-                    goal=command.goal,
-                    exit_criteria=command.exit_criteria,
-                    user_id=command.user_id,
-                )
-                code = PackageControlResultCode.APPLIED
-                revision_id = None
             elif command.action is PackageControlAction.REQUEST_REPLAN:
                 generation = await service.request_replan(
                     package_id=command.package_id,

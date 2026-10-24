@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vuzol.execution.domain import GitInspection
-from vuzol.providers.planner_handoff import PLANNER_CONTEXT_SOURCE, load_planner_context_for_run
 from vuzol.research.retrieval import (
     ApprovedHttpRetrieval,
     RetrievalBounds,
@@ -20,9 +19,8 @@ from vuzol.research.retrieval import (
 from vuzol.research.source_backed import assemble_source_report
 from vuzol.review.domain import ReviewVerdictKind
 from vuzol.review.handler import ResultReviewHandler
-from vuzol.storage.models import Step
 from vuzol.storage.records import LeaseToken, StepRecord
-from vuzol.storage.types import QueueClass, RiskLevel, StepStatus, WorktreeDeliveryState
+from vuzol.storage.types import RiskLevel, StepStatus, WorktreeDeliveryState
 from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.result_approval import verified_envelope
@@ -189,8 +187,8 @@ class _StubTransport:
 
 
 @pytest.mark.anyio
-async def test_http_adapter_to_report_to_planner_context() -> None:
-    """HTTP adapter → source report → planner context, hash-chained."""
+async def test_http_adapter_to_source_report() -> None:
+    """HTTP adapter → source report, hash-chained."""
 
     body = b"Postgres 16 supports logical replication. " + b"x" * 160
     adapter = ApprovedHttpRetrieval(
@@ -228,28 +226,6 @@ async def test_http_adapter_to_report_to_planner_context() -> None:
     )
     assert anchor == "2026-09-30T10:00:00Z"
     assert b"logical replication" in report_bytes
-
-    step = Step(
-        id=uuid.uuid4(),
-        run_id=uuid.uuid4(),
-        ordinal=1,
-        dependency_metadata={},
-        step_type="plan",
-        queue_class=QueueClass.LIGHT,
-        status=StepStatus.COMPLETED,
-        required_capabilities=[],
-        payload={},
-        result={
-            "text": "Plan: use Postgres 16 logical replication. Then validate.",
-            "finish_reason": "stop",
-            "handoff": {"status": "ready"},
-        },
-    )
-    items = load_planner_context_for_run(step)
-    assert len(items) == 1
-    assert items[0].source == PLANNER_CONTEXT_SOURCE
-    assert "logical replication" in items[0].content
-    assert items[0].content_hash == hashlib.sha256(items[0].content.encode()).hexdigest()
 
 
 def test_ast_no_call_diagnostic_with_pinned_allowlist() -> None:

@@ -1,21 +1,13 @@
-"""Historical DAG fixtures, independent of the production fixed factory (PR7)."""
+"""Frozen historical steps used to exercise upgrades without a legacy compiler."""
 
+import json
 import uuid
+from pathlib import Path
 
-from vuzol.interpretation.domain import TaskDraft, TaskType
-from vuzol.interpretation.planning import PlanningTier, tier_needs_planning
-from vuzol.storage.types import StepStatus
-from vuzol.workflows.definitions import WORKFLOW_REGISTRY
-from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow, WorkflowDefinitionError
+from pydantic import TypeAdapter
 
-TASK_WORKFLOWS = {
-    TaskType.CODING: "coding.v4",
-    TaskType.ARCHITECTURE: "architecture.v1",
-    TaskType.RESEARCH: "research.v1",
-    TaskType.INFRASTRUCTURE: "infrastructure.v1",
-    TaskType.FILE_PROCESSING: "simple_model.v1",
-    TaskType.GENERAL: "simple_model.v1",
-}
+from vuzol.interpretation.domain import TaskDraft
+from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow
 
 
 def stored_workflow(
@@ -23,72 +15,26 @@ def stored_workflow(
     *,
     interpretation_id: uuid.UUID,
     configured_workflow: str | None = None,
-    planning_tier: PlanningTier | None = None,
 ) -> MaterializedWorkflow:
-    stable_id = configured_workflow or TASK_WORKFLOWS[draft.task_type]
-    definition = WORKFLOW_REGISTRY.get(stable_id)
-    if definition is None or draft.task_type.value not in definition.task_types:
-        raise WorkflowDefinitionError(f"incompatible workflow: {stable_id}")
-
-    # J4: the persisted, code-owned tier is authoritative when supplied; the
-    # in-memory boolean stays the fallback for callers without a tier.
-    needs_planning = (
-        tier_needs_planning(planning_tier)
-        if planning_tier is not None
-        else bool(draft.needs_planning)
+    name = (
+        configured_workflow
+        or {
+            "coding": "coding.v4",
+            "architecture": "architecture.v1",
+            "research": "research.v1",
+            "infrastructure": "infrastructure.v1",
+            "file_processing": "simple_model.v1",
+            "general": "simple_model.v1",
+        }[draft.task_type.value]
     )
-    flags = {
-        "needs_planning": needs_planning,
-        # Coding results always receive a cheap mechanical review. The review
-        # step re-evaluates risk from the measured diff and only invokes an
-        # independent model when the runtime facts require it.
-        "needs_review": draft.task_type is TaskType.CODING,
-    }
-    included = [
-        step for step in definition.steps if step.optional_flag is None or flags[step.optional_flag]
-    ]
-    ordinals = {step.key: index for index, step in enumerate(included)}
-    original = {step.key: step for step in definition.steps}
-
-    def resolved_predecessors(key: str) -> tuple[int, ...]:
-        resolved: set[int] = set()
-        pending = list(original[key].predecessors)
-        while pending:
-            predecessor = pending.pop()
-            if predecessor in ordinals:
-                resolved.add(ordinals[predecessor])
-            else:
-                pending.extend(original[predecessor].predecessors)
-        return tuple(sorted(resolved))
-
-    def payload_for(step_key: str, step_type: str) -> dict[str, str]:
-        if step_key == "interpret":
-            return {"interpretation_id": str(interpretation_id)}
-        if step_type == "approval" or step_key == "approve_result":
-            return {"requested_action": "apply_result"}
-        return {}
-
-    steps = tuple(
-        MaterializedStep(
-            ordinal=index,
-            key=step.key,
-            step_type=step.step_type,
-            predecessor_ordinals=resolved_predecessors(step.key),
-            queue_class=step.queue_class,
-            capabilities=step.capabilities,
-            retry_class=step.retry_class,
-            idempotency_class=step.idempotency_class,
-            timeout_seconds=step.timeout_seconds,
-            max_attempts=step.max_attempts,
-            priority=step.priority,
-            status=StepStatus.COMPLETED if step.key == "interpret" else StepStatus.PENDING,
-            payload=payload_for(step.key, step.step_type),
-        )
-        for index, step in enumerate(included)
-    )
+    records = json.loads(Path(__file__).with_name("stored_steps.json").read_text())[name]
+    for row in records:
+        if row["key"] == "interpret":
+            row["payload"] = {"interpretation_id": str(interpretation_id)}
+    workflow_type, version = name.rsplit(".v", 1)
     return MaterializedWorkflow(
-        workflow_type=definition.workflow_type,
-        version=definition.version,
-        interpretation_id=interpretation_id,
-        steps=steps,
+        workflow_type,
+        version,
+        interpretation_id,
+        TypeAdapter(tuple[MaterializedStep, ...]).validate_python(records),
     )

@@ -33,6 +33,7 @@ from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.dispatch import WorkflowDispatcher
 from vuzol.workflows.recovery import recover_expired_steps
+from vuzol.workflows.upgrade import require_workflow_upgrade
 from vuzol.workflows.worker import BASE_INTERNAL_HANDLERS, RoutedWorkflowWorker, WorkflowWorker
 
 
@@ -90,6 +91,7 @@ async def run() -> None:
     try:
         # S-2.1: fail closed before profile sync, recovery, ready, or claim loops.
         await require_migration_head(engine)
+        await require_workflow_upgrade(engine)
         factory = create_session_factory(engine)
         async with factory.begin() as session:
             await synchronize_profiles(
@@ -111,7 +113,6 @@ async def run() -> None:
         model_roles = frozenset(
             {
                 ProviderRole.EXECUTOR,
-                ProviderRole.PLANNER,
                 ProviderRole.SUMMARIZER,
                 ProviderRole.REVIEWER,
                 ProviderRole.LEAD,
@@ -209,8 +210,6 @@ async def run() -> None:
                 redaction_patterns=settings.redaction_patterns,
             )
             safe_handlers = provider_handlers(provider_handler)
-            if settings.execution.enabled:
-                safe_handlers.pop("plan", None)
             routed_worker = RoutedWorkflowWorker(
                 settings,
                 factory,

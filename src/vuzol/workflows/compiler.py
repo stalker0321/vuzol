@@ -5,10 +5,32 @@ import uuid
 from vuzol.config import Capability
 from vuzol.interpretation.domain import TaskDraft, TaskOperation, TaskType
 from vuzol.storage.types import IdempotencyClass, QueueClass, RetryClass, StepStatus
-from vuzol.workflows.definitions import _step
-from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow
+from vuzol.workflows.domain import MaterializedStep, MaterializedWorkflow, StepDefinition
 
 EXECUTION_CONTRACT_VERSION = "execution-contract.v2"
+
+
+def _step(
+    key: str,
+    *,
+    queue: QueueClass = QueueClass.LIGHT,
+    capabilities: frozenset[Capability] = frozenset(),
+    retry: RetryClass = RetryClass.NEVER,
+    idempotency: IdempotencyClass = IdempotencyClass.READ_ONLY,
+    timeout: int = 600,
+    attempts: int = 1,
+    step_type: str | None = None,
+) -> StepDefinition:
+    return StepDefinition(
+        key=key,
+        step_type=step_type or key,
+        queue_class=queue,
+        capabilities=capabilities,
+        retry_class=retry,
+        idempotency_class=idempotency,
+        timeout_seconds=timeout,
+        max_attempts=attempts,
+    )
 
 
 def compile_workflow(draft: TaskDraft, *, interpretation_id: uuid.UUID) -> MaterializedWorkflow:

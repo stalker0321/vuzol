@@ -116,7 +116,7 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
     if result is not None and result.reason == "continue_discussion":
         return "Напишите следующим сообщением, что хотите обсудить.", False
     if result is not None and result.reason == "request_replan":
-        return "Напишите следующим сообщением, что изменить в оставшейся части плана.", False
+        return "Запрос на пересмотр плана передан лиду.", False
     if result is not None and result.reason == "secret_cancelled":
         return "Ссылка отменена.", False
     return None, False

@@ -574,49 +574,6 @@ def test_authentication_failure_releases_reservation_without_usage(
 
 
 @pytest.mark.postgresql
-def test_planner_empty_output_is_transient_rejection(postgres_dsn: str, tmp_path: Path) -> None:
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        _settings, registries = bundle(tmp_path, profile("api"))
-        task_id, run_id, step_id, token = await _running_step(factory, step_type="plan")
-        async with factory.begin() as session:
-            await synchronize_profiles(
-                session, registries.profiles.items(), configuration_revision="a" * 64
-            )
-        reservation_id = await _insert_reservation(
-            factory, task_id=task_id, run_id=run_id, step_id=step_id
-        )
-        payload = {"budget_reservation_id": str(reservation_id), "provider_attempt": 1}
-        await _set_step_payload(factory, step_id, payload)
-        adapter = _StaticAdapter(_static_result(text="   ", structured_output={}))
-        handler = ProviderStepHandler(
-            factory, registries, _adapters_for(registries, tmp_path, "api", adapter)
-        )
-
-        outcome = await handler.execute(
-            _request(task_id, run_id, step_id, token, step_type="plan", payload=dict(payload)),
-            CancellationContext(),
-        )
-
-        assert outcome.kind is OutcomeKind.TRANSIENT_FAILURE
-        assert outcome.category == "planner_empty_output"
-        assert outcome.result["handoff"] == {
-            "status": "rejected",
-            "reason": "planner_empty_output",
-        }
-        assert outcome.result["profile_id"] == "api"
-        async with factory() as session:
-            health_count = int(
-                await session.scalar(select(func.count()).select_from(ProfileHealthObservation))
-                or 0
-            )
-            assert health_count == 1
-        await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.postgresql
 def test_retain_active_worktree_marks_worktree_retained(postgres_dsn: str, tmp_path: Path) -> None:
     repository = _git_repository(tmp_path)
 

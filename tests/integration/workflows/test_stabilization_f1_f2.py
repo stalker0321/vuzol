@@ -177,7 +177,7 @@ def test_paused_unknown_write_can_be_cancelled_but_not_blindly_resumed(
 
 
 @pytest.mark.postgresql
-def test_legacy_failed_task_with_paused_run_refuses_without_illegal_transition(
+def test_legacy_failed_task_with_paused_run_can_cancel_without_rewriting_failure(
     postgres_dsn: str,
 ) -> None:
     async def scenario() -> None:
@@ -197,14 +197,13 @@ def test_legacy_failed_task_with_paused_run_refuses_without_illegal_transition(
         async with factory.begin() as session:
             with pytest.raises(ValueError, match="no automatic repair"):
                 await resume_task(session, task.id, actor_id="1")
-            with pytest.raises(ValueError, match="no automatic repair"):
-                await cancel_task(session, task.id, actor_id="1")
+            await cancel_task(session, task.id, actor_id="1")
         async with factory() as session:
             task_row = await session.get(Task, task.id)
             run_row = await session.get(Run, run_id)
             step_row = await session.get(Step, step.id)
             assert task_row is not None and task_row.status is TaskStatus.FAILED
-            assert run_row is not None and run_row.status is RunStatus.PAUSED
+            assert run_row is not None and run_row.status is RunStatus.CANCELLED
             assert step_row is not None and step_row.status is StepStatus.FAILED
         await engine.dispose()
 

@@ -196,6 +196,8 @@ _STEP_TYPE_LABELS = {
     "inspect": "Инспекция",
     "privileged_execute": "Привилегированное выполнение",
     "complete_or_block": "Завершение или блок",
+    "await_apply_or_complete": "Ожидание применения результата",
+    "deliver_discussion_reply": "Доставка ответа",
 }
 
 _DELIVERY_STATE_LABELS: dict[WorktreeDeliveryState, str] = {

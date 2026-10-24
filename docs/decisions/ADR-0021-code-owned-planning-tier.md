@@ -1,6 +1,11 @@
 # ADR-0021 — Code-owned planning tier wired into compiler and dispatcher
 
-Status: accepted (J4, base d4f4c25). Implements `IMPLEMENTATION_PLAN.md` §J4.
+Status: superseded by PR7–PR8 (fixed executor and lead-owned strong planning).
+The tier, per-task planner and handoff described below have been removed.
+Historical events remain readable; current invariants are in
+[ARCHITECTURE_INVARIANTS.md](../ARCHITECTURE_INVARIANTS.md).
+
+Original decision: accepted (J4, base d4f4c25). Implements `IMPLEMENTATION_PLAN.md` §J4.
 Builds on ADR-0015 (D4 semantic planning) and ADR-0019 (context assembler).
 
 ## 1. Versioned planning policy

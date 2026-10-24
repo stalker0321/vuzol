@@ -15,7 +15,6 @@ from vuzol.discussion.application import (
 )
 from vuzol.discussion.context_budget import ChatContextError
 from vuzol.discussion.domain import DomainError, PackageControlAction
-from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.discussion import ControlOverrideKind
 from vuzol.interpretation.documents import DocumentError
@@ -545,7 +544,6 @@ class TelegramControlService:
                     self._session_factory,
                     enabled=True,
                     authorized_user_ids=frozenset(self._runtime.settings.allowed_user_ids),
-                    horizon_enabled=horizon_enabled(self._runtime.settings),
                 ).apply(
                     AuthoritativeControlCommand(
                         action=action,
@@ -685,7 +683,7 @@ class TelegramControlService:
                 inbox_id, entity_type="work_package", entity_id=callback.package_id
             )
         if (
-            operation in {"continue_discussion", "request_replan"}
+            operation == "continue_discussion"
             and self._continue_discussion_overrides is not None
             and update.message_thread_id is not None
         ):
@@ -693,10 +691,6 @@ class TelegramControlService:
                 chat_id=update.chat_id,
                 thread_id=update.message_thread_id,
                 user_id=update.user_id,
-                kind=(
-                    ControlOverrideKind.REPLAN
-                    if operation == "request_replan"
-                    else ControlOverrideKind.CONTINUE_DISCUSSION
-                ),
+                kind=ControlOverrideKind.CONTINUE_DISCUSSION,
             )
         return IngressResult(status=IngressStatus.HANDLED, reason=operation)

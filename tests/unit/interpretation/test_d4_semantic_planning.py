@@ -27,12 +27,10 @@ from vuzol.interpretation.discussion import (
 )
 from vuzol.interpretation.domain import TaskDraft
 from vuzol.interpretation.explicit import explicit_task_body, is_explicit_task_command
-from vuzol.interpretation.planning import PlanningTier, select_planning_tier
 from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.provenance import coerce_legacy_plan_item, task_source_refs
 from vuzol.interpretation.service import RECOVERY_MAX_FALLBACKS, RECOVERY_MAX_REPAIRS
-from vuzol.review.policy import FileClass, level_for, resolve_review_plan
-from vuzol.storage.types import InteractionMode, RiskLevel
+from vuzol.storage.types import InteractionMode
 
 from ._test_interpretation_helpers import draft, request
 
@@ -99,27 +97,6 @@ def test_task_spec_bridge_refs_and_legacy_provenance() -> None:
     assert legacy["derived"] is False
     assert legacy["source_turn_id"] is None
     assert legacy["source_spec_revision"] is None
-
-
-def test_tiers_do_not_change_review_floor_or_capabilities() -> None:
-    base = draft()
-    light = draft()
-    strong = draft(suggested_risk=RiskLevel.HIGH)
-    assert select_planning_tier(base) is PlanningTier.DIRECT
-    assert select_planning_tier(strong) is PlanningTier.STRONG
-    assert select_planning_tier(light, dependency_count=3) is PlanningTier.LIGHT
-
-    for candidate in (base, light, strong):
-        policy = enforce_interpretation_policy(request(), candidate, known_project_ids=frozenset())
-        assert policy.draft.required_capabilities == candidate.required_capabilities
-    low = resolve_review_plan(RiskLevel.LOW, ("src/a.py",))
-    high = resolve_review_plan(RiskLevel.HIGH, ("src/a.py",))
-    assert low["level"] != high["level"]
-    # Tier is a spend hint only: review floor derives from risk/files, not tier.
-    assert resolve_review_plan(RiskLevel.LOW, ("src/a.py",)) == resolve_review_plan(
-        RiskLevel.LOW, ("src/a.py",)
-    )
-    assert level_for(RiskLevel.LOW, FileClass.CODE).value == low["level"]
 
 
 def test_recovery_contract_is_bounded_and_fail_closed() -> None:

@@ -134,64 +134,6 @@ def test_capability_preflight_advances_without_reversing_task_status(
 
 
 @pytest.mark.postgresql
-@pytest.mark.skip(
-    reason="per-task planner is temporarily disabled in stored_workflow "
-    "(docs/BACKLOG.md, 'Revisit planner architecture'); re-enable with the planner"
-)
-def test_completed_plan_enqueues_system_trace(postgres_dsn: str) -> None:
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        draft = planned_coding_draft()
-        task_id, interpretation_id = await seed_interpreted(factory, draft)
-        async with factory.begin() as session:
-            await materialize_run(
-                session,
-                task_id=task_id,
-                workflow=stored_workflow(draft, interpretation_id=interpretation_id),
-                configuration_revision="a" * 64,
-                policy_revision="b" * 64,
-                prompt_revision="trace-v1",
-                automatic_start=True,
-            )
-        async with factory.begin() as session:
-            token = await claim_step(
-                session,
-                owner="planner",
-                lease_seconds=60,
-                capabilities=frozenset(),
-                step_types=frozenset({"plan"}),
-            )
-        assert token is not None
-        async with factory.begin() as session:
-            await start_step(session, token)
-            await commit_step_outcome(
-                session,
-                token,
-                StepOutcome.succeeded(
-                    {
-                        "model": "gpt-5-nano-2025-08-07",
-                        "profile_id": "openai-planner-prod",
-                        "text": "Inspect, edit, verify.",
-                        "finish_reason": "stop",
-                    }
-                ),
-            )
-        async with factory() as session:
-            trace = await session.scalar(
-                select(TransactionalOutbox).where(
-                    TransactionalOutbox.payload["role"].as_string() == "orchestration_trace",
-                    TransactionalOutbox.payload["trace_kind"].as_string() == "planner",
-                )
-            )
-            assert trace is not None
-            assert trace.linked_entity_id == token.step.id
-            assert trace.payload["attempt"] == 1
-        await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.postgresql
 def test_pause_resume_and_cancel_are_persisted(postgres_dsn: str) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)

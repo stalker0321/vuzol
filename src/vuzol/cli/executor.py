@@ -59,6 +59,7 @@ from vuzol.storage import create_engine, create_session_factory, resolve_databas
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
 from vuzol.workflows.ports import CancellationContext, StepHandler
+from vuzol.workflows.upgrade import require_workflow_upgrade
 from vuzol.workflows.worker import RoutedWorkflowWorker, WorkflowWorker
 
 VALIDATION_IMAGE_PREFLIGHT_COMMANDS: tuple[tuple[str, ...], ...] = (
@@ -185,6 +186,7 @@ async def run() -> None:
     try:
         # S-2.1: fail closed before profile sync, proxy reconcile, ready, or claim loops.
         await require_migration_head(engine)
+        await require_workflow_upgrade(engine)
         factory = create_session_factory(engine)
         owner = f"{socket.gethostname()}:{os.getpid()}:executor"
         async with factory.begin() as session:
@@ -370,18 +372,12 @@ async def run() -> None:
             handlers=worktree_handlers,
             queue_classes=frozenset({QueueClass.HEAVY}),
         )
-        # `plan` is retained solely for already materialized legacy runs. New
-        # executor contracts use execute_code/execute_agent and never call it.
-        legacy_provider_handlers = {
-            **executor_provider_handlers(provider_handler),
-            "plan": provider_handler,
-        }
         provider_worker = RoutedWorkflowWorker(
             settings,
             factory,
             registries=runtime.registries,
             owner=f"{owner}:provider",
-            handlers=legacy_provider_handlers,
+            handlers=executor_provider_handlers(provider_handler),
             queue_classes=frozenset({QueueClass.HEAVY}),
         )
         control_worker = RoutedWorkflowWorker(
@@ -389,7 +385,7 @@ async def run() -> None:
             factory,
             registries=runtime.registries,
             owner=f"{owner}:conversation",
-            handlers=legacy_provider_handlers,
+            handlers=executor_provider_handlers(provider_handler),
             queue_classes=frozenset({QueueClass.LIGHT}),
         )
         control_worktree_worker = WorkflowWorker(

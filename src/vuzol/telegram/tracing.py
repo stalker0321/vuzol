@@ -10,7 +10,6 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.interpretation.domain import InterpretationResult
-from vuzol.providers.planner_handoff import describe_planner_handoff
 from vuzol.storage.models import (
     Interpretation,
     ProviderBudgetReservation,
@@ -98,29 +97,6 @@ def enqueue_interpreter_trace(
                 "output_tokens": result.output_tokens,
                 "duration_ms": result.duration_ms,
                 "repaired": result.repaired,
-            },
-        )
-    )
-
-
-def enqueue_planner_trace(session: AsyncSession, *, task: Task, step: Step) -> None:
-    """Persist one trace for every committed planner-attempt outcome."""
-
-    session.add(
-        TransactionalOutbox(
-            destination="telegram",
-            operation_type="send_message",
-            linked_entity_type="step",
-            linked_entity_id=step.id,
-            idempotency_key=(
-                f"telegram:orchestration:{PLANNER_TRACE_KIND}:{step.id}:"
-                f"{step.attempt_count}:{step.status.value}"
-            ),
-            payload={
-                "role": ORCHESTRATION_TRACE_ROLE,
-                "trace_kind": PLANNER_TRACE_KIND,
-                "task_id": str(task.id),
-                "attempt": step.attempt_count,
             },
         )
     )
@@ -220,7 +196,6 @@ def build_planner_trace_html(
             f"лимит {_metric(output_limit)} out"
         ),
         f"Finish reason: <code>{telegram_html(finish_reason or '—')}</code>",
-        describe_planner_handoff(step),
     ]
     lines.extend(warnings)
     lines.extend(["", "<b>Выход планировщика</b>"])

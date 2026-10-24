@@ -130,7 +130,6 @@ async def consume_pending_edit(
     replacement: PlanDraft,
     user_id: int,
     project_id: str,
-    horizon_enabled: bool = False,
 ) -> RevisionResult:
     """Apply a pending edit through the existing domain service (single consume).
 
@@ -149,5 +148,4 @@ async def consume_pending_edit(
         expected_session_generation=expected_version,
         replacement=replacement,
         user_id=user_id,
-        horizon_enabled=horizon_enabled,
     )

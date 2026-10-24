@@ -8,10 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import RuntimeConfiguration
 from vuzol.interpretation.domain import TaskAction, TaskDraft
-from vuzol.interpretation.planning import (
-    PLANNING_TIER_EVENT,
-    PlanningTier,
-)
 from vuzol.providers.readiness import configured_executor_preflight
 from vuzol.storage.leasing import (
     claim_outbox_item,
@@ -144,9 +140,8 @@ class WorkflowDispatcher:
             TaskAction.ANSWER_QUESTION,
             TaskAction.GENERAL_CONVERSATION,
         }:
-            tier = await self._planning_tier(session, task)
             # Legacy planning requests become lead input, never executor steps.
-            if draft.needs_planning or tier in {PlanningTier.LIGHT, PlanningTier.STRONG}:
+            if draft.needs_planning:
                 from vuzol.workflows.lead_events import publish_planning_request
 
                 await publish_planning_request(session, task, interpretation.id)
@@ -329,32 +324,6 @@ class WorkflowDispatcher:
                 payload={"role": "project_name_options", "revision": naming.revision},
             )
         )
-
-    async def _planning_tier(self, session: AsyncSession, task: Task) -> PlanningTier | None:
-        """Read the code-owned tier bound to the current task spec revision."""
-
-        if task.spec_revision is None:
-            return None
-        row = await session.scalar(
-            select(Event)
-            .where(
-                Event.entity_type == "task",
-                Event.entity_id == task.id,
-                Event.event_type == PLANNING_TIER_EVENT,
-                Event.payload["spec_revision"].as_string() == task.spec_revision,
-            )
-            .order_by(Event.created_at.desc(), Event.id.desc())
-            .limit(1)
-        )
-        if row is None:
-            return None
-        raw_tier = row.payload.get("tier")
-        if not isinstance(raw_tier, str):
-            return None
-        try:
-            return PlanningTier(raw_tier)
-        except ValueError:
-            return None
 
     async def _enqueue_task_projection(self, session: AsyncSession, task: Task, run: Run) -> None:
         intake = await session.scalar(

@@ -30,7 +30,6 @@ from vuzol.storage.models import (
 from vuzol.storage.types import (
     PlanRevisionCreatedBy,
     PlanRevisionState,
-    WorkPackagePauseReason,
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -142,7 +141,7 @@ def _command(
     )
 
 
-async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
+async def test_failure_pause_retry_skip_preserve_revision_evidence(
     postgres_dsn: str,
 ) -> None:
     engine, factory = storage(postgres_dsn)
@@ -187,11 +186,8 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
     assert unsafe_retry.value.code == "item_not_safely_retryable"
     skipped = await ingress.apply(_command(PackageControlAction.SKIP_ITEM, created, 4, "skip-1"))
     assert skipped.code is PackageControlResultCode.APPLIED and skipped.status_generation == 5
-    replanned = await ingress.apply(
-        _command(PackageControlAction.REQUEST_REPLAN, created, 5, "replan-1")
-    )
-    assert replanned.code is PackageControlResultCode.APPLIED
-    assert replanned.status_generation == 6 and replanned.revision_id is None
+    with pytest.raises(DomainError, match="managed_goal_required"):
+        await ingress.apply(_command(PackageControlAction.REQUEST_REPLAN, created, 5, "replan-1"))
 
     async with factory() as session:
         package = await session.get(WorkPackage, created.package_id)
@@ -222,15 +218,14 @@ async def test_failure_pause_retry_skip_and_replan_preserve_revision_evidence(
         )
         task_count = await session.scalar(select(func.count()).select_from(Task))
     assert package is not None
-    assert package.status is WorkPackageStatus.PAUSED and package.version == 6
-    assert package.pause_reason is WorkPackagePauseReason.REPLAN_REQUIRED
+    assert package.status is WorkPackageStatus.RUNNING and package.version == 5
+    assert package.pause_reason is None
     assert package.cursor_ordinal == 2
     assert [revision.state for revision in revisions] == [PlanRevisionState.APPROVED]
     assert len(revision_items) == 2
     assert {
         "work_package.paused",
         "work_package.item_skipped",
-        "work_package.replan_requested",
     }.issubset(events)
     assert task_count == 1
     await engine.dispose()

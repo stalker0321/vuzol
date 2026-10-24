@@ -10,16 +10,11 @@ from pydantic import Field, model_validator
 
 from vuzol.discussion.domain import (
     CapabilityProvisioning,
-    CapabilityRequirementDraft,
     ComponentKind,
-    EnvironmentComponentDraft,
-    EnvironmentDeltaDraft,
-    PlanDraft,
-    PlanItemDraft,
 )
 from vuzol.discussion.memory import MemoryPack
 from vuzol.interpretation.domain import FrozenModel, SuggestedComplexity
-from vuzol.storage.types import EstimatedComplexity, InteractionMode, RiskLevel
+from vuzol.storage.types import InteractionMode, RiskLevel
 
 DISCUSSION_SCHEMA_VERSION = "discussion-interpret-v1"
 DISCUSSION_PROMPT_VERSION = "project-discussion-v1"
@@ -271,7 +266,11 @@ class DiscussionInterpretation(FrozenModel):
             InteractionMode.ITEM_EDIT: self.item_edit,
             InteractionMode.TASK_REQUEST: self.task_request,
         }
-        if self.interaction_mode in payloads and payloads[self.interaction_mode] is None:
+        if (
+            self.interaction_mode in payloads
+            and self.interaction_mode is not InteractionMode.PLAN_REQUEST
+            and payloads[self.interaction_mode] is None
+        ):
             raise ValueError(f"{self.interaction_mode.value} requires its matching payload")
         unexpected = [
             mode.value
@@ -377,22 +376,15 @@ def enforce_discussion_policy(
             }
         )
 
-    # v1 is confirm-first; P8 owns canonical Task materialization. A validated plan
-    # envelope may always materialize a non-executing draft. Do not let the model's
-    # redundant boolean suppress the explicit structured request.
+    # Planning intent belongs to the lead. Only the existing explicit edit
+    # session may still refine an item through this legacy admission surface.
     result = result.model_copy(
         update={
             "should_create_task": False,
             "should_mutate_plan": (
-                (
-                    result.interaction_mode is InteractionMode.PLAN_REQUEST
-                    and result.plan_request is not None
-                )
-                or (
-                    result.should_mutate_plan
-                    and result.interaction_mode is InteractionMode.ITEM_EDIT
-                    and has_authorized_edit_session
-                )
+                result.should_mutate_plan
+                and result.interaction_mode is InteractionMode.ITEM_EDIT
+                and has_authorized_edit_session
             ),
         }
     )
@@ -602,65 +594,9 @@ def stamp_plan_provenance(
     )
 
 
-def plan_draft_from_interpretation(result: DiscussionInterpretation) -> PlanDraft:
-    """Map a validated plan envelope to the draft-only work-package contract."""
-
-    if result.interaction_mode is not InteractionMode.PLAN_REQUEST or result.plan_request is None:
-        raise ValueError("discussion interpretation does not contain a plan request")
-    request = result.plan_request
-    return PlanDraft(
-        title=request.title,
-        items=tuple(
-            PlanItemDraft(
-                local_id=item.local_id,
-                summary=item.summary,
-                goal=item.goal,
-                expected_outcome=item.expected_outcome,
-                completion_criteria=item.completion_criteria,
-                allowed_scope=item.allowed_scope,
-                out_of_scope=item.out_of_scope,
-                dependencies=item.dependencies,
-                trusted_checks=item.trusted_checks,
-                suggested_risk=item.suggested_risk,
-                needs_approval=item.needs_approval,
-                estimated_complexity=EstimatedComplexity(item.estimated_complexity.value),
-                derived=item.derived,
-                source_turn_ref=item.source_turn_ref,
-                source_spec_revision=item.source_spec_revision,
-            )
-            for item in request.items
-        ),
-        environment_delta=EnvironmentDeltaDraft(
-            upsert_components=tuple(
-                EnvironmentComponentDraft(
-                    key=component.key,
-                    label=component.label,
-                    kind=component.kind,
-                    technology=component.technology,
-                    version=component.version,
-                    run_command=component.run_command,
-                    port=component.port,
-                    healthcheck_path=component.healthcheck_path,
-                    artifact_patterns=component.artifact_patterns,
-                )
-                for component in request.environment_delta.upsert_components
-            ),
-            remove_components=request.environment_delta.remove_components,
-            required_capabilities=tuple(
-                CapabilityRequirementDraft(
-                    key=capability.key,
-                    label=capability.label,
-                    provisioning=capability.provisioning,
-                    reason=capability.reason,
-                )
-                for capability in request.environment_delta.required_capabilities
-            ),
-        ),
-    )
-
-
 class DiscussionInterpretationService:
     """Model boundary that returns advisory/draft data and never applies controls."""
+
     def __init__(self, interpreter: SemanticDiscussionInterpreter) -> None:
         self._interpreter = interpreter
 

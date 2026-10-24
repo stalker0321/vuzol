@@ -19,23 +19,21 @@ from vuzol.storage.types import QueueClass, RunStatus, StepStatus
 
 @pytest.fixture
 def route_call(monkeypatch):
-    selected = configured("openai-compatible")
-    alternate = configured("openai-compatible", profile_id="alternate")
+    selected = configured("codex")
+    alternate = configured("codex", profile_id="alternate")
     task = Task(id=uuid.uuid4(), project_id="project", task_type="coding", budget_epoch=0)
     run = Run(
         id=uuid.uuid4(),
         task_id=task.id,
         status=RunStatus.RUNNING,
         budget_mode="balanced",
-        selected_route={
-            MATRIX_KEY: {"planner_light": assignment(selected).model_dump(mode="json")}
-        },
+        selected_route={MATRIX_KEY: {"executor": assignment(selected).model_dump(mode="json")}},
         configuration_revision="config",
     )
     step = Step(
         id=uuid.uuid4(),
         run_id=run.id,
-        step_type="plan",
+        step_type="execute_code",
         queue_class=QueueClass.LIGHT,
         status=StepStatus.QUEUED,
         payload={"retry_failed_profile_id": selected.id},
@@ -62,6 +60,7 @@ def route_call(monkeypatch):
     reserve = AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4(), reserved_output_tokens=100))
     persist = AsyncMock()
     blocked = AsyncMock()
+    monkeypatch.setattr(routing, "execution_constraints_context", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(routing, "_states", AsyncMock(return_value={}))
     monkeypatch.setattr(routing, "_estimated_input_tokens", lambda *_args: 100)
     monkeypatch.setattr(routing, "remaining_output_allowance", AsyncMock(return_value=100))
@@ -100,15 +99,15 @@ async def claim(c):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("provider", ["codex", "grok", "kimi", "pi", "openai-compatible"])
-async def test_pinned_planner_route_uses_selected_launch_mode_without_fallback(
+@pytest.mark.parametrize("provider", ["codex", "grok", "kimi", "pi"])
+async def test_pinned_executor_route_uses_selected_launch_mode_without_fallback(
     route_call, provider
 ):
     c = route_call
     selected = configured(provider).model_copy(update={"fallback_profile_ids": (c.alternate.id,)})
     c.registries = bundle(selected, c.alternate)
     c.registries.projects.get.return_value.allowed_capabilities = frozenset(Capability)
-    c.run.selected_route[MATRIX_KEY]["planner_light"] = assignment(selected).model_dump(mode="json")
+    c.run.selected_route[MATRIX_KEY]["executor"] = assignment(selected).model_dump(mode="json")
     c.step.payload.update(executor_model_override="stale-model", executor_reasoning_effort="low")
     token = await claim(c)
     assert token is not None and c.step.executor_profile_id == selected.id
@@ -133,26 +132,6 @@ async def test_changed_pinned_profile_blocks_without_spending(route_call):
     assert await claim(c) is None
     assert c.blocked.call_args.kwargs["category"] == "project_pin_unresolved"
     c.reserve.assert_not_awaited()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("host_enabled", [True, False])
-async def test_auto_planner_can_use_cli_only_on_the_host_owner(route_call, host_enabled):
-    c = route_call
-    selected = configured("pi")
-    c.registries = bundle(selected)
-    c.registries.projects.get.return_value.allowed_capabilities = frozenset(Capability)
-    c.settings.execution.enabled = host_enabled
-    c.run.selected_route = {MATRIX_KEY: {}}
-    c.step.payload = {}
-    c.step.executor_profile_id = None
-    token = await claim(c)
-    if host_enabled:
-        assert token is not None and c.step.executor_profile_id == selected.id
-        assert c.persist.call_args.kwargs["request"].required_launch_mode is None
-    else:
-        assert token is None
-        c.reserve.assert_not_awaited()
 
 
 @pytest.mark.anyio

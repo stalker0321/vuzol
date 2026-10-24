@@ -30,15 +30,10 @@ from vuzol.discussion.domain import (
     semantic_plan_hash,
     semantic_revision_hash,
 )
-from vuzol.discussion.horizon import is_horizon, pinned_horizon_enabled
-from vuzol.discussion.memory_writer import OUTCOME_OPERATION, enqueue_memory_extraction
 from vuzol.leadership.persistence import ManagedGoal
 from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
-    AcceptanceEvidence,
-    AcceptanceWaiver,
     Approval,
-    Artifact,
     EditSession,
     MaterializationLink,
     PlanRevision,
@@ -173,7 +168,6 @@ class WorkPackageService:
         planner_profile: str | None = None,
         prompt_version: str | None = None,
         goal: str | None = None,
-        horizon_enabled: bool = False,
         expected_intent_revision: str | None = None,
         _allow_stopped: bool = False,
         source_repo_commit: str | None = None,
@@ -212,22 +206,6 @@ class WorkPackageService:
             )
             if active is not None:
                 raise DomainError("current_task_unfinished")
-        # D1 pinned guard (lead decision): the history guard reads the pinned
-        # contract, not the live flag. Pre-D0 rows (NULL) fall back to the
-        # passed admission flag for compatibility.
-        if getattr(package, "execution_contract_version", None) is not None:
-            horizon_effective = pinned_horizon_enabled(package, fallback=bool(horizon_enabled))
-        else:
-            horizon_effective = bool(horizon_enabled)
-        if horizon_effective and is_horizon(package.goal, package.exit_criteria):
-            if goal is not None and goal.strip() and goal.strip() != (package.goal or "").strip():
-                # A product-goal change is a user choice, not a silent replan.
-                raise DomainError("goal_change_requires_choice")
-            if package.cursor_ordinal is not None:
-                await self._require_future_only_revision(package, previous, plan)
-        elif horizon_effective and goal is not None and goal.strip():
-            package.goal = goal.strip()
-            package.goal_revision = (package.goal_revision or 0) + 1
         previous.state = PlanRevisionState.SUPERSEDED
         package.approved_revision_id = None
         package.status = WorkPackageStatus.DRAFT
@@ -261,60 +239,6 @@ class WorkPackageService:
         )
         await self._sync_attention(package)
         return result
-
-    async def set_package_goal(
-        self,
-        *,
-        package_id: uuid.UUID,
-        revision_number: int,
-        h8: str,
-        expected_status_generation: int,
-        goal: str | None,
-        exit_criteria: list[dict[str, object]] | None,
-        user_id: int,
-    ) -> int:
-        """Set the horizon goal/criteria through the control layer (D2 UI path).
-
-        Same generation CAS as every other control; criteria entries must
-        carry ``criterion_id`` (fail-closed, never silent). Setting a goal on
-        an APPROVED package returns it to DRAFT (re-approval required).
-        """
-
-        from vuzol.discussion.domain import PackageControlAction as _Action
-
-        package = await self._uow.work_packages.get_package(package_id, for_update=True)
-        require_generation(package.version, expected_status_generation)
-        control_transition_target(package.status, _Action.SET_GOAL)
-        revision = await self._fenced_revision(package_id, revision_number, h8)
-        if package.head_revision_id != revision.id:
-            raise DomainError("stale_revision")
-        if goal is not None:
-            if not goal.strip():
-                raise DomainError("goal_missing")
-            package.goal = goal.strip()
-            package.goal_revision = (package.goal_revision or 0) + 1
-        if exit_criteria is not None:
-            for entry in exit_criteria:
-                if not isinstance(entry, dict) or not isinstance(entry.get("criterion_id"), str):
-                    raise DomainError("criterion_malformed")
-            package.exit_criteria = [dict(entry) for entry in exit_criteria]
-        previous_state = package.status
-        package.status = WorkPackageStatus.DRAFT
-        package.approved_revision_id = None
-        package.version += 1
-        await self._event(
-            package.id,
-            WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
-            "user",
-            previous_state=previous_state.value,
-            new_state=WorkPackageStatus.DRAFT.value,
-            payload={
-                "goal_set_by_user_id": user_id,
-                "goal_revision": package.goal_revision,
-                "status_generation": package.version,
-            },
-        )
-        return package.version
 
     async def _expire_pending_approvals(self, package_id: uuid.UUID) -> int:
         """Expire PENDING approvals requested under a superseded plan (D2 L4).
@@ -415,7 +339,6 @@ class WorkPackageService:
         h8: str,
         expected_status_generation: int,
         user_id: int,
-        horizon_enabled: bool = False,
     ) -> RevisionResult:
         """Clone a stopped approved revision so a fresh task can be materialized safely."""
 
@@ -425,36 +348,6 @@ class WorkPackageService:
         revision = await self._fenced_revision(package_id, revision_number, h8)
         if package.head_revision_id != revision.id or package.approved_revision_id != revision.id:
             raise DomainError("approval_binding_mismatch")
-        if horizon_enabled and is_horizon(package.goal, package.exit_criteria):
-            # Approved horizon continues: no new DRAFT revision, no re-approve.
-            # The package returns to APPROVED on the same approved revision so
-            # the sequencer can resume it directly (approve is skipped).
-            package.status = WorkPackageStatus.APPROVED
-            package.pause_reason = None
-            package.last_failure_task_id = None
-            package.version += 1
-            await self._event(
-                package.id,
-                WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
-                "user",
-                previous_state=WorkPackageStatus.STOPPED.value,
-                new_state=WorkPackageStatus.APPROVED.value,
-                payload={
-                    "previous_revision_id": str(revision.id),
-                    "new_revision_id": str(revision.id),
-                    "requested_by_user_id": user_id,
-                    "restart": True,
-                    "horizon_continued": True,
-                    "status_generation": package.version,
-                },
-            )
-            return RevisionResult(
-                package.id,
-                revision.id,
-                revision.revision_number,
-                revision.content_hash,
-                package.version,
-            )
         result = await self.revise_draft(
             package_id=package_id,
             expected_status_generation=expected_status_generation,
@@ -749,282 +642,6 @@ class WorkPackageService:
         )
         return package.version
 
-    async def record_acceptance(
-        self,
-        *,
-        package_id: uuid.UUID,
-        revision_number: int,
-        h8: str,
-        expected_status_generation: int,
-        accepted: bool,
-        artifact_id: uuid.UUID | None,
-        user_id: int,
-        horizon_enabled: bool = False,
-        waiver_id: uuid.UUID | None = None,
-    ) -> int:
-        """Record the acceptance verdict for an evaluating horizon package.
-
-        Accept closes the horizon (``COMPLETED`` with retained evidence);
-        reject keeps it ``RUNNING``/``evaluating`` and records a durable
-        corrective signal for bounded follow-up work.
-        """
-
-        from vuzol.workflows.acceptance import (
-            record_corrective_signal,
-        )
-
-        package = await self._uow.work_packages.get_package(package_id, for_update=True)
-        require_generation(package.version, expected_status_generation)
-        if package.status is not WorkPackageStatus.RUNNING:
-            raise DomainError("invalid_transition")
-        # D1 pinned gate (lead decision, T045 r2 follow-up): acceptance of an
-        # active package reads the pinned contract, not the live flag.
-        # Pre-D0 rows (NULL) fall back to the passed flag for compatibility.
-        if getattr(package, "execution_contract_version", None) is not None:
-            acceptance_effective = pinned_horizon_enabled(package, fallback=bool(horizon_enabled))
-        else:
-            acceptance_effective = bool(horizon_enabled)
-        if not (acceptance_effective and is_horizon(package.goal, package.exit_criteria)):
-            raise DomainError("horizon_not_enabled")
-        if package.horizon_phase != "evaluating":
-            raise DomainError("not_evaluating")
-        revision = await self._fenced_revision(package_id, revision_number, h8)
-        if package.running_revision_id != revision.id or package.head_revision_id != revision.id:
-            raise DomainError("approval_binding_mismatch")
-        if not accepted:
-            package.version += 1
-            await self._event(
-                package.id,
-                WorkPackageEvent.PACKAGE_ACCEPTANCE_REJECTED,
-                "user",
-                previous_state=WorkPackageStatus.RUNNING.value,
-                new_state=WorkPackageStatus.RUNNING.value,
-                payload={
-                    "revision_id": str(revision.id),
-                    "rejected_by_user_id": user_id,
-                    "status_generation": package.version,
-                },
-            )
-            # D2 L6: a reject never leaves the package hanging in evaluating
-            # without a durable corrective trace.
-            assert self._uow.session is not None
-            await record_corrective_signal(
-                self._uow.session,
-                scope="acceptance_rejected",
-                reason="acceptance_rejected",
-                package_id=package.id,
-            )
-            return package.version
-        assert self._uow.session is not None
-        if waiver_id is not None:
-            waiver = await self._resolve_waiver(waiver_id, package)
-        else:
-            waiver = None
-        if waiver is None:
-            # accepted=True requires evidence (E06-probe is impossible):
-            # the artifact must exist and carry a valid evidence document
-            # for THIS package and revision.
-            if artifact_id is None:
-                raise DomainError("acceptance_evidence_missing")
-            artifact = await self._uow.session.get(Artifact, artifact_id)
-            if artifact is None:
-                raise DomainError("artifact_missing")
-            await self._check_evidence_artifact(package, revision, artifact)
-            package.acceptance_artifact_id = artifact_id
-        else:
-            package.acceptance_artifact_id = None
-        package.accepted_at = datetime.now(UTC)
-        package.horizon_phase = None
-        package.status = WorkPackageStatus.COMPLETED
-        package.cursor_ordinal = None
-        package.pause_reason = None
-        package.last_failure_task_id = None
-        package.version += 1
-        await self._release_discussion(package)
-        trigger_event_id = await self._event(
-            package.id,
-            WorkPackageEvent.PACKAGE_ACCEPTED,
-            "user",
-            previous_state=WorkPackageStatus.RUNNING.value,
-            new_state=WorkPackageStatus.COMPLETED.value,
-            payload={
-                "revision_id": str(revision.id),
-                "acceptance_artifact_id": None if artifact_id is None else str(artifact_id),
-                "acceptance_waiver_id": None if waiver is None else str(waiver.id),
-                "accepted_by_user_id": user_id,
-                "status_generation": package.version,
-            },
-        )
-        # D5: outcome extraction is an async writer job in the same
-        # transaction — completion never waits for it (drill 11, P1).
-        await enqueue_memory_extraction(
-            self._uow,
-            trigger_event_id=trigger_event_id,
-            project_id=package.project_id,
-            session_id=package.session_id,
-            operation=OUTCOME_OPERATION,
-            entity_type="work_package",
-            entity_id=package.id,
-            payload={
-                "package_id": str(package.id),
-                "revision_number": revision.revision_number,
-                "accepted_by_user_id": user_id,
-                "artifact_id": None if artifact_id is None else str(artifact_id),
-                "waiver_id": None if waiver is None else str(waiver.id),
-            },
-        )
-        await self._enqueue_plan_projection(package.id, package.version, "accepted")
-        return package.version
-
-    async def _resolve_waiver(self, waiver_id: uuid.UUID, package: WorkPackage) -> AcceptanceWaiver:
-        """Validate a waiver for THIS package and its current head (D2 L3)."""
-
-        assert self._uow.session is not None
-        waiver = await self._uow.session.get(AcceptanceWaiver, waiver_id)
-        if waiver is None or waiver.package_id != package.id:
-            raise DomainError("acceptance_waiver_unknown")
-        # REDO-2: waivers authorize a promotion from the frozen base (the
-        # expected head the apply presents), matching the gate lookup.
-        if waiver.integration_head != package.integration_base_commit:
-            raise DomainError("acceptance_waiver_stale")
-        if not waiver.reason.strip() or waiver.principal_user_id == 0:
-            raise DomainError("acceptance_waiver_invalid")
-        return waiver
-
-    async def _check_evidence_artifact(
-        self, package: WorkPackage, revision: PlanRevision, artifact: Artifact
-    ) -> None:
-        """Validate an evidence artifact for THIS package/revision (D2 L2/L3).
-
-        Fail-closed: missing/foreign artifact, schema mismatch, criteria gaps,
-        plan drift and head mismatch all raise instead of completing.
-        """
-
-        from vuzol.workflows.acceptance import (
-            criteria_are_proven,
-            find_evidence,
-            load_stored_proofs,
-            required_criterion_ids,
-            validate_evidence,
-        )
-
-        assert self._uow.session is not None
-        # Foreign scope: the artifact must belong to this package's project.
-        artifact_task_id = getattr(artifact, "task_id", None)
-        if artifact_task_id is not None:
-            owner = await self._uow.session.get(Task, artifact_task_id)
-            if owner is None or owner.project_id != package.project_id:
-                raise DomainError("acceptance_evidence_foreign")
-        evidence = await find_evidence(
-            self._uow.session, package_id=package.id, plan_revision_id=None
-        )
-        candidate = None
-        if evidence is not None and evidence.artifact_id == artifact.id:
-            candidate = evidence
-        else:
-            rows = (
-                await self._uow.session.scalars(
-                    select(AcceptanceEvidence).where(AcceptanceEvidence.artifact_id == artifact.id)
-                )
-            ).all()
-            candidate = next((row for row in rows if row.package_id == package.id), None)
-        if candidate is None:
-            raise DomainError("acceptance_evidence_unknown")
-        errors = validate_evidence(candidate.evidence)
-        if errors:
-            raise DomainError("acceptance_evidence_invalid")
-        document = candidate.evidence
-        if document.get("plan_content_hash") != revision.content_hash:
-            raise DomainError("acceptance_evidence_stale_revision")
-        result_commit = document.get("result_commit")
-        required = required_criterion_ids(package.exit_criteria)
-        if not isinstance(result_commit, str):
-            raise DomainError("acceptance_criteria_unmet")
-        if required:
-            proofs = await load_stored_proofs(self._uow.session, package_id=package.id)
-            if not criteria_are_proven(
-                document,
-                result_commit=result_commit,
-                required_ids=required,
-                gates=proofs.gates,
-                findings=proofs.findings,
-                owner_decisions=proofs.owner_decisions,
-            ):
-                raise DomainError("acceptance_criteria_unmet")
-        # REDO-2: a real-target apply does not move integration_head (only
-        # integration-branch applies do), so the promoted result is proven
-        # through the CONSUMED approval envelope, not the head pointer.
-        await self._check_promotion_proof(package, document)
-        await self._check_evidence_revisions(package, document)
-
-    async def _check_promotion_proof(
-        self, package: WorkPackage, document: dict[str, object]
-    ) -> None:
-        """Prove the evidenced result was actually promoted (REDO-2).
-
-        The last item's approval must be CONSUMED with an envelope whose
-        result_commit equals the evidence result — i.e. the applier really
-        promoted what the evidence authorizes. Otherwise
-        ``acceptance_promotion_unproven`` (fail-closed, never silent).
-        """
-
-        assert self._uow.session is not None
-        result_commit = document.get("result_commit")
-        if not isinstance(result_commit, str):
-            raise DomainError("acceptance_evidence_invalid")
-        links = (
-            await self._uow.session.scalars(
-                select(MaterializationLink).where(MaterializationLink.work_package_id == package.id)
-            )
-        ).all()
-        if not links:
-            raise DomainError("acceptance_promotion_unproven")
-        last_task_id = max(links, key=lambda link: link.ordinal or 0).task_id
-        run_ids = (
-            await self._uow.session.scalars(select(Run.id).where(Run.task_id == last_task_id))
-        ).all()
-        if not run_ids:
-            raise DomainError("acceptance_promotion_unproven")
-        approvals = (
-            await self._uow.session.scalars(
-                select(Approval)
-                .join(Step, Step.id == Approval.step_id)
-                .where(
-                    Step.run_id.in_(run_ids),
-                    Approval.status == ApprovalStatus.CONSUMED,
-                )
-            )
-        ).all()
-        for approval in approvals:
-            step = await self._uow.session.get(Step, approval.step_id)
-            if step is None or not isinstance(step.payload, dict):
-                continue
-            envelope = step.payload.get("action_envelope")
-            if isinstance(envelope, dict) and envelope.get("result_commit") == result_commit:
-                return
-        raise DomainError("acceptance_promotion_unproven")
-
-    async def _check_evidence_revisions(
-        self, package: WorkPackage, document: dict[str, object]
-    ) -> None:
-        """The evidence revisions must match the last item run (no drift)."""
-
-        assert self._uow.session is not None
-        links = (
-            await self._uow.session.scalars(
-                select(MaterializationLink).where(MaterializationLink.work_package_id == package.id)
-            )
-        ).all()
-        if not links:
-            return
-        last = max(links, key=lambda link: link.ordinal or 0)
-        run = await self._uow.session.scalar(select(Run).where(Run.task_id == last.task_id))
-        if run is None:
-            return
-        for field in ("configuration_revision", "policy_revision"):
-            if document.get(field) != getattr(run, field):
-                raise DomainError("acceptance_evidence_stale_revision")
-
     async def _release_discussion(self, package: WorkPackage) -> None:
         session = self._uow.session
         if session is None:
@@ -1112,7 +729,6 @@ class WorkPackageService:
         expected_session_generation: int,
         replacement: PlanDraft,
         user_id: int,
-        horizon_enabled: bool = False,
     ) -> RevisionResult:
         edit = await self._uow.work_packages.get_edit_session(edit_session_id, for_update=True)
         if edit.opened_by_user_id != user_id:
@@ -1136,7 +752,6 @@ class WorkPackageService:
             plan=replacement,
             created_by=PlanRevisionCreatedBy.USER,
             actor_type="user",
-            horizon_enabled=horizon_enabled,
         )
         await self._event(
             edit.id,
@@ -1352,74 +967,6 @@ class WorkPackageService:
         )
         return package.version
 
-    async def approve_waiting_item(
-        self,
-        *,
-        package_id: uuid.UUID,
-        revision_number: int,
-        h8: str,
-        expected_status_generation: int,
-        ordinal: int,
-        user_id: int,
-        horizon_enabled: bool = False,
-    ) -> int:
-        """Approve a needs_approval item waiting in the horizon gate.
-
-        Records a single-use ``item_approved:{ordinal}`` marker so the next
-        ``materialize_running`` step lets exactly this ordinal through.
-        Only horizon packages behind the flag.
-        """
-
-        package, revision = await self._queue_control_package(
-            package_id, revision_number, h8, expected_status_generation
-        )
-        control_transition_target(package.status, PackageControlAction.APPROVE_ITEM)
-        if package.running_revision_id != revision.id:
-            raise DomainError("stale_revision")
-        # D0 pinned semantics: an active package reads its pinned contract.
-        # Pre-D0 rows (execution_contract_version NULL) fall back to the
-        # passed admission flag for compatibility.
-        if getattr(package, "execution_contract_version", None) is not None:
-            horizon_effective = pinned_horizon_enabled(package, fallback=bool(horizon_enabled))
-        else:
-            horizon_effective = bool(horizon_enabled)
-        if not (horizon_effective and is_horizon(package.goal, package.exit_criteria)):
-            raise DomainError("horizon_not_enabled")
-        if package.horizon_phase != "waiting_approval" or package.cursor_ordinal != ordinal:
-            raise DomainError("item_not_waiting_approval")
-        assert self._uow.session is not None
-        item = await self._uow.session.get(
-            PlanRevisionItem, await self._waiting_item_pk(package_id, revision_number, h8, ordinal)
-        )
-        if item is None or not item.needs_approval:
-            raise DomainError("item_not_waiting_approval")
-        package.horizon_phase = f"item_approved:{ordinal}"
-        package.version += 1
-        await self._event(
-            package.id,
-            WorkPackageEvent.PACKAGE_ITEM_APPROVED,
-            "user",
-            previous_state=WorkPackageStatus.RUNNING.value,
-            new_state=WorkPackageStatus.RUNNING.value,
-            payload={
-                "revision_id": str(revision.id),
-                "ordinal": ordinal,
-                "approved_by_user_id": user_id,
-                "status_generation": package.version,
-            },
-        )
-        return package.version
-
-    async def _waiting_item_pk(
-        self, package_id: uuid.UUID, revision_number: int, h8: str, ordinal: int
-    ) -> uuid.UUID:
-        resolved = await self._uow.work_packages.resolve_fenced_item(
-            package_id=package_id, revision_number=revision_number, h8=h8, ordinal=ordinal
-        )
-        if resolved is None:
-            raise DomainError("stale_revision")
-        return resolved[1]
-
     async def stop_package(
         self,
         *,
@@ -1506,27 +1053,20 @@ class WorkPackageService:
         expected_status_generation: int,
         user_id: int,
     ) -> int:
-        """Pause the queue until the next model-backed replacement plan is ready."""
-
+        """Send the fenced owner request to the project's lead."""
         package, revision = await self._queue_control_package(
             package_id, revision_number, h8, expected_status_generation
         )
-        control_transition_target(package.status, PackageControlAction.REQUEST_REPLAN)
-        previous_status = package.status
-        package.status = WorkPackageStatus.PAUSED
-        package.pause_reason = WorkPackagePauseReason.REPLAN_REQUIRED
-        package.version += 1
-        await self._event(
-            package.id,
-            WorkPackageEvent.PACKAGE_REPLAN_REQUESTED,
-            "user",
-            previous_state=previous_status.value,
-            new_state=WorkPackageStatus.PAUSED.value,
-            payload={
-                "previous_revision_id": str(revision.id),
-                "requested_by_user_id": user_id,
-                "status_generation": package.version,
-            },
+        assert self._uow.session is not None
+        from vuzol.leadership.wakeups import enqueue_legacy_plan_request
+
+        await enqueue_legacy_plan_request(
+            self._uow.session,
+            project_id=package.project_id,
+            user_id=user_id,
+            source_id=f"package:{package.id}:{revision.id}:{package.version}",
+            text="Пересмотри план оставшейся работы.",
+            package_id=package.id,
         )
         return package.version
 

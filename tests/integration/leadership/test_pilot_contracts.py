@@ -200,6 +200,8 @@ async def test_telegram_limits_are_explicit_and_do_not_resume_work(postgres_dsn,
         async with factory() as session:
             goal = await session.scalar(select(ManagedGoal))
             assert goal.constraints["work_limits"] == {
+                "max_cost": None,
+                "max_attempts": None,
                 "max_packages": 1,
                 "max_items_per_package": 1,
             }
@@ -210,6 +212,8 @@ async def test_telegram_limits_are_explicit_and_do_not_resume_work(postgres_dsn,
             goal = await session.scalar(select(ManagedGoal))
             assert goal.lifecycle == "paused"
             assert goal.constraints["work_limits"] == {
+                "max_cost": None,
+                "max_attempts": None,
                 "max_packages": 2,
                 "max_items_per_package": 3,
             }

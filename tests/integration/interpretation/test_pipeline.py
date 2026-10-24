@@ -10,7 +10,6 @@ from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
 from vuzol.config import Capability
 from vuzol.discussion.agent import DeliverDiscussionReplyHandler
-from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
 from vuzol.interpretation.discussion import (
     DISCUSSION_REPLY_DESTINATION,
@@ -34,7 +33,6 @@ from vuzol.storage.models import (
     ClarificationDecision,
     ConversationTurn,
     Interpretation,
-    PlanRevision,
     ProjectNamingRequest,
     Run,
     Step,
@@ -439,8 +437,15 @@ def test_discussion_runtime_hands_user_turn_to_hidden_project_agent(
     asyncio.run(scenario())
 
 
-def test_plan_request_materializes_package_and_queues_card_without_classifier_summary(
-    postgres_dsn: str, tmp_path: Path
+@pytest.mark.parametrize("control_override", [None, "create_or_update_plan", "replan"])
+@pytest.mark.parametrize("has_goal", [True, False])
+@pytest.mark.parametrize("with_legacy_payload", [True, False])
+def test_plan_request_emits_lead_event_without_materializing_classifier_plan(
+    postgres_dsn: str,
+    tmp_path: Path,
+    control_override: str | None,
+    has_goal: bool,
+    with_legacy_payload: bool,
 ) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
@@ -456,7 +461,7 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
             interaction_mode=InteractionMode.PLAN_REQUEST,
             confidence=0.95,
             # The classifier may omit this redundant hint. The validated structured
-            # plan request itself authorizes creation of a non-executing draft.
+            # plan request is forwarded to the lead, never materialized here.
             should_mutate_plan=False,
             user_visible_summary="internal classifier summary",
             plan_request={  # type: ignore[arg-type]
@@ -478,11 +483,13 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
                 ],
             },
         )
+        if not with_legacy_payload:
+            result = result.model_copy(update={"plan_request": None})
         pipeline = InterpretationPipeline(
             runtime,
             factory,
             interpreter=FakeInterpreter([]),
-            discussion_interpreter=FakeDiscussionInterpreter([result]),
+            discussion_interpreter=FakeDiscussionInterpreter([] if control_override else [result]),
             owner="interpreter-plan",
         )
         ingress = TelegramIngressService(runtime, factory)
@@ -492,6 +499,22 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
             )
         )
 
+        from tests.integration.leadership.test_managed_goal_flow import _enable
+        from vuzol.storage.models import ProjectDiscussionSession
+
+        async with factory() as session:
+            discussion = await session.scalar(select(ProjectDiscussionSession))
+            session_id = discussion.id
+        if has_goal:
+            await _enable(factory, session_id)
+        if control_override:
+            async with factory.begin() as session:
+                item = await session.scalar(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.destination == "discussion_classify"
+                    )
+                )
+                item.payload = {**item.payload, "control_override": control_override}
         assert accepted.task_id is None
         assert await pipeline.process_one()
         async with factory() as session:
@@ -513,102 +536,29 @@ def test_plan_request_materializes_package_and_queues_card_without_classifier_su
                     ConversationTurn.content == "internal classifier summary"
                 )
             )
-            assert package is not None and package.title == "Bill Buddy MVP"
-            assert {projection.operation_type for projection in projections} == {
-                "render_plan",
-                "render_status",
-            }
-            assert all(projection.linked_entity_id == package.id for projection in projections)
-            assert leaked_summary is None
-        await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-def test_repeated_terminal_plan_is_regenerated_without_memory(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
-    def plan_result(title: str, summary: str, goal: str) -> DiscussionInterpretation:
-        return DiscussionInterpretation(
-            interaction_mode=InteractionMode.PLAN_REQUEST,
-            confidence=0.95,
-            user_visible_summary="plan",
-            plan_request={  # type: ignore[arg-type]
-                "intent": "create_draft",
-                "title": title,
-                "items": [
-                    {
-                        "local_id": "item-1",
-                        "summary": summary,
-                        "goal": goal,
-                        "expected_outcome": "Expected result",
-                        "completion_criteria": ["Trusted checks pass"],
-                        "allowed_scope": "src/**",
-                        "suggested_risk": "low",
-                        "needs_approval": True,
-                        "estimated_complexity": "small",
-                    }
-                ],
-            },
-        )
-
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        base_runtime = telegram_runtime(tmp_path)
-        runtime = base_runtime.model_copy(
-            update={
-                "settings": base_runtime.settings.model_copy(
-                    update={"project_discussion_enabled": True}
+            assert package is None
+            assert not projections
+            event = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "project_lead",
+                    TransactionalOutbox.payload["wakeup_kind"].as_string() == "planning_requested",
                 )
-            }
-        )
-        repeated = plan_result("Old plan", "Build old UI", "Original wording")
-        paraphrased = plan_result(" old   PLAN ", " BUILD OLD UI ", "Paraphrased wording")
-        fresh = plan_result("New design plan", "Redesign the interface", "Address current request")
-        discussion = FakeDiscussionInterpreter([repeated, paraphrased, fresh])
-        pipeline = InterpretationPipeline(
-            runtime,
-            factory,
-            interpreter=FakeInterpreter([]),
-            discussion_interpreter=discussion,
-            owner="interpreter-plan-freshness",
-        )
-        ingress = TelegramIngressService(runtime, factory)
-
-        await ingress.accept_message(
-            text_update(153).model_copy(update={"text": "Create the original plan"})
-        )
-        assert await pipeline.process_one()
-        async with factory() as session:
-            package = await session.scalar(select(WorkPackage))
-            assert package is not None and package.head_revision_id is not None
-            revision = await session.get(PlanRevision, package.head_revision_id)
-            assert revision is not None
-            package_id = package.id
-            version = package.version
-            revision_number = revision.revision_number
-            h8 = revision.content_hash[:8]
-        async with UnitOfWork(factory) as uow:
-            await WorkPackageService(uow).discard(
-                package_id=package_id,
-                revision_number=revision_number,
-                h8=h8,
-                expected_status_generation=version,
-                user_id=42,
             )
-
-        await ingress.accept_message(
-            text_update(154).model_copy(update={"text": "Make a completely different design"})
-        )
-        assert await pipeline.process_one()
-
-        assert len(discussion.requests) == 3
-        assert discussion.requests[1].memory_pack is not None
-        assert discussion.requests[2].memory_pack is None
-        async with factory() as session:
-            packages = (await session.scalars(select(WorkPackage))).all()
-            assert len(packages) == 2
-            assert packages[-1].title == "New design plan"
+            item = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "discussion_classify"
+                )
+            )
+            if has_goal:
+                assert event is not None
+                assert event.payload["text"] == "Оформи согласованный план как пакет задач"
+                assert item.status is DeliveryStatus.DELIVERED
+            else:
+                assert event is None
+                assert item.status is DeliveryStatus.DEAD_LETTER
+                assert item.last_error_category == "discussion_plan_managed_goal_required"
+            assert await session.scalar(select(func.count()).select_from(Step)) == 0
+            assert leaked_summary is None
         await engine.dispose()
 
     asyncio.run(scenario())

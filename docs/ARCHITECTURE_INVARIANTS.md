@@ -158,8 +158,22 @@ These rules are non-negotiable unless explicitly changed through an ADR.
 - There is no DDL or rewrite of stored graphs. Stored coding v4, discussion-agent
   and adaptive-worker-trial runs keep their steps, handlers, approvals and recovery
   semantics. The task-level cap also counts historical repairs on the same task.
-  Old planner handlers, handoff, definitions and horizon machinery remain for PR8.
-  PR8 can remove the old registry/templates, per-task planning/tier producers and
-  handlers, planner handoff and horizon paths after its upgrade preflight. Preserve
-  the fixed factory (move it out of `compiler.py` if that module is removed), shared
-  execution constraints, acceptance evidence needed by apply, and historical data.
+  PR8 removes the old registry/templates, per-task planning/tier handlers, handoff
+  and horizon admission/transitions. The fixed factory stays in `compiler.py`,
+  shared execution constraints in `context/execution.py`, and strong planning in
+  `leadership/planning.py` via `planner_strong`. Legacy plan/replan inputs are lead events.
+- Before worker/executor/applier queues start, `workflows/upgrade.py` checks stored
+  steps of every non-terminal run, including paused/blocked runs and failed steps.
+  An unsupported handler aborts startup with run/step IDs. Completed/cancelled steps
+  and terminal runs remain readable. Non-terminal pinned horizon packages also
+  refuse startup until explicitly converted; the supplied production inventory has none.
+  No DDL or history rewrite is required.
+- `acceptance`, `publish_preview` and the other stored-run consumers remain.
+  Cancellation and lease recovery use stored steps. Resume preserves existing
+  fences: a failed task paired with a paused run requires explicit operator recovery
+  to resume. Cancellation can settle that run while retaining the task failure and
+  incrementing its projection version; it does not roll back effects.
+- Provider lifetime caps read managed-goal `constraints.work_limits.max_cost` and
+  `max_attempts`, including historical package-scoped receipts across that goal.
+  Epoch/revision changes never reset spend. Historical columns, evidence and card
+  projections remain readable.

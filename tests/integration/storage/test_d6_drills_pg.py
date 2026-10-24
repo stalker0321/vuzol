@@ -14,8 +14,6 @@ from sqlalchemy import select
 from tests.integration.storage.helpers import seed_task_run_step, storage
 from vuzol.config.settings import HardLimits
 from vuzol.discussion.domain import PlanDraft, PlanItemDraft
-from vuzol.discussion.horizon import HORIZON_CONTRACT_ENABLED
-from vuzol.discussion.memory_writer import MemoryWriterService
 from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.discussion.service import WorkPackageService
 from vuzol.execution.git import GitError, LocalGit
@@ -34,11 +32,9 @@ from vuzol.storage.leasing import claim_step
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.models import (
     MaterializationLink,
-    PlanRevision,
     Step,
     Task,
     TaskSpecRevision,
-    TransactionalOutbox,
     WorkAttempt,
     WorkPackage,
 )
@@ -48,10 +44,9 @@ from vuzol.storage.types import (
     RunStatus,
     StepStatus,
     TaskStatus,
-    WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.workflows.acceptance import record_evidence, record_waiver
+from vuzol.workflows.acceptance import record_evidence
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.service import commit_step_outcome
 
@@ -107,7 +102,6 @@ async def _horizon_package(factory: object) -> tuple[uuid.UUID, uuid.UUID]:
             h8=created.content_hash[:8],
             expected_status_generation=generation,
             user_id=42,
-            horizon_enabled=True,
         )
         return created.package_id, created.revision_id
 
@@ -135,70 +129,8 @@ async def _to_evaluating(factory: object, package_id: uuid.UUID) -> None:
             task = await uow.session.get(Task, link.task_id, with_for_update=True)
             assert task is not None
             task.status = TaskStatus.COMPLETED
-            await WorkPackageSequencer(uow).observe_terminal(
-                task_id=link.task_id, horizon_enabled=True
-            )
+            await WorkPackageSequencer(uow).observe_terminal(task_id=link.task_id)
     raise AssertionError("package did not reach evaluating")
-
-
-def test_acceptance_waiver_emits_durable_memory_job(postgres_dsn: str) -> None:
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        package_id, revision_id = await _horizon_package(factory)
-        await _to_evaluating(factory, package_id)
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            service = WorkPackageService(uow)
-            package = await uow.session.get(WorkPackage, package_id)
-            assert package is not None
-            package.integration_branch = "vuzol/package/x"
-            package.integration_target_branch = "main"
-            package.integration_base_commit = "a" * 40
-            package.integration_head_commit = "b" * 40
-            revision = await uow.session.get(PlanRevision, revision_id)
-            assert revision is not None
-            waiver = await record_waiver(
-                uow.session,
-                package_id=package_id,
-                integration_head="a" * 40,
-                principal_user_id=7,
-                reason="ship now, verify on prod",
-            )
-            await service.record_acceptance(
-                package_id=package_id,
-                revision_number=1,
-                h8=revision.content_hash[:8],
-                expected_status_generation=package.version,
-                accepted=True,
-                artifact_id=None,
-                user_id=7,
-                horizon_enabled=True,
-                waiver_id=waiver.id,
-            )
-            assert package.status is WorkPackageStatus.COMPLETED
-            jobs = tuple(
-                (
-                    await uow.session.scalars(
-                        select(TransactionalOutbox).where(
-                            TransactionalOutbox.destination == "memory_extract"
-                        )
-                    )
-                ).all()
-            )
-            assert len(jobs) == 1
-        writer = MemoryWriterService(factory, owner="test-memory")
-        assert await writer.process_one() is True
-        async with UnitOfWork(factory) as uow:
-            from vuzol.discussion.memory_units import RecallQuery
-
-            found = await uow.memory_units.recall(RecallQuery(project_id="vuzol"))
-            assert len(found) == 1
-            assert found[0].unit_type == "outcome_template"
-            assert found[0].status.value == "verified"
-            assert "waiver" in found[0].text
-        await engine.dispose()
-
-    asyncio.run(scenario())
 
 
 async def _prove_promotion(factory: object, *, package_id: uuid.UUID) -> None:
@@ -253,147 +185,6 @@ async def _prove_promotion(factory: object, *, package_id: uuid.UUID) -> None:
                 expires_at=datetime.now(UTC) + timedelta(days=1),
             )
         )
-
-
-def test_acceptance_evidence_emits_memory_unit_with_refs(postgres_dsn: str, tmp_path: Path) -> None:
-    async def scenario() -> None:
-        import json as _json
-
-        from vuzol.execution.artifacts import ArtifactStore
-
-        engine, factory = storage(postgres_dsn)
-        package_id, revision_id = await _horizon_package(factory)
-        await _to_evaluating(factory, package_id)
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            package = await uow.session.get(WorkPackage, package_id)
-            assert package is not None
-            package.integration_branch = "vuzol/package/x"
-            package.integration_target_branch = "main"
-            package.integration_base_commit = "a" * 40
-            package.integration_head_commit = "b" * 40
-            revision = await uow.session.get(PlanRevision, revision_id)
-            assert revision is not None
-            links = (
-                await uow.session.scalars(
-                    select(MaterializationLink).where(
-                        MaterializationLink.work_package_id == package_id
-                    )
-                )
-            ).all()
-            task_id = links[0].task_id
-            run_id = await uow.runs.create(
-                task_id=task_id,
-                workflow_type="coding",
-                workflow_version="4",
-                budget_mode="balanced",
-                configuration_revision="c" * 64,
-                policy_revision="d" * 64,
-                status=RunStatus.RUNNING,
-            )
-            step_record = await uow.steps.create(
-                run_id=run_id,
-                ordinal=1,
-                step_type="acceptance",
-                idempotency_class=IdempotencyClass.IDEMPOTENT,
-            )
-            validate = await uow.steps.create(
-                run_id=run_id,
-                ordinal=2,
-                step_type="validate",
-                idempotency_class=IdempotencyClass.IDEMPOTENT,
-            )
-            measured = await uow.session.get(Step, validate.id, with_for_update=True)
-            assert measured is not None
-            measured.status = StepStatus.COMPLETED
-            measured.result = {
-                "structured_output": {
-                    "result_commit": "b" * 40,
-                    "gates": [{"name": "done", "exit_code": 0}],
-                }
-            }
-        store = ArtifactStore(
-            tmp_path, max_bytes=1_000_000, retention_days=7, redaction_patterns=()
-        )
-        document = {
-            "schema": "acceptance-evidence.v1",
-            "package_id": str(package_id),
-            "plan_revision_id": str(revision_id),
-            "plan_content_hash": revision.content_hash,
-            "goal": "ship the horizon",
-            "goal_revision": 1,
-            "spec_revision": None,
-            "configuration_revision": "c" * 64,
-            "policy_revision": "d" * 64,
-            "integration_base_head": "a" * 40,
-            "result_commit": "b" * 40,
-            "criteria": [
-                {
-                    "criterion_id": "done",
-                    "satisfied": True,
-                    "evidence_ref": "gate:done:" + ("b" * 40),
-                }
-            ],
-            "test_results": [],
-            "review_refs": ["aa" * 32],
-            "unresolved_caveats": [],
-            "unresolved_effects": [],
-            "created_at": "2026-09-30T00:00:00+00:00",
-        }
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            artifact = await store.persist(
-                uow.session,
-                task_id=task_id,
-                run_id=run_id,
-                step_id=step_record.id,
-                artifact_type="acceptance_evidence",
-                content=_json.dumps(document, sort_keys=True).encode(),
-                media_type="application/json",
-                sensitivity="internal",
-                visibility="private",
-            )
-            artifact_id = artifact.id
-            await record_evidence(
-                uow.session,
-                package_id=package_id,
-                plan_revision_id=revision_id,
-                document=document,
-                artifact_id=artifact_id,
-            )
-        from vuzol.discussion.service import WorkPackageService as _Service
-
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            service = _Service(uow)
-            package = await uow.session.get(WorkPackage, package_id)
-            assert package is not None
-            revision = await uow.session.get(PlanRevision, revision_id)
-            assert revision is not None
-            await _prove_promotion(factory, package_id=package_id)
-            await service.record_acceptance(
-                package_id=package_id,
-                revision_number=1,
-                h8=revision.content_hash[:8],
-                expected_status_generation=package.version,
-                accepted=True,
-                artifact_id=artifact_id,
-                user_id=7,
-                horizon_enabled=True,
-            )
-            assert package.acceptance_artifact_id == artifact_id
-        writer = MemoryWriterService(factory, owner="test-memory")
-        assert await writer.process_one() is True
-        async with UnitOfWork(factory) as uow:
-            from vuzol.discussion.memory_units import RecallQuery
-
-            found = await uow.memory_units.recall(RecallQuery(project_id="vuzol"))
-            assert len(found) == 1
-            assert found[0].source_artifact_id == artifact_id
-            assert found[0].source_acceptance_evidence_id is not None
-        await engine.dispose()
-
-    asyncio.run(scenario())
 
 
 def test_repair_replan_share_one_denominator(postgres_dsn: str) -> None:
@@ -461,7 +252,6 @@ def test_exhaustion_blocks_spend_but_keeps_final_evidence(postgres_dsn: str) -> 
     async def scenario() -> None:
         from vuzol.config import LaunchMode
         from vuzol.config.models import Capability, CostClass, ProviderProfileConfig
-        from vuzol.workflows.acceptance import record_evidence
 
         engine, factory = storage(postgres_dsn)
         profile = ProviderProfileConfig(
@@ -536,24 +326,6 @@ async def test_migration_head_verified_on_postgres(postgres_dsn: str) -> None:
         await require_migration_head(engine)
     finally:
         await engine.dispose()
-
-
-def test_pinned_contract_survives_flag_off_without_restart(postgres_dsn: str) -> None:
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        package_id, _revision_id = await _horizon_package(factory)
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            package = await uow.session.get(WorkPackage, package_id, with_for_update=True)
-            assert package is not None and package.status is WorkPackageStatus.RUNNING
-            package.execution_contract_version = HORIZON_CONTRACT_ENABLED
-            result = await WorkPackageSequencer(uow).materialize_running(
-                package_id=package_id, horizon_enabled=False
-            )
-            assert result.task_id is not None
-        await engine.dispose()
-
-    asyncio.run(scenario())
 
 
 def test_final_failure_leaves_target_branch_untouched(postgres_dsn: str, tmp_path: Path) -> None:

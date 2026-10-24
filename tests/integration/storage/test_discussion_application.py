@@ -23,12 +23,10 @@ from vuzol.interpretation.discussion import (
     DiscussionInterpretRequest,
     EditSessionContext,
     ItemEditPayload,
-    PlanSnapshot,
 )
 from vuzol.storage.models import (
     Interpretation,
     MaterializationLink,
-    PlanRevision,
     Task,
     TelegramControlAction,
     TransactionalOutbox,
@@ -120,63 +118,6 @@ async def create_package(factory: object) -> tuple[uuid.UUID, uuid.UUID, uuid.UU
             actor_type="planner_model",
         )
     return session_id, created.package_id, created.revision_id, created.content_hash
-
-
-async def test_plan_application_creates_and_revises_only_with_trusted_snapshot(
-    postgres_dsn: str,
-) -> None:
-    engine, factory = storage(postgres_dsn)
-    async with UnitOfWork(factory) as uow:
-        session_id = await uow.discussions.create_session(
-            project_id="vuzol", chat_id=-100, message_thread_id=10
-        )
-    application = DiscussionPlanApplicationService(factory, enabled=True)
-    create_request = DiscussionInterpretRequest(
-        original_input="create a plan", project_id="vuzol", user_id=42
-    )
-    created = await application.apply_plan_request(
-        session_id=session_id,
-        request=create_request,
-        interpretation=plan_interpretation(intent="create_draft", title="Discussion plan"),
-        planner_profile="fake-planner",
-    )
-    snapshot = PlanSnapshot(
-        package_id=created.package_id,
-        revision_id=created.revision_id,
-        revision_number=created.revision_number,
-        revision_hash=created.content_hash,
-        status_generation=created.status_generation,
-        title="Discussion plan",
-    )
-    revise_request = DiscussionInterpretRequest(
-        original_input="revise the plan",
-        project_id="vuzol",
-        user_id=42,
-        plan_snapshot=snapshot,
-    )
-    revised = await application.apply_plan_request(
-        session_id=session_id,
-        request=revise_request,
-        interpretation=plan_interpretation(
-            intent="revise_draft",
-            title="Discussion plan revised",
-            base_revision_id=uuid.uuid4(),
-            base_revision_hash="f" * 64,
-        ),
-    )
-    assert revised.revision_number == 2
-    assert revised.status_generation == 2
-    async with factory() as session:
-        revisions = (
-            await session.scalars(
-                select(PlanRevision)
-                .where(PlanRevision.work_package_id == created.package_id)
-                .order_by(PlanRevision.revision_number)
-            )
-        ).all()
-        assert len(revisions) == 2
-        assert await session.scalar(select(func.count()).select_from(Task)) == 0
-    await engine.dispose()
 
 
 async def test_item_edit_application_rejects_changes_outside_fenced_item(
@@ -507,31 +448,5 @@ async def test_item_edit_vs_approve_race_has_one_revision_epoch_winner(
         package = await session.get(WorkPackage, package_id)
         assert package is not None and package.version == 2
         assert package.status in {WorkPackageStatus.DRAFT, WorkPackageStatus.APPROVED}
-        assert await session.scalar(select(func.count()).select_from(Task)) == 0
-    await engine.dispose()
-
-
-async def test_model_plan_control_has_no_application_mutation_edge(postgres_dsn: str) -> None:
-    engine, factory = storage(postgres_dsn)
-    session_id, package_id, _, _ = await create_package(factory)
-    application = DiscussionPlanApplicationService(factory, enabled=True)
-    interpretation = DiscussionInterpretation(
-        interaction_mode=InteractionMode.PLAN_CONTROL,
-        confidence=0.99,
-        user_visible_summary="Approve requested.",
-        plan_control={"action": "approve", "authoritative": True},  # type: ignore[arg-type]
-    )
-    request = DiscussionInterpretRequest(original_input="approve", project_id="vuzol", user_id=42)
-    with pytest.raises(DomainError) as rejected:
-        await application.apply_plan_request(
-            session_id=session_id,
-            request=request,
-            interpretation=interpretation,
-        )
-    assert rejected.value.code == "plan_mutation_not_authorized"
-    async with factory() as session:
-        package = await session.get(WorkPackage, package_id)
-        assert package is not None and package.status is WorkPackageStatus.DRAFT
-        assert package.version == 1
         assert await session.scalar(select(func.count()).select_from(Task)) == 0
     await engine.dispose()

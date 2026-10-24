@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -121,7 +121,6 @@ class ProjectEventService:
         session_id: uuid.UUID,
         idempotency_key: str,
         text: str,
-        mode: Literal["lead", "think"] = "lead",
         scope: str | None = None,
         criteria: list[dict[str, Any]] | None = None,
         work_limits: dict[str, Any] | None = None,
@@ -138,7 +137,7 @@ class ProjectEventService:
         project = self.runtime.registries.projects.get(project_id)
         if principal.user_id not in settings.allowed_user_ids or not project.enabled:
             raise PermissionError("project_not_available")
-        if mode not in {"lead", "think"} or not text.strip():
+        if not text.strip():
             raise ValueError("event_invalid")
         await lock_project_admission(session, project_id)
         await session.execute(
@@ -170,7 +169,6 @@ class ProjectEventService:
         body = {
             "session_id": str(session_id),
             "text": text,
-            "mode": mode,
             "scope": scope or text,
             "criteria": criteria or [],
             "work_limits": limits,
@@ -227,7 +225,6 @@ class ProjectEventService:
             session_id=session_id,
             key=idempotency_key,
             text=text,
-            mode=mode,
             intake=intake,
             reply_to_message_id=reply_to_message_id,
             extra={
@@ -294,7 +291,6 @@ async def write_owner_event(
     session_id: uuid.UUID,
     key: str,
     text: str,
-    mode: str = "lead",
     intake: TelegramIntakeMessage | None = None,
     reply_to_message_id: int | None = None,
     extra: dict[str, Any] | None = None,
@@ -347,7 +343,6 @@ async def write_owner_event(
                 "goal_id": str(goal.id),
                 "wakeup_kind": "owner_message",
                 "source_event_id": str(event_id),
-                "mode": mode,
                 "intake_id": str(intake.id) if intake else str(event_id),
                 "received_at": received.astimezone(UTC).isoformat(timespec="microseconds"),
                 "source_turn_id": str(source_turn_id),

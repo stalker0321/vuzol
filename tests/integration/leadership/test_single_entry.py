@@ -126,7 +126,6 @@ async def test_question_is_a_lead_turn_without_task_or_jev(postgres_dsn, runtime
         assert await worker.process_one()
         assert not await worker.process_one()
         assert len(transport.requests) == 1
-        assert '"mode": "lead"' in transport.requests[0].original_input
         assert "Да, это можно обсудить здесь." in await _drain(factory)
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(Task)) == 0
@@ -155,7 +154,7 @@ async def test_concurrent_telegram_mcp_and_uuid_replay(postgres_dsn, runtime):
         assert {receipt["status"], repeated["status"]} == {"accepted", "duplicate"}
         assert receipt["event_id"] == repeated["event_id"]
         assert receipt["receipt_id"] == repeated["receipt_id"]
-        for changed in ({"request": "Другой текст"}, {"mode": "think"}):
+        for changed in ({"request": "Другой текст"}, {"scope": "Другой объём"}):
             conflict = await app.submit(access, work.model_copy(update=changed))
             assert conflict["reason"] == "idempotency_conflict"
         async with factory() as session:

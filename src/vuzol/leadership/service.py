@@ -179,18 +179,6 @@ class LeadershipCommandService:
                 if goal is None
                 else await uow.session.get(GoalDelegation, goal.delegation_id, with_for_update=True)
             )
-            if claim is not None and name not in READ_COMMANDS:
-                from vuzol.storage.models import TransactionalOutbox
-
-                source = await uow.session.get(TransactionalOutbox, claim.wakeup_id)
-                if source is not None and source.payload.get("mode") == "think":
-                    return await store(
-                        uow.session,
-                        actor,
-                        command,
-                        digest,
-                        _Outcome(CommandStatus.DENIED, "read_only_mode", {}, goal),
-                    )
             if (
                 goal is not None
                 and not has_owner_mandate(goal)

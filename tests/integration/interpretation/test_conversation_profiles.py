@@ -86,7 +86,6 @@ def test_cli_conversation_does_not_require_architecture(
                             TransactionalOutbox.destination == "project_lead"
                         )
                     )
-                    assert item.payload["mode"] == mode
                     assert item.payload["wakeup_kind"] == "owner_message"
                     assert "conversation_route" not in item.payload
                     assert (await session.scalar(select(ManagedGoal))).lifecycle == "draft"
@@ -111,7 +110,6 @@ def test_default_lead_discussion_has_a_route_without_an_explicit_switch(postgres
                         TransactionalOutbox.destination == "project_lead"
                     )
                 )
-                assert item.payload["mode"] == "lead"
                 assert item.payload["wakeup_kind"] == "owner_message"
                 assert await session.scalar(select(func.count()).select_from(Task)) == 0
         finally:

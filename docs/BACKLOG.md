@@ -36,8 +36,6 @@ deferred. Completed work belongs in `CHANGELOG.md`.
   event drives. If that turn was an owner message, the message is dropped (same on restart,
   `worker.py` stale claimed turn). Re-enqueue it as a new wakeup instead; resending the same
   turn is forbidden by inference reconciliation.
-- MCP `submit_event(mode="think")` still runs a read-only lead turn, while Telegram `/think`
-  goes to the separate discussion model. Pick one meaning for MCP.
 
 ## Product consolidation — 2026-10-21
 

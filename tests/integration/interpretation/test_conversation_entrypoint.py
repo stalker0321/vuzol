@@ -129,7 +129,6 @@ def test_lead_conversation_through_executor_entrypoint(
                 assert envelope.sandbox.empty_workspace and envelope.sandbox.network_disabled
                 body = json.loads(envelope.stdin)
                 assert body["role"] == "lead"
-                assert f'"mode": "{mode}"' in body["original_input"]
                 launched.append(envelope)
                 message = {
                     "role": "assistant",

@@ -148,9 +148,8 @@ def test_mode_survives_restart_is_topic_local_and_commands_do_not_start_work(
                         )
                     )
                 ).all()
-                routes = {i.payload["message_thread_id"]: i.payload["mode"] for i in items}
                 # /think in topic 10 goes to its own discussion model, not to the lead.
-                assert routes == {20: "lead"}
+                assert [i.payload["message_thread_id"] for i in items] == [20]
                 thinking = (
                     await session.scalars(
                         select(TransactionalOutbox).where(
@@ -190,7 +189,6 @@ def test_queued_message_and_reply_keep_the_original_mode(postgres_dsn, tmp_path)
                 adapter=transport,
             )
             assert await worker.process_one()
-            assert '"mode": "lead"' in transport.requests[0].original_input
             assert "Только обсуждение." in await _drain(factory)
             async with factory() as session:
                 saved = await session.scalar(select(LeadershipTurn))

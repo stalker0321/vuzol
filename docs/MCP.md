@@ -15,20 +15,20 @@ provenance, durable request notices, idempotency and live execution checks.
 - `get_project_status(project_id)`: latest owned goal in the configured discussion.
 - `get_result(project_id, goal_id)`: owned goal and existing evidence projection.
 - `submit_request(work)`: a user-authorized message, project and UUID `request_id`;
-  optional `scope`, `criteria`, existing `work_limits`, and `mode` (`lead` by default, or `think`).
+  optional `scope`, `criteria` and existing `work_limits`. There is no discussion mode: the
+  assistant's own chat is the discussion, and a submission is always for the lead.
   `ProjectApplication` calls the same `ProjectEventService.submit_event` as Telegram.
 
 Submission returns `{status, event_id, goal_id, receipt_id, reason}` after commit.
 `status=accepted` acknowledges durable input, not started or finished work; a replay returns
 `status=duplicate` with the same event and receipt IDs. Retry an uncertain submission with the
-SAME UUID and identical content/mode. Changed content with that UUID is denied. Provenance
+SAME UUID and identical content. Changed content with that UUID is denied. Provenance
 records the first authenticated client and request UUID; a renamed client does not invalidate
 retries. `allow_submit` and OAuth `vuzol:submit` remain required.
 
 New messages join the live goal, or create a draft conversation when none exists. The lead
 answers, clarifies or asks the strong planner for a plan; replies and plan cards arrive in the
-project topic. Execution requires the owner's plan approval. `mode=think` permits only reads
-and replies. A message alone does not resume a paused goal or approve a plan. Poll status/result
+project topic. Execution requires the owner's plan approval. A message alone does not resume a paused goal or approve a plan. Poll status/result
 later; do not retry denials in a loop. If an accepted event is moved after its original goal
 finishes, its receipt still identifies the original admission; `get_project_status` shows the
 latest goal.

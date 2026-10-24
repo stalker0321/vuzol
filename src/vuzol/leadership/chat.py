@@ -159,6 +159,7 @@ async def enqueue_owner_message(
     intake: TelegramIntakeMessage,
     raw: str,
     transcription: dict[str, Any] | None = None,
+    reply_to_message_id: int | None = None,
 ) -> uuid.UUID:
     """Caller locks the goal; source identity and reply address come from ingress."""
     from vuzol.discussion.memory_service import DiscussionMemoryService
@@ -203,6 +204,30 @@ async def enqueue_owner_message(
         classifier_mode=InteractionMode.DISCUSSION,
         intake_message_id=intake.id,
     )
+    reply_context: dict[str, Any] | None = None
+    if reply_to_message_id is not None:
+        from vuzol.storage.models import PlanRevision, TelegramMessageLink
+
+        link = await uow.session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.chat_id == intake.chat_id,
+                TelegramMessageLink.message_thread_id == intake.message_thread_id,
+                TelegramMessageLink.message_id == reply_to_message_id,
+            )
+        )
+        reply_context = {"message_id": reply_to_message_id}
+        if link is not None:
+            reply_context["role"] = link.message_role
+            if link.plan_revision_id:
+                revision = await uow.session.get(PlanRevision, link.plan_revision_id)
+                if revision is not None:
+                    reply_context.update(
+                        {
+                            "package_id": str(link.work_package_id),
+                            "plan_revision_id": str(revision.id),
+                            "plan": revision.immutable_body,
+                        }
+                    )
     event_id = uuid.uuid4()
     uow.session.add(
         TransactionalOutbox(
@@ -220,6 +245,7 @@ async def enqueue_owner_message(
                 "received_at": intake.created_at.astimezone(UTC).isoformat(timespec="microseconds"),
                 "source_turn_id": str(source_turn_id),
                 "text": raw,
+                **({"reply_context": reply_context} if reply_context else {}),
                 "attachments": intake.attachments,
                 "owner_user_id": intake.user_id,
                 "delegation_id": str(goal.delegation_id),

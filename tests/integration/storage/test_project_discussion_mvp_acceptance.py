@@ -201,7 +201,7 @@ async def test_default_off_composed_discussion_to_sequential_completion(
         final_card = await build_work_package_status_card(session, created.package_id)
         assert package is not None and package.status is WorkPackageStatus.COMPLETED
         assert package.version > approved.status_generation
-        assert final_card.html.startswith("<b>Ready | Auto</b>")
-        assert "Send a new task" in final_card.html
+        assert final_card.html.startswith("<b>Готов к новой задаче</b>")
+        assert "Можно дать новое поручение" in final_card.html
         assert await session.scalar(select(func.count()).select_from(Task)) == 2
     await engine.dispose()

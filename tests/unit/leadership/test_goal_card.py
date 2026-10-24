@@ -10,6 +10,7 @@ from vuzol.cli import worker as worker_cli
 from vuzol.leadership.card import (
     render_goal_card,
     render_goal_contract,
+    render_goal_debug,
     render_goal_details,
     render_question,
 )
@@ -36,11 +37,9 @@ def test_goal_card_names_status_blocker_package_next_and_result() -> None:
     plain = visible(rendered)
     assert "НУЖНО РЕШЕНИЕ" in plain
     assert "Нужно твоё решение" in plain
-    assert "Пакет: Отдельный вход · в работе" in plain
-    assert "Дальше\nОтветь на вопрос" in plain
-    assert "Результат\nГотовность пока не подтверждена" in plain
-    assert "Вопрос\nНужен ли отдельный вход?" in plain
-    assert "<b>Вопрос</b>" in rendered
+    assert "Ответь на сообщение с вопросом." in plain
+    assert "Нужен ли отдельный вход?" not in plain  # The question has its own reply binding.
+    assert "Пакет:" not in plain
     assert "waiting" not in plain and "owner" not in plain
 
 
@@ -49,9 +48,9 @@ def test_question_notice_binds_the_version() -> None:
     text = visible(
         telegram_markdown_html(render_question("Нужен ли отдельный вход?", 4, goal_id=goal_id))
     )
-    assert "Вопрос\nНужен ли отдельный вход?" in text
-    assert f"/lead_answer {goal_id} 4 <ответ>" in text
-    assert "не возобновляет работу на паузе" in text
+    assert "Нужен ли отдельный вход?" in text
+    assert "Ответь на это сообщение" in text
+    assert goal_id not in text and "/lead_answer" not in text
 
 
 @pytest.mark.parametrize(
@@ -100,8 +99,9 @@ def test_long_goal_does_not_push_out_the_question_or_result():
     card = visible(telegram_markdown_html(render_goal_card(view)))
     assert len(card) < 1200
     assert "КОНЕЦ_ЗАДАНИЯ" not in card and "…" in card
-    assert "Сравнивать только доступные варианты?" in card
-    assert "Результат" in card and "/lead_goal" in card and "/lead_details" in card
+    assert "Ответь на сообщение с вопросом." in card
+    assert "Сравнивать только доступные варианты?" not in card
+    assert "/lead_answer" not in card
     parts = telegram_markdown_parts(render_goal_contract(view))
     assert len(parts) > 1
     assert request in "".join(visible(body) for body, _ in parts)
@@ -164,6 +164,7 @@ def test_lead_answer_is_a_command_and_enable_still_needs_text() -> None:
     assert parse_lead_command("/lead_status") == ("status", "")
     assert parse_lead_command("/lead_goal@bot") == ("goal", "")
     assert parse_lead_command("/lead_details") == ("details", "")
+    assert parse_lead_command("/lead_debug") == ("debug", "")
     assert parse_lead_command("/lead_details unexpected") is None
     assert parse_lead_command("/lead") is None
 
@@ -183,3 +184,74 @@ def test_worker_entrypoint_uses_the_profile_factory() -> None:
     source = inspect.getsource(worker_cli.run)
     assert "build_project_lead_worker" in source
     assert "UnconfiguredLeadModel" not in source
+
+
+def test_owner_text_guard_and_debug_separation():
+    from vuzol.leadership.text import owner_text
+
+    identifiers = ["12345678-1234-1234-1234-123456789012", "a" * 40, "B" * 64]
+    raw = "Проверяю <код> " + " ".join(identifiers) + ". Подожди."
+    cleaned = owner_text(raw)
+    assert all(identifier not in cleaned for identifier in identifiers)
+    assert "Проверяю <код>" in cleaned and "Подожди." in cleaned
+    view = {
+        "request": raw,
+        "lifecycle": "waiting",
+        "waiting_reason": "plan_approval",
+        "goal_id": identifiers[0],
+        "version": 36,
+        "integration_branch": "managed/internal",
+        "scope_revision": 3,
+        "result_commit": identifiers[1],
+        "criteria": [{"id": "raw-criterion", "description": "internal criterion"}],
+        "covered": [],
+        "missing": ["raw-criterion"],
+        "execution": [
+            {
+                "profile": "private-profile",
+                "account": "private-account",
+                "model": "private-model",
+                "task_status": "running",
+            }
+        ],
+    }
+    for renderer in (render_goal_card, render_goal_details):
+        rendered = visible(telegram_markdown_html(renderer(view)))
+        assert all(identifier not in rendered for identifier in identifiers)
+        assert all(
+            value not in rendered
+            for value in (
+                "managed/internal",
+                "private-profile",
+                "private-account",
+                "private-model",
+                "scope_revision",
+                "running",
+                "internal criterion",
+            )
+        )
+    details = visible(telegram_markdown_html(render_goal_details(view)))
+    assert all(
+        label in details
+        for label in ("Цель:", "Сделано:", "Осталось:", "Что мешает:", "Что можно сделать:")
+    )
+    debug = visible(telegram_markdown_html(render_goal_debug(view)))
+    assert identifiers[0] in debug and identifiers[1] in debug
+    assert "managed/internal" in debug and "internal criterion" in debug
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Утверждаете запуск?",
+        "Подтверди план",
+        "Можно начинать?",
+        "План подходит?",
+        "Proceed with the plan?",
+    ],
+)
+def test_plan_approval_wording_is_folded(question):
+    from vuzol.leadership.text import is_plan_approval_question
+
+    assert is_plan_approval_question(question)
+    assert not is_plan_approval_question("Как назвать новый раздел?")

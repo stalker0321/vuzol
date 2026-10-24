@@ -7,17 +7,9 @@ import re
 from collections.abc import Mapping
 from string import punctuation
 
+from vuzol.leadership.text import owner_text, short_owner_text
+
 _ESCAPES = str.maketrans({character: "\\" + character for character in punctuation})
-_PACKAGE_STATES = {
-    "draft": "план подготовлен",
-    "approved": "готов к запуску",
-    "running": "в работе",
-    "paused": "на паузе",
-    "completed": "завершён",
-    "stopped": "остановлен",
-    "failed": "не выполнен",
-    "blocked": "нужно решение",
-}
 _REASONS = {
     "owner": "Нужно твоё решение, чтобы продолжить.",
     "owner_pause": "Ты поставил работу на паузу.",
@@ -35,7 +27,7 @@ _REASONS = {
     "lead_context_limit": "Материалы не помещаются в доступный контекст руководителя.",
     "goal_review_context_limit": "Материалы не помещаются в доступный контекст проверки.",
     "lead_model_unconfigured": "Модель руководителя не подключена.",
-    "lead_profile_unselected": "Нужно выбрать доступную модель руководителя через /model.",
+    "lead_profile_unselected": "Нужно подключить доступную модель руководителя.",
     "lead_model_unavailable": "Обращение к модели не завершилось успешно. Работа не продолжена.",
     "lead_response_invalid": "Модель вернула ответ, который нельзя безопасно применить.",
     "goal_review_invalid": "Независимая проверка не вернула пригодного заключения.",
@@ -62,8 +54,7 @@ def _literal_block(value: object) -> str:
 
 
 def _preview(value: object, limit: int = 110) -> str:
-    text = " ".join(str(value or "").split())
-    return literal_markdown(text if len(text) <= limit else text[: limit - 1].rstrip() + "…")
+    return literal_markdown(short_owner_text(value, limit))
 
 
 def reason_text(reason: object) -> str:
@@ -96,122 +87,125 @@ def owner_answer_text(constraints: object) -> str | None:
 
 
 def render_goal_card(view: Mapping[str, object]) -> str:
-    """Compact ordinary Telegram card. Full authoritative text lives in /lead_goal."""
-    lifecycle = view.get("lifecycle")
-    reason = view.get("waiting_reason")
-    question = view.get("question")
-    confirmed = view.get("completion_confirmed") is True
+    """One live status: current work and the owner's next action."""
+    lifecycle, reason = view.get("lifecycle"), view.get("waiting_reason")
     if lifecycle == "paused":
         heading = "⏸ **НА ПАУЗЕ · Руководитель**"
-        explanation = reason_text(reason or "owner_pause")
-        next_step = (
-            "Нужно новое разрешение владельца; обычное продолжение его не заменяет."
-            if reason == "delegation_revoked"
-            else "Продолжить: /lead_resume.\nНеопределённые изменения сначала требуют проверки."
-        )
+        now = reason_text(reason or "owner_pause")
+        action = "Когда будешь готов, разреши продолжить работу."
     elif lifecycle == "cancelled":
         heading = "⏹ **ОТМЕНЕНО · Руководитель**"
-        explanation = "Работа отменена. Сохранённые результаты не удалены."
-        next_step = "Продолжение этой цели не запланировано."
-    elif lifecycle == "completed" and confirmed:
-        heading = "✅ **ГОТОВО · Руководитель**"
-        explanation = "Независимая проверка подтвердила все критерии результата."
-        next_step = "Цель завершена. Новая работа требует нового поручения."
+        now = "Работа отменена. Сохранённые результаты не удалены."
+        action = "Сейчас от тебя ничего не требуется."
     elif lifecycle == "completed":
-        heading = "🟡 **НУЖНА ПРОВЕРКА · Руководитель**"
-        explanation = (
-            "Цель помечена завершённой, "
-            "но подтверждения всех критериев для текущего результата нет."
+        confirmed = view.get("completion_confirmed") is True
+        heading = (
+            "✅ **ГОТОВО · Руководитель**" if confirmed else "🟡 **НУЖНА ПРОВЕРКА · Руководитель**"
         )
-        next_step = "Проверь сведения о результате: /lead_details."
+        now = (
+            "Независимая проверка подтвердила результат."
+            if confirmed
+            else "Готовность результата пока не подтверждена."
+        )
+        action = "Можно дать новое поручение." if confirmed else "Нужно проверить результат."
+    elif reason == "plan_approval":
+        heading = "🟡 **ПЛАН ГОТОВ · Руководитель**"
+        now = "План подготовлен. Работа ещё не запущена."
+        action = "Выбери действие под карточкой плана."
     elif lifecycle == "waiting" and reason != "wait_for":
         heading = (
             "🔴 **ОШИБКА · Руководитель**"
             if reason in _ERROR_REASONS
             else "🟡 **НУЖНО РЕШЕНИЕ · Руководитель**"
         )
-        explanation = reason_text(reason)
-        next_step = (
-            "Ответь на вопрос командой выше." if question else "Проверь подробности: /lead_details."
+        now = reason_text(reason)
+        action = (
+            "Ответь на сообщение с вопросом." if view.get("question") else "Уточни следующий шаг."
         )
     elif view.get("current_package_status") == "paused":
-        heading = "🟡 **ПАКЕТ НА ПАУЗЕ · Руководитель**"
-        explanation = "Текущий пакет остановлен. Готовность цели пока не подтверждена."
-        next_step = "Проверь причину остановки: /lead_details."
+        heading = "🟡 **РАБОТА ПРИОСТАНОВЛЕНА · Руководитель**"
+        now = "Текущая задача остановлена. Готовность цели пока не подтверждена."
+        action = "Нужно уточнить следующий шаг."
     else:
         heading = "⏳ **В РАБОТЕ · Руководитель**"
-        package_status = view.get("current_package_status")
-        explanation = (
-            "Выполняется текущий пакет работы."
-            if package_status == "running"
-            else "Руководитель проверяет результат и выбирает следующий шаг."
-            if package_status in {"completed", "failed", "blocked", "stopped"}
-            else "Руководитель готовит следующий шаг."
+        now = (
+            "Выполняю задачи по плану."
+            if view.get("current_package_status") == "running"
+            else "Проверяю результат и выбираю следующий шаг."
+            if view.get("current_package_status") in {"completed", "failed", "blocked", "stopped"}
+            else "Готовлю план работы."
         )
-        next_step = "Сейчас от тебя ничего не требуется."
-
-    rows = [heading, f"**{_preview(view.get('request')) or 'Текущая цель'}**", explanation]
-    execution = view.get("execution")
-    if isinstance(execution, list) and execution:
-        lines = []
-        for item in execution[:4]:
-            if not isinstance(item, dict):
-                continue
-            state = item.get("task_status")
-            icon = "⏸" if state == "paused" else "🔴" if state == "failed" else "🔹"
-            detail = f"{icon} {state} · {item.get('step') or 'ожидание следующего шага'}"
-            if item.get("profile"):
-                detail += f" · {item['profile']}"
-                if item.get("account") and item["account"] != item["profile"]:
-                    detail += f" · аккаунт {item['account']}"
-                detail += f" · {item.get('model') or 'модель неизвестна'}"
-            if item.get("elapsed_seconds") is not None:
-                detail += f" · {item['elapsed_seconds']} с"
-            if item.get("runtime_state_known") is False:
-                detail += " · исход runtime неизвестен, нужна сверка"
-            lines.append(literal_markdown(detail))
-        if lines:
-            rows.append("**Исполнение · снимок состояния**\n" + "\n".join(lines))
-    if isinstance(question, str) and question.strip():
-        rows.append("**Вопрос**\n" + literal_markdown(question.strip()))
-        version = view.get("question_version")
-        if version is not None and view.get("goal_id"):
-            rows.append(_answer_instruction(str(view["goal_id"]), version))
-    result = "Готовность пока не подтверждена."
-    covered, missing = view.get("covered"), view.get("missing")
-    if isinstance(covered, list) and isinstance(missing, list) and covered:
-        result = f"Подтверждено критериев: {len(covered)} из {len(covered) + len(missing)}."
-    commit = view.get("result_commit")
-    if isinstance(commit, str) and commit:
-        result += f"\nКоммит: {literal_markdown(commit[:12])}"
-    rows.append("**Результат**\n" + result)
-    rows.append("**Дальше**\n" + next_step)
-    if view.get("owner_answer"):
-        rows.append("*Твой ответ сохранён. Полный текст — в подробностях.*")
-    if view.get("current_package_status"):
-        status = _PACKAGE_STATES.get(str(view["current_package_status"]), "состояние уточняется")
-        title = _preview(view.get("package_title"), 80)
-        rows.append(f"*Пакет: {title + ' · ' if title else ''}{status}.*")
-    rows.append("/lead_goal — полное задание\n/lead_details — подробности")
-    return "\n\n".join(rows)
+        action = "Сейчас от тебя ничего не требуется."
+    return "\n\n".join((heading, _preview(view.get("request")) or "Текущая цель", now, action))
 
 
-def _answer_instruction(goal_id: str, version: object) -> str:
-    command = f"/lead_answer {goal_id} {version} <ответ>"
-    return "Замени «<ответ>» своим текстом:\n\n" + _literal_block(command)
-
-
-def render_question(question: str, version: int, *, goal_id: str = "") -> str:
-    """Owner-facing question bound to the goal version that asked it."""
-
+def render_question(
+    question: str, version: int, *, goal_id: str = "", has_options: bool = False
+) -> str:
+    """Identity/version live in the delivery binding, never in the visible text."""
     return "\n\n".join(
         (
-            "🟡 **НУЖНО РЕШЕНИЕ · Руководитель**",
-            "**Вопрос**\n" + literal_markdown(question.strip()),
-            _answer_instruction(goal_id, version),
-            "*Ответ относится именно к этому вопросу. Он не возобновляет работу на паузе.*",
+            "🟡 **ВОПРОС · Руководитель**",
+            literal_markdown(owner_text(question)),
+            "Ответь на это сообщение или выбери кнопку ниже."
+            if has_options
+            else "Ответь на это сообщение.",
         )
     )
+
+
+def render_goal_details(view: Mapping[str, object]) -> str:
+    covered, missing = view.get("covered"), view.get("missing")
+    done = len(covered) if isinstance(covered, list) else 0
+    left = len(missing) if isinstance(missing, list) else 0
+    reason = view.get("waiting_reason")
+    blocker = (
+        "Нужно одобрить план кнопкой под его карточкой."
+        if reason == "plan_approval"
+        else owner_text(view["question"])
+        if view.get("question")
+        else reason_text(reason)
+        if reason and reason != "wait_for"
+        else "Сейчас препятствий нет."
+    )
+    rows = [
+        "**ПОДРОБНОСТИ · Руководитель**",
+        "**Цель:** " + _preview(view.get("request"), 240),
+        f"**Сделано:** подтверждено условий готовности — {done}.",
+        f"**Осталось:** проверить условий — {left}."
+        if left
+        else "**Осталось:** подтвердить итоговый результат."
+        if not view.get("completion_confirmed")
+        else "**Осталось:** работа завершена.",
+        "**Что мешает:** " + literal_markdown(blocker),
+        "**Что можно сделать:** "
+        + (
+            "выбрать действие под карточкой плана."
+            if reason == "plan_approval"
+            else "ответить на сообщение с вопросом."
+            if view.get("question")
+            else "разрешить продолжение работы."
+            if view.get("lifecycle") == "paused"
+            else "написать руководителю, если нужно изменить задачу."
+        ),
+    ]
+    progress = view.get("progress")
+    if isinstance(progress, list) and progress:
+        done_items = [item for item in progress if item.get("status") == "completed"]
+        left_items = [item for item in progress if item.get("status") != "completed"]
+        rows[2] = "**Сделано:** " + (
+            "; ".join(_preview(item["summary"], 240) for item in done_items)
+            or "пока нет завершённых задач."
+        )
+        rows[3] = "**Осталось:** " + (
+            "; ".join(_preview(item["summary"], 240) for item in left_items)
+            or "проверить итоговый результат."
+        )
+    if view.get("owner_answer"):
+        rows.append(
+            "**Твой последний ответ**\n\n" + _literal_block(owner_text(view["owner_answer"]))
+        )
+    return "\n\n".join(rows)
 
 
 def render_goal_contract(view: Mapping[str, object]) -> str:
@@ -233,8 +227,8 @@ def render_goal_contract(view: Mapping[str, object]) -> str:
     return "\n\n".join(rows)
 
 
-def render_goal_details(view: Mapping[str, object]) -> str:
-    rows = [render_goal_card(view), "**Технические подробности**"]
+def render_goal_debug(view: Mapping[str, object]) -> str:
+    rows = ["**Технические подробности**"]
     for label, key in (
         ("Цель", "goal_id"),
         ("Версия", "version"),

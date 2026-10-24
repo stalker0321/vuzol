@@ -36,6 +36,7 @@ from vuzol.storage.models import (
     Artifact,
     ConversationTurn,
     Interpretation,
+    MaterializationLink,
     ProjectDiscussionSession,
     ProjectNamingRequest,
     ProjectProvisioning,
@@ -57,6 +58,7 @@ from vuzol.storage.types import (
     ArtifactStorageState,
     ConversationTurnRole,
     ConversationTurnSource,
+    DeliveryStatus,
     TaskStatus,
 )
 from vuzol.telegram.formatting import telegram_markdown_parts, telegram_rich_html
@@ -338,12 +340,61 @@ async def prepare_delivery(
             if type(part_index) is not int or not 0 <= part_index < len(parts):
                 raise PermanentDeliveryError("chat_notice_part_invalid")
             html_body, fallback = parts[part_index]
+        projection_role = item.payload.get("projection_role")
+        link = None
+        notice_revision = int(item.payload.get("revision", 0))
+        if projection_role and projection_role.startswith("ls:"):
+            # Earlier versions must finish before another worker edits/sends this projection.
+            earlier = await session.scalar(
+                select(TransactionalOutbox)
+                .where(
+                    TransactionalOutbox.destination == "telegram",
+                    TransactionalOutbox.payload["projection_role"].astext == projection_role,
+                    TransactionalOutbox.payload["chat_id"].astext == str(chat_id),
+                    TransactionalOutbox.payload["message_thread_id"].astext == str(thread_id),
+                    TransactionalOutbox.payload["revision"].as_integer() < notice_revision,
+                    TransactionalOutbox.status.in_(
+                        (
+                            DeliveryStatus.PENDING,
+                            DeliveryStatus.LEASED,
+                            DeliveryStatus.AMBIGUOUS,
+                        )
+                    ),
+                )
+                .limit(1)
+            )
+            if earlier is not None:
+                if earlier.status == DeliveryStatus.AMBIGUOUS:
+                    raise PermanentDeliveryError("lead_projection_ambiguous")
+                # Backpressure must not spend the retry budget while another sender is working.
+                raise RetryAfter(1)
+            link = await session.scalar(
+                select(TelegramMessageLink)
+                .where(
+                    TelegramMessageLink.chat_id == chat_id,
+                    TelegramMessageLink.message_thread_id == thread_id,
+                    TelegramMessageLink.message_role == projection_role,
+                )
+                .order_by(TelegramMessageLink.projection_revision.desc())
+                .limit(1)
+            )
+            if link is not None and link.projection_revision >= notice_revision:
+                return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
         return PreparedDelivery(
-            DeliveryAction.SEND_HELP,
+            (DeliveryAction.EDIT_STATUS if link else DeliveryAction.SEND_STATUS)
+            if projection_role
+            else DeliveryAction.SEND_HELP,
             chat_id=chat_id,
             thread_id=thread_id,
             html=html_body,
-            message_role=str(item.payload["role"]),
+            message_id=link.message_id if link else None,
+            link_id=link.id if link else None,
+            revision=notice_revision,
+            callback_buttons=tuple(
+                tuple((str(label), str(data)) for label, data in row)
+                for row in item.payload.get("callback_buttons", ())
+            ),
+            message_role=projection_role or str(item.payload["role"]),
             fallback_html=fallback,
             discussion_parts=parts,
             discussion_part_index=part_index,
@@ -495,6 +546,18 @@ async def prepare_delivery(
     projection_task = await session.get(Task, task_id) if task_id is not None else None
     if projection_task is not None and projection_task.task_type == "discussion_agent_internal":
         return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
+    if (
+        projection_task is not None
+        and role == "intake_ack"
+        and projection_task.status != TaskStatus.WAITING_APPROVAL
+    ):
+        managed_goal_id = await session.scalar(
+            select(WorkPackage.managed_goal_id)
+            .join(MaterializationLink, MaterializationLink.work_package_id == WorkPackage.id)
+            .where(MaterializationLink.task_id == projection_task.id)
+        )
+        if managed_goal_id is not None:
+            return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
     if role == "semantic_clarification":
         assert intake is not None
         raw_id = item.payload.get("interpretation_id")
@@ -626,6 +689,11 @@ async def _prepare_work_package_projection(
     }.get(item.operation_type)
     if role is None:
         raise PermanentDeliveryError("invalid_work_package_projection_operation")
+    if role == WORK_PACKAGE_STATUS_ROLE:
+        package = await session.get(WorkPackage, package_id)
+        if package is not None and package.managed_goal_id is not None:
+            # The goal owns the live status. Its plan remains the decision card.
+            return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
     if item.operation_type == "repost_plan":
         # A finished package must be visible where the user is looking, not in
         # an edited card far up the topic history. Send a fresh plan card and
@@ -800,6 +868,17 @@ async def _prepare_project_topic_status(
         )
     )
     if link is not None and link.projection_revision >= revision:
+        return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
+    from vuzol.leadership.persistence import LIVE_GOAL_LIFECYCLES, ManagedGoal
+
+    if await session.scalar(
+        select(ManagedGoal.id)
+        .where(
+            ManagedGoal.project_id == project_id,
+            ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
+        )
+        .limit(1)
+    ):
         return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
     preference = await load_preference(session, project_id)
     worker = (
@@ -1600,6 +1679,7 @@ class TelegramDeliveryService:
                     prepared.message_role
                     not in {PROJECT_STATUS_DASHBOARD_ROLE, WORK_PACKAGE_STATUS_ROLE}
                     and prepared.work_package_id is None
+                    and not (prepared.message_role or "").startswith(("ls:", "lq:"))
                 ):
                     assert prepared.task_id is not None
                 session.add(

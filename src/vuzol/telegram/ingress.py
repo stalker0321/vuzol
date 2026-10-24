@@ -191,6 +191,23 @@ class TelegramIngressService:
         except (TelegramPolicyError, RegistryError) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 
+        if topic.project_id and update.reply_to_message_id and update.text:
+            from vuzol.leadership.telegram_commands import answer_question_message
+
+            answered = await answer_question_message(
+                session_factory=self._session_factory,
+                settings=settings,
+                project_id=topic.project_id,
+                chat_id=update.chat_id,
+                thread_id=update.message_thread_id,
+                message_id=update.reply_to_message_id,
+                user_id=update.user_id,
+                key=f"telegram:lead-reply:{update.bot_id}:{update.update_id}",
+                answer=update.text,
+            )
+            if answered is not None:
+                return answered
+
         if settings.project_lead.enabled and topic.kind is TopicKind.PROJECT:
             routed = await self._accept_live_lead_message(update, topic)
             if routed is not None:
@@ -582,7 +599,23 @@ class TelegramIngressService:
                 if mapping is not None and mapping.conversation_mode_message_id is not None
                 else "lead"
             )
-            if mode != "lead":
+            replied_goal_id = None
+            if update.reply_to_message_id is not None:
+                from vuzol.storage.models import TelegramMessageLink, WorkPackage
+
+                replied_goal_id = await uow.session.scalar(
+                    select(WorkPackage.managed_goal_id)
+                    .join(
+                        TelegramMessageLink, TelegramMessageLink.work_package_id == WorkPackage.id
+                    )
+                    .where(
+                        TelegramMessageLink.chat_id == update.chat_id,
+                        TelegramMessageLink.message_thread_id == update.message_thread_id,
+                        TelegramMessageLink.message_id == update.reply_to_message_id,
+                        WorkPackage.project_id == topic.project_id,
+                    )
+                )
+            if mode != "lead" and replied_goal_id is None:
                 return None
             goal = await uow.session.scalar(
                 select(ManagedGoal)
@@ -590,6 +623,7 @@ class TelegramIngressService:
                     ManagedGoal.project_id == topic.project_id,
                     ManagedGoal.owner_user_id == update.user_id,
                     ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
+                    *((ManagedGoal.id == replied_goal_id,) if replied_goal_id else ()),
                 )
                 .with_for_update()
             )
@@ -627,7 +661,13 @@ class TelegramIngressService:
             )
             intake_id = await uow.telegram_intake.add(intake)
             if voice is None:
-                await enqueue_owner_message(uow, goal=goal, intake=intake, raw=update.text or "")
+                await enqueue_owner_message(
+                    uow,
+                    goal=goal,
+                    intake=intake,
+                    raw=update.text or "",
+                    reply_to_message_id=update.reply_to_message_id,
+                )
             else:
                 await uow.outbox.enqueue(
                     destination="telegram_file",

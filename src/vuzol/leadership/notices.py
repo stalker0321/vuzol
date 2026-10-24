@@ -27,7 +27,7 @@ _REASONS = {
     "package_still_live": "текущий план ещё выполняется или стоит на паузе",
     "task_spec_stale": "пункт плана или версия цели изменились",
     "result_revision_stale": "результат относится к другой версии задания или плана",
-    "result_commit_stale": "commit результата не совпадает с проверенным",
+    "result_commit_stale": "Сохранённый результат не совпадает с проверенным",
     "result_not_ready": "задача ещё не готова к приёмке",
     "validation_or_repair_pending": "проверки или исправления задачи ещё не закончены",
     "feature_disabled": "управление задачами через лида отключено",
@@ -76,11 +76,6 @@ async def command_notice(
                 "Уточнение к моему ответу: изменение цели сохранено, "
                 f"но ещё не применено — {reason}."
             )
-    elif receipt.status == "waiting":
-        text = (
-            "Уточнение к моему ответу: выполнение ожидает ответа владельца "
-            "или завершения текущей работы."
-        )
     if text:
         await enqueue_chat_notice(
             session,
@@ -151,12 +146,12 @@ async def planner_failure_notice(
         "planner_quota_exhausted": "исчерпана квота модели",
         "planner_rate_limited": "достигнут лимит запросов модели",
         "planner_profile_unselected": "профиль планировщика недоступен",
-        "planner_head_changed": "исходный commit изменился во время планирования",
+        "planner_head_changed": "исходный код изменился во время планирования",
         "planner_scope_changed": "цель изменилась во время планирования",
         "planner_invalid_output": "модель вернула некорректный план",
         "planner_output_truncated": "ответ модели был обрезан",
         "current_task_unfinished": "текущая задача ещё не завершена",
-        "source_repository_unavailable": "не удалось безопасно прочитать исходный commit",
+        "source_repository_unavailable": "не удалось безопасно прочитать исходный код",
         "planner_context_limit": "контекст превышает лимит планировщика",
         "planner_revision_changed": "ревизия плана изменилась во время планирования",
         "planner_invalid_structured_output": "модель вернула некорректный ответ",
@@ -168,5 +163,5 @@ async def planner_failure_notice(
         chat_id=topic.chat_id,
         thread_id=topic.message_thread_id,
         key=f"{key}:notice",
-        text=f"План не подготовлен: {detail} ({reason}). Лид может повторить запрос позже.",
+        text=f"План не подготовлен: {detail}. Руководитель может повторить запрос позже.",
     )

@@ -102,7 +102,7 @@ async def test_sequencer_is_one_ahead_idempotent_and_completes(postgres_dsn: str
     assert first.ordinal == 1 and first.task_id is not None
     async with factory() as session:
         status_card = await build_work_package_status_card(session, created.package_id)
-    assert status_card.html.startswith("<b>Working | Auto</b>\n1/2 · Implement step 1")
+    assert status_card.html.startswith("<b>В работе</b>\n1/2 · Implement step 1")  # noqa: RUF001
 
     async with factory.begin() as session:
         task = await session.get(Task, first.task_id, with_for_update=True)
@@ -209,7 +209,7 @@ async def test_final_item_approval_is_rendered_as_package_result(
 
     async with factory() as session:
         card = await build_work_package_action_card(session, created.package_id)
-    assert card.html.startswith("<b>Plan completed · approval required</b>")
+    assert card.html.startswith("<b>План выполнен · нужно принять результат</b>")
     assert "Ready |" not in card.html
     assert "✅ 1. Implement step 1" in card.html
     assert "✅ 2. Implement step 2" in card.html

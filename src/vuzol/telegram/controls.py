@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config import RuntimeConfiguration
+from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.discussion.application import (
     AuthoritativeControlCommand,
     PackageControlIngress,
@@ -175,6 +175,49 @@ class TelegramControlService:
                 chat_id=update.chat_id,
                 user_id=update.user_id,
             )
+            if update.action_kind in {"lead_resume", "lead_cancel"}:
+                from vuzol.leadership.telegram_commands import apply_goal_button
+
+                if update.message_id is None or update.message_thread_id is None:
+                    raise TelegramPolicyError("control_binding_missing")
+                topic = self._runtime.registries.topics.resolve(
+                    update.chat_id, update.message_thread_id
+                )
+                if not topic.enabled or topic.project_id is None:
+                    raise TelegramPolicyError("outside_scope")
+                return await apply_goal_button(
+                    session_factory=self._session_factory,
+                    settings=self._runtime.settings,
+                    project_id=topic.project_id,
+                    update=update,
+                )
+            if update.action_kind == "lead_answer":
+                from vuzol.leadership.telegram_commands import answer_question_message
+
+                if update.message_id is None or update.message_thread_id is None:
+                    raise TelegramPolicyError("control_binding_missing")
+                topic = self._runtime.registries.topics.resolve(
+                    update.chat_id, update.message_thread_id
+                )
+                if not topic.enabled or topic.project_id is None:
+                    raise TelegramPolicyError("outside_scope")
+                if update.question_version is None or update.answer_option is None:
+                    raise TelegramPolicyError("answer_required")
+                result = await answer_question_message(
+                    session_factory=self._session_factory,
+                    settings=self._runtime.settings,
+                    project_id=topic.project_id,
+                    chat_id=update.chat_id,
+                    thread_id=update.message_thread_id,
+                    message_id=update.message_id,
+                    user_id=update.user_id,
+                    key=f"telegram:lead-answer:{update.callback_query_id}",
+                    question_version=update.question_version,
+                    option=update.answer_option,
+                )
+                return result or IngressResult(
+                    status=IngressStatus.REJECTED, reason="control_binding_missing"
+                )
             naming_action = update.action_kind.startswith("project_name_")
             model_action = update.action_kind.startswith("project_model_")
             secret_action = update.action_kind == "secret_cancel"
@@ -188,7 +231,7 @@ class TelegramControlService:
                 raise TelegramPolicyError("control action requires a persisted target")
             if update.action_kind in {"approve", "redo", "reject"} and update.approval_id is None:
                 raise TelegramPolicyError("approval action requires approval_id")
-        except TelegramPolicyError as error:
+        except (TelegramPolicyError, RegistryError) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 
         payload_hash = hashlib.sha256(update.model_dump_json().encode()).hexdigest()
@@ -608,7 +651,15 @@ class TelegramControlService:
                     await service.close_edit_session(
                         edit_session_id=edit_id, user_id=update.user_id
                     )
-                operation = "continue_discussion"
+                if package.managed_goal_id is not None:
+                    from vuzol.leadership.persistence import ManagedGoal
+
+                    goal = await uow.session.get(ManagedGoal, package.managed_goal_id)
+                    if goal is None or goal.owner_user_id != update.user_id:
+                        raise DomainError("outside_scope")
+                    operation = "change_plan"
+                else:
+                    operation = "continue_discussion"
             elif callback.kind is WorkPackageCallbackKind.REQUEST_REPLAN:
                 await service.request_replan(
                     package_id=callback.package_id,

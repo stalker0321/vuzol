@@ -147,6 +147,7 @@ def parse_lead_command(text: str | None) -> tuple[str, str] | None:
         "/lead_status": "status",
         "/lead_goal": "goal",
         "/lead_details": "details",
+        "/lead_debug": "debug",
     }
     kind = kinds.get(command)
     if kind is None or len(parts) != 1:
@@ -180,7 +181,8 @@ def build_help_card(kind: TopicKind) -> str:
                 "<code>/plan</code> — план.",
                 "<code>/lead_status</code> — статус цели.",
                 "<code>/lead_goal</code> — задание.",
-                "<code>/lead_details</code> — результат.",
+                "<code>/lead_details</code> — ход работы.",
+                "<code>/lead_debug</code> — диагностика.",
                 "<code>/source</code> — внешние источники.",
             )
         )

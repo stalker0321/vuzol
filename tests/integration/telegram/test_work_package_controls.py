@@ -359,7 +359,9 @@ async def test_non_mutating_detail_edit_continue_and_clear_lifecycle(
     edited = await press(61, "wp-edit-1", 802, edit_data)
     assert edited.status is IngressStatus.HANDLED and edited.reason == "open_edit"
 
-    discuss_data = next(data for row in plan_keyboard for label, data in row if label == "Обсудить")
+    discuss_data = next(
+        data for row in plan_keyboard for label, data in row if label == "✏️ Изменить"
+    )
     continued = await press(62, "wp-discuss-1", 801, discuss_data)
     assert continued.status is IngressStatus.HANDLED and continued.reason == "continue_discussion"
     ingress = TelegramIngressService(runtime, factory, overrides)

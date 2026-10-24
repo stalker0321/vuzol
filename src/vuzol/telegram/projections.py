@@ -1446,6 +1446,9 @@ async def enqueue_chat_notice(
     key: str,
     text: str,
     markdown: bool = False,
+    projection_role: str | None = None,
+    revision: int = 0,
+    callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
 ) -> None:
     """Durable notice; opt-in Markdown uses the existing safe, lossless renderer."""
 
@@ -1457,6 +1460,10 @@ async def enqueue_chat_notice(
         select(TransactionalOutbox.id).where(TransactionalOutbox.idempotency_key == key)
     ):
         return
+    if key.startswith("lead:") and not key.startswith("lead:debug:"):
+        from vuzol.leadership.text import owner_text
+
+        text = owner_text(text)
     parts = telegram_markdown_parts(text) if markdown else ()
     session.add(
         TransactionalOutbox(
@@ -1467,6 +1474,15 @@ async def enqueue_chat_notice(
             idempotency_key=key,
             payload={
                 "role": "chat_notice",
+                **(
+                    {
+                        "projection_role": projection_role,
+                        "revision": revision,
+                        "callback_buttons": callback_buttons,
+                    }
+                    if projection_role
+                    else {}
+                ),
                 "chat_id": chat_id,
                 "message_thread_id": thread_id,
                 "html": parts[0][0] if parts else telegram_html(text),

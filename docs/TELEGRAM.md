@@ -31,21 +31,31 @@ not an in-memory restart flag.
 
 ## Project-lead cards
 
-The lead's ordinary status card shows a short request preview, a human-readable
-state/reason, any open owner question, the recorded result and the next action.
-The complete request is not repeated on every state transition. These owner commands
-read the current project goal through the existing authorized `get_goal` boundary:
+Each goal has one live status message, edited in place. It says what is happening
+and whether the owner needs to act; profile, account and runtime details are omitted.
+Questions and terminal outcomes get separate messages. Plan approval is the plan card
+itself: full item summaries, short scope/checks, flagged risks, and **✅ Запускай**,
+**✏️ Изменить**, **❌ Отменить**. The lead does not repeat the approval question.
+Change prompts the owner to reply to that card; the lead receives the reply together
+with the card's saved plan revision. Only the owner approval button authorizes the plan.
 
-- `/lead_status`: compact state card;
-- `/lead_goal`: full original request, scope and acceptance criteria, preserving
-  source indentation and embedded markup as literal text;
-- `/lead_details`: state plus goal/version, package, integration branch/commit,
-  work limits, criterion coverage and the last accepted owner answer.
+Other questions accept a Telegram reply to their message or a short inline choice.
+The delivered message binds the answer to the exact question version, even after
+pausing; old questions cannot answer newer ones. `/lead_answer <goal-id> <version> <answer>`
+remains a fallback. Plain text without a reply in lead mode is an owner message.
+
+These reads use the existing authorized `get_goal` boundary:
+
+- `/lead_status`: refresh the live state card;
+- `/lead_goal`: full original request, scope and acceptance criteria;
+- `/lead_details`: goal, completed work, remaining work, blockers and owner actions;
+- `/lead_debug`: IDs, versions, branch/commit, limits and raw criterion coverage.
 
 Reads do not start/resume work or change the goal version. They remain available to
 the owner when the lead feature is disabled. An allowed Telegram user is not
-automatically the owner of every goal. Questions retain the exact goal ID and
-question-version reply command; answering is not implicit approval or resume.
+automatically the owner of every goal. Answers never approve a plan or resume a pause.
+Owner-facing lead replies, questions and notices strip UUIDs and full 40/64-hex hashes;
+identifiers remain available in debug output and server-side callback bindings.
 
 `ГОТОВО` is green only for a completed goal whose current recorded result passes
 the existing evidence assessment. A commit, a completed package or a historical

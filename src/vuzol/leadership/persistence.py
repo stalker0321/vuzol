@@ -250,6 +250,17 @@ class LeadershipInference(TimestampMixin, Base):
     )
 
 
+def current_request(goal: ManagedGoal) -> str:
+    """What the goal asks for now: after an owner amendment the amended scope is the goal
+    and the first wording is history (live pilot 2026-10-24: lead, reviewer and cards
+    kept working on the superseded request)."""
+    return goal.scope_text if goal.scope_revision > 1 else goal.original_request
+
+
+def superseded_request(goal: ManagedGoal) -> str | None:
+    return goal.original_request if goal.scope_revision > 1 else None
+
+
 class ManagedGoalEvidence(IdentityMixin, Base):
     """Checker verdict for one criterion at one scope revision and result commit.
 

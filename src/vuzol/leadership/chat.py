@@ -14,7 +14,12 @@ from vuzol.discussion.work_context import ChatWorkContext
 from vuzol.interpretation.domain import TaskDraft
 from vuzol.leadership.commands import LeadCommand
 from vuzol.leadership.feedback import result_context
-from vuzol.leadership.persistence import CONTRACT_VERSION, ManagedGoal
+from vuzol.leadership.persistence import (
+    CONTRACT_VERSION,
+    ManagedGoal,
+    current_request,
+    superseded_request,
+)
 from vuzol.leadership.service import LeadershipCommandService
 from vuzol.storage.models import TelegramIntakeMessage, WorkPackage
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -137,7 +142,8 @@ async def conversation_goal_context(
             "goal_id": str(goal.id),
             "version": goal.version,
             "scope_revision": goal.scope_revision,
-            "request": goal.original_request,
+            "request": current_request(goal),
+            "superseded_request": superseded_request(goal),
             "scope": goal.scope_text,
             "lifecycle": goal.lifecycle,
             "waiting_reason": goal.waiting_reason,

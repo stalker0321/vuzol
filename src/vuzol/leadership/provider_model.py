@@ -23,7 +23,7 @@ from vuzol.leadership.persistence import POLICY_REVISION
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v8"
+PROMPT_REVISION = "project-lead-prompt.v9"
 LEDGER_PURPOSE = "project_lead"
 _COMMANDS = (
     "amend_goal",
@@ -356,7 +356,15 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "A wait, question, amendment, read, pause, cancel or completion must be last.",
         f"package_id: {snapshot.current_package_id or 'none'}",
         f"integration_head: {snapshot.integration_head_commit or 'none'}",
-        f"request: {snapshot.original_request}",
+        f"request: {snapshot.request}",
+        *(
+            (
+                f"superseded_request (owner replaced it, never work on it): "
+                f"{snapshot.superseded_request}",
+            )
+            if snapshot.superseded_request
+            else ()
+        ),
         f"scope: {snapshot.scope_text}",
         f"lifecycle: {snapshot.lifecycle}",
         f"package: {snapshot.current_package_status or 'none'}",

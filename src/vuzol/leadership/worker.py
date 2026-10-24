@@ -37,6 +37,8 @@ from vuzol.leadership.persistence import (
     LeadershipCommandReceipt,
     LeadershipTurn,
     ManagedGoal,
+    current_request,
+    superseded_request,
 )
 from vuzol.leadership.planning import PLAN_EVENTS, publish_outcome
 from vuzol.leadership.rules import delegation_is_expired
@@ -479,7 +481,8 @@ class ProjectLeadWorker:
                 current_package_id=None if package is None else str(package.id),
                 current_package_status=status,
                 integration_head_commit=head,
-                original_request=goal.original_request,
+                request=current_request(goal),
+                superseded_request=superseded_request(goal),
                 scope_text=goal.scope_text,
                 waiting_reason=goal.waiting_reason,
                 completed_package_count=int(completed or 0),

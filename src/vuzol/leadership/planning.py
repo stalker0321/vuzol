@@ -33,6 +33,8 @@ from vuzol.leadership.persistence import (
     LeadershipInference,
     LeadershipTurn,
     ManagedGoal,
+    current_request,
+    superseded_request,
 )
 from vuzol.leadership.provider_model import (
     _Payload,
@@ -53,7 +55,7 @@ from vuzol.storage.models import (
 from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, DeliveryStatus, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
-PROMPT_REVISION = "project-planner.v2"
+PROMPT_REVISION = "project-planner.v3"
 PLAN_EVENTS = {"plan_requested", "plan_ready", "plan_failed", "planning_requested"}
 
 
@@ -242,7 +244,8 @@ async def generate_plan(
                     "source_repo_commit": commit,
                     "scope_revision": goal.scope_revision,
                     "scope": goal.scope_text,
-                    "original_request": goal.original_request,
+                    "request_now": current_request(goal),
+                    "superseded_request": superseded_request(goal),
                     "criteria": goal.criteria,
                     "constraints": goal.constraints,
                     "request": event["request"],

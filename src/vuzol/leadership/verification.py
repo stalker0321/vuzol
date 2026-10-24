@@ -22,7 +22,12 @@ from vuzol.leadership.evidence import (
 from vuzol.leadership.fencing import TurnClaim, claim_current
 from vuzol.leadership.inference import invoke
 from vuzol.leadership.model import LeadModelUnavailable
-from vuzol.leadership.persistence import ManagedGoal, ManagedGoalEvidence
+from vuzol.leadership.persistence import (
+    ManagedGoal,
+    ManagedGoalEvidence,
+    current_request,
+    superseded_request,
+)
 from vuzol.leadership.provider_model import strict_response_schema
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
@@ -47,12 +52,11 @@ class GoalVerdict(BaseModel):
 def review_body(
     goal: ManagedGoal, head: str, files: dict[str, object], validation: object
 ) -> dict[str, object]:
-    amended = goal.scope_revision > 1
+    superseded = superseded_request(goal)
     return {
-        # After an owner amendment the goal is the amended scope and criteria;
-        # judging the original wording made every amended goal fail review.
-        "request": goal.scope_text if amended else goal.original_request,
-        **({"original_request_superseded": goal.original_request} if amended else {}),
+        # Judging the original wording made every amended goal fail review.
+        "request": current_request(goal),
+        **({"original_request_superseded": superseded} if superseded else {}),
         "scope": goal.scope_text,
         "scope_revision": goal.scope_revision,
         "criteria": goal.criteria,
@@ -127,8 +131,7 @@ class GoalVerifier:
             "Judge every criterion including constraints; do not waive missing evidence. "
             "The goal is request, scope and criteria at scope_revision. "
             "original_request_superseded, when present, is history the owner replaced; "
-            "never judge against it.\n"
-            + json.dumps(body, ensure_ascii=False)
+            "never judge against it.\n" + json.dumps(body, ensure_ascii=False)
         )
         input_tokens = (len(prompt.encode()) + 2) // 3 + 1500
         output_tokens = min(

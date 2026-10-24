@@ -69,16 +69,28 @@ def test_cli_conversation_does_not_require_architecture(
                 mapping = (await session.scalars(select(TopicMapping))).one()
                 assert mapping.conversation_mode == mode
                 assert mapping.conversation_mode_message_id == 1101
-                item = await session.scalar(
-                    select(TransactionalOutbox).where(
-                        TransactionalOutbox.destination == "project_lead"
+                if mode == "think":
+                    # /think keeps its own discussion model; the lead never hears it.
+                    item = await session.scalar(
+                        select(TransactionalOutbox).where(
+                            TransactionalOutbox.destination == "discussion_classify"
+                        )
                     )
-                )
-                assert item.payload["mode"] == mode
-                assert item.payload["wakeup_kind"] == "owner_message"
-                assert "conversation_route" not in item.payload
+                    assert "conversation_route_error" not in item.payload
+                    route = item.payload["conversation_route"]
+                    assert route["assignment"]["profile_id"] == profile_id
+                    assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
+                else:
+                    item = await session.scalar(
+                        select(TransactionalOutbox).where(
+                            TransactionalOutbox.destination == "project_lead"
+                        )
+                    )
+                    assert item.payload["mode"] == mode
+                    assert item.payload["wakeup_kind"] == "owner_message"
+                    assert "conversation_route" not in item.payload
+                    assert (await session.scalar(select(ManagedGoal))).lifecycle == "draft"
                 assert await session.scalar(select(func.count()).select_from(Task)) == 0
-                assert (await session.scalar(select(ManagedGoal))).lifecycle == "draft"
         finally:
             await engine.dispose()
 

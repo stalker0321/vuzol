@@ -27,7 +27,8 @@ from vuzol.telegram.projections import FakeTelegramClient
 pytestmark = pytest.mark.postgresql
 
 
-@pytest.mark.parametrize("mode", ["lead", "think"])
+# /think talks to its own discussion model; this covers the lead entrypoint.
+@pytest.mark.parametrize("mode", ["lead"])
 @pytest.mark.parametrize(
     "model,effort",
     [

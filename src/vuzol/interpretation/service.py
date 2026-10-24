@@ -527,7 +527,13 @@ class InterpretationPipeline:
             raise DocumentError("document_parser_limit") from None
         if prepared is None:
             return
-        if self._runtime.settings.project_lead.enabled:
+        async with self._factory() as session:
+            routed = await session.get(TransactionalOutbox, token.item_id)
+            assert routed is not None
+            route_mode = (routed.payload.get("conversation_route") or {}).get("conversation_mode")
+        # With the lead on, /think is a read-only answer from its own model; all else is the lead's.
+        think_only = self._runtime.settings.project_lead.enabled and route_mode == "think"
+        if self._runtime.settings.project_lead.enabled and not think_only:
             from vuzol.leadership.events import ProjectEventService
             from vuzol.leadership.provenance import RequestOrigin
             from vuzol.workflows.application import Principal
@@ -547,10 +553,7 @@ class InterpretationPipeline:
                     idempotency_key=f"lead:message:{intake.chat_id}:{intake.message_id}",
                     text=str(prepared["turn"]),
                     intake=intake,
-                    mode="think"
-                    if (item.payload.get("conversation_route") or {}).get("conversation_mode")
-                    == "think"
-                    else "lead",
+                    mode="lead",
                     reply_to_message_id=item.payload.get("reply_to_message_id"),
                     origin=RequestOrigin(channel="telegram", display_name="Telegram"),
                 )
@@ -775,7 +778,8 @@ class InterpretationPipeline:
                 "or its state. If necessary ask a focused question about the missing reference."
             )
         work = (
-            effect is IntakeEffect.EXECUTE_REQUEST
+            not think_only
+            and effect is IntakeEffect.EXECUTE_REQUEST
             and not receipt["abstain"]
             and bool(str(prepared["caption"] or "").strip())
         )
@@ -857,14 +861,17 @@ class InterpretationPipeline:
                     source_turn = await session.get(ConversationTurn, user_turn_id)
                     assert source_turn is not None
                     source_turn.should_create_task = False
-            if (
-                result.draft.action is TaskAction.CONTINUE_TASK
-                and not result.draft.needs_clarification
-                and context_failure is None
-            ) or (
-                effect is IntakeEffect.CONTROL_REQUEST
-                and receipt.get("target_id") is not None
-                and not receipt.get("abstain")
+            if not think_only and (
+                (
+                    result.draft.action is TaskAction.CONTINUE_TASK
+                    and not result.draft.needs_clarification
+                    and context_failure is None
+                )
+                or (
+                    effect is IntakeEffect.CONTROL_REQUEST
+                    and receipt.get("target_id") is not None
+                    and not receipt.get("abstain")
+                )
             ):
                 target_id = result.draft.referenced_task_id
                 if target_id is None and isinstance(receipt.get("target_id"), str):
@@ -889,7 +896,7 @@ class InterpretationPipeline:
                             "Ничего не запущено."
                         ),
                     )
-            elif (
+            elif not think_only and (
                 context_failure is not None
                 or result.draft.needs_clarification
                 or effect

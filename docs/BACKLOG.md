@@ -32,6 +32,12 @@ deferred. Completed work belongs in `CHANGELOG.md`.
   usable from Vuzol until provisioned like `codex-a` / `codex-e`.
 - `codex-e` uses the same ChatGPT login in Vuzol and in the owner's local Codex; a token
   refresh on one side may log out the other.
+- A lead turn whose goal moves on mid-call (fence change) is closed, not retried; the newer
+  event drives. If that turn was an owner message, the message is dropped (same on restart,
+  `worker.py` stale claimed turn). Re-enqueue it as a new wakeup instead; resending the same
+  turn is forbidden by inference reconciliation.
+- MCP `submit_event(mode="think")` still runs a read-only lead turn, while Telegram `/think`
+  goes to the separate discussion model. Pick one meaning for MCP.
 
 ## Product consolidation — 2026-10-21
 

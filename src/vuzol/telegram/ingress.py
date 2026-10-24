@@ -201,12 +201,8 @@ class TelegramIngressService:
         except (TelegramPolicyError, RegistryError) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 
-        if (
-            settings.project_lead.enabled
-            and topic.kind is TopicKind.PROJECT
-            and update.text
-            and not update.attachments
-        ):
+        think_selected = False
+        if settings.project_lead.enabled and topic.kind is TopicKind.PROJECT:
             async with self._session_factory() as session:
                 mapping = await session.scalar(
                     select(TopicMapping).where(
@@ -214,14 +210,12 @@ class TelegramIngressService:
                         TopicMapping.message_thread_id == update.message_thread_id,
                     )
                 )
-                if (
-                    mapping is not None
-                    and mapping.conversation_mode == "think"
-                    and (mapping.conversation_mode_message_id is not None)
-                ):
-                    return await self._accept_lead_text(
-                        update, topic, text=update.text, mode="think"
-                    )
+            # /think talks to its own discussion model, never to the lead.
+            think_selected = (
+                mapping is not None
+                and mapping.conversation_mode == "think"
+                and mapping.conversation_mode_message_id is not None
+            )
 
         if topic.project_id and update.reply_to_message_id and update.text:
             from vuzol.leadership.telegram_commands import answer_question_message
@@ -240,7 +234,7 @@ class TelegramIngressService:
             if answered is not None:
                 return answered
 
-        if settings.project_lead.enabled and topic.kind is TopicKind.PROJECT:
+        if settings.project_lead.enabled and topic.kind is TopicKind.PROJECT and not think_selected:
             if update.text and not update.attachments:
                 return await self._accept_lead_text(update, topic, text=update.text)
             routed = await self._accept_live_lead_message(update, topic)
@@ -1249,14 +1243,6 @@ class TelegramIngressService:
                 and update.message_id <= mapping.conversation_mode_message_id
             ):
                 notice = "Это старое переключение; текущий собеседник не изменён."
-            elif self._runtime.settings.project_lead.enabled:
-                mapping.conversation_mode = mode
-                mapping.conversation_mode_message_id = update.message_id
-                notice = (
-                    "Режим обсуждения: отвечаю на вопросы без запуска работы."
-                    if mode == "think"
-                    else "Режим руководителя: обсудим запрос и подготовим план для одобрения."
-                )
             else:
                 try:
                     route = await select_conversation_route(

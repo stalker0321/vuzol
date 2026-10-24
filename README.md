@@ -72,10 +72,9 @@ approval grants execution for the current scope, and the lead then starts each t
 
 With `chat.enabled=true`, bare `/think` and `/lead` select the persistent mode in that topic.
 The default is lead when the project lead is enabled. Switching mode creates no goal and does
-not pause or resume existing work. Mode is frozen in each accepted event. `/think` uses the
-same lead turn with only reads and replies permitted, including when the model asks to start
-work. Model assignments are pinned by the existing leadership turn mechanism; `/model` manages
-those assignments.
+not pause or resume existing work. `/think` sends the topic's messages to its own discussion
+model (the `think` slot of `/model`), never to the lead: it answers, including a work request,
+and never starts or plans work. `/lead` returns the topic to the lead.
 
 Live goals accept subsequent messages without automatically changing scope or resuming work.
 Scope amendments require a new owner-approved plan. Unprocessed owner messages arriving around

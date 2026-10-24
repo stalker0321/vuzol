@@ -748,7 +748,7 @@ async def test_project_messages_use_lead_and_keep_owner_boundary(postgres_dsn, t
             IngressStatus.REJECTED if case == "other_owner" else IngressStatus.HANDLED
         )
         async with factory() as session:
-            assert not await session.scalar(
+            classify = await session.scalar(
                 select(TransactionalOutbox.id).where(
                     TransactionalOutbox.destination == "discussion_classify"
                 )
@@ -758,13 +758,17 @@ async def test_project_messages_use_lead_and_keep_owner_boundary(postgres_dsn, t
                     TransactionalOutbox.idempotency_key == f"lead:message:{CHAT}:900"
                 )
             )
-            if case == "other_owner":
-                assert event is None
+            if case == "think":
+                # /think answers with its own discussion model, never through the lead.
+                assert classify is not None and event is None
+            elif case == "other_owner":
+                assert classify is None and event is None
                 assert accepted.reason == "goal_not_available"
             else:
-                assert event.payload["mode"] == ("think" if case == "think" else "lead")
+                assert classify is None
+                assert event.payload["mode"] == "lead"
                 goal = await session.get(ManagedGoal, event.linked_entity_id)
-                assert goal.lifecycle == ("draft" if case == "no_live_goal" else "active")
+                assert goal.lifecycle == "draft"
             assert await session.scalar(select(func.count()).select_from(Task)) == 0
 
 

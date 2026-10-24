@@ -73,4 +73,6 @@ ls -1dt "$RELEASES"/*/.installed | tail -n +$((KEEP + 1)) | while read -r marker
   docker rmi "vuzol:$(basename "$old")" >/dev/null 2>&1 || true
 done
 docker image prune -f >/dev/null
+# Every release builds an image; unbounded build cache filled the disk on 2026-10-24.
+docker builder prune -f --max-used-space 2gb >/dev/null
 echo "== deployed $SHA"

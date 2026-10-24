@@ -26,12 +26,13 @@ class LeadSnapshot:
     current_package_id: str | None
     current_package_status: str | None
     integration_head_commit: str | None
-    original_request: str
+    request: str
     scope_text: str
     waiting_reason: str | None
     completed_package_count: int = 0
     owner_answer: str | None = None
     owner_event: dict[str, Any] | None = None
+    superseded_request: str | None = None
     invocation_id: uuid.UUID | None = None
     result_context: dict[str, Any] = field(default_factory=dict)
 

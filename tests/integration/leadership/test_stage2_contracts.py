@@ -670,7 +670,15 @@ async def test_amendment_releases_a_wait_that_belonged_to_the_old_scope(postgres
 
         class Replan:
             async def decide(self, snapshot):
+                from vuzol.leadership.provider_model import _prompt
+
                 seen.append((snapshot.lifecycle, snapshot.scope_revision))
+                # The lead works on the amended goal; the first wording is history.
+                assert snapshot.request == "README only"
+                assert snapshot.superseded_request == "ship the marker"
+                prompt = _prompt(snapshot)
+                assert "request: README only" in prompt
+                assert "superseded_request (owner replaced it" in prompt
                 return LeadDecision(reply="Запрошу новый план")
 
         worker = _worker(factory, Replan())

@@ -36,6 +36,7 @@ from vuzol.leadership.persistence import (
     GoalDelegation,
     LeadershipCommandReceipt,
     ManagedGoal,
+    current_request,
 )
 from vuzol.leadership.policy import (
     PolicyDecision,
@@ -955,7 +956,7 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
             for summary, status in rows
         ]
     return {
-        "request": goal.original_request,
+        "request": current_request(goal),
         "scope": goal.scope_text,
         "criteria": list(goal.criteria),
         "goal_id": str(goal.id),

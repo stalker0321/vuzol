@@ -15,6 +15,24 @@ deferred. Completed work belongs in `CHANGELOG.md`.
 - The integration test database must not use an unbounded tmpfs: WAL filled it and Postgres
   stopped mid-run. `vuzol-test-db` now runs with `size=1g` and `max_wal_size=128MB`.
 
+## Found in the live pilot — 2026-10-24
+
+- Import cycle: `leadership.persistence → storage → providers → discussion.service →
+  leadership.persistence`. Production import order hides it; importing a leadership module
+  first fails. Break it (e.g. lazy import in `discussion/service.py`).
+- The lead copies transient owner instructions ("держи на паузе") into the amended goal scope,
+  and later obeys them as part of the goal. Amendment scope should hold the work, not controls.
+- A pause the lead decides on its own is recorded as `owner_pause`.
+- `/model` lets a slot point at a profile whose `runtime_network` the project's network policy
+  does not allow; the call then fails at launch ("turn CLI egress exceeds project policy").
+  Validate at assignment time.
+- Every rejected Telegram control answers "Действие уже недоступно. Обновите карточку.", which
+  hid "project discussion is disabled". Map known reasons to specific answers; log the rest.
+- `codex-b` / `codex-c` point at home directories the executor cannot read (0700); they are not
+  usable from Vuzol until provisioned like `codex-a` / `codex-e`.
+- `codex-e` uses the same ChatGPT login in Vuzol and in the owner's local Codex; a token
+  refresh on one side may log out the other.
+
 ## Product consolidation — 2026-10-21
 
 Direction: `ASTRA_PRODUCT_CONSOLIDATION_HANDOFF.md` (owner-provided, separate

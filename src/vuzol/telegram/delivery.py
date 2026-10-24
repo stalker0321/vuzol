@@ -713,7 +713,15 @@ async def _prepare_delivery(
             .join(MaterializationLink, MaterializationLink.work_package_id == WorkPackage.id)
             .where(MaterializationLink.task_id == projection_task.id)
         )
-        if managed_goal_id is not None:
+        shown = await session.scalar(
+            select(TelegramMessageLink.id).where(
+                TelegramMessageLink.task_id == projection_task.id,
+                TelegramMessageLink.message_role == "task_status",
+            )
+        )
+        # A lead task shows its card only for a result decision; once shown, the
+        # card follows the task so a decided result loses its buttons (pilot 2026-10-24).
+        if managed_goal_id is not None and shown is None:
             return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
     if role == "semantic_clarification":
         assert intake is not None

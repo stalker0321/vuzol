@@ -158,12 +158,14 @@ async def test_invalid_provider_response_parks_without_a_plan(
             adapter=transport,
         )
         assert await worker.process_one()
+        assert await worker.process_one()  # one retry of a malformed answer
+        assert not await worker.process_one()
         async with factory() as session:
             goal = await session.scalar(select(ManagedGoal))
             count = await session.scalar(select(func.count()).select_from(UsageRecord))
             assert goal is not None and goal.waiting_reason == "lead_response_invalid"
             assert goal.proposed_plan is None
-            assert count == 1
+            assert count == 2
         assert await _package_count(factory) == 0
     get_settings.cache_clear()
 

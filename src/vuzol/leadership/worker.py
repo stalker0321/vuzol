@@ -868,6 +868,34 @@ class ProjectLeadWorker:
                 goal.lease_until = None
                 await self._complete(uow.session, token)
                 return
+            item = await uow.session.get(TransactionalOutbox, wakeup_id)
+            if (
+                reason == "lead_response_invalid"
+                and item is not None
+                and "retry_of" not in item.payload
+                and goal.lifecycle not in {"cancelled", "completed", "paused"}
+            ):
+                # One malformed answer from a cheap model is noise, not a blocker
+                # (live pilot 2026-10-24). A turn makes one call, so the same event
+                # gets one fresh turn; a second malformed answer parks the goal.
+                uow.session.add(
+                    TransactionalOutbox(
+                        destination="project_lead",
+                        operation_type="lead_wakeup",
+                        linked_entity_type="managed_goal",
+                        linked_entity_id=goal.id,
+                        idempotency_key=f"lead:retry-invalid:{wakeup_id}",
+                        payload={**item.payload, "retry_of": str(wakeup_id)},
+                        status=DeliveryStatus.PENDING,
+                    )
+                )
+                turn.status = "lost"
+                turn.usage = {"cost_known": False}
+                turn.decision = None
+                goal.lease_owner = None
+                goal.lease_until = None
+                await self._complete(uow.session, token)
+                return
             if goal.lifecycle not in {"cancelled", "completed"}:
                 if goal.lifecycle != "paused":
                     goal.lifecycle = "waiting"

@@ -127,10 +127,14 @@ async def test_restart_preserves_failure_reason_and_diagnostics_without_resendin
         assert len(calls) == 1
         async with factory() as session:
             phase = await session.scalar(select(LeadershipInference))
-            goal = await session.scalar(select(ManagedGoal))
             assert phase.result == saved and phase.state == "received"
-            assert goal.waiting_reason == "lead_response_invalid"
             assert await session.scalar(select(func.count()).select_from(UsageRecord)) == 1
+        # The replayed failure gets one fresh turn, which calls the model once more.
+        assert await second.process_one()
+        assert len(calls) == 2
+        async with factory() as session:
+            goal = await session.scalar(select(ManagedGoal))
+            assert goal.waiting_reason == "lead_response_invalid"
 
 
 async def test_switch_during_turn_keeps_receipt_pin_then_new_turn_uses_new_choice(

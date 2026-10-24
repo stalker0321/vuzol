@@ -448,3 +448,48 @@ async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runt
             )
         # The newer event (here the plan approval) drives the next turn; this one is done.
         assert event is None
+
+
+@pytest.mark.parametrize("second", ["answers", "malformed_again"])
+async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, second):
+    """Live pilot 2026-10-24: one malformed JSON answer parked the goal with a red error."""
+    from vuzol.leadership.model import LeadModelUnavailable
+    from vuzol.storage.models import Event
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            for item in await session.scalars(select(TransactionalOutbox)):
+                item.status = DeliveryStatus.DELIVERED
+        await TelegramIngressService(runtime, factory).accept_message(_message(902, "Запускай"))
+
+        class Flaky:
+            def __init__(self):
+                self.seen = []
+
+            async def decide(self, snapshot):
+                self.seen.append(snapshot)
+                if len(self.seen) == 1 or second == "malformed_again":
+                    raise LeadModelUnavailable("lead_response_invalid")
+                return LeadDecision(reply="Запускаю.", profile_id="fixture")
+
+        model = Flaky()
+        worker = _worker(factory, model)
+        assert await worker.process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.waiting_reason is None
+        assert await worker.process_one()
+        assert len(model.seen) == 2
+        # The retry carries the same owner message.
+        assert model.seen[1].owner_event["text"] == "Запускай"
+        assert not await worker.process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            parked = await session.scalar(
+                select(Event.id).where(Event.event_type == "managed_goal.lead_parked")
+            )
+            if second == "answers":
+                assert goal.waiting_reason is None and parked is None
+            else:
+                assert goal.waiting_reason == "lead_response_invalid" and parked is not None

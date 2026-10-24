@@ -1141,10 +1141,7 @@ async def _prepare_discussion_reply(
         if handoff.criteria:
             brief.append("Критерии:")
             brief.extend(f"• {owner_text(value)}" for value in handoff.criteria)
-        # Keep model-supplied Markdown literal in the owner-facing brief.
-        from vuzol.leadership.provenance import literal_block
-
-        reply_text += "\n\n" + literal_block("\n".join(brief))
+        reply_text += "\n\n" + "\n".join(brief)
     if item.payload.get("conversation_route") is not None:
         from vuzol.discussion.conversation import ConversationRoute
 

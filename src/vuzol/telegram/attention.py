@@ -175,6 +175,11 @@ async def sync_attention(
         return
     decision_version = decision or str(goal.version if version is None else version)
     identity = uuid.uuid5(goal.id, f"{scope}:{reason}:{decision_version}")
+    reopened = 1
+    while f"la:{identity.hex}" in resolved:
+        # The same situation came back after it was resolved: a new item, not a no-op.
+        reopened += 1
+        identity = uuid.uuid5(goal.id, f"{scope}:{reason}:{decision_version}:{reopened}")
     await _enqueue(
         session,
         goal.id,
@@ -218,14 +223,14 @@ async def sync_goal_attention(
             elif delegation_is_expired(delegation.expires_at, now=datetime.now(UTC)):
                 reason = "delegation_expired"
     condition = goal.wakeup_condition or {}
+    # A draft only the owner can approve stays his decision whatever the goal's
+    # waiting reason says: the lead may call it wait_for, or the owner may pause.
+    pending_plan = await _pending_owner_plan(session, goal)
+    if pending_plan is not None and reason not in {"delegation_revoked", "delegation_expired"}:
+        reason = "plan_approval"
     if reason == "plan_approval":
-        package = await session.get(WorkPackage, goal.current_package_id)
-        if (
-            package is not None
-            and package.status is WorkPackageStatus.DRAFT
-            and package.head_revision_id is not None
-        ):
-            decision = str(package.head_revision_id)
+        if pending_plan is not None:
+            package, decision = pending_plan
             target = {
                 "work_package_id": str(package.id),
                 "plan_revision_id": decision,
@@ -242,8 +247,30 @@ async def sync_goal_attention(
         reason,
         decision=decision,
         target=target,
-        resolve_all=goal.lifecycle in {"cancelled", "completed", "paused"},
+        resolve_all=goal.lifecycle in {"cancelled", "completed"}
+        or (goal.lifecycle == "paused" and reason != "plan_approval"),
     )
+
+
+async def _pending_owner_plan(
+    session: AsyncSession, goal: ManagedGoal
+) -> tuple[WorkPackage, str] | None:
+    from vuzol.leadership.batches import owner_approval_required
+    from vuzol.storage.models import PlanRevision
+
+    if goal.lifecycle in {"completed", "cancelled"} or goal.current_package_id is None:
+        return None
+    package = await session.get(WorkPackage, goal.current_package_id)
+    if (
+        package is None
+        or package.status is not WorkPackageStatus.DRAFT
+        or package.head_revision_id is None
+    ):
+        return None
+    revision = await session.get(PlanRevision, package.head_revision_id)
+    if revision is None or not owner_approval_required(revision):
+        return None
+    return package, str(revision.id)
 
 
 def matches_target(payload: dict[str, Any], link: TelegramMessageLink) -> bool:

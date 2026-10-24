@@ -426,9 +426,22 @@ class LeadershipCommandService:
                     {"version": goal.version},
                     goal,
                 )
-            goal.wakeup_condition = dict(condition)
             goal.lease_owner = None
             goal.lease_until = None
+            from vuzol.leadership.batches import owner_approval_required
+            from vuzol.storage.models import PlanRevision
+
+            revision = (
+                await uow.session.get(PlanRevision, package.head_revision_id)
+                if package.status is WorkPackageStatus.DRAFT and package.head_revision_id
+                else None
+            )
+            if revision is not None and owner_approval_required(revision):
+                # Waiting on a draft only the owner can approve is a plan approval,
+                # whatever the lead called it; the card and attention depend on it.
+                goal.wakeup_condition = {"kind": "plan_approval", "revision_id": str(revision.id)}
+                return _transition(goal, actor, "waiting", "plan_approval", CommandStatus.WAITING)
+            goal.wakeup_condition = dict(condition)
             return _transition(goal, actor, "waiting", "wait_for", CommandStatus.WAITING)
         if name in {LeadCommandName.REQUEST_PLAN, LeadCommandName.REVISE_PLAN}:
             from vuzol.leadership.planning import apply_outcome, queue_request

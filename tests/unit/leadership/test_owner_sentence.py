@@ -11,3 +11,12 @@ def test_preferred_sentence_answers_the_card_line():
     assert owner_sentence(scope, prefer=(r"измен",)) == "Изменять разрешено только README.md."
     assert owner_sentence(scope, prefer=(r"нет такого",)) == "Одна небольшая задача в пилоте."
     assert owner_sentence("", prefer=(r"измен",)) == ""
+
+
+def test_files_line_prefers_a_sentence_naming_files():
+    from vuzol.telegram.work_package_projections import _FILES_SENTENCE
+
+    scope = "Основную ветку менять нельзя. Меняются только duration_tools.py и tests/."
+    assert owner_sentence(scope, prefer=_FILES_SENTENCE) == (
+        "Меняются только duration_tools.py и tests/."
+    )

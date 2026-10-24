@@ -225,7 +225,7 @@ async def sync_goal_attention(
     condition = goal.wakeup_condition or {}
     # A draft only the owner can approve stays his decision whatever the goal's
     # waiting reason says: the lead may call it wait_for, or the owner may pause.
-    pending_plan = await _pending_owner_plan(session, goal)
+    pending_plan = await pending_owner_plan(session, goal)
     if pending_plan is not None and reason not in {"delegation_revoked", "delegation_expired"}:
         reason = "plan_approval"
     if reason == "plan_approval":
@@ -252,7 +252,7 @@ async def sync_goal_attention(
     )
 
 
-async def _pending_owner_plan(
+async def pending_owner_plan(
     session: AsyncSession, goal: ManagedGoal
 ) -> tuple[WorkPackage, str] | None:
     from vuzol.leadership.batches import owner_approval_required

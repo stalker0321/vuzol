@@ -174,6 +174,11 @@ class TelegramControlService:
                 chat_id=update.chat_id,
                 user_id=update.user_id,
             )
+            if update.action_kind == "think_handoff":
+                from vuzol.discussion.handoff import accept_think_handoff
+
+                async with UnitOfWork(self._session_factory) as uow:
+                    return await accept_think_handoff(uow, self._runtime, update)
             if update.action_kind in {"lead_resume", "lead_cancel"}:
                 from vuzol.leadership.telegram_commands import apply_goal_button
 

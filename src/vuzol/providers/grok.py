@@ -345,7 +345,7 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
                 request_sent=True,
                 safe_summary="Grok CLI returned an invalid independent review report",
             ) from error
-    if request.output_schema_version == "discussion-agent-reply.v1":
+    if request.output_schema_version in {"discussion-agent-reply.v1", "discussion-agent-reply.v2"}:
         from vuzol.discussion.agent import DiscussionAgentReply
 
         try:

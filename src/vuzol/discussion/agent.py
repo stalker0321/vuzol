@@ -8,7 +8,7 @@ import uuid
 from dataclasses import replace
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,8 +44,32 @@ from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 from vuzol.workflows.service import materialize_run
 
 DISCUSSION_INTERNAL_TASK_TYPE = CONVERSATION_TASK_TYPE
-DISCUSSION_AGENT_SCHEMA_VERSION = "discussion-agent-reply.v1"
-DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v7"
+DISCUSSION_AGENT_SCHEMA_VERSION = "discussion-agent-reply.v2"
+DISCUSSION_AGENT_PROMPT_VERSION = "project-discussion-agent-v8"
+
+
+class DiscussionHandoff(BaseModel):
+    """An optional brief, never execution authority."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    request: str = Field(min_length=1, max_length=500, pattern=r"^[^\r\n]+$")
+    scope: str | None = Field(default=None, max_length=2000)
+    criteria: list[str] = Field(max_length=20)
+
+    @field_validator("criteria")
+    @classmethod
+    def validate_criteria(cls, values: list[str]) -> list[str]:
+        if any(not value or len(value) > 500 for value in values):
+            raise ValueError("invalid handoff criterion")
+        return values
+
+
+def validated_handoff(value: object) -> DiscussionHandoff | None:
+    try:
+        return DiscussionHandoff.model_validate(value)
+    except ValueError:
+        return None
 
 
 class DiscussionAgentReply(BaseModel):
@@ -57,6 +81,14 @@ class DiscussionAgentReply(BaseModel):
     # Optional derived memory must never cause an otherwise valid reply to be
     # discarded for exceeding an arbitrary summary size. Validate it separately.
     memory_summary: str | None = None
+    handoff: DiscussionHandoff | None = None
+
+    @field_validator("handoff", mode="before")
+    @classmethod
+    def optional_handoff(cls, value: object) -> DiscussionHandoff | None:
+        # A broken optional brief must never discard the actual answer, including
+        # stored structured outputs replayed by the delivery/recovery handlers.
+        return validated_handoff(value)
 
 
 def normalize_discussion_reply(text: str | None, structured: object = None) -> DiscussionAgentReply:
@@ -81,7 +113,7 @@ def normalize_discussion_reply(text: str | None, structured: object = None) -> D
         isinstance(decoded, dict)
         and isinstance(decoded.get("reply"), str)
         and decoded["reply"].strip()
-        and set(decoded) <= {"reply", "memory_summary"}
+        and set(decoded) <= {"reply", "memory_summary", "handoff"}
     ):
         return DiscussionAgentReply(
             reply=decoded["reply"],
@@ -90,6 +122,7 @@ def normalize_discussion_reply(text: str | None, structured: object = None) -> D
                 if isinstance(decoded.get("memory_summary"), str)
                 else None
             ),
+            handoff=decoded.get("handoff"),
         )
     return DiscussionAgentReply(reply=text)
 
@@ -171,6 +204,11 @@ async def schedule_discussion_agent(
         )
         conversation_route.validate_profile(runtime, project_id=project_id)
     conversation_mode = conversation_route.conversation_mode if conversation_route else "think"
+    handoff_enabled = (
+        runtime.settings.project_lead.enabled
+        and conversation_route is not None
+        and conversation_mode == "think"
+    )
     if current_turn is not None:
         memory_pack = replace(
             memory_pack, turns=tuple(t for t in memory_pack.turns if t.id != source_turn_id)
@@ -181,6 +219,7 @@ async def schedule_discussion_agent(
         rich_messages=runtime.settings.chat.rich_messages,
         memory_enabled=runtime.settings.chat.memory_enabled,
         conversation_mode=conversation_mode,
+        handoff_enabled=handoff_enabled,
     )
     if current_turn is not None:
         prompt += (
@@ -236,6 +275,7 @@ async def schedule_discussion_agent(
                 rich_messages=runtime.settings.chat.rich_messages,
                 memory_enabled=runtime.settings.chat.memory_enabled,
                 conversation_mode=conversation_mode,
+                handoff_enabled=handoff_enabled,
             )
             if current_turn is not None:
                 prompt += (
@@ -269,6 +309,7 @@ async def schedule_discussion_agent(
             "task_summary": "Internal project discussion reply",
             "required_capabilities": [Capability.REPOSITORY_READ.value],
             "memory_enabled": runtime.settings.chat.memory_enabled,
+            "handoff_enabled": handoff_enabled,
             "document_text_chars": documents if runtime.settings.chat.enabled else 0,
             "memory_summary_revision": memory_pack.summary.revision if memory_pack.summary else 0,
             "memory_summary_eligible": not memory_pack.decisions_truncated
@@ -435,6 +476,9 @@ async def persist_discussion_reply(
             "mode": str(task.task_draft["interaction_mode"]),
             "worker_task_id": str(task.id),
             "conversation_route": task.task_draft.get("conversation_route"),
+            "handoff": parsed.handoff.model_dump(mode="json")
+            if task.task_draft.get("handoff_enabled") and parsed.handoff is not None
+            else None,
             "memory_summary": safe_summary_candidate(parsed.memory_summary)
             if task.task_draft.get("memory_enabled")
             else None,
@@ -511,6 +555,7 @@ def _discussion_prompt(
     rich_messages: bool = False,
     memory_enabled: bool = False,
     conversation_mode: str = "think",
+    handoff_enabled: bool = False,
 ) -> str:
     turns = "\n".join(
         f"[{turn.ordinal}] {turn.role.value}: {turn.chat_text}" for turn in memory_pack.turns
@@ -560,6 +605,19 @@ def _discussion_prompt(
         if conversation_mode == "lead"
         else "project discussion partner"
     )
+    handoff_instruction = (
+        "When you and the owner have agreed on a concrete piece of work the owner wants done, "
+        'you may return an envelope with "reply" and optional "handoff": '
+        '{"request": "one imperative line", "scope": "agreed details and constraints or null", '
+        '"criteria": ["done criterion"]}. Write the brief in plain Russian, keep it short, '
+        "and preserve all agreed constraints. Criteria may be empty. This is a brief for the "
+        "project lead, not a task launch. The owner alone authorizes sending it by pressing "
+        "«➡️ Передать лиду». Never claim work has started or the brief has been sent. "
+        "Omit this field for questions, brainstorming without agreement, or when the owner "
+        "said not now. Do not ask for a handoff just because the topic could become work."
+        if handoff_enabled and conversation_mode == "think"
+        else ""
+    )
     return f"""You are the {persona} for project {project_id}.
 The current conversation mode is {conversation_mode}. This selects the interlocutor only,
 not execution authority. Existing authorized work can continue independently. Treat supplied
@@ -585,6 +643,7 @@ required. For optional derived memory, you may instead return exactly one object
 {{"reply": "<your complete Markdown answer>", "memory_summary": "<derived summary>"}}.
 Do not let formatting or optional memory truncate or replace the answer.
 {memory_instruction}
+{handoff_instruction}
 
 Accepted decisions:
 {decisions}

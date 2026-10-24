@@ -14,7 +14,7 @@ from vuzol.leadership.persistence import ManagedGoal
 class RequestOrigin(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    channel: Literal["mcp", "telegram", "telegram_assistant", "api", "cli"]
+    channel: Literal["mcp", "telegram", "telegram_assistant", "think", "api", "cli"]
     display_name: str = Field(min_length=1, max_length=100)
     client_id: str | None = Field(default=None, max_length=300)
     request_id: str | None = Field(default=None, max_length=200)

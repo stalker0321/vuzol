@@ -74,7 +74,11 @@ With `chat.enabled=true`, bare `/think` and `/lead` select the persistent mode i
 The default is lead when the project lead is enabled. Switching mode creates no goal and does
 not pause or resume existing work. `/think` sends the topic's messages to its own discussion
 model (the `think` slot of `/model`), never to the lead: it answers, including a work request,
-and never starts or plans work. `/lead` returns the topic to the lead.
+and never starts or plans work. Once a concrete task is agreed, Sol may offer a brief with
+**➡️ Передать лиду**. Pressing it sends the brief to the lead like an MCP request and returns
+the topic to the lead; the lead can then ask for a plan, whose launch still needs owner approval.
+The button is available only with the project lead enabled. `/lead` followed by
+«делай как обсудили» also works: the lead sees recent conversation turns.
 
 Live goals accept subsequent messages without automatically changing scope or resuming work.
 Scope amendments require a new owner-approved plan. Unprocessed owner messages arriving around

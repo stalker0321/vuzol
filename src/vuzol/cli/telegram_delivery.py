@@ -59,6 +59,7 @@ async def run() -> None:
                 ),
                 dogfood_settings=settings.telegram_dogfood,
                 rich_messages=settings.chat.rich_messages,
+                project_lead_enabled=settings.project_lead.enabled,
                 artifacts=ArtifactStore(
                     settings.artifact_root,
                     max_bytes=settings.limits.artifact_bytes,

@@ -171,7 +171,12 @@ async def test_grok_adapter_classifies_subscription_exhaustion_as_quota(tmp_path
 
 
 @pytest.mark.anyio
-async def test_grok_adapter_validates_discussion_agent_reply(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "schema_version", ["discussion-agent-reply.v1", "discussion-agent-reply.v2"]
+)
+async def test_grok_adapter_validates_discussion_agent_reply(
+    tmp_path: Path, schema_version: str
+) -> None:
     class DiscussionTransport(FakeCodexTransport):
         async def run(
             self, invocation: CodexInvocation, cancellation: CancellationContext
@@ -209,7 +214,7 @@ async def test_grok_adapter_validates_discussion_agent_reply(tmp_path: Path) -> 
         provider_request().model_copy(
             update={
                 "sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001",
-                "output_schema_version": "discussion-agent-reply.v1",
+                "output_schema_version": schema_version,
             }
         ),
         configured,

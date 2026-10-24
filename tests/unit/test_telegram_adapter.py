@@ -593,3 +593,23 @@ def test_attention_url_button_and_silent_project_send():
         assert bot.do_api_request.await_args.kwargs["api_kwargs"]["disable_notification"] is True
 
     asyncio.run(scenario())
+
+
+def test_handoff_keyboard_edit_is_idempotent_and_keeps_answer_text() -> None:
+    async def scenario() -> None:
+        bot = AsyncMock()
+        client = PythonTelegramClient(bot)
+        callback = f"v2:th:{uuid.uuid4().hex}"
+        buttons = ((("✅ Передано лиду", callback),),)
+        await client.edit_reply_markup(chat_id=-100, message_id=17, callback_buttons=buttons)
+        kwargs = bot.edit_message_reply_markup.call_args.kwargs
+        assert kwargs["chat_id"] == -100 and kwargs["message_id"] == 17
+        assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == callback
+        bot.edit_message_text.assert_not_called()
+        bot.edit_message_reply_markup.side_effect = BadRequest("Message_is_not_modified")
+        await client.edit_reply_markup(chat_id=-100, message_id=17, callback_buttons=buttons)
+        bot.edit_message_reply_markup.side_effect = BadRequest("message to edit not found")
+        with pytest.raises(BadRequest, match="message to edit not found"):
+            await client.edit_reply_markup(chat_id=-100, message_id=17, callback_buttons=buttons)
+
+    asyncio.run(scenario())

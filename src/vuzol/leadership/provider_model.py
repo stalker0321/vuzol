@@ -23,7 +23,7 @@ from vuzol.leadership.persistence import POLICY_REVISION
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v11"
+PROMPT_REVISION = "project-lead-prompt.v12"
 LEDGER_PURPOSE = "project_lead"
 _COMMANDS = (
     "amend_goal",
@@ -336,6 +336,7 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "The planner supplies concrete task contracts, stable local_id and dependencies; "
         "on the next turn copy task_control.start_spec to start_task {spec:...}. "
         "You must start EACH item explicitly, only when no task is executing. "
+        "A next_item with plan_approved is approved already: start it, do not wait. "
         "Multi-item, large or elevated-risk plans await the owner approving that exact revision. "
         "Never turn a required approval into a low-risk classification. "
         "Revisions require dispatch stopped and the current task finished; preserve all "

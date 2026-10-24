@@ -375,3 +375,23 @@ async def test_paused_goal_can_revise_and_approve_without_resuming(postgres_dsn)
         async with factory() as session:
             assert (await session.get(ManagedGoal, goal_id)).lifecycle == "paused"
             assert await session.scalar(select(func.count()).select_from(Task)) == 0
+
+
+async def test_next_item_of_an_approved_plan_does_not_ask_for_approval(postgres_dsn):
+    """Live pilot 2026-10-24: the lead read the planner's needs_approval on the next item of an
+    approved plan as "wait for the owner's button" and stopped."""
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        plan = plan_items(1)
+        plan["items"][0]["needs_approval"] = True
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            package = await session.get(WorkPackage, goal.current_package_id)
+            package.approved_revision_id = package.head_revision_id
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            context = await task_context(session, goal)
+            assert context["start_spec"] is not None
+            assert "needs_approval" not in context["next_item"]
+            assert context["next_item"]["plan_approved"] is True

@@ -284,9 +284,15 @@ async def task_context(session: AsyncSession, goal: ManagedGoal) -> dict[str, An
     )
     if revision is not None and context["start_spec"] is not None:
         ordinal = context["start_spec"]["ordinal"]
-        context["next_item"] = next(
+        item = next(
             (item for item in revision.immutable_body["items"] if item["ordinal"] == ordinal), None
         )
+        if item is not None and package.approved_revision_id == revision.id:
+            # The owner approved this plan. A planner "needs approval" flag read as
+            # "wait for the button" stalled the next item (live pilot 2026-10-24).
+            item = {k: v for k, v in item.items() if k != "needs_approval"}
+            item["plan_approved"] = True
+        context["next_item"] = item
     rows = await session.execute(
         select(Task, Run, Worktree)
         .join(MaterializationLink, MaterializationLink.task_id == Task.id)

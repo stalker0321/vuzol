@@ -187,7 +187,7 @@ class TelegramIngressService:
                     except ValueError as error:
                         return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
                     return await self._accept_lead_text(
-                        update, topic, text=text, mode="lead", work_limits=limits
+                        update, topic, text=text, work_limits=limits
                     )
                 return await self._handle_lead_command(update, topic, lead)
             if is_source_command(update.text):
@@ -611,13 +611,10 @@ class TelegramIngressService:
         topic: TopicConfig,
         *,
         text: str,
-        mode: ConversationMode | None = None,
         work_limits: dict[str, int] | None = None,
     ) -> IngressResult:
         try:
-            return await self._record_lead_text(
-                update, topic, text=text, mode=mode, work_limits=work_limits
-            )
+            return await self._record_lead_text(update, topic, text=text, work_limits=work_limits)
         except (PermissionError, ValueError) as error:
             return IngressResult(status=IngressStatus.REJECTED, reason=str(error))
 
@@ -627,7 +624,6 @@ class TelegramIngressService:
         topic: TopicConfig,
         *,
         text: str,
-        mode: ConversationMode | None,
         work_limits: dict[str, int] | None,
     ) -> IngressResult:
         from vuzol.leadership.events import ProjectEventService
@@ -671,17 +667,6 @@ class TelegramIngressService:
                     enabled=topic.enabled,
                 )
             )
-            mapping = await uow.session.scalar(
-                select(TopicMapping).where(
-                    TopicMapping.chat_id == update.chat_id,
-                    TopicMapping.message_thread_id == update.message_thread_id,
-                )
-            )
-            frozen_mode = mode or (
-                cast(ConversationMode, mapping.conversation_mode)
-                if mapping and mapping.conversation_mode_message_id is not None
-                else "lead"
-            )
             session_id = await uow.discussions.active_session_id(
                 chat_id=update.chat_id,
                 message_thread_id=update.message_thread_id,
@@ -711,7 +696,6 @@ class TelegramIngressService:
                 session_id=session_id,
                 idempotency_key=f"lead:message:{update.chat_id}:{update.message_id}",
                 text=text,
-                mode=frozen_mode,
                 work_limits=work_limits,
                 intake=intake,
                 reply_to_message_id=update.reply_to_message_id,

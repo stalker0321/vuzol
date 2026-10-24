@@ -553,7 +553,6 @@ class InterpretationPipeline:
                     idempotency_key=f"lead:message:{intake.chat_id}:{intake.message_id}",
                     text=str(prepared["turn"]),
                     intake=intake,
-                    mode="lead",
                     reply_to_message_id=item.payload.get("reply_to_message_id"),
                     origin=RequestOrigin(channel="telegram", display_name="Telegram"),
                 )

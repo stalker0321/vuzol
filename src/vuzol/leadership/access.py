@@ -7,7 +7,7 @@ synthetic Telegram identities. Reads do not create command receipts or wakeups.
 
 import uuid
 from dataclasses import asdict
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -38,7 +38,6 @@ class WorkRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=100)
     request_id: uuid.UUID
     request: str = Field(min_length=1, max_length=20_000)
-    mode: Literal["lead", "think"] = "lead"
     scope: str | None = Field(default=None, min_length=1, max_length=40_000)
     criteria: list[str] = Field(default_factory=list, max_length=30)
     work_limits: WorkLimits = Field(default_factory=WorkLimits)
@@ -119,7 +118,6 @@ class ProjectApplication:
                 session_id=session_id,
                 idempotency_key=f"assistant:submit:{request.request_id}",
                 text=request.request,
-                mode=request.mode,
                 scope=request.scope,
                 criteria=[
                     {"id": f"outcome-{i}", "description": item}

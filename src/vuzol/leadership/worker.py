@@ -625,12 +625,9 @@ class ProjectLeadWorker:
                 item is not None
                 and item.payload.get("wakeup_kind") == "owner_message"
                 and decision.reply.strip()
-                and (
-                    item.payload.get("mode") == "think"
-                    or not any(
-                        command.name in {"ask_owner", "request_permission"}
-                        for command in decision.commands
-                    )
+                and not any(
+                    command.name in {"ask_owner", "request_permission"}
+                    for command in decision.commands
                 )
                 and not (
                     goal.waiting_reason == "plan_approval"

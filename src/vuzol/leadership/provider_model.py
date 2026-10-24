@@ -23,7 +23,7 @@ from vuzol.leadership.persistence import POLICY_REVISION
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v10"
+PROMPT_REVISION = "project-lead-prompt.v11"
 LEDGER_PURPOSE = "project_lead"
 _COMMANDS = (
     "amend_goal",
@@ -352,10 +352,7 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "reply and no commands. For a work request, clarify if needed and request_plan; the "
         "owner must approve the plan before execution, including a single small task. "
         "If the current request differs from the new message, first amend_goal using its "
-        "source_event_id to record the current scope and observable criteria. "
-        "When owner_event.mode is think, only reply and read_status are allowed; do not plan, "
-        "amend, ask_owner, cancel, complete or start any work. "
-        "Mode is frozen per event; a later mode switch does not change this turn.",
+        "source_event_id to record the current scope and observable criteria.",
         "Reply to owner_event in reply; describe intended actions, not unexecuted success. "
         "Waiting/paused goals permit conversation and amendments, never start or resume. "
         "amend_goal uses scope, criteria, supplied source_event_id, reason and inflight_policy: "

@@ -161,7 +161,7 @@ async def test_http_submit_restart_retry_and_read(postgres_dsn, tmp_path, signer
                     if tool["name"] == "submit_request"
                 )
                 assert "event receipt" in submit_tool["description"]
-                assert "mode=think" in submit_tool["description"]
+                assert "think" not in submit_tool["description"]
                 assert "Only owner approval grants execution" in submit_tool["description"]
                 result = await _call(client, "submit_request", {"work": work})
                 assert not result.get("isError"), result
@@ -281,7 +281,6 @@ async def test_submit_scope_cannot_override_read_only_project_grant(postgres_dsn
                         "project_id": PROJECT,
                         "request_id": str(uuid.uuid4()),
                         "request": "Можно задать вопрос?",
-                        "mode": "think",
                     }
                 },
             )

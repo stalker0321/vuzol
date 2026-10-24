@@ -34,7 +34,7 @@ def create_server(application: ProjectApplication, config: MCPConfig) -> FastMCP
             "The receipt acknowledges a durably accepted event, not started or completed work. "
             "The lead replies asynchronously in the project topic. Live goals accept messages; "
             "without one, a draft conversation is created. Execution requires owner plan approval. "
-            "Use mode=think for a read-only discussion. No production approval."
+            "No production approval."
         ),
         host="127.0.0.1",
         port=config.port,
@@ -90,8 +90,8 @@ def create_server(application: ProjectApplication, config: MCPConfig) -> FastMCP
 
         Supply a stable request UUID and the message; scope and criteria are optional context.
         New messages join a live goal or create a draft. The lead decides whether to answer,
-        clarify or request a plan. Only owner approval grants execution. mode=think allows
-        read-only discussion. Calls may consume model quota. No push or deployment permission.
+        clarify or request a plan. Only owner approval grants execution.
+        Calls may consume model quota. No push or deployment permission.
         Retry the same UUID and content to obtain the same event_id without another turn.
         """
         access = grant()

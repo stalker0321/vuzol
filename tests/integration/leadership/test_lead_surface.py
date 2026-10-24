@@ -766,7 +766,7 @@ async def test_project_messages_use_lead_and_keep_owner_boundary(postgres_dsn, t
                 assert accepted.reason == "goal_not_available"
             else:
                 assert classify is None
-                assert event.payload["mode"] == "lead"
+                assert event.payload["wakeup_kind"] == "owner_message"
                 goal = await session.get(ManagedGoal, event.linked_entity_id)
                 assert goal.lifecycle == "draft"
             assert await session.scalar(select(func.count()).select_from(Task)) == 0

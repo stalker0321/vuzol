@@ -44,7 +44,7 @@ def anyio_backend():
     return "asyncio"
 
 
-async def command(factory, goal_id, name, payload, *, key=None):
+async def command(factory, goal_id, name, payload, *, key=None, reason=""):
     async with factory() as session:
         goal = await session.get(ManagedGoal, goal_id)
         version = goal.version
@@ -58,6 +58,7 @@ async def command(factory, goal_id, name, payload, *, key=None):
             expected_version=version,
             idempotency_key=key or str(uuid.uuid4()),
             payload=payload,
+            reason=reason,
         ),
     )
 

@@ -166,6 +166,13 @@ async def apply_pending_amendment(session: AsyncSession, goal: ManagedGoal) -> b
         goal.lifecycle = "active"
         goal.waiting_reason = None
         goal.wakeup_condition = None
+    if goal.constraints.get("mandate_required"):
+        from vuzol.leadership.commands import DRAFT_ACTIONS
+
+        delegation.allowed_actions = sorted(DRAFT_ACTIONS)
+        delegation.version += 1
+        if goal.lifecycle == "active":
+            goal.lifecycle = "draft"
     goal.scope_revision += 1
     goal.version += 1
     goal.fence_epoch += 1

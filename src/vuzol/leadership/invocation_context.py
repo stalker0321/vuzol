@@ -48,7 +48,7 @@ async def invocation_current(session: AsyncSession, context: TurnInvocationConte
         or turn is None
         or turn.status != "claimed"
         or (
-            goal.lifecycle != "active"
+            goal.lifecycle not in {"draft", "active"}
             and not (context.conversational and goal.lifecycle in {"waiting", "paused"})
         )
         or goal.project_id != context.project_id

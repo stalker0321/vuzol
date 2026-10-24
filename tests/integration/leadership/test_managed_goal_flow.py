@@ -628,10 +628,15 @@ async def test_flag_off_leaves_lead_text_on_the_legacy_path(
 
 
 def _runtime(
-    tmp_path: Path, repository: Path, *, lead: bool, discussion: bool = True
+    tmp_path: Path, repository: Path, *, lead: bool, discussion: bool = False
 ) -> RuntimeConfiguration:
+    from tests.integration.providers._test_routing_helpers import profile
+
+    from vuzol.config.settings import ChatSettings
+
     settings = Settings(
         environment="test",
+        chat=ChatSettings(enabled=lead, profile_id="chat-fixture"),
         allowed_user_ids=(OWNER,),
         allowed_chat_ids=(CHAT,),
         repository_root=repository.parent,
@@ -644,6 +649,17 @@ def _runtime(
         project_lead=ProjectLeadSettings(enabled=lead),
     )
     document = RegistryDocument(
+        profiles=(
+            profile(
+                "chat-fixture",
+                provider="codex",
+                launch_mode="cli",
+                sandbox_required=True,
+                capabilities=frozenset({Capability.REPOSITORY_READ}),
+                runtime_identity="fixture-chat",
+                state_directory=tmp_path / "chat-state",
+            ),
+        ),
         projects=(
             ProjectConfig(
                 id=PROJECT,
@@ -828,7 +844,13 @@ async def run_managed_goal_flow(
             for _ in range(5):
                 if not await delivery.deliver_one():
                     break
-            assert any("Руководитель" in text for _, _, text in client.sent)
+            # Admission alone does not claim that any work has started.
+            assert not client.sent
+            async with factory() as session:
+                goal = await session.scalar(select(ManagedGoal))
+                assert goal.lifecycle == "draft"
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
+                goal_id = goal.id
             git = LocalGit()
             worktrees = WorktreeService(settings.worktree_root, git, retention_days=1)
             workers = _workflow_workers(runtime, factory, git, worktrees)
@@ -839,8 +861,15 @@ async def run_managed_goal_flow(
             background = (dispatcher, *workers, sequence)
 
             first = _provider_worker(factory, settings, owner="lead-1")
-            assert await first.process_one()
-            assert await first.process_one()
+            assert await first.process_one()  # lead requests the strong plan
+            from tests.integration.leadership.test_plan_revisions import approve_plan
+
+            async with factory() as session:
+                planned = await session.get(ManagedGoal, goal_id)
+                assert planned.current_package_id is not None, planned.waiting_reason
+            assert (await approve_plan(factory, goal_id)).code == "applied"
+            assert await first.process_one()  # stale plan_ready is consumed
+            assert await first.process_one()  # approval lets the lead start the first task
             await _drain(background)
             await accept_current_result(factory)
             await _drain(background)
@@ -1078,7 +1107,7 @@ def _provider_worker(factory, settings, *, owner, transport=None):
                 }
             elif "completed_packages: 2" in prompt:
                 payload = {"commands": [{"name": "propose_completion", "payload": {}}]}
-            elif "package: draft" in prompt:
+            elif "package: draft" in prompt or "package: approved" in prompt:
                 context = json.loads(prompt.split("result_context: ", 1)[1])
                 payload = {
                     "commands": [
@@ -1104,6 +1133,8 @@ def _provider_worker(factory, settings, *, owner, transport=None):
                         },
                     ]
                 }
+            if request.role is ProviderRole.LEAD:
+                payload["reply"] = "Подготовлю следующий шаг по вашему запросу."
             return ProviderResult(
                 status=ProviderResultStatus.SUCCEEDED,
                 structured_output=payload,

@@ -43,11 +43,14 @@ async def test_short_state_and_lossless_full_goal_are_distinct_authorized_reads(
         result = await ingress.accept_message(_message(701, "/lead " + request))
         assert result.status is IngressStatus.HANDLED
         await drain(factory, client)
+        assert not client.sent  # A text receipt does not claim execution started.
+        await ingress.accept_message(_message(700, "/lead_status"))
+        await drain(factory, client)
         assert len(client.sent) == 1, "command echo duplicated the durable state card"
         card = client.sent[0][2]
-        assert "<b>В РАБОТЕ · Руководитель</b>" in card
+        assert "<b>ОБСУЖДЕНИЕ · Руководитель</b>" in card
         assert len(visible(card)) < 1000 and "ФИНАЛ" not in visible(card)
-        assert "Сейчас от тебя ничего не требуется." in card
+        assert "Напиши сообщение в этом топике." in card
         assert client.rich_sent == [], "short system cards should use ordinary HTML"
         await ingress.accept_message(_message(701, "/lead " + request))
         await drain(factory, client)
@@ -143,6 +146,7 @@ async def test_completed_status_without_evidence_never_becomes_green(
     async with _factory(postgres_dsn) as factory:
         ingress = TelegramIngressService(runtime, factory)
         await ingress.accept_message(_message(721, "/lead outcome needs proof"))
+        await ingress.accept_message(_message(720, "/lead_status"))
         await drain(factory, FakeTelegramClient())
         # Inject an inconsistent/historical row. Rendering must not repair or trust it.
         async with factory.begin() as session:

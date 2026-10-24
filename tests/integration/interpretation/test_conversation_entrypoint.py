@@ -1,4 +1,4 @@
-"""Real executor/worker and Git; fake Docker/ACL, Jev HTTP and Telegram transport."""
+"""Real executor leadership turn; fake Docker/ACL and Telegram transport."""
 
 import asyncio
 import hashlib
@@ -13,15 +13,14 @@ from sqlalchemy import func, select
 from tests.integration.interpretation.test_conversation_modes import classify, modes_runtime, turn
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.test_delivery import service
-from vuzol.cli import executor, worker
+from vuzol.cli import executor
 from vuzol.config import RegistryDocument, RuntimeConfiguration, build_bundle
 from vuzol.config.models import ProviderRole
 from vuzol.execution.access import WorktreeAccessManager
-from vuzol.execution.domain import MountMode
-from vuzol.leadership.persistence import ManagedGoal
+from vuzol.leadership.persistence import LeadershipInference, LeadershipTurn, ManagedGoal
 from vuzol.providers.ports import CodexProcessResult
-from vuzol.storage.models import RoutingDecision, Step, SupervisedProcess, Task, UsageRecord
-from vuzol.storage.types import ProcessStatus, StepStatus, TaskStatus
+from vuzol.storage.models import Step, SupervisedProcess, Task, UsageRecord
+from vuzol.storage.types import ProcessStatus
 from vuzol.telegram.ingress import TelegramIngressService
 from vuzol.telegram.projections import FakeTelegramClient
 
@@ -118,24 +117,30 @@ def test_lead_conversation_through_executor_entrypoint(
 
         class DockerBoundary:
             async def run(self, envelope, cancellation):
-                assert envelope.turn_binding is None and not cancellation.requested
+                assert envelope.turn_binding is not None and not cancellation.requested
                 assert envelope.profile_id == "lead-only"
-                assert envelope.argv[envelope.argv.index("--tools") + 1] == "read,grep,find,ls"
+                assert "--no-tools" in envelope.argv and "--tools" not in envelope.argv
+                assert envelope.task_id is None and envelope.run_id is None
                 assert envelope.argv[envelope.argv.index("--model") + 1] == model
                 if effort is not None:
                     assert envelope.argv[envelope.argv.index("--thinking") + 1] == effort
-                mounts = {mount.purpose: mount for mount in envelope.sandbox.mounts}
-                assert mounts["task-worktree"].mode is MountMode.READ_ONLY
-                assert mounts["worktree-git-metadata"].mode is MountMode.READ_ONLY
-                assert envelope.sandbox.network_disabled
-                assert json.loads(envelope.stdin)["role"] == (
-                    "lead" if mode == "lead" else "executor"
-                )
+                assert [mount.purpose for mount in envelope.sandbox.mounts] == ["provider-state"]
+                assert envelope.sandbox.empty_workspace and envelope.sandbox.network_disabled
+                body = json.loads(envelope.stdin)
+                assert body["role"] == "lead"
+                assert f'"mode": "{mode}"' in body["original_input"]
                 launched.append(envelope)
                 message = {
                     "role": "assistant",
                     "stopReason": "stop",
-                    "content": [{"type": "text", "text": "Discussing, not executing."}],
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {"commands": [], "reply": "Обсудим варианты без запуска работы."}
+                            ),
+                        }
+                    ],
                     "usage": {"input": 100, "output": 10},
                 }
                 return CodexProcessResult(
@@ -146,34 +151,20 @@ def test_lead_conversation_through_executor_entrypoint(
                     1,
                 )
 
+            async def cleanup(self, envelope):
+                assert envelope in launched
+
         monkeypatch.setattr(WorktreeAccessManager, "preflight", AsyncMock())
         monkeypatch.setattr(executor, "get_runtime_configuration", lambda **kwargs: runtime)
         monkeypatch.setattr(executor, "resolve_database_dsn", lambda _: SecretStr(postgres_dsn))
         monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda *_a, **_k: DockerBoundary())
         monkeypatch.setattr(executor, "_refresh_subscription_limits_tick", AsyncMock())
 
-        async def two_iterations(processor, *args, **kwargs):
-            # Production runs each lane in its own loop (_run_loop); conversation
-            # steps live in the light control lanes, not in process_one().
-            async def any_lane():
-                for lane in processor.lanes():
-                    if await lane.process_one():
-                        return True
-                return False
+        async def one_turn(processor, *args, **kwargs):
+            assert processor._lead is not None
+            assert await processor.process_one()
 
-            assert await any_lane()  # real prepare_worktree
-            assert await any_lane()  # real routing/handler/adapter/envelope
-
-        monkeypatch.setattr(executor, "_run_loop", two_iterations)
-        monkeypatch.setattr(worker, "get_runtime_configuration", lambda **kwargs: runtime)
-        monkeypatch.setattr(worker, "resolve_database_dsn", lambda _: SecretStr(postgres_dsn))
-
-        async def deliver_and_finalize(*, worker, **kwargs):
-            assert await worker.process_one()  # deliver_discussion_reply
-            assert await worker.process_one()  # finalize
-            assert not await worker.process_one()
-
-        monkeypatch.setattr(worker, "run_runtime", deliver_and_finalize)
+        monkeypatch.setattr(executor, "_run_loop", one_turn)
         engine, factory = storage(postgres_dsn)
         try:
             ingress = TelegramIngressService(runtime, factory)
@@ -181,9 +172,8 @@ def test_lead_conversation_through_executor_entrypoint(
             await ingress.accept_message(turn("Let's discuss the plan; do not execute it.", 1102))
             # This newer mode must not substitute the queued answer's speaker.
             await ingress.accept_message(turn("/think" if mode == "lead" else "/lead", 1103))
-            assert await classify(runtime, factory, "plan")
-            await executor.run()
-            await worker.run()  # real internal handler persists reply and completes the task
+            assert not await classify(runtime, factory, "plan")
+            await executor.run()  # turn adapter persists the reply without workflow steps
             telegram = FakeTelegramClient()
             delivery = service(factory, telegram)
             for _ in range(8):
@@ -191,36 +181,24 @@ def test_lead_conversation_through_executor_entrypoint(
                     break
             else:
                 raise AssertionError("conversation delivery did not drain")
-            speaker = "Руководитель" if mode == "lead" else "Обсуждение"
-            assert any(
-                speaker in str(call)
-                and model in str(call)
-                and "Discussing, not executing." in str(call)
-                for call in telegram.sent
+            assert (
+                sum("Обсудим варианты без запуска работы." in text for _, _, text in telegram.sent)
+                == 1
             )
             async with factory() as session:
-                step = await session.scalar(select(Step).where(Step.step_type == "execute_agent"))
-                assert step.status is StepStatus.COMPLETED, (
-                    step.failure_category,
-                    step.failure_summary,
-                )
-                assert step.executor_profile_id == "lead-only"
-                assert step.payload["project_model_slot"] == mode
-                decision = await session.scalar(
-                    select(RoutingDecision).where(RoutingDecision.step_id == step.id)
-                )
-                assert decision.inputs["task_type"] == "discussion_agent_internal"
+                assert await session.scalar(select(func.count()).select_from(Step)) == 0
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
+                saved = (await session.scalars(select(LeadershipTurn))).one()
+                assert saved.model_assignments["lead"]["model"] == model
+                assert saved.model_assignments["lead"]["reasoning_effort"] == effort
                 process = (await session.scalars(select(SupervisedProcess))).one()
-                assert process.status is ProcessStatus.EXITED
-                assert process.runtime_metadata["cleanup_confirmed"] is True
+                assert process.status is ProcessStatus.EXITED and process.reaped_at is not None
+                phase = (await session.scalars(select(LeadershipInference))).one()
                 usage = await session.scalar(
-                    select(UsageRecord).where(UsageRecord.step_id == step.id)
+                    select(UsageRecord).where(UsageRecord.invocation_id == phase.id)
                 )
-                assert usage.profile_id == "lead-only"
-                assert await session.scalar(select(func.count()).select_from(Task)) == 1
-                task = (await session.scalars(select(Task))).one()
-                assert task.status is TaskStatus.COMPLETED
-                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
+                assert usage.profile_id == "lead-only" and usage.task_id is None
+                assert (await session.scalar(select(ManagedGoal))).lifecycle == "draft"
                 assert len(launched) == 1
         finally:
             await engine.dispose()

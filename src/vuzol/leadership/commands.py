@@ -96,6 +96,18 @@ DELEGATED_ACTIONS = frozenset(
     }
 )
 
+# A conversation may plan and clarify, but only the owner's plan approval grants execution.
+DRAFT_ACTIONS = frozenset(c.value for c in READ_COMMANDS) | frozenset(
+    {
+        "request_plan",
+        "revise_plan",
+        "amend_goal",
+        "request_permission",
+        "pause_goal",
+        "cancel_goal",
+    }
+)
+
 PROTECTED_BRANCHES = frozenset(
     {"main", "master", "trunk", "default", "production", "prod", "release"}
 )

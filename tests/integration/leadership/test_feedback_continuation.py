@@ -181,7 +181,7 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
                     {"name": draft.name, "payload": draft.payload}
                     for draft in flow._start_decision().commands
                 ]
-            elif context["package"]["status"] == "draft":
+            elif context["package"]["status"] in {"draft", "approved"}:
                 commands = [
                     {
                         "name": "start_task",
@@ -215,7 +215,7 @@ async def test_review_drives_a_corrective_package_through_actual_provider_inputs
                         }
                     ]
             decisions.append(commands)
-            return response({"commands": commands})
+            return response({"commands": commands, "reply": "Подготовлю план для одобрения."})
 
     transport = Transport()
     monkeypatch.setattr(

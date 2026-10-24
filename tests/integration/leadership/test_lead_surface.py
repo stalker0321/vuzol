@@ -312,9 +312,8 @@ async def test_owner_question_and_answer_bind_the_goal_revision(
         )
         assert answered.status is IngressStatus.HANDLED
         card = await _drain(factory)
-        assert "Сейчас от тебя ничего не требуется." in card
-        assert "В РАБОТЕ · Руководитель" in card
-        assert "Готовлю план работы." in card
+        assert "ОБСУЖДЕНИЕ · Руководитель" in card
+        assert "Обсуждаем запрос" in card
         await TelegramIngressService(runtime, factory).accept_message(_message(53, "/lead_details"))
         details = await _drain(factory)
         assert f"<b>Твой последний ответ</b>\n\n<pre><code>{answer}\n</code></pre>" in details
@@ -713,7 +712,7 @@ async def test_voice_is_transcribed_before_later_owner_text(postgres_dsn, tmp_pa
 
 
 @pytest.mark.parametrize("case", ["no_live_goal", "think", "other_owner"])
-async def test_messages_outside_live_owner_lead_keep_discussion_route(postgres_dsn, tmp_path, case):
+async def test_project_messages_use_lead_and_keep_owner_boundary(postgres_dsn, tmp_path, case):
     from vuzol.storage.models import TopicMapping, TransactionalOutbox
 
     repository = tmp_path / "repositories" / PROJECT
@@ -745,21 +744,28 @@ async def test_messages_outside_live_owner_lead_keep_discussion_route(postgres_d
         if case == "other_owner":
             message = message.model_copy(update={"user_id": 99})
         accepted = await TelegramIngressService(runtime, factory).accept_message(message)
-        assert accepted.status is IngressStatus.HANDLED
+        assert accepted.status is (
+            IngressStatus.REJECTED if case == "other_owner" else IngressStatus.HANDLED
+        )
         async with factory() as session:
-            assert (
-                await session.scalar(
-                    select(TransactionalOutbox.id).where(
-                        TransactionalOutbox.destination == "discussion_classify"
-                    )
-                )
-                is not None
-            )
             assert not await session.scalar(
                 select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.destination == "discussion_classify"
+                )
+            )
+            event = await session.scalar(
+                select(TransactionalOutbox).where(
                     TransactionalOutbox.idempotency_key == f"lead:message:{CHAT}:900"
                 )
             )
+            if case == "other_owner":
+                assert event is None
+                assert accepted.reason == "goal_not_available"
+            else:
+                assert event.payload["mode"] == ("think" if case == "think" else "lead")
+                goal = await session.get(ManagedGoal, event.linked_entity_id)
+                assert goal.lifecycle == ("draft" if case == "no_live_goal" else "active")
+            assert await session.scalar(select(func.count()).select_from(Task)) == 0
 
 
 async def test_project_messages_from_two_chats_reply_to_their_source_topic(postgres_dsn, tmp_path):

@@ -1,4 +1,4 @@
-"""Persistent interlocutors, independent Jev intent, exact RO model boundary: TEST PG."""
+"""Persistent modes through leadership turns, with no Jev or conversational Task: TEST PG."""
 # ruff: noqa: RUF001
 
 import asyncio
@@ -10,7 +10,6 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from tests.integration.interpretation.test_chat_boundary import chat_runtime, message
-from tests.integration.interpretation.test_chat_intent_context import finish_reply
 from tests.integration.providers._test_routing_helpers import profile
 from tests.integration.storage.helpers import storage
 from tests.unit.interpretation.test_jev_live import response
@@ -22,9 +21,7 @@ from vuzol.interpretation.service import InterpretationPipeline
 from vuzol.leadership.commands import LeadCommand
 from vuzol.leadership.persistence import CONTRACT_VERSION, LeadershipCommandReceipt, ManagedGoal
 from vuzol.leadership.service import LeadershipCommandService
-from vuzol.projects.model_matrix import set_assignment
 from vuzol.storage.models import (
-    Run,
     Task,
     TelegramIntakeMessage,
     TopicMapping,
@@ -32,7 +29,6 @@ from vuzol.storage.models import (
 )
 from vuzol.telegram.domain import IngressStatus
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.application import Principal
 
 pytestmark = pytest.mark.postgresql
@@ -42,6 +38,7 @@ def modes_runtime(tmp_path):
     runtime = chat_runtime(tmp_path)
     settings = runtime.settings.model_copy(
         update={
+            "project_discussion_enabled": False,
             "project_lead": runtime.settings.project_lead.model_copy(
                 update={
                     "enabled": True,
@@ -62,6 +59,7 @@ def modes_runtime(tmp_path):
         supported_task_types=frozenset({"coding", "project_lead", "general"}),
         capabilities=frozenset({Capability.REPOSITORY_READ}),
         sandbox_required=True,
+        context_limit=32000,
         runtime_identity="test-lead",
         state_directory=tmp_path / "lead-state",
     )
@@ -146,59 +144,50 @@ def test_mode_survives_restart_is_topic_local_and_commands_do_not_start_work(
                 items = (
                     await session.scalars(
                         select(TransactionalOutbox).where(
-                            TransactionalOutbox.destination == "discussion_classify"
+                            TransactionalOutbox.destination == "project_lead"
                         )
                     )
                 ).all()
-                routes = {
-                    i.payload["message_thread_id"]: i.payload["conversation_route"] for i in items
-                }
-                assert routes[10]["conversation_mode"] == "think"
-                assert routes[10]["assignment"]["profile_id"] == "sol-chat"
-                assert routes[20]["conversation_mode"] == "lead"
-                assert routes[20]["assignment"]["profile_id"] == "lead-only"
+                routes = {i.payload["message_thread_id"]: i.payload["mode"] for i in items}
+                assert routes == {10: "think", 20: "lead"}
+                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 1
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
         finally:
             await engine.dispose()
 
     asyncio.run(scenario())
 
 
-def test_queued_message_and_reply_keep_the_original_speaker(postgres_dsn, tmp_path):
+def test_queued_message_and_reply_keep_the_original_mode(postgres_dsn, tmp_path):
+    from tests.integration.leadership.test_lead_surface import _drain, _Transport
+    from vuzol.leadership.composition import build_project_lead_worker
+    from vuzol.leadership.persistence import LeadershipTurn
+
     async def scenario():
         engine, factory = storage(postgres_dsn)
         runtime = modes_runtime(tmp_path)
         try:
             ingress = TelegramIngressService(runtime, factory)
             await ingress.accept_message(turn("/lead"))
-            await ingress.accept_message(turn("Предложи план, пока не запускай.", 1102))
+            await ingress.accept_message(turn("Предложи варианты, пока не запускай.", 1102))
             await ingress.accept_message(turn("/think", 1103))
-            assert await classify(runtime, factory, "plan")
-            async with factory() as session:
-                task = (await session.scalars(select(Task))).one()
-                run = (await session.scalars(select(Run))).one()
-                assert run.selected_route["trusted_profile_id"] == "lead-only"
-                assert run.selected_route["conversation_mode"] == "lead"
-                assert task.task_draft["required_capabilities"] == ["repository_read"]
-                assert "project lead, speaking in read-only" in task.original_text
-                assert "Managed goal in this topic: none" in task.original_text
-                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
-                task_id = task.id
-            telegram = FakeTelegramClient()
-            await finish_reply(factory, task_id, "Только обсуждение.", client=telegram)
-            async with factory() as session:
-                reply = await session.scalar(
-                    select(TransactionalOutbox).where(
-                        TransactionalOutbox.payload["role"].as_string() == "discussion_reply"
-                    )
-                )
-                assert (
-                    reply.payload["conversation_route"]["assignment"]["model"]
-                    == "vendor/current-lead"
-                )
-            assert any(
-                "vendor/current-lead" in str(call) and "Руководитель" in str(call)
-                for call in telegram.sent
+            assert not await classify(runtime, factory, "plan")
+            transport = _Transport({"reply": "Только обсуждение.", "commands": []})
+            worker = build_project_lead_worker(
+                factory,
+                settings=runtime.settings,
+                profiles=runtime.registries.profiles,
+                owner="mode-reply",
+                adapter=transport,
             )
+            assert await worker.process_one()
+            assert '"mode": "lead"' in transport.requests[0].original_input
+            assert "Только обсуждение." in await _drain(factory)
+            async with factory() as session:
+                saved = await session.scalar(select(LeadershipTurn))
+                assert saved.model_assignments["lead"]["profile_id"] == "lead-only"
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
+                assert (await session.scalar(select(ManagedGoal))).lifecycle == "draft"
         finally:
             await engine.dispose()
 
@@ -215,12 +204,12 @@ def test_explicit_work_goes_to_lead_once_and_switch_does_not_resume(postgres_dsn
             await ingress.accept_message(turn(f"/{mode}"))
             request = turn("Добавь поиск книг; не публикуй результат в production.", 1102)
             await ingress.accept_message(request)
-            assert await classify(runtime, factory, "execute_request")
+            assert not await classify(runtime, factory, "execute_request")
             assert (await ingress.accept_message(request)).status is IngressStatus.DUPLICATE
             assert not await classify(runtime, factory, "execute_request")
             async with factory() as session:
                 goal = (await session.scalars(select(ManagedGoal))).one()
-                assert goal.lifecycle == "active"
+                assert goal.lifecycle == "draft"
                 assert "не публикуй" in goal.scope_text
                 assert goal.criteria and goal.owner_user_id == 42
                 assert await session.scalar(select(func.count()).select_from(Task)) == 0
@@ -230,7 +219,7 @@ def test_explicit_work_goes_to_lead_once_and_switch_does_not_resume(postgres_dsn
                 )
                 assert (
                     await session.scalar(select(TelegramIntakeMessage))
-                ).affinity_kind == "managed_goal"
+                ).affinity_kind == "discussion"
                 goal_id, version = goal.id, goal.version
             service = LeadershipCommandService(factory, enabled=True)
             paused = await service.apply_human(
@@ -258,7 +247,7 @@ def test_explicit_work_goes_to_lead_once_and_switch_does_not_resume(postgres_dsn
                     select(TransactionalOutbox).where(
                         TransactionalOutbox.destination == "project_lead",
                         TransactionalOutbox.linked_entity_id == goal_id,
-                        TransactionalOutbox.payload["wakeup_kind"].as_string() == "owner_message",
+                        TransactionalOutbox.idempotency_key == "lead:message:-100:1104",
                     )
                 )
                 assert event is not None and event.payload["text"] == "Теперь добавь фильтр."
@@ -268,21 +257,11 @@ def test_explicit_work_goes_to_lead_once_and_switch_does_not_resume(postgres_dsn
     asyncio.run(scenario())
 
 
-def test_lead_only_profile_reaches_real_handler_and_pi_read_only_transport(postgres_dsn, tmp_path):
-    from datetime import UTC, datetime, timedelta
-
-    from vuzol.config import ScopedSecretResolver
+def test_lead_only_profile_reaches_turn_adapter_and_pi_transport(postgres_dsn, tmp_path):
+    from vuzol.leadership.composition import build_project_lead_worker
     from vuzol.providers.catalog import cli_adapter
-    from vuzol.providers.handlers import ProviderStepHandler
-    from vuzol.providers.health import synchronize_profiles
     from vuzol.providers.ports import CodexProcessResult
-    from vuzol.providers.registry import AdapterRegistry
     from vuzol.providers.role_cli import RoleBoundCliAdapter
-    from vuzol.providers.routing import claim_routed_step
-    from vuzol.storage.models import Step, Worktree
-    from vuzol.storage.types import StepStatus
-    from vuzol.workflows.domain import OutcomeKind
-    from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
     class Transport:
         invocation = None
@@ -291,15 +270,20 @@ def test_lead_only_profile_reaches_real_handler_and_pi_read_only_transport(postg
             self.invocation = invocation
             body = json.loads(invocation.stdin)
             assert body["role"] == "lead"
-            assert body["output_schema"] is None  # Conversation, not mutating lead command JSON.
-            assert "owner_user_id" not in invocation.stdin
-            assert invocation.argv[invocation.argv.index("--tools") + 1] == "read,grep,find,ls"
-            assert "--no-tools" not in invocation.argv  # Repository inspection is available.
-            assert invocation.sandbox_reference.startswith("worktree:")
+            assert body["output_schema"] is not None
+            assert "--no-tools" in invocation.argv
+            assert invocation.sandbox_reference.startswith("lead-turn:")
             assistant = {
                 "role": "assistant",
                 "stopReason": "stop",
-                "content": [{"type": "text", "text": "Предлагаю обсудить варианты."}],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {"reply": "Предлагаю обсудить варианты.", "commands": []}
+                        ),
+                    }
+                ],
                 "usage": {"input": 500, "output": 20},
             }
             return CodexProcessResult(
@@ -310,103 +294,49 @@ def test_lead_only_profile_reaches_real_handler_and_pi_read_only_transport(postg
                 5,
             )
 
+    class UnexpectedAdapter:
+        async def execute(self, *args):
+            raise AssertionError("A project message must use the leadership turn adapter")
+
     async def scenario():
         engine, factory = storage(postgres_dsn)
         runtime = modes_runtime(tmp_path)
         try:
-            ingress = TelegramIngressService(runtime, factory)
-            await ingress.accept_message(turn("/lead"))
-            await ingress.accept_message(turn("Обсуди варианты, не выполняй.", 1102))
-            assert await classify(runtime, factory)
-            async with factory.begin() as session:
-                await synchronize_profiles(
-                    session,
-                    runtime.registries.profiles.items(),
-                    configuration_revision=runtime.registries.revision,
-                )
-                task = (await session.scalars(select(Task))).one()
-                run = (await session.scalars(select(Run))).one()
-                steps = (await session.scalars(select(Step))).all()
-                for step in steps:
-                    if step.step_type == "prepare_worktree":
-                        step.status = StepStatus.COMPLETED
-                    elif step.step_type == "execute_agent":
-                        step.status = StepStatus.QUEUED
-                session.add(
-                    Worktree(
-                        task_id=task.id,
-                        run_id=run.id,
-                        project_id="vuzol",
-                        repository_identity_hash="a" * 64,
-                        base_commit="b" * 40,
-                        default_branch="main",
-                        expected_target_head="b" * 40,
-                        branch="test/read-only",
-                        path=str(tmp_path / "checkout"),
-                        owner="test",
-                        retention_until=datetime.now(UTC) + timedelta(days=1),
-                    )
-                )
-            async with factory.begin() as session:
-                token = await claim_routed_step(
-                    session,
-                    settings=runtime.settings,
-                    registries=runtime.registries,
-                    owner="test",
-                    lease_seconds=60,
-                    candidate_limit=20,
-                    step_types=frozenset({"execute_agent"}),
-                )
-                assert token is not None
-                step = await session.get(Step, token.step.id)
-                assert step.executor_profile_id == "lead-only"
-                assert step.required_capabilities == ["repository_read"]
-                payload = dict(step.payload)
-                step.status = StepStatus.RUNNING  # Worker entry after claim, no provider stub.
-            configured = runtime.registries.profiles.get("lead-only")
+            await TelegramIngressService(runtime, factory).accept_message(
+                turn("Обсуди варианты, не выполняй.", 1102)
+            )
             transport = Transport()
-            base = cli_adapter(configured, transport)
-
-            class ForbiddenAdapter:
-                async def execute(self, *args):
-                    raise AssertionError("conversation entered an autonomous turn adapter")
-
-            # Same role dispatcher used by the executor entrypoint, fake only at process boundary.
-            adapter = RoleBoundCliAdapter(base, ForbiddenAdapter(), ForbiddenAdapter())
-            adapters = AdapterRegistry(
-                runtime.registries.profiles,
-                ScopedSecretResolver(
-                    access_policy={}, secret_file_root=tmp_path / "secrets", environment={}
-                ),
-                adapters={"lead-only": adapter},
-                session_factory=factory,
+            adapter = RoleBoundCliAdapter(
+                UnexpectedAdapter(),
+                UnexpectedAdapter(),
+                cli_adapter(runtime.registries.profiles.get("lead-only"), transport),
             )
-            outcome = await ProviderStepHandler(factory, runtime.registries, adapters).execute(
-                StepExecutionRequest(
-                    task_id=task.id,
-                    run_id=run.id,
-                    step_id=token.step.id,
-                    step_type="execute_agent",
-                    payload=payload,
-                    timeout_seconds=60,
-                    lease=token,
-                ),
-                CancellationContext(),
+            worker = build_project_lead_worker(
+                factory,
+                settings=runtime.settings,
+                profiles=runtime.registries.profiles,
+                owner="pi-turn",
+                adapter=adapter,
             )
-            assert outcome.kind is OutcomeKind.SUCCEEDED, outcome
-            assert outcome.result["structured_output"]["reply"] == "Предлагаю обсудить варианты."
+            assert await worker.process_one()
             assert transport.invocation is not None
             async with factory() as session:
-                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
+                assert (await session.scalar(select(ManagedGoal))).lifecycle == "draft"
         finally:
             await engine.dispose()
 
     asyncio.run(scenario())
 
 
-def test_model_selection_is_pinned_at_intake_and_catalog_change_fails_closed(
-    postgres_dsn, tmp_path
-):
+def test_model_selection_is_pinned_by_turn_and_catalog_change_fails_closed(postgres_dsn, tmp_path):
+    from tests.integration.leadership.test_lead_surface import _Transport
+    from tests.integration.leadership.test_model_assignment_receipts import _claim
+    from tests.integration.leadership.test_stage2_contracts import expire_claim
+    from vuzol.config.registries import ProfileRegistry
+    from vuzol.leadership.composition import build_project_lead_worker
+    from vuzol.leadership.persistence import LeadershipTurn
+
     async def scenario():
         engine, factory = storage(postgres_dsn)
         runtime = modes_runtime(tmp_path)
@@ -414,55 +344,38 @@ def test_model_selection_is_pinned_at_intake_and_catalog_change_fails_closed(
             ingress = TelegramIngressService(runtime, factory)
             await ingress.accept_message(turn("/think", 1100))
             await ingress.accept_message(turn("Первый вопрос"))
-            async with factory.begin() as session:
-                await set_assignment(
-                    session,
-                    project_id="vuzol",
-                    slot="think",
-                    profile_id="other-worker",
-                    expected_revision=1,
-                    user_id=42,
-                    registries=runtime.registries,
+            transport = _Transport({"reply": "Обсудим.", "commands": []})
+            worker = build_project_lead_worker(
+                factory,
+                settings=runtime.settings,
+                profiles=runtime.registries.profiles,
+                owner="before",
+                adapter=transport,
+            )
+            claim = await _claim(factory, worker, "before")
+            await worker._infer(claim)  # Crash after the provider receipt, before saving decision.
+            await expire_claim(factory)
+            profiles = ProfileRegistry(
+                tuple(
+                    p.model_copy(update={"model": "changed"}) if p.id == "lead-only" else p
+                    for p in runtime.registries.profiles.items()
                 )
-            await ingress.accept_message(turn("/think", 1102, thread=20))
-            await ingress.accept_message(turn("Второй вопрос", 1103, thread=20))
-            async with factory() as session:
-                items = (
-                    await session.scalars(
-                        select(TransactionalOutbox)
-                        .where(TransactionalOutbox.destination == "discussion_classify")
-                        .order_by(TransactionalOutbox.created_at)
-                    )
-                ).all()
-                assert [
-                    i.payload["conversation_route"]["assignment"]["profile_id"] for i in items
-                ] == [
-                    "sol-chat",
-                    "other-worker",
-                ]
-            # Same profile id now points at another model: do not silently substitute it.
-            old = runtime.registries
-            document = RegistryDocument(
-                projects=old.projects.items(),
-                topics=old.topics.items(),
-                sandboxes=old.sandboxes.items(),
-                profiles=tuple(
-                    p.model_copy(update={"model": "changed"}) if p.id == "sol-chat" else p
-                    for p in old.profiles.items()
-                ),
             )
-            changed = runtime.model_copy(
-                update={"registries": build_bundle(document, runtime.settings)}
+            restarted = build_project_lead_worker(
+                factory,
+                settings=runtime.settings,
+                profiles=profiles,
+                owner="after",
+                adapter=transport,
             )
-            assert await classify(changed, factory)
+            assert await restarted.process_one()
+            assert len(transport.requests) == 1
             async with factory() as session:
                 assert await session.scalar(select(func.count()).select_from(Task)) == 0
-                notice = await session.scalar(
-                    select(TransactionalOutbox).where(
-                        TransactionalOutbox.idempotency_key.like("chat:responder:%")
-                    )
-                )
-                assert notice is not None
+                goal = await session.scalar(select(ManagedGoal))
+                assert goal.waiting_reason == "lead_profile_unselected"
+                saved = await session.scalar(select(LeadershipTurn))
+                assert saved.model_assignments["lead"]["model"] == "vendor/current-lead"
         finally:
             await engine.dispose()
 
@@ -494,38 +407,64 @@ def test_disabled_or_unauthorized_switch_never_becomes_a_task(postgres_dsn, tmp_
     asyncio.run(scenario())
 
 
-def test_accepted_discussion_is_frozen_for_lead_and_criterion_is_not_just_yes(
+def test_accepted_discussion_reaches_lead_and_amendment_keeps_meaningful_criteria(
     postgres_dsn, tmp_path
 ):
+    from tests.integration.leadership.test_managed_goal_flow import _worker
     from vuzol.leadership.chat import conversation_goal_context
+    from vuzol.leadership.model import LeadCommandDraft, LeadDecision
+    from vuzol.leadership.persistence import current_request
+
+    proposal = "Добавить поиск книг по названию и автору. Не менять страницу профиля."
+
+    class Model:
+        async def decide(self, snapshot):
+            if not snapshot.owner_event:
+                return LeadDecision()
+            if snapshot.owner_event["message_id"] == 1101:
+                return LeadDecision(reply=proposal)
+            assert any(t["text"] == proposal for t in snapshot.result_context["conversation"])
+            assert "Прод не трогай" in snapshot.owner_event["text"]
+            return LeadDecision(
+                reply="Уточню цель по нашему обсуждению.",
+                commands=(
+                    LeadCommandDraft(
+                        "amend_goal",
+                        {
+                            "scope": proposal,
+                            "criteria": [{"id": "search", "description": proposal}],
+                            "source_event_id": snapshot.owner_event["source_event_id"],
+                            "inflight_policy": "finish_current",
+                        },
+                        reason="Владелец согласовал обсуждённое направление",
+                    ),
+                ),
+            )
 
     async def scenario():
         engine, factory = storage(postgres_dsn)
         runtime = modes_runtime(tmp_path)
         try:
             ingress = TelegramIngressService(runtime, factory)
+            worker = _worker(factory, Model())
             await ingress.accept_message(turn("Предложи план поиска книг, без публикации."))
-            assert await classify(runtime, factory, "plan")
-            async with factory() as session:
-                task = (await session.scalars(select(Task))).one()
-                task_id = task.id
-            proposal = "Добавить поиск книг по названию и автору. Не менять страницу профиля."
-            await finish_reply(factory, task_id, proposal, client=FakeTelegramClient())
+            assert await worker.process_one()
             await ingress.accept_message(turn("Да, реализуй этот план. Прод не трогай.", 1102))
-            assert await classify(runtime, factory, "execute_request", "conversation_context")
+            assert await worker.process_one()
+            assert await worker.process_one()  # Apply pending amendment in the next turn.
             async with factory() as session:
                 goal = (await session.scalars(select(ManagedGoal))).one()
-                scope = json.loads(goal.scope_text)
-                frozen = scope["accepted_conversation_context"]
-                assert proposal in frozen["content"]
-                assert "Прод не трогай" in scope["current_user_request"]
-                assert frozen["content_hash"] in goal.criteria[0]["description"]
-                assert goal.criteria[0]["description"] != goal.original_request
+                assert current_request(goal) == proposal
+                assert goal.criteria == [{"id": "search", "description": proposal}]
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
                 context = await conversation_goal_context(
-                    session, project_id="vuzol", user_id=42, chat_id=-100, thread_id=10
+                    session,
+                    project_id="vuzol",
+                    user_id=42,
+                    chat_id=-100,
+                    thread_id=10,
                 )
-                assert str(goal.id) in context and '"lifecycle": "active"' in context
-                assert "owner_user_id" not in context
+                assert proposal in context and "owner_user_id" not in context
                 for user_id, thread_id in [(999, 10), (42, 20)]:
                     other = await conversation_goal_context(
                         session,
@@ -541,61 +480,84 @@ def test_accepted_discussion_is_frozen_for_lead_and_criterion_is_not_just_yes(
     asyncio.run(scenario())
 
 
-def test_crash_after_command_before_ack_rolls_back_then_recovers_once(
+def test_crash_after_event_before_ack_rolls_back_then_recovers_once(
     postgres_dsn, tmp_path, monkeypatch
 ):
-    from datetime import UTC, datetime, timedelta
-
-    from vuzol.interpretation import service as pipeline_module
-    from vuzol.storage.models import ConversationTurn
-    from vuzol.storage.types import DeliveryStatus
+    from vuzol.storage.models import ConversationTurn, ExternalInbox
+    from vuzol.storage.repositories.delivery import InboxRepository
 
     async def scenario():
         engine, factory = storage(postgres_dsn)
         runtime = modes_runtime(tmp_path)
         try:
-            await TelegramIngressService(runtime, factory).accept_message(
-                turn("Добавь поиск книг.")
-            )
-            complete = pipeline_module.complete_outbox_item
+            original = InboxRepository.mark_processed
 
-            async def crash(session, token):
-                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 1
+            async def crash(repository, *args, **kwargs):
                 raise RuntimeError("crash before intake ack")
 
-            monkeypatch.setattr(pipeline_module, "complete_outbox_item", crash)
+            monkeypatch.setattr(InboxRepository, "mark_processed", crash)
+            ingress = TelegramIngressService(runtime, factory)
+            update = turn("Добавь поиск книг.")
             with pytest.raises(RuntimeError, match="crash before intake ack"):
-                await classify(runtime, factory, "execute_request")
-            async with factory.begin() as session:
-                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
-                assert (
-                    await session.scalar(select(func.count()).select_from(LeadershipCommandReceipt))
-                    == 0
-                )
-                assert await session.scalar(select(func.count()).select_from(ConversationTurn)) == 0
-                item = await session.scalar(
-                    select(TransactionalOutbox).where(
-                        TransactionalOutbox.destination == "discussion_classify"
-                    )
-                )
-                assert item.status is DeliveryStatus.LEASED
-                # Test clock advance. Runtime must recover via its ordinary expired lease claim.
-                item.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
-            monkeypatch.setattr(pipeline_module, "complete_outbox_item", complete)
-            assert await classify(runtime, factory, "execute_request")
-            assert not await classify(runtime, factory, "execute_request")
+                await ingress.accept_message(update)
             async with factory() as session:
-                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 1
-                assert (
-                    await session.scalar(select(func.count()).select_from(LeadershipCommandReceipt))
-                    == 1
-                )
-                item = await session.scalar(
-                    select(TransactionalOutbox).where(
-                        TransactionalOutbox.destination == "discussion_classify"
+                for model in (
+                    ManagedGoal,
+                    LeadershipCommandReceipt,
+                    ConversationTurn,
+                    ExternalInbox,
+                ):
+                    assert await session.scalar(select(func.count()).select_from(model)) == 0
+            monkeypatch.setattr(InboxRepository, "mark_processed", original)
+            assert (await ingress.accept_message(update)).status is IngressStatus.HANDLED
+            assert (await ingress.accept_message(update)).status is IngressStatus.DUPLICATE
+            async with factory() as session:
+                for model in (ManagedGoal, LeadershipCommandReceipt, ConversationTurn):
+                    assert await session.scalar(select(func.count()).select_from(model)) == 1
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_pending_old_chat_intake_enters_lead_without_jev(postgres_dsn, tmp_path):
+    from vuzol.interpretation.ports import InterpreterUnavailable
+
+    class NeverClassify:
+        async def interpret(self, *args, **kwargs):
+            raise InterpreterUnavailable("Jev must not decide lead entry")
+
+    async def scenario():
+        engine, factory = storage(postgres_dsn)
+        runtime = modes_runtime(tmp_path)
+        try:
+            ingress = TelegramIngressService(runtime, factory)
+            update = turn("Что здесь можно улучшить?")
+            topic = runtime.registries.topics.resolve(update.chat_id, update.message_thread_id)
+            accepted = await ingress._accept_discussion_message(update, topic)
+            pipeline = InterpretationPipeline(
+                runtime,
+                factory,
+                owner="old-chat-intake",
+                interpreter=NeverClassify(),
+            )
+            assert await pipeline.process_one()
+            assert not await pipeline.process_one()
+            async with factory() as session:
+                goal = await session.scalar(select(ManagedGoal))
+                assert goal.lifecycle == "draft"
+                assert await session.scalar(select(func.count()).select_from(Task)) == 0
+                events = list(
+                    await session.scalars(
+                        select(TransactionalOutbox).where(
+                            TransactionalOutbox.destination == "project_lead"
+                        )
                     )
                 )
-                assert item.status is DeliveryStatus.DELIVERED
+                assert len(events) == 1 and events[0].payload["intake_id"] == str(
+                    accepted.intake_id
+                )
         finally:
             await engine.dispose()
 

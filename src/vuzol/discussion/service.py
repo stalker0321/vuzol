@@ -393,6 +393,20 @@ class WorkPackageService:
             self._require_managed_revision(goal, package, revision)
             if user_id != goal.owner_user_id:
                 raise DomainError("control_unauthorized")
+            if goal.constraints.get("mandate_required"):
+                from vuzol.leadership.commands import DELEGATED_ACTIONS
+                from vuzol.leadership.persistence import POLICY_REVISION, GoalDelegation
+                from vuzol.leadership.rules import delegation_is_expired
+
+                assert self._uow.session is not None
+                delegation = await self._uow.session.get(GoalDelegation, goal.delegation_id)
+                if (
+                    delegation is None
+                    or delegation.revoked_at is not None
+                    or delegation.policy_revision != POLICY_REVISION
+                    or delegation_is_expired(delegation.expires_at, now=datetime.now(UTC))
+                ):
+                    raise DomainError("delegation_inactive")
             if content_hash != revision.content_hash or scope_revision != goal.scope_revision:
                 raise DomainError("stale_revision")
         if (
@@ -445,7 +459,25 @@ class WorkPackageService:
         if goal is not None:
             from vuzol.leadership.wakeups import enqueue_goal_wakeup
 
-            if goal.lifecycle == "waiting" and goal.waiting_reason == "plan_approval":
+            if goal.constraints.get("mandate_required"):
+                assert delegation is not None
+                delegation.allowed_actions = sorted(
+                    DELEGATED_ACTIONS - {"propose_batch", "request_revision"}
+                )
+                delegation.version += 1
+                goal.constraints = {
+                    **goal.constraints,
+                    "owner_mandate": {
+                        "scope_revision": goal.scope_revision,
+                        "revision_id": str(revision.id),
+                        "content_hash": revision.content_hash,
+                        "owner_user_id": user_id,
+                    },
+                }
+
+            if goal.lifecycle == "draft" or (
+                goal.lifecycle == "waiting" and goal.waiting_reason == "plan_approval"
+            ):
                 goal.lifecycle = "active"
                 goal.waiting_reason = None
                 goal.wakeup_condition = None
@@ -481,8 +513,11 @@ class WorkPackageService:
         if package.head_revision_id != revision.id or revision.state is not PlanRevisionState.DRAFT:
             raise DomainError("stale_revision")
         from vuzol.leadership.batches import owner_approval_required
-        from vuzol.leadership.persistence import POLICY_REVISION, GoalDelegation
+        from vuzol.leadership.persistence import POLICY_REVISION, GoalDelegation, has_owner_mandate
         from vuzol.leadership.rules import delegation_is_expired
+
+        if goal is not None and not has_owner_mandate(goal):
+            raise DomainError("owner_mandate_required")
 
         assert self._uow.session is not None
         delegation = await self._uow.session.get(GoalDelegation, delegation_id)

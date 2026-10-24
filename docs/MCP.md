@@ -14,21 +14,27 @@ provenance, durable request notices, idempotency and live execution checks.
 - `list_projects`: only explicitly granted, enabled projects.
 - `get_project_status(project_id)`: latest owned goal in the configured discussion.
 - `get_result(project_id, goal_id)`: owned goal and existing evidence projection.
-- `submit_request(work)`: explicit request, scope, acceptance criteria, project,
-  UUID `request_id`, optional existing work limits. Creates an isolated managed
-  goal through `LeadershipCommandService`, not Telegram ingress or another model.
+- `submit_request(work)`: a user-authorized message, project and UUID `request_id`;
+  optional `scope`, `criteria`, existing `work_limits`, and `mode` (`lead` by default, or `think`).
+  `ProjectApplication` calls the same `ProjectEventService.submit_event` as Telegram.
 
-Submission returns a committed receipt, not a finished task. Retry an uncertain
-submission with the SAME UUID and identical payload. Payload changes with that
-UUID are denied. A different request while a goal is live is rejected; it does
-not append work, resume a pause or override approval. Do not retry denials in a
-loop. Follow with status/result calls after an appropriate interval.
+Submission returns `{status, event_id, goal_id, receipt_id, reason}` after commit.
+`status=accepted` acknowledges durable input, not started or finished work; a replay returns
+`status=duplicate` with the same event and receipt IDs. Retry an uncertain submission with the
+SAME UUID and identical content/mode. Changed content with that UUID is denied. Provenance
+records the first authenticated client and request UUID; a renamed client does not invalidate
+retries. `allow_submit` and OAuth `vuzol:submit` remain required.
 
-Transport-neutral `ProjectApplication` is reusable by a personal-assistant
-adapter. It does not classify conversational intent: the caller must explicitly
-choose submission. Existing project discussion sessions are required in v1.
-No arbitrary SQL, shell, file reads, project creation, push or deploy approval
-is exposed. Normal existing goal notifications still use their project topic.
+New messages join the live goal, or create a draft conversation when none exists. The lead
+answers, clarifies or asks the strong planner for a plan; replies and plan cards arrive in the
+project topic. Execution requires the owner's plan approval. `mode=think` permits only reads
+and replies. A message alone does not resume a paused goal or approve a plan. Poll status/result
+later; do not retry denials in a loop. If an accepted event is moved after its original goal
+finishes, its receipt still identifies the original admission; `get_project_status` shows the
+latest goal.
+
+Existing project discussion sessions remain required in the access grant. No arbitrary SQL,
+shell, file reads, project creation, push or deployment approval is exposed. No DDL is needed.
 
 ## Configuration
 

@@ -18,6 +18,7 @@ from vuzol.discussion.domain import DomainError, PlanDraft
 from vuzol.leadership.actor import Actor, ActorKind, ActorRejected
 from vuzol.leadership.commands import (
     DELEGATED_ACTIONS,
+    DRAFT_ACTIONS,
     READ_COMMANDS,
     CommandResult,
     CommandStatus,
@@ -37,6 +38,7 @@ from vuzol.leadership.persistence import (
     LeadershipCommandReceipt,
     ManagedGoal,
     current_request,
+    has_owner_mandate,
 )
 from vuzol.leadership.policy import (
     PolicyDecision,
@@ -177,6 +179,37 @@ class LeadershipCommandService:
                 if goal is None
                 else await uow.session.get(GoalDelegation, goal.delegation_id, with_for_update=True)
             )
+            if claim is not None and name not in READ_COMMANDS:
+                from vuzol.storage.models import TransactionalOutbox
+
+                source = await uow.session.get(TransactionalOutbox, claim.wakeup_id)
+                if source is not None and source.payload.get("mode") == "think":
+                    return await store(
+                        uow.session,
+                        actor,
+                        command,
+                        digest,
+                        _Outcome(CommandStatus.DENIED, "read_only_mode", {}, goal),
+                    )
+            if (
+                goal is not None
+                and not has_owner_mandate(goal)
+                and name.value not in DRAFT_ACTIONS
+                and name
+                not in {
+                    LeadCommandName.ANSWER_PERMISSION,
+                    LeadCommandName.RESUME_GOAL,
+                    LeadCommandName.SET_WORK_LIMITS,
+                    LeadCommandName.REVOKE_DELEGATION,
+                }
+            ):
+                return await store(
+                    uow.session,
+                    actor,
+                    command,
+                    digest,
+                    _Outcome(CommandStatus.DENIED, "owner_mandate_required", {}, goal),
+                )
             decision = _decision(actor, name, command, goal, delegation, self._enabled)
             if not decision.allowed:
                 return await store(
@@ -350,7 +383,13 @@ class LeadershipCommandService:
             except (ValueError, DomainError) as error:
                 return _Outcome(CommandStatus.DENIED, str(error)[:120], {}, goal)
             goal.wakeup_condition = None
-            outcome = _transition(goal, actor, "active", None, CommandStatus.APPLIED)
+            outcome = _transition(
+                goal,
+                actor,
+                "active" if has_owner_mandate(goal) else "draft",
+                None,
+                CommandStatus.APPLIED,
+            )
             await enqueue_goal_wakeup(
                 uow.session,
                 goal_id=goal.id,
@@ -413,7 +452,13 @@ class LeadershipCommandService:
                     return outcome
                 goal.constraints = {**goal.constraints, "last_ready_wait": ready_identity}
                 goal.wakeup_condition = None
-                _transition(goal, actor, "active", None, CommandStatus.APPLIED)
+                _transition(
+                    goal,
+                    actor,
+                    "active" if has_owner_mandate(goal) else "draft",
+                    None,
+                    CommandStatus.APPLIED,
+                )
                 await enqueue_goal_wakeup(
                     uow.session,
                     goal_id=goal.id,
@@ -831,7 +876,9 @@ async def _answer_permission(
             {"version": goal.version, "lifecycle": goal.lifecycle},
             goal,
         )
-    outcome = _transition(goal, actor, "active", None, CommandStatus.APPLIED)
+    outcome = _transition(
+        goal, actor, "active" if has_owner_mandate(goal) else "draft", None, CommandStatus.APPLIED
+    )
     await enqueue_goal_wakeup(
         session,
         goal_id=goal.id,

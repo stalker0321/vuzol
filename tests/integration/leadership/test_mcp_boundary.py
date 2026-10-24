@@ -111,7 +111,7 @@ async def test_http_submit_restart_retry_and_read(postgres_dsn, tmp_path, signer
             "scope": "MARKER.txt only; no push or deployment",
             "criteria": ["MARKER.txt contains hello"],
         }
-        goal_id = None
+        goal_id = event_id = receipt_id = None
         for restart in range(2):
             if restart:
                 config = config.model_copy(
@@ -155,14 +155,26 @@ async def test_http_submit_restart_retry_and_read(postgres_dsn, tmp_path, signer
                     "get_result",
                     "submit_request",
                 }
+                submit_tool = next(
+                    tool
+                    for tool in listed.json()["result"]["tools"]
+                    if tool["name"] == "submit_request"
+                )
+                assert "event receipt" in submit_tool["description"]
+                assert "mode=think" in submit_tool["description"]
+                assert "Only owner approval grants execution" in submit_tool["description"]
                 result = await _call(client, "submit_request", {"work": work})
                 assert not result.get("isError"), result
                 receipt = result["structuredContent"]
                 assert receipt["reason"] == ("duplicate" if restart else None), receipt
-                assert receipt["status"] == ("duplicate" if restart else "applied"), receipt
+                assert receipt["status"] == ("duplicate" if restart else "accepted"), receipt
                 if goal_id is None:
                     goal_id = receipt["goal_id"]
+                    event_id = receipt["event_id"]
+                    receipt_id = receipt["receipt_id"]
                 assert receipt["goal_id"] == goal_id
+                assert receipt["event_id"] == event_id
+                assert receipt["receipt_id"] == receipt_id
                 conflict = await _call(
                     client, "submit_request", {"work": {**work, "request": "different work"}}
                 )
@@ -180,6 +192,7 @@ async def test_http_submit_restart_retry_and_read(postgres_dsn, tmp_path, signer
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 1
             goal = await session.scalar(select(ManagedGoal))
+            assert goal.lifecycle == "draft"
             assert goal.constraints["request_origin"]["display_name"] == "ChatGPT"
             assert goal.constraints["request_origin"]["client_id"] == "chatgpt-test-client"
             events = list(
@@ -192,8 +205,7 @@ async def test_http_submit_restart_retry_and_read(postgres_dsn, tmp_path, signer
             notices = list(
                 await session.scalars(
                     select(TransactionalOutbox).where(
-                        TransactionalOutbox.idempotency_key
-                        == f"managed-goal:{goal_id}:incoming-request"
+                        TransactionalOutbox.idempotency_key == f"lead:incoming:{event_id}"
                     )
                 )
             )
@@ -249,5 +261,30 @@ async def test_authentication_and_write_boundaries(postgres_dsn, tmp_path, signe
             assert injected["isError"]
             hostile = await client.post("/mcp", json={}, headers={"Host": "evil.example"})
             assert hostile.status_code == 421
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
+
+
+async def test_submit_scope_cannot_override_read_only_project_grant(postgres_dsn, tmp_path, signer):
+    async with _factory(postgres_dsn) as factory:
+        config = _config(await _session(factory), allow_submit=False)
+        repository = tmp_path / "repositories" / PROJECT
+        repository.mkdir(parents=True)
+        runtime = _runtime(tmp_path, repository, lead=True)
+        app = create_http_app(create_server(ProjectApplication(runtime, factory), config), config)
+        async with app.router.lifespan_context(app), _client(app, signer()) as client:
+            result = await _call(
+                client,
+                "submit_request",
+                {
+                    "work": {
+                        "project_id": PROJECT,
+                        "request_id": str(uuid.uuid4()),
+                        "request": "Можно задать вопрос?",
+                        "mode": "think",
+                    }
+                },
+            )
+            assert result["isError"]
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0

@@ -86,9 +86,13 @@ PYTHONPATH=src python tests/preview_lead_cards.py /tmp/vuzol-lead-cards
 Open `index.html` locally. PNGs use host fonts, which may lack emoji glyphs; the
 status text still identifies every state. These are rendered layout previews, not
 screenshots from a live Telegram client, and generate no external messages.
-No schema migration, new formatter, execution engine, provider setting or feature
-flag is required. This change does not implement conversational `/think`/`/lead`
-modes or MCP; `/lead <goal>` retains its existing execution meaning.
+With `project_lead.enabled=true`, plain project-topic text and `/lead <goal>` record the
+same owner event. Without a live goal this creates a draft conversation, with no Task card.
+The lead answers questions or requests a strong plan; the owner approves the plan card before
+execution. Later messages join the live goal without implicitly changing scope or resuming it.
+`/think` freezes read-only mode on new messages through the same lead turn. Mode switches need
+`chat.enabled=true`; neither admission nor managed plan buttons require the legacy
+`project_discussion_enabled` flag. This text-entry change requires no schema migration.
 
 ## Ingress and affinity
 

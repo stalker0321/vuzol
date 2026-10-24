@@ -36,7 +36,7 @@ async def apply_telegram_lead(
 ) -> IngressResult:
     """Apply an owner command; mutations publish their card with the command receipt."""
 
-    session_id = await _discussion_session(
+    await _discussion_session(
         session_factory,
         project_id=project_id,
         chat_id=update.chat_id,
@@ -47,12 +47,9 @@ async def apply_telegram_lead(
         kind=kind,
         argument=argument,
         project_id=project_id,
-        session_id=session_id,
         goal_id=goal_id,
         version=version,
         update=update,
-        default_branch=default_branch,
-        prefix=settings.project_lead.integration_branch_prefix,
     )
     if command is None:
         return IngressResult(status=IngressStatus.REJECTED, reason="lead_command_invalid")
@@ -129,44 +126,29 @@ async def apply_telegram_lead(
     return IngressResult(status=IngressStatus.HANDLED, reason=result.status)
 
 
+def normalize_lead_message(argument: str) -> tuple[str, dict[str, int]]:
+    """Keep explicit legacy limits as message metadata, without enabling a goal."""
+    limits: dict[str, int] = {}
+    fields = {"--max-packages": "max_packages", "--max-items": "max_items_per_package"}
+    while argument.startswith("--"):
+        parts = argument.split(maxsplit=2)
+        if len(parts) != 3 or parts[0] not in fields or not parts[1].isdigit():
+            raise ValueError("lead_command_invalid")
+        limits[fields[parts[0]]] = int(parts[1])
+        argument = parts[2]
+    return argument, limits
+
+
 def _command(
     *,
     kind: str,
     argument: str,
     project_id: str,
-    session_id: uuid.UUID,
     goal_id: uuid.UUID | None,
     version: int | None,
     update: MessageUpdate,
-    default_branch: str,
-    prefix: str,
 ) -> LeadCommand | None:
     key = f"telegram:{update.bot_id}:{update.update_id}:{kind}"
-    if kind == "enable":
-        limits: dict[str, int] = {}
-        while argument.startswith("--"):
-            parts = argument.split(maxsplit=2)
-            fields = {"--max-packages": "max_packages", "--max-items": "max_items_per_package"}
-            if len(parts) != 3 or parts[0] not in fields or not parts[1].isdigit():
-                return None
-            limits[fields[parts[0]]] = int(parts[1])
-            argument = parts[2]
-        branch = f"{prefix}{project_id}/{session_id.hex[:12]}"
-        return LeadCommand(
-            name="enable_managed_goal",
-            project_id=project_id,
-            idempotency_key=key,
-            contract_version=_CONTRACT,
-            payload={
-                "session_id": str(session_id),
-                "integration_branch": branch,
-                "request": argument,
-                "scope": argument,
-                "criteria": [{"id": "requested-outcome", "description": argument}],
-                "project_default_branch": default_branch,
-                "work_limits": limits,
-            },
-        )
     names = {
         "pause": "pause_goal",
         "resume": "resume_goal",

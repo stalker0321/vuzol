@@ -63,45 +63,30 @@ delivery retry or process restart cannot silently lose workflow state.
 
 ### Project conversation modes (opt-in)
 
-With `chat.enabled=true`, bare `/think` and `/lead` select the persistent conversational
-addressee **in that topic**. `/lead` also requires `project_lead.enabled=true`. Switching does
-not create a goal, pause work, or resume anything. `/lead <request>` remains an explicit legacy
-goal-creation command; it is not a mode switch.
-Until explicitly selected, the primary interlocutor is lead when enabled, otherwise think.
+With `project_lead.enabled=true`, ordinary text in a project topic and `/lead <request>`
+both enter `ProjectEventService.submit_event`. Telegram and MCP record a message atomically;
+`ProjectLeadWorker` decides whether to answer, clarify, or request a strong plan. Jev does not
+classify this text path. Without a live goal, admission creates a draft conversation. Questions
+receive replies in the topic without a Task. A work request produces a plan card; the owner's
+approval grants execution for the current scope, and the lead then starts each task.
 
-- `/think`: the project's `think` model assignment, defaulting to `chat.profile_id`.
-- `/lead`: the project's existing `lead` assignment, defaulting to `project_lead.profile_id`.
-- `/model`: change either assignment through the existing revision-fenced role picker.
+With `chat.enabled=true`, bare `/think` and `/lead` select the persistent mode in that topic.
+The default is lead when the project lead is enabled. Switching mode creates no goal and does
+not pause or resume existing work. Mode is frozen in each accepted event. `/think` uses the
+same lead turn with only reads and replies permitted, including when the model asks to start
+work. Model assignments are pinned by the existing leadership turn mechanism; `/model` manages
+those assignments.
 
-Jev still classifies intent independently. Discussions, plans, and status questions use the
-selected interlocutor's read-only workflow. Clear execution requests in **either** mode go
-through the existing managed-goal command/receipt boundary when the lead feature is enabled.
-An existing live goal/package is a visible conflict, not permission to resume or replace it.
-With the lead feature disabled, the legacy task-admission path remains unchanged.
+Live goals accept subsequent messages without automatically changing scope or resuming work.
+Scope amendments require a new owner-approved plan. Unprocessed owner messages arriving around
+goal completion move to a new or existing live conversation; late task results never reopen a
+completed goal. Admission and retries create no duplicate events or conversational Tasks.
 
-Each admitted message pins its mode, model, reasoning effort, and profile revision. Changing a
-mode or assignment affects later messages, not queued answers. Changed/missing profiles fail
-closed without silently substituting a different model. Replies identify the pinned speaker.
-Conversation currently requires a sandboxed CLI profile with `repository_read`
-and the corresponding role (`executor` for think; `lead` for lead). API-only profiles do not
-yet have a repository-capable conversation adapter. Host-side command validation and read-only
-mounts apply to both modes; discussing a plan is not execution authorization.
-Conversation does not require `architecture` in the profile's execution task types; ordinary
-execution still requires its configured task type. Existing profiles/assignment revisions do
-not need rewriting for this distinction.
-
-Apply migration `e8b5a61fa505` to the **explicitly selected** test/deployment database before
-starting this version. Defaults remain off. Disable `chat.enabled` to disable the mode UI;
-disable `project_lead.enabled` to disable new managed admission. These flags do not substitute
-for `/lead_pause` or `/lead_revoke` on already authorized work. Stored mode selections are
-retained. MCP is a separate adapter onto application commands, not a conversation mode; no
-MCP server is introduced by this change.
-
-This slice covers the existing text/document chat intake. Voice/audio still use the legacy
-transcription/task path and are not conversation-mode aware. For contextual execution requests,
-the accepted discussion remains a frozen, hash-bound scope attachment; extracting a compact,
-structured work brief and its user-facing acceptance summary is a separate remaining product
-consolidation step. Do not treat this slice as completion of the entire consolidation handoff.
+This path works with `project_discussion_enabled=false`. No schema migration is needed for
+single text entry. Existing owner-enabled goals retain their grants. With the lead feature
+disabled, the legacy intake remains available; pause, cancel and status controls still work.
+Voice, attachment preparation and INBOX project creation retain their existing paths and are
+separate follow-up work. See [Telegram](docs/TELEGRAM.md) and [MCP](docs/MCP.md) for contracts.
 
 ## Supported integrations
 

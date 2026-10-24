@@ -862,7 +862,16 @@ class ProjectLeadWorker:
                     turn.status = "lost"
                     await self._complete(uow.session, token)
                 return
-            if goal is not None and goal.lifecycle not in {"cancelled", "completed"}:
+            if goal.fence_epoch != turn.fence_epoch:
+                # The goal moved on mid-call (the owner approved the plan) and the guard
+                # cancelled the stale call: not a model failure (live pilot 2026-10-24).
+                # Like a restart that finds a stale claimed turn: the newer event drives.
+                turn.status = "lost"
+                goal.lease_owner = None
+                goal.lease_until = None
+                await self._complete(uow.session, token)
+                return
+            if goal.lifecycle not in {"cancelled", "completed"}:
                 if goal.lifecycle != "paused":
                     goal.lifecycle = "waiting"
                     goal.waiting_reason = reason

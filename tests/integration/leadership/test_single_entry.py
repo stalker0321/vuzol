@@ -296,28 +296,7 @@ async def test_plain_work_gets_plan_then_owner_button_allows_lead_start(postgres
         assert (await start(factory, goal.id)).reason == "owner_mandate_required"
 
 
-@pytest.mark.parametrize(
-    "action",
-    [
-        "request_plan",
-        "start_task",
-        "amend_goal",
-        "ask_owner",
-        "cancel_goal",
-        "propose_completion",
-        "read_status",
-    ],
-)
-async def test_think_freezes_read_only_even_if_model_requests_mutation(
-    postgres_dsn, runtime, action
-):
-    class ThinkModel:
-        async def decide(self, snapshot):
-            assert snapshot.owner_event["mode"] == "think"
-            return LeadDecision(
-                reply="Обсудим без запуска работы.", commands=(LeadCommandDraft(action, {}),)
-            )
-
+async def test_think_message_never_reaches_the_lead(postgres_dsn, runtime):
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         async with factory.begin() as session:
@@ -326,24 +305,24 @@ async def test_think_freezes_read_only_even_if_model_requests_mutation(
         ingress = TelegramIngressService(runtime, factory)
         await ingress.accept_message(_message(900, "/think"))
         await ingress.accept_message(_message(901, "Сделай страницу"))
-        await ingress.accept_message(_message(902, "/lead"))
-        worker = _worker(factory, ThinkModel())
-        assert await worker.process_one()
+        model = Answer()
+        assert not await _worker(factory, model).process_one()
+        assert not model.seen
         async with factory() as session:
             goal = await session.get(ManagedGoal, goal_id)
             assert goal.lifecycle == "active" and goal.scope_revision == 1
-            receipts = list(
-                await session.scalars(
-                    select(LeadershipCommandReceipt).where(
-                        LeadershipCommandReceipt.actor_kind == "agent"
-                    )
+            assert not await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.idempotency_key == f"lead:message:{CHAT}:901"
                 )
             )
-            assert len(receipts) == 1
-            assert receipts[0].reason == (None if action == "read_status" else "read_only_mode")
+            # /think goes to its own discussion model through the interpreter.
+            assert await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.destination == "discussion_classify"
+                )
+            )
             assert await session.scalar(select(func.count()).select_from(WorkPackage)) == 0
-            assert await session.scalar(select(func.count()).select_from(Task)) == 0
-        assert "Обсудим без запуска работы." in await _drain(factory)
 
 
 @pytest.mark.parametrize("when", ["before_admission", "queued", "inference", "provider_fenced"])
@@ -417,3 +396,56 @@ async def test_late_task_result_never_opens_new_goal(postgres_dsn, runtime):
         async with factory() as session:
             assert (await session.get(ManagedGoal, goal_id)).lifecycle == "completed"
             assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 1
+
+
+@pytest.mark.parametrize("wakeup", ["owner_message", "plan_ready"])
+async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runtime, wakeup):
+    """Live pilot 2026-10-24: the owner approved the plan while the lead was thinking about
+    "plan ready"; the guard cancelled the stale call and the goal was parked as a model error."""
+    from vuzol.leadership.model import LeadModelUnavailable
+    from vuzol.leadership.wakeups import enqueue_goal_wakeup
+    from vuzol.storage.models import Event
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            for item in await session.scalars(select(TransactionalOutbox)):
+                item.status = DeliveryStatus.DELIVERED
+        if wakeup == "owner_message":
+            await TelegramIngressService(runtime, factory).accept_message(
+                _message(901, "Как дела?")
+            )
+        else:
+            async with factory.begin() as session:
+                await enqueue_goal_wakeup(
+                    session,
+                    goal_id=goal_id,
+                    idempotency_key="plan-ready-test",
+                    package_id=None,
+                    kind="plan_ready",
+                )
+
+        class Approved:
+            async def decide(self, snapshot):
+                async with factory.begin() as session:
+                    goal = await session.get(ManagedGoal, goal_id, with_for_update=True)
+                    goal.version += 1
+                    goal.fence_epoch += 1
+                raise LeadModelUnavailable("lead_model_unavailable")
+
+        assert await _worker(factory, Approved()).process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "active" and goal.waiting_reason is None
+            assert goal.lease_owner is None
+            assert not await session.scalar(
+                select(Event.id).where(Event.event_type == "managed_goal.lead_parked")
+            )
+            event = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "project_lead",
+                    TransactionalOutbox.status != DeliveryStatus.DELIVERED,
+                )
+            )
+        # The newer event (here the plan approval) drives the next turn; this one is done.
+        assert event is None

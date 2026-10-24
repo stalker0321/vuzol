@@ -149,7 +149,16 @@ def test_mode_survives_restart_is_topic_local_and_commands_do_not_start_work(
                     )
                 ).all()
                 routes = {i.payload["message_thread_id"]: i.payload["mode"] for i in items}
-                assert routes == {10: "think", 20: "lead"}
+                # /think in topic 10 goes to its own discussion model, not to the lead.
+                assert routes == {20: "lead"}
+                thinking = (
+                    await session.scalars(
+                        select(TransactionalOutbox).where(
+                            TransactionalOutbox.destination == "discussion_classify"
+                        )
+                    )
+                ).all()
+                assert [i.payload["message_thread_id"] for i in thinking] == [10]
                 assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 1
                 assert await session.scalar(select(func.count()).select_from(Task)) == 0
         finally:
@@ -194,7 +203,37 @@ def test_queued_message_and_reply_keep_the_original_mode(postgres_dsn, tmp_path)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["think", "lead"])
+def test_think_answers_with_its_own_model_and_never_starts_work(postgres_dsn, tmp_path):
+    from vuzol.discussion.agent import DISCUSSION_INTERNAL_TASK_TYPE
+
+    async def scenario():
+        engine, factory = storage(postgres_dsn)
+        runtime = modes_runtime(tmp_path)
+        try:
+            ingress = TelegramIngressService(runtime, factory)
+            await ingress.accept_message(turn("/think"))
+            await ingress.accept_message(
+                turn("Добавь поиск книг; не публикуй результат в production.", 1102)
+            )
+            # Even a work request is only discussed: Jev runs, the lead never hears it.
+            assert await classify(runtime, factory, "execute_request")
+            async with factory() as session:
+                assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 0
+                assert not await session.scalar(
+                    select(TransactionalOutbox.id).where(
+                        TransactionalOutbox.destination == "project_lead"
+                    )
+                )
+                tasks = (await session.scalars(select(Task))).all()
+                assert [t.task_type for t in tasks] == [DISCUSSION_INTERNAL_TASK_TYPE]
+                assert tasks[0].task_draft["conversation_route"]["conversation_mode"] == "think"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["lead"])
 def test_explicit_work_goes_to_lead_once_and_switch_does_not_resume(postgres_dsn, tmp_path, mode):
     async def scenario():
         engine, factory = storage(postgres_dsn)
@@ -342,7 +381,7 @@ def test_model_selection_is_pinned_by_turn_and_catalog_change_fails_closed(postg
         runtime = modes_runtime(tmp_path)
         try:
             ingress = TelegramIngressService(runtime, factory)
-            await ingress.accept_message(turn("/think", 1100))
+            await ingress.accept_message(turn("/lead", 1100))
             await ingress.accept_message(turn("Первый вопрос"))
             transport = _Transport({"reply": "Обсудим.", "commands": []})
             worker = build_project_lead_worker(

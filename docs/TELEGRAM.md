@@ -90,7 +90,7 @@ With `project_lead.enabled=true`, plain project-topic text and `/lead <goal>` re
 same owner event. Without a live goal this creates a draft conversation, with no Task card.
 The lead answers questions or requests a strong plan; the owner approves the plan card before
 execution. Later messages join the live goal without implicitly changing scope or resuming it.
-`/think` freezes read-only mode on new messages through the same lead turn. Mode switches need
+`/think` sends new messages to the separate discussion model, never the lead. Mode switches need
 `chat.enabled=true`; neither admission nor managed plan buttons require the legacy
 `project_discussion_enabled` flag. This text-entry change requires no schema migration.
 

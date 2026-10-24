@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+# Known import cycle (leadership.persistence -> storage -> providers -> discussion ->
+# leadership.persistence) when a leadership module is imported first; see BACKLOG.
+import vuzol.storage  # noqa: F401
 from vuzol.leadership.verification import review_body
 
 

@@ -273,12 +273,17 @@ class ProjectEventService:
             from vuzol.telegram.projections import enqueue_chat_notice
 
             context = f"\n\n{scope}" if scope and scope != text else ""
+            heading = (
+                "Задача из обсуждения:"
+                if origin.channel == "think"
+                else f"Сообщение от {origin.display_name}:"
+            )
             await enqueue_chat_notice(
                 session,
                 chat_id=discussion.chat_id,
                 thread_id=discussion.message_thread_id,
                 key=f"lead:incoming:{event_id}",
-                text=owner_text(f"Сообщение от {origin.display_name}:\n{text}{context}"),
+                text=owner_text(f"{heading}\n{text}{context}"),
             )
         await session.flush()
         return EventReceipt("accepted", event_id, goal.id, receipt.id)

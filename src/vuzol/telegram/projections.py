@@ -2334,6 +2334,14 @@ class TelegramClient(Protocol):
         callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
     ) -> None: ...
 
+    async def edit_reply_markup(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...],
+    ) -> None: ...
+
     async def delete_message(self, *, chat_id: int, message_id: int) -> None: ...
 
     async def pin_message(self, *, chat_id: int, message_id: int) -> bool: ...
@@ -2437,6 +2445,17 @@ class FakeTelegramClient:
         if self.fail:
             raise self.fail
         self.edited.append((chat_id, message_id, html))
+        self.edited_keyboards.append(callback_buttons)
+
+    async def edit_reply_markup(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...],
+    ) -> None:
+        if self.fail:
+            raise self.fail
         self.edited_keyboards.append(callback_buttons)
 
     async def delete_message(self, *, chat_id: int, message_id: int) -> None:

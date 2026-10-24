@@ -65,6 +65,7 @@
     "callback:ControlUpdate:approve": "controls",
     "callback:ControlUpdate:cancel": "controls",
     "callback:ControlUpdate:chat_retry": "delivery",
+    "callback:ControlUpdate:think_handoff": "goal",
     "callback:ControlUpdate:cpage": "controls",
     "callback:ControlUpdate:criterion": "controls",
     "callback:ControlUpdate:pause": "controls",

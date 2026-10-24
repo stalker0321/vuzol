@@ -75,6 +75,9 @@ class CommittingUpdateQueue(asyncio.Queue[object]):
 
 def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
     chat_messages = {
+        "think_handoff_sent": "Передано лиду",
+        "think_handoff_duplicate": "Уже передано",
+        "think_handoff_unavailable": "Передача из этого обсуждения недоступна.",
         "task_retry_stale": "Состояние задачи изменилось. Отправляю актуальную карточку.",
         "task_retry_scope_mismatch": "Эта кнопка не относится к твоей задаче в этом топике.",
         "task_retry_version_required": (
@@ -259,6 +262,25 @@ class PythonTelegramClient:
             if "message is not modified" not in str(error).lower().replace("_", " "):
                 raise
 
+    async def edit_reply_markup(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        callback_buttons: tuple[tuple[tuple[str, str], ...], ...],
+    ) -> None:
+        try:
+            await self._bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=_control_markup(
+                    (), task_id=None, approval_id=None, callback_buttons=callback_buttons
+                ),
+            )
+        except BadRequest as error:
+            if "message is not modified" not in str(error).lower().replace("_", " "):
+                raise
+
     async def delete_message(self, *, chat_id: int, message_id: int) -> None:
         try:
             await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -372,6 +394,22 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
     parts = query.data.split(":")
     message_thread_id = getattr(query.message, "message_thread_id", None)
     message_id = getattr(query.message, "message_id", None)
+    if len(parts) == 3 and parts[:2] == ["v2", "th"]:
+        try:
+            assistant_turn_id = uuid.UUID(parts[2])
+        except ValueError:
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+            message_id=message_id,
+            action_kind="think_handoff",
+            assistant_turn_id=assistant_turn_id,
+        )
     if len(parts) == 5 and parts[:2] == ["v2", "task"]:
         if parts[2] not in {"start", "pause", "resume", "cancel"}:
             return None

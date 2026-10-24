@@ -115,6 +115,7 @@ class DeliveryAction(StrEnum):
     SEND_STATUS = "send_status"
     EDIT_STATUS = "edit_status"
     EDIT_MESSAGE = "edit_message"
+    EDIT_REPLY_MARKUP = "edit_reply_markup"
     SEND_CLARIFICATION = "send_clarification"
     SEND_PROJECT_WELCOME = "send_project_welcome"
     SEND_PROJECT_NAMES = "send_project_names"
@@ -267,6 +268,7 @@ async def prepare_delivery(
     trace_always_include_anomalies: bool = True,
     rich_messages: bool = False,
     artifacts: ArtifactStore | None = None,
+    project_lead_enabled: bool = False,
 ) -> PreparedDelivery:
     prepared = await _prepare_delivery(
         session,
@@ -279,6 +281,7 @@ async def prepare_delivery(
         trace_always_include_anomalies,
         rich_messages,
         artifacts,
+        project_lead_enabled,
     )
     if (
         item.payload.get("role") == "attention"
@@ -323,11 +326,26 @@ async def _prepare_delivery(
     trace_always_include_anomalies: bool = True,
     rich_messages: bool = False,
     artifacts: ArtifactStore | None = None,
+    project_lead_enabled: bool = False,
 ) -> PreparedDelivery:
     if item.payload.get("role") == "attention":
         return await _prepare_attention(session, item, topics, projects)
     if getattr(item, "destination", "telegram") == WORK_PACKAGE_PROJECTION_DESTINATION:
         return await _prepare_work_package_projection(session, item)
+    if (
+        item.operation_type == "edit_reply_markup"
+        and item.payload.get("role") == "think_handoff_confirmation"
+    ):
+        return PreparedDelivery(
+            DeliveryAction.EDIT_REPLY_MARKUP,
+            chat_id=int(item.payload["chat_id"]),
+            thread_id=int(item.payload["message_thread_id"]),
+            message_id=int(item.payload["message_id"]),
+            callback_buttons=tuple(
+                tuple((str(label), str(data)) for label, data in row)
+                for row in item.payload["callback_buttons"]
+            ),
+        )
     if item.operation_type not in {"send_message", "delete_message"}:
         raise PermanentDeliveryError("unsupported_telegram_operation")
     if item.payload.get("role") == "task_result_archive":
@@ -573,7 +591,9 @@ async def _prepare_delivery(
             trace_always_include_anomalies=trace_always_include_anomalies,
         )
     if item.payload.get("role") == DISCUSSION_REPLY_DESTINATION:
-        return await _prepare_discussion_reply(session, item, rich_messages=rich_messages)
+        return await _prepare_discussion_reply(
+            session, item, rich_messages=rich_messages, project_lead_enabled=project_lead_enabled
+        )
     if item.payload.get("role") == DISCUSSION_THINKING_ROLE:
         return await _prepare_discussion_thinking(session, item)
     if item.linked_entity_type == "project_naming":
@@ -1080,7 +1100,11 @@ def _stored_message_parts(raw: object, category: str) -> tuple[tuple[str, str], 
 
 
 async def _prepare_discussion_reply(
-    session: AsyncSession, item: TransactionalOutbox, *, rich_messages: bool = False
+    session: AsyncSession,
+    item: TransactionalOutbox,
+    *,
+    rich_messages: bool = False,
+    project_lead_enabled: bool = False,
 ) -> PreparedDelivery:
     if item.linked_entity_type != "conversation_turn":
         raise PermanentDeliveryError("invalid_discussion_reply_entity")
@@ -1099,6 +1123,28 @@ async def _prepare_discussion_reply(
         raise PermanentDeliveryError("discussion_reply_part_invalid")
     stored_parts = item.payload.get("reply_parts")
     reply_text = turn.content
+    from vuzol.discussion.agent import validated_handoff
+    from vuzol.leadership.text import owner_text
+
+    route = item.payload.get("conversation_route")
+    handoff = (
+        validated_handoff(item.payload.get("handoff"))
+        if project_lead_enabled
+        and isinstance(route, dict)
+        and route.get("conversation_mode") == "think"
+        else None
+    )
+    if handoff is not None:
+        brief = ["Задача для лида:", owner_text(handoff.request)]
+        if handoff.scope:
+            brief.append(owner_text(handoff.scope))
+        if handoff.criteria:
+            brief.append("Критерии:")
+            brief.extend(f"• {owner_text(value)}" for value in handoff.criteria)
+        # Keep model-supplied Markdown literal in the owner-facing brief.
+        from vuzol.leadership.provenance import literal_block
+
+        reply_text += "\n\n" + literal_block("\n".join(brief))
     if item.payload.get("conversation_route") is not None:
         from vuzol.discussion.conversation import ConversationRoute
 
@@ -1117,7 +1163,20 @@ async def _prepare_discussion_reply(
     if part_index >= len(parts):
         raise PermanentDeliveryError("discussion_reply_part_invalid")
     html_body, fallback_body = parts[part_index]
-    rich_body = telegram_rich_html(reply_text) if rich_messages and part_index == 0 else None
+    # Rich posts cannot carry an inline keyboard. Deliver briefs as ordinary
+    # messages, placing the authorization button on the last chunk only.
+    rich_body = (
+        telegram_rich_html(reply_text)
+        if rich_messages and part_index == 0 and handoff is None
+        else None
+    )
+    callback_buttons = (
+        ((("➡️ Передать лиду", f"v2:th:{turn.id.hex}"),),)
+        if handoff is not None and part_index == len(parts) - 1
+        else ()
+    )
+    worker_task_id = item.payload.get("worker_task_id")
+    task_id = uuid.UUID(str(worker_task_id)) if handoff is not None and worker_task_id else None
     if rich_body is not None and len(parts) == 1 and "<table>" not in rich_body:
         # Ordinary Markdown formatting already works in short messages.
         # Posts are useful for long replies or rich-only structure, not every turn.
@@ -1151,6 +1210,8 @@ async def _prepare_discussion_reply(
             discussion_parts=parts,
             discussion_part_index=part_index,
             rich_html=rich_body,
+            callback_buttons=callback_buttons,
+            task_id=task_id,
         )
     return PreparedDelivery(
         DeliveryAction.SEND_DISCUSSION_REPLY,
@@ -1163,6 +1224,8 @@ async def _prepare_discussion_reply(
         discussion_parts=parts,
         discussion_part_index=part_index,
         rich_html=rich_body,
+        callback_buttons=callback_buttons,
+        task_id=task_id,
     )
 
 
@@ -1532,6 +1595,7 @@ class TelegramDeliveryService:
         dogfood_settings: TelegramDogfoodSettings | None = None,
         rich_messages: bool = False,
         artifacts: ArtifactStore | None = None,
+        project_lead_enabled: bool = False,
     ) -> None:
         self._factory = session_factory
         self._client = client
@@ -1547,6 +1611,7 @@ class TelegramDeliveryService:
         self._trace_sample_percent = trace_sample_percent
         self._trace_always_include_anomalies = trace_always_include_anomalies
         self._dogfood_settings = dogfood_settings or TelegramDogfoodSettings()
+        self._project_lead_enabled = project_lead_enabled
         self._rich_messages = rich_messages
         self._artifacts = artifacts
         self._logger = get_logger(__name__)
@@ -1577,6 +1642,7 @@ class TelegramDeliveryService:
                     trace_always_include_anomalies=self._trace_always_include_anomalies,
                     rich_messages=self._rich_messages,
                     artifacts=self._artifacts,
+                    project_lead_enabled=self._project_lead_enabled,
                 )
             if prepared.action == DeliveryAction.NOOP:
                 await self._complete(token, prepared, None)
@@ -1682,6 +1748,14 @@ class TelegramDeliveryService:
         return message_id
 
     async def _call_telegram(self, prepared: PreparedDelivery) -> int | None:
+        if prepared.action == DeliveryAction.EDIT_REPLY_MARKUP:
+            assert prepared.message_id is not None
+            await self._client.edit_reply_markup(
+                chat_id=prepared.chat_id,
+                message_id=prepared.message_id,
+                callback_buttons=prepared.callback_buttons,
+            )
+            return None
         if prepared.action == DeliveryAction.SEND_DOCUMENT:
             message_id = await self._client.send_document(
                 chat_id=prepared.chat_id,
@@ -1875,6 +1949,16 @@ class TelegramDeliveryService:
                         message_role="clarification",
                     )
                 )
+            elif (
+                prepared.action == DeliveryAction.EDIT_MESSAGE
+                and prepared.message_role == DISCUSSION_REPLY_DESTINATION
+                and prepared.task_id is not None
+            ):
+                assert prepared.link_id is not None
+                link = await session.get(TelegramMessageLink, prepared.link_id)
+                assert link is not None
+                link.message_role = DISCUSSION_REPLY_DESTINATION
+                link.task_id = prepared.task_id
             elif prepared.action == DeliveryAction.SEND_DISCUSSION_REPLY:
                 assert confirmed_message_id is not None
                 session.add(

@@ -22,7 +22,6 @@ from vuzol.interpretation.discussion import (
     RefusalCode,
     TaskRequestPayload,
     enforce_discussion_policy,
-    plan_draft_from_interpretation,
 )
 from vuzol.storage.types import ConversationTurnRole, InteractionMode
 
@@ -329,36 +328,6 @@ def test_continue_discussion_override_clears_model_action_payload() -> None:
     assert result.interaction_mode is InteractionMode.DISCUSSION
     assert result.task_request is None
     assert not result.should_create_task
-
-
-def test_plan_request_maps_to_domain_draft_without_control_authority() -> None:
-    result = envelope(
-        interaction_mode="plan_request",
-        should_mutate_plan=True,
-        plan_request={
-            "intent": "create_draft",
-            "title": "Улучшение интерфейса",
-            "items": [
-                {
-                    "local_id": "telegram-ui",
-                    "summary": "Упростить карточку",
-                    "goal": "Сделать карточку понятнее",
-                    "expected_outcome": "Короткая карточка, понятные действия",
-                    "completion_criteria": ["Карточка покрыта тестом"],
-                    "allowed_scope": "telegram projections",
-                    "suggested_risk": "low",
-                    "needs_approval": False,
-                    "estimated_complexity": "small",
-                }
-            ],
-        },
-    )
-
-    draft = plan_draft_from_interpretation(result)
-
-    assert draft.title == "Улучшение интерфейса"
-    assert len(draft.items) == 1
-    assert draft.items[0].local_id == "telegram-ui"
 
 
 def test_revision_plan_request_uses_only_injected_snapshot_fence() -> None:

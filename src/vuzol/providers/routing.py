@@ -16,6 +16,7 @@ from vuzol.config.models import (
 from vuzol.config.registries import ConfigurationBundle, RegistryError
 from vuzol.config.revision import content_revision
 from vuzol.config.settings import Settings
+from vuzol.context.execution import execution_constraints_context
 from vuzol.ops.disk_pressure import (
     FreeSpaceProbe,
     assess_heavy_claim_gate,
@@ -55,7 +56,6 @@ from vuzol.providers.control import ceiling_is_admission_only
 from vuzol.providers.domain import EffectiveProfileState
 from vuzol.providers.fallback_policy import should_fallback_provider
 from vuzol.providers.health import effective_health
-from vuzol.providers.planner_handoff import execution_constraints_context
 from vuzol.providers.policy import (
     ExclusionReason,
     PolicyDecision,
@@ -78,7 +78,6 @@ PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
     "execute_model": ProviderRole.EXECUTOR,
     "research_execute": ProviderRole.EXECUTOR,
     "synthesize": ProviderRole.SUMMARIZER,
-    "plan": ProviderRole.PLANNER,
     "review": ProviderRole.REVIEWER,
     "execute_code": ProviderRole.EXECUTOR,
     "execute_agent": ProviderRole.EXECUTOR,
@@ -240,11 +239,7 @@ async def claim_routed_step(
                 summary="Full discussion context exceeds the provider input budget.",
             )
             continue
-        requested_output = (
-            settings.limits.planner_output_tokens
-            if role is ProviderRole.PLANNER
-            else settings.limits.provider_call_output_tokens
-        )
+        requested_output = settings.limits.provider_call_output_tokens
         requested_output = await remaining_output_allowance(
             session,
             task_id=task.id,
@@ -531,8 +526,6 @@ async def claim_routed_step(
                 if matrix_profile is not None
                 else LaunchMode.CLI
                 if step.step_type in {"execute_code", "execute_agent"}
-                else None
-                if role is ProviderRole.PLANNER and settings.execution.enabled is True
                 else LaunchMode.API
             ),
         )
@@ -706,10 +699,6 @@ async def claim_routed_step(
                     reasoning_effort=selected.model_reasoning_effort,
                     content_revision=run.selected_route["profile_revision"],
                 ).model_dump(mode="json"),
-            )
-        if role is ProviderRole.PLANNER:
-            next_payload["reasoning_max_tokens"] = min(
-                settings.limits.planner_reasoning_tokens, reservation.reserved_output_tokens
             )
         if matrix_choice is not None:
             # The configured profile already carries the exact snapshotted model

@@ -62,12 +62,12 @@ policy sorts by price, prefers endpoints with p90 throughput of at least 70 toke
 allows int8 and fp8 quantizations, and keeps provider fallbacks enabled. The policy is sent on
 both task interpretation and project-discussion planning requests.
 
-Planner output and reasoning budgets are configured independently through
-`limits.planner_output_tokens` and `limits.planner_reasoning_tokens`. The per-task coding planner
-is currently disabled while its repository-context boundary is being revisited; routing and
-budget fields remain available for the later reintroduction. When enabled, routing persists the
-reasoning budget with the leased planner step, and the OpenAI-compatible adapter forwards both
-values in the provider request.
+Planning requests are durable lead events. Jev classifies planning intent without
+calling its old draft structurer. Legacy plan/replan callbacks send the request
+to the lead directly. Only `leadership/planning.py` calls the
+`planner_strong` assignment and stores a plan revision for owner approval. The
+fixed executor never creates a `plan` step or invokes a per-task planner. Shared
+execution constraints are supplied by `context/execution.py`.
 
 Start the optional runtime with `docker compose --profile interpretation up`. It also needs the
 single Telegram bot token for attachment reads; it does not introduce another bot.

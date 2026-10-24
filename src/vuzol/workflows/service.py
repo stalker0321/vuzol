@@ -33,7 +33,6 @@ from vuzol.telegram.projections import (
     enqueue_task_status_projection,
     enqueue_terminal_task_projections,
 )
-from vuzol.telegram.tracing import enqueue_planner_trace
 from vuzol.workflows.domain import MaterializedWorkflow, OutcomeKind, StepOutcome
 from vuzol.workflows.locking import lock_task_run_step
 from vuzol.workflows.recovery_policy import (
@@ -301,13 +300,9 @@ async def commit_step_outcome(
                 **step.payload,
                 "backpressure_count": state.backpressure_count + 1,
             }
-            if step.step_type == "plan" and outcome.result:
-                step.result = outcome.result
         elif action is RecoveryAction.RETRY:
             await transition_step(session, step, StepStatus.QUEUED, actor_type="worker")
             step.available_at = func.now() + timedelta(seconds=retry_delay_seconds)
-            if step.step_type == "plan" and outcome.result:
-                step.result = outcome.result
         else:
             await _block_for_attention(session, run, step)
     elif outcome.kind is OutcomeKind.NEEDS_USER_INPUT:
@@ -370,8 +365,6 @@ async def commit_step_outcome(
     else:
         await transition_step(session, step, StepStatus.FAILED, actor_type="worker")
         await transition_run(session, run, RunStatus.FAILED, actor_type="worker")
-        if step.step_type == "plan" and outcome.result:
-            step.result = outcome.result
     if outcome.kind is not OutcomeKind.SUCCEEDED:
         step.failure_category = outcome.category
         step.failure_summary = outcome.summary
@@ -397,8 +390,6 @@ async def commit_step_outcome(
         from vuzol.workflows.lead_events import publish_review_event
 
         await publish_review_event(session, task, step)
-    if step.step_type == "plan":
-        enqueue_planner_trace(session, task=task, step=step)
     target = derive_task_status(await _steps_for_run(session, run.id), run.status)
     if target is not task.status:
         await transition_task(session, task, target, actor_type="workflow_manager")
@@ -932,7 +923,6 @@ def derive_task_status(steps: tuple[Step, ...], run_status: RunStatus) -> TaskSt
     mapping = {
         "ensure_capabilities": TaskStatus.CONTEXT_PREPARED,
         "prepare_context": TaskStatus.CONTEXT_PREPARED,
-        "plan": TaskStatus.PLANNED,
         "validate": TaskStatus.VALIDATING,
         "review": TaskStatus.REVIEWING,
     }

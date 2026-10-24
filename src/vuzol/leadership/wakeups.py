@@ -70,3 +70,59 @@ async def enqueue_goal_wakeup(
         )
     )
     await session.flush()
+
+
+async def enqueue_legacy_plan_request(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    user_id: int,
+    source_id: str,
+    text: str,
+    package_id: uuid.UUID | None = None,
+) -> None:
+    """Retired plan/replan inputs become durable, owner-scoped lead events.
+
+    This only appends input. Do not acquire a goal lock after the caller's
+    discussion/package lock; the lead rechecks authority before any action.
+    """
+    from vuzol.discussion.domain import DomainError
+    from vuzol.leadership.persistence import ManagedGoal
+
+    goal = await session.scalar(
+        select(ManagedGoal).where(
+            ManagedGoal.project_id == project_id,
+            ManagedGoal.lifecycle.in_(("draft", "active", "waiting", "paused")),
+        )
+    )
+    if goal is None:
+        raise DomainError("managed_goal_required")
+    if goal.owner_user_id != user_id:
+        raise DomainError("outside_scope")
+    key = f"lead:legacy-plan:{source_id}"
+    existing = await session.scalar(
+        select(TransactionalOutbox.id).where(
+            TransactionalOutbox.destination == "project_lead",
+            TransactionalOutbox.idempotency_key == key,
+        )
+    )
+    if existing is not None:
+        return
+    session.add(
+        TransactionalOutbox(
+            destination="project_lead",
+            operation_type="lead_wakeup",
+            linked_entity_type="managed_goal",
+            linked_entity_id=goal.id,
+            idempotency_key=key,
+            payload={
+                "goal_id": str(goal.id),
+                "wakeup_kind": "planning_requested",
+                "text": text,
+                "owner_user_id": user_id,
+                "source_id": source_id,
+                "package_id": str(package_id) if package_id else None,
+            },
+        )
+    )
+    await session.flush()

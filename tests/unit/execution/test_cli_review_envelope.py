@@ -90,21 +90,8 @@ def envelope_call(review_call, tmp_path):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("role", [ProviderRole.REVIEWER, ProviderRole.PLANNER])
-async def test_native_review_adapter_uses_canonical_read_only_envelope(envelope_call, role):
+async def test_native_review_adapter_uses_canonical_read_only_envelope(envelope_call):
     c = envelope_call
-    if role is ProviderRole.PLANNER:
-        c.profile = c.profile.model_copy(update={"roles": frozenset({role})})
-        c.runtime.registries.profiles.get.return_value = c.profile
-        c.runtime.settings.disk_pressure.min_free_bytes = 0
-        c.step.step_type = "plan"
-        c.step.executor_profile_id = c.profile.id
-        c.request = c.request.model_copy(update={"role": role})
-        c.wrapper._worktrees = MagicMock(
-            prepare=AsyncMock(
-                return_value=SimpleNamespace(id=c.worktree.id, path=Path(c.worktree.path))
-            )
-        )
     outputs = {
         "codex": '{"text":"reviewed"}',
         "grok": '{"type":"text","data":"reviewed"}\n{"type":"end","stopReason":"EndTurn"}',
@@ -128,9 +115,7 @@ async def test_native_review_adapter_uses_canonical_read_only_envelope(envelope_
 
     transport = MagicMock(run=AsyncMock(side_effect=run))
     c.wrapper._adapter = adapters[c.profile.provider](transport)
-    c.session.scalar.side_effect = (
-        [0, c.worktree, None] if role is ProviderRole.REVIEWER else [0, None]
-    )
+    c.session.scalar.side_effect = [0, c.worktree, None]
     result = await c.wrapper.execute(c.request, c.profile, c.cancellation)
 
     assert result.text == "reviewed"
@@ -156,7 +141,7 @@ async def test_native_review_adapter_uses_canonical_read_only_envelope(envelope_
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("tamper", ["writable", "extra-argument", "wrong-model", "wrong-effort"])
-@pytest.mark.parametrize("step_type", ["plan", "review", "execute_agent"])
+@pytest.mark.parametrize("step_type", ["review", "execute_agent"])
 async def test_review_rejects_noncanonical_commands_before_process_record(
     envelope_call, tamper, step_type
 ):

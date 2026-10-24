@@ -585,3 +585,34 @@ def test_bounded_discussion_task_cannot_silently_drop_trailing_condition() -> No
             assert not result.should_mutate_plan
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("configured_structurer", [False, True])
+def test_plan_intent_never_invokes_legacy_planner(configured_structurer: bool) -> None:
+    async def scenario() -> None:
+        structurer = MagicMock()
+        structurer.interpret_discussion = AsyncMock(
+            side_effect=AssertionError("planning belongs to the lead")
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=response("plan")))
+        ) as client:
+            adapter = JevDecisionsInterpreter(
+                credential=SecretStr("test-key"),
+                profile_id="jev",
+                admitted=lambda _: True,
+                structurer=structurer if configured_structurer else None,
+                client=client,
+            )
+            result = await adapter.interpret_discussion(
+                DiscussionInterpretRequest(
+                    original_input="Составь план изменений", project_id="books", user_id=1
+                )
+            )
+            assert result.interaction_mode is InteractionMode.PLAN_REQUEST
+            assert result.plan_request is None
+            assert not result.should_create_task and not result.should_mutate_plan
+            structurer.interpret_discussion.assert_not_awaited()
+            assert len(adapter.drain_attempts()) == 1
+
+    asyncio.run(scenario())

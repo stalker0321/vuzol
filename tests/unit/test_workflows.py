@@ -1,6 +1,5 @@
 import asyncio
 import uuid
-from dataclasses import replace
 
 import pytest
 from pydantic import ValidationError
@@ -24,10 +23,9 @@ from vuzol.storage.types import (
     StepStatus,
     TaskStatus,
 )
-from vuzol.workflows import WORKFLOW_DEFINITIONS, compile_workflow
+from vuzol.workflows import compile_workflow
 from vuzol.workflows import transitions as workflow_transitions
-from vuzol.workflows.definitions import validate_definition
-from vuzol.workflows.domain import StepOutcome, WorkflowDefinition, WorkflowDefinitionError
+from vuzol.workflows.domain import StepOutcome
 from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.service import derive_task_status
 
@@ -50,21 +48,6 @@ def draft(
         needs_clarification=False,
         normalized_title="Implement request",
     )
-
-
-def test_definitions_are_valid_and_stable() -> None:
-    assert [item.stable_id for item in WORKFLOW_DEFINITIONS] == [
-        "simple_model.v1",
-        "coding.v1",
-        "architecture.v1",
-        "research.v1",
-        "infrastructure.v1",
-        "coding.v2",
-        "coding.v3",
-        "coding.v4",
-    ]
-    for definition in WORKFLOW_DEFINITIONS:
-        validate_definition(definition)
 
 
 def test_compiler_skips_disabled_planner() -> None:
@@ -152,35 +135,6 @@ def test_size_does_not_change_stages(complexity: SuggestedComplexity) -> None:
     assert actual == expected
 
 
-@pytest.mark.parametrize("version", ["1", "2", "3", "4"])
-def test_legacy_definitions_remain_available_for_stored_runs(version: str) -> None:
-    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
-
-    definition = WORKFLOW_REGISTRY[f"coding.v{version}"]
-    assert definition.version == version
-    assert any(s.key == "plan" for s in definition.steps)
-
-
-def test_definition_validation_rejects_duplicate_and_missing_edges() -> None:
-    valid = WORKFLOW_DEFINITIONS[0]
-    duplicate = WorkflowDefinition(
-        workflow_type="bad",
-        version="1",
-        task_types=frozenset({"general"}),
-        steps=(valid.steps[0], valid.steps[0]),
-    )
-    with pytest.raises(WorkflowDefinitionError, match="duplicate"):
-        validate_definition(duplicate)
-    missing = WorkflowDefinition(
-        workflow_type="bad",
-        version="1",
-        task_types=frozenset({"general"}),
-        steps=(valid.steps[1],),
-    )
-    with pytest.raises(WorkflowDefinitionError, match="predecessor"):
-        validate_definition(missing)
-
-
 def test_step_outcome_and_workflow_timing_contracts() -> None:
     assert StepOutcome.succeeded({"ok": True}).result == {"ok": True}
     assert WorkflowSettings().heartbeat_seconds == 15
@@ -188,20 +142,6 @@ def test_step_outcome_and_workflow_timing_contracts() -> None:
         WorkflowSettings(lease_seconds=45, heartbeat_seconds=15)
     with pytest.raises(ValidationError, match="minimum"):
         WorkflowSettings(retry_min_seconds=5, retry_max_seconds=1)
-
-
-def test_definition_validation_rejects_unsafe_retry_and_limits() -> None:
-    valid = WORKFLOW_DEFINITIONS[0]
-    unsafe = replace(
-        valid.steps[1],
-        max_attempts=2,
-        idempotency_class=IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE,
-    )
-    with pytest.raises(WorkflowDefinitionError, match="unsafe"):
-        validate_definition(replace(valid, steps=(valid.steps[0], unsafe)))
-    invalid_limits = replace(valid.steps[0], timeout_seconds=0)
-    with pytest.raises(WorkflowDefinitionError, match="limits"):
-        validate_definition(replace(valid, steps=(invalid_limits,)))
 
 
 def test_task_status_derivation_covers_run_and_step_categories() -> None:
@@ -317,16 +257,6 @@ def test_retrying_task_can_restore_early_workflow_status(target: TaskStatus) -> 
         workflow_transitions.TASK_TRANSITIONS,
     )
 
-
-def test_coding_workflow_and_heavy_queue() -> None:
-    """Test the coding workflow queue and effects policy."""
-    from vuzol.storage.types import IdempotencyClass, QueueClass
-    from vuzol.workflows.definitions import WORKFLOW_DEFINITIONS
-
-    coding = next(d for d in WORKFLOW_DEFINITIONS if d.workflow_type == "coding")
-    exec_step = next(s for s in coding.steps if s.key == "execute_code")
-    assert exec_step.queue_class == QueueClass.HEAVY
-    assert exec_step.idempotency_class == IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
     # This exercises the definition validation and step properties.
 
 

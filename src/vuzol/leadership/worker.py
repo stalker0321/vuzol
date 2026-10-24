@@ -191,6 +191,7 @@ class ProjectLeadWorker:
             conversational = item is not None and item.payload.get("wakeup_kind") in {
                 "owner_message",
                 *PLAN_EVENTS,
+                "planning_requested",
             }
             context = TurnInvocationContext(
                 claim=claim,
@@ -224,7 +225,7 @@ class ProjectLeadWorker:
                 await self._complete(uow.session, token)
                 return None
             owner_event = item.payload.get("wakeup_kind") == "owner_message"
-            planning_event = item.payload.get("wakeup_kind") in PLAN_EVENTS
+            planning_event = item.payload.get("wakeup_kind") in {*PLAN_EVENTS, "planning_requested"}
             if not owner_event and item.payload.get("task_id"):
                 from vuzol.storage.models import Step, Task
                 from vuzol.storage.types import TaskStatus

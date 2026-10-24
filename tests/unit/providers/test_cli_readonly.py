@@ -132,7 +132,7 @@ async def test_review_pins_profile_and_bounds_capabilities_without_replacing_ide
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "role",
-    [role for role in ProviderRole if role not in {ProviderRole.REVIEWER, ProviderRole.PLANNER}],
+    [role for role in ProviderRole if role is not ProviderRole.REVIEWER],
 )
 async def test_non_reviewer_requests_fail_before_claim_or_launch(review_call, role):
     c = review_call
@@ -268,72 +268,3 @@ async def test_transport_failure_or_cancellation_revokes_access(review_call, fai
     with pytest.raises(type(failure)):
         await c.wrapper.execute(c.request, c.profile, c.cancellation)
     c.access.revoke.assert_awaited_once()
-
-
-@pytest.fixture
-def planner_call(review_call):
-    c = review_call
-    c.profile = c.profile.model_copy(update={"roles": frozenset({ProviderRole.PLANNER})})
-    c.request = c.request.model_copy(update={"role": ProviderRole.PLANNER})
-    c.step.step_type = "plan"
-    c.step.executor_profile_id = c.profile.id
-    c.runtime.settings.disk_pressure.min_free_bytes = 0
-    c.wrapper._worktrees = MagicMock(
-        prepare=AsyncMock(
-            return_value=SimpleNamespace(
-                id=c.worktree.id, path=c.profile.state_directory.parent / "worktree"
-            )
-        )
-    )
-    return c
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("failure", ["paused", "wrong-profile", "stale", "cancelled"])
-async def test_planner_fences_precede_worktree_effects(planner_call, failure):
-    c = planner_call
-    if failure == "paused":
-        c.run.status = RunStatus.PAUSED
-    elif failure == "wrong-profile":
-        c.step.executor_profile_id = "other-account"
-    elif failure == "stale":
-        c.step.lease_generation += 1
-    else:
-        c.cancellation.request()
-    with pytest.raises(LeaseLost):
-        await c.wrapper.execute(c.request, c.profile, c.cancellation)
-    c.wrapper._worktrees.prepare.assert_not_awaited()
-    c.adapter.execute.assert_not_awaited()
-
-
-@pytest.mark.anyio
-async def test_planner_prepares_under_run_lock_and_reuses_same_worktree(planner_call):
-    c = planner_call
-    c.session.scalar.side_effect = [0, 0]
-    for _ in range(2):
-        await c.wrapper.execute(c.request, c.profile, c.cancellation)
-    assert c.wrapper._worktrees.prepare.await_count == 2
-    c.wrapper._worktrees.prepare.assert_awaited_with(
-        c.session,
-        task_id=c.request.task_id,
-        run_id=c.request.run_id,
-        project=c.runtime.registries.projects.get.return_value,
-        owner="cli-planner",
-    )
-    c.session.get.assert_any_await(Run, c.request.run_id, with_for_update=True)
-    assert c.step.payload["cli_planner_pin"]["profile_revision"] == content_revision(c.profile)
-    assert {call.args[0].sandbox_reference for call in c.adapter.execute.await_args_list} == {
-        f"worktree:{c.worktree.id}"
-    }
-
-
-@pytest.mark.anyio
-async def test_planner_worktree_binding_failure_never_launches(planner_call):
-    from vuzol.execution.worktrees import WorktreeError
-
-    c = planner_call
-    c.wrapper._worktrees.prepare.side_effect = WorktreeError("identity does not match")
-    with pytest.raises(WorktreeError):
-        await c.wrapper.execute(c.request, c.profile, c.cancellation)
-    c.adapter.execute.assert_not_awaited()
-    c.wrapper._access.grant.assert_not_awaited()

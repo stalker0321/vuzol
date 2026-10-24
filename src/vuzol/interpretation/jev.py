@@ -1,8 +1,8 @@
 """Native Jev INTAKE decisions mapped into the existing durable intake ports.
 
 Jev classifies only bounded choices. Runtime policy owns capabilities, controls,
-and task materialization. The optional planner structures drafts after routing;
-it cannot replace Jev's classification or grant approval.
+and task materialization. Planning intent goes to the lead; the optional
+structurer is used only for project naming.
 """
 
 from __future__ import annotations
@@ -27,11 +27,9 @@ from vuzol.experiments.intake_shadow import (
 )
 from vuzol.interpretation.adapters import OpenAICompatibleInterpreter
 from vuzol.interpretation.discussion import (
-    ControlOverride,
     ControlOverrideKind,
     DiscussionInterpretation,
     DiscussionInterpretRequest,
-    PlanRequestIntent,
     RefusalCode,
     TaskRequestPayload,
 )
@@ -523,42 +521,10 @@ class JevDecisionsInterpreter:
                 ControlOverrideKind.REPLAN,
             }
         ):
-            if self._structurer is None:
-                return DiscussionInterpretation(
-                    **common,
-                    interaction_mode=InteractionMode.QUERY_REFUSE,
-                    refusal_code=RefusalCode.INTERPRETER_UNAVAILABLE,
-                    clarification_question="Для подробного плана нужен настроенный планировщик.",
-                )
-            structured_request = request.model_copy(
-                update={
-                    "control_override": ControlOverride(
-                        kind=ControlOverrideKind.CREATE_OR_UPDATE_PLAN,
-                    )
-                }
+            return DiscussionInterpretation(
+                **common,
+                interaction_mode=InteractionMode.PLAN_REQUEST,
             )
-            started = time.monotonic()
-            attempt: dict[str, Any] = {
-                "profile_id": self._structurer.profile_id,
-                "model": self._structurer.model,
-                "outcome": "failed",
-            }
-            try:
-                plan = await self._structurer.interpret_discussion(structured_request)
-                if plan.interaction_mode is not InteractionMode.PLAN_REQUEST:
-                    raise InvalidInterpreterOutput("planner_changed_jev_route")
-                if plan.plan_request is None:
-                    raise InvalidInterpreterOutput("planner_missing_plan")
-                if (
-                    plan.plan_request.intent is not PlanRequestIntent.CREATE_DRAFT
-                    and request.plan_snapshot is None
-                ):
-                    raise InvalidInterpreterOutput("planner_invented_plan_target")
-                attempt["outcome"] = "succeeded"
-                return plan.model_copy(update={"confidence": 1.0, "should_create_task": False})
-            finally:
-                attempt["duration_ms"] = int((time.monotonic() - started) * 1000)
-                self._attempts.append(attempt)
         if decision.effect is IntakeEffect.EXECUTE_REQUEST:
             text = request.original_input.strip()
             if len(text) > 4000:

@@ -792,11 +792,15 @@ async def _horizon_display_status(
     "Результат принят" (verdict recorded, receipts pending) instead of "Готово".
     """
 
-    from vuzol.discussion.horizon import horizon_status
     from vuzol.execution.effect import _ACTIVE_STATUSES
     from vuzol.storage.models import Effect
 
-    code = horizon_status(package.status, package.horizon_phase, package.accepted_at is not None)
+    # Presentation only: preserve persisted historical phases after retiring horizon runtime.
+    code = package.status.value
+    if package.status is WorkPackageStatus.RUNNING and package.horizon_phase:
+        code = package.horizon_phase
+    elif package.status is WorkPackageStatus.COMPLETED:
+        code = "succeeded" if package.accepted_at is not None else "running"
     if code == "evaluating":
         return "Проверяю результат"
     if code in {"waiting_approval", "waiting_resource", "waiting_input"}:

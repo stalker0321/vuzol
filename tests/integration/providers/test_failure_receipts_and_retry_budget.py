@@ -309,37 +309,3 @@ def test_concurrent_reservations_cannot_oversubscribe_remainder(postgres_dsn):
             await engine.dispose()
 
     asyncio.run(scenario())
-
-
-def test_planner_reasoning_fits_reduced_output_allowance(postgres_dsn, tmp_path):
-    async def scenario():
-        engine, factory = storage(postgres_dsn)
-        settings, registries = bundle(tmp_path, profile("api"))
-        settings = settings.model_copy(
-            update={
-                "limits": settings.limits.model_copy(update={"step_output_tokens": 100}),
-            }
-        )
-        _, _, step_id = await seed_provider_step(factory, step_type="plan")
-        try:
-            async with factory.begin() as session:
-                await synchronize_profiles(
-                    session, registries.profiles.items(), configuration_revision="a" * 64
-                )
-                token = await claim_routed_step(
-                    session,
-                    settings=settings,
-                    registries=registries,
-                    owner="planner-test",
-                    lease_seconds=60,
-                    candidate_limit=20,
-                )
-                assert token is not None
-                reservation = (await session.scalars(select(ProviderBudgetReservation))).one()
-                step = await session.get(Step, step_id)
-                assert reservation.reserved_output_tokens == 100
-                assert step.payload["reasoning_max_tokens"] == 100
-        finally:
-            await engine.dispose()
-
-    asyncio.run(scenario())

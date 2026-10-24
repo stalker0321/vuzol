@@ -28,7 +28,7 @@ from vuzol.storage.unit_of_work import UnitOfWork
 pytestmark = pytest.mark.postgresql
 
 
-@pytest.mark.parametrize("step_type", ["plan", "execute_model", "research_execute", "synthesize"])
+@pytest.mark.parametrize("step_type", ["execute_model", "research_execute", "synthesize"])
 @pytest.mark.parametrize("mode", ["normal", "budget", "source"])
 def test_frozen_work_context_is_reserved_and_forwarded_before_spend(
     postgres_dsn,

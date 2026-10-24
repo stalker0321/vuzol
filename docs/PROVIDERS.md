@@ -558,27 +558,18 @@ include the following examples; actual deployment defaults must be inspected loc
 
 | Role | Profile | Model | Credential | Output bound |
 | --- | --- | --- | --- | --- |
-| planner | `openrouter-deepseek-planner-prod` | DeepSeek via OpenRouter | `VUZOL_OPENROUTER_PLANNER_API_KEY` | `HardLimits.planner_output_tokens` (default 3,000, reasoning 1,800) under the profile `output_limit` of 8,000 |
 | reviewer | `openrouter-mimo-reviewer-prod` | Xiaomi MiMo-V2.5 via OpenRouter, reasoning effort `low` | `VUZOL_OPENROUTER_REVIEWER_API_KEY` | derives its window from its own profile `output_limit` (8,000) |
 | executor | account profiles (`codex-a`, `grok-subscription-a/b`, `tokenrouter-a`, `pi-opencode-go-a/b/c`) from the local overlay | subscription agent CLIs | subscription auth (no API keys) | sandbox-bound |
 | interpreter / transcriber | configured in the interpreter registry, not this mirror | DeepSeek-based interpretation; OpenAI transcription API | their own credential references | their own profile limits |
 
-Planning uses its selected profile with the planner budget from `HardLimits`;
-empty or token-truncated planner output is rejected rather than completed, and a validated plan is
-handed to downstream `execute_code` / `execute_agent` steps as bounded redacted context items.
-Content-quality plan rejection is recorded as a provider failure observation (not a success) and
-reconciles usage under the planner failure category, but it does **not** force cross-profile
-fallback—the same planner may retry within attempt limits.
+Planning runs only through `leadership/planning.py` and the `planner_strong` slot.
+Its result is a plan revision requiring owner approval. Per-task planner routing,
+planner token settings and step-result handoff were removed in PR8. Workflow CLI
+read-only calls now cover review; leadership planning uses the turn transport.
 
-**Supported automatic plan consumers** are only provider-executed coding/agent steps
-(`execute_code`, `execute_agent`). In `infrastructure.v1`, the `plan` step is **approval/human
-context only**: general privileged automatic execution remains outside the supported boundary, so
-plan text is not injected into a provider executor request for `privileged_execute`.
-
-Repository analysis and architectural discussion remain full agent tasks rather than planner work.
-Architecture tasks route to subscription agents through a dedicated read-only workflow. The
-repository worktree and provider permissions are both read-only, no validation/apply approval is
-created, and the agent's bounded textual result is returned to the project topic.
+Repository analysis and architecture tasks use the fixed executor's read-only report path,
+including validation, review and result approval. Subscription agents receive repository read
+permissions; report approval does not apply a code change.
 
 The dedicated executor also registers isolated Codex and Grok CLI transports behind the Step 08
 worktree, supervised-process, rootless-sandbox, and controlled-egress boundary. Provider state,

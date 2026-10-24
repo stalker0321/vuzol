@@ -150,66 +150,6 @@ def _plan_with(*, first_summary: str = "Step 1", scope: str = "src/**") -> PlanD
 
 
 @pytest.mark.anyio
-async def test_d1_guard_rejects_scope_rewrite_of_past_item() -> None:
-    """pp.1: scope rewrite of a passed item → revision_conflict (was silent)."""
-
-    from vuzol.discussion.domain import DomainError
-    from vuzol.discussion.service import WorkPackageService
-    from vuzol.storage.types import PlanRevisionCreatedBy
-
-    package = _running_package(cursor=2)
-    uow = _revise_uow(package, item_ids=(uuid.uuid4(),))
-    service = WorkPackageService(cast(Any, uow))
-    with pytest.raises(DomainError, match="revision_conflict"):
-        await service.revise_draft(
-            package_id=uuid.uuid4(),
-            expected_status_generation=3,
-            plan=_plan_with(scope="src/elsewhere/**"),
-            created_by=PlanRevisionCreatedBy.USER,
-            actor_type="user",
-            horizon_enabled=True,
-        )
-
-
-@pytest.mark.anyio
-async def test_d1_guard_off_without_flag_and_on_when_pinned() -> None:
-    """pp.2: flag off → no guard (legacy); pinned-enabled + flag off → guard."""
-
-    from vuzol.discussion.domain import DomainError
-    from vuzol.discussion.horizon import HORIZON_CONTRACT_ENABLED
-    from vuzol.discussion.service import WorkPackageService
-    from vuzol.storage.types import PlanRevisionCreatedBy
-
-    package = _running_package()
-    uow = _revise_uow(package, item_ids=(uuid.uuid4(),))
-    service = WorkPackageService(cast(Any, uow))
-    # flag off, unpinned: legacy path, no history guard — succeeds past _require
-    result = await service.revise_draft(
-        package_id=uuid.uuid4(),
-        expected_status_generation=3,
-        plan=_plan_with(first_summary="Rewritten history"),
-        created_by=PlanRevisionCreatedBy.USER,
-        actor_type="user",
-        horizon_enabled=False,
-    )
-    assert result.status_generation == 4
-
-    pinned = _running_package(cursor=2)
-    pinned.execution_contract_version = HORIZON_CONTRACT_ENABLED
-    uow2 = _revise_uow(pinned, item_ids=(uuid.uuid4(),))
-    service2 = WorkPackageService(cast(Any, uow2))
-    with pytest.raises(DomainError, match="revision_conflict"):
-        await service2.revise_draft(
-            package_id=uuid.uuid4(),
-            expected_status_generation=3,
-            plan=_plan_with(first_summary="Rewritten history"),
-            created_by=PlanRevisionCreatedBy.USER,
-            actor_type="user",
-            horizon_enabled=False,
-        )
-
-
-@pytest.mark.anyio
 async def test_d1_pause_closes_commit_path() -> None:
     """pp.6: a live lease cannot commit while the run is PAUSED (soft pause)."""
 

@@ -12,8 +12,6 @@ import pytest
 from pydantic import HttpUrl
 
 from vuzol.config.models import CostClass, LaunchMode, ProviderProfileConfig, ProviderRole
-from vuzol.discussion.horizon import HORIZON_CONTRACT_ENABLED
-from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.execution.domain import GitInspection
 from vuzol.review.handler import ResultReviewHandler
 from vuzol.storage.records import LeaseToken, StepRecord
@@ -269,44 +267,6 @@ async def test_d0_direct_command_creates_no_review(monkeypatch: pytest.MonkeyPat
     src = _inspect.getsource(apply_task_command)
     assert "adapter.execute" not in src.lower()
     assert "independentmodelreviewer" not in src.lower()
-
-
-@pytest.mark.anyio
-async def test_d0_flag_off_keeps_materialized_package() -> None:
-    """6. Flag off does not downgrade a materialized (pinned) workflow."""
-    from types import SimpleNamespace as _NS
-    from typing import Any as _Any
-    from typing import cast as _cast
-    from unittest.mock import AsyncMock as _AM
-    from unittest.mock import MagicMock as _MM
-
-    from vuzol.storage.models import WorkPackage
-    from vuzol.storage.types import WorkPackageStatus as _WPS
-
-    uow = _MM()
-    uow.session.scalar = _AM(return_value=None)
-    uow.session.get = _AM(return_value=None)
-    uow.events.append = _AM()
-    uow.outbox.enqueue = _AM()
-    sequencer = WorkPackageSequencer(_cast(_Any, uow))
-    package = WorkPackage(
-        session_id=uuid.uuid4(),
-        project_id="test",
-        status=_WPS.RUNNING,
-        title="horizon package",
-    )
-    package.id = uuid.uuid4()
-    package.goal = "ship the horizon"
-    package.exit_criteria = None
-    package.cursor_ordinal = 1
-    package.version = 1
-    package.horizon_phase = None
-    package.execution_contract_version = HORIZON_CONTRACT_ENABLED
-    revision = _NS(id=uuid.uuid4())
-    result = await sequencer._materialize_current(package, revision, horizon_enabled=False)  # type: ignore[arg-type]
-    assert result.completed is False
-    assert package.status is _WPS.RUNNING
-    assert package.horizon_phase == "evaluating"
 
 
 def test_d0_executor_never_reviewer_and_level_budget_plumbed() -> None:

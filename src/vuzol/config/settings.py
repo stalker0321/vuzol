@@ -272,8 +272,6 @@ class HardLimits(BaseModel):
     step_output_tokens: int = Field(default=25_000, ge=1)
     provider_call_input_tokens: int = Field(default=100_000, ge=1)
     provider_call_output_tokens: int = Field(default=25_000, ge=1)
-    planner_output_tokens: int = Field(default=3_000, ge=1)
-    planner_reasoning_tokens: int = Field(default=1_800, ge=1)
     # Primary plus bounded fallbacks. Four leaves room for a provider-originated
     # cancellation followed by a quota-triggered account failover.
     provider_attempts: int = Field(default=6, ge=1, le=20)
@@ -309,9 +307,7 @@ class HardLimits(BaseModel):
     review_allowance_cost_units: float = Field(default=1.0, ge=0)
 
     @model_validator(mode="after")
-    def validate_planner_reasoning_budget(self) -> "HardLimits":
-        if self.planner_reasoning_tokens > self.planner_output_tokens:
-            raise ValueError("planner reasoning token limit must not exceed planner output limit")
+    def validate_money_cap(self) -> "HardLimits":
         if self.explicit_money_cap_units is not None and self.explicit_money_cap_units <= 0:
             raise ValueError("explicit money cap must be positive")
         return self
@@ -541,18 +537,6 @@ class BackupSettings(BaseModel):
         return self
 
 
-class HorizonSettings(BaseModel):
-    """Opt-in horizon v1 runtime over WorkPackage (WP08, ADR-A01.5)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    # Default off: the legacy WorkPackage lifecycle stays the only executable
-    # path for new admissions. The flag gates admission of new horizon plans;
-    # active packages read their pinned `execution_contract_version` (D0), so
-    # flag off never downgrades an already materialized workflow.
-    enabled: bool = False
-
-
 class ProjectLeadSettings(BaseModel):
     """Opt-in project-lead overlay. Off leaves legacy sequencing as the only path."""
 
@@ -656,7 +640,6 @@ class Settings(BaseSettings):
     dependency_provisioning: DependencyProvisioningSettings = Field(
         default_factory=DependencyProvisioningSettings
     )
-    horizon: HorizonSettings = Field(default_factory=HorizonSettings)
 
     @field_validator(
         "repository_root",

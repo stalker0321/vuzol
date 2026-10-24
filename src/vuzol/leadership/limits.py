@@ -12,6 +12,8 @@ from vuzol.storage.models import WorkPackage
 class WorkLimits(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    max_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_attempts: int | None = Field(default=None, ge=1)
     max_packages: int | None = Field(default=None, ge=1)
     max_items_per_package: int | None = Field(default=None, ge=1)
 

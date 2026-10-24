@@ -215,7 +215,6 @@ async def execute_batch(
             h8=revision.content_hash[:8],
             expected_status_generation=package.version,
             user_id=delegation.owner_user_id,
-            horizon_enabled=False,
             actor_type="agent",
             actor_id=actor.subject,
             delegation_id=delegation.id,

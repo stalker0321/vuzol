@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.config.models import ProviderProfileConfig
 from vuzol.config.revision import content_revision
 from vuzol.config.settings import HardLimits
-from vuzol.discussion.horizon import parse_budget
 from vuzol.providers.control import ceiling_is_admission_only
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.errors import LeaseLost
@@ -443,7 +442,6 @@ def accounting_for_profile(
 
 
 _STEP_PURPOSE = {
-    "plan": "planning",
     "planner": "planning",
     "execute_model": "coding",
     "execute_code": "coding",
@@ -498,18 +496,17 @@ async def resolve_package_id(session: AsyncSession, task_id: uuid.UUID) -> uuid.
     return link.work_package_id if link is not None else None
 
 
-async def _lifetime_task_count(session: AsyncSession, horizon_id: uuid.UUID) -> int:
+async def _lifetime_task_count(session: AsyncSession, scopes: set[uuid.UUID]) -> int:
     """Tasks plus attempt rows for a lifetime owner (REDO-3 unit).
 
-    Same unit as ``_lifetime_spend``/``budget_state`` (task-set size), plus
-    the finer-grained WorkAttempt rows the lead decision names. Epochs,
-    retries and revisions never shrink it.
+    Count each task once across goal and package receipts, plus its WorkAttempt
+    rows. Epochs, retries and revisions never shrink the history.
     """
 
     usage_tasks = (
         await session.scalars(
             select(UsageRecord.task_id).where(
-                UsageRecord.horizon_id == horizon_id,
+                UsageRecord.horizon_id.in_(scopes),
                 UsageRecord.task_id.is_not(None),
             )
         )
@@ -517,7 +514,7 @@ async def _lifetime_task_count(session: AsyncSession, horizon_id: uuid.UUID) -> 
     reserved_tasks = (
         await session.scalars(
             select(ProviderBudgetReservation.task_id).where(
-                ProviderBudgetReservation.horizon_id == horizon_id,
+                ProviderBudgetReservation.horizon_id.in_(scopes),
                 ProviderBudgetReservation.task_id.is_not(None),
             )
         )
@@ -964,32 +961,41 @@ async def _enforce_lifetime_budget(
     horizon_id: uuid.UUID,
     estimate: ReservationEstimate,
 ) -> None:
-    """Admission-budget check for a lifetime owner (D3 W4, DELTA §D3).
+    """Enforce lead work limits across current and historical package scopes.
 
-    Totals are canonical lifetime (settled + outstanding, no epoch filter).
-    Enforced against the package lifetime budget when the horizon scope is a
-    package; other scopes are totaled but uncapped (documented).
+    The persisted horizon_id column remains the accounting owner key. Existing
+    package receipts are included, without resetting costs on revision or retry.
     """
+    from vuzol.leadership.limits import parse_work_limits
+    from vuzol.leadership.persistence import ManagedGoal
 
-    _spent_in, _spent_out, spent_cost, _spent_quota, _spent_calls = await _lifetime_totals(
-        session, horizon_id
-    )
     package = await session.get(WorkPackage, horizon_id)
-    if package is None or package.lifetime_budget is None:
+    goal_id = package.managed_goal_id if package is not None else horizon_id
+    goal = await session.get(ManagedGoal, goal_id) if goal_id is not None else None
+    if goal is None:
         return
-    budget = parse_budget(package.lifetime_budget)
-    if budget is None:
+    budget = parse_work_limits(goal.constraints.get("work_limits", {}))
+    if budget.max_cost is None and budget.max_attempts is None:
         return
+    scopes = {
+        goal.id,
+        *await session.scalars(
+            select(WorkPackage.id).where(WorkPackage.managed_goal_id == goal.id)
+        ),
+    }
+    spent_cost = Decimal(0)
+    for scope in scopes:
+        totals = await _lifetime_totals(session, scope)
+        spent_cost += totals[2]
     if budget.max_cost is not None and spent_cost + estimate.cost_units > Decimal(
         str(budget.max_cost)
     ):
         raise BudgetExceeded("lifetime owner cost budget exhausted")
-    # REDO-3 (lead decision): the attempt gate counts in _lifetime_spend
-    # units — tasks plus attempt rows for the owner — never provider calls.
-    if budget.max_attempts is not None:
-        units = await _lifetime_task_count(session, horizon_id)
-        if units >= budget.max_attempts:
-            raise BudgetExceeded("lifetime owner attempt budget exhausted")
+    if (
+        budget.max_attempts is not None
+        and await _lifetime_task_count(session, scopes) >= budget.max_attempts
+    ):
+        raise BudgetExceeded("lifetime owner attempt budget exhausted")
 
 
 async def reserve_invocation_budget(

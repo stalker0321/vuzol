@@ -24,6 +24,7 @@ from vuzol.storage.types import QueueClass
 from vuzol.workflows.acceptance import AcceptanceGateHandler
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.ports import StepHandler
+from vuzol.workflows.upgrade import require_workflow_upgrade
 from vuzol.workflows.worker import WorkflowWorker
 
 
@@ -77,6 +78,7 @@ async def run() -> None:
     try:
         # S-2.1: fail closed before control/apply workers, ready event, or poll loops.
         await require_migration_head(engine)
+        await require_workflow_upgrade(engine)
         # Run in this service's real mount namespace, not in the interpreter
         # container. A single-project systemd exception cannot admit new projects.
         if any(

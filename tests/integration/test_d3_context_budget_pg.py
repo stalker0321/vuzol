@@ -85,9 +85,7 @@ def _research_result(
 
 
 @pytest.mark.anyio
-async def test_d3_source_backed_research_end_to_end(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+async def test_d3_source_backed_research_end_to_end(postgres_dsn: str, tmp_path: Path) -> None:
     """W1: question → retrieval → report → artifact → binding → synthesize."""
 
     from vuzol.providers.handlers import ProviderStepHandler
@@ -169,9 +167,7 @@ async def test_d3_source_backed_research_end_to_end(
             assert uow.session is not None
             bindings = (
                 await uow.session.scalars(
-                    select(InputBinding).where(
-                        InputBinding.consumer_step_id == consumer_id
-                    )
+                    select(InputBinding).where(InputBinding.consumer_step_id == consumer_id)
                 )
             ).all()
             assert len(bindings) == 1
@@ -203,8 +199,11 @@ async def test_d3_source_backed_research_end_to_end(
 
 
 @pytest.mark.anyio
-async def test_d3_lifetime_gate_and_epoch_canon(postgres_dsn: str, tmp_path: Path) -> None:
-    """pp.2/Q2: lifetime enforced on horizon scope; epoch resets caps only."""
+@pytest.mark.parametrize("work_limits", [{"max_cost": 0.015}, {"max_attempts": 1}])
+async def test_d3_lifetime_gate_and_epoch_canon(
+    postgres_dsn: str, tmp_path: Path, work_limits: dict
+) -> None:
+    """Lead limits include historical package receipts across retry epochs."""
 
     from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
     from vuzol.storage.types import PlanRevisionCreatedBy
@@ -212,12 +211,15 @@ async def test_d3_lifetime_gate_and_epoch_canon(postgres_dsn: str, tmp_path: Pat
     engine, factory = storage(postgres_dsn)
     settings, _registries = bundle(tmp_path, profile("api"))
     try:
+        from tests.integration.leadership.test_managed_goal_flow import _enable, _session
+        from vuzol.leadership.persistence import ManagedGoal
+        from vuzol.storage.models import WorkPackage
+
+        session_id = await _session(factory)
+        goal_id = await _enable(factory, session_id)
         task_id, run_id, step = await seed_provider_step(factory)
         package_id: uuid.UUID | None = None
         async with UnitOfWork(factory) as uow:
-            session_id = await uow.discussions.create_session(
-                project_id="vuzol", chat_id=-100, message_thread_id=10
-            )
             created = await WorkPackageService(uow).create_draft(
                 session_id=session_id,
                 project_id="vuzol",
@@ -235,9 +237,16 @@ async def test_d3_lifetime_gate_and_epoch_canon(postgres_dsn: str, tmp_path: Pat
                 ),
                 created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
                 actor_type="planner_model",
-                lifetime_budget={"max_cost": 0.015, "max_attempts": 100},
             )
             package_id = created.package_id
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            goal.constraints = {
+                **goal.constraints,
+                "work_limits": work_limits,
+            }
+            package = await session.get(WorkPackage, package_id)
+            package.managed_goal_id = goal_id
         assert package_id is not None
         api = profile("api")
         estimate = estimate_reservation(api, input_tokens=1, output_tokens=1)
@@ -253,9 +262,7 @@ async def test_d3_lifetime_gate_and_epoch_canon(postgres_dsn: str, tmp_path: Pat
                 provider_attempt=1,
                 estimate=estimate,
                 limits=settings.limits,
-                accounting=accounting_for_profile(
-                    api, purpose="coding", horizon_id=horizon
-                ),
+                accounting=accounting_for_profile(api, purpose="coding", horizon_id=horizon),
             )
         # epoch bump does not erase lifetime: still over budget on retry
         async with UnitOfWork(factory) as uow:
@@ -277,21 +284,39 @@ async def test_d3_lifetime_gate_and_epoch_canon(postgres_dsn: str, tmp_path: Pat
                     estimate=big,
                     limits=settings.limits,
                     accounting=accounting_for_profile(
-                        api, purpose="coding", attempt_kind="retry", horizon_id=horizon
+                        api, purpose="coding", attempt_kind="retry", horizon_id=goal_id
                     ),
                 )
         # lifetime totals see the spend across the epoch bump (canon, no filter)
         async with factory.begin() as session:
             totals = await _lifetime_totals(session, horizon)
             assert totals[2] >= estimate.cost_units
+
+        # The same task can have historical package and newer goal receipts.
+        # They share one task unit, while every receipt still counts as spend.
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            goal.constraints = {**goal.constraints, "work_limits": {"max_attempts": 2}}
+            await reserve_budget(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=step,
+                profile_id="api",
+                provider_attempt=2,
+                estimate=estimate,
+                limits=settings.limits,
+                accounting=accounting_for_profile(api, purpose="coding", horizon_id=goal_id),
+            )
+            from vuzol.providers.budgets import _lifetime_task_count
+
+            assert await _lifetime_task_count(session, {goal_id, package_id}) == 1
     finally:
         await engine.dispose()
 
 
 @pytest.mark.anyio
-async def test_d3_counters_and_allowance_exhaustion(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+async def test_d3_counters_and_allowance_exhaustion(postgres_dsn: str, tmp_path: Path) -> None:
     """W4: admission counters + deductible review allowance pool."""
 
     engine, factory = storage(postgres_dsn)
@@ -510,17 +535,11 @@ async def test_d3_scout_partial_retry_capacity(postgres_dsn: str, tmp_path: Path
 
 
 @pytest.mark.anyio
-async def test_d3_scope_freshness_manifest_task_pair(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+async def test_d3_scope_freshness_manifest_task_pair(postgres_dsn: str, tmp_path: Path) -> None:
     """pp.5/6 W5: missing scope, retrieved_at anchor, manifest persist, pair."""
 
-
-
     engine, factory = storage(postgres_dsn)
-    store = ArtifactStore(
-        tmp_path, max_bytes=5_000_000, retention_days=7, redaction_patterns=()
-    )
+    store = ArtifactStore(tmp_path, max_bytes=5_000_000, retention_days=7, redaction_patterns=())
     try:
         task_id, run_id, first_step = await seed_provider_step(factory)
         task_project = "vuzol"
@@ -650,9 +669,7 @@ async def test_d3_scope_freshness_manifest_task_pair(
             assert len(records) == 1
             stored = json.loads(store.read(records[0].content_uri).decode())
             assert stored["policy"] == "context-resolver.v1"
-            assert stored["manifest"]["entries"][0]["content_hash"] == (
-                artifact.content_hash
-            )
+            assert stored["manifest"]["entries"][0]["content_hash"] == (artifact.content_hash)
     finally:
         await engine.dispose()
 
@@ -708,9 +725,7 @@ async def test_d3_provider_call_counter_blocks_independently(
 
 
 @pytest.mark.anyio
-async def test_d3_accounting_failure_event_not_silent(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+async def test_d3_accounting_failure_event_not_silent(postgres_dsn: str, tmp_path: Path) -> None:
     """REDO-2: accounting failure writes an Event and never breaks the call."""
 
     from unittest.mock import patch
@@ -730,9 +745,7 @@ async def test_d3_accounting_failure_event_not_silent(
             interpreter=MagicMock(),
             owner="test",
         )
-        observe = pipeline._attempt_observer(
-            task_id=None, purpose="intake", intake_id=uuid.uuid4()
-        )
+        observe = pipeline._attempt_observer(task_id=None, purpose="intake", intake_id=uuid.uuid4())
         with patch(
             "vuzol.providers.budgets.reserve_invocation_budget",
             side_effect=BudgetExceeded("daily quota exhausted"),
@@ -752,9 +765,7 @@ async def test_d3_accounting_failure_event_not_silent(
             assert uow.session is not None
             events = (
                 await uow.session.scalars(
-                    select(Event).where(
-                        Event.event_type == "budget.accounting_failed"
-                    )
+                    select(Event).where(Event.event_type == "budget.accounting_failed")
                 )
             ).all()
             assert len(events) == 1
@@ -782,9 +793,7 @@ async def test_d3_intake_owner_in_usage_horizon(postgres_dsn: str, tmp_path: Pat
             owner="test",
         )
         intake_id = uuid.uuid4()
-        observe = pipeline._attempt_observer(
-            task_id=None, purpose="intake", intake_id=intake_id
-        )
+        observe = pipeline._attempt_observer(task_id=None, purpose="intake", intake_id=intake_id)
         await observe(
             profile_id="api",
             model="model",
@@ -894,104 +903,6 @@ async def test_d3_item_retry_new_task_keeps_lifetime(postgres_dsn: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_d3_lifetime_attempt_unit_links_both_gates(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
-    """REDO-3: sequencer-gate within ⟺ admission-gate within on the same data."""
-
-    from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
-    from vuzol.discussion.horizon import budget_state, parse_budget
-    from vuzol.storage.types import PlanRevisionCreatedBy
-
-    engine, factory = storage(postgres_dsn)
-    settings, _registries = bundle(tmp_path, profile("api"))
-    try:
-        budget = parse_budget({"max_cost": 100.0, "max_attempts": 2})
-        assert budget is not None
-        async with UnitOfWork(factory) as uow:
-            session_id = await uow.discussions.create_session(
-                project_id="vuzol", chat_id=-100, message_thread_id=10
-            )
-            created = await WorkPackageService(uow).create_draft(
-                session_id=session_id,
-                project_id="vuzol",
-                plan=PlanDraft(
-                    title="t",
-                    items=(
-                        PlanItemDraft(
-                            summary="s",
-                            goal="g",
-                            expected_outcome="o",
-                            completion_criteria=("c",),
-                            allowed_scope="src/**",
-                        ),
-                    ),
-                ),
-                created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
-                actor_type="planner_model",
-                lifetime_budget={"max_cost": 100.0, "max_attempts": 2},
-            )
-            horizon = created.package_id
-        task_a, run_a, step_a = await seed_provider_step(factory)
-        estimate = estimate_reservation(profile("api"), input_tokens=1, output_tokens=1)
-        async with factory.begin() as session:
-            await reserve_budget(
-                session,
-                task_id=task_a,
-                run_id=run_a,
-                step_id=step_a,
-                profile_id="api",
-                provider_attempt=1,
-                estimate=estimate,
-                limits=settings.limits,
-                accounting=accounting_for_profile(
-                    profile("api"), purpose="coding", horizon_id=horizon
-                ),
-            )
-        # one task spent: sequencer unit says within, admission agrees
-        assert (
-            budget_state(budget, spent_cost=0.01, spent_attempts=1).value == "within"
-        )
-        task_b, run_b, step_b = await seed_provider_step(factory)
-        async with factory.begin() as session:
-            await reserve_budget(
-                session,
-                task_id=task_b,
-                run_id=run_b,
-                step_id=step_b,
-                profile_id="api",
-                provider_attempt=1,
-                estimate=estimate,
-                limits=settings.limits,
-                accounting=accounting_for_profile(
-                    profile("api"), purpose="coding", horizon_id=horizon
-                ),
-            )
-        # two tasks spent: sequencer unit says exhausted, admission agrees
-        assert (
-            budget_state(budget, spent_cost=0.02, spent_attempts=2).value == "exhausted"
-        )
-        task_c, run_c, step_c = await seed_provider_step(factory)
-        with pytest.raises(BudgetExceeded, match="lifetime owner attempt"):
-            async with factory.begin() as session:
-                await reserve_budget(
-                    session,
-                    task_id=task_c,
-                    run_id=run_c,
-                    step_id=step_c,
-                    profile_id="api",
-                    provider_attempt=1,
-                    estimate=estimate,
-                    limits=settings.limits,
-                    accounting=accounting_for_profile(
-                        profile("api"), purpose="coding", horizon_id=horizon
-                    ),
-                )
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.anyio
 async def test_d3_work_attempt_counter_fires(postgres_dsn: str, tmp_path: Path) -> None:
     """REDO-4: max_work_attempts counts attempt rows plus step attempts."""
 
@@ -1086,9 +997,7 @@ async def test_d3_replan_counter_fires_on_package_revisions(
             revision = await uow.session.get(PlanRevision, created.revision_id)
             assert revision is not None
             item = await uow.session.scalar(
-                select(PlanRevisionItem).where(
-                    PlanRevisionItem.plan_revision_id == revision.id
-                )
+                select(PlanRevisionItem).where(PlanRevisionItem.plan_revision_id == revision.id)
             )
             assert item is not None
             uow.session.add(

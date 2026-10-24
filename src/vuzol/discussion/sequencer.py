@@ -17,17 +17,6 @@ from vuzol.discussion.domain import (
     control_transition_target,
     require_generation,
 )
-from vuzol.discussion.horizon import (
-    HorizonBudgetState,
-    budget_state,
-    deadline_exceeded,
-    horizon_enabled,
-    is_horizon,
-    needs_approval_gate,
-    parse_budget,
-    pinned_contract_for,
-    pinned_horizon_enabled,
-)
 from vuzol.interpretation.domain import (
     TASK_DRAFT_SCHEMA_VERSION,
     SuggestedComplexity,
@@ -44,7 +33,6 @@ from vuzol.storage.leasing import (
     dead_letter_outbox_item,
 )
 from vuzol.storage.models import (
-    Event,
     Interpretation,
     MaterializationLink,
     PlanRevision,
@@ -64,6 +52,7 @@ from vuzol.storage.types import (
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
+from vuzol.workflows.compiler import EXECUTION_CONTRACT_VERSION
 
 MATERIALIZER_PROFILE = "work_package_materializer"
 MATERIALIZER_MODEL = "deterministic"
@@ -185,7 +174,6 @@ class WorkPackageSequencer:
         h8: str,
         expected_status_generation: int,
         user_id: int,
-        horizon_enabled: bool = False,
         actor_type: str = "user",
         actor_id: str | None = None,
         delegation_id: uuid.UUID | None = None,
@@ -225,7 +213,7 @@ class WorkPackageSequencer:
         # Restart/resume of an already pinned package must never silently
         # re-pin (no downgrade of active workflows to legacy).
         if getattr(package, "execution_contract_version", None) is None:
-            package.execution_contract_version = pinned_contract_for(bool(horizon_enabled))
+            package.execution_contract_version = EXECUTION_CONTRACT_VERSION
         if actor_type == "user":
             start_payload: dict[str, object] = {
                 "revision_id": str(revision.id),
@@ -250,11 +238,9 @@ class WorkPackageSequencer:
             new_state=package.status.value,
             payload=start_payload,
         )
-        return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
+        return await self._materialize_current(package, revision)
 
-    async def observe_terminal(
-        self, *, task_id: uuid.UUID, horizon_enabled: bool = False
-    ) -> SequenceResult | None:
+    async def observe_terminal(self, *, task_id: uuid.UUID) -> SequenceResult | None:
         """Consume terminal evidence once; duplicate observations are harmless."""
 
         assert self._uow.session is not None
@@ -349,11 +335,9 @@ class WorkPackageSequencer:
             if remaining is not None:
                 await self._projection(package.id, package.version, "item_finished")
                 return SequenceResult(package.id, package.version, None, package.cursor_ordinal)
-        return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
+        return await self._materialize_current(package, revision)
 
-    async def materialize_running(
-        self, *, package_id: uuid.UUID, horizon_enabled: bool = False
-    ) -> SequenceResult:
+    async def materialize_running(self, *, package_id: uuid.UUID) -> SequenceResult:
         """Materialize the fenced cursor after an explicit skip/recovery transition."""
 
         await self._lock_managed_goal(package_id)
@@ -365,7 +349,7 @@ class WorkPackageSequencer:
         revision = await self._uow.work_packages.get_revision(package.running_revision_id)
         if revision.id != package.head_revision_id or revision.id != package.approved_revision_id:
             raise DomainError("stale_revision")
-        return await self._materialize_current(package, revision, horizon_enabled=horizon_enabled)
+        return await self._materialize_current(package, revision)
 
     async def retry_failed_item(
         self,
@@ -512,123 +496,7 @@ class WorkPackageSequencer:
         await self._projection(package.id, package.version, "failed_item_retry")
         return SequenceResult(package.id, package.version, task.id, link.ordinal)
 
-    async def _lifetime_spend(self, package: object) -> tuple[float, int]:
-        """Lifetime spend across every task the horizon ever materialized.
-
-        Retry re-links ``MaterializationLink.task_id`` in place, so
-        retried-away attempts are recovered from ``PACKAGE_RETRIED`` event
-        payloads (``task_id``/``previous_task_id``). Cost is a plain lifetime
-        sum per task (no epoch filter); attempts is the task-set size.
-        """
-
-        from decimal import Decimal
-
-        from vuzol.providers.budgets import usage_totals_by_purpose
-
-        assert self._uow.session is not None
-        assert hasattr(package, "id")
-        linked = set(
-            (
-                await self._uow.session.scalars(
-                    select(MaterializationLink.task_id).where(
-                        MaterializationLink.work_package_id == package.id
-                    )
-                )
-            ).all()
-        )
-        payloads = (
-            await self._uow.session.scalars(
-                select(Event.payload).where(
-                    Event.entity_type == "work_package",
-                    Event.entity_id == package.id,
-                    Event.event_type == WorkPackageEvent.PACKAGE_RETRIED.value,
-                )
-            )
-        ).all()
-        candidate = set(linked)
-        for payload in payloads:
-            if not isinstance(payload, dict):
-                continue
-            for key in ("task_id", "previous_task_id"):
-                value = payload.get(key)
-                if isinstance(value, str):
-                    try:
-                        candidate.add(uuid.UUID(value))
-                    except ValueError:
-                        continue
-        spent = Decimal(0)
-        for task_id in candidate:
-            for _, cost, _ in await usage_totals_by_purpose(self._uow.session, task_id=task_id):
-                spent += cost
-        return float(spent), len(candidate)
-
-    async def _pause_for_horizon_limit(
-        self, package: object, revision: PlanRevision, ordinal: int, reason: str
-    ) -> SequenceResult:
-        """Pause on an exhausted lifetime budget or a passed deadline."""
-
-        from vuzol.storage.models import WorkPackage
-        from vuzol.storage.types import WorkPackagePauseReason
-
-        assert isinstance(package, WorkPackage)
-        assert self._uow.session is not None
-        package.status = WorkPackageStatus.PAUSED
-        package.pause_reason = WorkPackagePauseReason.ITEM_BLOCKED
-        package.version += 1
-        await self._uow.events.append(
-            entity_type="work_package",
-            entity_id=package.id,
-            event_type=WorkPackageEvent.PACKAGE_PAUSED.value,
-            actor_type="system",
-            previous_state=WorkPackageStatus.RUNNING.value,
-            new_state=WorkPackageStatus.PAUSED.value,
-            payload={
-                "revision_id": str(revision.id),
-                "ordinal": ordinal,
-                "reason": reason,
-                "failure_task_id": None,
-                "status_generation": package.version,
-            },
-        )
-        await self._projection(package.id, package.version, "horizon_limit")
-        kind = "recovery_exhausted" if "exhausted" in reason else "blocked"
-        return SequenceResult(package.id, package.version, None, ordinal, terminal_kind=kind)
-
-    async def _check_horizon_limits(
-        self, package: object, revision: PlanRevision, ordinal: int
-    ) -> SequenceResult | None:
-        """Pause on an exhausted lifetime budget or a passed deadline.
-
-        Lifetime composes over Task.budget_epoch: retry epochs never reset
-        it, so spend is summed across all linked tasks including retried-away
-        and cancelled attempts (see _lifetime_spend). Returns None when the
-        package is within limits.
-        """
-
-        from datetime import UTC, datetime
-
-        from vuzol.storage.models import WorkPackage
-
-        assert isinstance(package, WorkPackage)
-        budget = parse_budget(package.lifetime_budget)
-        if budget is not None:
-            spent_cost, spent_attempts = await self._lifetime_spend(package)
-            if (
-                budget_state(budget, spent_cost=spent_cost, spent_attempts=spent_attempts)
-                is HorizonBudgetState.EXHAUSTED
-            ):
-                return await self._pause_for_horizon_limit(
-                    package, revision, ordinal, "lifetime_budget_exhausted"
-                )
-        if deadline_exceeded(deadline=package.deadline, now=datetime.now(UTC)):
-            return await self._pause_for_horizon_limit(
-                package, revision, ordinal, "deadline_exceeded"
-            )
-        return None
-
-    async def _materialize_current(
-        self, package: object, revision: PlanRevision, *, horizon_enabled: bool = False
-    ) -> SequenceResult:
+    async def _materialize_current(self, package: object, revision: PlanRevision) -> SequenceResult:
         from vuzol.storage.models import WorkPackage
 
         assert isinstance(package, WorkPackage)
@@ -645,10 +513,6 @@ class WorkPackageSequencer:
                     package.cursor_ordinal,
                     terminal_kind="blocked",
                 )
-        # D0 pinned semantics: an active package reads its pinned contract.
-        # Pre-D0 rows (NULL) fall back to the passed admission flag.
-        if getattr(package, "execution_contract_version", None) is not None:
-            horizon_enabled = pinned_horizon_enabled(package, fallback=bool(horizon_enabled))
         ordinal = package.cursor_ordinal
         if ordinal is None:
             raise DomainError("cursor_missing")
@@ -660,23 +524,6 @@ class WorkPackageSequencer:
             )
         )
         if item is None:
-            if horizon_enabled and is_horizon(package.goal, package.exit_criteria):
-                # Horizon v1 (WP08): an exhausted queue is not success. The
-                # package stays RUNNING in the evaluating phase until
-                # acceptance is recorded; COMPLETED requires accepted=true.
-                package.horizon_phase = "evaluating"
-                package.version += 1
-                await self._uow.events.append(
-                    entity_type="work_package",
-                    entity_id=package.id,
-                    event_type=WorkPackageEvent.PACKAGE_EVALUATING.value,
-                    actor_type="system",
-                    previous_state=WorkPackageStatus.RUNNING.value,
-                    new_state=WorkPackageStatus.RUNNING.value,
-                    payload={"revision_id": str(revision.id), "horizon_phase": "evaluating"},
-                )
-                await self._projection(package.id, package.version, "evaluating")
-                return SequenceResult(package.id, package.version, None, None, completed=False)
             package.status = WorkPackageStatus.COMPLETED
             package.cursor_ordinal = None
             package.pause_reason = None
@@ -706,18 +553,6 @@ class WorkPackageSequencer:
                 terminal_kind="completed",
             )
 
-        if (
-            horizon_enabled
-            and is_horizon(package.goal, package.exit_criteria)
-            and (package.lifetime_budget is not None or package.deadline is not None)
-        ):
-            # Limits gate pending items only: the queue-end branch above
-            # already returned, so finished work always reaches evaluating
-            # (acceptance stays callable). A stale link (e.g. to a cancelled
-            # task after restart) still cannot bypass an exhausted budget.
-            limited = await self._check_horizon_limits(package, revision, ordinal)
-            if limited is not None:
-                return limited
         existing = await self._uow.session.scalar(
             select(MaterializationLink).where(
                 MaterializationLink.work_package_id == package.id,
@@ -728,41 +563,7 @@ class WorkPackageSequencer:
         if existing is not None:
             return SequenceResult(package.id, package.version, existing.task_id, ordinal)
 
-        if (
-            horizon_enabled
-            and is_horizon(package.goal, package.exit_criteria)
-            and needs_approval_gate(item.needs_approval)
-            and package.horizon_phase != f"item_approved:{ordinal}"
-        ):
-            # Item-level approval is a runtime gate: the item is not
-            # materialized until explicitly approved (approve_waiting_item
-            # records an ``item_approved:{ordinal}`` marker that lets exactly
-            # this ordinal through). Repeat observations are idempotent.
-            if package.horizon_phase == "waiting_approval":
-                return SequenceResult(package.id, package.version, None, ordinal)
-            package.horizon_phase = "waiting_approval"
-            package.version += 1
-            await self._uow.events.append(
-                entity_type="work_package",
-                entity_id=package.id,
-                event_type=WorkPackageEvent.PACKAGE_WAITING_APPROVAL.value,
-                actor_type="system",
-                previous_state=WorkPackageStatus.RUNNING.value,
-                new_state=WorkPackageStatus.RUNNING.value,
-                payload={
-                    "revision_id": str(revision.id),
-                    "ordinal": ordinal,
-                    "horizon_phase": "waiting_approval",
-                },
-            )
-            await self._projection(package.id, package.version, "waiting_approval")
-            return SequenceResult(package.id, package.version, None, ordinal)
-
         await check_item_dependencies(self._uow.session, package.id, item)
-
-        if (package.horizon_phase or "").startswith("item_approved:"):
-            # Approved marker is single-use: clear it as the item materializes.
-            package.horizon_phase = None
 
         discussion = await self._uow.session.get(ProjectDiscussionSession, package.session_id)
         if discussion is None:
@@ -1082,7 +883,6 @@ class WorkPackageSequenceConsumer:
                     raise ValueError("invalid_sequence_item")
                 await WorkPackageSequencer(uow).observe_terminal(
                     task_id=item.linked_entity_id,
-                    horizon_enabled=horizon_enabled(self._settings),
                 )
                 await complete_outbox_item(uow.session, token)
         except (DomainError, ValueError) as error:

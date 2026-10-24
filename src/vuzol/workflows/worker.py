@@ -139,7 +139,6 @@ class WorkflowWorker:
             "execute_agent",
             "execute_code",
             "execute_model",
-            "plan",
             "research_execute",
             "synthesize",
         }:

@@ -18,12 +18,9 @@ from vuzol.discussion.agent import (
     schedule_discussion_agent,
     unwrap_agent_reply,
 )
-from vuzol.discussion.application import apply_plan_request_in_uow
 from vuzol.discussion.context_budget import ChatContextError, context_failure_text
 from vuzol.discussion.domain import DomainError
-from vuzol.discussion.horizon import horizon_enabled
 from vuzol.discussion.memory_service import DiscussionMemoryService
-from vuzol.discussion.service import WorkPackageService
 from vuzol.discussion.work_context import freeze_work_context
 from vuzol.experiments.intake_shadow import IntakeEffect
 from vuzol.interpretation.chat_documents import (
@@ -41,15 +38,12 @@ from vuzol.interpretation.discussion import (
     DiscussionInterpretation,
     DiscussionInterpretRequest,
     EditSessionContext,
-    PlanRequestIntent,
     PlanSnapshot,
     PlanSnapshotItem,
     SemanticDiscussionInterpreter,
     enforce_discussion_policy,
     explicit_task_interpretation,
     is_explicit_fast_path,
-    plan_draft_from_interpretation,
-    stamp_plan_provenance,
 )
 from vuzol.interpretation.documents import DocumentError
 from vuzol.interpretation.domain import (
@@ -58,11 +52,9 @@ from vuzol.interpretation.domain import (
     ProjectSummary,
     TaskAction,
     TaskContext,
-    TaskDraft,
     TranscriptionInput,
 )
 from vuzol.interpretation.jev import JevDecisionsInterpreter
-from vuzol.interpretation.planning import PLANNING_TIER_EVENT, resolve_planning_tier
 from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.ports import (
     AttachmentDownloader,
@@ -971,7 +963,6 @@ class InterpretationPipeline:
                         if work_context is not None
                         else None,
                     )
-                    await _record_planning_tier(session, task, policy.draft)
                     current_intake.task_id = task.id
                     current_intake.affinity_kind = "new_task"
                     session.add(
@@ -1144,6 +1135,28 @@ class InterpretationPipeline:
                 else ControlOverride(kind=ControlOverrideKind(item.payload["control_override"]))
             ),
         )
+        if request.control_override is not None and request.control_override.kind in {
+            ControlOverrideKind.CREATE_OR_UPDATE_PLAN,
+            ControlOverrideKind.REPLAN,
+        }:
+            from vuzol.leadership.wakeups import enqueue_legacy_plan_request
+
+            async with self._factory.begin() as session:
+                try:
+                    await enqueue_legacy_plan_request(
+                        session,
+                        project_id=project_id,
+                        user_id=intake.user_id,
+                        source_id=str(intake.id),
+                        text=intake.original_text,
+                    )
+                except DomainError as error:
+                    raise PermanentPipelineError(f"discussion_plan_{error}") from error
+                await TelegramIntakeRepository(session).set_status(
+                    intake.id, IntakeStatus.COMPLETED
+                )
+                await complete_outbox_item(session, token)
+            return
         if is_explicit_fast_path(request):
             from vuzol.interpretation.explicit import explicit_task_body
 
@@ -1157,26 +1170,6 @@ class InterpretationPipeline:
                 request,
                 on_attempt=self._attempt_observer(task_id=intake.task_id, intake_id=intake.id),
             )
-        if (
-            result.interaction_mode is InteractionMode.PLAN_REQUEST
-            and result.plan_request is not None
-            and result.plan_request.intent is PlanRequestIntent.CREATE_DRAFT
-        ):
-            candidate_plan = plan_draft_from_interpretation(result)
-            async with UnitOfWork(self._factory) as uow:
-                repeated = await WorkPackageService(uow).is_duplicate_terminal_plan(
-                    session_id=session_id,
-                    project_id=project_id,
-                    plan=candidate_plan,
-                )
-            if repeated:
-                request = request.model_copy(update={"memory_pack": None})
-                result = await interpret_discussion_with_recovery(
-                    self._discussion_interpreter,
-                    self._discussion_fallbacks,
-                    request,
-                    on_attempt=self._attempt_observer(task_id=intake.task_id, intake_id=intake.id),
-                )
         self._logger.info(
             "Discussion interpretation completed",
             extra={
@@ -1265,32 +1258,21 @@ class InterpretationPipeline:
                 return
             if (
                 result.interaction_mode is InteractionMode.PLAN_REQUEST
-                and result.should_mutate_plan
+                and result.refusal_code is None
             ):
-                # D4 REDO: stamp system-owned provenance with the persisted
-                # turn id and the base revision hash before application, so
-                # immutable_body markers are written by the system, not the
-                # model (which only ever sees nulled refs from enforce).
-                base_revision_hash: str | None = None
-                if request.plan_snapshot is not None:
-                    base_revision_hash = request.plan_snapshot.revision_hash
-                result = stamp_plan_provenance(
-                    result,
-                    source_turn_id=user_turn_id,
-                    source_spec_revision=base_revision_hash,
-                )
+                assert uow.session is not None
+                from vuzol.leadership.wakeups import enqueue_legacy_plan_request
+
                 try:
-                    await apply_plan_request_in_uow(
-                        uow,
-                        session_id=session_id,
-                        request=request,
-                        result=result,
-                        planner_profile=getattr(self._discussion_interpreter, "profile_id", None),
-                        horizon_enabled=horizon_enabled(self._runtime.settings),
+                    await enqueue_legacy_plan_request(
+                        uow.session,
+                        project_id=project_id,
+                        user_id=intake.user_id,
+                        source_id=str(intake.id),
+                        text=intake.original_text,
                     )
                 except DomainError as error:
                     raise PermanentPipelineError(f"discussion_plan_{error}") from error
-                assert uow.session is not None
                 await TelegramIntakeRepository(uow.session).set_status(
                     intake.id, IntakeStatus.COMPLETED
                 )
@@ -1547,8 +1529,6 @@ class InterpretationPipeline:
             task.version += 1
             # D1 L2: version the spec separately from the mutating task_draft.
             await snapshot_task_spec(session, task)
-            # J4: the planning tier is code-owned and bound to the spec revision.
-            await _record_planning_tier(session, task, policy.draft)
             enqueue_interpreter_trace(
                 session,
                 task=task,
@@ -1914,37 +1894,6 @@ def _discussion_reply_text(result: DiscussionInterpretation) -> str:
     if not result.clarification_question:
         return summary
     return f"{summary}\n\n{unwrap_agent_reply(result.clarification_question)}"
-
-
-async def _record_planning_tier(session: AsyncSession, task: Task, draft: TaskDraft) -> None:
-    """Persist the code-owned planning tier bound to the task spec revision.
-
-    Idempotent: a re-tick of the same spec revision reuses the existing event
-    instead of writing a second verdict. The model never supplies this value.
-    """
-
-    if task.spec_revision is None:
-        return
-    existing = await session.scalar(
-        select(Event).where(
-            Event.entity_type == "task",
-            Event.entity_id == task.id,
-            Event.event_type == PLANNING_TIER_EVENT,
-            Event.payload["spec_revision"].as_string() == task.spec_revision,
-        )
-    )
-    if existing is not None:
-        return
-    decision = resolve_planning_tier(draft, required_gaps=draft.missing_information)
-    session.add(
-        Event(
-            entity_type="task",
-            entity_id=task.id,
-            event_type=PLANNING_TIER_EVENT,
-            actor_type="system",
-            payload=decision.event_payload(spec_revision=task.spec_revision),
-        )
-    )
 
 
 async def _enqueue_interpretation(

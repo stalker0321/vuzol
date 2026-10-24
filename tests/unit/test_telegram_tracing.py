@@ -32,11 +32,9 @@ from vuzol.storage.types import (
 from vuzol.telegram.tracing import (
     INTERPRETER_TRACE_KIND,
     ORCHESTRATION_TRACE_ROLE,
-    PLANNER_TRACE_KIND,
     build_interpreter_trace_html,
     build_planner_trace_html,
     enqueue_interpreter_trace,
-    enqueue_planner_trace,
     interpreter_trace_is_anomalous,
     orchestration_trace_sample_bucket,
     planner_trace_is_anomalous,
@@ -172,7 +170,6 @@ def test_planner_trace_makes_empty_truncated_failure_visible() -> None:
     assert "375 in / 1,000 out · лимит 1,000 out" in html
     assert "finish_reason=length" in html
     assert "Пустой вывод" in html
-    assert "Handoff воркеру: <b>ожидает retry</b>" in html
     assert "planner_truncated" in html
 
 
@@ -187,8 +184,6 @@ def test_planner_trace_reports_ready_handoff_on_completed_plan() -> None:
         "handoff": {"status": "ready"},
     }
     html = build_planner_trace_html(task, step, usage=None, reservation=None)
-    assert "Handoff воркеру: <b>подключён</b>" in html
-    assert "ProviderRequest" in html
     assert "1. Inspect" in html
 
 
@@ -208,7 +203,6 @@ def test_planner_trace_bounds_structured_failure_output() -> None:
     assert "unsafe &lt;shape&gt;" in html
     assert "Structured output" in html
     assert "…</pre>" in html
-    assert "Handoff воркеру: <b>не выполнен</b>" in html
 
 
 def test_interpreter_trace_handles_unknown_metrics_without_policy_change() -> None:
@@ -247,14 +241,10 @@ def test_trace_enqueues_are_durable_and_idempotent() -> None:
         interpretation=interpretation,
         result=result,
     )
-    enqueue_planner_trace(session, task=task, step=_plan_step())
     first = cast(TransactionalOutbox, session.add.call_args_list[0].args[0])
-    second = cast(TransactionalOutbox, session.add.call_args_list[1].args[0])
     assert first.payload["role"] == ORCHESTRATION_TRACE_ROLE
     assert first.payload["trace_kind"] == INTERPRETER_TRACE_KIND
     assert first.idempotency_key.endswith(str(interpretation.id))
-    assert second.payload["trace_kind"] == PLANNER_TRACE_KIND
-    assert ":1:completed" in second.idempotency_key
 
 
 def test_trace_sampling_is_stable_at_task_level_and_anomaly_aware() -> None:

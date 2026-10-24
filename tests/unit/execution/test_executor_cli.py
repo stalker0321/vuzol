@@ -14,7 +14,6 @@ from ._execution_helpers import (
     EgressDestination,
     ExecutionEnvelopeFactory,
     GateExecutionContext,
-    IdempotencyClass,
     MagicMock,
     MountMode,
     NetworkPolicy,
@@ -558,63 +557,6 @@ async def test_codex_envelope_and_lifecycle_mocks(
     state_dir.chmod(0o700)
 
 
-def test_coding_workflow_execute_code_config() -> None:
-    """Test execute_code step has the Step 08 UNKNOWN_EFFECTS config (real definition)."""
-    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
-
-    coding = WORKFLOW_REGISTRY["coding.v1"]
-    exec_step = next((s for s in coding.steps if s.key == "execute_code"), None)
-    assert exec_step is not None
-    assert exec_step.idempotency_class == IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
-
-
-def test_coding_workflow_review_is_retryable() -> None:
-    from vuzol.storage.types import RetryClass
-    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
-
-    coding = WORKFLOW_REGISTRY["coding.v1"]
-    review = next((s for s in coding.steps if s.key == "review"), None)
-    assert review is not None
-    assert review.max_attempts == 3
-    assert review.retry_class is RetryClass.TRANSIENT
-
-
-def test_coding_v2_produces_artifacts_before_static_delivery() -> None:
-    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
-
-    coding = WORKFLOW_REGISTRY["coding.v2"]
-    producer = next(step for step in coding.steps if step.key == "produce_artifacts")
-    static_build = next(step for step in coding.steps if step.key == "build_static")
-
-    assert producer.predecessors == ("review",)
-    assert producer.idempotency_class is IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
-    assert static_build.predecessors == ("produce_artifacts",)
-
-
-def test_current_coding_workflow_checks_capabilities_before_context() -> None:
-    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
-
-    coding = WORKFLOW_REGISTRY["coding.v3"]
-    capability = next(step for step in coding.steps if step.key == "ensure_capabilities")
-    context = next(step for step in coding.steps if step.key == "prepare_context")
-
-    assert capability.predecessors == ("plan",)
-    assert capability.idempotency_class is IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
-    assert context.predecessors == ("ensure_capabilities",)
-
-
-def test_current_coding_workflow_approves_dependencies_before_validation() -> None:
-    from vuzol.workflows.definitions import WORKFLOW_REGISTRY
-
-    coding = WORKFLOW_REGISTRY["coding.v4"]
-    dependency = next(step for step in coding.steps if step.key == "ensure_dependencies")
-    validation = next(step for step in coding.steps if step.key == "validate")
-
-    assert dependency.predecessors == ("execute_code",)
-    assert dependency.idempotency_class is IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
-    assert validation.predecessors == ("ensure_dependencies",)
-
-
 def test_grok_execution_boundary_accepts_only_canonical_runtime() -> None:
     from vuzol.execution.codex import _provider_state_runtime, _require_provider_command
     from vuzol.providers.grok import canonical_grok_argv
@@ -751,6 +693,7 @@ async def test_executor_composes_enabled_runtime(
     monkeypatch.setattr(executor_cli, "create_engine", lambda *_args: engine)
     migration_head = AsyncMock()
     monkeypatch.setattr(executor_cli, "require_migration_head", migration_head)
+    monkeypatch.setattr(executor_cli, "require_workflow_upgrade", AsyncMock())
     monkeypatch.setattr(executor_cli, "create_session_factory", lambda _engine: factory)
     turn_reconciler = MagicMock()
     turn_reconciler.reconcile_startup = AsyncMock()
@@ -802,7 +745,7 @@ async def test_executor_composes_enabled_runtime(
     executor_cli.ReadOnlyCliAdapter.assert_called_once()
     provider_calls = executor_cli.RoutedWorkflowWorker.call_args_list
     assert len(provider_calls) == 2
-    assert all("plan" in call.kwargs["handlers"] for call in provider_calls)
+    assert all("plan" not in call.kwargs["handlers"] for call in provider_calls)
     assert {call.kwargs["queue_classes"] for call in provider_calls} == {
         frozenset({executor_cli.QueueClass.LIGHT}),
         frozenset({executor_cli.QueueClass.HEAVY}),

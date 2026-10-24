@@ -566,7 +566,8 @@ async def cancel_task(
     if run.status is RunStatus.CANCELLED:
         await _noop(session, run.id, "cancel", actor_id)
         return
-    if task.status in {TaskStatus.FAILED, TaskStatus.COMPLETED} and run.status is RunStatus.PAUSED:
+    retain_failure = task.status is TaskStatus.FAILED and run.status is RunStatus.PAUSED
+    if task.status is TaskStatus.COMPLETED and run.status is RunStatus.PAUSED:
         raise ValueError(
             f"task is {task.status.value} while its run is paused; no automatic repair is applied"
         )
@@ -583,7 +584,17 @@ async def cancel_task(
         step.lease_owner = None
         step.lease_expires_at = None
     await transition_run(session, run, RunStatus.CANCELLED, actor_type="user", actor_id=actor_id)
-    await transition_task(session, task, TaskStatus.CANCELLED, actor_type="user", actor_id=actor_id)
+    if retain_failure:
+        # Legacy inconsistent state: cancellation settles the still-live run;
+        # it neither retries work nor rewrites the terminal task failure.
+        task.version += 1
+        from vuzol.workflows.lead_events import publish_task_event
+
+        await publish_task_event(session, task)
+    else:
+        await transition_task(
+            session, task, TaskStatus.CANCELLED, actor_type="user", actor_id=actor_id
+        )
     from vuzol.projects.capability_provisioning import abandon_capability_installation
 
     for step in steps:
@@ -596,7 +607,7 @@ async def cancel_task(
             event_type="task.cancel_requested",
             actor_type="user",
             actor_id=actor_id,
-            payload={"rollback_attempted": False},
+            payload={"rollback_attempted": False, "retained_task_failure": retain_failure},
         )
     )
     await _enqueue_telegram_projection(session, task, run)

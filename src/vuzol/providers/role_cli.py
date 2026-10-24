@@ -23,7 +23,9 @@ class RoleBoundCliAdapter:
             if request.role not in {ProviderRole.LEAD, ProviderRole.REVIEWER, ProviderRole.PLANNER}:
                 raise ValueError("unsupported role within a leadership turn")
             adapter = self._turn
-        elif request.role in {ProviderRole.PLANNER, ProviderRole.REVIEWER}:
+        elif request.role is ProviderRole.PLANNER:
+            raise ValueError("planner requires a leadership turn")
+        elif request.role is ProviderRole.REVIEWER:
             adapter = self._readonly
         else:
             adapter = self._workflow

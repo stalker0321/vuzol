@@ -153,7 +153,7 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
     monkeypatch.setattr(executor, "_refresh_subscription_limits_tick", AsyncMock())
 
     async def one_turn(processor, *args, **kwargs):
-        assert "plan" in processor._providers._handlers
+        assert "plan" not in processor._providers._handlers
         assert processor._reviews is not None
         assert processor._lead is not None
         assert await processor.process_one()

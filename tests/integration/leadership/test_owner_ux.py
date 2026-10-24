@@ -418,3 +418,68 @@ async def test_live_status_serializes_delivery_and_quarantines_unknown_send(post
             assert first.status is DeliveryStatus.AMBIGUOUS
             assert second.status is DeliveryStatus.DEAD_LETTER
             assert second.last_error_category == "lead_projection_ambiguous"
+
+
+async def test_waiting_lead_wait_keeps_plan_approval_and_approval_always_resumes(
+    postgres_dsn, runtime
+):
+    """Live pilot 2026-10-24: a lead "wait" on a goal already waiting for plan approval was
+    denied, turned into an owner question and replaced the reason; the owner's later approval
+    then left the goal waiting forever."""
+    from tests.integration.leadership.planning_helpers import seed_plan
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": plan_items(1)})
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            package_id = goal.current_package_id
+            # As the worker leaves an idle lead with a plan on the owner's card.
+            goal.lifecycle = "waiting"
+            goal.waiting_reason = "plan_approval"
+            goal.wakeup_condition = {"kind": "plan_approval"}
+        waited = await command(
+            factory,
+            goal_id,
+            "wait_for",
+            {"condition": {"kind": "package", "package_id": str(package_id)}},
+        )
+        assert waited.status == "waiting"
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.waiting_reason == "plan_approval"
+            assert not await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("lead:question:%")
+                )
+            )
+            # A goal already parked under another reason by the old behavior.
+            goal.waiting_reason = "goal_waiting"
+            goal.wakeup_condition = None
+            card = await build_work_package_plan_card(session, package_id)
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.work_package_id == package_id,
+                    TelegramMessageLink.message_role == "work_package_plan",
+                )
+            )
+        callbacks = {label: data for row in card.callback_buttons for label, data in row}
+        approved = await TelegramControlService(runtime, factory).accept(
+            WorkPackageControlUpdate(
+                bot_id="test",
+                update_id=940,
+                callback_query_id="approve",
+                callback_data=callbacks["✅ Запускай"],
+                chat_id=CHAT,
+                message_thread_id=THREAD,
+                message_id=link.message_id,
+                user_id=OWNER,
+            )
+        )
+        assert approved.status is IngressStatus.HANDLED
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "active" and goal.waiting_reason is None

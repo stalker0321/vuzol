@@ -152,6 +152,7 @@ class PreparedDelivery:
     rich_html: str | None = None
     document_content: bytes = field(default=b"", repr=False)
     document_filename: str = ""
+    disable_notification: bool = False
 
 
 class PermanentDeliveryError(RuntimeError):
@@ -160,6 +161,84 @@ class PermanentDeliveryError(RuntimeError):
     def __init__(self, category: str) -> None:
         super().__init__(category)
         self.category = category
+
+
+async def _prepare_attention(
+    session: AsyncSession,
+    item: TransactionalOutbox,
+    topics: TopicRegistry | None,
+    projects: ProjectRegistry | None,
+) -> PreparedDelivery:
+    from vuzol.telegram.attention import ATTENTION_REASONS, attention_text, project_message_url
+
+    data = item.payload
+    chat_id, thread_id = int(data["chat_id"]), int(data["project_thread_id"])
+    destination = topics.system_topic(chat_id, TopicKind.APPROVALS) if topics else None
+    attention_thread = (
+        destination.message_thread_id if destination and destination.enabled else None
+    )
+    if attention_thread is None:
+        attention_thread = await session.scalar(
+            select(TopicMapping.message_thread_id).where(
+                TopicMapping.chat_id == chat_id,
+                TopicMapping.topic_kind == TopicKind.APPROVALS.value,
+                TopicMapping.enabled.is_(True),
+            )
+        )
+    if attention_thread is None:
+        raise PermanentDeliveryError("approval_topic_missing")
+    topic = (
+        next(
+            (t for t in topics.items() if (t.chat_id, t.message_thread_id) == (chat_id, thread_id)),
+            None,
+        )
+        if topics
+        else None
+    )
+    name = topic.display_name if topic else None
+    if not name and projects:
+        name = projects.get(data["project_id"]).display_name
+    target = data["target"]
+    conditions = [
+        TelegramMessageLink.chat_id == chat_id,
+        TelegramMessageLink.message_thread_id == thread_id,
+    ]
+    for key, value in target.items():
+        column = getattr(TelegramMessageLink, key)
+        conditions.append(column == (value if key == "message_role" else uuid.UUID(value)))
+    message_id = await session.scalar(
+        select(TelegramMessageLink.message_id)
+        .where(*conditions)
+        .order_by(TelegramMessageLink.created_at.desc())
+        .limit(1)
+    )
+    resolved = bool(data["resolved"]) or bool(
+        await session.scalar(
+            select(TransactionalOutbox.id).where(
+                TransactionalOutbox.destination == "telegram",
+                TransactionalOutbox.idempotency_key == data["projection_role"] + ":resolved",
+            )
+        )
+    )
+    # Reuse the fenced, ordered in-place projection path; no second delivery mechanism.
+    projection = TransactionalOutbox(
+        destination="telegram",
+        operation_type="send_message",
+        payload={
+            "role": "chat_notice",
+            "chat_id": chat_id,
+            "message_thread_id": attention_thread,
+            "html": attention_text(data["reason"], name or "Проект", resolved=resolved),
+            "projection_role": data["projection_role"],
+            "revision": data["revision"],
+            "callback_buttons": []
+            if resolved
+            else [[("Открыть", project_message_url(chat_id, thread_id, message_id))]],
+        },
+    )
+    prepared = await _prepare_delivery(session, projection)
+    icon, _ = ATTENTION_REASONS.get(data["reason"], ATTENTION_REASONS["waiting"])
+    return replace(prepared, disable_notification=resolved or icon == "✅" or data["revision"] > 1)
 
 
 class DeliveryRunner(Protocol):
@@ -189,6 +268,64 @@ async def prepare_delivery(
     rich_messages: bool = False,
     artifacts: ArtifactStore | None = None,
 ) -> PreparedDelivery:
+    prepared = await _prepare_delivery(
+        session,
+        item,
+        topics,
+        projects,
+        profiles,
+        trace_enabled,
+        trace_sample_percent,
+        trace_always_include_anomalies,
+        rich_messages,
+        artifacts,
+    )
+    if (
+        item.payload.get("role") == "attention"
+        or prepared.thread_id is None
+        or prepared.action in {DeliveryAction.NOOP, DeliveryAction.DELETE_MESSAGE}
+    ):
+        return prepared
+    topic = (
+        next(
+            (
+                t
+                for t in topics.items()
+                if (t.chat_id, t.message_thread_id) == (prepared.chat_id, prepared.thread_id)
+            ),
+            None,
+        )
+        if topics
+        else None
+    )
+    project_topic = topic is not None and topic.kind is TopicKind.PROJECT
+    if topic is None:
+        project_topic = bool(
+            await session.scalar(
+                select(TopicMapping.id).where(
+                    TopicMapping.chat_id == prepared.chat_id,
+                    TopicMapping.message_thread_id == prepared.thread_id,
+                    TopicMapping.topic_kind == TopicKind.PROJECT.value,
+                )
+            )
+        )
+    return replace(prepared, disable_notification=project_topic)
+
+
+async def _prepare_delivery(
+    session: AsyncSession,
+    item: TransactionalOutbox,
+    topics: TopicRegistry | None = None,
+    projects: ProjectRegistry | None = None,
+    profiles: ProfileRegistry | None = None,
+    trace_enabled: bool = True,
+    trace_sample_percent: int = 100,
+    trace_always_include_anomalies: bool = True,
+    rich_messages: bool = False,
+    artifacts: ArtifactStore | None = None,
+) -> PreparedDelivery:
+    if item.payload.get("role") == "attention":
+        return await _prepare_attention(session, item, topics, projects)
     if getattr(item, "destination", "telegram") == WORK_PACKAGE_PROJECTION_DESTINATION:
         return await _prepare_work_package_projection(session, item)
     if item.operation_type not in {"send_message", "delete_message"}:
@@ -343,7 +480,7 @@ async def prepare_delivery(
         projection_role = item.payload.get("projection_role")
         link = None
         notice_revision = int(item.payload.get("revision", 0))
-        if projection_role and projection_role.startswith("ls:"):
+        if projection_role and projection_role.startswith(("ls:", "la:")):
             # Earlier versions must finish before another worker edits/sends this projection.
             earlier = await session.scalar(
                 select(TransactionalOutbox)
@@ -1535,7 +1672,10 @@ class TelegramDeliveryService:
             return None
         assert prepared.action == DeliveryAction.SEND_DISCUSSION_REPLY
         message_id = await self._client.send_rich_message(
-            chat_id=prepared.chat_id, thread_id=prepared.thread_id, html=prepared.rich_html
+            chat_id=prepared.chat_id,
+            thread_id=prepared.thread_id,
+            html=prepared.rich_html,
+            disable_notification=prepared.disable_notification,
         )
         if type(message_id) is not int or message_id <= 0:
             raise LostTelegramResponse("rich send returned no confirmed message ID")
@@ -1571,6 +1711,7 @@ class TelegramDeliveryService:
                     task_id=prepared.task_id,
                     approval_id=prepared.approval_id,
                     callback_buttons=prepared.callback_buttons,
+                    disable_notification=prepared.disable_notification,
                 )
             except BadRequest:
                 if prepared.fallback_html is None:
@@ -1583,6 +1724,7 @@ class TelegramDeliveryService:
                     task_id=prepared.task_id,
                     approval_id=prepared.approval_id,
                     callback_buttons=prepared.callback_buttons,
+                    disable_notification=prepared.disable_notification,
                 )
             if not message_id:
                 raise LostTelegramResponse("Telegram returned no confirmed message ID")
@@ -1679,7 +1821,7 @@ class TelegramDeliveryService:
                     prepared.message_role
                     not in {PROJECT_STATUS_DASHBOARD_ROLE, WORK_PACKAGE_STATUS_ROLE}
                     and prepared.work_package_id is None
-                    and not (prepared.message_role or "").startswith(("ls:", "lq:"))
+                    and not (prepared.message_role or "").startswith(("ls:", "lq:", "lp:", "la:"))
                 ):
                     assert prepared.task_id is not None
                 session.add(
@@ -1816,6 +1958,23 @@ class TelegramDeliveryService:
                     project_id=prepared.project_id,
                     source_outbox_id=token.item_id,
                 )
+            message_id = confirmed_message_id
+            if (
+                message_id is not None
+                and prepared.action == DeliveryAction.SEND_STATUS
+                and not (prepared.message_role or "").startswith("la:")
+            ):
+                from vuzol.telegram.attention import refresh_attention_links
+
+                await session.flush()
+                source_link = await session.scalar(
+                    select(TelegramMessageLink).where(
+                        TelegramMessageLink.chat_id == prepared.chat_id,
+                        TelegramMessageLink.message_id == message_id,
+                    )
+                )
+                if source_link is not None:
+                    await refresh_attention_links(session, source_link)
             await complete_outbox_item(session, token)
 
     async def _mark_ambiguous(self, token: OutboxLeaseToken) -> None:

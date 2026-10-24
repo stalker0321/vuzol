@@ -155,7 +155,14 @@ class PythonTelegramClient:
             raise LostTelegramResponse("document send returned no confirmed message ID")
         return message.message_id
 
-    async def send_rich_message(self, *, chat_id: int, thread_id: int | None, html: str) -> int:
+    async def send_rich_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int | None,
+        html: str,
+        disable_notification: bool = False,
+    ) -> int:
         try:
             result = await self._bot.do_api_request(
                 "sendRichMessage",
@@ -163,6 +170,7 @@ class PythonTelegramClient:
                     "chat_id": chat_id,
                     "message_thread_id": thread_id,
                     "rich_message": {"html": html},
+                    "disable_notification": disable_notification,
                 },
             )
         except (BadRequest, EndPointNotFound):
@@ -203,10 +211,12 @@ class PythonTelegramClient:
         task_id: uuid.UUID | None = None,
         approval_id: uuid.UUID | None = None,
         callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
+        disable_notification: bool = False,
     ) -> int:
         message = await self._bot.send_message(
             chat_id=chat_id,
             message_thread_id=thread_id,
+            disable_notification=disable_notification,
             text=html,
             parse_mode=ParseMode.HTML,
             reply_markup=_control_markup(
@@ -738,7 +748,12 @@ def _control_markup(
         for action in actions
     ]
     rows.extend(
-        [InlineKeyboardButton(label, callback_data=data) for label, data in row]
+        [
+            InlineKeyboardButton(label, url=data)
+            if data.startswith("https://t.me/")
+            else InlineKeyboardButton(label, callback_data=data)
+            for label, data in row
+        ]
         for row in callback_buttons
     )
     return InlineKeyboardMarkup(rows)

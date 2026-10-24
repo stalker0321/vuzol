@@ -76,6 +76,7 @@ async def test_api_bridge_send_and_edit_have_rich_payload_without_text_or_token(
         "chat_id": -100,
         "message_thread_id": 10,
         "rich_message": {"html": "<h1>Ответ</h1>"},
+        "disable_notification": False,
     }
     assert calls[1].args == ("editMessageText",)
     assert calls[1].kwargs["api_kwargs"] == {

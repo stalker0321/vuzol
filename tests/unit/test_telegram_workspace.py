@@ -95,7 +95,7 @@ async def test_workspace_sync_persists_all_topics_and_renames_best_effort(
     # Enabled topics only: personal + approvals.
     assert client.set_topic_pinned.await_count == 2
     # Product layout forces the canonical approvals name.
-    assert client.rename_topic.await_args_list[1].kwargs["name"] == "Апрувы"
+    assert client.rename_topic.await_args_list[1].kwargs["name"] == "🔔 Внимание"
     enqueue_status.assert_not_awaited()
 
 

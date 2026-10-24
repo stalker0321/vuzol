@@ -259,6 +259,7 @@ class WorkPackageService:
             entity_type="plan_revision",
             payload={"package_id": str(package_id), "revision_number": previous.revision_number},
         )
+        await self._sync_attention(package)
         return result
 
     async def set_package_goal(
@@ -564,6 +565,7 @@ class WorkPackageService:
                 idempotency_key=f"lead:plan-approved:{revision.id}:{revision.content_hash}:{goal.scope_revision}",
                 kind="plan_approved",
             )
+            await self._sync_attention(package)
         return package.version
 
     async def bind_delegated_approval(
@@ -688,7 +690,19 @@ class WorkPackageService:
             new_state=WorkPackageStatus.DISCARDED.value,
             payload={"revision_id": str(revision.id), "discarded_by_user_id": user_id},
         )
+        await self._sync_attention(package)
         return package.version
+
+    async def _sync_attention(self, package: WorkPackage) -> None:
+        from vuzol.telegram.attention import sync_attention, sync_goal_attention
+
+        assert self._uow.session is not None
+        if package.managed_goal_id is not None:
+            goal = await self._uow.session.get(ManagedGoal, package.managed_goal_id)
+            if goal is not None:
+                # Replacing/accepting/discarding this plan settles its previous decisions.
+                await sync_attention(self._uow.session, goal, None, resolve_all=True)
+                await sync_goal_attention(self._uow.session, goal)
 
     async def finish_package(
         self,

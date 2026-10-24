@@ -131,6 +131,9 @@ async def queue_request(
     )
     session.add(item)
     await session.flush()
+    from vuzol.telegram.attention import sync_attention
+
+    await sync_attention(session, goal, None, scope="planner")
     return {"planner_request_id": str(item.id)}
 
 
@@ -470,4 +473,13 @@ async def publish_outcome(
     )
     if reason:
         await planner_failure_notice(session, goal, key, reason)
+    from vuzol.telegram.attention import sync_attention
+
+    await sync_attention(
+        session,
+        goal,
+        None if reason in {"planner_scope_changed", "planner_revision_changed"} else reason,
+        scope="planner",
+        target={"message_role": f"lp:{uuid.uuid5(goal.id, key).hex}"},
+    )
     await session.flush()

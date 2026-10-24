@@ -39,7 +39,7 @@ def test_project_help_is_concise_and_context_aware() -> None:
 def test_control_topics_only_show_relevant_action() -> None:
     assert "/update" in build_help_card(TopicKind.TASK_DASHBOARD)
     assert "предложит названия" in build_help_card(TopicKind.INBOX)
-    assert "выберите действие кнопкой" in build_help_card(TopicKind.APPROVALS)
+    assert "Нажми «Открыть»" in build_help_card(TopicKind.APPROVALS)
 
 
 def test_receipt_command_requires_a_positive_amount() -> None:

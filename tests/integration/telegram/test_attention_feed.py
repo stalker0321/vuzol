@@ -447,3 +447,40 @@ async def test_resolution_before_delivery_is_silent_and_concurrent_producers_ded
         assert client.sent_silent[feed[0]] is True
         assert "решено:" in client.sent[feed[0]][2]
         assert client.sent_keyboards[feed[0]] == ()
+
+
+async def test_pending_owner_plan_survives_pause_and_a_lead_wait_for(postgres_dsn, topics):
+    # Live pilot: after pause/resume the lead answered wait_for on the package. The
+    # attention item closed although the owner never approved the plan.
+    from tests.integration.leadership.planning_helpers import seed_plan
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await seed(factory)
+        plan = plan_items(1)
+        plan["items"][0]["suggested_risk"] = "high"
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
+        client = FakeTelegramClient()
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            goal.lifecycle, goal.waiting_reason = "paused", "owner_pause"
+            await sync_goal_attention(session, goal)
+        await drain(factory, client, topics)
+        assert len([m for m in client.sent if m[1] == 7]) == 1
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            goal.lifecycle, goal.waiting_reason, goal.wakeup_condition = "active", None, None
+            package_id = goal.current_package_id
+        result = await command(
+            factory,
+            goal_id,
+            "wait_for",
+            {"condition": {"kind": "package", "package_id": str(package_id)}},
+        )
+        assert result.status == "waiting"
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert (goal.lifecycle, goal.waiting_reason) == ("waiting", "plan_approval")
+            await sync_goal_attention(session, goal)
+        await drain(factory, client, topics)
+        assert not any("решено" in body for _, _, body in client.edited)
+        assert len([m for m in client.sent if m[1] == 7]) == 1

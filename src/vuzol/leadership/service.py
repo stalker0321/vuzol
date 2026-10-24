@@ -326,6 +326,10 @@ class LeadershipCommandService:
             LeadCommandName.REVISE_PLAN,
             LeadCommandName.WAIT_FOR,
         }:
+            if goal.lifecycle == "waiting" and name is LeadCommandName.WAIT_FOR:
+                # Already waiting: the lead agrees to wait. Denying it turned the
+                # wait into an owner question and lost the reason (pilot 2026-10-24).
+                return _Outcome(CommandStatus.WAITING, None, {"already_waiting": True}, goal)
             if goal.lifecycle == "waiting":
                 planning = name in {LeadCommandName.REQUEST_PLAN, LeadCommandName.REVISE_PLAN}
                 from vuzol.storage.models import TransactionalOutbox

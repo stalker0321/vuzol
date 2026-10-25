@@ -121,7 +121,8 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
         "task_retry_message_mismatch": (
             "Кнопка устарела. Напиши «продолжи» для актуальной карточки."
         ),
-        "goal_accepted": "✅ Принято. Результат влит в main.",
+        "goal_accepted": "✅ Уже принято.",
+        "goal_accept_queued": "⏳ Вливаю результат в main. Карточка обновится через пару секунд.",
         "goal_rework_requested": "✏️ Напиши следующим сообщением, что доработать.",
         "target_moved": (
             "main изменился с начала работы, влить автоматически нельзя. "  # noqa: RUF001

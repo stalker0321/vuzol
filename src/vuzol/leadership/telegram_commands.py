@@ -452,7 +452,7 @@ async def apply_goal_button(
             return IngressResult(status=IngressStatus.REJECTED, reason="control_binding_missing")
         goal_id = uuid.UUID(link.message_role[3:])
         if update.action_kind in {"lead_accept", "lead_rework"}:
-            from vuzol.leadership.acceptance import accept_goal, request_rework
+            from vuzol.leadership.acceptance import queue_accept, request_rework
             from vuzol.leadership.fence import lock_project_admission
             from vuzol.leadership.service import enqueue_goal_status
 
@@ -464,14 +464,15 @@ async def apply_goal_button(
                 return IngressResult(status=IngressStatus.DUPLICATE, reason="goal_accepted")
             if goal.version != update.goal_version:
                 return IngressResult(status=IngressStatus.REJECTED, reason="stale_goal_card")
-            outcome = (
-                await accept_goal(uow.session, goal, user_id=update.user_id)
-                if update.action_kind == "lead_accept"
-                else await request_rework(uow.session, goal, user_id=update.user_id)
-            )
-            if outcome in {"accepted", "rework_requested"}:
+            if update.action_kind == "lead_accept":
+                outcome = await queue_accept(uow.session, goal, user_id=update.user_id)
+                if outcome == "accept_queued":
+                    return IngressResult(status=IngressStatus.HANDLED, reason="goal_accept_queued")
+                return IngressResult(status=IngressStatus.REJECTED, reason=outcome)
+            outcome = await request_rework(uow.session, goal, user_id=update.user_id)
+            if outcome == "rework_requested":
                 await enqueue_goal_status(uow.session, goal)
-                return IngressResult(status=IngressStatus.HANDLED, reason=f"goal_{outcome}")
+                return IngressResult(status=IngressStatus.HANDLED, reason="goal_rework_requested")
             return IngressResult(status=IngressStatus.REJECTED, reason=outcome)
         result = await LeadershipCommandService(
             session_factory,

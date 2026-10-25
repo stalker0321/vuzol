@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """The owner's decision on a finished goal: accept it into the project, or ask for more.
 
 Live pilot 2026-10-25: items are accepted by the delegated lead, so the owner's one
@@ -19,6 +20,43 @@ from vuzol.leadership.persistence import LIVE_GOAL_LIFECYCLES, ManagedGoal, Mana
 from vuzol.storage.models import Event
 
 REWORK_QUESTION = "Что доработать в результате? Опиши одним сообщением."
+# Telegram ingress has no git: the lead worker performs the merge.
+OWNER_ACCEPT_OPERATION = "owner_goal_accept"
+_REFUSALS = {
+    "target_moved": (
+        "Не влил в main: main изменился с начала работы. "
+        "Нажми «Доработать», чтобы руководитель подтянул изменения."
+    ),
+    "goal_not_verified": "Не влил в main: результат на ветке больше не совпадает с проверенным.",
+    "merge_failed": "Не влил в main: репозиторий проекта занят или изменён вручную.",
+}
+
+
+def acceptance_refusal_text(outcome: str) -> str:
+    return _REFUSALS.get(outcome, "Не влил в main: действие уже недоступно.")
+
+
+async def queue_accept(session: AsyncSession, goal: ManagedGoal, *, user_id: int) -> str:
+    """Check what ingress can check and hand the merge to the lead worker."""
+    from vuzol.storage.models import TransactionalOutbox
+    from vuzol.storage.types import DeliveryStatus
+
+    if goal.owner_user_id != user_id:
+        return "goal_not_available"
+    if not await acceptance_ready(session, goal):
+        return "goal_not_verified"
+    session.add(
+        TransactionalOutbox(
+            destination="project_lead",
+            operation_type=OWNER_ACCEPT_OPERATION,
+            linked_entity_type="managed_goal",
+            linked_entity_id=goal.id,
+            idempotency_key=f"lead:owner-accept:{goal.id}:{goal.version}",
+            payload={"user_id": user_id, "version": goal.version},
+            status=DeliveryStatus.PENDING,
+        )
+    )
+    return "accept_queued"
 
 
 def owner_acceptance(goal: ManagedGoal) -> dict[str, Any] | None:

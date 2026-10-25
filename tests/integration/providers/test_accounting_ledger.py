@@ -65,9 +65,7 @@ async def _reserve_started(
         await start_step(session, token)
     async with factory() as session:
         reservation = await session.scalar(
-            select(ProviderBudgetReservation).where(
-                ProviderBudgetReservation.step_id == step_id
-            )
+            select(ProviderBudgetReservation).where(ProviderBudgetReservation.step_id == step_id)
         )
         assert reservation is not None
         step = await session.get(Step, step_id)
@@ -118,9 +116,7 @@ def test_reservation_and_reconcile_carry_purpose_and_pricing(
     asyncio.run(scenario())
 
 
-def test_unknown_usage_is_conservative_and_never_zero(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
+def test_unknown_usage_is_conservative_and_never_zero(postgres_dsn: str, tmp_path: Path) -> None:
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         settings, registries = bundle(tmp_path, profile("api"))
@@ -402,8 +398,7 @@ def test_intake_usage_and_breakdowns_use_same_rows(postgres_dsn: str, tmp_path: 
 
         async with factory() as session:
             breakdown = {
-                purpose: cost
-                for purpose, cost, _count in await usage_totals_by_purpose(session)
+                purpose: cost for purpose, cost, _count in await usage_totals_by_purpose(session)
             }
             assert breakdown["intake"] == Decimal("0.004")
             assert breakdown["review"] == Decimal("0.01")

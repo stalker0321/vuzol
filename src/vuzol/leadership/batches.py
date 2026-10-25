@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.discussion.domain import DomainError, PlanDraft, semantic_plan_hash
 from vuzol.discussion.sequencer import WorkPackageSequencer
@@ -90,7 +91,9 @@ async def propose_plan(
         goal.current_package_id = result.package_id
     revision = await uow.session.get(PlanRevision, result.revision_id)
     assert revision is not None
-    approval_required = not has_owner_mandate(goal) or owner_approval_required(revision)
+    approval_required = not has_owner_mandate(goal) or await revision_needs_owner(
+        uow.session, revision
+    )
     if approval_required and goal.lifecycle != "paused":
         goal.lifecycle = "waiting"
         goal.waiting_reason = "plan_approval"
@@ -103,7 +106,10 @@ async def propose_plan(
         "legacy_plan_revision_v1": {"status": "superseded"},
         **goal.constraints,
     }
-    await service._enqueue_plan_projection(result.package_id, result.status_generation, "proposal")
+    # A new revision changes the decision card; an edit far up the topic goes unseen.
+    await service._enqueue_plan_projection(
+        result.package_id, result.status_generation, "proposal", repost=True
+    )
     return {
         "package_id": str(result.package_id),
         "revision_id": str(result.revision_id),
@@ -115,8 +121,41 @@ async def propose_plan(
     }
 
 
-def owner_approval_required(revision: PlanRevision) -> bool:
+_RISK_RANK = {"low": 0, "medium": 1, "high": 2, "privileged": 3}
+# The lead may grow an owner-approved plan by this many items before asking again.
+DELEGATED_GROWTH = 2
+
+
+def owner_approval_required(revision: PlanRevision, baseline: PlanRevision | None = None) -> bool:
+    """Whether only the owner can approve this revision.
+
+    ``baseline`` is the owner's last approved revision of the same package. Items the
+    owner approved verbatim are already decided; a follow-up item at the risk the owner
+    accepted is within the mandate. Live pilot: every review-driven follow-up item asked
+    the owner again for a README edit.
+    """
     items = revision.immutable_body.get("items", [])
+    if baseline is not None:
+        approved = baseline.immutable_body.get("items", [])
+        if (
+            approved
+            and len(items) <= len(approved) + DELEGATED_GROWTH
+            and revision.immutable_body.get("environment_delta")
+            == baseline.immutable_body.get("environment_delta")
+        ):
+            seen = [_decision_content(item) for item in approved]
+            risk = max(_RISK_RANK.get(item.get("suggested_risk", "low"), 3) for item in approved)
+            large = any(item.get("estimated_complexity") == "large" for item in approved)
+            gated = any(item.get("needs_approval", False) for item in approved)
+            return any(
+                _decision_content(item) not in seen
+                and (
+                    _RISK_RANK.get(item.get("suggested_risk", "low"), 3) > risk
+                    or (item.get("estimated_complexity") == "large" and not large)
+                    or (item.get("needs_approval", False) and not gated)
+                )
+                for item in items
+            )
     return (
         len(items) != 1
         or any(
@@ -127,6 +166,43 @@ def owner_approval_required(revision: PlanRevision) -> bool:
         )
         or bool(revision.immutable_body.get("environment_delta"))
     )
+
+
+def _decision_content(item: dict[str, Any]) -> dict[str, Any]:
+    # Identity and position are bookkeeping; a new package gets new item ids.
+    return {key: value for key, value in item.items() if key not in {"ordinal", "item_id"}}
+
+
+async def owner_baseline(session: AsyncSession, revision: PlanRevision) -> PlanRevision | None:
+    """The owner's last approved revision for this goal under the same scope.
+
+    A finished package is replanned as a new package, so look across the goal.
+    """
+    goal_id = await session.scalar(
+        select(WorkPackage.managed_goal_id).where(WorkPackage.id == revision.work_package_id)
+    )
+    if goal_id is None:
+        return None
+    baseline = await session.scalar(
+        select(PlanRevision)
+        .join(WorkPackage, WorkPackage.id == PlanRevision.work_package_id)
+        .where(
+            WorkPackage.managed_goal_id == goal_id,
+            PlanRevision.id != revision.id,
+            PlanRevision.approved_by_user_id.is_not(None),
+        )
+        .order_by(PlanRevision.approved_at.desc())
+        .limit(1)
+    )
+    if baseline is None or baseline.immutable_body.get("scope_revision") != (
+        revision.immutable_body.get("scope_revision")
+    ):
+        return None
+    return baseline
+
+
+async def revision_needs_owner(session: AsyncSession, revision: PlanRevision) -> bool:
+    return owner_approval_required(revision, await owner_baseline(session, revision))
 
 
 async def execute_batch(
@@ -178,14 +254,16 @@ async def execute_batch(
     else:
         if package.status not in {WorkPackageStatus.DRAFT, WorkPackageStatus.APPROVED}:
             raise DomainError("package_still_live")
-        if package.status is WorkPackageStatus.DRAFT and owner_approval_required(revision):
+        if package.status is WorkPackageStatus.DRAFT and await revision_needs_owner(
+            uow.session, revision
+        ):
             goal.lifecycle = "waiting"
             goal.waiting_reason = "plan_approval"
             goal.wakeup_condition = {"kind": "plan_approval", "revision_id": str(revision.id)}
             goal.version += 1
             goal.fence_epoch += 1
             await WorkPackageService(uow)._enqueue_plan_projection(
-                package.id, package.version, "approval_required"
+                package.id, package.version, "approval_required", repost=True
             )
             return {
                 "status": CommandStatus.WAITING.value,

@@ -47,10 +47,8 @@ def test_default_worker_is_fenced_and_does_not_replace_other_choices(
                     state_directory=state,
                     sandbox_required=True,
                     enabled=not (
-                        (case == "unavailable"
-                        and provider == "pi")
-                        or (case == "fallback"
-                        and profile_id == "oc3")
+                        (case == "unavailable" and provider == "pi")
+                        or (case == "fallback" and profile_id == "oc3")
                     ),
                     supported_task_types=frozenset({"coding", "architecture"}),
                     capabilities=frozenset(

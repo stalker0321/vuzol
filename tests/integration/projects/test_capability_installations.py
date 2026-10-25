@@ -188,16 +188,12 @@ def test_post_install_probe_records_installation(postgres_dsn: str, tmp_path: Pa
         environment = SimpleNamespace(
             contract={"capabilities": {"node-runtime": {"provisioning": "automatic"}}}
         )
-        await handler._record_installations(
-            ("node-runtime",), cast(Any, environment), failed=False
-        )
+        await handler._record_installations(("node-runtime",), cast(Any, environment), failed=False)
         async with factory() as session:
             states = await installation_states(session)
             assert states["node-runtime"] == "installed"
         # A failed probe is recorded as failed, excluding the capability.
-        await handler._record_installations(
-            ("node-runtime",), cast(Any, environment), failed=True
-        )
+        await handler._record_installations(("node-runtime",), cast(Any, environment), failed=True)
         async with factory() as session:
             states = await installation_states(session)
             assert states["node-runtime"] == "failed"

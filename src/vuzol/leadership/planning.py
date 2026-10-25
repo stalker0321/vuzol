@@ -55,7 +55,7 @@ from vuzol.storage.models import (
 from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, DeliveryStatus, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
-PROMPT_REVISION = "project-planner.v3"
+PROMPT_REVISION = "project-planner.v4"
 PLAN_EVENTS = {"plan_requested", "plan_ready", "plan_failed", "planning_requested"}
 
 
@@ -330,6 +330,10 @@ async def _request(
         "(start_task, ordinal, scope_revision, package, revision). Keep summaries within 240 "
         "characters, scope and checks concise. Flag blockers and risks explicitly in summary "
         "(for example a stub function) and suggested_risk; do not hide them in technical fields. "
+        "Plan the whole goal in this revision, including its final check: the owner approves "
+        "it once, so do not leave known steps for later revisions. Edits confined to project "
+        "files, docs and tests are suggested_risk low without needs_approval; reserve them for "
+        "deploys, external effects, secrets, dependencies or deleting data. "
         "The owner's card shows one sentence per field, so start expected_outcome with what the "
         "owner gets, allowed_scope with which files change (e.g. 'Меняется только README.md.'), "
         "and the first trusted_check with how the result is verified; details follow after it. "

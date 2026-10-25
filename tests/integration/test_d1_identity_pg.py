@@ -72,7 +72,6 @@ async def _leased_step(
 ) -> tuple[TaskRecord, uuid.UUID, Step, LeaseToken]:
     """Seed task/run/step and fence a lease on the step; returns ids + token."""
 
-
     task_record, run_id, step_record = await seed_task_run_step(
         factory,  # type: ignore[arg-type]
         step_status=StepStatus.QUEUED,
@@ -192,15 +191,11 @@ async def test_d1_repeat_redo_rejects_and_keeps_candidate(postgres_dsn: str) -> 
             )
         async with UnitOfWork(factory) as uow:
             assert uow.session is not None
-            await decide_result(
-                uow.session, approval_id, decision="redo", deciding_user_id=7
-            )
+            await decide_result(uow.session, approval_id, decision="redo", deciding_user_id=7)
         async with UnitOfWork(factory) as uow:
             assert uow.session is not None
             attempts = (
-                await uow.session.scalars(
-                    select(WorkAttempt).where(WorkAttempt.step_id == step.id)
-                )
+                await uow.session.scalars(select(WorkAttempt).where(WorkAttempt.step_id == step.id))
             ).all()
             assert len(attempts) == 1
             attempt = attempts[0]
@@ -208,17 +203,18 @@ async def test_d1_repeat_redo_rejects_and_keeps_candidate(postgres_dsn: str) -> 
             assert attempt.attempt_kind == "retry"
             assert attempt.parent_attempt_id is None
             assert attempt.stable_item_id == task_record.id
-            assert attempt.prior_candidate_hash == hashlib.sha256(
-                json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            assert (
+                attempt.prior_candidate_hash
+                == hashlib.sha256(
+                    json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+            )
             assert attempt.prior_review_summary == "looks good"
             # candidate/review survive on the step
             kept = await uow.session.get(Step, step.id)
             assert kept is not None and kept.result == candidate
             with pytest.raises(ValueError, match="already decided"):
-                await decide_result(
-                    uow.session, approval_id, decision="redo", deciding_user_id=7
-                )
+                await decide_result(uow.session, approval_id, decision="redo", deciding_user_id=7)
             kept2 = await uow.session.get(Step, step.id)
             assert kept2 is not None and kept2.result == candidate
     finally:

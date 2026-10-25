@@ -395,3 +395,55 @@ async def test_next_item_of_an_approved_plan_does_not_ask_for_approval(postgres_
             assert context["start_spec"] is not None
             assert "needs_approval" not in context["next_item"]
             assert context["next_item"]["plan_approved"] is True
+
+
+def pilot_items(count):
+    plan = plan_items(count)
+    for entry in plan["items"]:
+        entry.update(suggested_risk="medium", needs_approval=True)
+    return plan
+
+
+async def test_follow_up_items_at_the_approved_risk_need_no_new_approval(postgres_dsn):
+    """Live pilot 2026-10-25: the owner approved a one-item README plan, then had to approve
+    again for each review-driven follow-up item (revisions 2 and 3), all of the same risk."""
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        plan = pilot_items(1)
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
+        await approve_plan(factory, goal_id)
+        assert (await start(factory, goal_id)).status == "applied"
+        async with UnitOfWork(factory) as uow:
+            task = await uow.session.scalar(select(Task))
+            task.status = TaskStatus.COMPLETED
+            await WorkPackageSequencer(uow).observe_terminal(task_id=task.id)
+
+        grown = pilot_items(2)
+        grown["items"][0] = plan["items"][0]
+        proposed = await seed_plan(factory, goal_id, {"plan": grown})
+        assert proposed.status == "applied", proposed
+        assert proposed.result["owner_approval_required"] is False
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.waiting_reason != "plan_approval"
+            outbox = await session.scalars(
+                select(TransactionalOutbox.operation_type).where(
+                    TransactionalOutbox.destination == "work_package_projection",
+                    TransactionalOutbox.idempotency_key.like("wp:projection:proposal:%"),
+                )
+            )
+            assert "repost_plan" in outbox.all()
+        riskier = deepcopy(grown)
+        riskier["items"].append(
+            item("item-3", suggested_risk="high", dependencies=["item-2"], needs_approval=True)
+        )
+        proposed = await seed_plan(factory, goal_id, {"plan": riskier})
+        assert proposed.result.get("owner_approval_required") is True, proposed
+        async with factory() as session:
+            assert (await session.get(ManagedGoal, goal_id)).waiting_reason == "plan_approval"
+        back = deepcopy(grown)
+        back["items"][1]["goal"] = "Finish the import"
+        proposed = await seed_plan(factory, goal_id, {"plan": back})
+        assert proposed.result["owner_approval_required"] is False
+        result = await start(factory, goal_id)
+        assert result.status == "applied", result

@@ -675,7 +675,8 @@ class WorkPackageSequencer:
         return revision
 
     async def _projection(self, package_id: uuid.UUID, generation: int, reason: str) -> None:
-        if reason == "completed":
+        if reason in {"completed", "terminal_pause"}:
+            # Both need the owner: the card with its buttons moves where they look.
             await self._uow.outbox.enqueue(
                 destination="work_package_projection",
                 operation_type="repost_plan",

@@ -168,9 +168,7 @@ def test_memory_writer_cli_wiring() -> None:
     assert callable(memory_writer.run)
     parameters = inspect.signature(MemoryWriterService.__init__).parameters
     assert parameters["lease_seconds"].default == 60
-    pyproject = (Path(__file__).resolve().parents[3] / "pyproject.toml").read_text(
-        encoding="utf-8"
-    )
+    pyproject = (Path(__file__).resolve().parents[3] / "pyproject.toml").read_text(encoding="utf-8")
     assert 'vuzol-memory-writer = "vuzol.cli.memory_writer:main"' in pyproject
 
 

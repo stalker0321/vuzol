@@ -861,20 +861,12 @@ async def _prepare_work_package_projection(
             return PreparedDelivery(DeliveryAction.NOOP, chat_id=0, thread_id=None)
     if item.operation_type == "repost_plan":
         # A finished package must be visible where the user is looking, not in
-        # an edited card far up the topic history. Send a fresh plan card and
-        # retire stale plan links so later renders converge on this message.
+        # an edited card far up the topic history. Send a fresh plan card; its
+        # confirmed send retires the older ones (see _complete).
         try:
             card = await build_work_package_plan_card(session, package_id)
         except WorkPackageProjectionError as error:
             raise PermanentDeliveryError(str(error)) from error
-        stale_links = await session.scalars(
-            select(TelegramMessageLink).where(
-                TelegramMessageLink.work_package_id == package_id,
-                TelegramMessageLink.message_role == WORK_PACKAGE_PLAN_ROLE,
-            )
-        )
-        for stale_link in stale_links:
-            await session.delete(stale_link)
         return PreparedDelivery(
             DeliveryAction.SEND_STATUS,
             chat_id=card.chat_id,
@@ -1002,6 +994,34 @@ async def _prepare_work_package_projection(
         control_status_generation=card.status_generation,
         pin_after_send=role == WORK_PACKAGE_STATUS_ROLE and link is None,
     )
+
+
+async def _retire_plan_cards(session: AsyncSession, package_id: uuid.UUID) -> None:
+    """One current plan card per package: older cards go away with their buttons."""
+    stale_links = await session.scalars(
+        select(TelegramMessageLink).where(
+            TelegramMessageLink.work_package_id == package_id,
+            TelegramMessageLink.message_role == WORK_PACKAGE_PLAN_ROLE,
+        )
+    )
+    for stale_link in stale_links:
+        session.add(
+            TransactionalOutbox(
+                destination="telegram",
+                operation_type="delete_message",
+                linked_entity_type="work_package",
+                linked_entity_id=package_id,
+                idempotency_key=f"wp:retire:{stale_link.chat_id}:{stale_link.message_id}",
+                payload={
+                    "role": "user_command_delete",
+                    "chat_id": stale_link.chat_id,
+                    "message_thread_id": stale_link.message_thread_id,
+                    "message_id": stale_link.message_id,
+                },
+                status=DeliveryStatus.PENDING,
+            )
+        )
+        await session.delete(stale_link)
 
 
 async def _prepare_project_topic_status(
@@ -1903,6 +1923,8 @@ class TelegramDeliveryService:
                     and not (prepared.message_role or "").startswith(("ls:", "lq:", "lp:", "la:"))
                 ):
                     assert prepared.task_id is not None
+                if message_role == WORK_PACKAGE_PLAN_ROLE and prepared.work_package_id is not None:
+                    await _retire_plan_cards(session, prepared.work_package_id)
                 session.add(
                     TelegramMessageLink(
                         chat_id=prepared.chat_id,

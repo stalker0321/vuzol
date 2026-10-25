@@ -114,7 +114,10 @@ async def invoke(
                     if prior.state in {"received", "not_sent"} and prior.result is not None:
                         replay = ProviderResult.model_validate(prior.result)
                         if replay.status is not ProviderResultStatus.SUCCEEDED:
-                            raise LeadModelUnavailable(_failure_reason(replay.failure, purpose))
+                            raise LeadModelUnavailable(
+                                _failure_reason(replay.failure, purpose),
+                                retryable=replay.failure is None or replay.failure.retryable,
+                            )
                         return replay
                     if prior.state == "not_sent":
                         raise LeadModelUnavailable("lead_model_unavailable")
@@ -193,7 +196,9 @@ async def invoke(
                 "failure": error.details().model_dump(mode="json"),
             },
         )
-        raise LeadModelUnavailable(_failure_reason(error.details(), purpose)) from error
+        raise LeadModelUnavailable(
+            _failure_reason(error.details(), purpose), retryable=error.retryable
+        ) from error
     except Exception as error:
         _logger.warning(
             "Project model invocation ended without a receipt",

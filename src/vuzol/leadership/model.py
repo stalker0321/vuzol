@@ -11,6 +11,11 @@ from typing import Any, Protocol
 class LeadModelUnavailable(RuntimeError):
     """The lead has no model. Callers must not invent a plan."""
 
+    def __init__(self, reason: str, *, retryable: bool = True) -> None:
+        super().__init__(reason)
+        # False when the provider said a resend cannot help (auth, a bad request).
+        self.retryable = retryable
+
 
 @dataclass(frozen=True, slots=True)
 class LeadSnapshot:

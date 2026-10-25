@@ -179,7 +179,7 @@ class TelegramControlService:
 
                 async with UnitOfWork(self._session_factory) as uow:
                     return await accept_think_handoff(uow, self._runtime, update)
-            if update.action_kind in {"lead_resume", "lead_cancel"}:
+            if update.action_kind in {"lead_resume", "lead_cancel", "lead_accept", "lead_rework"}:
                 from vuzol.leadership.telegram_commands import apply_goal_button
 
                 if update.message_id is None or update.message_thread_id is None:

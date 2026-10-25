@@ -561,8 +561,19 @@ class LeadershipCommandService:
             )
             return _Outcome(CommandStatus.APPLIED, None, {"amendment": amendment}, goal)
         if name is LeadCommandName.PROPOSE_COMPLETION:
+            from vuzol.leadership.evidence import _current_head
+
+            rework_from = goal.constraints.get("rework_from_head")
+            if rework_from is not None and await _current_head(uow.session, goal) == rework_from:
+                # The owner asked for more on this exact result (final goal card).
+                return _Outcome(CommandStatus.DENIED, "rework_pending", {}, goal)
             assessment = await assess_completion(uow.session, goal, check_live_head=True)
             if assessment.satisfied:
+                goal.constraints = {
+                    key: value
+                    for key, value in goal.constraints.items()
+                    if key != "rework_from_head"
+                }
                 previous = goal.lifecycle
                 goal.lifecycle = "completed"
                 goal.waiting_reason = None
@@ -905,13 +916,21 @@ async def enqueue_goal_status(session: AsyncSession, goal: ManagedGoal) -> None:
         callback_buttons=goal_status_buttons(goal),
     )
     if goal.lifecycle in {"completed", "cancelled"}:
+        from vuzol.leadership.acceptance import acceptance_ready
+        from vuzol.leadership.telegram_commands import final_card_buttons
+
+        # The finished card is the owner's one decision on the goal: it arrives at the
+        # bottom of the topic and is edited in place once accepted.
         await enqueue_chat_notice(
             session,
             chat_id=goal.source_chat_id,
             thread_id=goal.source_thread_id,
-            key=f"lead:finished:{goal.id}",
+            key=f"lead:finished:{goal.id}:{goal.version}",
             text=text,
             markdown=True,
+            projection_role=f"lf:{goal.id.hex}",
+            revision=goal.version,
+            callback_buttons=final_card_buttons(goal, ready=await acceptance_ready(session, goal)),
         )
 
 
@@ -1125,6 +1144,7 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
         if question
         else None,
         "owner_answer": owner_answer_text(goal.constraints),
+        "owner_acceptance": goal.constraints.get("owner_acceptance"),
         "work_limits": goal.constraints.get("work_limits", {}),
         "covered": list(assessment.covered),
         "missing": list(assessment.missing),

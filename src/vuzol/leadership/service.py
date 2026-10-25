@@ -1108,8 +1108,19 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
 
     progress = []
     if package is not None:
+        from vuzol.storage.models import PlanRevision
+
+        revision = (
+            await session.get(PlanRevision, package.head_revision_id)
+            if package.head_revision_id
+            else None
+        )
+        goals = {
+            item.get("ordinal"): item.get("goal")
+            for item in ([] if revision is None else revision.immutable_body.get("items", []))
+        }
         rows = await session.execute(
-            select(PlanRevisionItem.summary, Task.status)
+            select(PlanRevisionItem.summary, Task.status, PlanRevisionItem.ordinal)
             .outerjoin(
                 MaterializationLink,
                 (
@@ -1122,8 +1133,12 @@ async def _goal_projection(session: AsyncSession, goal: ManagedGoal) -> dict[str
             .order_by(PlanRevisionItem.ordinal)
         )
         progress = [
-            {"summary": summary, "status": status.value if status else "planned"}
-            for summary, status in rows
+            {
+                "summary": summary,
+                "goal": goals.get(ordinal) or summary,
+                "status": status.value if status else "planned",
+            }
+            for summary, status, ordinal in rows
         ]
     return {
         "request": current_request(goal),

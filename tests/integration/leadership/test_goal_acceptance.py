@@ -155,7 +155,22 @@ async def test_the_final_card_carries_the_decision_buttons(postgres_dsn, tmp_pat
             project_id=flow.PROJECT,
             update=update,
         )
-        assert result.status is IngressStatus.HANDLED and result.reason == "goal_accepted"
+        assert result.status is IngressStatus.HANDLED and result.reason == "goal_accept_queued"
+        # Ingress has no git: the lead worker performs the merge.
+        assert await flow._worker(factory, object()).process_one()
+        async with factory() as session:
+            goal = await session.scalar(select(ManagedGoal))
+            assert _main(tmp_path) == goal.constraints["owner_acceptance"]["commit"]
+            accepted_card = await session.scalar(
+                select(TransactionalOutbox)
+                .where(
+                    TransactionalOutbox.payload["projection_role"].astext == f"lf:{goal.id.hex}"
+                )
+                .order_by(TransactionalOutbox.created_at.desc())
+                .limit(1)
+            )
+            assert "ПРИНЯТО" in accepted_card.payload["html"]
+            assert not accepted_card.payload.get("callback_buttons")
         again = await apply_goal_button(
             session_factory=factory,
             settings=runtime.settings,

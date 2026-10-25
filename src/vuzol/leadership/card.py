@@ -154,7 +154,27 @@ def render_goal_card(view: Mapping[str, object]) -> str:
             else "Готовлю план работы."
         )
         action = "Сейчас от тебя ничего не требуется."
-    return "\n\n".join((heading, _preview(view.get("request")) or "Текущая цель", now, action))
+    # The planner's title names the goal; the owner's raw message is a stream of thought
+    # (live pilot 2026-10-25). Before a plan exists the request is all there is.
+    title = view.get("package_title")
+    subject = (
+        f"**{_preview(title)}**"
+        if isinstance(title, str) and title.strip()
+        else _preview(view.get("request")) or "Текущая цель"
+    )
+    parts = [heading, subject, now]
+    progress = view.get("progress")
+    if lifecycle == "completed" and isinstance(progress, list):
+        done = [item for item in progress if item.get("status") == "completed"][:6]
+        if done:
+            parts.append(
+                "Сделано:\n"
+                + "\n".join(
+                    "• " + _preview(item.get("goal") or item["summary"], 160) for item in done
+                )
+            )
+    parts.append(action)
+    return "\n\n".join(parts)
 
 
 def render_question(

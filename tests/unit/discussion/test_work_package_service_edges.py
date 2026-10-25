@@ -126,6 +126,7 @@ async def test_retry_and_skip_reject_incomplete_failure_contexts() -> None:
         last_failure_task_id=uuid.uuid4(),
     )
     service._queue_control_package = AsyncMock(return_value=(package, revision))  # type: ignore[method-assign]
+    service._lock_managed_goal = AsyncMock(return_value=None)  # type: ignore[method-assign]
     arguments = {**_args(package_id), "user_id": 42}
 
     with pytest.raises(DomainError, match="failure_context_missing"):

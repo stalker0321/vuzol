@@ -57,6 +57,17 @@ from vuzol.storage.unit_of_work import UnitOfWork
 
 # A refusal meaning "too early": the package answers it, not the owner.
 _NOT_YET_REASONS = frozenset({"result_not_ready", "project_task_running"})
+# One malformed answer or dropped call from a cheap model is noise. The goal
+# reviewer is the same kind of call (live pilot 2026-10-25: one bad verdict
+# stopped a finished goal).
+_RETRIED_ONCE = frozenset(
+    {
+        "lead_response_invalid",
+        "lead_model_unavailable",
+        "goal_review_invalid",
+        "goal_review_unavailable",
+    }
+)
 _TERMINAL_GOAL = frozenset({"cancelled", "completed"})
 _MODEL_BLOCKERS = frozenset(
     {
@@ -880,7 +891,7 @@ class ProjectLeadWorker:
                 return
             item = await uow.session.get(TransactionalOutbox, wakeup_id)
             if (
-                reason in {"lead_response_invalid", "lead_model_unavailable"}
+                reason in _RETRIED_ONCE
                 and item is not None
                 and "retry_of" not in item.payload
                 and retryable

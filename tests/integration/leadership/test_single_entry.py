@@ -450,7 +450,9 @@ async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runt
         assert event is None
 
 
-@pytest.mark.parametrize("reason", ["lead_response_invalid", "lead_model_unavailable"])
+@pytest.mark.parametrize(
+    "reason", ["lead_response_invalid", "lead_model_unavailable", "goal_review_invalid"]
+)
 @pytest.mark.parametrize("second", ["answers", "malformed_again"])
 async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, second, reason):
     """Live pilot 2026-10-24: one malformed JSON answer, and later one dropped provider call,

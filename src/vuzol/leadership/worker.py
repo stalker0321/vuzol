@@ -145,7 +145,14 @@ class ProjectLeadWorker:
                 reason = str(error)
                 if reason not in _MODEL_BLOCKERS:
                     reason = "lead_model_unavailable"
-                await self._park_unconfigured(goal_id, wakeup_id, token, reason=reason, claim=claim)
+                await self._park_unconfigured(
+                    goal_id,
+                    wakeup_id,
+                    token,
+                    reason=reason,
+                    claim=claim,
+                    retryable=error.retryable,
+                )
                 return
             saved = await self._save_decision(goal_id, wakeup_id, decision, claim=claim)
             if not saved:
@@ -842,6 +849,7 @@ class ProjectLeadWorker:
         *,
         reason: str,
         claim: TurnClaim,
+        retryable: bool = False,
     ) -> None:
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
@@ -870,14 +878,15 @@ class ProjectLeadWorker:
                 return
             item = await uow.session.get(TransactionalOutbox, wakeup_id)
             if (
-                reason == "lead_response_invalid"
+                reason in {"lead_response_invalid", "lead_model_unavailable"}
                 and item is not None
                 and "retry_of" not in item.payload
+                and retryable
                 and goal.lifecycle not in {"cancelled", "completed", "paused"}
             ):
-                # One malformed answer from a cheap model is noise, not a blocker
-                # (live pilot 2026-10-24). A turn makes one call, so the same event
-                # gets one fresh turn; a second malformed answer parks the goal.
+                # One malformed answer or dropped call from a cheap model is noise,
+                # not a blocker (live pilot 2026-10-24). A turn makes one call, so the
+                # same event gets one fresh turn; a second failure parks the goal.
                 uow.session.add(
                     TransactionalOutbox(
                         destination="project_lead",

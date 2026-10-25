@@ -450,9 +450,11 @@ async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runt
         assert event is None
 
 
+@pytest.mark.parametrize("reason", ["lead_response_invalid", "lead_model_unavailable"])
 @pytest.mark.parametrize("second", ["answers", "malformed_again"])
-async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, second):
-    """Live pilot 2026-10-24: one malformed JSON answer parked the goal with a red error."""
+async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, second, reason):
+    """Live pilot 2026-10-24: one malformed JSON answer, and later one dropped provider call,
+    parked the goal with a red error."""
     from vuzol.leadership.model import LeadModelUnavailable
     from vuzol.storage.models import Event
 
@@ -470,7 +472,7 @@ async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, 
             async def decide(self, snapshot):
                 self.seen.append(snapshot)
                 if len(self.seen) == 1 or second == "malformed_again":
-                    raise LeadModelUnavailable("lead_response_invalid")
+                    raise LeadModelUnavailable(reason)
                 return LeadDecision(reply="Запускаю.", profile_id="fixture")
 
         model = Flaky()
@@ -492,4 +494,4 @@ async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, 
             if second == "answers":
                 assert goal.waiting_reason is None and parked is None
             else:
-                assert goal.waiting_reason == "lead_response_invalid" and parked is not None
+                assert goal.waiting_reason == reason and parked is not None

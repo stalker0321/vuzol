@@ -39,6 +39,7 @@
   ],
   "edges": [["intake","conversation"],["intake","goal"],["intake","legacy"],["mcp","goal"],["project","intake"],["goal","execution"],["execution","review"],["review","goal"],["goal","controls"],["execution","runtime"],["execution","capability"],["accounts","execution"],["conversation","memory"],["goal","delivery"],["research","delivery"],["operations","runtime"]],
   "outbox_contracts": {
+    "goal_acceptance": {"guards":"Owner of the goal; completed goal with goal review for the live head; project admission lock", "retry":"Lease expiry re-claims; accept is idempotent (already accepted / ref already there)", "dead_letter":"Not used: a refusal is reported to the owner and the item completes", "next":"Fast-forward of the project default branch, goal card refresh or a refusal notice"},
     "discussion_classify": {"guards":"Interpreter; chat/project-discussion feature gates", "retry":"Provider/storage transient → bounded exponential; ordered discussion → defer", "dead_letter":"Permanent errors или max_attempts", "next":"Conversation reply, managed goal или legacy interpretation"},
     "interpretation": {"guards":"Interpreter, project policy и frozen request", "retry":"Provider/storage transient → settings.max_attempts с exponential backoff", "dead_letter":"Permanent interpretation error или исчерпанные попытки", "next":"workflow_dispatch или telegram; inbox receipt сохраняется"},
     "telegram_file": {"guards":"Interpreter attachment limits и document/voice parsing policy", "retry":"Общий interpretation retry budget", "dead_letter":"Неподдерживаемый/повреждённый вход и exhausted retries", "next":"interpretation и telegram"},
@@ -183,6 +184,7 @@
     "outbox:discussion_classify": "intake",
     "outbox:interpretation": "intake",
     "outbox:memory_extract": "memory",
+    "outbox:goal_acceptance": "goal",
     "outbox:project_lead": "goal",
     "outbox:project_provisioning": "project",
     "outbox:subscription_limits": "accounts",

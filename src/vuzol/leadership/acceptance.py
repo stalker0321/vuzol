@@ -13,15 +13,16 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.leadership.evidence import GOAL_HEAD_CHECKER, _current_head, assess_completion
 from vuzol.leadership.persistence import LIVE_GOAL_LIFECYCLES, ManagedGoal, ManagedGoalEvidence
 from vuzol.storage.models import Event
 
 REWORK_QUESTION = "Что доработать в результате? Опиши одним сообщением."
-# Telegram ingress has no git: the lead worker performs the merge.
-OWNER_ACCEPT_OPERATION = "owner_goal_accept"
+# Telegram ingress and the worker container have no git and no write access to project
+# repositories; the host applier owns them and performs the merge.
+GOAL_ACCEPTANCE_DESTINATION = "goal_acceptance"
 _REFUSALS = {
     "target_moved": (
         "Не влил в main: main изменился с начала работы. "
@@ -47,8 +48,8 @@ async def queue_accept(session: AsyncSession, goal: ManagedGoal, *, user_id: int
         return "goal_not_verified"
     session.add(
         TransactionalOutbox(
-            destination="project_lead",
-            operation_type=OWNER_ACCEPT_OPERATION,
+            destination=GOAL_ACCEPTANCE_DESTINATION,
+            operation_type="accept_goal",
             linked_entity_type="managed_goal",
             linked_entity_id=goal.id,
             idempotency_key=f"lead:owner-accept:{goal.id}:{goal.version}",
@@ -174,3 +175,51 @@ async def request_rework(session: AsyncSession, goal: ManagedGoal, *, user_id: i
     )
     await _enqueue_owner_question(session, goal, REWORK_QUESTION, asked_version)
     return "rework_requested"
+
+
+class GoalAcceptanceConsumer:
+    """Applier-side consumer: fast-forward main for one queued owner acceptance."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], *, owner: str) -> None:
+        self._factory = factory
+        self._owner = owner
+
+    async def process_one(self) -> bool:
+        from vuzol.leadership.fence import lock_project_admission
+        from vuzol.leadership.service import enqueue_goal_status
+        from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item
+        from vuzol.storage.models import TransactionalOutbox
+        from vuzol.telegram.projections import enqueue_chat_notice
+
+        async with self._factory.begin() as session:
+            token = await claim_outbox_item(
+                session,
+                owner=self._owner,
+                lease_seconds=60,
+                allowed_destinations=frozenset({GOAL_ACCEPTANCE_DESTINATION}),
+            )
+        if token is None:
+            return False
+        async with self._factory.begin() as session:
+            item = await session.get(TransactionalOutbox, token.item_id)
+            assert item is not None
+            goal = await session.get(ManagedGoal, item.linked_entity_id)
+            if goal is not None:
+                await lock_project_admission(session, goal.project_id)
+                goal = await session.get(ManagedGoal, goal.id, with_for_update=True)
+            if goal is not None:
+                outcome = await accept_goal(
+                    session, goal, user_id=int(item.payload.get("user_id", 0))
+                )
+                if outcome == "accepted":
+                    await enqueue_goal_status(session, goal)
+                else:
+                    await enqueue_chat_notice(
+                        session,
+                        chat_id=goal.source_chat_id,
+                        thread_id=goal.source_thread_id,
+                        key=f"lead:accept-refused:{token.item_id}",
+                        text=acceptance_refusal_text(outcome),
+                    )
+            await complete_outbox_item(session, token)
+        return True

@@ -156,8 +156,14 @@ async def test_the_final_card_carries_the_decision_buttons(postgres_dsn, tmp_pat
             update=update,
         )
         assert result.status is IngressStatus.HANDLED and result.reason == "goal_accept_queued"
-        # Ingress has no git: the lead worker performs the merge.
-        assert await flow._worker(factory, object()).process_one()
+        # Ingress has no git: the host applier performs the merge.
+        from vuzol.cli.applier import ApplierChain
+        from vuzol.leadership.acceptance import GoalAcceptanceConsumer
+
+        consumer = GoalAcceptanceConsumer(factory, owner="test-applier")
+        assert await consumer.process_one()
+        assert not await consumer.process_one()
+        assert ApplierChain is not None
         async with factory() as session:
             goal = await session.scalar(select(ManagedGoal))
             assert _main(tmp_path) == goal.constraints["owner_acceptance"]["commit"]

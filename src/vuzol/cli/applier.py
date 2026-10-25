@@ -13,6 +13,7 @@ from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.effect_reconciliation import EffectReconciler
 from vuzol.execution.git import LocalGit, require_writable_directory
 from vuzol.execution.result_apply import ResultApplyHandler
+from vuzol.leadership.acceptance import GoalAcceptanceConsumer
 from vuzol.observability import configure_logging, get_logger
 from vuzol.projects.capability_provisioning import (
     CapabilityProvisioningHandler,
@@ -29,12 +30,22 @@ from vuzol.workflows.worker import WorkflowWorker
 
 
 class ApplierChain:
-    def __init__(self, controls: WorkflowControlConsumer, worker: WorkflowWorker) -> None:
+    def __init__(
+        self,
+        controls: WorkflowControlConsumer,
+        worker: WorkflowWorker,
+        acceptance: GoalAcceptanceConsumer | None = None,
+    ) -> None:
         self._controls = controls
         self._worker = worker
+        self._acceptance = acceptance
 
     async def process_one(self) -> bool:
-        return await self._controls.process_one() or await self._worker.process_one()
+        return (
+            await self._controls.process_one()
+            or await self._worker.process_one()
+            or (self._acceptance is not None and await self._acceptance.process_one())
+        )
 
 
 def main() -> None:
@@ -121,6 +132,9 @@ async def run() -> None:
             capabilities=frozenset({Capability.GIT, Capability.HOST_ADMIN}),
             queue_classes=frozenset({QueueClass.PRIVILEGED}),
         )
+        # The owner's accepted goal fast-forwards main here: this service owns the
+        # project repositories (live pilot 2026-10-25: ingress/worker have no git).
+        acceptance = GoalAcceptanceConsumer(factory, owner=f"{owner}:goal-acceptance")
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for signum in (signal.SIGTERM, signal.SIGINT):
@@ -128,7 +142,7 @@ async def run() -> None:
                 loop.add_signal_handler(signum, stop.set)
         get_logger(__name__).info("applier ready", extra={"event": "applier.ready"})
         while not stop.is_set():
-            if not await ApplierChain(controls, worker).process_one():
+            if not await ApplierChain(controls, worker, acceptance).process_one():
                 with suppress(TimeoutError):
                     await asyncio.wait_for(
                         stop.wait(), timeout=settings.workflow.poll_interval_seconds

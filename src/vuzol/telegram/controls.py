@@ -33,7 +33,7 @@ from vuzol.storage.models import (
     TelegramMessageLink,
     WorkPackage,
 )
-from vuzol.storage.types import EditSessionStatus, RunStatus, StepStatus
+from vuzol.storage.types import EditSessionStatus, RunStatus, StepStatus, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.domain import (
     ControlUpdate,
@@ -576,7 +576,32 @@ class TelegramControlService:
             return await self._apply_non_mutating_package_callback(update, callback)
         except (TelegramPolicyError, WorkPackageCallbackError, DomainError, LookupError) as error:
             reason = error.code if isinstance(error, DomainError) else str(error)
+            if isinstance(error, DomainError) and await self._repost_stale_card(update):
+                reason = "stale_card_reposted"
             return IngressResult(status=IngressStatus.REJECTED, reason=reason)
+
+    async def _repost_stale_card(self, update: WorkPackageControlUpdate) -> bool:
+        """A press on an outdated card brings the current one to the bottom of the topic."""
+        try:
+            package_id = parse_work_package_callback(update.callback_data).package_id
+        except WorkPackageCallbackError:
+            return False
+        async with UnitOfWork(self._session_factory) as uow:
+            try:
+                package = await uow.work_packages.get_package(package_id)
+            except LookupError:
+                return False
+            if package.status is WorkPackageStatus.DISCARDED:
+                return False
+            await uow.outbox.enqueue(
+                destination="work_package_projection",
+                operation_type="repost_plan",
+                entity_type="work_package",
+                entity_id=package_id,
+                idempotency_key=f"wp:repost:stale:{update.callback_query_id}",
+                payload={"package_id": str(package_id)},
+            )
+        return True
 
     async def _apply_non_mutating_package_callback(
         self, update: WorkPackageControlUpdate, callback: WorkPackageCallback

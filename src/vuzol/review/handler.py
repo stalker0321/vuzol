@@ -155,6 +155,16 @@ class ResultReviewHandler:
             elif review_error and "explicit money cap" in message:
                 category = "money_cap_reached"
                 summary = EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY
+            elif review_error and "invalid structured output" in message:
+                # Live pilot 2026-10-25: one malformed reviewer answer blocked the item.
+                # Review is read-only: retry it within the step's attempts.
+                return StepOutcome(
+                    kind=OutcomeKind.TRANSIENT_FAILURE,
+                    result={},
+                    category="reviewer_output_invalid",
+                    summary=message[:500],
+                    unknown_effects=False,
+                )
             else:
                 category = "independent_review_required" if review_error else "review_failed"
                 summary = message[:500]

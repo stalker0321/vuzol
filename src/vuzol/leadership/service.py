@@ -951,13 +951,15 @@ _STEP_NAMES = {
     "finalize": "завершения",
 }
 _FAILURES = {
-    "shutdown_cancelled": "сервер перезапускался во время {step}",
+    "shutdown_cancelled": "сервис обновлялся во время {step}",
     "lease_expired_attempts_exhausted": "несколько попыток {step} не успели завершиться",
     "provider_unavailable": "модель была недоступна во время {step}",
     "provider_request_invalid": "модель отклонила запрос во время {step}",
     "budget_exhausted": "закончился бюджет пункта во время {step}",
     "no_compatible_profile": "нет подходящей модели для {step}",
     "approved_result_not_applied": "одобренный результат не удалось применить",
+    "reviewer_output_invalid": "модель-ревьюер несколько раз ответила в неверном формате",
+    "independent_review_required": "независимое ревью не дало заключения",
 }
 
 

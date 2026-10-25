@@ -544,3 +544,8 @@ async def test_shown_lead_task_card_follows_the_task_after_the_decision(postgres
         await drain(factory, client)
         assert len(client.edited) > edits
         assert client.edited[-1][1] == link.message_id
+        # The owner sees the step of the goal, not ids, accounts, tokens or delivery states.
+        html = client.edited[-1][2]
+        assert "Шаг 1 из 1" in html
+        for noise in ("Задача №", "Проект:", "Исполнитель", "Токены", "Доставка", "Работа моделей"):
+            assert noise not in html

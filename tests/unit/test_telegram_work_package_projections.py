@@ -10,8 +10,8 @@ from vuzol.storage.models import WorkPackage
 from vuzol.storage.types import StepStatus, WorkPackagePauseReason
 from vuzol.telegram.work_package_projections import (
     _environment_delta_lines,
-    _package_retry_available,
     _route_provider_label,
+    package_retry_available,
 )
 
 
@@ -102,7 +102,7 @@ async def test_package_retry_is_off_without_a_blocked_item() -> None:
         ),
     )
 
-    assert not await _package_retry_available(session, package)
+    assert not await package_retry_available(session, package)
     cast(AsyncMock, session.scalar).assert_not_awaited()
 
 
@@ -127,7 +127,7 @@ async def test_package_retry_uses_shared_safe_retry_policy() -> None:
         ),
     )
 
-    assert await _package_retry_available(session, package)
+    assert await package_retry_available(session, package)
     cast(AsyncMock, session.scalar).assert_awaited_once()
 
 
@@ -181,4 +181,4 @@ async def test_package_retry_covers_pause_and_step_safety_edges(
         ),
     )
 
-    assert await _package_retry_available(session, package) is expected
+    assert await package_retry_available(session, package) is expected

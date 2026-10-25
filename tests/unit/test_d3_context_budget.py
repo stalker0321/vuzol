@@ -119,8 +119,10 @@ def test_d3_assembly_without_retrieval_is_refused() -> None:
     from vuzol.research.source_backed import SourceBackedError, assemble_source_report
 
     _fixtures = FixtureRetrieval(fixtures={})
+
     def fetcher(uri: str, *, now: str) -> RetrievedSource:
         return _fixtures.fetch(uri, now=now)
+
     try:
         assemble_source_report(
             structured_output={
@@ -158,8 +160,10 @@ def test_d3_assembly_roundtrip_hash_chain() -> None:
 
     raw = b"adapter backed by fixtures"
     _fixtures = FixtureRetrieval(fixtures={"fixture://adapter.md": raw})
+
     def fetcher(uri: str, *, now: str) -> RetrievedSource:
         return _fixtures.fetch(uri, now=now)
+
     content, blobs, anchor = assemble_source_report(
         structured_output={
             "research": {
@@ -229,9 +233,9 @@ def test_d3_scout_packet_bytes_validate() -> None:
     from vuzol.scout import validate_scout_packet_bytes
 
     assert validate_scout_packet_bytes(b"nope") == ("scout_packet_not_json",)
-    assert validate_scout_packet_bytes(
-        json.dumps({"schema": "scout-packet.v1"}).encode()
-    ) == ("scout_packet_status_invalid",)
+    assert validate_scout_packet_bytes(json.dumps({"schema": "scout-packet.v1"}).encode()) == (
+        "scout_packet_status_invalid",
+    )
     full = {
         "schema": "scout-packet.v1",
         "packet_id": "p",
@@ -301,9 +305,7 @@ def test_d3_repo_probe_read_file_contained() -> None:
             raise AssertionError("expected escape refusal")
         try:
             asyncio.run(
-                LocalRepoProbeExecutor().run(
-                    op="exec", path="notes.md", root=root, max_bytes=65536
-                )
+                LocalRepoProbeExecutor().run(op="exec", path="notes.md", root=root, max_bytes=65536)
             )
         except ScoutError as error:
             assert error.code == "scout_repo_op_unsupported"

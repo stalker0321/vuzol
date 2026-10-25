@@ -1992,56 +1992,53 @@ def test_send_without_confirmed_message_id_marks_ambiguous(postgres_dsn: str) ->
 @pytest.mark.postgresql
 def test_repost_plan_sends_fresh_card_and_retires_stale_links(postgres_dsn: str) -> None:
     from tests.integration.telegram.test_projections import _materialize_plan_item
+    from vuzol.storage.models import WorkPackage
     from vuzol.telegram.work_package_projections import WORK_PACKAGE_PLAN_ROLE
 
     async def scenario() -> None:
         engine, factory = storage(postgres_dsn)
         _, package_id = await _materialize_plan_item(factory, ordinal=2)
-        async with factory() as session:
-            session.add(
-                TelegramMessageLink(
-                    chat_id=-100,
-                    message_thread_id=92,
-                    message_id=111,
-                    work_package_id=package_id,
-                    message_role=WORK_PACKAGE_PLAN_ROLE,
+        async with factory.begin() as session:
+            package = await session.get(WorkPackage, package_id)
+            assert package is not None
+            for message_id in (111, 222):
+                session.add(
+                    TelegramMessageLink(
+                        chat_id=-100,
+                        message_thread_id=92,
+                        message_id=message_id,
+                        work_package_id=package_id,
+                        plan_revision_id=package.head_revision_id,
+                        control_status_generation=package.version,
+                        message_role=WORK_PACKAGE_PLAN_ROLE,
+                    )
                 )
-            )
             session.add(
-                TelegramMessageLink(
-                    chat_id=-100,
-                    message_thread_id=92,
-                    message_id=222,
-                    work_package_id=package_id,
-                    message_role=WORK_PACKAGE_PLAN_ROLE,
-                )
-            )
-
-        async with factory() as session:
-            prepared = await prepare_delivery(
-                session,
                 _outbox(
                     destination=WORK_PACKAGE_PROJECTION_DESTINATION,
                     operation_type="repost_plan",
                     linked_entity_type="work_package",
                     linked_entity_id=package_id,
-                ),
-            )
-
-        assert prepared.action is DeliveryAction.SEND_STATUS
-        assert prepared.message_id is None
-        assert prepared.message_role == WORK_PACKAGE_PLAN_ROLE
-        assert prepared.work_package_id == package_id
-        assert prepared.revision is not None
-
-        async with factory() as session:
-            remaining = await session.scalars(
-                select(TelegramMessageLink).where(
-                    TelegramMessageLink.work_package_id == package_id,
-                    TelegramMessageLink.message_role == WORK_PACKAGE_PLAN_ROLE,
                 )
             )
-            assert remaining.all() == []
+        client = FakeTelegramClient(next_message_id=500)
+        delivery = service(factory, client)
+        while await delivery.deliver_one():
+            pass
+
+        # The stale links are retired only by the confirmed send: a failed send
+        # keeps the old cards. Live pilot: the prepare-time delete never committed.
+        assert {(-100, 111), (-100, 222)} <= set(client.deleted)
+        async with factory() as session:
+            remaining = (
+                await session.scalars(
+                    select(TelegramMessageLink.message_id).where(
+                        TelegramMessageLink.work_package_id == package_id,
+                        TelegramMessageLink.message_role == WORK_PACKAGE_PLAN_ROLE,
+                    )
+                )
+            ).all()
+        assert len(remaining) == 1 and remaining[0] >= 500
         await engine.dispose()
 
     asyncio.run(scenario())

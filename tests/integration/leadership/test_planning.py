@@ -357,7 +357,9 @@ async def test_revision_receives_results_and_preserves_completed_contracts(
                 assert revision.immutable_body["items"][0] == original["items"][0]
                 assert revision.immutable_body["items"][1]["goal"] == "Correct future work"
                 assert revision.approved_by_user_id is None
-                assert goal.waiting_reason == "plan_approval"
+                # The owner approved this plan; a corrected future item at the same risk
+                # is within that mandate (live pilot 2026-10-25).
+                assert goal.waiting_reason != "plan_approval"
 
 
 async def test_old_name_only_uses_existing_grant_and_never_accepts_lead_plan(postgres_dsn):

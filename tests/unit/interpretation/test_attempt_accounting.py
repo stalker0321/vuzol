@@ -40,9 +40,7 @@ def test_fallback_lineage_is_observed() -> None:
         async def observer(**kwargs: object) -> None:
             observed.append(kwargs)
 
-        await interpret_with_recovery(
-            primary, (fallback,), request(), on_attempt=observer
-        )
+        await interpret_with_recovery(primary, (fallback,), request(), on_attempt=observer)
 
         assert [item["attempt_kind"] for item in observed] == ["initial", "retry"]
         assert [item["outcome"] for item in observed] == ["unavailable", "succeeded"]
@@ -61,9 +59,7 @@ def test_repair_failure_then_fallback_is_observed() -> None:
         async def observer(**kwargs: object) -> None:
             observed.append(kwargs)
 
-        await interpret_with_recovery(
-            primary, (fallback,), request(), on_attempt=observer
-        )
+        await interpret_with_recovery(primary, (fallback,), request(), on_attempt=observer)
 
         assert [item["outcome"] for item in observed] == [
             "invalid_output",

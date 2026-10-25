@@ -286,7 +286,13 @@ class PythonTelegramClient:
             await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
         except BadRequest:
             # Naming cards are ephemeral. Missing/expired cards must not block regeneration.
-            return
+            # A message older than 48 hours cannot be deleted: at least drop its buttons.
+            try:
+                await self._bot.edit_message_reply_markup(
+                    chat_id=chat_id, message_id=message_id, reply_markup=None
+                )
+            except BadRequest:
+                return
 
     async def pin_message(self, *, chat_id: int, message_id: int) -> bool:
         """Best-effort pin for the reconstructable package status message."""

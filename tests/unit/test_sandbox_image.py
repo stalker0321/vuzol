@@ -37,13 +37,12 @@ def test_grok_upgrade_preserves_base_and_identity_and_pins_required_isolation() 
     content = (DOCKERFILE.parent / "Dockerfile.sandbox-grok-upgrade").read_text()
     assert (
         "ARG BASE_IMAGE=vuzol-sandbox@sha256:"
-        "e75a5358bf1f4a5a67de29bdb33de4721321161bbf58abeedda6ee9856150d15"
-        in content
+        "e75a5358bf1f4a5a67de29bdb33de4721321161bbf58abeedda6ee9856150d15" in content
     )
     assert "FROM ${BASE_IMAGE}" in content
     assert "COPY --chmod=0755 grok-1.0.41-linux-x86_64 /usr/local/bin/grok" in content
     assert "9ce03ed23e16ea01072b4496263d6213a27899e1e3e107f008d36edf82e70407" in content
-    assert 'grok 1.0.41 (4220f3b224a6)' in content
+    assert "grok 1.0.41 (4220f3b224a6)" in content
     assert content.rstrip().endswith("USER 10001:10001\nWORKDIR /workspace")
     assert "ARG BUBBLEWRAP_VERSION=0.8.0-2+deb12u1" in content
     assert '--no-upgrade --no-install-recommends "bubblewrap=${BUBBLEWRAP_VERSION}"' in content

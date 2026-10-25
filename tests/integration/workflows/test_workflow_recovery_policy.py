@@ -142,8 +142,7 @@ async def test_identical_failure_does_not_schedule_a_second_repair(postgres_dsn:
     assert len(first) == 3 and first[2].dependency_metadata["template_key"] == "repair_code"
     persisted = next(step for step in first if step.id == validate_id)
     assert (
-        persisted.payload["failure_fingerprint"]
-        in persisted.payload["failure_fingerprint_history"]
+        persisted.payload["failure_fingerprint"] in persisted.payload["failure_fingerprint_history"]
     )
 
     # Complete the repair so the same validate step is queued again.
@@ -154,9 +153,7 @@ async def test_identical_failure_does_not_schedule_a_second_repair(postgres_dsn:
 
     second_token = await _start(factory, validate_id)
     async with factory.begin() as session:
-        await commit_step_outcome(
-            session, second_token, _validation_failure({"exit_code": 1})
-        )
+        await commit_step_outcome(session, second_token, _validation_failure({"exit_code": 1}))
 
     after = await _steps(factory, run_id)
     assert len(after) == 3, "identical failure must not schedule an identical repair"
@@ -190,9 +187,7 @@ async def test_changed_evidence_schedules_another_repair(postgres_dsn: str) -> N
 
     second_token = await _start(factory, validate_id)
     async with factory.begin() as session:
-        await commit_step_outcome(
-            session, second_token, _validation_failure({"exit_code": 2})
-        )
+        await commit_step_outcome(session, second_token, _validation_failure({"exit_code": 2}))
     after = await _steps(factory, run_id)
     assert len(after) == 4, "changed evidence must allow another repair"
     assert after[3].dependency_metadata["template_key"] == "repair_code"

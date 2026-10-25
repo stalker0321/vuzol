@@ -38,9 +38,7 @@ def test_cached_tokens_do_not_change_the_priced_cost() -> None:
     )
     cached = account_usage(
         profile,
-        NormalizedUsage(
-            input_tokens=1_000, output_tokens=1_000, cached_tokens=800, duration_ms=1
-        ),
+        NormalizedUsage(input_tokens=1_000, output_tokens=1_000, cached_tokens=800, duration_ms=1),
     )
     assert base.cost_units == Decimal("0.006")
     assert cached.cost_units == base.cost_units

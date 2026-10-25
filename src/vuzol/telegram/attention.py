@@ -255,7 +255,7 @@ async def sync_goal_attention(
 async def pending_owner_plan(
     session: AsyncSession, goal: ManagedGoal
 ) -> tuple[WorkPackage, str] | None:
-    from vuzol.leadership.batches import owner_approval_required
+    from vuzol.leadership.batches import revision_needs_owner
     from vuzol.storage.models import PlanRevision
     from vuzol.storage.types import PlanRevisionState
 
@@ -274,7 +274,7 @@ async def pending_owner_plan(
     if (
         revision is None
         or revision.state is not PlanRevisionState.DRAFT
-        or not owner_approval_required(revision)
+        or not await revision_needs_owner(session, revision)
     ):
         return None
     return package, str(revision.id)

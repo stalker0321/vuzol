@@ -511,7 +511,7 @@ class WorkPackageService:
         revision = await self._fenced_revision(package_id, revision_number, h8)
         if package.head_revision_id != revision.id or revision.state is not PlanRevisionState.DRAFT:
             raise DomainError("stale_revision")
-        from vuzol.leadership.batches import owner_approval_required
+        from vuzol.leadership.batches import revision_needs_owner
         from vuzol.leadership.persistence import POLICY_REVISION, GoalDelegation, has_owner_mandate
         from vuzol.leadership.rules import delegation_is_expired
 
@@ -533,7 +533,7 @@ class WorkPackageService:
         ):
             raise DomainError("delegation_inactive")
         self._require_managed_revision(goal, package, revision)
-        if owner_approval_required(revision):
+        if await revision_needs_owner(self._uow.session, revision):
             raise DomainError("owner_plan_approval_required")
         revision.state = PlanRevisionState.APPROVED
         revision.approved_at = datetime.now(UTC)
@@ -1165,11 +1165,12 @@ class WorkPackageService:
             raise DomainError("failure_context_missing")
 
     async def _enqueue_plan_projection(
-        self, package_id: uuid.UUID, generation: int, reason: str
+        self, package_id: uuid.UUID, generation: int, reason: str, *, repost: bool = False
     ) -> None:
+        # repost: the owner must act on this card, so it moves to the bottom of the topic.
         await self._uow.outbox.enqueue(
             destination="work_package_projection",
-            operation_type="render_plan",
+            operation_type="repost_plan" if repost else "render_plan",
             entity_type="work_package",
             entity_id=package_id,
             idempotency_key=f"wp:projection:{reason}:{package_id}:{generation}",

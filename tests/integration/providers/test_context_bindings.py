@@ -99,9 +99,7 @@ def _handler(
             ),
             adapters={"api": adapter},
         ),
-        artifacts=ArtifactStore(
-            settings.artifact_root, max_bytes=10_000_000, retention_days=14
-        ),
+        artifacts=ArtifactStore(settings.artifact_root, max_bytes=10_000_000, retention_days=14),
     )
 
 
@@ -399,9 +397,7 @@ def test_resolver_rejects_foreign_scope_and_expired(postgres_dsn: str, tmp_path:
 
         async with factory() as session:
             with pytest.raises(BindingError) as exc:
-                await resolve_context(
-                    session, store, consumer_step_id=synth_id, project_id="proj"
-                )
+                await resolve_context(session, store, consumer_step_id=synth_id, project_id="proj")
             assert exc.value.category == "foreign_scope"
 
         # Expired freshness on a required binding fails closed as well.
@@ -418,9 +414,7 @@ def test_resolver_rejects_foreign_scope_and_expired(postgres_dsn: str, tmp_path:
             )
         async with factory() as session:
             with pytest.raises(BindingError) as expired:
-                await resolve_context(
-                    session, store, consumer_step_id=synth_id, project_id="proj"
-                )
+                await resolve_context(session, store, consumer_step_id=synth_id, project_id="proj")
             assert expired.value.category == "expired"
         await engine.dispose()
 
@@ -440,9 +434,7 @@ def test_estimate_includes_declared_context(postgres_dsn: str, tmp_path: Path) -
 
         reserved: dict[str, int] = {}
         for label, estimate in (("plain", 0), ("context", 5_000)):
-            _task_id, _run_id, step_id = await seed_provider_step(
-                factory, step_type="synthesize"
-            )
+            _task_id, _run_id, step_id = await seed_provider_step(factory, step_type="synthesize")
             async with factory.begin() as session:
                 step = await session.get(Step, step_id, with_for_update=True)
                 assert step is not None

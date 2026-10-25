@@ -466,7 +466,7 @@ class LeadershipCommandService:
                 )
             goal.lease_owner = None
             goal.lease_until = None
-            from vuzol.leadership.batches import owner_approval_required
+            from vuzol.leadership.batches import revision_needs_owner
             from vuzol.storage.models import PlanRevision
 
             revision = (
@@ -474,7 +474,7 @@ class LeadershipCommandService:
                 if package.status is WorkPackageStatus.DRAFT and package.head_revision_id
                 else None
             )
-            if revision is not None and owner_approval_required(revision):
+            if revision is not None and await revision_needs_owner(uow.session, revision):
                 # Waiting on a draft only the owner can approve is a plan approval,
                 # whatever the lead called it; the card and attention depend on it.
                 goal.wakeup_condition = {"kind": "plan_approval", "revision_id": str(revision.id)}
@@ -936,14 +936,124 @@ async def _enqueue_owner_question(
     await enqueue_goal_status(session, goal)
 
 
+_STEP_NAMES = {
+    "interpret": "разбора задачи",
+    "prepare_context": "подготовки",
+    "prepare_worktree": "подготовки",
+    "plan": "планирования",
+    "execute_code": "работы исполнителя",
+    "execute_agent": "работы исполнителя",
+    "validate": "проверок",
+    "review": "ревью",
+    "approval": "приёмки",
+    "apply_result": "применения результата",
+    "publish_static": "публикации",
+    "finalize": "завершения",
+}
+_FAILURES = {
+    "shutdown_cancelled": "сервер перезапускался во время {step}",
+    "lease_expired_attempts_exhausted": "несколько попыток {step} не успели завершиться",
+    "provider_unavailable": "модель была недоступна во время {step}",
+    "provider_request_invalid": "модель отклонила запрос во время {step}",
+    "budget_exhausted": "закончился бюджет пункта во время {step}",
+    "no_compatible_profile": "нет подходящей модели для {step}",
+    "approved_result_not_applied": "одобренный результат не удалось применить",
+}
+
+
+async def _stopped_item_question(session: AsyncSession, goal: ManagedGoal) -> str | None:
+    """Say which item stopped, why, and which button continues it."""
+    from vuzol.leadership.text import short_owner_text
+    from vuzol.storage.models import PlanRevision, Run, Step
+    from vuzol.storage.types import StepStatus, WorkPackagePauseReason
+    from vuzol.telegram.work_package_projections import package_retry_available
+
+    package = (
+        await session.get(WorkPackage, goal.current_package_id) if goal.current_package_id else None
+    )
+    if (
+        package is None
+        or package.status is not WorkPackageStatus.PAUSED
+        or package.pause_reason
+        not in {WorkPackagePauseReason.ITEM_BLOCKED, WorkPackagePauseReason.ITEM_FAILED}
+    ):
+        return None
+    revision = (
+        await session.get(PlanRevision, package.head_revision_id)
+        if package.head_revision_id
+        else None
+    )
+    items = [] if revision is None else revision.immutable_body.get("items", [])
+    ordinal = package.cursor_ordinal
+    item = next((i for i in items if i.get("ordinal") == ordinal), None)
+    step = (
+        None
+        if package.last_failure_task_id is None
+        else await session.scalar(
+            select(Step)
+            .join(Run, Run.id == Step.run_id)
+            .where(
+                Run.task_id == package.last_failure_task_id,
+                Step.status.in_((StepStatus.BLOCKED, StepStatus.FAILED)),
+            )
+            .order_by(Step.updated_at.desc())
+            .limit(1)
+        )
+    )
+    name = "пункт"
+    if ordinal is not None:
+        name = f"Пункт {ordinal} из {len(items)}" if items else f"Пункт {ordinal}"
+    if item is not None and item.get("goal"):
+        name += f" «{short_owner_text(item['goal'], 90)}»"
+    if step is None:
+        why = "не завершился"
+    else:
+        where = _STEP_NAMES.get(step.step_type, "работы")
+        why = _FAILURES.get(step.failure_category or "", "не завершился на этапе {step}").format(
+            step=where
+        )
+    if await package_retry_available(session, package):
+        action = (
+            "Карточка плана сразу над этим сообщением: «Повторить» запустит пункт заново, "
+            "«Перепланировать» попросит новый план. Или напиши, что сделать иначе."
+        )
+    else:
+        action = (
+            "Этот пункт повторить нельзя: в карточке плана над этим сообщением можно "
+            "перепланировать или завершить работу. Или напиши, что сделать иначе."
+        )
+    return f"{name} остановился: {why}. {action}"
+
+
 async def request_owner_recovery(session: AsyncSession, goal: ManagedGoal, reason: str) -> None:
     from vuzol.leadership.card import reason_text
+    from vuzol.storage.models import TransactionalOutbox
+    from vuzol.storage.types import DeliveryStatus
 
-    question = (
-        "Несколько ходов подряд нет нового результата и запуска работы. Уточните следующий шаг."
-        if reason == "continuation_without_progress"
-        else f"{reason_text(reason)} Уточни следующий шаг после устранения причины."
-    )
+    stopped = await _stopped_item_question(session, goal)
+    if stopped is not None:
+        assert goal.current_package_id is not None
+        # Live pilot: the card with "Повторить" was far up the topic, and the
+        # question only said "уточни следующий шаг". Show both together.
+        session.add(
+            TransactionalOutbox(
+                destination="work_package_projection",
+                operation_type="repost_plan",
+                linked_entity_type="work_package",
+                linked_entity_id=goal.current_package_id,
+                idempotency_key=f"wp:repost:recovery:{goal.id}:{goal.version}",
+                payload={"package_id": str(goal.current_package_id)},
+                status=DeliveryStatus.PENDING,
+            )
+        )
+    if stopped is not None:
+        question = stopped
+    elif reason == "continuation_without_progress":
+        question = (
+            "Несколько ходов подряд нет нового результата и запуска работы. Уточните следующий шаг."
+        )
+    else:
+        question = f"{reason_text(reason)} Уточни следующий шаг после устранения причины."
     goal.wakeup_condition = {
         "kind": "owner",
         "question": question,

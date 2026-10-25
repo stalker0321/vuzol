@@ -599,7 +599,7 @@ async def build_work_package_plan_card(
         buttons.append(tuple(navigation))
     controls: list[tuple[str, str]] = []
     if package_delivery_failure is not None:
-        if await _package_retry_available(session, package):
+        if await package_retry_available(session, package):
             controls.append(
                 ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
             )
@@ -662,7 +662,7 @@ async def build_work_package_plan_card(
             )
         )
     elif not _status_card and package.status is WorkPackageStatus.PAUSED:
-        if await _package_retry_available(session, package):
+        if await package_retry_available(session, package):
             controls.append(
                 ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
             )
@@ -838,7 +838,7 @@ async def _horizon_display_status(
     return fallback
 
 
-async def _package_retry_available(session: AsyncSession, package: WorkPackage) -> bool:
+async def package_retry_available(session: AsyncSession, package: WorkPackage) -> bool:
     if package.last_failure_task_id is None:
         return False
     expected_status = (

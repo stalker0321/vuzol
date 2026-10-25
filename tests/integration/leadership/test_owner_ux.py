@@ -561,7 +561,8 @@ async def test_owner_retry_of_a_blocked_lead_item_resumes_the_waiting_goal(postg
 
     from vuzol.discussion.sequencer import WorkPackageSequencer
     from vuzol.discussion.service import WorkPackageService
-    from vuzol.storage.models import PlanRevision, Run, Step, Task
+    from vuzol.leadership.service import request_owner_recovery
+    from vuzol.storage.models import PlanRevision, Run, Step, Task, TransactionalOutbox
     from vuzol.storage.types import RunStatus, StepStatus, TaskStatus
     from vuzol.storage.unit_of_work import UnitOfWork
 
@@ -593,7 +594,20 @@ async def test_owner_retry_of_a_blocked_lead_item_resumes_the_waiting_goal(postg
             goal = await session.get(ManagedGoal, goal_id, with_for_update=True)
             goal.lifecycle = "waiting"
             goal.waiting_reason = "project_task_running"
-            goal.wakeup_condition = {"kind": "owner", "question": "Что дальше?"}
+            await request_owner_recovery(session, goal, "project_task_running")
+            # The owner sees which item stopped, why, and the card that continues it.
+            question = goal.wakeup_condition["question"]
+            assert question.startswith("Пункт 1 из 1 «"), question
+            assert "остановился: модель была недоступна во время" in question
+            assert "«Повторить» запустит пункт заново" in question
+            reposts = await session.scalars(
+                select(TransactionalOutbox.idempotency_key).where(
+                    TransactionalOutbox.operation_type == "repost_plan"
+                )
+            )
+            keys = reposts.all()
+            assert any(key.startswith("wp:repost:recovery:") for key in keys)
+            assert any(key.endswith(":terminal_pause") for key in keys)
             package = await session.get(WorkPackage, goal.current_package_id)
             revision = await session.get(PlanRevision, package.head_revision_id)
             package_id, version = package.id, package.version

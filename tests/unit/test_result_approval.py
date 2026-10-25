@@ -587,3 +587,60 @@ async def test_plan_approval_does_not_cover_standalone_task() -> None:
     session.execute = AsyncMock(return_value=result)
 
     assert not await _plan_approval_covers_intermediate_result(session, uuid.uuid4())
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("managed", [True, False])
+async def test_last_item_of_a_lead_goal_applies_at_the_branch_head(managed: bool) -> None:
+    """Live pilot 2026-10-25: item 2 of 2 of a lead goal was bound to the package base, so
+    the apply after item 1 failed with "target branch changed"."""
+    package_base, item_head, result_commit = "a" * 40, "b" * 40, "c" * 40
+    validate = _step(
+        step_type="validate",
+        ordinal=5,
+        result={
+            "structured_output": {
+                "base_commit": item_head,
+                "result_commit": result_commit,
+                "gates": [{"name": "git-facts", "exit_code": 0, "duration_ms": 1}],
+            },
+        },
+    )
+    approval_step = MagicMock(id=uuid.uuid4(), payload={"requested_action": "apply_result"})
+    worktree = SimpleNamespace(
+        result_commit=result_commit,
+        diff_hash="d" * 64,
+        base_commit=item_head,
+        project_id="pilot",
+        repository_identity_hash="e" * 64,
+        default_branch="vuzol-managed/pilot/goal",
+        expected_target_head=item_head,
+    )
+    link = SimpleNamespace(work_package_id=uuid.uuid4(), plan_revision_id=uuid.uuid4(), ordinal=2)
+    package = SimpleNamespace(
+        managed_goal_id=uuid.uuid4() if managed else None,
+        integration_base_commit=package_base,
+        integration_target_branch="vuzol-managed/pilot/goal" if managed else "main",
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(side_effect=(None, worktree, link, 2))
+    session.get = AsyncMock(return_value=package)
+    session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
+    session.flush = AsyncMock()
+    run = MagicMock(
+        task_id=uuid.uuid4(),
+        id=uuid.uuid4(),
+        configuration_revision="f" * 64,
+        policy_revision="1" * 64,
+        execution_contract_version="execution-contract.v2",
+    )
+    await ensure_result_approval(
+        session, run=run, approval_step=approval_step, steps_by_ordinal={5: validate}
+    )
+    envelope = approval_step.payload["action_envelope"]
+    if managed:
+        assert envelope["target_branch"] == "vuzol-managed/pilot/goal"
+        assert envelope["expected_target_head"] == item_head
+    else:
+        assert envelope["target_branch"] == "main"
+        assert envelope["expected_target_head"] == package_base

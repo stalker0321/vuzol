@@ -68,7 +68,10 @@ async def ensure_result_approval(
         )
         if package is None or package.integration_base_commit is None:
             raise ValueError("package integration state is missing")
-        if link.ordinal == int(item_count or 0):
+        # A lead goal applies every item, the last one too, to its own branch at the
+        # branch's current head; the whole-package apply onto the package base is the
+        # legacy path (live pilot 2026-10-25: item 2 of 2 was refused as "target changed").
+        if link.ordinal == int(item_count or 0) and package.managed_goal_id is None:
             if package.integration_target_branch is None:
                 raise ValueError("package target branch is missing")
             target_branch = package.integration_target_branch

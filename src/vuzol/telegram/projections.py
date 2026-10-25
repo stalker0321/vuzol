@@ -1964,8 +1964,11 @@ async def build_status_card(
         )
     title = task_title(task)
     scope = task.project_id or "личный"
+    # A lead goal has no whole-package result: the lead accepts every item itself.
+    legacy_package = package is None or package.managed_goal_id is None
     final_package_result = bool(
-        materialization is not None
+        legacy_package
+        and materialization is not None
         and plan_size is not None
         and materialization.ordinal == int(plan_size)
         and task.status is TaskStatus.WAITING_APPROVAL
@@ -1973,7 +1976,8 @@ async def build_status_card(
         and step.step_type == "approval"
     )
     final_package_delivery_failure = bool(
-        materialization is not None
+        legacy_package
+        and materialization is not None
         and plan_size is not None
         and materialization.ordinal == int(plan_size)
         and step is not None
@@ -2056,6 +2060,7 @@ async def build_status_card(
             )
     if (
         approval is not None
+        and legacy_package
         and materialization is not None
         and plan_size is not None
         and materialization.ordinal == int(plan_size)

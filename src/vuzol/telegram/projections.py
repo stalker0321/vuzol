@@ -1980,12 +1980,37 @@ async def build_status_card(
         and step.step_type == "approval"
         and task.status in {TaskStatus.BLOCKED, TaskStatus.FAILED}
     )
-    lines = [f"<b>{telegram_html(title)}</b>"]
-    if materialization is not None and plan_size:
-        lines.append(f"Пункт плана: <b>{materialization.ordinal}/{int(plan_size)}</b>")
-    draft = task.task_draft if isinstance(task.task_draft, dict) else {}
-    if any(draft.get(key) for key in ("task_summary", "normalized_title", "goal", "title")):
-        lines.append(f"Задача: {telegram_html(task_sense_sentence(task))}")
+    # A lead task is one step of the owner's goal: show the step, not the machinery
+    # (live pilot 2026-10-24: ids, accounts, tokens and delivery states were noise).
+    lead_task = package is not None and package.managed_goal_id is not None
+    item_goal = None
+    if lead_task and revision is not None and materialization is not None:
+        item_goal = next(
+            (
+                item.get("goal")
+                for item in revision.immutable_body.get("items", [])
+                if item.get("ordinal") == materialization.ordinal
+            ),
+            None,
+        )
+    if lead_task:
+        heading = (
+            f"Шаг {materialization.ordinal} из {int(plan_size)}"
+            if materialization is not None and plan_size
+            else "Шаг плана"
+        )
+        lines = [f"<b>{heading}</b>"]
+        if isinstance(item_goal, str) and item_goal.strip():
+            lines.append(telegram_html(item_goal.strip()))
+        else:
+            lines.append(telegram_html(task_sense_sentence(task)))
+    else:
+        lines = [f"<b>{telegram_html(title)}</b>"]
+        if materialization is not None and plan_size:
+            lines.append(f"Пункт плана: <b>{materialization.ordinal}/{int(plan_size)}</b>")
+        draft = task.task_draft if isinstance(task.task_draft, dict) else {}
+        if any(draft.get(key) for key in ("task_summary", "normalized_title", "goal", "title")):
+            lines.append(f"Задача: {telegram_html(task_sense_sentence(task))}")
     status_label = (
         "Работа завершена"
         if final_package_result or final_package_delivery_failure
@@ -2003,18 +2028,18 @@ async def build_status_card(
         status_label = "Остановлена: критерий без доказательства"
     elif step is not None and step.failure_category == "budget_exhausted":
         status_label = "Остановлена: внутренний бюджет этапа исчерпан"
-    lines.extend(
-        (
-            f"Проект: {telegram_html(scope)}",
-            f"Статус: <b>{status_label}</b>",
-        )
-    )
-    if run is not None and run.status is RunStatus.CREATED:
-        lines.append("Этап: Ожидает запуска")
-    elif step is not None and not final_package_result and not final_package_delivery_failure:
-        lines.append(f"Этап: {step_type_label(step.step_type)} ({step_status_label(step.status)})")
+    if not lead_task:
+        lines.append(f"Проект: {telegram_html(scope)}")
+    lines.append(f"Статус: <b>{status_label}</b>")
+    if not lead_task:
+        if run is not None and run.status is RunStatus.CREATED:
+            lines.append("Этап: Ожидает запуска")
+        elif step is not None and not final_package_result and not final_package_delivery_failure:
+            lines.append(
+                f"Этап: {step_type_label(step.step_type)} ({step_status_label(step.status)})"
+            )
     worker = await _task_worker_label(session, task.id) if run is not None else None
-    if worker is not None:
+    if worker is not None and not lead_task:
         lines.append(f"Исполнитель: {telegram_html(worker)}")
     approval = None
     if step is not None and step.status.value == "waiting_approval":
@@ -2041,7 +2066,7 @@ async def build_status_card(
         # card, not on the item card.
         approval = None
         lines.append("Результат пункта готов; итог плана ожидает вашего решения.")
-    if run is not None and run.selected_route:
+    if run is not None and run.selected_route and not lead_task:
         executor = (
             run.selected_route.get("trusted_profile_id")
             or run.selected_route.get("executor")
@@ -2098,11 +2123,12 @@ async def build_status_card(
             lines.append("Внешний эффект не подтверждён. Продолжение недоступно. Можно отменить.")
         else:
             lines.append("Сделанная работа сохранена. Можно продолжить или отменить.")
-    model_seconds = await _history_work_seconds(session, task)
-    lines.append(f"Работа моделей: {_format_duration_ru(model_seconds)}")
-    identity_footer = _task_identity_footer(task)
-    if identity_footer is not None:
-        lines.append(identity_footer)
+    if not lead_task:
+        model_seconds = await _history_work_seconds(session, task)
+        lines.append(f"Работа моделей: {_format_duration_ru(model_seconds)}")
+        identity_footer = _task_identity_footer(task)
+        if identity_footer is not None:
+            lines.append(identity_footer)
     if redo_requested is not None:
         lines.append(
             "Чтобы переделать результат, отправьте новую задачу отдельным сообщением "

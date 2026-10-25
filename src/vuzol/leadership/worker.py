@@ -55,6 +55,8 @@ from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import DeliveryStatus, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
+# A refusal meaning "too early": the package answers it, not the owner.
+_NOT_YET_REASONS = frozenset({"result_not_ready", "project_task_running"})
 _TERMINAL_GOAL = frozenset({"cancelled", "completed"})
 _MODEL_BLOCKERS = frozenset(
     {
@@ -982,6 +984,28 @@ class ProjectLeadWorker:
                 goal.waiting_reason = "plan_approval"
                 goal.wakeup_condition = {"kind": "plan_approval", "revision_id": pending[1]}
                 return
+            if reason in _NOT_YET_REASONS and goal.current_package_id is not None:
+                # Live pilot 2026-10-25: the lead accepted a result a minute early and
+                # the refusal asked the owner "уточни следующий шаг". "Not yet" is the
+                # package's to answer: wait for its next decision.
+                from vuzol.leadership.wakeups import enqueue_goal_wakeup
+
+                package = await uow.session.get(WorkPackage, goal.current_package_id)
+                if package is not None and package.status is not WorkPackageStatus.DISCARDED:
+                    condition = {"kind": "package", "package_id": str(package.id)}
+                    goal.waiting_reason = "wait_for"
+                    goal.wakeup_condition = condition
+                    if await _waiting_exit_ready(uow.session, goal):
+                        # Ready already: one wakeup per package state, so a repeated
+                        # early command cannot loop.
+                        await enqueue_goal_wakeup(
+                            uow.session,
+                            goal_id=goal.id,
+                            idempotency_key=f"lead:not-yet:{package.id}:{package.version}",
+                            package_id=package.id,
+                            kind="wait_ready",
+                        )
+                    return
             goal.waiting_reason = reason
             await request_owner_recovery(uow.session, goal, reason)
 

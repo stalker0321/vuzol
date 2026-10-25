@@ -549,3 +549,64 @@ async def test_shown_lead_task_card_follows_the_task_after_the_decision(postgres
         assert "Шаг 1 из 1" in html
         for noise in ("Задача №", "Проект:", "Исполнитель", "Токены", "Доставка", "Работа моделей"):
             assert noise not in html
+
+
+async def test_owner_retry_of_a_blocked_lead_item_resumes_the_waiting_goal(postgres_dsn, runtime):
+    """Live pilot 2026-10-25: a deploy blocked a lead task's review; the owner's retry ran it
+    again but the goal stayed waiting, so the lead never heard how the item ended."""
+    import uuid
+
+    from tests.integration.leadership.planning_helpers import seed_plan
+    from tests.integration.leadership.test_plan_revisions import start
+
+    from vuzol.discussion.sequencer import WorkPackageSequencer
+    from vuzol.discussion.service import WorkPackageService
+    from vuzol.storage.models import PlanRevision, Run, Step, Task
+    from vuzol.storage.types import RunStatus, StepStatus, TaskStatus
+    from vuzol.storage.unit_of_work import UnitOfWork
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": plan_items(1)})
+        started = await start(factory, goal_id)
+        assert started.status == "applied"
+        task_id = uuid.UUID(started.result["task_id"])
+        from vuzol.workflows.dispatch import WorkflowDispatcher
+
+        dispatcher = WorkflowDispatcher(runtime, factory, owner="retry-dispatch")
+        for _ in range(5):
+            if not await dispatcher.process_one():
+                break
+        async with factory.begin() as session:
+            run = await session.scalar(select(Run).where(Run.task_id == task_id))
+            step = await session.scalar(
+                select(Step).where(Step.run_id == run.id).order_by(Step.ordinal.desc()).limit(1)
+            )
+            step.status = StepStatus.BLOCKED
+            step.failure_category = "provider_unavailable"
+            run.status = RunStatus.BLOCKED
+            (await session.get(Task, task_id)).status = TaskStatus.BLOCKED
+        async with UnitOfWork(factory) as uow:
+            paused = await WorkPackageSequencer(uow).observe_terminal(task_id=task_id)
+        assert paused is not None
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id, with_for_update=True)
+            goal.lifecycle = "waiting"
+            goal.waiting_reason = "project_task_running"
+            goal.wakeup_condition = {"kind": "owner", "question": "Что дальше?"}
+            package = await session.get(WorkPackage, goal.current_package_id)
+            revision = await session.get(PlanRevision, package.head_revision_id)
+            package_id, version = package.id, package.version
+            number, h8 = revision.revision_number, revision.content_hash[:8]
+        async with UnitOfWork(factory) as uow:
+            await WorkPackageService(uow).retry_item(
+                package_id=package_id,
+                revision_number=number,
+                h8=h8,
+                expected_status_generation=version,
+                user_id=OWNER,
+            )
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "active" and goal.waiting_reason is None
+            assert goal.wakeup_condition is None

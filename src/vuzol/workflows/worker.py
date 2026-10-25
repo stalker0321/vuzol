@@ -191,8 +191,11 @@ class WorkflowWorker:
             uncertain = await asyncio.shield(self._effects_uncertain(step_id))
         except Exception:
             uncertain = True
+        # A restart (a deploy) that cuts off a step which writes nothing loses no work:
+        # queue it again instead of blocking the task (live pilot 2026-10-25).
+        requeue = category == "shutdown_cancelled" and not uncertain
         return StepOutcome(
-            kind=OutcomeKind.BLOCKED,
+            kind=OutcomeKind.TRANSIENT_FAILURE if requeue else OutcomeKind.BLOCKED,
             result={},
             category=category,
             summary=summary,

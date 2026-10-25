@@ -19,6 +19,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from vuzol.storage.base import Base
@@ -254,6 +255,27 @@ def has_owner_mandate(goal: ManagedGoal) -> bool:
     """Legacy owner-enabled goals retain their grant; text drafts require plan approval."""
     return not goal.constraints.get("mandate_required") or (
         (goal.constraints.get("owner_mandate") or {}).get("scope_revision") == goal.scope_revision
+    )
+
+
+async def lead_accepts_results(session: AsyncSession, goal: ManagedGoal) -> bool:
+    """The owner delegated item acceptance: the lead accepts each item, the owner the goal.
+
+    Live pilot 2026-10-25: every item's card asked the owner to accept it, and the
+    lead's own acceptance raced the owner's button.
+    """
+    from datetime import UTC
+
+    from vuzol.leadership.rules import delegation_is_expired
+
+    if goal.lifecycle in {"cancelled", "completed", "paused"} or not has_owner_mandate(goal):
+        return False
+    delegation = await session.get(GoalDelegation, goal.delegation_id)
+    return (
+        delegation is not None
+        and delegation.revoked_at is None
+        and not delegation_is_expired(delegation.expires_at, now=datetime.now(UTC))
+        and bool({"accept_result", "apply_integration"} & set(delegation.allowed_actions))
     )
 
 

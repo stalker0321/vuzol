@@ -48,6 +48,11 @@ async def publish_task_event(session: AsyncSession, task: Task) -> None:
             )
             if task.status is TaskStatus.COMPLETED or goal.lifecycle in {"completed", "cancelled"}:
                 reason = None
+            if reason == "waiting_approval":
+                from vuzol.leadership.persistence import lead_accepts_results
+
+                if await lead_accepts_results(session, goal):
+                    reason = None
             if (
                 reason == "blocked"
                 and (

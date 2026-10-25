@@ -408,3 +408,51 @@ async def test_acceptance_waits_for_repair_binds_commit_and_runs_applier_once(
                 goal.current_package_id = rejected
                 assert await _current_head(session, goal) == done
         assert await git.resolve_commit(repository, "main") == base
+
+
+async def test_an_early_accept_waits_for_the_task_instead_of_asking_the_owner(postgres_dsn):
+    """Live pilot 2026-10-25: the lead accepted item 1 a minute before it finished; the
+    refusal asked the owner "Уточни следующий шаг" and the goal stopped."""
+    from tests.integration.leadership.planning_helpers import seed_plan
+    from tests.integration.leadership.test_managed_goal_flow import _decision, _worker
+    from tests.integration.leadership.test_plan_revisions import plan_items, start
+
+    from vuzol.leadership.model import LeadCommandDraft
+    from vuzol.leadership.wakeups import enqueue_goal_wakeup
+    from vuzol.storage.types import DeliveryStatus
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": plan_items(1)})
+        assert (await start(factory, goal_id)).status == "applied"
+        async with factory.begin() as session:
+            for item in await session.scalars(select(TransactionalOutbox)):
+                item.status = DeliveryStatus.DELIVERED
+            goal = await session.get(ManagedGoal, goal_id)
+            spec = (await task_context(session, goal))["tasks"][0]["accept_spec"]
+            await enqueue_goal_wakeup(
+                session,
+                goal_id=goal_id,
+                idempotency_key="test:early-accept",
+                package_id=goal.current_package_id,
+                kind="resume",
+            )
+
+        class EarlyAccept:
+            async def decide(self, snapshot):
+                return _decision(LeadCommandDraft(name="accept_result", payload=spec))
+
+        assert await _worker(factory, EarlyAccept()).process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "waiting" and goal.waiting_reason == "wait_for"
+            assert goal.wakeup_condition == {
+                "kind": "package",
+                "package_id": str(goal.current_package_id),
+            }
+            question = await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.idempotency_key.like("%lead:question:%")
+                )
+            )
+            assert question is None

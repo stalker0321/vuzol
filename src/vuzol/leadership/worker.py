@@ -13,7 +13,6 @@ from typing import cast
 from sqlalchemy import and_, func, literal, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.leadership.acceptance import OWNER_ACCEPT_OPERATION
 from vuzol.leadership.actor import server_agent_principal
 from vuzol.leadership.amendments import apply_pending_amendment
 from vuzol.leadership.batches import execute_batch
@@ -138,12 +137,6 @@ class ProjectLeadWorker:
         return True
 
     async def _handle(self, token: OutboxLeaseToken) -> None:
-        async with self._factory() as session:
-            item = await session.get(TransactionalOutbox, token.item_id)
-            owner_accept = item is not None and item.operation_type == OWNER_ACCEPT_OPERATION
-        if owner_accept:
-            await self._owner_accept(token)
-            return
         prepared = await self._prepare_turn(token)
         if prepared is None:
             return
@@ -155,36 +148,6 @@ class ProjectLeadWorker:
             renewal.cancel()
             with suppress(asyncio.CancelledError):
                 await renewal
-
-    async def _owner_accept(self, token: OutboxLeaseToken) -> None:
-        """Merge an accepted goal here: this process has git and the project repository."""
-        from vuzol.leadership.acceptance import accept_goal, acceptance_refusal_text
-        from vuzol.leadership.fence import lock_project_admission
-        from vuzol.leadership.service import enqueue_goal_status
-        from vuzol.telegram.projections import enqueue_chat_notice
-
-        async with self._factory.begin() as session:
-            item = await session.get(TransactionalOutbox, token.item_id)
-            assert item is not None
-            goal = await session.get(ManagedGoal, item.linked_entity_id)
-            if goal is not None:
-                await lock_project_admission(session, goal.project_id)
-                goal = await session.get(ManagedGoal, goal.id, with_for_update=True)
-            if goal is not None:
-                outcome = await accept_goal(
-                    session, goal, user_id=int(item.payload.get("user_id", 0))
-                )
-                if outcome == "accepted":
-                    await enqueue_goal_status(session, goal)
-                else:
-                    await enqueue_chat_notice(
-                        session,
-                        chat_id=goal.source_chat_id,
-                        thread_id=goal.source_thread_id,
-                        key=f"lead:accept-refused:{token.item_id}",
-                        text=acceptance_refusal_text(outcome),
-                    )
-            await self._complete(session, token)
 
     async def _run_turn(self, token: OutboxLeaseToken, claim: TurnClaim, status: str) -> None:
         goal_id, wakeup_id = claim.goal_id, claim.wakeup_id

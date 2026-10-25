@@ -425,10 +425,15 @@ async def test_applier_composes_narrow_control_and_privileged_worker(
     monkeypatch.setattr(applier_cli, "EffectReconciler", lambda *_args, **_kwargs: reconciler)
     worker_constructor = MagicMock(return_value=worker)
     monkeypatch.setattr(applier_cli, "WorkflowWorker", worker_constructor)
+    acceptance = MagicMock()
+    acceptance.process_one = AsyncMock(return_value=False)
+    monkeypatch.setattr(applier_cli, "GoalAcceptanceConsumer", lambda *_a, **_k: acceptance)
     monkeypatch.setattr("vuzol.cli.applier.asyncio.Event", Stop)
 
     await applier_cli.run()
 
+    # The owner's goal acceptance merges here: the applier owns project repositories.
+    acceptance.process_one.assert_awaited_once()
     assert calls["service"] == "vuzol-applier"
     assert calls["disposed"] is True
     migration_head.assert_awaited()

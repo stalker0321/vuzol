@@ -764,7 +764,7 @@
     {
       "id": "module:vuzol.cli.applier",
       "sources": [
-        "src/vuzol/cli/applier.py:40"
+        "src/vuzol/cli/applier.py:51"
       ],
       "producers": [],
       "consumers": [],
@@ -960,6 +960,17 @@
         "src/vuzol/interpretation/service.py:473"
       ],
       "scenario": "intake"
+    },
+    {
+      "id": "outbox:goal_acceptance",
+      "sources": [],
+      "producers": [
+        "src/vuzol/leadership/acceptance.py:50"
+      ],
+      "consumers": [
+        "src/vuzol/leadership/acceptance.py:195"
+      ],
+      "scenario": "goal"
     },
     {
       "id": "outbox:interpretation",
@@ -1211,7 +1222,7 @@
     {
       "id": "telegram-handler:filters.ALL",
       "sources": [
-        "src/vuzol/telegram/adapter.py:912"
+        "src/vuzol/telegram/adapter.py:913"
       ],
       "producers": [],
       "consumers": [],

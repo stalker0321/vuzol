@@ -224,7 +224,7 @@ def test_worker_normalizes_handler_exception(postgres_dsn: str) -> None:
 
 
 @pytest.mark.postgresql
-def test_worker_shutdown_cancellation_records_uncertainty(postgres_dsn: str) -> None:
+def test_worker_shutdown_requeues_a_step_that_writes_nothing(postgres_dsn: str) -> None:
     started = asyncio.Event()
 
     class BlockingHandler:
@@ -259,12 +259,12 @@ def test_worker_shutdown_cancellation_records_uncertainty(postgres_dsn: str) -> 
         async with factory() as session:
             step = await session.scalar(select(Step).where(Step.step_type == "execute_model"))
             run = await session.scalar(select(Run).where(Run.task_id == task_id))
-            assert step is not None and step.status is StepStatus.BLOCKED
-            assert step.failure_category == "shutdown_cancelled"
-            # execute_model is read-only and has no mutating capability.
-            # Shutdown loses the verdict, not an external write.
+            # execute_model is read-only and has no mutating capability. Shutdown
+            # loses the verdict, not an external write, so a restart runs it again
+            # (live pilot 2026-10-25: a deploy blocked a lead task's review).
+            assert step is not None and step.status is StepStatus.QUEUED
             assert step.unknown_effects is False
-            assert run is not None and run.status is RunStatus.BLOCKED
+            assert run is not None and run.status is not RunStatus.BLOCKED
         await engine.dispose()
 
     asyncio.run(scenario())

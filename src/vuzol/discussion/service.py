@@ -937,6 +937,8 @@ class WorkPackageService:
         expected_status_generation: int,
         user_id: int,
     ) -> int:
+        # Goal before package, the approval lock order.
+        goal = await self._lock_managed_goal(package_id)
         package, revision = await self._queue_control_package(
             package_id, revision_number, h8, expected_status_generation
         )
@@ -971,6 +973,18 @@ class WorkPackageService:
         package.status = WorkPackageStatus.RUNNING
         package.pause_reason = None
         package.version += 1
+        if goal is not None and goal.lifecycle == "waiting":
+            # The owner's retry answers whatever the goal waited on, so the lead
+            # hears how the retried item ends (live pilot 2026-10-25).
+            from vuzol.leadership.persistence import has_owner_mandate
+            from vuzol.telegram.attention import sync_goal_attention
+
+            goal.lifecycle = "active" if has_owner_mandate(goal) else "draft"
+            goal.waiting_reason = None
+            goal.wakeup_condition = None
+            goal.version += 1
+            goal.fence_epoch += 1
+            await sync_goal_attention(self._uow.session, goal)
         await self._event(
             package.id,
             WorkPackageEvent.PACKAGE_RETRIED,

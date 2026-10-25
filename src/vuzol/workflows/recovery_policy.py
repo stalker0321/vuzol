@@ -29,6 +29,8 @@ BACKPRESSURE_CATEGORIES = frozenset(
         "rate_limited",
         "quota_exhausted",
         "provider_unavailable",
+        # A restart is host backpressure: wait without burning an attempt.
+        "shutdown_cancelled",
     }
 )
 

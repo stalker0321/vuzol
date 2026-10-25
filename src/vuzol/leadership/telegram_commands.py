@@ -7,7 +7,7 @@ import uuid
 from dataclasses import replace
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.settings import Settings
@@ -413,6 +413,19 @@ def goal_status_buttons(goal: ManagedGoal) -> tuple[tuple[tuple[str, str], ...],
     )
 
 
+def final_card_buttons(
+    goal: ManagedGoal, *, ready: bool
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    if not ready:
+        return ()
+    return (
+        (
+            ("✅ Принять — влить в main", f"v1:lg:{goal.version}:accept"),
+            ("✏️ Доработать", f"v1:lg:{goal.version}:rework"),
+        ),
+    )
+
+
 async def apply_goal_button(
     *,
     session_factory: async_sessionmaker[AsyncSession],
@@ -429,11 +442,37 @@ async def apply_goal_button(
                 TelegramMessageLink.chat_id == update.chat_id,
                 TelegramMessageLink.message_thread_id == update.message_thread_id,
                 TelegramMessageLink.message_id == update.message_id,
-                TelegramMessageLink.message_role.startswith("ls:"),
+                or_(
+                    TelegramMessageLink.message_role.startswith("ls:"),
+                    TelegramMessageLink.message_role.startswith("lf:"),
+                ),
             )
         )
         if link is None or update.goal_version is None:
             return IngressResult(status=IngressStatus.REJECTED, reason="control_binding_missing")
+        goal_id = uuid.UUID(link.message_role[3:])
+        if update.action_kind in {"lead_accept", "lead_rework"}:
+            from vuzol.leadership.acceptance import accept_goal, request_rework
+            from vuzol.leadership.fence import lock_project_admission
+            from vuzol.leadership.service import enqueue_goal_status
+
+            await lock_project_admission(uow.session, project_id)
+            goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
+            if goal is None or goal.project_id != project_id:
+                return IngressResult(status=IngressStatus.REJECTED, reason="goal_not_available")
+            if update.action_kind == "lead_accept" and goal.constraints.get("owner_acceptance"):
+                return IngressResult(status=IngressStatus.DUPLICATE, reason="goal_accepted")
+            if goal.version != update.goal_version:
+                return IngressResult(status=IngressStatus.REJECTED, reason="stale_goal_card")
+            outcome = (
+                await accept_goal(uow.session, goal, user_id=update.user_id)
+                if update.action_kind == "lead_accept"
+                else await request_rework(uow.session, goal, user_id=update.user_id)
+            )
+            if outcome in {"accepted", "rework_requested"}:
+                await enqueue_goal_status(uow.session, goal)
+                return IngressResult(status=IngressStatus.HANDLED, reason=f"goal_{outcome}")
+            return IngressResult(status=IngressStatus.REJECTED, reason=outcome)
         result = await LeadershipCommandService(
             session_factory,
             enabled=settings.project_lead.enabled,
@@ -442,7 +481,7 @@ async def apply_goal_button(
             LeadCommand(
                 name="resume_goal" if update.action_kind == "lead_resume" else "cancel_goal",
                 project_id=project_id,
-                goal_id=uuid.UUID(link.message_role.removeprefix("ls:")),
+                goal_id=goal_id,
                 expected_version=update.goal_version,
                 idempotency_key=f"telegram:lead-control:{update.callback_query_id}",
                 payload={},

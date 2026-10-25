@@ -23,7 +23,7 @@ from vuzol.leadership.persistence import POLICY_REVISION
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v13"
+PROMPT_REVISION = "project-lead-prompt.v14"
 LEDGER_PURPOSE = "project_lead"
 _COMMANDS = (
     "amend_goal",
@@ -338,6 +338,8 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "You must start EACH item explicitly, only when no task is executing. "
         "A next_item with plan_approved is approved already: start it, do not wait. "
         "Multi-item, large or elevated-risk plans await the owner approving that exact revision. "
+        "An owner answer to 'Что доработать' reopens a finished goal: plan that rework with "
+        "request_plan on the current branch; propose_completion needs a new result. "
         "Once the owner approved a plan, a revision adding up to two follow-up items at the "
         "approved risk is delegated; any other revision waits for the owner again. "
         "Never turn a required approval into a low-risk classification. "

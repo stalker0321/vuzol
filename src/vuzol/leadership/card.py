@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from string import punctuation
+from typing import cast
 
 from vuzol.leadership.text import owner_text, short_owner_text
 
@@ -32,6 +33,7 @@ _REASONS = {
     "lead_response_invalid": "Модель вернула ответ, который нельзя безопасно применить.",
     "goal_review_invalid": "Независимая проверка не вернула пригодного заключения.",
     "goal_review_unavailable": "Не удалось выполнить независимую приёмку цели. Результат сохранён.",
+    "rework_pending": "Доработка ещё не сделана: результат тот же, что ты просил доработать.",
 }
 _ERROR_REASONS = {
     "lead_model_unavailable",
@@ -97,17 +99,29 @@ def render_goal_card(view: Mapping[str, object]) -> str:
         heading = "⏹ **ОТМЕНЕНО · Руководитель**"
         now = "Работа отменена. Сохранённые результаты не удалены."
         action = "Сейчас от тебя ничего не требуется."
+    elif lifecycle == "completed" and isinstance(view.get("owner_acceptance"), dict):
+        accepted = cast(Mapping[str, object], view["owner_acceptance"])
+        heading = "✅ **ПРИНЯТО · Руководитель**"
+        now = (
+            f"Результат влит в {literal_markdown(accepted.get('branch', 'main'))}"
+            f" (коммит {literal_markdown(str(accepted.get('commit', ''))[:12])})."
+        )
+        action = "Можно дать новое поручение."
     elif lifecycle == "completed":
         confirmed = view.get("completion_confirmed") is True
         heading = (
             "✅ **ГОТОВО · Руководитель**" if confirmed else "🟡 **НУЖНА ПРОВЕРКА · Руководитель**"
         )
         now = (
-            "Независимая проверка подтвердила результат."
+            "Независимая проверка подтвердила результат. Работа лежит на ветке цели."
             if confirmed
             else "Готовность результата пока не подтверждена."
         )
-        action = "Можно дать новое поручение." if confirmed else "Нужно проверить результат."
+        action = (
+            "Прими результат, чтобы влить его в main, или нажми «Доработать»."
+            if confirmed
+            else "Нужно проверить результат."
+        )
     elif lifecycle == "draft":
         heading = "💬 **ОБСУЖДЕНИЕ · Руководитель**"
         now = "Обсуждаем запрос и уточняем следующий шаг."

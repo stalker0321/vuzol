@@ -121,6 +121,16 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
         "task_retry_message_mismatch": (
             "Кнопка устарела. Напиши «продолжи» для актуальной карточки."
         ),
+        "goal_accepted": "✅ Принято. Результат влит в main.",
+        "goal_rework_requested": "✏️ Напиши следующим сообщением, что доработать.",
+        "target_moved": (
+            "main изменился с начала работы, влить автоматически нельзя. "  # noqa: RUF001
+            "Нажми «Доработать», чтобы лид подтянул изменения."
+        ),
+        "goal_not_verified": "Результат ещё не подтверждён проверкой, принять пока нельзя.",
+        "merge_failed": "Не удалось влить в main: репозиторий проекта занят или изменён.",  # noqa: RUF001
+        "other_goal_live": "В проекте уже идёт другая цель. Доработку можно начать после неё.",  # noqa: RUF001
+        "stale_goal_card": "Карточка устарела. Актуальная — последняя карточка цели.",
         "chat_retry_stale": "Это старый запрос. Используй кнопку под последней ошибкой.",
         "chat_retry_ambiguous": (
             "Результат доставки неизвестен. Повтор заблокирован, чтобы не отправить дубль."
@@ -554,7 +564,11 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
             expected_task_version=version,
             retry_step_ordinal=ordinal,
         )
-    if len(parts) == 4 and parts[:2] == ["v1", "lg"] and parts[3] in {"resume", "cancel"}:
+    if (
+        len(parts) == 4
+        and parts[:2] == ["v1", "lg"]
+        and parts[3] in {"resume", "cancel", "accept", "rework"}
+    ):
         try:
             version = int(parts[2])
             if version < 1 or len(query.data.encode()) > 64:

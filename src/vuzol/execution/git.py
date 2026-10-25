@@ -474,6 +474,34 @@ class LocalGit:
                 raise GitError("managed worktree did not reset to the approved result")
         return True
 
+    async def fast_forward(self, repository: Path, *, branch: str, commit: str) -> str:
+        """Advance ``branch`` to ``commit`` only when that is a fast-forward.
+
+        Returns "advanced", "already" (the branch is there) or "diverged" (the branch
+        moved on independently; nothing is changed). Never creates a merge commit.
+        """
+
+        target_ref = f"refs/heads/{branch}"
+        current = await self.read_ref(repository, branch)
+        if current == commit:
+            return "already"
+        if current is not None and not await self.is_ancestor(repository, current, commit):
+            return "diverged"
+        checked_out = await self._optional(repository, "symbolic-ref", "--quiet", "HEAD")
+        target_is_checked_out = (
+            checked_out is not None and checked_out.decode().strip() == target_ref
+        )
+        if target_is_checked_out:
+            await self.require_clean_source(repository)
+        await self._run(repository, "update-ref", target_ref, commit, current or "0" * 40)
+        if await self.resolve_commit(repository, target_ref) != commit:
+            raise GitError("target branch did not advance to the accepted result")
+        if target_is_checked_out:
+            await self._run(repository, "reset", "--hard", commit)
+            if await self.resolve_commit(repository, "HEAD") != commit:
+                raise GitError("checked-out branch did not reset to the accepted result")
+        return "advanced"
+
     async def _tree_matches_commit(self, repository: Path, commit: str) -> bool:
         tracked = await self._run(
             repository,

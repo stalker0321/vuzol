@@ -703,26 +703,32 @@ async def _prepare_delivery(
     projection_task = await session.get(Task, task_id) if task_id is not None else None
     if projection_task is not None and projection_task.task_type == "discussion_agent_internal":
         return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
-    if (
-        projection_task is not None
-        and role == "intake_ack"
-        and projection_task.status != TaskStatus.WAITING_APPROVAL
-    ):
+    if projection_task is not None and role in {"intake_ack", "approval_card"}:
         managed_goal_id = await session.scalar(
             select(WorkPackage.managed_goal_id)
             .join(MaterializationLink, MaterializationLink.work_package_id == WorkPackage.id)
             .where(MaterializationLink.task_id == projection_task.id)
         )
-        shown = await session.scalar(
-            select(TelegramMessageLink.id).where(
-                TelegramMessageLink.task_id == projection_task.id,
-                TelegramMessageLink.message_role == "task_status",
+        if managed_goal_id is not None:
+            from vuzol.leadership.persistence import ManagedGoal, lead_accepts_results
+
+            shown = await session.scalar(
+                select(TelegramMessageLink.id).where(
+                    TelegramMessageLink.task_id == projection_task.id,
+                    TelegramMessageLink.message_role == "task_status",
+                )
             )
-        )
-        # A lead task shows its card only for a result decision; once shown, the
-        # card follows the task so a decided result loses its buttons (pilot 2026-10-24).
-        if managed_goal_id is not None and shown is None:
-            return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
+            goal = await session.get(ManagedGoal, managed_goal_id)
+            delegated = goal is not None and await lead_accepts_results(session, goal)
+            # A lead task shows its card only for an owner result decision; once shown,
+            # the card follows the task so a decided result loses its buttons (pilot
+            # 2026-10-24). With acceptance delegated the lead decides each item and the
+            # owner the goal (pilot 2026-10-25), so there is no per-item card.
+            decision = projection_task.status == TaskStatus.WAITING_APPROVAL and not delegated
+            if role == "approval_card" and delegated:
+                return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
+            if role == "intake_ack" and shown is None and not decision:
+                return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
     if role == "semantic_clarification":
         assert intake is not None
         raw_id = item.payload.get("interpretation_id")

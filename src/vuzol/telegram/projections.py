@@ -1097,6 +1097,9 @@ def _dependency_approval_fact_lines(
     return lines
 
 
+LEAD_ACCEPTS_LINE = "Результат проверяет руководитель. От тебя ничего не нужно."
+
+
 def _approval_buttons(approval: Approval) -> tuple[str, ...]:
     return (
         ("approve", "reject")
@@ -2144,8 +2147,18 @@ async def build_status_card(
         buttons = ()
     elif approval is not None and step is not None:
         envelope = verified_envelope(step, approval)
-        lines.extend(("", *_approval_fact_lines(envelope, approval.human_summary)))
+        facts = _approval_fact_lines(envelope, approval.human_summary)
         buttons = _approval_buttons(approval)
+        if lead_task and approval.requested_action == "apply_result":
+            from vuzol.leadership.persistence import ManagedGoal, lead_accepts_results
+
+            assert package is not None
+            goal = await session.get(ManagedGoal, package.managed_goal_id)
+            if goal is not None and await lead_accepts_results(session, goal):
+                # The owner accepts the whole goal at its end, not every step.
+                facts = [*facts[:-2], "", LEAD_ACCEPTS_LINE]
+                buttons = ()
+        lines.extend(("", *facts))
     else:
         buttons = (
             ("start",)

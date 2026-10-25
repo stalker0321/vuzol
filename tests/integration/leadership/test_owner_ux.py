@@ -485,14 +485,58 @@ async def test_waiting_lead_wait_keeps_plan_approval_and_approval_always_resumes
             assert goal.lifecycle == "active" and goal.waiting_reason is None
 
 
-async def test_shown_lead_task_card_follows_the_task_after_the_decision(postgres_dsn, runtime):
-    """Live pilot 2026-10-24: a lead task's result card kept its "Принять" buttons after the
-    lead accepted the result, and pressing it only said the action was unavailable."""
+async def test_delegated_item_results_send_the_owner_no_card(postgres_dsn, runtime):
+    """Live pilot 2026-10-25: the owner had to accept each item; the lead accepts items
+    and the owner the goal."""
     import uuid
 
     from tests.integration.leadership.planning_helpers import seed_plan
     from tests.integration.leadership.test_plan_revisions import start
 
+    from vuzol.storage.models import Task
+    from vuzol.storage.types import TaskStatus
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": plan_items(1)})
+        started = await start(factory, goal_id)
+        task_id = uuid.UUID(started.result["task_id"])
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id, with_for_update=True)
+            task.status = TaskStatus.WAITING_APPROVAL
+            task.version += 1
+            session.add(
+                TransactionalOutbox(
+                    destination="telegram",
+                    operation_type="send_message",
+                    linked_entity_type="task",
+                    linked_entity_id=task_id,
+                    idempotency_key=f"card:{uuid.uuid4()}",
+                    payload={"role": "intake_ack", "task_id": str(task_id)},
+                )
+            )
+        await drain(factory, client)
+        async with factory() as session:
+            assert not await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.task_id == task_id,
+                    TelegramMessageLink.message_role == "task_status",
+                )
+            )
+
+
+async def test_shown_lead_task_card_follows_the_task_after_the_decision(postgres_dsn, runtime):
+    """Live pilot 2026-10-24: a lead task's result card kept its "Принять" buttons after the
+    lead accepted the result, and pressing it only said the action was unavailable.
+    Here the owner kept item acceptance, so the card asks them."""
+    import uuid
+
+    from tests.integration.leadership.planning_helpers import seed_plan
+    from tests.integration.leadership.test_plan_revisions import start
+
+    from vuzol.leadership.persistence import GoalDelegation
     from vuzol.storage.models import Task
     from vuzol.storage.types import TaskStatus
 
@@ -518,6 +562,14 @@ async def test_shown_lead_task_card_follows_the_task_after_the_decision(postgres
         started = await start(factory, goal_id)
         assert started.status == "applied"
         task_id = uuid.UUID(started.result["task_id"])
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            delegation = await session.get(GoalDelegation, goal.delegation_id)
+            delegation.allowed_actions = [
+                action
+                for action in delegation.allowed_actions
+                if action not in {"accept_result", "apply_integration"}
+            ]
         client = FakeTelegramClient()
         await drain(factory, client)
         await card(task_id, TaskStatus.EXECUTING)

@@ -290,22 +290,33 @@ async def test_plan_decision_resolves_or_supersedes_attention(postgres_dsn, topi
 
 
 @pytest.mark.parametrize(
-    "status",
+    ("status", "delegated"),
     [
-        TaskStatus.WAITING_APPROVAL,
-        TaskStatus.FAILED,
-        TaskStatus.BLOCKED,
-        TaskStatus.QUOTA_EXHAUSTED,
+        (TaskStatus.WAITING_APPROVAL, False),
+        (TaskStatus.WAITING_APPROVAL, True),
+        (TaskStatus.FAILED, True),
+        (TaskStatus.BLOCKED, True),
+        (TaskStatus.QUOTA_EXHAUSTED, True),
     ],
 )
 async def test_managed_task_events_resolve_on_resume_without_legacy_duplicates(
-    postgres_dsn, topics, status
+    postgres_dsn, topics, status, delegated
 ):
     from tests.integration.leadership.planning_helpers import seed_plan
+    from vuzol.leadership.persistence import GoalDelegation
 
     async with _factory(postgres_dsn) as factory:
         goal_id = await seed(factory)
         await seed_plan(factory, goal_id, {"plan": plan_items(1)})
+        if not delegated:
+            async with factory.begin() as session:
+                goal = await session.get(ManagedGoal, goal_id)
+                grant = await session.get(GoalDelegation, goal.delegation_id)
+                grant.allowed_actions = [
+                    action
+                    for action in grant.allowed_actions
+                    if action not in {"accept_result", "apply_integration"}
+                ]
         async with UnitOfWork(factory) as uow:
             goal = await uow.session.get(ManagedGoal, goal_id)
             package = await uow.session.get(WorkPackage, goal.current_package_id)
@@ -340,6 +351,10 @@ async def test_managed_task_events_resolve_on_resume_without_legacy_duplicates(
             await publish_task_event(uow.session, task)
             task.version += 1
             await publish_task_event(uow.session, task)
+            if status is TaskStatus.WAITING_APPROVAL and delegated:
+                # The lead accepts delegated items; the owner gets nothing to decide.
+                assert await attention_rows(uow.session) == []
+                return
             assert len(await attention_rows(uow.session)) == 1
             task_id = task.id
         client = FakeTelegramClient()

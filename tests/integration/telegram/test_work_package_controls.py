@@ -199,7 +199,14 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
         )
     )
     assert first.status is IngressStatus.HANDLED and first.reason == "applied"
-    assert stale.status is IngressStatus.REJECTED and stale.reason == "invalid_transition"
+    # An outdated press brings the current card down instead of a bare refusal.
+    assert stale.status is IngressStatus.REJECTED and stale.reason == "stale_card_reposted"
+    async with factory() as session:
+        assert await session.scalar(
+            select(TransactionalOutbox.id).where(
+                TransactionalOutbox.idempotency_key == "wp:repost:stale:wp-approve-stale"
+            )
+        )
     assert stale_open.status is IngressStatus.HANDLED and stale_open.reason == "render_detail"
     async with factory() as session:
         package = await session.get(WorkPackage, result.package_id)

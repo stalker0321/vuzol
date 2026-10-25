@@ -69,9 +69,12 @@ def test_callback_answer_explains_discussion_mode_and_rejections() -> None:
         IngressResult(status=IngressStatus.HANDLED, reason="continue_discussion")
     ) == ("Напишите следующим сообщением, что хотите обсудить.", False)
     assert _callback_answer(IngressResult(status=IngressStatus.REJECTED)) == (
-        "Действие уже недоступно. Обновите карточку.",
+        "Эта кнопка устарела: состояние уже изменилось.",
         True,
     )
+    assert _callback_answer(
+        IngressResult(status=IngressStatus.REJECTED, reason="stale_card_reposted")
+    ) == ("Эта карточка устарела. Актуальная карточка — внизу чата.", True)
     assert _callback_answer(
         IngressResult(
             status=IngressStatus.REJECTED,
@@ -613,3 +616,31 @@ def test_handoff_keyboard_edit_is_idempotent_and_keeps_answer_text() -> None:
             await client.edit_reply_markup(chat_id=-100, message_id=17, callback_buttons=buttons)
 
     asyncio.run(scenario())
+
+
+def test_every_accepted_press_says_what_it_did() -> None:
+    """Live pilot 2026-10-25: a successful press only stopped the spinner."""
+    from vuzol.telegram.adapter import _done_answer
+
+    package = WorkPackageControlUpdate(
+        bot_id="main",
+        update_id=1,
+        callback_query_id="q",
+        callback_data="v1:wp:R:0123456789abcdef0123456789abcdef:3:abcdef01:3",
+        chat_id=-100,
+        message_id=7,
+        user_id=42,
+        message_thread_id=9,
+    )
+    assert _done_answer(package) == (
+        "🔁 Повторяю пункт. Карточка обновится, когда он начнёт работу."
+    )
+    task = ControlUpdate(
+        bot_id="main",
+        update_id=2,
+        callback_query_id="q2",
+        chat_id=-100,
+        user_id=42,
+        action_kind="pause",
+    )
+    assert _done_answer(task) == "⏸ Ставлю на паузу."

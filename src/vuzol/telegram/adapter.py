@@ -73,6 +73,41 @@ class CommittingUpdateQueue(asyncio.Queue[object]):
                 delay = min(delay * 2, 5.0)
 
 
+_PACKAGE_DONE = {
+    "A": "✅ План принят. Запускаю первый пункт.",
+    "S": "▶️ Запускаю.",
+    "D": "🗑 План отклонён.",
+    "R": "🔁 Повторяю пункт. Карточка обновится, когда он начнёт работу.",
+    "N": "⏭ Пункт пропущен.",
+    "X": "⏹ Останавливаю после текущего шага.",
+    "Z": "✅ Работа по плану завершена.",
+    "Y": "🔁 Запускаю план заново.",
+    "T": "✅ Результат принят.",
+    "J": "↩️ Результат отклонён.",
+}
+_TASK_DONE = {
+    "start": "▶️ Запускаю.",
+    "pause": "⏸ Ставлю на паузу.",
+    "resume": "▶️ Продолжаю.",
+    "cancel": "⏹ Отменяю задачу.",
+    "retry": "🔁 Повторяю шаг.",
+    "admit": "✅ Записал.",
+    "uncertain": "✅ Записал.",
+    "criterion": "✅ Записал.",
+    "lead_resume": "▶️ Лид продолжает работу.",
+    "lead_cancel": "⏹ Цель отменена.",
+    "lead_answer": "✅ Ответ передан лиду.",
+}
+
+
+def _done_answer(update: ControlUpdate | WorkPackageControlUpdate) -> str | None:
+    """Every accepted press says what it did: a silent spinner reads as nothing happened."""
+    if isinstance(update, WorkPackageControlUpdate):
+        parts = update.callback_data.split(":")
+        return _PACKAGE_DONE.get(parts[2]) if len(parts) > 2 else None
+    return _TASK_DONE.get(update.action_kind or "")
+
+
 def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
     chat_messages = {
         "think_handoff_sent": "Передано лиду",
@@ -113,7 +148,9 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
     if result is not None and result.status is IngressStatus.REJECTED:
         if result.reason == "item_not_safely_retryable":
             return "Повтор недоступен для текущего состояния задачи.", True
-        return "Действие уже недоступно. Обновите карточку.", True
+        if result.reason == "stale_card_reposted":
+            return "Эта карточка устарела. Актуальная карточка — внизу чата.", True
+        return "Эта кнопка устарела: состояние уже изменилось.", True
     if result is not None and result.reason == "change_plan":
         return "Ответь на карточку плана: что нужно изменить?", True
     if result is not None and result.reason == "continue_discussion":
@@ -812,6 +849,8 @@ async def dispatch_update(
         if converted is not None:
             result = await on_control(converted)
             text, show_alert = _callback_answer(result)
+            if text is None and result is not None and result.status is IngressStatus.HANDLED:
+                text = _done_answer(converted)
             try:
                 await query.answer(text=text, show_alert=show_alert)
             except TelegramError:

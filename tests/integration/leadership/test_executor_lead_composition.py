@@ -21,10 +21,11 @@ from vuzol.config.models import ProviderRole
 from vuzol.config.registries import ProfileRegistry
 from vuzol.config.settings import ProjectLeadSettings
 from vuzol.leadership.persistence import LeadershipInference, ManagedGoal
+from vuzol.leadership.retrospective import DESTINATION, enqueue_retrospective
 from vuzol.providers.account_persistence import ProviderAccountLease
 from vuzol.providers.ports import CodexProcessResult
-from vuzol.storage.models import SupervisedProcess, Task, UsageRecord
-from vuzol.storage.types import ProcessOutcome, ProcessStatus
+from vuzol.storage.models import SupervisedProcess, Task, TransactionalOutbox, UsageRecord
+from vuzol.storage.types import DeliveryStatus, ProcessOutcome, ProcessStatus
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
@@ -36,12 +37,14 @@ def anyio_backend():
 
 @pytest.mark.parametrize("reasoning_effort", [None, "high"])
 @pytest.mark.parametrize("invalid", [False, True])
+@pytest.mark.parametrize("retrospective", [False, True])
 async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
     postgres_dsn,
     tmp_path,
     monkeypatch,
     reasoning_effort,
     invalid,
+    retrospective,
 ):
     monkeypatch.delenv("VUZOL_TEST_DATABASE_DSN", raising=False)
     repository = tmp_path / "repositories" / PROJECT
@@ -114,14 +117,20 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             assert body["role"] == "lead"
             assert "owner_user_id" not in envelope.stdin
             invocations.append(envelope)
+            if retrospective:
+                answer = {
+                    "decisions": [],
+                    "summary": "Итоги цели.",
+                    "notebook": "private-invalid-value" if invalid else [],
+                }
+            else:
+                answer = {"commands": "private-invalid-value" if invalid else [], "reply": ""}
             message = {
                 "role": "assistant",
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"commands":"private-invalid-value","reply":""}'
-                        if invalid
-                        else '{"commands":[],"reply":""}',
+                        "text": json.dumps(answer),
                     }
                 ],
                 "stopReason": "stop",
@@ -157,10 +166,25 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
         assert processor._reviews is not None
         assert processor._lead is not None
         assert await processor.process_one()
+        if retrospective:
+            # The terminal goal's old lead wakeup is acknowledged first.
+            assert await processor.process_one()
 
     monkeypatch.setattr(executor, "_run_loop", one_turn)
     async with _factory(postgres_dsn) as factory:
-        await _enable(factory, await _session(factory))
+        goal_id = await _enable(factory, await _session(factory))
+        if retrospective:
+            async with factory.begin() as session:
+                goal = await session.get(ManagedGoal, goal_id)
+                goal.lifecycle = "completed"
+                goal.constraints = {
+                    **goal.constraints,
+                    "owner_acceptance": {
+                        "commit": "a" * 40,
+                        "branch": "main",
+                    },
+                }
+                await enqueue_retrospective(session, goal, outcome="accepted")
         await executor.run()
         assert len(invocations) == len(cleaned) == 1
         async with factory() as session:
@@ -169,7 +193,18 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             goal = await session.scalar(select(ManagedGoal))
             usage = await session.scalar(select(UsageRecord))
             # A malformed answer gets one fresh turn before the goal parks.
-            assert goal.waiting_reason == (None if invalid else "model_idle")
+            assert goal.waiting_reason == (None if invalid or retrospective else "model_idle")
+            if retrospective:
+                assert goal.version == goal.fence_epoch == 1
+                assert usage.purpose == "lead_retrospective"
+                job = await session.scalar(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.destination == DESTINATION
+                    )
+                )
+                assert job.status == (
+                    DeliveryStatus.PENDING if invalid else DeliveryStatus.DELIVERED
+                )
             assert process.status is ProcessStatus.EXITED
             assert process.outcome is ProcessOutcome.SUCCEEDED
             assert process.reaped_at is not None
@@ -177,9 +212,8 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             assert phase.state == "received"
             if invalid:
                 assert phase.result["failure"]["category"] == "invalid_structured_output"
-                assert (
-                    phase.result["failure"]["diagnostic"]["schema_path"]
-                    == "properties/commands/type"
+                assert phase.result["failure"]["diagnostic"]["schema_path"] == (
+                    "properties/notebook/type" if retrospective else "properties/commands/type"
                 )
                 assert "private-invalid-value" not in json.dumps(phase.result)
                 assert usage.outcome == "failed" and usage.input_tokens == 50

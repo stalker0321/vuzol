@@ -547,6 +547,8 @@ def recovered_turn_binding(
         raise ValueError("missing turn launch owner")
     if type(payload.get("conversational", False)) is not bool:
         raise ValueError("malformed recovered turn conversational binding")
+    if type(payload.get("retrospective", False)) is not bool:
+        raise ValueError("malformed recovered turn retrospective binding")
     context = TurnInvocationContext(
         claim=TurnClaim(
             goal_id=uuid.UUID(payload["goal_id"]),
@@ -561,6 +563,7 @@ def recovered_turn_binding(
         fence_epoch=payload["fence_epoch"],
         scope_revision=payload["scope_revision"],
         conversational=payload.get("conversational", False),
+        retrospective=payload.get("retrospective", False),
         enabled=enabled,
     )
     envelope = ProcessEnvelope.model_validate(

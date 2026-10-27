@@ -855,7 +855,7 @@ class MemoryUnit(IdentityMixin, TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint(
             "unit_type IN ('decision_template', 'outcome_template', 'observation', 'lesson', "
-            "'notebook_note')",
+            "'notebook_note', 'decision_entry')",
             name="memory_unit_type_bounded",
         ),
         CheckConstraint(
@@ -869,6 +869,10 @@ class MemoryUnit(IdentityMixin, TimestampMixin, Base):
             name="memory_unit_notebook_bounded",
         ),
         CheckConstraint("char_length(text) BETWEEN 1 AND 4000", name="memory_unit_text_bounded"),
+        CheckConstraint(
+            "unit_type <> 'decision_entry' OR scope = 'project'",
+            name="memory_unit_decision_scope",
+        ),
         CheckConstraint(
             "char_length(extraction_identity) BETWEEN 1 AND 255",
             name="memory_unit_extraction_identity_bounded",
@@ -901,6 +905,7 @@ class MemoryUnit(IdentityMixin, TimestampMixin, Base):
         ForeignKey("managed_goals.id", ondelete="RESTRICT")
     )
     unit_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     status: Mapped[MemoryUnitStatus] = mapped_column(
         enum_type(MemoryUnitStatus, "memory_unit_status"),
         nullable=False,

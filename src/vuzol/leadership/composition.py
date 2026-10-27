@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -17,6 +18,8 @@ from vuzol.leadership.invocation_context import current_turn, invocation_current
 from vuzol.leadership.model import LeadDecision, LeadModelUnavailable, LeadSnapshot
 from vuzol.leadership.persistence import LeadershipTurn
 from vuzol.leadership.provider_model import ProviderLeadModel
+from vuzol.leadership.retrospective import GoalRetrospectiveConsumer
+from vuzol.leadership.retrospective_model import RetrospectiveResponse, generate_retrospective
 from vuzol.leadership.verification import GoalVerifier
 from vuzol.leadership.worker import ProjectLeadWorker
 from vuzol.projects.model_matrix import SLOT_ROLES, ModelAssignment, assignment_snapshot
@@ -62,6 +65,31 @@ def build_project_lead_worker(
         default_branches=default_branches,
         repository_paths=repository_paths,
         verifier=selection,
+    )
+
+
+def build_goal_retrospective_worker(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    settings: Settings,
+    profiles: ProfileRegistry,
+    owner: str,
+    adapter: ProviderAdapter | None = None,
+    adapter_registry: AdapterRegistry | None = None,
+) -> GoalRetrospectiveConsumer:
+    return GoalRetrospectiveConsumer(
+        session_factory,
+        owner=owner,
+        model=_TurnModels(
+            session_factory, settings, profiles, adapter, adapter_registry, None, None, None
+        ),
+        enabled=lambda: settings.project_lead.enabled,
+        timeout_seconds=settings.project_lead.inference_timeout_seconds,
+        # A model outage lasts minutes to hours (2026-10-27: ~40 minutes); back off for
+        # about two hours in total before giving the retrospective up.
+        max_attempts=8,
+        retry_min_seconds=60,
+        retry_max_seconds=3600,
     )
 
 
@@ -126,6 +154,23 @@ class _TurnModels:
                 slot: ModelAssignment.model_validate(raw)
                 for slot, raw in turn.model_assignments.items()
             }
+
+    async def retrospect(
+        self, project_id: str, context: dict[str, Any], *, invocation_id: uuid.UUID
+    ) -> RetrospectiveResponse:
+        pins = await self._pins()
+        if "lead" not in pins:
+            raise LeadModelUnavailable("lead_profile_unselected")
+        profile, adapter = self._resolve(pins["lead"], "lead")
+        return await generate_retrospective(
+            self._factory,
+            profile,
+            adapter,
+            context,
+            invocation_id=invocation_id,
+            limits=self._settings.limits,
+            timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
+        )
 
     def _resolve(
         self, pin: ModelAssignment, slot: str

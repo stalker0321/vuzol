@@ -14,6 +14,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vuzol.cli.worker import ProcessorChain
 from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
 from vuzol.config.models import SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
@@ -37,8 +38,7 @@ from vuzol.execution.result_validation import ResultValidationHandler
 from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
-from vuzol.leadership.composition import build_project_lead_worker
-from vuzol.leadership.worker import ProjectLeadWorker
+from vuzol.leadership.composition import build_goal_retrospective_worker, build_project_lead_worker
 from vuzol.observability import configure_logging, get_logger
 from vuzol.projects.capability_provisioning import (
     CapabilityProvisioningHandler,
@@ -79,7 +79,7 @@ class ExecutorChain:
         worktrees: WorkflowWorker,
         providers: RoutedWorkflowWorker,
         reviews: WorkflowWorker | None = None,
-        lead: ProjectLeadWorker | None = None,
+        lead: ExecutorLane | None = None,
         recovery: Callable[[], Awaitable[None]] | None = None,
         *,
         control: ExecutorLane | None = None,
@@ -407,18 +407,27 @@ async def run() -> None:
             profile_limits={p.id: p.concurrency_limit for p in runtime.registries.profiles.items()},
         )
         lead_worker = (
-            build_project_lead_worker(
-                factory,
-                settings=settings,
-                profiles=runtime.registries.profiles,
-                owner=f"{owner}:project-lead",
-                default_branches={
-                    p.id: p.default_branch for p in runtime.registries.projects.items()
-                },
-                repository_paths={
-                    p.id: p.repository_path for p in runtime.registries.projects.items()
-                },
-                adapter_registry=adapter_registry,
+            ProcessorChain(
+                build_project_lead_worker(
+                    factory,
+                    settings=settings,
+                    profiles=runtime.registries.profiles,
+                    owner=f"{owner}:project-lead",
+                    default_branches={
+                        p.id: p.default_branch for p in runtime.registries.projects.items()
+                    },
+                    repository_paths={
+                        p.id: p.repository_path for p in runtime.registries.projects.items()
+                    },
+                    adapter_registry=adapter_registry,
+                ),
+                build_goal_retrospective_worker(
+                    factory,
+                    settings=settings,
+                    profiles=runtime.registries.profiles,
+                    owner=f"{owner}:retrospective",
+                    adapter_registry=adapter_registry,
+                ),
             )
             if settings.project_lead.enabled
             else None

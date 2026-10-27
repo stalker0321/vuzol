@@ -125,6 +125,9 @@ async def accept_goal(session: AsyncSession, goal: ManagedGoal, *, user_id: int)
             payload={"commit": head, "branch": branch, "fast_forward": outcome},
         )
     )
+    from vuzol.leadership.retrospective import enqueue_retrospective
+
+    await enqueue_retrospective(session, goal, outcome="accepted")
     return "accepted"
 
 

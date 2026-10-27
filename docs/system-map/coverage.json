@@ -620,7 +620,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_refresh_subscription_limits_tick",
       "sources": [
-        "src/vuzol/cli/executor.py:454"
+        "src/vuzol/cli/executor.py:463"
       ],
       "producers": [],
       "consumers": [],
@@ -629,7 +629,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_run_loop",
       "sources": [
-        "src/vuzol/cli/executor.py:533"
+        "src/vuzol/cli/executor.py:542"
       ],
       "producers": [],
       "consumers": [],
@@ -638,7 +638,7 @@
     {
       "id": "job:src/vuzol/cli/worker.py:_recovery_loop",
       "sources": [
-        "src/vuzol/cli/worker.py:312"
+        "src/vuzol/cli/worker.py:326"
       ],
       "producers": [],
       "consumers": [],
@@ -872,7 +872,7 @@
     {
       "id": "module:vuzol.cli.worker",
       "sources": [
-        "src/vuzol/cli/worker.py:69"
+        "src/vuzol/cli/worker.py:70"
       ],
       "producers": [],
       "consumers": [],
@@ -896,9 +896,18 @@
         "src/vuzol/leadership/acceptance.py:50"
       ],
       "consumers": [
-        "src/vuzol/leadership/acceptance.py:195"
+        "src/vuzol/leadership/acceptance.py:198"
       ],
       "scenario": "goal"
+    },
+    {
+      "id": "outbox:goal_retrospective",
+      "sources": [],
+      "producers": [],
+      "consumers": [
+        "src/vuzol/leadership/retrospective.py:193"
+      ],
+      "scenario": "lead-retrospective"
     },
     {
       "id": "outbox:interpretation",
@@ -933,7 +942,7 @@
         "src/vuzol/leadership/planning.py:472",
         "src/vuzol/leadership/wakeups.py:52",
         "src/vuzol/leadership/wakeups.py:102",
-        "src/vuzol/leadership/worker.py:913",
+        "src/vuzol/leadership/worker.py:929",
         "src/vuzol/workflows/lead_events.py:104",
         "src/vuzol/workflows/lead_events.py:130",
         "src/vuzol/workflows/lead_events.py:206"
@@ -962,7 +971,7 @@
         "src/vuzol/telegram/ingress.py:1095"
       ],
       "consumers": [
-        "src/vuzol/cli/executor.py:478"
+        "src/vuzol/cli/executor.py:487"
       ],
       "scenario": "accounts"
     },
@@ -1051,7 +1060,7 @@
         "src/vuzol/discussion/sequencer.py:680",
         "src/vuzol/discussion/service.py:1155",
         "src/vuzol/discussion/service.py:1288",
-        "src/vuzol/leadership/service.py:1078",
+        "src/vuzol/leadership/service.py:1084",
         "src/vuzol/telegram/controls.py:535",
         "src/vuzol/telegram/controls.py:647",
         "src/vuzol/telegram/ingress.py:1303",

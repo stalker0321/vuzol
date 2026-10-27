@@ -21,7 +21,14 @@ MEMORY_DESTINATION = "memory_extract"
 MEMORY_EXTRACT_OPERATION = "extract_memory_unit"
 
 UNIT_TYPES = frozenset(
-    {"decision_template", "outcome_template", "observation", "lesson", "notebook_note"}
+    {
+        "decision_template",
+        "outcome_template",
+        "observation",
+        "lesson",
+        "notebook_note",
+        "decision_entry",
+    }
 )
 
 RECALLABLE_STATUSES = frozenset({MemoryUnitStatus.OBSERVATION, MemoryUnitStatus.VERIFIED})

@@ -439,7 +439,7 @@ async def test_applier_composes_narrow_control_and_privileged_worker(
     migration_head.assert_awaited()
     controls.process_one.assert_awaited_once()
     worker.process_one.assert_awaited_once()
-    assert "acceptance" in worker_constructor.call_args.kwargs["handlers"]
+    assert "acceptance" not in worker_constructor.call_args.kwargs["handlers"]
     capability_handler = worker_constructor.call_args.kwargs["handlers"]["ensure_capabilities"]
     assert capability_handler._apply_access_check is not None
     assert capability_handler._apply_access_check.__name__ == "require_apply_access"

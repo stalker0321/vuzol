@@ -58,10 +58,6 @@ _TELEGRAM_OWNER_ACTIONS = {
         "accept_uncertainty",
         "owner accepted the current unknown cost from the status card",
     ),
-    "criterion": (
-        "accept_criterion",
-        "owner confirmed the unproven criterion from the status card",
-    ),
 }
 
 
@@ -153,7 +149,7 @@ class WorkflowControlConsumer:
                 deciding_user_id=action.requested_by_user_id,
             )
             return
-        if action.action_kind in {"retry", "admit", "uncertain", "criterion"}:
+        if action.action_kind in {"retry", "admit", "uncertain"}:
             if action.step_id is None:
                 raise ValueError("retry requires a step target")
             if action.status is not ControlActionStatus.QUEUED:
@@ -186,7 +182,6 @@ class WorkflowControlConsumer:
                 from vuzol.workflows.application import OwnerDecision
 
                 command, reason = _TELEGRAM_OWNER_ACTIONS[action.action_kind]
-                token = action.payload.get("criterion_token")
                 result = await apply_task_command(
                     session,
                     task_id=target_task_id,
@@ -194,10 +189,7 @@ class WorkflowControlConsumer:
                     principal=Principal(action.requested_by_user_id, "telegram"),
                     expected_task_version=version,
                     step_id=action.step_id,
-                    decision=OwnerDecision(
-                        reason=reason,
-                        criterion_token=token if isinstance(token, str) else None,
-                    ),
+                    decision=OwnerDecision(reason=reason),
                 )
             action.payload = {**action.payload, "outcome": _command_outcome(result)}
             return
@@ -374,7 +366,7 @@ async def decide_result(
         event_type = f"{installation_event}.rejected" if installation_action else "result.rejected"
         # D2 L6: a rejected final approval leaves a durable corrective trace
         # instead of silent cancellation.
-        from vuzol.workflows.acceptance import record_corrective_signal
+        from vuzol.workflows.corrective import record_corrective_signal
 
         await record_corrective_signal(
             session,
@@ -775,7 +767,6 @@ async def recover_unsent_cli_review(
                 "produce_artifacts",
                 "build_static",
                 "publish_preview",
-                "acceptance",
                 "approval",
                 "apply_result",
                 "publish_static",

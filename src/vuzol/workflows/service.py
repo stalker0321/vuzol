@@ -1074,7 +1074,7 @@ async def _block_for_attention(session: AsyncSession, run: Run, step: Step) -> N
     # D2 L6: blocking without a durable corrective trace is forbidden — the
     # Event + projection row below is the job record; bounded repair already
     # ran (or was inapplicable) before this call.
-    from vuzol.workflows.acceptance import record_corrective_signal
+    from vuzol.workflows.corrective import record_corrective_signal
 
     await record_corrective_signal(
         session,

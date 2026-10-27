@@ -1,4 +1,4 @@
-"""Fixed change/report chains and stored coding-v4 with real lifecycle handlers.
+"""Fixed change/report chains and stored coding-v3 with real lifecycle handlers.
 
 No production DB, model calls, Telegram writes or external publication. The
 fixture is deliberately docs-only: trusted sandbox gates have separate tests.
@@ -72,7 +72,7 @@ from vuzol.workflows.worker import BASE_INTERNAL_HANDLERS, WorkflowWorker
 pytestmark = pytest.mark.postgresql
 
 
-@pytest.mark.parametrize("kind", ["fixed", "coding.v4", "report"])
+@pytest.mark.parametrize("kind", ["fixed", "coding.v3", "report"])
 def test_real_handlers_wait_for_approval_then_finish(
     postgres_dsn: str, tmp_path: Path, kind: str
 ) -> None:
@@ -155,8 +155,12 @@ def test_real_handlers_wait_for_approval_then_finish(
             run = await materialize_run(
                 session,
                 task_id=task_id,
-                workflow=(stored_workflow if kind == "coding.v4" else compile_workflow)(
-                    draft, interpretation_id=interpretation_id
+                workflow=(
+                    stored_workflow(
+                        draft, interpretation_id=interpretation_id, configured_workflow=kind
+                    )
+                    if kind == "coding.v3"
+                    else compile_workflow(draft, interpretation_id=interpretation_id)
                 ),
                 configuration_revision=runtime.registries.revision,
                 policy_revision="b" * 64,
@@ -355,7 +359,7 @@ def test_real_handlers_wait_for_approval_then_finish(
                         and env.source == "detected"
                         and env.contract["components"] == {}
                     )
-                if kind != "coding.v4":
+                if kind != "coding.v3":
                     assert all(
                         s.step_type not in {"plan", "acceptance", "publish_preview"} for s in steps
                     )

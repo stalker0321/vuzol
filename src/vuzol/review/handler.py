@@ -24,9 +24,7 @@ from vuzol.providers.budgets import (
 )
 from vuzol.providers.domain import ContextItem
 from vuzol.review.domain import (
-    ExitCriterionSpec,
     FindingSeverity,
-    PackageReviewContract,
     ReviewFinding,
     ReviewVerdict,
     ReviewVerdictKind,
@@ -64,7 +62,6 @@ class IndependentReviewPort(Protocol):
         cancellation: CancellationContext,
         lease: LeaseToken,
         work_context: tuple[ContextItem, ...] = (),
-        package_contract: PackageReviewContract | None = None,
     ) -> ReviewVerdict: ...
 
 
@@ -255,11 +252,6 @@ class ResultReviewHandler:
             if structured.get("base_commit") != base_commit:
                 raise ValueError("validate base commit does not match retained worktree")
             bound_task = task
-            package_goal: str | None = None
-            goal_revision: int | None = None
-            plan_revision_id: str | None = None
-            criterion_specs: tuple[ExitCriterionSpec, ...] = ()
-            unproven_criteria: tuple[str, ...] = ()
             from vuzol.discussion.work_context import load_work_context
 
             work_context: tuple[ContextItem, ...] = ()
@@ -310,43 +302,6 @@ class ResultReviewHandler:
                     for index, item in enumerate(batch, start=1)
                 )
 
-            from vuzol.storage.models import MaterializationLink, WorkPackage
-            from vuzol.workflows.acceptance import (
-                exit_criterion_specs,
-                load_stored_proofs,
-                unproven_criterion_ids,
-            )
-
-            link = await session.scalar(
-                select(MaterializationLink).where(MaterializationLink.task_id == request.task_id)
-            )
-            if link is not None:
-                package = await session.get(WorkPackage, link.work_package_id)
-                if package is not None:
-                    criterion_specs = exit_criterion_specs(package.exit_criteria)
-                    if isinstance(package.goal, str) and package.goal.strip():
-                        package_goal = package.goal.strip()[:2000]
-                    if isinstance(package.goal_revision, int):
-                        goal_revision = package.goal_revision
-                    plan_revision_id = str(link.plan_revision_id)
-                    if criterion_specs:
-                        proofs = await load_stored_proofs(session, package_id=package.id)
-                        unproven_criteria = unproven_criterion_ids(
-                            result_commit=result_commit,
-                            required_ids=tuple(spec.criterion_id for spec in criterion_specs),
-                            gates=proofs.gates,
-                            findings=proofs.findings,
-                            owner_decisions=proofs.owner_decisions,
-                        )
-        package_contract = None
-        if criterion_specs or package_goal is not None:
-            package_contract = PackageReviewContract(
-                goal=package_goal,
-                goal_revision=goal_revision,
-                plan_revision_id=plan_revision_id,
-                criteria=criterion_specs,
-            )
-
         await self._git.require_clean_worktree(path)
         await self._git.require_no_remotes(path)
         inspection = await self._git.inspect(path, base_commit)
@@ -379,16 +334,8 @@ class ResultReviewHandler:
             )
 
         requires_independent_level = _requires_independent_for(risk, inspection.changed_files)
-        # A mechanical pass cannot prove a goal criterion. Retrying that pass
-        # would stop at acceptance with the same missing evidence.
-        needs_criterion_review = bool(unproven_criteria)
-        if report or requires_independent_level or needs_criterion_review:
+        if report or requires_independent_level:
             if self._independent is None:
-                if needs_criterion_review:
-                    names = ", ".join(unproven_criteria)
-                    raise IndependentReviewError(
-                        "unproven exit criteria require an independent reviewer: " + names
-                    )
                 raise IndependentReviewError(
                     "high or privileged risk requires an independent model reviewer, "
                     "but none is configured on this worker"
@@ -406,7 +353,6 @@ class ResultReviewHandler:
                 timeout_seconds=request.timeout_seconds,
                 cancellation=cancellation,
                 lease=request.lease,
-                package_contract=package_contract,
                 **({"work_context": work_context} if work_context else {}),
             )
             # The result must not mutate mid-review: a changed hash

@@ -1,6 +1,5 @@
 """Structured review verdicts for Step 09."""
 
-from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -21,26 +20,6 @@ class FindingSeverity(StrEnum):
     WARNING = "warning"
     ERROR = "error"
     BLOCKER = "blocker"
-
-
-@dataclass(frozen=True, slots=True)
-class ExitCriterionSpec:
-    """One package criterion, including the words the reviewer has to judge."""
-
-    criterion_id: str
-    statement: str | None = None
-    evidence_kind: str | None = None
-    observable: bool | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PackageReviewContract:
-    """Package goal and criteria bound to the revision under review."""
-
-    goal: str | None
-    goal_revision: int | None
-    plan_revision_id: str | None
-    criteria: tuple[ExitCriterionSpec, ...]
 
 
 class ReviewFinding(FrozenModel):

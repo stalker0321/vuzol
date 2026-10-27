@@ -63,7 +63,7 @@ BINDING_PAIRS: tuple[BindingPair, ...] = (
         slot=SCOUT_SLOT,
     ),
     BindingPair(
-        producers=frozenset({"acceptance", "finalize", "execute_code"}),
+        producers=frozenset({"finalize", "execute_code"}),
         consumers=frozenset({"plan"}),
         slot=TASK_SLOT,
     ),
@@ -144,9 +144,7 @@ def validate_resolved_bindings(resolved: object) -> None:
         schema_name = getattr(binding, "schema_name", "")
         schema_version = getattr(binding, "schema_version", "")
         slot = getattr(binding, "slot", "")
-        check_pair_schema(
-            slot=slot, schema_name=schema_name, schema_version=schema_version
-        )
+        check_pair_schema(slot=slot, schema_name=schema_name, schema_version=schema_version)
         validate_binding_content(
             schema_name=schema_name,
             schema_version=schema_version,

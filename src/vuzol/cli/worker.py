@@ -176,9 +176,6 @@ async def run() -> None:
                 worktree_root=settings.worktree_root,
                 independent_reviewer=independent_reviewer,
             ),
-            # "acceptance" belongs to the applier alone: it owns the artifact
-            # store and the apply boundary. Registering it here as well let
-            # whichever process claimed first run the gate.
         }
         if settings.execution.enabled:
             # All project reviews share one owner, so switching API/CLI cannot

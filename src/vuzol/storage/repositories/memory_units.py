@@ -42,7 +42,6 @@ class MemoryUnitRepository:
         source_event_id: uuid.UUID | None = None,
         source_decision_id: uuid.UUID | None = None,
         source_artifact_id: uuid.UUID | None = None,
-        source_acceptance_evidence_id: uuid.UUID | None = None,
         source_turn_id: uuid.UUID | None = None,
         source_summary_id: uuid.UUID | None = None,
         source_key: str | None = None,
@@ -62,7 +61,6 @@ class MemoryUnitRepository:
                 source_event_id=source_event_id,
                 source_decision_id=source_decision_id,
                 source_artifact_id=source_artifact_id,
-                source_acceptance_evidence_id=source_acceptance_evidence_id,
                 source_turn_id=source_turn_id,
                 source_summary_id=source_summary_id,
                 source_key=source_key,
@@ -157,9 +155,7 @@ class MemoryUnitRepository:
             conditions.append(MemoryUnit.unit_type.in_(sorted(query.unit_types)))
         if query.query is not None:
             conditions.append(
-                MemoryUnit.text_search.op("@@")(
-                    func.plainto_tsquery("simple", query.query)
-                )
+                MemoryUnit.text_search.op("@@")(func.plainto_tsquery("simple", query.query))
             )
         statement = (
             select(MemoryUnit)
@@ -169,9 +165,7 @@ class MemoryUnitRepository:
         )
         return tuple((await self._session.scalars(statement)).all())
 
-    async def active_units_for_decision(
-        self, decision_id: uuid.UUID
-    ) -> tuple[MemoryUnit, ...]:
+    async def active_units_for_decision(self, decision_id: uuid.UUID) -> tuple[MemoryUnit, ...]:
         """Live units derived from one accepted decision (retraction fan-out)."""
 
         from vuzol.discussion.memory_units import RECALLABLE_STATUSES
@@ -182,9 +176,7 @@ class MemoryUnitRepository:
         )
         return tuple((await self._session.scalars(statement)).all())
 
-    async def units_referencing_artifact(
-        self, artifact_id: uuid.UUID
-    ) -> tuple[MemoryUnit, ...]:
+    async def units_referencing_artifact(self, artifact_id: uuid.UUID) -> tuple[MemoryUnit, ...]:
         """Provenance refs pinning an artifact against retention sweep."""
 
         statement = select(MemoryUnit).where(MemoryUnit.source_artifact_id == artifact_id)
@@ -204,13 +196,9 @@ class MemoryUnitRepository:
         }
 
     async def count_all(self) -> int:
-        return int(
-            await self._session.scalar(select(func.count()).select_from(MemoryUnit)) or 0
-        )
+        return int(await self._session.scalar(select(func.count()).select_from(MemoryUnit)) or 0)
 
-    async def units_by_status(
-        self, statuses: Sequence[MemoryUnitStatus]
-    ) -> tuple[MemoryUnit, ...]:
+    async def units_by_status(self, statuses: Sequence[MemoryUnitStatus]) -> tuple[MemoryUnit, ...]:
         statement = select(MemoryUnit).where(
             MemoryUnit.status.in_(tuple(member.value for member in statuses))
         )

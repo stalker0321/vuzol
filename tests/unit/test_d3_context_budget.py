@@ -81,7 +81,6 @@ def test_d3_materializer_rejects_unknown_kind_and_write_intent() -> None:
 def test_d3_purpose_classifies_new_steps_explicitly() -> None:
     """pp.8: new steps never fall silently into default coding."""
 
-    assert purpose_for_step_type("acceptance") == "review"
     assert purpose_for_step_type("scout") == "scout"
     assert purpose_for_step_type("research_execute") == "research"
 

@@ -47,7 +47,6 @@ from vuzol.providers.errors import ProviderFailure
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.review.domain import (
     FindingSeverity,
-    PackageReviewContract,
     ReviewFinding,
     ReviewVerdict,
     ReviewVerdictKind,
@@ -381,7 +380,6 @@ class IndependentModelReviewer:
         cancellation: CancellationContext,
         lease: LeaseToken,
         work_context: tuple[ContextItem, ...] = (),
-        package_contract: PackageReviewContract | None = None,
     ) -> ReviewVerdict:
         from vuzol.review.policy import ReviewLevel, resolve_review_plan
 
@@ -542,7 +540,6 @@ class IndependentModelReviewer:
                 lease=lease,
                 diff_truncated=manifest.partitions[0].diff_truncated,
                 work_context=work_context,
-                package_contract=package_contract,
             )
             return verdict
         return await self._review_partitioned(
@@ -564,7 +561,6 @@ class IndependentModelReviewer:
             cancellation=cancellation,
             lease=lease,
             work_context=work_context,
-            package_contract=package_contract,
         )
 
     async def _review_single_partition(
@@ -590,7 +586,6 @@ class IndependentModelReviewer:
         diff_truncated: bool,
         work_context: tuple[ContextItem, ...] = (),
         call_ordinal: int = 1,
-        package_contract: PackageReviewContract | None = None,
     ) -> ReviewVerdict:
         if len(inspection.changed_files) > _MAX_FILES:
             raise IndependentReviewError(
@@ -623,7 +618,6 @@ class IndependentModelReviewer:
             partition_id=partition_id,
             diff_truncated=diff_truncated,
             work_context=work_context,
-            package_contract=package_contract,
         )
         try:
             reservation = await self._accounting.reserve(request=provider_request, profile=profile)
@@ -700,7 +694,6 @@ class IndependentModelReviewer:
         cancellation: CancellationContext,
         lease: LeaseToken,
         work_context: tuple[ContextItem, ...] = (),
-        package_contract: PackageReviewContract | None = None,
     ) -> ReviewVerdict:
         from vuzol.review.partitions import split_diff_by_file
 
@@ -755,7 +748,6 @@ class IndependentModelReviewer:
                 diff_truncated=partition.diff_truncated,
                 work_context=work_context,
                 call_ordinal=ordinal,
-                package_contract=package_contract,
             )
             unknown_usage = unknown_usage or verdict.unknown_usage
             verdicts.append(verdict)
@@ -1003,7 +995,6 @@ def _build_request(
     partition_id: str | None = None,
     diff_truncated: bool = False,
     work_context: tuple[ContextItem, ...] = (),
-    package_contract: PackageReviewContract | None = None,
 ) -> ProviderRequest:
     files = inspection.changed_files
     diff_text = inspection.diff.decode("utf-8", "replace")
@@ -1016,23 +1007,6 @@ def _build_request(
             break
     if not task_goal and isinstance(task.original_text, str):
         task_goal = task.original_text.strip()[:1_000]
-    package_goal = None if package_contract is None else package_contract.goal
-    goal_revision = None if package_contract is None else package_contract.goal_revision
-    plan_revision_id = None if package_contract is None else package_contract.plan_revision_id
-    criteria_payload: list[dict[str, object]] = []
-    if package_contract is not None:
-        for spec in package_contract.criteria:
-            item: dict[str, object] = {"criterion_id": spec.criterion_id}
-            if spec.statement:
-                item["statement"] = spec.statement
-            if spec.evidence_kind:
-                item["evidence_kind"] = spec.evidence_kind
-            if spec.observable is not None:
-                item["observable"] = spec.observable
-            criteria_payload.append(item)
-    # The package goal is what the criteria belong to. The item goal stays
-    # visible as task_goal and does not replace it.
-    goal = package_goal or task_goal
 
     payload = {
         "instruction": (
@@ -1045,20 +1019,10 @@ def _build_request(
             "retained diff, its practical consequence, and the affected path/line when one "
             "exists. Do not emit generic, hypothetical, best-practice, or 'ensure/consider' "
             "warnings merely because build, deploy, network, or dependency scripts exist. "
-            "When exit_criteria are present, judge each statement against the retained "
-            "diff of result_commit. package_goal and goal_revision are the package being "
-            "checked; task_goal is only this item. A criterion you can observe is a finding "
-            "with classification criterion_pass, criterion_id set to that id, and evidence "
-            "quoting the observation. Do not emit human_accepted: that is an owner action, "
-            "not a model result. A validation gate name is not an exit criterion. Return "
-            "only the required JSON object."
+            "Return only the required JSON object."
         ),
         "risk": risk.value,
-        "goal": goal,
-        "task_goal": task_goal,
-        "package_goal": package_goal,
-        "goal_revision": goal_revision,
-        "plan_revision_id": plan_revision_id,
+        "goal": task_goal,
         "base_commit": base_commit,
         "result_commit": result_commit,
         "diff_hash": diff_hash or inspection.diff_hash,
@@ -1070,7 +1034,6 @@ def _build_request(
         "review_policy_revision": _REVIEW_POLICY_REVISION,
         "partition_id": partition_id,
         "gates": gates[:20],
-        "exit_criteria": criteria_payload,
         "mechanical_findings": [
             finding.model_dump(mode="json") for finding in mechanical_findings[:20]
         ],
@@ -1111,7 +1074,7 @@ def _build_request(
         provider_attempt=provider_attempt,
         role=ProviderRole.REVIEWER,
         original_input_reference=f"task:{task_id}:review",
-        original_input=goal or "independent coding result review",
+        original_input=task_goal or "independent coding result review",
         task_draft={
             "task_type": "coding",
             "suggested_risk": risk.value,

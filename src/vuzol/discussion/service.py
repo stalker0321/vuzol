@@ -85,11 +85,6 @@ class WorkPackageService:
         actor_type: str,
         planner_profile: str | None = None,
         prompt_version: str | None = None,
-        goal: str | None = None,
-        exit_criteria: list[dict[str, object]] | None = None,
-        lifetime_budget: dict[str, object] | None = None,
-        deadline: datetime | None = None,
-        owner: str | None = None,
         managed_goal_id: uuid.UUID | None = None,
         source_repo_commit: str | None = None,
     ) -> RevisionResult:
@@ -112,17 +107,6 @@ class WorkPackageService:
             title=plan.title.strip(),
             managed_goal_id=managed_goal_id,
         )
-        if goal is not None and goal.strip():
-            package.goal = goal.strip()
-            package.goal_revision = 1
-        if exit_criteria is not None:
-            package.exit_criteria = exit_criteria
-        if lifetime_budget is not None:
-            package.lifetime_budget = lifetime_budget
-        if deadline is not None:
-            package.deadline = deadline
-        if owner is not None:
-            package.owner = owner
         package_id = await self._uow.work_packages.add_package(package)
         await self._event(
             package_id,

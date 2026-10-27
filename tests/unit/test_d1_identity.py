@@ -124,8 +124,6 @@ def _running_package(*, cursor: int | None = 1) -> MagicMock:
     package.managed_goal_id = None
     package.version = 3
     package.cursor_ordinal = cursor
-    package.goal = "ship it"
-    package.exit_criteria = None
     package.execution_contract_version = None
     package.intent_revision = None
     return package

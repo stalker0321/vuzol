@@ -76,8 +76,6 @@ class WorkPackageCallbackKind(StrEnum):
     OPEN_ITEM = "I"
     OPEN_EDIT = "E"
     SET_PAGE = "G"
-    ACCEPT_PACKAGE = "T"
-    REJECT_PACKAGE = "J"
 
 
 _VALUE_KINDS = frozenset(

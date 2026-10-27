@@ -451,7 +451,6 @@ _STEP_PURPOSE = {
     "ensure_dependencies": "setup",
     # D3: every routed step type is classified explicitly; the "coding"
     # default below covers only legacy/unknown types, never new steps.
-    "acceptance": "review",
     "scout": "scout",
 }
 

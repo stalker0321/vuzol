@@ -15,6 +15,8 @@ class LeadCommandName(StrEnum):
     GET_PROJECT_STATE = "get_project_state"
     GET_CAPABILITIES = "get_capabilities"
     GET_RESULT = "get_result"
+    REMEMBER = "remember"
+    FORGET = "forget"
     ENABLE_MANAGED_GOAL = "enable_managed_goal"
     SET_WORK_LIMITS = "set_work_limits"
     PROPOSE_BATCH = "propose_batch"
@@ -57,6 +59,10 @@ READ_COMMANDS = frozenset(
         LeadCommandName.GET_RESULT,
     }
 )
+
+MEMORY_COMMANDS = frozenset({LeadCommandName.REMEMBER, LeadCommandName.FORGET})
+MAX_MEMORY_COMMANDS = 3
+
 
 OWNER_ONLY_COMMANDS = frozenset(
     {

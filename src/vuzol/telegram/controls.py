@@ -106,6 +106,22 @@ class TelegramControlService:
 
                 async with UnitOfWork(self._session_factory) as uow:
                     return await accept_think_handoff(uow, self._runtime, update)
+            if update.action_kind == "memory_undo":
+                from vuzol.leadership.telegram_commands import undo_notebook_note
+
+                if update.message_id is None or update.message_thread_id is None:
+                    raise TelegramPolicyError("control_binding_missing")
+                topic = self._runtime.registries.topics.resolve(
+                    update.chat_id, update.message_thread_id
+                )
+                if not topic.enabled or topic.project_id is None:
+                    raise TelegramPolicyError("outside_scope")
+                return await undo_notebook_note(
+                    session_factory=self._session_factory,
+                    settings=self._runtime.settings,
+                    project_id=topic.project_id,
+                    update=update,
+                )
             if update.action_kind in {"lead_resume", "lead_cancel", "lead_accept", "lead_rework"}:
                 from vuzol.leadership.telegram_commands import apply_goal_button
 

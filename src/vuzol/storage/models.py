@@ -43,6 +43,7 @@ from vuzol.storage.types import (
     InboxStatus,
     IntakeStatus,
     InteractionMode,
+    MemoryScope,
     MemoryUnitStatus,
     PlanRevisionCreatedBy,
     PlanRevisionState,
@@ -843,21 +844,29 @@ class AcceptedDecision(IdentityMixin, TimestampMixin, Base):
 
 
 class MemoryUnit(IdentityMixin, TimestampMixin, Base):
-    """Derived memory unit (D5, DELTA §D5).
+    """Derived memory and lead notebook notes with explicit scope and provenance.
 
-    Templates-first store for accepted decisions and verified outcomes plus
-    explicitly recorded hypotheses/observations. Only scenarios NOT covered
-    by AcceptedDecision rows and ConversationSummary get their own units;
-    existing decisions are referenced (source_decision_id), never copied as
-    a second authoritative string. Async writer output only — never written
-    on the task/plan completion path. Legacy: no rows (table is new in D5).
+    Derived units reference accepted decisions rather than duplicating their
+    authority. Notebook notes are curated by the lead through command receipts.
+    Both retain supersession/retraction history.
     """
 
     __tablename__ = "memory_units"
     __table_args__ = (
         CheckConstraint(
-            "unit_type IN ('decision_template', 'outcome_template', 'observation', 'lesson')",
+            "unit_type IN ('decision_template', 'outcome_template', 'observation', 'lesson', "
+            "'notebook_note')",
             name="memory_unit_type_bounded",
+        ),
+        CheckConstraint(
+            "(scope = 'project' AND project_id IS NOT NULL) OR "
+            "(scope IN ('session', 'global') AND project_id IS NULL)",
+            name="memory_unit_scope_project",
+        ),
+        CheckConstraint(
+            "unit_type <> 'notebook_note' OR "
+            "(scope IN ('project', 'global') AND char_length(text) <= 600)",
+            name="memory_unit_notebook_bounded",
         ),
         CheckConstraint("char_length(text) BETWEEN 1 AND 4000", name="memory_unit_text_bounded"),
         CheckConstraint(
@@ -884,6 +893,12 @@ class MemoryUnit(IdentityMixin, TimestampMixin, Base):
     project_id: Mapped[str | None] = mapped_column(String(100), index=True)
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("project_discussion_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    scope: Mapped[MemoryScope] = mapped_column(
+        enum_type(MemoryScope, "memory_scope", length=30), nullable=False
+    )
+    goal_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("managed_goals.id", ondelete="RESTRICT")
     )
     unit_type: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[MemoryUnitStatus] = mapped_column(

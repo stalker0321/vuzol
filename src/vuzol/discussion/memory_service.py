@@ -37,6 +37,7 @@ from vuzol.storage.types import (
     ConversationTurnRole,
     ConversationTurnSource,
     InteractionMode,
+    MemoryScope,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 
@@ -254,10 +255,21 @@ class DiscussionMemoryService:
         if not chat_memory:
             return pack
         relevant = await self._uow.memory_units.recall(
-            RecallQuery(project_id=discussion.project_id, query=query, limit=5)
+            RecallQuery(
+                scope=MemoryScope.PROJECT if discussion.project_id else MemoryScope.SESSION,
+                project_id=discussion.project_id,
+                session_id=session_id,
+                query=query,
+                limit=5,
+            )
         )
         recent = await self._uow.memory_units.recall(
-            RecallQuery(project_id=discussion.project_id, limit=5)
+            RecallQuery(
+                scope=MemoryScope.PROJECT if discussion.project_id else MemoryScope.SESSION,
+                project_id=discussion.project_id,
+                session_id=session_id,
+                limit=5,
+            )
         )
         recalled: list[RecalledMemory] = []
         seen: set[uuid.UUID] = set()

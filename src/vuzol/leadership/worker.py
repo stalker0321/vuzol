@@ -569,6 +569,13 @@ class ProjectLeadWorker:
                         for t in reversed(prior_turns)
                     ]
 
+            from vuzol.leadership.notebooks import note_view
+            from vuzol.storage.types import MemoryScope
+
+            project_notebook = await uow.memory_units.notebook(
+                scope=MemoryScope.PROJECT, project_id=goal.project_id
+            )
+            global_notebook = await uow.memory_units.notebook(scope=MemoryScope.GLOBAL)
             return LeadSnapshot(
                 goal_id=goal.id,
                 project_id=goal.project_id,
@@ -590,6 +597,8 @@ class ProjectLeadWorker:
                 owner_answer=owner_answer_text(goal.constraints),
                 owner_event=owner_event,
                 invocation_id=wakeup_id,
+                project_notebook=tuple(note_view(note) for note in project_notebook.notes),
+                global_notebook=tuple(note_view(note) for note in global_notebook.notes),
                 result_context={
                     **await result_context(uow.session, goal, package),
                     "work_limits": goal.constraints.get("work_limits", {}),

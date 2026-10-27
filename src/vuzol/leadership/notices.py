@@ -11,6 +11,8 @@ from vuzol.storage.models import TransactionalOutbox
 from vuzol.telegram.projections import enqueue_chat_notice
 
 _REASONS = {
+    "notebook_full": "блокнот заполнен; сначала нужно заменить или забыть заметки",
+    "sensitive_memory": "заметка содержит признаки секретных данных",
     "goal_paused": "цель на паузе; запуск работы запрещён",
     "goal_waiting": "цель ожидает ответа владельца",
     "goal_terminal": "цель уже завершена или отменена",

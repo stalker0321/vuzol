@@ -14,13 +14,15 @@ from datetime import datetime
 
 from vuzol.discussion.domain import DomainError
 from vuzol.discussion.memory import ensure_memory_safe
-from vuzol.storage.types import MemoryUnitStatus
+from vuzol.storage.types import MemoryScope, MemoryUnitStatus
 
 EXTRACTOR_VERSION = "memory-extractor.v1"
 MEMORY_DESTINATION = "memory_extract"
 MEMORY_EXTRACT_OPERATION = "extract_memory_unit"
 
-UNIT_TYPES = frozenset({"decision_template", "outcome_template", "observation", "lesson"})
+UNIT_TYPES = frozenset(
+    {"decision_template", "outcome_template", "observation", "lesson", "notebook_note"}
+)
 
 RECALLABLE_STATUSES = frozenset({MemoryUnitStatus.OBSERVATION, MemoryUnitStatus.VERIFIED})
 
@@ -150,12 +152,20 @@ def lesson_text(*, body: str, evidence_present: bool) -> str:
 
 @dataclass(frozen=True, slots=True)
 class RecallQuery:
+    scope: MemoryScope
     project_id: str | None = None
+    session_id: uuid.UUID | None = None
     unit_types: frozenset[str] = frozenset()
     query: str | None = None
     limit: int = 10
 
     def __post_init__(self) -> None:
+        if (
+            self.scope not in set(MemoryScope)
+            or (self.scope == MemoryScope.PROJECT) != (self.project_id is not None)
+            or (self.scope == MemoryScope.SESSION and self.session_id is None)
+        ):
+            raise DomainError("invalid_memory_recall", "recall requires an explicit valid scope")
         unknown = set(self.unit_types) - UNIT_TYPES
         if unknown:
             raise DomainError("invalid_memory_recall", f"unknown unit types: {sorted(unknown)}")

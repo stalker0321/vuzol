@@ -1,26 +1,32 @@
-"""Persistence for derived memory units (D5).
+"""Persistence for derived memory and the lead's explicitly scoped notebooks.
 
-Units are writer output only: completed task/plan paths never query this
-repository. Redelivery dedups on the unique extraction identity; delayed
-writers resolve supersession from source revisions, never job order.
+Redelivery dedups on extraction identity. Notebook writers serialize budget
+checks; derived writers resolve supersession from source revisions.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.storage.models import MemoryUnit
-from vuzol.storage.types import MemoryUnitStatus
+from vuzol.storage.types import MemoryScope, MemoryUnitStatus
 
 if TYPE_CHECKING:  # pragma: no cover
     from vuzol.discussion.memory_units import RecallQuery
+
+
+@dataclass(frozen=True, slots=True)
+class Notebook:
+    notes: tuple[MemoryUnit, ...]
+    text_bytes: int
 
 
 class MemoryUnitRepository:
@@ -37,6 +43,8 @@ class MemoryUnitRepository:
         extraction_identity: str,
         effective_at: datetime,
         project_id: str | None = None,
+        scope: MemoryScope | None = None,
+        goal_id: uuid.UUID | None = None,
         session_id: uuid.UUID | None = None,
         trigger_event_id: uuid.UUID | None = None,
         source_event_id: uuid.UUID | None = None,
@@ -52,6 +60,8 @@ class MemoryUnitRepository:
             postgres_insert(MemoryUnit)
             .values(
                 project_id=project_id,
+                scope=scope or (MemoryScope.PROJECT if project_id else MemoryScope.SESSION),
+                goal_id=goal_id,
                 session_id=session_id,
                 unit_type=unit_type,
                 status=status.value,
@@ -84,6 +94,103 @@ class MemoryUnitRepository:
 
     async def get(self, unit_id: uuid.UUID) -> MemoryUnit | None:
         return await self._session.get(MemoryUnit, unit_id)
+
+    async def lock_note(self, note_id: uuid.UUID) -> MemoryUnit | None:
+        return cast(
+            MemoryUnit | None,
+            await self._session.scalar(
+                select(MemoryUnit)
+                .where(MemoryUnit.id == note_id, MemoryUnit.unit_type == "notebook_note")
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ),
+        )
+
+    async def lock_notebook(self, scope: MemoryScope, project_id: str | None) -> None:
+        # Serialize budget checks across goals, including an empty/global notebook.
+        key = f"lead-notebook:{scope.value}:{project_id or '-'}"
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(func.hashtextextended(key, 0)))
+        )
+
+    async def notebook(self, *, scope: MemoryScope, project_id: str | None = None) -> Notebook:
+        if scope not in {MemoryScope.PROJECT, MemoryScope.GLOBAL} or (
+            (scope == MemoryScope.PROJECT) != (project_id is not None)
+        ):
+            raise ValueError("notebook requires project or global scope")
+        notes = tuple(
+            await self._session.scalars(
+                select(MemoryUnit)
+                .where(
+                    MemoryUnit.scope == scope,
+                    MemoryUnit.project_id == project_id,
+                    MemoryUnit.unit_type == "notebook_note",
+                    MemoryUnit.status == MemoryUnitStatus.OBSERVATION,
+                )
+                .order_by(MemoryUnit.created_at, MemoryUnit.id)
+            )
+        )
+        return Notebook(notes, sum(len(note.text.encode("utf-8")) for note in notes))
+
+    async def create_note(
+        self,
+        *,
+        scope: MemoryScope,
+        project_id: str | None,
+        goal_id: uuid.UUID,
+        text: str,
+        extraction_identity: str,
+    ) -> MemoryUnit:
+        return await self.create_unit(
+            scope=scope,
+            project_id=project_id,
+            goal_id=goal_id,
+            text=text,
+            unit_type="notebook_note",
+            status=MemoryUnitStatus.OBSERVATION,
+            extractor_version="lead-notebook.v1",
+            extraction_identity=extraction_identity,
+            effective_at=datetime.now(UTC),
+        )
+
+    async def retract_note(self, note: MemoryUnit) -> bool:
+        """Caller holds the note lock; repeated Undo is a no-op, including superseded notes."""
+        if note.unit_type != "notebook_note" or note.status != MemoryUnitStatus.OBSERVATION:
+            return False
+        await self.set_status(note, MemoryUnitStatus.RETRACTED)
+        return True
+
+    async def restore_replaced_note(self, note: MemoryUnit) -> MemoryUnit | None:
+        """Undoing a replacement brings back the note it replaced.
+
+        The only path from superseded back to active: it is an owner's Undo of the
+        replacing note, so the lifecycle check that forbids it elsewhere does not apply.
+        """
+        replaced = await self._session.scalar(
+            select(MemoryUnit)
+            .where(
+                MemoryUnit.superseded_by == note.id,
+                MemoryUnit.unit_type == "notebook_note",
+                MemoryUnit.status == MemoryUnitStatus.SUPERSEDED,
+            )
+            .with_for_update()
+        )
+        if replaced is None:
+            return None
+        replaced.status = MemoryUnitStatus.OBSERVATION
+        replaced.superseded_by = None
+        replaced.superseded_at = None
+        await self._session.flush()
+        return replaced
+
+    async def supersede_note(self, note: MemoryUnit, *, superseded_by: uuid.UUID) -> bool:
+        """Caller holds the note lock; supersession history is written only once."""
+        if note.unit_type != "notebook_note" or note.status != MemoryUnitStatus.OBSERVATION:
+            return False
+        await self.mark_superseded(
+            note, superseded_by=superseded_by, superseded_at=datetime.now(UTC)
+        )
+        return True
 
     async def active_chain(
         self,
@@ -147,10 +254,12 @@ class MemoryUnitRepository:
         from vuzol.discussion.memory_units import RECALLABLE_STATUSES, clamp_recall_limit
 
         conditions: list[Any] = [
-            MemoryUnit.status.in_(tuple(member.value for member in RECALLABLE_STATUSES))
+            MemoryUnit.status.in_(tuple(member.value for member in RECALLABLE_STATUSES)),
+            MemoryUnit.scope == query.scope,
+            MemoryUnit.project_id == query.project_id,
         ]
-        if query.project_id is not None:
-            conditions.append(MemoryUnit.project_id == query.project_id)
+        if query.scope == MemoryScope.SESSION:
+            conditions.append(MemoryUnit.session_id == query.session_id)
         if query.unit_types:
             conditions.append(MemoryUnit.unit_type.in_(sorted(query.unit_types)))
         if query.query is not None:

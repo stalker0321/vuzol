@@ -19,6 +19,7 @@ from vuzol.leadership.actor import Actor, ActorKind, ActorRejected
 from vuzol.leadership.commands import (
     DELEGATED_ACTIONS,
     DRAFT_ACTIONS,
+    MEMORY_COMMANDS,
     READ_COMMANDS,
     CommandResult,
     CommandStatus,
@@ -183,6 +184,7 @@ class LeadershipCommandService:
                 goal is not None
                 and not has_owner_mandate(goal)
                 and name.value not in DRAFT_ACTIONS
+                and name not in MEMORY_COMMANDS
                 and name
                 not in {
                     LeadCommandName.ANSWER_PERMISSION,
@@ -240,7 +242,12 @@ class LeadershipCommandService:
                     outcome = _transition(goal, actor, "waiting", error.code, CommandStatus.WAITING)
                     await _enqueue_owner_question(uow.session, goal, question, goal.version)
                 else:
-                    outcome = _Outcome(CommandStatus.DENIED, error.code, {}, goal)
+                    outcome = _Outcome(
+                        CommandStatus.DENIED,
+                        error.code,
+                        {"message": str(error)} if name in MEMORY_COMMANDS else {},
+                        goal,
+                    )
             return await store(uow.session, actor, command, digest, outcome)
 
     async def apply_human(
@@ -291,7 +298,7 @@ class LeadershipCommandService:
             return _Outcome(CommandStatus.DENIED, "goal_not_found", {}, None)
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
-        if goal.lifecycle == "paused" and name not in READ_COMMANDS | {
+        if goal.lifecycle == "paused" and name not in READ_COMMANDS | MEMORY_COMMANDS | {
             LeadCommandName.REQUEST_PLAN,
             LeadCommandName.REVISE_PLAN,
             LeadCommandName.AMEND_GOAL,
@@ -315,6 +322,17 @@ class LeadershipCommandService:
                 body.update(await _goal_projection(uow.session, goal))
                 body["task_control"] = await task_context(uow.session, goal)
             return _Outcome(CommandStatus.APPLIED, None, body, goal)
+        if name in MEMORY_COMMANDS:
+            from vuzol.leadership.notebooks import apply_memory_command
+
+            note = await apply_memory_command(uow.session, goal, command)
+            _bump(goal, actor)
+            return _Outcome(
+                CommandStatus.APPLIED,
+                None,
+                {"note_id": str(note.id), "version": goal.version},
+                goal,
+            )
         if name is LeadCommandName.PROPOSE_COMPLETION and (
             goal.constraints.get("pending_amendment") or goal.constraints.get("queued_amendment")
         ):
@@ -1183,7 +1201,7 @@ def _next_operation(goal: ManagedGoal, package: WorkPackage | None, question: st
 def _view(name: LeadCommandName, goal: ManagedGoal, delegation: GoalDelegation) -> dict[str, Any]:
     if name is LeadCommandName.GET_CAPABILITIES:
         return {
-            "actions": list(delegation.allowed_actions),
+            "actions": sorted(set(delegation.allowed_actions) | {c.value for c in MEMORY_COMMANDS}),
             "integration_branch": goal.integration_branch,
             "environments": list(delegation.environments),
             "unsupported": ["research", "deploy", "host_admin", "secrets"],

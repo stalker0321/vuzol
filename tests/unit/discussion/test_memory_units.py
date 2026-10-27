@@ -25,7 +25,7 @@ from vuzol.discussion.memory_units import (
     should_supersede,
 )
 from vuzol.interpretation.domain import TaskAction
-from vuzol.storage.types import MemoryUnitStatus
+from vuzol.storage.types import MemoryScope, MemoryUnitStatus
 
 
 def test_job_and_unit_identity_are_stable() -> None:
@@ -117,12 +117,19 @@ def test_recall_query_is_bounded() -> None:
     assert clamp_recall_limit(10_000) == 50
     with pytest.raises(DomainError, match="positive"):
         clamp_recall_limit(0)
-    query = RecallQuery(project_id="demo", unit_types=frozenset({"observation"}), query="postgres")
+    query = RecallQuery(
+        scope=MemoryScope.PROJECT,
+        project_id="demo",
+        unit_types=frozenset({"observation"}),
+        query="postgres",
+    )
     assert query.limit == 10
     with pytest.raises(DomainError, match="unknown unit types"):
-        RecallQuery(unit_types=frozenset({"embeddings"}))
+        RecallQuery(
+            scope=MemoryScope.PROJECT, project_id="demo", unit_types=frozenset({"embeddings"})
+        )
     with pytest.raises(DomainError, match="blank"):
-        RecallQuery(query="   ")
+        RecallQuery(scope=MemoryScope.PROJECT, project_id="demo", query="   ")
     assert MEMORY_DESTINATION == "memory_extract"
     assert EXTRACTOR_VERSION == "memory-extractor.v1"
 

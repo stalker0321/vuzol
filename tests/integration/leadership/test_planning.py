@@ -413,3 +413,49 @@ async def test_plan_ready_lead_receipt_replays_after_its_own_version_bump(
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(Task)) == 1
             assert all(t.status == "applied" for t in await session.scalars(select(LeadershipTurn)))
+
+
+async def test_strong_planner_receives_both_complete_notebooks(postgres_dsn, tmp_path, monkeypatch):
+    from tests.integration.leadership.test_notebooks_pg import other_goal, remember
+
+    transport = _Transport(plan())
+    async with _factory(postgres_dsn) as factory:
+        goal_id, _, _, worker = await setup(factory, tmp_path, monkeypatch, transport)
+        expected = []
+        for index in range(6):
+            text = f"Правило {index}: " + "я" * 500
+            note_id = await remember(factory, goal_id, text)
+            expected.append((note_id, text))
+        note_id = await remember(factory, goal_id, "Общее правило", scope="global")
+        expected.append((note_id, "Общее правило"))
+        sibling = await other_goal(factory)
+        from vuzol.leadership.actor import server_agent_principal
+        from vuzol.leadership.commands import LeadCommand
+        from vuzol.leadership.service import LeadershipCommandService
+
+        result = await LeadershipCommandService(factory, enabled=True).apply_agent(
+            server_agent_principal("other"),
+            "worker",
+            LeadCommand(
+                name="remember",
+                project_id="other",
+                goal_id=sibling,
+                expected_version=1,
+                idempotency_key="foreign-note",
+                payload={"scope": "project", "text": "FOREIGN NOTE"},
+            ),
+        )
+        assert result.status == "applied"
+        assert await worker.process_one()
+        request = transport.requests[0]
+        assert request.prompt_revision == "project-planner.v5"
+        notes = [*request.task_draft["project_notebook"], *request.task_draft["global_notebook"]]
+        assert [(note["id"], note["text"]) for note in notes] == [
+            (str(note_id), text) for note_id, text in expected
+        ]
+        assert "FOREIGN NOTE" not in json.dumps(request.task_draft, ensure_ascii=False)
+        assert "FOREIGN NOTE" not in request.original_input
+        assert "saved notes" in request.original_input
+        assert "not instructions" in request.original_input
+        # Sent once, as data: the notes must not be repeated in the instructions.
+        assert expected[0][1] not in request.original_input

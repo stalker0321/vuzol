@@ -69,41 +69,26 @@ uses manual topic creation without invoking the provisioner.
 
 See [ADR-0023](decisions/ADR-0023-live-jev-intake.md) for rollout and authority boundaries.
 
-There is no single registry file. Each runtime loads its own registry document plus the shared
-append-only project overlay:
+Every runtime, host units and containers alike, loads the same two documents: the registry
+`/etc/vuzol/registries-t091.toml` (`VUZOL_REGISTRY_FILE`) and the account overlay
+`/var/lib/vuzol/registry/account-profiles.toml` (`VUZOL_REGISTRY_OVERLAY_FILE`), merged before
+validation. Containers bind-mount both at `/app/config/`. Neither file is in the repository: it is
+public, and both carry host-specific facts. `config/registries.example.toml` shows the shape.
 
-| Runtime | Registry source | Notes |
-| --- | --- | --- |
-| Worker, executor, applier | `/etc/vuzol/executor-registries.toml` | repo mirror: `deploy/registries.executor.toml` |
-| Project provisioner | `/etc/vuzol/executor-registries.toml` | writes dynamic projects into the overlay |
-| Telegram ingress and delivery | `/etc/vuzol/telegram-registries.toml` | topics and projects needed at the chat boundary |
-| Interpretation runtime (container) | host registry mounted via `VUZOL_REGISTRY_FILE_HOST` | interpreter and transcriber profiles live here, pinned by `VUZOL_INTERPRETATION__PROFILE_ID` and `VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID` |
+### Account profiles live only in the overlay
 
-Every service also appends `/var/lib/vuzol/registry/projects.json` (the provisioner-owned overlay,
-see [Configuration](CONFIGURATION.md)) and resolves role budgets from process settings. Two
-checked-in files pin production registry facts and must change together with any registry edit:
-`deploy/mvp/check.py` and `tests/unit/deploy/test_provider_registry.py`.
+Account-bound CLI profiles belong in the overlay, never in the registry. The registry carries only
+provider facts without an account binding: API profiles, prepared API workers, sandboxes,
+projects, and topics. One account maps to one state directory, but may expose several model/role
+profiles through an explicit shared `account_id`. There is no implicit default account or
+cross-account fallback for explicit choices.
 
-### Account profiles live only in the local overlay
-
-Account-bound CLI profiles are local facts and never belong in the tracked registry. The tracked
-`deploy/registries.executor.toml` carries only provider facts without an account
-binding: the planner and reviewer API profiles, prepared API workers, sandboxes,
-projects, and topics. Every account profile moves to the untracked overlay
-selected by `VUZOL_REGISTRY_OVERLAY_FILE`; the production loader appends it to
-the tracked registry before validation. One account maps to one state directory,
-but may expose several model/role profiles through an explicit shared `account_id`.
-There is no implicit default account or cross-account fallback for explicit choices.
-
-The current local overlay is `/var/lib/vuzol/registry/account-profiles.toml`.
-Because it holds host-specific `state_directory` values, it is checked by a
-local script outside the repository (`verify-account-profiles.py` next to the
-overlay), not by a checked-in unit test. The naming standard is `codex-a/b/c`, `opencode-a/b/c`, and
-`tokenrouter-a`, with a model suffix only when a key is bound to a single model
-(`tokenrouter-a-<model>`); `grok-subscription-a/b` and `pi-opencode-go-a/b/c`
-already comply. `deploy/mvp/check.py` enforces that the tracked registry carries
-no account-bound profile, so account profiles stay outside the MVP readiness
-check by construction.
+Because the overlay holds host-specific `state_directory` values, it is checked by a local script
+next to it (`verify-account-profiles.py`), not by a unit test. The naming standard is
+`codex-a/b/c`, `opencode-a/b/c`, and `tokenrouter-a`, with a model suffix only when a key is bound
+to a single model (`tokenrouter-a-<model>`); `grok-subscription-a/b` and `pi-opencode-go-a/b/c`
+already comply. Validate an edited overlay with the new code before restarting anything: a field
+the schema no longer knows stops every service at startup.
 
 ### Role-scoped profiles
 
@@ -553,8 +538,8 @@ test fixture reproduced 8 failures/2 passes before the fix. The resulting comple
 was **3404 passed, 1 skipped**, with three dependency deprecation warnings. This is separate
 from the independent HTTP-fix acceptance above.
 
-The checked-in executor registry (`deploy/registries.executor.toml`) and older local overlays
-include the following examples; actual deployment defaults must be inspected locally:
+Earlier registries and overlays included the following examples; actual deployment defaults
+must be inspected locally:
 
 | Role | Profile | Model | Credential | Output bound |
 | --- | --- | --- | --- | --- |

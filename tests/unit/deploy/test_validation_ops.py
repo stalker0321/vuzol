@@ -9,9 +9,7 @@ from pathlib import Path
 
 from coverage.results import should_fail_under
 
-from ._test_mvp_helpers import (
-    ROOT,
-)
+ROOT = Path(__file__).parents[3]
 
 
 def test_platform_suite_keeps_temporary_coverage_floor() -> None:
@@ -86,19 +84,3 @@ def test_validation_wrapper_returns_the_real_pytest_status() -> None:
     assert "return completed.returncode" in content
     assert "| tee" not in content
     assert "shell=True" not in content
-
-
-def test_validation_clone_uses_the_verified_operator_checkout() -> None:
-    content = (ROOT / "deploy/mvp/check.py").read_text()
-    assert '"--no-hardlinks", str(ROOT), str(checkout)' in content
-    assert '"--no-hardlinks", str(DEPLOYED), str(checkout)' not in content
-    assert 'f"u:{executor_uid}:x", str(temporary_root)' in content
-    assert 'f"u:{mapped_uid}:x", str(temporary_root)' in content
-    assert '"-x", f"u:{mapped_uid}", str(temporary_root)' in content
-    assert '"-x", f"u:{executor_uid}", str(temporary_root)' in content
-    assert '"--read-only"' in content
-    assert '"seccomp=/etc/vuzol/sandbox-seccomp.json"' in content
-    assert "dst=/workspace/.git,readonly" in content
-    assert '"UV_NO_SYNC": "1"' in content
-    assert '"UV_OFFLINE": "1"' in content
-    assert '"UV_CACHE_DIR": "/tmp/uv-cache"' in content

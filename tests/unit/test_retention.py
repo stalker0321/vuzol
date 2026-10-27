@@ -232,15 +232,6 @@ async def test_retention_cli_run_modes(
     assert "removal_incomplete" in capsys.readouterr().out
 
 
-def test_retention_unit_templates_disabled_comments() -> None:
-    root = Path(__file__).resolve().parents[2]
-    service = (root / "deploy/systemd/vuzol-retention.service").read_text()
-    timer = (root / "deploy/systemd/vuzol-retention.timer").read_text()
-    assert "Do not install" in service
-    assert "Do not install" in timer
-    assert "--apply" in service
-
-
 def test_sweep_report_counts_and_payload() -> None:
     from vuzol.ops.retention import RetentionAction, RetentionSweepReport
 

@@ -24,7 +24,8 @@ Create a dedicated `vuzol-secret-ingress` system user and a root-owned deploymen
 write access is limited to that user. Consumers should receive read access only to the individual
 files they need. Do not share the Telegram service environment with this process.
 
-Copy `deploy/systemd/vuzol-secret-ingress.env.example`, set the public URL and explicit
-`allowed_names`, install the unit, run database migrations, then enable it. DNS and a valid TLS
+Production does not run this service; the old unit template was removed. To run it, write an env
+file with the public URL and explicit `allowed_names`, add a unit under
+`deploy/production/systemd`, run database migrations, then enable it. DNS and a valid TLS
 certificate must exist before exposing the route. Secret values are never accepted as command
 arguments or query parameters.

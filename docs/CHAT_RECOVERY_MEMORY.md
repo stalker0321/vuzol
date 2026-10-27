@@ -70,25 +70,11 @@ It is NOT a chat summarizer; merely starting it does not connect recall. The cha
 summary producer described above fills that separate gap without another call.
 Acceptance/decision producers retain their existing explicit-user authority.
 
-## Rollout boundary
+## Rollout
 
-Implementation does not activate production. At an owner-authorized rollout:
-
-1. Freeze one image/source containing T096+this change for the four common
-   consumers, existing executor and standalone writer; preserve T095 rich/chunk
-   delivery, account pins/credentials and manual execution flags.
-2. Append `deploy/chat-memory.compose.yaml` AFTER existing runtime overrides with
-   `VUZOL_CHAT_RELEASE_IMAGE` set to that same immutable image. Render privately;
-   do not print resolved environment/compose (may contain secrets).
-3. Enable the existing `memory` compose profile and explicitly bring up only
-   `memory-writer`. Match the live worker's registry/overlay read-only mounts,
-   user and DSN secret references through existing runtime configuration. Do not
-   copy the bot/Jev credentials into the writer. No PostgreSQL restart/migration.
-4. Update the frozen executor release and append
-   `deploy/chat-memory-executor.conf` consistently with common consumers. The
-   flag alone does not update source/ExecStart. Verify actual imports/config.
-5. Verify writer.ready and all pins/flags; owner Telegram request/click is the
-   live E2E test. No automatic replay of existing failed turns or work tasks.
+Chat memory is live: `deploy/production/compose.yaml` runs the standalone `memory-writer`, and the
+executor unit sets `VUZOL_CHAT__MEMORY_ENABLED=true` through `/etc/vuzol/executor.env`. The
+one-off rollout overlay and executor drop-in used for the first activation were removed.
 
 Rollback must retain compatible T094 chunk handling for pending or ambiguous
 chains. Turn memory off consistently to stop new summaries/recall, stop ONLY the

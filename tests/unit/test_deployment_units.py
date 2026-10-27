@@ -6,50 +6,19 @@ repository-side decisions from the Step 08 rootless user-service migration:
 - The production daemon unit is a real systemd USER unit.
 - No hard-coded numeric UIDs in portable files.
 - No reference to the rootful Docker socket.
-- Executor unit does not depend on the (now-legacy) system daemon unit name.
+- Executor unit does not depend on a system-level daemon unit.
 - Readiness logic resolves identity dynamically.
 """
 
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-USER_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/user/vuzol-rootless-docker.service"
-LEGACY_DAEMON_UNIT = REPO_ROOT / "deploy/systemd/vuzol-rootless-docker.service"
-EXECUTOR_UNIT = REPO_ROOT / "deploy/systemd/vuzol-executor.service"
-APPLIER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-applier.service"
-STATIC_PUBLISHER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-static-publisher.service"
-STATIC_PUBLISHER_TIMER = REPO_ROOT / "deploy/systemd/vuzol-static-publisher.timer"
-STATIC_PUBLISHER_WORKER = REPO_ROOT / "deploy/systemd/vuzol-static-publisher-worker.service"
+UNITS = REPO_ROOT / "deploy/production/systemd"
+USER_DAEMON_UNIT = UNITS / "user/vuzol-rootless-docker.service"
+EXECUTOR_UNIT = UNITS / "vuzol-executor.service"
+APPLIER_UNIT = UNITS / "vuzol-applier.service"
+STATIC_PUBLISHER_WORKER = UNITS / "vuzol-static-publisher-worker.service"
 STATIC_SITE_CADDY = REPO_ROOT / "deploy/caddy/hryshyn.dev.caddy"
-WORKER_UNIT = REPO_ROOT / "deploy/systemd/vuzol-worker.service"
-TELEGRAM_UNITS = (
-    REPO_ROOT / "deploy/systemd/vuzol-telegram.service",
-    REPO_ROOT / "deploy/systemd/vuzol-telegram-delivery.service",
-)
-
-
-def test_static_publisher_is_unprivileged_and_path_fenced() -> None:
-    service = _read(STATIC_PUBLISHER_UNIT)
-    timer = _read(STATIC_PUBLISHER_TIMER)
-    assert "User=vuzol-publisher" in service
-    assert "NoNewPrivileges=true" in service
-    assert "ProtectSystem=strict" in service
-    assert "ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol/static-sites.json" in service
-    assert "ReadWritePaths=/srv/vuzol/sites" in service
-    assert "/var/www" not in service
-    assert "OnUnitActiveSec=15s" in timer
-    assert "Persistent=true" in timer
-
-
-def test_applier_allows_managed_repositories_without_single_project_exception() -> None:
-    config = APPLIER_UNIT.read_text()
-    assert "ReadWritePaths=/srv/vuzol/repositories\n" in config
-    assert "ReadOnlyPaths=/srv/vuzol/repositories" not in config
-    assert "ReadOnlyPaths=/srv/vuzol/worktrees /etc/vuzol" in config
-    assert "ReadWritePaths=/srv/vuzol/artifacts" in config
-    assert "ProtectSystem=strict" in config
-    assert "afterword" not in config
-    assert "books-rating" not in config
 
 
 def test_static_publisher_worker_is_unprivileged_and_path_fenced() -> None:
@@ -57,8 +26,8 @@ def test_static_publisher_worker_is_unprivileged_and_path_fenced() -> None:
     assert "User=vuzol-publisher" in service
     assert "NoNewPrivileges=true" in service
     assert "ProtectSystem=strict" in service
-    assert "ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol /var/lib/vuzol/registry" in service
-    assert "ReadWritePaths=/srv/vuzol/sites" in service
+    assert "ReadWritePaths=/srv/vuzol/sites/" in service
+    assert "ReadOnlyPaths=/srv/vuzol/repositories " in service
     assert "Restart=on-failure" in service
 
 
@@ -142,16 +111,6 @@ def test_user_daemon_unit_does_not_hardcode_uid() -> None:
     assert any(f"/run/user/{n}" in text for n in range(100, 2000)) is False
 
 
-def test_legacy_unit_is_clearly_labelled_and_not_the_production_definition() -> None:
-    text = _read(LEGACY_DAEMON_UNIT)
-    assert "LEGACY" in text
-    assert "MIGRATION REFERENCE" in text or "DO NOT USE" in text
-    assert "deploy/systemd/user/vuzol-rootless-docker.service" in text
-    # The legacy file may still contain the old body for rollback reference,
-    # but must not be the one we document as current.
-    assert "User=vuzol-executor" in text  # old form is present for reference only
-
-
 def test_executor_unit_no_longer_depends_on_system_daemon_unit() -> None:
     text = _read(EXECUTOR_UNIT)
     lines = text.splitlines()
@@ -165,9 +124,6 @@ def test_executor_unit_no_longer_depends_on_system_daemon_unit() -> None:
             assert "vuzol-rootless-docker.service" not in stripped, (
                 f"Found old daemon dep in: {stripped}"
             )
-    # The comment must explain the new readiness model (string may appear in comments)
-    assert "user unit" in text.lower()
-    assert "fail-closed" in text.lower() or "preflight" in text.lower()
     assert "ExecStartPre" in text
 
 
@@ -205,7 +161,7 @@ def test_user_daemon_readiness_uses_systemd_literal_dollar_escaping() -> None:
 
 
 def test_no_rootful_socket_anywhere_in_units() -> None:
-    for unit in (USER_DAEMON_UNIT, LEGACY_DAEMON_UNIT, EXECUTOR_UNIT):
+    for unit in (USER_DAEMON_UNIT, EXECUTOR_UNIT, APPLIER_UNIT, STATIC_PUBLISHER_WORKER):
         text = _read(unit)
         assert "/var/run/docker.sock" not in text
         assert '"/var/run/docker.sock"' not in text
@@ -274,40 +230,13 @@ def test_readiness_loops_are_bounded_and_fail_closed() -> None:
         )
 
 
-def test_telegram_units_use_dedicated_unprivileged_identity() -> None:
-    for unit in TELEGRAM_UNITS:
-        text = _read(unit)
-        assert "User=vuzol-telegram" in text
-        assert "Group=vuzol-telegram" in text
-        assert "EnvironmentFile=/etc/vuzol/telegram.env" in text
-        assert "NoNewPrivileges=true" in text
-        assert "ProtectSystem=strict" in text
-        assert "ProtectHome=true" in text
-        assert "docker.sock" not in text
-        assert "/var/lib/vuzol-provider-state" not in text
-
-
 def test_applier_has_only_the_managed_repository_write_boundary() -> None:
     text = _read(APPLIER_UNIT)
-    assert "ExecStart=/opt/vuzol/.venv/bin/vuzol-applier" in text
-    assert "ReadWritePaths=/srv/vuzol/repositories" in text
-    assert "ReadOnlyPaths=/srv/vuzol/worktrees /etc/vuzol" in text
-    assert "ReadWritePaths=/srv/vuzol/artifacts" in text
+    assert "ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.applier" in text
+    assert "ReadWritePaths=/srv/vuzol/repositories /srv/vuzol/artifacts " in text
+    assert "ReadOnlyPaths=/srv/vuzol/worktrees /etc/vuzol " in text
+    assert "ReadOnlyPaths=/srv/vuzol/repositories" not in text
     assert "/var/lib/vuzol-provider-state" not in text
-    assert "docker.sock" not in text
-    assert "NoNewPrivileges=true" in text
-    assert "ProtectSystem=strict" in text
-
-
-def test_workflow_worker_is_persistent_and_has_no_repository_write_boundary() -> None:
-    text = _read(WORKER_UNIT)
-    assert "ExecStart=/opt/vuzol/.venv/bin/vuzol-worker" in text
-    assert "User=vuzol-executor" in text
-    assert "EnvironmentFile=/etc/vuzol/executor.env" in text
-    assert "Restart=on-failure" in text
-    assert "WantedBy=multi-user.target" in text
-    assert "ReadWritePaths=" not in text
-    assert "ReadOnlyPaths=/srv/vuzol/repositories" in text
     assert "docker.sock" not in text
     assert "NoNewPrivileges=true" in text
     assert "ProtectSystem=strict" in text

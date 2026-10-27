@@ -333,6 +333,34 @@ async def test_unconfigured_model_parks_without_a_plan(postgres_dsn: str) -> Non
         assert await _package_count(factory) == 0
 
 
+async def test_answered_owner_message_lifts_a_model_blocker(postgres_dsn: str) -> None:
+    from vuzol.leadership.events import write_owner_event
+    from vuzol.storage.unit_of_work import UnitOfWork
+
+    async with _factory(postgres_dsn) as factory:
+        session_id = await _session(factory)
+        goal_id = await _enable(factory, session_id)
+        assert await _worker(factory, UnconfiguredLeadModel()).process_one()
+
+        class Answers:
+            async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
+                del snapshot
+                return LeadDecision(reply="Модель снова на месте.")
+
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
+            assert goal is not None and goal.waiting_reason == "lead_model_unconfigured"
+            await write_owner_event(
+                uow, goal=goal, session_id=session_id, key="model-back", text="ты тут?"
+            )
+        assert await _worker(factory, Answers()).process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal is not None
+            assert goal.lifecycle != "waiting" and goal.waiting_reason is None
+
+
 async def test_crash_before_model_then_applies_once(postgres_dsn: str) -> None:
     async with _factory(postgres_dsn) as factory:
         await _enable(factory, await _session(factory))

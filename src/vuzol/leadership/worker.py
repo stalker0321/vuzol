@@ -833,6 +833,22 @@ class ProjectLeadWorker:
                 and goal.lease_owner == claim.owner
                 and goal.lease_epoch == claim.lease_epoch
             ):
+                if (
+                    turn.status == "applied"
+                    and goal.lifecycle == "waiting"
+                    and goal.waiting_reason in _MODEL_BLOCKERS
+                ):
+                    # The model just answered, so whatever parked the goal on it is gone;
+                    # an owner message alone never leaves waiting (live 2026-10-27).
+                    from vuzol.leadership.persistence import has_owner_mandate
+                    from vuzol.telegram.attention import sync_goal_attention
+
+                    goal.lifecycle = "active" if has_owner_mandate(goal) else "draft"
+                    goal.waiting_reason = None
+                    goal.wakeup_condition = None
+                    await sync_goal_attention(session, goal)
+                    goal.version += 1
+                    goal.fence_epoch += 1
                 item = await session.get(TransactionalOutbox, wakeup_id)
                 if item is None or item.payload.get("wakeup_kind") != "owner_message":
                     await continue_if_idle(

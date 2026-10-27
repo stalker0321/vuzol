@@ -6,11 +6,10 @@ import uuid
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config.models import AgentRuntimeContract, Capability, ProviderProfileConfig
+from vuzol.config.models import Capability, ProviderProfileConfig
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.context.bindings import (
     RESEARCH_SLOT,
@@ -32,13 +31,6 @@ from vuzol.execution.access import (
 )
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.commit_messages import DatabaseCommitMessageResolver
-from vuzol.execution.finalization import (
-    FinalizedWorkerResult,
-    GateExecutionContext,
-    WorkerFinalizationError,
-    WorkerFinalizer,
-)
-from vuzol.execution.runtime_contract import AgentCertificateStore
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.interpretation.domain import TaskAction, TaskDraft
 from vuzol.interpretation.provenance import provenance_reference
@@ -111,9 +103,7 @@ class ProviderStepHandler:
         *,
         worktrees: WorktreeService | None = None,
         artifacts: ArtifactStore | None = None,
-        finalizer: WorkerFinalizer | None = None,
         worktree_access: WorktreeAccessManager | None = None,
-        agent_certificates: AgentCertificateStore | None = None,
         redaction_patterns: tuple[str, ...] = (),
         research_fetcher: SourceFetcher | None = None,
         research_retriever: str = "approved-http",
@@ -124,9 +114,7 @@ class ProviderStepHandler:
         self._adapters = adapters
         self._worktrees = worktrees
         self._artifacts = artifacts
-        self._finalizer = finalizer
         self._worktree_access = worktree_access
-        self._agent_certificates = agent_certificates
         self._redaction_patterns = redaction_patterns
         # D3 W1: retrieval fetcher for source-backed research. None means
         # legacy provider-text only (prod default: live trials forbidden).
@@ -211,12 +199,8 @@ class ProviderStepHandler:
     ) -> StepOutcome:
         reservation_id = _reservation_id(request.payload)
         try:
-            built = (
-                provider_request,
-                profile_id,
-                reservation_id,
-                _configuration_revision,
-            ) = await self._build_request(request)
+            built = await self._build_request(request)
+            _provider_request, profile_id, reservation_id, _configuration_revision = built
             profile = apply_profile_overrides(
                 self._registries.profiles.get(profile_id), request.payload
             )
@@ -242,33 +226,7 @@ class ProviderStepHandler:
                 reservation_id=reservation_id,
                 error=error,
             )
-        requires_finalizer = (
-            request.step_type == "execute_code" and "step09a_capsule" in provider_request.task_draft
-        )
         requires_worktree_access = request.step_type == "execute_code"
-        if requires_finalizer and (
-            self._finalizer is None or self._worktrees is None or self._worktree_access is None
-        ):
-            return await self._pre_provider_failure(
-                request,
-                reservation_id=reservation_id,
-                category="worker_finalizer_unavailable",
-                summary="deterministic worker finalizer is unavailable",
-            )
-        if (
-            requires_finalizer
-            and isinstance(profile.agent_runtime_contract, AgentRuntimeContract)
-            and not _is_runtime_certification(provider_request.task_draft)
-        ):
-            try:
-                await self._require_agent_certificate(request, profile)
-            except (LookupError, ValueError) as error:
-                return await self._pre_provider_failure(
-                    request,
-                    reservation_id=reservation_id,
-                    category="agent_runtime_uncertified",
-                    error=error,
-                )
         access: WorktreeAccessLease | None = None
         if requires_worktree_access:
             if self._worktree_access is None:
@@ -429,28 +387,6 @@ class ProviderStepHandler:
                 unknown_effects=False,
             )
 
-        finalized: FinalizedWorkerResult | None = None
-        finalization_failure: WorkerFinalizationError | None = None
-        invalid_edit_report = False
-        if (
-            request.step_type == "execute_code"
-            and "step09a_capsule" in provider_request.task_draft
-            and self._finalizer is not None
-            and self._worktrees is not None
-        ):
-            try:
-                finalized = await self._finalize_worker_result(
-                    request=request,
-                    provider_request=provider_request,
-                    profile_id=profile.id,
-                    result=result,
-                    cancellation=cancellation,
-                    access=access,
-                )
-            except WorkerFinalizationError as error:
-                finalization_failure = error
-            except ValidationError:
-                invalid_edit_report = True
         accounted_usage = account_usage(profile, result.usage)
         lease_lost = False
         try:
@@ -472,21 +408,6 @@ class ProviderStepHandler:
                     configuration_revision=configuration_revision,
                 )
                 await self._persist_input_bindings(session, request=request, result=result)
-                finalization_result = (
-                    finalized
-                    if finalized is not None
-                    else finalization_failure.result
-                    if finalization_failure is not None
-                    else None
-                )
-                if finalization_result is not None and self._finalizer is not None:
-                    await self._finalizer.persist(
-                        session,
-                        task_id=request.task_id,
-                        run_id=request.run_id,
-                        step_id=request.step_id,
-                        result=finalization_result,
-                    )
                 if (
                     request.step_type in {"execute_code", "execute_agent"}
                     and self._worktrees is not None
@@ -521,107 +442,17 @@ class ProviderStepHandler:
                 summary="provider result settled after the step lease was lost",
                 unknown_effects=False,
             )
-        if finalization_failure is not None:
-            return StepOutcome(
-                kind=OutcomeKind.PERMANENT_FAILURE,
-                result={},
-                category=finalization_failure.category,
-                summary=finalization_failure.safe_summary,
-                unknown_effects=False,
-            )
-        if invalid_edit_report:
-            return StepOutcome(
-                kind=OutcomeKind.PERMANENT_FAILURE,
-                result={},
-                category="invalid_worker_edit_report",
-                summary="provider returned an invalid worker edit report",
-                unknown_effects=False,
-            )
-        structured_output = (
-            finalized.manifest.model_dump(mode="json")
-            if finalized is not None
-            else result.structured_output
-        )
         return StepOutcome.succeeded(
             {
                 "profile_id": profile.id,
                 "model": profile.model,
                 "provider_request_id": result.provider_request_id,
                 "text": result.text,
-                "structured_output": structured_output,
+                "structured_output": result.structured_output,
                 "output_schema_version": provider_request.output_schema_version,
-                "implementation_summary": (
-                    finalized.evidence.provider_edit_report.implementation_summary
-                    if finalized is not None
-                    else None
-                ),
                 "finish_reason": result.finish_reason,
             }
         )
-
-    async def _finalize_worker_result(
-        self,
-        *,
-        request: StepExecutionRequest,
-        provider_request: ProviderRequest,
-        profile_id: str,
-        result: ProviderResult,
-        cancellation: CancellationContext,
-        access: WorktreeAccessLease | None,
-    ) -> FinalizedWorkerResult:
-        from vuzol.experiments.domain import WorkerEditReport, WorkerTaskCapsule
-
-        if self._finalizer is None or self._worktrees is None:
-            raise RuntimeError("deterministic worker finalizer is unavailable")
-        capsule = WorkerTaskCapsule.model_validate(provider_request.task_draft["step09a_capsule"])
-        edit_report = WorkerEditReport.model_validate(result.structured_output)
-        async with self._factory() as session:
-            worktree = await self._worktrees.reference_for_run(session, run_id=request.run_id)
-        commit_message = await self._commit_messages.resolve(
-            task_id=request.task_id,
-            run_id=request.run_id,
-            project_id=worktree.project_id,
-        )
-        return await self._finalizer.finalize(
-            worktree=worktree.path,
-            capsule=capsule,
-            edit_report=edit_report,
-            worker_profile=profile_id,
-            provider_usage=result.usage,
-            provider_attempt=provider_request.provider_attempt,
-            commit_message=commit_message,
-            gate_context=GateExecutionContext(
-                task_id=request.task_id,
-                run_id=request.run_id,
-                step_id=request.step_id,
-                worktree_id=worktree.id,
-                profile_id=profile_id,
-                provider_attempt=provider_request.provider_attempt,
-                lease_generation=request.lease.generation,
-            ),
-            cancellation=cancellation,
-            access=access,
-        )
-
-    async def _require_agent_certificate(
-        self, request: StepExecutionRequest, profile: ProviderProfileConfig
-    ) -> None:
-        if profile.agent_runtime_contract is None:
-            raise ValueError(f"profile {profile.id} has no agent runtime contract")
-        if self._agent_certificates is None:
-            raise ValueError("agent certificate store is unavailable")
-        async with self._factory() as session:
-            worktree = await session.scalar(
-                select(Worktree).where(
-                    Worktree.run_id == request.run_id,
-                    Worktree.task_id == request.task_id,
-                )
-            )
-        if worktree is None:
-            raise LookupError("certified worker execution has no worktree")
-        project = self._registries.projects.get(worktree.project_id)
-        sandbox = self._registries.sandboxes.get(project.sandbox_profile)
-        self._agent_certificates.require(profile, sandbox)
 
     async def _pre_provider_failure(
         self,
@@ -1336,7 +1167,7 @@ class ProviderStepHandler:
                         content_hash=hashlib.sha256(instruction.encode()).hexdigest(),
                     ),
                 )
-            output_schema_name, output_schema_version, output_json_schema = _step09a_result_schema(
+            output_schema_name, output_schema_version, output_json_schema = result_schema_for_step(
                 step.step_type, worker_draft
             )
             reasoning_max_tokens = step.payload.get("reasoning_max_tokens")
@@ -1542,25 +1373,3 @@ def provider_handlers(handler: ProviderStepHandler) -> dict[str, ProviderStepHan
 
 def executor_provider_handlers(handler: ProviderStepHandler) -> dict[str, ProviderStepHandler]:
     return {"execute_agent": handler, "execute_code": handler}
-
-
-def _step09a_result_schema(
-    step_type: str, task_draft: dict[str, object]
-) -> tuple[str | None, str | None, dict[str, object] | None]:
-    return result_schema_for_step(step_type, task_draft)
-
-
-def _is_runtime_certification(task_draft: dict[str, object]) -> bool:
-    capsule = task_draft.get("step09a_capsule")
-    if not isinstance(capsule, dict) or capsule.get("runtime_certification") is not True:
-        return False
-    task_id = capsule.get("task_id")
-    required_gates = capsule.get("required_gates")
-    return (
-        isinstance(task_id, str)
-        and task_id.startswith("agent-certification-")
-        and capsule.get("allowed_paths") == ["certification/agent-runtime-probe.txt"]
-        and capsule.get("maximum_repair_count") == 0
-        and capsule.get("parent_attempt") is None
-        and required_gates == [{"name": "format-check", "command_id": "make format-check"}]
-    )

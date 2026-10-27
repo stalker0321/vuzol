@@ -446,15 +446,6 @@
       "scenario": "execution"
     },
     {
-      "id": "cli:vuzol-experiment",
-      "sources": [
-        "src/vuzol/cli/experiment.py:1"
-      ],
-      "producers": [],
-      "consumers": [],
-      "scenario": "operations"
-    },
-    {
       "id": "cli:vuzol-interpreter",
       "sources": [
         "src/vuzol/cli/interpreter.py:1"
@@ -563,15 +554,6 @@
       "scenario": "delivery"
     },
     {
-      "id": "cli:vuzol-telegram-dogfood",
-      "sources": [
-        "src/vuzol/cli/telegram_dogfood.py:1"
-      ],
-      "producers": [],
-      "consumers": [],
-      "scenario": "execution"
-    },
-    {
       "id": "cli:vuzol-worker",
       "sources": [
         "src/vuzol/cli/worker.py:1"
@@ -593,7 +575,7 @@
       "id": "dynamic-outbox:src/vuzol/telegram/delivery.py:item.destination",
       "sources": [],
       "producers": [
-        "src/vuzol/telegram/delivery.py:2050"
+        "src/vuzol/telegram/delivery.py:2021"
       ],
       "consumers": [],
       "scenario": "delivery"
@@ -665,7 +647,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_refresh_subscription_limits_tick",
       "sources": [
-        "src/vuzol/cli/executor.py:468"
+        "src/vuzol/cli/executor.py:454"
       ],
       "producers": [],
       "consumers": [],
@@ -674,7 +656,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_run_loop",
       "sources": [
-        "src/vuzol/cli/executor.py:547"
+        "src/vuzol/cli/executor.py:533"
       ],
       "producers": [],
       "consumers": [],
@@ -744,15 +726,6 @@
       "scenario": "accounts"
     },
     {
-      "id": "module:vuzol.cli.agent_certify",
-      "sources": [
-        "src/vuzol/cli/agent_certify.py:34"
-      ],
-      "producers": [],
-      "consumers": [],
-      "scenario": "operations"
-    },
-    {
       "id": "module:vuzol.cli.app",
       "sources": [
         "src/vuzol/cli/app.py:10"
@@ -791,20 +764,11 @@
     {
       "id": "module:vuzol.cli.executor",
       "sources": [
-        "src/vuzol/cli/executor.py:131"
+        "src/vuzol/cli/executor.py:130"
       ],
       "producers": [],
       "consumers": [],
       "scenario": "execution"
-    },
-    {
-      "id": "module:vuzol.cli.experiment",
-      "sources": [
-        "src/vuzol/cli/experiment.py:33"
-      ],
-      "producers": [],
-      "consumers": [],
-      "scenario": "operations"
     },
     {
       "id": "module:vuzol.cli.grok_limit_exporter",
@@ -917,7 +881,7 @@
     {
       "id": "module:vuzol.cli.telegram",
       "sources": [
-        "src/vuzol/cli/telegram.py:52"
+        "src/vuzol/cli/telegram.py:49"
       ],
       "producers": [],
       "consumers": [],
@@ -926,20 +890,11 @@
     {
       "id": "module:vuzol.cli.telegram_delivery",
       "sources": [
-        "src/vuzol/cli/telegram_delivery.py:81"
+        "src/vuzol/cli/telegram_delivery.py:80"
       ],
       "producers": [],
       "consumers": [],
       "scenario": "delivery"
-    },
-    {
-      "id": "module:vuzol.cli.telegram_dogfood",
-      "sources": [
-        "src/vuzol/cli/telegram_dogfood.py:124"
-      ],
-      "producers": [],
-      "consumers": [],
-      "scenario": "execution"
     },
     {
       "id": "module:vuzol.cli.worker",
@@ -1034,7 +989,7 @@
         "src/vuzol/telegram/ingress.py:1095"
       ],
       "consumers": [
-        "src/vuzol/cli/executor.py:492"
+        "src/vuzol/cli/executor.py:478"
       ],
       "scenario": "accounts"
     },
@@ -1061,10 +1016,9 @@
         "src/vuzol/telegram/attention.py:103",
         "src/vuzol/telegram/controls.py:137",
         "src/vuzol/telegram/controls.py:312",
-        "src/vuzol/telegram/delivery.py:225",
-        "src/vuzol/telegram/delivery.py:1015",
-        "src/vuzol/telegram/delivery.py:1911",
-        "src/vuzol/telegram/dogfood.py:194",
+        "src/vuzol/telegram/delivery.py:224",
+        "src/vuzol/telegram/delivery.py:1014",
+        "src/vuzol/telegram/delivery.py:1882",
         "src/vuzol/telegram/ingress.py:343",
         "src/vuzol/telegram/ingress.py:458",
         "src/vuzol/telegram/ingress.py:564",
@@ -1090,7 +1044,7 @@
         "src/vuzol/workflows/dispatch.py:340"
       ],
       "consumers": [
-        "src/vuzol/telegram/delivery.py:1652"
+        "src/vuzol/telegram/delivery.py:1649"
       ],
       "scenario": "delivery"
     },
@@ -1143,7 +1097,7 @@
         "src/vuzol/workflows/acceptance.py:677"
       ],
       "consumers": [
-        "src/vuzol/telegram/delivery.py:1652"
+        "src/vuzol/telegram/delivery.py:1649"
       ],
       "scenario": "delivery"
     },
@@ -1402,15 +1356,6 @@
       "producers": [],
       "consumers": [],
       "scenario": "operations"
-    },
-    {
-      "id": "telegram:/sol",
-      "sources": [
-        "src/vuzol/telegram/dogfood.py:52"
-      ],
-      "producers": [],
-      "consumers": [],
-      "scenario": "execution"
     },
     {
       "id": "telegram:/think",

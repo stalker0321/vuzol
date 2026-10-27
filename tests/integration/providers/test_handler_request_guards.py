@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from tests.integration.providers._test_routing_helpers import (
     AdapterRegistry,
     AsyncMock,
@@ -29,7 +27,6 @@ from tests.integration.providers._test_routing_helpers import (
     ProviderRequest,
     ProviderResult,
     ProviderResultStatus,
-    ProviderRole,
     ProviderStepHandler,
     RegistryDocument,
     RoutedWorkflowWorker,
@@ -61,9 +58,8 @@ from tests.integration.providers._test_routing_helpers import (
 )
 from vuzol.config import SandboxProfileConfig
 from vuzol.execution.access import WorktreeAccessError
-from vuzol.execution.domain import WorktreeReference
-from vuzol.providers.handlers import _step09a_result_schema
 from vuzol.providers.ports import ProviderAdapter
+from vuzol.providers.result_schema import result_schema_for_step
 from vuzol.storage.records import StepRecord
 from vuzol.workflows.domain import OutcomeKind
 
@@ -459,52 +455,6 @@ def test_unexpected_pre_provider_failure_is_reported(postgres_dsn: str, tmp_path
 
 
 @pytest.mark.postgresql
-def test_worker_finalizer_unavailable_fails_before_provider(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        _settings, registries = bundle(tmp_path, profile("api"))
-        task_id, run_id, step_id, token = await _running_step(factory, step_type="execute_code")
-        provider_request = ProviderRequest(
-            task_id=task_id,
-            run_id=run_id,
-            step_id=step_id,
-            provider_attempt=1,
-            lease_generation=None,
-            role=ProviderRole.EXECUTOR,
-            task_draft={"step09a_capsule": {"goal": "bounded edit"}},
-            system_policy_revision="policy",
-            prompt_revision="prompt",
-            timeout_seconds=60,
-            max_input_tokens=1000,
-            max_output_tokens=1000,
-            reserved_cost_units=Decimal("1"),
-            reserved_quota_units=Decimal("1"),
-        )
-        adapter, execute_mock = _never_called_adapter()
-        handler = ProviderStepHandler(
-            factory, registries, _adapters_for(registries, tmp_path, "api", adapter)
-        )
-        handler._build_request = AsyncMock(  # type: ignore[method-assign]
-            return_value=(provider_request, "api", uuid.uuid4(), "a" * 64)
-        )
-
-        outcome = await handler.execute(
-            _request(task_id, run_id, step_id, token, step_type="execute_code"),
-            CancellationContext(),
-        )
-
-        assert outcome.kind is OutcomeKind.PERMANENT_FAILURE
-        assert outcome.category == "worker_finalizer_unavailable"
-        assert outcome.summary == "deterministic worker finalizer is unavailable"
-        execute_mock.assert_not_awaited()
-        await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.postgresql
 def test_authentication_failure_releases_reservation_without_usage(
     postgres_dsn: str, tmp_path: Path
 ) -> None:
@@ -891,7 +841,7 @@ def test_execute_code_builds_system_contexts_and_succeeds(
 
         assert outcome.kind is OutcomeKind.SUCCEEDED
         assert outcome.result["structured_output"] == {"ok": True}
-        assert outcome.result["implementation_summary"] is None
+        assert "implementation_summary" not in outcome.result
         built = adapter.requests[0]
         sources = [item.source for item in built.context]
         assert "system_skill" in sources
@@ -908,209 +858,13 @@ def test_execute_code_builds_system_contexts_and_succeeds(
     asyncio.run(scenario())
 
 
-def _capsule(worktree: WorktreeReference) -> dict[str, object]:
-    return {
-        "experiment_id": "capsule-handler-test",
-        "task_id": "typed-report",
-        "worker_profile": "api",
-        "base_commit": worktree.base_commit,
-        "target_branch": worktree.branch,
-        "goal": "Edit the bounded file.",
-        "classification": {
-            "task_class": "bounded_feature",
-            "complexity": "low",
-            "risk": "low",
-            "testability": "high",
-            "blast_radius": "low",
-            "coupling": "low",
-            "novelty": "low",
-            "expected_file_count": 1,
-        },
-        "predicted_strategy": "solo",
-        "actual_strategy": "solo",
-        "allowed_paths": ["tracked.txt"],
-        "acceptance_criteria": ["The bounded edit is measured."],
-        "required_gates": [{"name": "tests", "command_id": "make test"}],
-        "maximum_execution_seconds": 30,
-        "context_manifest": {"role": "worker", "entries": []},
-    }
-
-
-@pytest.mark.postgresql
-def test_capsule_worker_result_is_finalized_persisted_and_retained(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
-    repository = _git_repository(tmp_path)
-
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        project = _project(repository)
-        _settings, registries = _registries_with(
-            tmp_path, project, sandboxes=(_sandbox("dev"), _sandbox("vld"))
-        )
-        task_id, run_id, step_id, token = await _running_step(factory, step_type="execute_code")
-        async with factory.begin() as session:
-            await synchronize_profiles(
-                session, registries.profiles.items(), configuration_revision="a" * 64
-            )
-        reservation_id = await _insert_reservation(
-            factory, task_id=task_id, run_id=run_id, step_id=step_id
-        )
-        await _set_step_payload(
-            factory,
-            step_id,
-            {"budget_reservation_id": str(reservation_id), "provider_attempt": 1},
-        )
-        worktrees = WorktreeService(tmp_path / "worktrees", LocalGit(), retention_days=3)
-        async with factory.begin() as session:
-            worktree = await worktrees.prepare(
-                session,
-                task_id=task_id,
-                run_id=run_id,
-                project=project,
-                owner="provider-worker",
-            )
-            stored_task = await session.get(Task, task_id)
-            assert stored_task is not None
-            stored_task.task_draft = {
-                "task_type": "general",
-                "step09a_capsule": _capsule(worktree),
-            }
-        edit_report = {
-            "schema_version": "step09a-worker-edit-report.v1",
-            "experiment_id": "capsule-handler-test",
-            "task_id": "typed-report",
-            "attempt": 1,
-            "claimed_complete": True,
-            "implementation_summary": "Implemented the bounded edit.",
-            "limitations": [],
-            "failure_classification": None,
-            "usage": None,
-        }
-        adapter = _StaticAdapter(_static_result(structured_output=edit_report))
-        finalized = SimpleNamespace(
-            manifest=SimpleNamespace(model_dump=lambda mode: {"ok": True}),
-            evidence=SimpleNamespace(
-                provider_edit_report=SimpleNamespace(implementation_summary="did thing")
-            ),
-        )
-        finalizer = MagicMock()
-        finalizer.finalize = AsyncMock(return_value=finalized)
-        finalizer.persist = AsyncMock()
-        handler = ProviderStepHandler(
-            factory,
-            registries,
-            _adapters_for(registries, tmp_path, "api", adapter),
-            worktrees=worktrees,
-            finalizer=finalizer,
-            worktree_access=MagicMock(grant=AsyncMock()),
-        )
-        access = MagicMock(revoke=AsyncMock())
-        handler._grant_worktree_access = AsyncMock(return_value=access)  # type: ignore[method-assign]
-        handler._commit_messages = MagicMock(resolve=AsyncMock(return_value="task(proj): bounded"))
-        payload = {"budget_reservation_id": str(reservation_id), "provider_attempt": 1}
-
-        outcome = await handler.execute(
-            _request(
-                task_id, run_id, step_id, token, step_type="execute_code", payload=dict(payload)
-            ),
-            CancellationContext(),
-        )
-
-        assert outcome.kind is OutcomeKind.SUCCEEDED
-        assert outcome.result["structured_output"] == {"ok": True}
-        assert outcome.result["implementation_summary"] == "did thing"
-        finalizer.finalize.assert_awaited_once()
-        assert finalizer.finalize.await_args.kwargs["commit_message"] == "task(proj): bounded"
-        finalizer.persist.assert_awaited_once()
-        access.revoke.assert_awaited_once()
-        async with factory() as session:
-            stored = await session.scalar(select(Worktree).where(Worktree.run_id == run_id))
-            assert stored is not None
-            assert stored.delivery_state is WorktreeDeliveryState.WORKTREE_RETAINED
-        await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.postgresql
-def test_invalid_worker_edit_report_fails_permanently(postgres_dsn: str, tmp_path: Path) -> None:
-    repository = _git_repository(tmp_path)
-
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        project = _project(repository)
-        _settings, registries = _registries_with(
-            tmp_path, project, sandboxes=(_sandbox("dev"), _sandbox("vld"))
-        )
-        task_id, run_id, step_id, token = await _running_step(factory, step_type="execute_code")
-        async with factory.begin() as session:
-            await synchronize_profiles(
-                session, registries.profiles.items(), configuration_revision="a" * 64
-            )
-        reservation_id = await _insert_reservation(
-            factory, task_id=task_id, run_id=run_id, step_id=step_id
-        )
-        await _set_step_payload(
-            factory,
-            step_id,
-            {"budget_reservation_id": str(reservation_id), "provider_attempt": 1},
-        )
-        worktrees = WorktreeService(tmp_path / "worktrees", LocalGit(), retention_days=3)
-        async with factory.begin() as session:
-            worktree = await worktrees.prepare(
-                session,
-                task_id=task_id,
-                run_id=run_id,
-                project=project,
-                owner="provider-worker",
-            )
-            stored_task = await session.get(Task, task_id)
-            assert stored_task is not None
-            stored_task.task_draft = {
-                "task_type": "general",
-                "step09a_capsule": _capsule(worktree),
-            }
-        adapter = _StaticAdapter(_static_result(structured_output={}))
-        finalizer = MagicMock()
-        finalizer.finalize = AsyncMock(side_effect=AssertionError("finalize must not run"))
-        finalizer.persist = AsyncMock()
-        handler = ProviderStepHandler(
-            factory,
-            registries,
-            _adapters_for(registries, tmp_path, "api", adapter),
-            worktrees=worktrees,
-            finalizer=finalizer,
-            worktree_access=MagicMock(grant=AsyncMock()),
-        )
-        access = MagicMock(revoke=AsyncMock())
-        handler._grant_worktree_access = AsyncMock(return_value=access)  # type: ignore[method-assign]
-        handler._commit_messages = MagicMock(resolve=AsyncMock(return_value="task(proj): bounded"))
-        payload = {"budget_reservation_id": str(reservation_id), "provider_attempt": 1}
-
-        outcome = await handler.execute(
-            _request(
-                task_id, run_id, step_id, token, step_type="execute_code", payload=dict(payload)
-            ),
-            CancellationContext(),
-        )
-
-        assert outcome.kind is OutcomeKind.PERMANENT_FAILURE
-        assert outcome.category == "invalid_worker_edit_report"
-        finalizer.finalize.assert_not_awaited()
-        finalizer.persist.assert_not_awaited()
-        await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-def test_step09a_result_schema_discussion_branch() -> None:
-    name, version, schema = _step09a_result_schema(
+def test_result_schema_discussion_branch() -> None:
+    name, version, schema = result_schema_for_step(
         "execute_agent", {"discussion_agent_contract": {"channel": "x"}}
     )
     assert name == "DiscussionTextReply"
     assert version == "discussion-text-reply.v2"
     assert schema is None
 
-    plain = _step09a_result_schema("execute_model", {})
+    plain = result_schema_for_step("execute_model", {})
     assert plain == (None, None, None)

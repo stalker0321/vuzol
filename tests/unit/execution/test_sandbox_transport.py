@@ -6,7 +6,6 @@ from ._execution_helpers import (
     AsyncMock,
     CancellationContext,
     CodexProcessResult,
-    LocalGit,
     MagicMock,
     Path,
     ProxyNetworkLease,
@@ -15,7 +14,6 @@ from ._execution_helpers import (
     RequiredGate,
     SandboxCodexTransport,
     SandboxError,
-    WorkerFinalizer,
     WorktreeAccessError,
     _sandbox_gate_runner,
     asyncio,
@@ -40,10 +38,9 @@ async def test_missing_validation_sandbox_prevents_provider_execution(
         MagicMock(),
         MagicMock(),
         worktrees=MagicMock(),
-        finalizer=MagicMock(),
         worktree_access=MagicMock(),
     )
-    provider_request = MagicMock(task_draft={"step09a_capsule": {}})
+    provider_request = MagicMock(task_draft={})
     handler._build_request = AsyncMock(  # type: ignore[method-assign]
         return_value=(provider_request, "grok-a", uuid.uuid4(), "revision")
     )
@@ -72,11 +69,6 @@ async def test_gate_runner_requires_fenced_sandbox_context(tmp_path: Path) -> No
         )
     envelopes.build_gate.assert_not_awaited()
     runtime.run.assert_not_awaited()
-
-
-def test_worker_finalizer_requires_explicit_sandbox_runner() -> None:
-    with pytest.raises(ValueError, match="explicit sandbox gate runner"):
-        WorkerFinalizer(LocalGit())
 
 
 @pytest.mark.anyio

@@ -49,15 +49,13 @@ from vuzol.execution.domain import (
     SandboxMount,
     SandboxSpec,
 )
-from vuzol.execution.finalization import (
+from vuzol.execution.gates import (
     CapturedOutput,
     GateEvidence,
     GateExecutionContext,
     GateRun,
+    RequiredGate,
     TrustedGateRunner,
-    WorkerFinalizationError,
-    WorkerFinalizer,
-    _reported_usage,
 )
 from vuzol.execution.git import SYSTEM_GIT_CONFIG, GitError, LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
@@ -70,11 +68,6 @@ from vuzol.execution.paths import (
 )
 from vuzol.execution.proxy_networks import ProxyNetworkLease
 from vuzol.execution.proxy_service import ProxyServiceError, ProxyServiceLease
-from vuzol.execution.runtime_contract import (
-    AgentCertificateStore,
-    certification_key,
-    new_certificate,
-)
 from vuzol.execution.sandbox import (
     RootlessDockerRuntime,
     SandboxError,
@@ -87,21 +80,6 @@ from vuzol.execution.sandbox import (
     validate_seccomp_profile,
 )
 from vuzol.execution.worktrees import WorktreeService
-from vuzol.experiments.domain import (
-    AgentCheckResult,
-    AgentCheckStatus,
-    BoundedLevel,
-    ContextManifest,
-    ExecutionStrategy,
-    ReportedUsage,
-    RequiredGate,
-    RiskLevel,
-    TaskClass,
-    TaskClassification,
-    WorkerEditReport,
-    WorkerTaskCapsule,
-)
-from vuzol.experiments.review import VerificationResult
 from vuzol.providers.codex import canonical_codex_argv
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.providers.grok import (
@@ -118,20 +96,16 @@ __all__ = [
     "ANY",
     "GROK_DIAGNOSTIC_FILE_MAX_BYTES",
     "SYSTEM_GIT_CONFIG",
-    "AgentCertificateStore",
     "Any",
     "ArtifactSecretError",
     "ArtifactStore",
     "AsyncMock",
-    "BoundedLevel",
     "CancellationContext",
     "CapturedOutput",
     "CodexInvocation",
     "CodexProcessResult",
-    "ContextManifest",
     "EgressDestination",
     "ExecutionEnvelopeFactory",
-    "ExecutionStrategy",
     "GateEvidence",
     "GateExecutionContext",
     "GateRun",
@@ -149,9 +123,7 @@ __all__ = [
     "ProxyNetworkLease",
     "ProxyServiceError",
     "ProxyServiceLease",
-    "ReportedUsage",
     "RequiredGate",
-    "RiskLevel",
     "RootlessDockerRuntime",
     "RootlessIdentity",
     "RootlessIdentityResolver",
@@ -163,14 +135,7 @@ __all__ = [
     "SandboxSpec",
     "Step",
     "StepStatus",
-    "TaskClass",
-    "TaskClassification",
     "TrustedGateRunner",
-    "VerificationResult",
-    "WorkerEditReport",
-    "WorkerFinalizationError",
-    "WorkerFinalizer",
-    "WorkerTaskCapsule",
     "Worktree",
     "WorktreeAccessError",
     "WorktreeAccessManager",
@@ -182,21 +147,14 @@ __all__ = [
     "_atomic_write_diagnostic",
     "_base_acl_mode",
     "_bounded_read",
-    "_certified_codex_profile",
     "_collect_entries",
-    "_edit_report",
-    "_finalizer_capsule",
-    "_finalizer_repository",
-    "_gate_context",
     "_get_xattr",
     "_git",
     "_map_id",
-    "_normalized_usage",
     "_numeric_acl",
     "_prepare_diagnostic_destinations",
     "_read_id_map",
     "_reader",
-    "_reported_usage",
     "_require_trusted_command",
     "_sandbox_gate_runner",
     "_seccomp_profile",
@@ -209,7 +167,6 @@ __all__ = [
     "asyncio",
     "canonical_codex_argv",
     "canonical_grok_argv",
-    "certification_key",
     "contained",
     "contextlib",
     "docker_run_argv",
@@ -218,7 +175,6 @@ __all__ = [
     "hashlib",
     "io",
     "json",
-    "new_certificate",
     "os",
     "patch",
     "pytest",
@@ -318,154 +274,14 @@ def _reader(content: bytes) -> asyncio.StreamReader:
     return reader
 
 
-def _finalizer_repository(tmp_path: Path) -> tuple[Path, str, str]:
-    repository = tmp_path / "finalizer-repo"
-    repository.mkdir()
-    _git(repository, "init", "-b", "main")
-    (repository / "src").mkdir()
-    (repository / "src" / "example.py").write_text("VALUE = 1\n")
-    (repository / "Makefile").write_text("test format-check lint type-check:\n\t@true\n")
-    _git(repository, "add", ".")
-    _git(
-        repository,
-        "-c",
-        "user.name=Base",
-        "-c",
-        "user.email=base@example.invalid",
-        "commit",
-        "-m",
-        "base",
-    )
-    base = _git(repository, "rev-parse", "HEAD").strip()
-    branch = "step09a/test/finalizer"
-    _git(repository, "switch", "-c", branch)
-    return repository, base, branch
-
-
-def _finalizer_capsule(
-    base: str,
-    branch: str,
-    *,
-    allowed_paths: tuple[str, ...] = ("src/example.py",),
-    gates: tuple[RequiredGate, ...] | None = None,
-    parent_attempt: int | None = None,
-) -> WorkerTaskCapsule:
-    return WorkerTaskCapsule(
-        experiment_id="step09a-finalizer-test",
-        task_id="bounded-edit",
-        worker_profile="grok-a",
-        base_commit=base,
-        target_branch=branch,
-        goal="Change the bounded example.",
-        classification=TaskClassification(
-            task_class=TaskClass.BOUNDED_FEATURE,
-            complexity=BoundedLevel.MEDIUM,
-            risk=RiskLevel.LOW,
-            testability=BoundedLevel.HIGH,
-            blast_radius=BoundedLevel.LOW,
-            coupling=BoundedLevel.LOW,
-            novelty=BoundedLevel.LOW,
-            expected_file_count=1,
-        ),
-        predicted_strategy=ExecutionStrategy.REVIEWED,
-        actual_strategy=ExecutionStrategy.REVIEWED,
-        allowed_paths=allowed_paths,
-        acceptance_criteria=("The measured change passes trusted gates.",),
-        required_gates=gates
-        or tuple(
-            RequiredGate(name=name, command_id=f"make {name}")
-            for name in ("test", "format-check", "lint", "type-check")
-        ),
-        maximum_execution_seconds=30,
-        context_manifest=ContextManifest(role="worker"),
-        parent_attempt=parent_attempt,
-    )
-
-
-def _edit_report(*, attempt: int = 1, claimed_complete: bool = False) -> WorkerEditReport:
-    return WorkerEditReport(
-        experiment_id="provider-claim-does-not-control-result",
-        task_id="provider-claim-does-not-control-result",
-        attempt=attempt,
-        claimed_complete=claimed_complete,
-        implementation_summary="Implemented the requested bounded change.",
-        agent_checks=(
-            AgentCheckResult(
-                name="focused test",
-                status=AgentCheckStatus.PASSED,
-                detail="Provider-local execution only.",
-            ),
-        ),
-        limitations=("Provider-authored limitation retained as context.",),
-        usage=ReportedUsage(input_tokens=999, output_tokens=999),
-    )
-
-
-def _normalized_usage() -> NormalizedUsage:
-    return NormalizedUsage(
-        input_tokens=11,
-        cached_tokens=3,
-        output_tokens=7,
-        duration_ms=19,
-    )
-
-
-def _gate_context() -> GateExecutionContext:
-    return GateExecutionContext(
-        task_id=uuid.uuid4(),
-        run_id=uuid.uuid4(),
-        step_id=uuid.uuid4(),
-        worktree_id=uuid.uuid4(),
-        profile_id="grok-a",
-        provider_attempt=1,
-        lease_generation=1,
-    )
-
-
 def _sandbox_gate_runner() -> tuple[TrustedGateRunner, AsyncMock, AsyncMock]:
     envelopes = AsyncMock()
     envelope = MagicMock(spec=ProcessEnvelope)
     envelope.sandbox = MagicMock(image="validation@sha256:" + "b" * 64)
     envelopes.build_gate.return_value = envelope
-    envelopes.build_canonicalizer.return_value = envelope
     runtime = AsyncMock()
     runtime.run.return_value = CodexProcessResult(0, "gate passed\n", "", 2)
     return TrustedGateRunner(envelopes, runtime), envelopes, runtime
-
-
-def _certified_codex_profile() -> Any:
-    from vuzol.config.models import ProviderProfileConfig
-
-    return ProviderProfileConfig.model_validate(
-        {
-            "id": "codex-certified",
-            "provider": "codex",
-            "model": "codex",
-            "launch_mode": "cli",
-            "credential_required": False,
-            "capabilities": ["repository_read", "code_edit", "project_shell"],
-            "concurrency_limit": 1,
-            "cost_class": "strong",
-            "supported_task_types": ["coding"],
-            "runtime_identity": "codex-certified",
-            "state_directory": "/var/lib/vuzol-provider-state/codex-certified",
-            "agent_runtime_contract": {
-                "cli_version": "codex-cli 0.144.1",
-                "edit_mechanism": "shell_backed_repository_tools",
-                "working_directory": "/workspace",
-                "writable_roots": ["/workspace"],
-                "protected_roots": ["/workspace/.git"],
-                "structured_output_source": "final_agent_message_json",
-                "inner_sandbox_mode": "provider_managed",
-                "supports_read": True,
-                "supports_search": True,
-                "supports_edit": True,
-                "supports_git": False,
-                "supports_network": False,
-                "supports_local_checks": False,
-            },
-        }
-    )
 
 
 def _numeric_acl(path: Path) -> str:

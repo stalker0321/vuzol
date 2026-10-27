@@ -8,7 +8,7 @@ import pytest
 from vuzol.config import StaticDeploymentConfig
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.access import WorktreeAccessManager
-from vuzol.execution.finalization import GateRunner
+from vuzol.execution.gates import GateRunner
 from vuzol.execution.git import LocalGit
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.storage.types import StepStatus

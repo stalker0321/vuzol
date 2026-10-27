@@ -323,12 +323,8 @@ def _durable_state() -> None:
     sql = """
 SELECT violation_type, object_id, run_id, run_status
 FROM (
-  SELECT 'qualification_reserved_budget' AS violation_type,
+  SELECT 'terminal_reserved_budget' AS violation_type,
          r.id::text AS object_id, x.id::text AS run_id, x.status::text AS run_status
-  FROM provider_budget_reservations r JOIN runs x ON x.id=r.run_id
-  WHERE r.status='reserved' AND x.selected_route->>'experiment_id' LIKE '%qual%'
-  UNION ALL
-  SELECT 'terminal_reserved_budget', r.id::text, x.id::text, x.status::text
   FROM provider_budget_reservations r JOIN runs x ON x.id=r.run_id
   WHERE r.status='reserved' AND x.status IN ('completed', 'failed', 'cancelled', 'blocked')
   UNION ALL

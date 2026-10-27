@@ -221,7 +221,7 @@ class GrokCliAdapter:
                 provider_request_id=receipt_id,
             ) from error
         try:
-            structured_output = _step09a_structured_output(request, str(body["text"]))
+            structured_output = _structured_output(request, str(body["text"]))
         except ProviderFailure as failure:
             raise replace(
                 failure.with_receipt(measured_usage, _optional_string(body.get("request_id"))),
@@ -323,7 +323,7 @@ class GrokProviderCancelled(ValueError):
     """The CLI completed normally but its structured protocol reported cancellation."""
 
 
-def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str, object] | None:
+def _structured_output(request: ProviderRequest, value: str) -> dict[str, object] | None:
     from pydantic import ValidationError
 
     if request.output_schema_version == "independent-review.v1":
@@ -359,32 +359,7 @@ def _step09a_structured_output(request: ProviderRequest, value: str) -> dict[str
                     mode="json", exclude_none=True
                 )
             raise ValueError("invalid discussion agent reply") from error
-    if request.output_schema_version not in {
-        "step09a-worker-edit-report.v1",
-        "step09a-worker-result.v1",
-    }:
-        return None
-    from vuzol.experiments.domain import WorkerEditReport, WorkerResultManifest
-
-    try:
-        contract = (
-            WorkerEditReport
-            if request.output_schema_version == "step09a-worker-edit-report.v1"
-            else WorkerResultManifest
-        )
-        # Grok occasionally emits one short progress sentence before the requested
-        # JSON object. Accept only that bounded shape; trailing prose still fails.
-        object_start = value.find("{")
-        candidate = value[object_start:] if object_start > 0 else value
-        manifest = contract.model_validate_json(candidate)
-    except ValidationError as error:
-        raise ProviderFailure(
-            ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
-            retryable=False,
-            request_sent=True,
-            safe_summary="Grok CLI returned an invalid worker result manifest",
-        ) from error
-    return manifest.model_dump(mode="json")
+    return None
 
 
 def _result_contract_instruction(request: ProviderRequest) -> str:
@@ -395,17 +370,6 @@ def _result_contract_instruction(request: ProviderRequest) -> str:
             "Do not add worker-manifest fields such as unavailable_reason. Preserve all "
             "findings and their actual verdict; incomplete evidence must not become a pass."
         )
-    if request.output_schema_version == "step09a-worker-edit-report.v1":
-        return (
-            "Do not invoke shell commands or run local checks. Vuzol owns measured "
-            "inspection, staging, commit creation, trusted validation, and the authoritative "
-            "result manifest. Return one agent_checks entry for each relevant local check, "
-            "including checks attempted or intentionally not run, using passed, failed, "
-            "unavailable, or not_run honestly; return an empty list when there were no relevant "
-            "check candidates. Never present agent_checks as trusted gates. Return only "
-            "the small requested edit report. When all provider usage is unavailable, include a "
-            "concise non-empty unavailable_reason."
-        )
     return (
         "When every provider usage value is unavailable, set unavailable_reason to a concise "
         "non-empty explanation. Return an object that validates against the requested schema."
@@ -413,14 +377,6 @@ def _result_contract_instruction(request: ProviderRequest) -> str:
 
 
 def _shell_contract_instruction(request: ProviderRequest) -> str:
-    if request.output_schema_version == "step09a-worker-edit-report.v1":
-        return (
-            "The shell tool is unavailable. Inspect files with the native List, Read, and Grep "
-            "tools and make changes with the native Edit tool. Do not attempt git, build, test, "
-            "or other terminal commands. The "
-            "deterministic Vuzol finalizer independently owns measured inspection, staging, commit "
-            "creation, and trusted gates."
-        )
     return (
         "Invoke each allowed shell command separately; do not use cd, chains, wrappers, or "
         "command substitution. Commands must begin exactly with git, make, or ./verify.sh. The "

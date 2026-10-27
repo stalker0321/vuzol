@@ -233,10 +233,9 @@ async def test_provider_handler_revokes_acl_on_provider_failure_or_cancellation(
         MagicMock(),
         MagicMock(),
         worktrees=MagicMock(),
-        finalizer=MagicMock(),
         worktree_access=MagicMock(),
     )
-    provider_request = MagicMock(task_draft={"step09a_capsule": {}})
+    provider_request = MagicMock(task_draft={})
     handler._build_request = AsyncMock(  # type: ignore[method-assign]
         return_value=(provider_request, "grok-a", uuid.uuid4(), "revision")
     )

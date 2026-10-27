@@ -23,7 +23,6 @@ from vuzol.config import (
 )
 from vuzol.execution.git import LocalGit
 from vuzol.execution.worktrees import WorktreeService
-from vuzol.experiments.domain import WorkerEditReport
 from vuzol.providers.budgets import (
     BudgetExceeded,
     estimate_reservation,
@@ -137,7 +136,6 @@ __all__ = [
     "TaskStatus",
     "UnitOfWork",
     "UsageRecord",
-    "WorkerEditReport",
     "Worktree",
     "WorktreeDeliveryState",
     "WorktreeService",

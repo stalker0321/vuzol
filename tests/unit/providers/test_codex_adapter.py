@@ -14,7 +14,6 @@ from ._test_providers_helpers import (
     ProviderErrorCategory,
     ProviderFailure,
     StaticCodexTransport,
-    WorkerEditReport,
     codex_jsonl,
     codex_profile,
     codex_request,
@@ -149,7 +148,7 @@ async def test_codex_structured_jsonl_promotes_final_typed_object(tmp_path: Path
     }
     transport = StaticCodexTransport(codex_jsonl(json.dumps(payload)), duration_ms=73)
     result = await CodexCliAdapter(transport).execute(
-        codex_request(schema=WorkerEditReport.model_json_schema()),
+        codex_request(schema={"type": "object"}),
         codex_profile(tmp_path),
         CancellationContext(),
     )

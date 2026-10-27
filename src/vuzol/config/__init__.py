@@ -2,8 +2,6 @@
 
 from vuzol.config.loader import ConfigurationLoadError, build_bundle, load_document, merge_documents
 from vuzol.config.models import (
-    AgentEditMechanism,
-    AgentRuntimeContract,
     BudgetMode,
     Capability,
     CommandDefinition,
@@ -11,7 +9,6 @@ from vuzol.config.models import (
     DeliveryMode,
     EgressDestination,
     GitDeliveryPolicy,
-    InnerSandboxMode,
     LaunchMode,
     NetworkPolicy,
     OpenRouterProviderRouting,
@@ -22,7 +19,6 @@ from vuzol.config.models import (
     SandboxNetworkMode,
     SandboxProfileConfig,
     StaticDeploymentConfig,
-    StructuredOutputSource,
     TopicConfig,
     TopicKind,
 )
@@ -51,15 +47,12 @@ from vuzol.config.settings import (
     RetentionDefaults,
     Settings,
     SubscriptionLimitSettings,
-    TelegramDogfoodSettings,
     TelegramSettings,
     WorkflowSettings,
     get_settings,
 )
 
 __all__ = [
-    "AgentEditMechanism",
-    "AgentRuntimeContract",
     "BackupSettings",
     "BudgetMode",
     "Capability",
@@ -78,7 +71,6 @@ __all__ = [
     "ExecutionSettings",
     "GitDeliveryPolicy",
     "HardLimits",
-    "InnerSandboxMode",
     "InterpretationSettings",
     "LaunchMode",
     "NetworkPolicy",
@@ -101,9 +93,7 @@ __all__ = [
     "Settings",
     "SnapshotCompatibility",
     "StaticDeploymentConfig",
-    "StructuredOutputSource",
     "SubscriptionLimitSettings",
-    "TelegramDogfoodSettings",
     "TelegramSettings",
     "TopicConfig",
     "TopicKind",

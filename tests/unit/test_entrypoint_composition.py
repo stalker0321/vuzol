@@ -548,8 +548,6 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     polling_kwargs: dict[str, object] = {}
     ingress = MagicMock()
     ingress.accept_message = AsyncMock()
-    dogfood = MagicMock()
-    dogfood.accept_message = AsyncMock(return_value=None)
     workspace = MagicMock()
     workspace.synchronize = AsyncMock()
     durable = MagicMock()
@@ -579,7 +577,6 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(telegram_cli, "require_migration_head", pass_head)
     monkeypatch.setattr(telegram_cli, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(telegram_cli, "TelegramIngressService", lambda *_args: ingress)
-    monkeypatch.setattr(telegram_cli, "TelegramDogfoodIngressService", lambda *_args: dogfood)
     monkeypatch.setattr(telegram_cli, "TelegramControlService", MagicMock())
     monkeypatch.setattr(telegram_cli, "TelegramWorkspaceService", lambda *_args: workspace)
     monkeypatch.setattr(telegram_cli, "DurableTelegramIngress", lambda *args, **kwargs: durable)
@@ -616,14 +613,7 @@ def test_telegram_main_composes_long_polling(monkeypatch: MonkeyPatch) -> None:
     assert callable(on_message)
     update = MagicMock()
     asyncio.run(on_message(update))
-    dogfood.accept_message.assert_awaited_once_with(update)
     ingress.accept_message.assert_awaited_once_with(update)
-
-    dogfood.accept_message.reset_mock(return_value=True)
-    dogfood.accept_message.return_value = object()
-    ingress.accept_message.reset_mock()
-    asyncio.run(on_message(update))
-    ingress.accept_message.assert_not_awaited()
 
 
 def test_telegram_fails_closed_before_polling_when_migration_head_refuses(

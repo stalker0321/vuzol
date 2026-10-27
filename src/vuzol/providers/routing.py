@@ -461,11 +461,7 @@ async def claim_routed_step(
         trusted_profile_id = (
             chat_profile_id
             or (matrix_choice.profile_id if matrix_choice else None)
-            or (
-                project_pin.trusted_profile_id
-                if project_pin is not None
-                else _trusted_profile_id(run)
-            )
+            or (project_pin.trusted_profile_id if project_pin is not None else None)
         )
         default_executor_id = settings.execution.default_executor_profile_id
         default_executor_applied = False
@@ -728,14 +724,6 @@ async def claim_routed_step(
             await enqueue_project_status_dashboard(session, task.source_chat_id)
         return LeaseToken(step=step_record(step), owner=owner, generation=step.lease_generation)
     return None
-
-
-def _trusted_profile_id(run: Run) -> str | None:
-    """Read only the bounded internal Step 09A route pin, never model task output."""
-    if run.selected_route.get("schema_version") != "step09a-route.v1":
-        return None
-    value = run.selected_route.get("trusted_profile_id")
-    return value if isinstance(value, str) else None
 
 
 async def _states(

@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
 
-from vuzol.config import TelegramDogfoodSettings, TopicKind, TopicRegistry
+from vuzol.config import TopicKind, TopicRegistry
 from vuzol.config.registries import ProfileRegistry, ProjectRegistry
 from vuzol.execution.artifacts import ArtifactError, ArtifactStore
 from vuzol.execution.paths import PathViolation
@@ -21,7 +21,6 @@ from vuzol.interpretation.discussion import (
     DISCUSSION_THINKING_ROLE,
 )
 from vuzol.observability import get_logger
-from vuzol.ops.telegram_dogfood import DogfoodFault, consume_fault
 from vuzol.projects.executor_preference import format_preference_label, load_preference
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
@@ -1623,7 +1622,6 @@ class TelegramDeliveryService:
         trace_enabled: bool = True,
         trace_sample_percent: int = 100,
         trace_always_include_anomalies: bool = True,
-        dogfood_settings: TelegramDogfoodSettings | None = None,
         rich_messages: bool = False,
         artifacts: ArtifactStore | None = None,
         project_lead_enabled: bool = False,
@@ -1641,7 +1639,6 @@ class TelegramDeliveryService:
         self._trace_enabled = trace_enabled
         self._trace_sample_percent = trace_sample_percent
         self._trace_always_include_anomalies = trace_always_include_anomalies
-        self._dogfood_settings = dogfood_settings or TelegramDogfoodSettings()
         self._project_lead_enabled = project_lead_enabled
         self._rich_messages = rich_messages
         self._artifacts = artifacts
@@ -1678,8 +1675,6 @@ class TelegramDeliveryService:
             if prepared.action == DeliveryAction.NOOP:
                 await self._complete(token, prepared, None)
                 return True
-            if await self._consume_transient_dogfood_fault(prepared):
-                raise TimedOut("controlled dogfood Telegram failure before request")
             try:
                 if prepared.rich_html is not None:
                     try:
@@ -1734,30 +1729,6 @@ class TelegramDeliveryService:
                 extra={"event": "telegram.delivery.lease_lost", "outbox_id": str(token.item_id)},
             )
         return True
-
-    async def _consume_transient_dogfood_fault(self, prepared: PreparedDelivery) -> bool:
-        project_id = prepared.project_id
-        async with self._factory.begin() as session:
-            if project_id is None and prepared.task_id is not None:
-                project_id = await session.scalar(
-                    select(Task.project_id).where(Task.id == prepared.task_id)
-                )
-            if project_id is None and prepared.work_package_id is not None:
-                project_id = await session.scalar(
-                    select(WorkPackage.project_id).where(WorkPackage.id == prepared.work_package_id)
-                )
-            if project_id is None:
-                return False
-            return (
-                await consume_fault(
-                    session,
-                    self._dogfood_settings,
-                    project_id=project_id,
-                    fault=DogfoodFault.TELEGRAM_TRANSIENT_BEFORE_REQUEST,
-                    consumer=self._owner,
-                )
-                is not None
-            )
 
     async def _call_rich_telegram(self, prepared: PreparedDelivery) -> int | None:
         assert prepared.rich_html is not None

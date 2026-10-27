@@ -574,13 +574,10 @@ permissions; report approval does not apply a code change.
 The dedicated executor also registers isolated Codex and Grok CLI transports behind the Step 08
 worktree, supervised-process, rootless-sandbox, and controlled-egress boundary. Provider state,
 worktrees, containers, proxies, credentials, and concurrency are separated by profile and task.
-Provider output is typed and untrusted; the host-side finalizer independently measures scope and
-Git facts, runs trusted gates in a separate pinned validation image, and creates a result commit
-only after verification succeeds.
+Provider output is typed and untrusted; result validation independently measures scope and Git
+facts, runs trusted gates in a separate pinned validation image, and creates a result commit only
+after verification succeeds.
 
-Production user intake exposes only the explicit bounded `/sol` Telegram path documented in
-`TELEGRAM.md`. It fixes the profile to `codex-a` (local overlay), accepts one to ten contained
-repository-relative paths, permits no model repair, and retains rather than integrates the result.
-Grok execution and multi-worker modes remain experimental evidence, not an automatically trusted
-production route. Merge, push, deployment, privileged execution, and automatic trust promotion
+Production coding work enters through the project lead: each approved plan item runs as a
+`fixed_executor` workflow. Push, deployment, privileged execution, and automatic trust promotion
 remain unavailable.

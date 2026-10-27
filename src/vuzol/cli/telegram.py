@@ -17,7 +17,6 @@ from vuzol.telegram.adapter import (
     resolve_bot_token,
 )
 from vuzol.telegram.controls import TelegramControlService
-from vuzol.telegram.dogfood import TelegramDogfoodIngressService
 from vuzol.telegram.domain import (
     ControlUpdate,
     IngressResult,
@@ -36,12 +35,10 @@ def ingress_handlers(
     """One ingress composition for polling and transport-boundary tests."""
     overrides = ContinueDiscussionOverrides()
     ingress = TelegramIngressService(runtime, factory, overrides)
-    dogfood = TelegramDogfoodIngressService(runtime, factory)
     controls = TelegramControlService(runtime, factory, overrides)
 
     async def on_message(update: MessageUpdate) -> None:
-        if await dogfood.accept_message(update) is None:
-            await ingress.accept_message(update)
+        await ingress.accept_message(update)
 
     async def on_control(update: ControlUpdate | WorkPackageControlUpdate) -> IngressResult:
         return await controls.accept(update)

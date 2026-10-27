@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 from tests.integration.leadership import test_managed_goal_flow as flow
 
-from vuzol.execution.finalization import GateEvidence
+from vuzol.execution.gates import GateEvidence
 from vuzol.execution.result_validation import ResultValidationHandler, _success_payload
 from vuzol.leadership import verification
 from vuzol.leadership.evidence import runtime_validation

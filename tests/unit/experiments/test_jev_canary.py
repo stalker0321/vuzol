@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from vuzol.experiments.canary import (
     CanaryPolicy,
     KillSwitch,
+    WhitelistGate,
     cohort_bucket,
     in_cohort,
 )
-from vuzol.experiments.decision import WhitelistGate
 
 
 def test_canary_is_deterministic_and_one_kind_only() -> None:
@@ -47,3 +49,14 @@ def test_kill_switch_and_rollback_block_apply() -> None:
     assert blocked.allowed is False and blocked.reason == "kill_switch"
     switch.thaw("intake")
     assert policy.admit(decision_kind="intake", opportunity_id="op-1").allowed is True
+
+
+def test_whitelist_gate_default_off() -> None:
+    gate = WhitelistGate()
+    assert gate.allows("repair_triage") is False
+    enabled = gate.enable("repair_triage", gate_evidence="preregistration-hash-abc")
+    assert gate.allows("repair_triage") is False
+    assert enabled.allows("repair_triage") is True
+    assert enabled.allows("other_kind") is False
+    with pytest.raises(ValueError, match="gate evidence"):
+        gate.enable("repair_triage", gate_evidence="  ")

@@ -13,8 +13,26 @@ import hashlib
 from dataclasses import dataclass, field
 
 from vuzol.config.settings import Settings
-from vuzol.experiments.decision import WhitelistGate
-from vuzol.experiments.domain import FrozenModel
+from vuzol.execution.domain import FrozenModel
+
+
+@dataclass(frozen=True, slots=True)
+class WhitelistGate:
+    """Production whitelist for decision classes. Default off.
+
+    Enabling requires explicit gate evidence (e.g. a preregistration/report
+    hash); allowlist membership is the only route to production.
+    """
+
+    enabled_kinds: frozenset[str] = frozenset()
+
+    def allows(self, decision_kind: str) -> bool:
+        return decision_kind in self.enabled_kinds
+
+    def enable(self, decision_kind: str, *, gate_evidence: str) -> WhitelistGate:
+        if not gate_evidence.strip():
+            raise ValueError("whitelist enable requires gate evidence")
+        return WhitelistGate(enabled_kinds=self.enabled_kinds | {decision_kind})
 
 
 class CanaryDecision(FrozenModel):

@@ -238,7 +238,6 @@ def test_ast_no_call_diagnostic_with_pinned_allowlist() -> None:
     # cleanup kills plus finite-argv runs. Any new call site fails this test
     # and must be justified as supervised (timeout + bounded argv).
     pinned = {
-        "cli/agent_certify.py",
         # Fixed native OpenCode --version / console orgs, no model call;
         # stripped env, 10/30s timeouts, shared owner lock, durable-token check.
         "cli/opencode_usage_export.py",
@@ -247,7 +246,6 @@ def test_ast_no_call_diagnostic_with_pinned_allowlist() -> None:
         "execution/proxy_networks.py",
         "execution/proxy_service.py",
         "execution/sandbox.py",
-        "experiments/review.py",
         # Fixed local document parser, stripped credential environment,
         # CPU/address-space limits, wall timeout and cancellation kill+reap.
         # No user program, shell, workspace mutation or provider invocation.

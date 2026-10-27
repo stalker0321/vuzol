@@ -15,8 +15,7 @@ import hashlib
 import re
 from collections.abc import Sequence
 
-from vuzol.execution.domain import GitInspection
-from vuzol.experiments.domain import FrozenModel
+from vuzol.execution.domain import FrozenModel, GitInspection
 from vuzol.review.policy import (
     REVIEW_POLICY_REVISION,
     FileClass,

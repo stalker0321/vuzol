@@ -238,7 +238,7 @@ async def test_result_validation_fails_scaffold_on_code_transition(
     request.step_id = uuid4()
     request.lease = MagicMock(generation=1)
 
-    from vuzol.experiments.domain import RequiredGate
+    from vuzol.execution.gates import RequiredGate
 
     with pytest.raises(ResultValidationError, match="scaffold") as raised:
         await handler._validate(

@@ -44,6 +44,30 @@ commit. Migrations are not downgraded, so they must stay compatible with the pre
   `u:vuzol-executor:--x`, `auth.json` `110000:vuzol-executor 0640`) and a unique
   `runtime_identity`; a home directory such as `~/.codex-c` is not readable by the executor.
 
+## Backups and retention
+
+`vuzol-backup.timer` runs `vuzol-backup-run.sh` every night at about 03:30. It takes an encrypted
+`pg_dump` of the database (`vuzol-backup capture`), checks that the new package decrypts
+(`restore --verify-crypto`), and copies every local package to the hosts in `BACKUP_TARGETS`
+(`/etc/vuzol/backup.env`). Seven packages stay in `/srv/vuzol/backups/daily`. The copies land in
+`~/vuzol-backups/daily` on `vuzol-main` and the NL server. The ssh key in
+`/etc/vuzol/backup` is allowed only `rrsync -wo -no-del` there: it can add packages, not read or
+delete them, so old copies are not pruned remotely. Only the database is backed up, not
+repositories, artifacts or `/etc/vuzol`.
+
+The key that decrypts the packages is `/etc/vuzol/backup/kek`, with copies in
+`~/vuzol-backups/kek/kek` on both target hosts. Without it the packages cannot be restored. To
+restore, put a package under the staging root and run, as root with the backup environment:
+`vuzol-backup restore --run-id <id> --verify-crypto`, then into an empty `vuzol_restore` database
+`VUZOL_BACKUP__RESTORE_CLI_PERMITTED=true vuzol-backup restore --run-id <id> --apply
+--i-understand-partial-postgres-only`. The restore DSN is `/etc/vuzol/backup/restore_dsn`.
+
+`vuzol-retention.timer` runs `vuzol-retention --apply` every night at about 04:30 as
+`vuzol-executor`. It removes worktrees of finished tasks after their retention period, deletes
+expired artifacts, and moves files with no artifact row into `/srv/vuzol/artifacts/.quarantine`
+(never emptied automatically). Run `vuzol-retention --json` without `--apply` to see what it would
+do.
+
 ## Not cleaned up yet
 
 - Postgres uses the default password and services run with `VUZOL_ENVIRONMENT=development`.

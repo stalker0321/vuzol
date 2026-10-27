@@ -436,3 +436,36 @@ def test_retention_action_abort_carries_action() -> None:
     abort = _RetentionActionAbort(action)
     assert abort.action is action
     assert "x" in str(abort)
+
+
+def test_artifact_path_accepts_absolute_paths_inside_the_artifact_root(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from vuzol.execution.paths import PathViolation
+
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "telegram-intake").mkdir(parents=True)
+    sweeper = RetentionSweeper(
+        AsyncMock(),
+        worktree_root=tmp_path / "worktrees",
+        artifact_root=artifacts,
+        repository_root=tmp_path / "repos",
+        retention=RetentionDefaults(),
+        owner="test",
+    )
+    (tmp_path / "worktrees").mkdir()
+    (tmp_path / "repos").mkdir()
+    sweeper._bind_roots(mode=RetentionSweepMode.DRY_RUN)
+    attachment = artifacts / "telegram-intake" / "item.bin"
+    path = sweeper._artifact_path(SimpleNamespace(content_uri=str(attachment)))  # type: ignore[arg-type]
+    assert path == attachment.resolve()
+    assert (
+        sweeper._artifact_path(SimpleNamespace(content_uri="artifact:ab/abcd"))
+        == (  # type: ignore[arg-type]
+            artifacts / "ab" / "abcd"
+        ).resolve()
+    )
+    with pytest.raises(PathViolation):
+        sweeper._artifact_path(SimpleNamespace(content_uri=str(tmp_path / "elsewhere.bin")))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unsupported"):
+        sweeper._artifact_path(SimpleNamespace(content_uri="https://example.com/x"))  # type: ignore[arg-type]

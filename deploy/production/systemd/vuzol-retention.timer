@@ -1,0 +1,11 @@
+[Unit]
+Description=Sweep expired Vuzol worktrees and artifacts every night
+
+[Timer]
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=15m
+Persistent=true
+Unit=vuzol-retention.service
+
+[Install]
+WantedBy=timers.target

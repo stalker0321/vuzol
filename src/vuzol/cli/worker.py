@@ -140,7 +140,10 @@ async def run() -> None:
                 runtime.registries.profiles, resolver, session_factory=factory
             )
         if settings.project_lead.enabled and not settings.execution.enabled:
-            from vuzol.leadership.composition import build_project_lead_worker
+            from vuzol.leadership.composition import (
+                build_goal_retrospective_worker,
+                build_project_lead_worker,
+            )
 
             control_processors.append(
                 build_project_lead_worker(
@@ -155,6 +158,15 @@ async def run() -> None:
                         project.id: project.default_branch
                         for project in runtime.registries.projects.items()
                     },
+                    adapter_registry=adapter_registry,
+                )
+            )
+            control_processors.append(
+                build_goal_retrospective_worker(
+                    factory,
+                    settings=settings,
+                    profiles=runtime.registries.profiles,
+                    owner=f"{owner}:retrospective",
                     adapter_registry=adapter_registry,
                 )
             )

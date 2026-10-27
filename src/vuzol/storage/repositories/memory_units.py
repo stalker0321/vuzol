@@ -45,6 +45,7 @@ class MemoryUnitRepository:
         project_id: str | None = None,
         scope: MemoryScope | None = None,
         goal_id: uuid.UUID | None = None,
+        details: dict[str, Any] | None = None,
         session_id: uuid.UUID | None = None,
         trigger_event_id: uuid.UUID | None = None,
         source_event_id: uuid.UUID | None = None,
@@ -62,6 +63,7 @@ class MemoryUnitRepository:
                 project_id=project_id,
                 scope=scope or (MemoryScope.PROJECT if project_id else MemoryScope.SESSION),
                 goal_id=goal_id,
+                details=details,
                 session_id=session_id,
                 unit_type=unit_type,
                 status=status.value,
@@ -151,6 +153,44 @@ class MemoryUnitRepository:
             extractor_version="lead-notebook.v1",
             extraction_identity=extraction_identity,
             effective_at=datetime.now(UTC),
+        )
+
+    async def create_decision(
+        self,
+        *,
+        project_id: str,
+        goal_id: uuid.UUID,
+        text: str,
+        details: dict[str, Any],
+        extraction_identity: str,
+    ) -> MemoryUnit:
+        return await self.create_unit(
+            scope=MemoryScope.PROJECT,
+            project_id=project_id,
+            goal_id=goal_id,
+            text=text,
+            details=details,
+            unit_type="decision_entry",
+            status=MemoryUnitStatus.OBSERVATION,
+            extractor_version="lead-retrospective.v1",
+            extraction_identity=extraction_identity,
+            effective_at=datetime.now(UTC),
+        )
+
+    async def decisions_for_goal(
+        self, *, project_id: str, goal_id: uuid.UUID
+    ) -> tuple[MemoryUnit, ...]:
+        return tuple(
+            await self._session.scalars(
+                select(MemoryUnit)
+                .where(
+                    MemoryUnit.unit_type == "decision_entry",
+                    MemoryUnit.scope == MemoryScope.PROJECT,
+                    MemoryUnit.project_id == project_id,
+                    MemoryUnit.goal_id == goal_id,
+                )
+                .order_by(MemoryUnit.created_at, MemoryUnit.id)
+            )
         )
 
     async def retract_note(self, note: MemoryUnit) -> bool:

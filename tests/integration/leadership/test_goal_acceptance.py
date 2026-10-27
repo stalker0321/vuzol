@@ -68,6 +68,17 @@ async def test_accepting_a_finished_goal_fast_forwards_main(postgres_dsn, tmp_pa
             assert await request_rework(session, goal, user_id=goal.owner_user_id) == (
                 "goal_not_finished"
             )
+            from vuzol.leadership.retrospective import DESTINATION, enqueue_retrospective
+
+            await enqueue_retrospective(session, goal, outcome="accepted")
+            jobs = list(
+                await session.scalars(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.destination == DESTINATION
+                    )
+                )
+            )
+            assert len(jobs) == 1 and jobs[0].linked_entity_id == goal.id
 
 
 async def test_a_moved_main_is_never_overwritten(postgres_dsn, tmp_path, monkeypatch):
@@ -169,9 +180,7 @@ async def test_the_final_card_carries_the_decision_buttons(postgres_dsn, tmp_pat
             assert _main(tmp_path) == goal.constraints["owner_acceptance"]["commit"]
             accepted_card = await session.scalar(
                 select(TransactionalOutbox)
-                .where(
-                    TransactionalOutbox.payload["projection_role"].astext == f"lf:{goal.id.hex}"
-                )
+                .where(TransactionalOutbox.payload["projection_role"].astext == f"lf:{goal.id.hex}")
                 .order_by(TransactionalOutbox.created_at.desc())
                 .limit(1)
             )

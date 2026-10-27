@@ -409,8 +409,14 @@ class LeadershipCommandService:
             )
             return outcome
         if name is LeadCommandName.CANCEL_GOAL:
+            from vuzol.leadership.retrospective import enqueue_retrospective
+
             await _settle_children(uow.session, goal, actor, stop=True)
-            return _transition(goal, actor, "cancelled", "cancelled", CommandStatus.APPLIED)
+            outcome = _transition(goal, actor, "cancelled", "cancelled", CommandStatus.APPLIED)
+            await enqueue_retrospective(
+                uow.session, goal, outcome="cancelled", reason=command.reason or "cancelled"
+            )
+            return outcome
         if name is LeadCommandName.REVOKE_DELEGATION:
             delegation.revoked_at = datetime.now(UTC)
             delegation.version += 1

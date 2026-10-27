@@ -68,7 +68,7 @@ def test_all_status_and_delivery_values_have_russian_labels() -> None:
 def test_all_registered_workflow_steps_have_dedicated_labels() -> None:
     from vuzol.workflows.upgrade import SUPPORTED_STEP_TYPES
 
-    step_types = SUPPORTED_STEP_TYPES | {"interpret", "plan", "inspect", "privileged_execute"}
+    step_types = SUPPORTED_STEP_TYPES | {"interpret"}
     for step_type in step_types:
         assert step_type_label(step_type) != step_type
 

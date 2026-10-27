@@ -12,17 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vuzol.interpretation.domain import InterpretationResult
 from vuzol.storage.models import (
     Interpretation,
-    ProviderBudgetReservation,
-    Step,
     Task,
     TransactionalOutbox,
-    UsageRecord,
 )
 from vuzol.telegram.projections import task_number_label, telegram_html
 
 ORCHESTRATION_TRACE_ROLE = "orchestration_trace"
 INTERPRETER_TRACE_KIND = "interpreter"
-PLANNER_TRACE_KIND = "planner"
 _TRACE_SAMPLE_NAMESPACE = b"vuzol-orchestration-trace-v1:"
 # Keep both interpreter drafts readable in Telegram.  These are presentation
 # bounds only; the persisted model output and the validated draft are complete.
@@ -58,18 +54,6 @@ def interpreter_trace_is_anomalous(interpretation: Interpretation, payload: dict
     raw = payload.get("model_task_draft")
     policy_changed = isinstance(raw, dict) and raw != interpretation.task_draft
     return payload.get("repaired") is True or policy_changed
-
-
-def planner_trace_is_anomalous(step: Step) -> bool:
-    result = step.result if isinstance(step.result, dict) else {}
-    text = result.get("text")
-    plan = text.strip() if isinstance(text, str) else ""
-    return (
-        step.status.value != "completed"
-        or step.failure_category is not None
-        or result.get("finish_reason") == "length"
-        or not plan
-    )
 
 
 def enqueue_interpreter_trace(
@@ -150,62 +134,6 @@ def build_interpreter_trace_html(
                 _json_pre(effective, limit=_INTERPRETER_POLICY_JSON_LIMIT),
             ]
         )
-    return "\n".join(lines)
-
-
-def build_planner_trace_html(
-    task: Task,
-    step: Step,
-    *,
-    usage: UsageRecord | None,
-    reservation: ProviderBudgetReservation | None,
-) -> str:
-    result = step.result if isinstance(step.result, dict) else {}
-    text = result.get("text")
-    plan = text.strip() if isinstance(text, str) else ""
-    finish_reason = result.get("finish_reason")
-    warnings: list[str] = []
-    if finish_reason == "length":
-        warnings.append("⚠️ Ответ остановлен по лимиту токенов (<code>finish_reason=length</code>).")
-    if not plan and step.status.value == "completed":
-        warnings.append("🚨 План пустой, хотя шаг отмечен как completed.")
-    if step.failure_category:
-        warnings.append(
-            "🚨 Ошибка: "
-            f"<code>{telegram_html(step.failure_category)}</code> — "
-            f"{telegram_html(step.failure_summary or 'без описания')}"
-        )
-    model = result.get("model") or (usage.model if usage is not None else "—")
-    profile = result.get("profile_id") or step.executor_profile_id or "—"
-    input_tokens = usage.input_tokens if usage is not None else None
-    output_tokens = usage.output_tokens if usage is not None else None
-    output_limit = reservation.reserved_output_tokens if reservation is not None else None
-    lines = [
-        f"<b>📝 Планировщик · #{telegram_html(task_number_label(task))}</b>",
-        f"Проект: <code>{telegram_html(task.project_id or '—')}</code>",
-        (
-            f"Статус: <code>{telegram_html(step.status.value)}</code> · "
-            f"попытка {step.attempt_count}/{step.max_attempts}"
-        ),
-        (
-            f"Модель: <code>{telegram_html(model)}</code> · "
-            f"профиль <code>{telegram_html(profile)}</code>"
-        ),
-        (
-            f"Usage: {_metric(input_tokens)} in / {_metric(output_tokens)} out · "
-            f"лимит {_metric(output_limit)} out"
-        ),
-        f"Finish reason: <code>{telegram_html(finish_reason or '—')}</code>",
-    ]
-    lines.extend(warnings)
-    lines.extend(["", "<b>Выход планировщика</b>"])
-    if plan:
-        lines.append(_text_pre(plan, limit=2_350))
-    else:
-        lines.append("<i>Пустой вывод</i>")
-    structured = result.get("structured_output")
-    if structured is not None:
-        lines.extend(["", "<b>Structured output</b>", _json_pre(structured, limit=650)])
     return "\n".join(lines)
 
 

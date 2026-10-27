@@ -446,7 +446,6 @@ class IndependentModelReviewer:
                                 (
                                     "execute_code",
                                     "execute_agent",
-                                    "execute_model",
                                     "research_execute",
                                 )
                             ),

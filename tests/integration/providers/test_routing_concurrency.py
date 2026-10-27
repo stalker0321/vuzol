@@ -98,7 +98,7 @@ def test_concurrent_reservations_cannot_exceed_shared_task_budget(
             second = await uow.steps.create(
                 run_id=run_id,
                 ordinal=2,
-                step_type="execute_model",
+                step_type="research_execute",
                 idempotency_class=IdempotencyClass.IDEMPOTENT,
                 status=StepStatus.QUEUED,
                 max_attempts=3,
@@ -157,7 +157,7 @@ def test_new_budget_epoch_resets_task_and_step_token_caps(
             second = await uow.steps.create(
                 run_id=run_id,
                 ordinal=2,
-                step_type="execute_model",
+                step_type="research_execute",
                 idempotency_class=IdempotencyClass.IDEMPOTENT,
                 status=StepStatus.QUEUED,
                 max_attempts=3,

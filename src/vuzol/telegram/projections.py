@@ -72,8 +72,6 @@ _RECEIPT_LINE = "Сверка известной суммы: команда /rec
 
 _ACTIVE_PROVIDER_STEPS = frozenset(
     {
-        "plan",
-        "execute_model",
         "execute_code",
         "execute_agent",
         "research_execute",
@@ -81,9 +79,7 @@ _ACTIVE_PROVIDER_STEPS = frozenset(
         "review",
     }
 )
-_WORKER_STEP_TYPES = frozenset(
-    {"execute_model", "execute_code", "execute_agent", "research_execute", "synthesize"}
-)
+_WORKER_STEP_TYPES = frozenset({"execute_code", "execute_agent", "research_execute", "synthesize"})
 
 
 def telegram_html(value: object) -> str:
@@ -173,10 +169,7 @@ _STEP_STATUS_LABELS: dict[StepStatus, str] = {
 
 _STEP_TYPE_LABELS = {
     "interpret": "Интерпретация",
-    "execute_model": "Вызов модели",
-    "format_result": "Форматирование результата",
     "finalize": "Завершение",
-    "plan": "Планирование",
     "prepare_context": "Подготовка контекста",
     "prepare_worktree": "Подготовка рабочей копии",
     "execute_code": "Выполнение кода",
@@ -193,10 +186,6 @@ _STEP_TYPE_LABELS = {
     "execute_agent": "Агент",
     "research_execute": "Исследование",
     "synthesize": "Синтез",
-    "inspect": "Инспекция",
-    "privileged_execute": "Привилегированное выполнение",
-    "complete_or_block": "Завершение или блок",
-    "await_apply_or_complete": "Ожидание применения результата",
     "deliver_discussion_reply": "Доставка ответа",
 }
 

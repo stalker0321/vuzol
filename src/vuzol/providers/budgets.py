@@ -443,12 +443,10 @@ def accounting_for_profile(
 
 _STEP_PURPOSE = {
     "planner": "planning",
-    "execute_model": "coding",
     "execute_code": "coding",
     "execute_agent": "coding",
     "research_execute": "research",
     "synthesize": "research",
-    "privileged_execute": "setup",
     "ensure_capabilities": "setup",
     "ensure_dependencies": "setup",
     # D3: every routed step type is classified explicitly; the "coding"

@@ -221,9 +221,6 @@ class CompleteHandler:
 
 
 BASE_INTERNAL_HANDLERS: dict[str, StepHandler] = {
-    "await_apply_or_complete": CompleteHandler(),
-    "complete_or_block": CompleteHandler(),
-    "format_result": CompleteHandler(),
     "finalize": CompleteHandler(),
     # Repository inspection remains the executor agent's responsibility. This bounded step
     # records the workflow boundary without duplicating an agent-scale repository read.

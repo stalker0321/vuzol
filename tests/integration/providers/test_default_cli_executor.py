@@ -71,7 +71,7 @@ def test_default_worker_is_fenced_and_does_not_replace_other_choices(
         )
         task_id, run_id, step_id = await seed_provider_step(
             factory,
-            step_type="execute_model"
+            step_type="research_execute"
             if case == "api"
             else "execute_agent"
             if case == "chat"

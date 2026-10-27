@@ -136,7 +136,7 @@ def _probe_token(step_id: uuid.UUID, run_id: uuid.UUID) -> LeaseToken:
 async def _running_step(
     factory: async_sessionmaker[AsyncSession],
     *,
-    step_type: str = "execute_model",
+    step_type: str = "research_execute",
     executor_profile_id: str | None = "api",
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, LeaseToken]:
     task_id, run_id, step_id = await seed_provider_step(factory, step_type=step_type)
@@ -192,7 +192,7 @@ def _request(
     step_id: uuid.UUID,
     token: LeaseToken,
     *,
-    step_type: str = "execute_model",
+    step_type: str = "research_execute",
     payload: dict[str, object] | None = None,
 ) -> StepExecutionRequest:
     return StepExecutionRequest(
@@ -866,5 +866,5 @@ def test_result_schema_discussion_branch() -> None:
     assert version == "discussion-text-reply.v2"
     assert schema is None
 
-    plain = result_schema_for_step("execute_model", {})
+    plain = result_schema_for_step("research_execute", {})
     assert plain == (None, None, None)

@@ -1212,7 +1212,7 @@ class ProviderStepHandler:
             )
 
 
-SAFE_PROVIDER_STEP_TYPES = frozenset({"execute_model", "research_execute", "synthesize"})
+SAFE_PROVIDER_STEP_TYPES = frozenset({"research_execute", "synthesize"})
 
 
 def _research_result_bytes(result: ProviderResult) -> bytes:

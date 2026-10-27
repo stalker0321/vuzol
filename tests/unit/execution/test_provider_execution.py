@@ -27,7 +27,7 @@ async def test_provider_request_preparation_failure_unwinds_before_adapter(
         task_id=uuid.uuid4(),
         run_id=uuid.uuid4(),
         step_id=uuid.uuid4(),
-        step_type="execute_model",
+        step_type="research_execute",
         payload={"budget_reservation_id": str(uuid.uuid4()), "provider_attempt": 1},
     )
 
@@ -124,7 +124,7 @@ async def test_non_code_failure_does_not_retain_a_worktree() -> None:
     factory = MagicMock()
     handler = ProviderStepHandler(factory, MagicMock(), MagicMock(), worktrees=worktrees)
 
-    await handler._retain_active_worktree(MagicMock(step_type="execute_model"))
+    await handler._retain_active_worktree(MagicMock(step_type="research_execute"))
 
     factory.begin.assert_not_called()
     worktrees.retain.assert_not_awaited()

@@ -46,7 +46,7 @@ async def _reserve_started(
     registries: Any,
     settings: Any,
 ) -> tuple[Any, ProviderBudgetReservation, Any]:
-    _task_id, _run_id, step_id = await seed_provider_step(factory, step_type="execute_model")
+    _task_id, _run_id, step_id = await seed_provider_step(factory, step_type="research_execute")
     async with factory.begin() as session:
         await synchronize_profiles(
             session, registries.profiles.items(), configuration_revision="a" * 64
@@ -85,7 +85,7 @@ def test_reservation_and_reconcile_carry_purpose_and_pricing(
         async with factory() as session:
             stored = await session.get(ProviderBudgetReservation, reservation.id)
             assert stored is not None
-            assert stored.purpose == "coding"
+            assert stored.purpose == "research"
             assert stored.attempt_kind == "initial"
             assert stored.currency == "USD"
             assert stored.pricing_revision is not None

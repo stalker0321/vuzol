@@ -93,8 +93,8 @@ def test_registered_worker_executes_simple_internal_test_handlers(postgres_dsn: 
             factory,
             owner="worker",
             handlers={
-                "execute_model": handler,
-                "format_result": handler,
+                "research_execute": handler,
+                "prepare_context": handler,
                 "finalize": handler,
             },
         )
@@ -209,7 +209,7 @@ def test_worker_normalizes_handler_exception(postgres_dsn: str) -> None:
             Settings(environment="test"),
             factory,
             owner="worker",
-            handlers={"execute_model": FailingHandler()},
+            handlers={"research_execute": FailingHandler()},
         )
         assert await worker.process_one()
         async with factory() as session:
@@ -250,16 +250,16 @@ def test_worker_shutdown_requeues_a_step_that_writes_nothing(postgres_dsn: str) 
             Settings(environment="test"),
             factory,
             owner="worker",
-            handlers={"execute_model": BlockingHandler()},
+            handlers={"research_execute": BlockingHandler()},
         )
         execution = asyncio.create_task(worker.process_one())
         await started.wait()
         execution.cancel()
         assert await execution
         async with factory() as session:
-            step = await session.scalar(select(Step).where(Step.step_type == "execute_model"))
+            step = await session.scalar(select(Step).where(Step.step_type == "research_execute"))
             run = await session.scalar(select(Run).where(Run.task_id == task_id))
-            # execute_model is read-only and has no mutating capability. Shutdown
+            # research_execute is read-only and has no mutating capability. Shutdown
             # loses the verdict, not an external write, so a restart runs it again
             # (live pilot 2026-10-25: a deploy blocked a lead task's review).
             assert step is not None and step.status is StepStatus.QUEUED
@@ -295,21 +295,21 @@ def test_worker_shutdown_of_unknown_step_keeps_mutation_uncertain(postgres_dsn: 
                 prompt_revision=None,
                 automatic_start=True,
             )
-            step = await session.scalar(select(Step).where(Step.step_type == "execute_model"))
+            step = await session.scalar(select(Step).where(Step.step_type == "research_execute"))
             assert step is not None
             step.idempotency_class = IdempotencyClass.UNKNOWN_EFFECTS_POSSIBLE
         worker = WorkflowWorker(
             Settings(environment="test"),
             factory,
             owner="worker",
-            handlers={"execute_model": BlockingHandler()},
+            handlers={"research_execute": BlockingHandler()},
         )
         execution = asyncio.create_task(worker.process_one())
         await started.wait()
         execution.cancel()
         assert await execution
         async with factory() as session:
-            step = await session.scalar(select(Step).where(Step.step_type == "execute_model"))
+            step = await session.scalar(select(Step).where(Step.step_type == "research_execute"))
             assert step is not None and step.status is StepStatus.BLOCKED
             assert step.unknown_effects is True
         await engine.dispose()

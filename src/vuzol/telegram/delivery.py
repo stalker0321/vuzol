@@ -39,15 +39,11 @@ from vuzol.storage.models import (
     ProjectDiscussionSession,
     ProjectNamingRequest,
     ProjectProvisioning,
-    ProviderBudgetReservation,
-    Run,
-    Step,
     Task,
     TelegramIntakeMessage,
     TelegramMessageLink,
     TopicMapping,
     TransactionalOutbox,
-    UsageRecord,
     WorkPackage,
     Worktree,
 )
@@ -85,11 +81,8 @@ from vuzol.telegram.projections import (
 from vuzol.telegram.tracing import (
     INTERPRETER_TRACE_KIND,
     ORCHESTRATION_TRACE_ROLE,
-    PLANNER_TRACE_KIND,
     build_interpreter_trace_html,
-    build_planner_trace_html,
     interpreter_trace_is_anomalous,
-    planner_trace_is_anomalous,
     should_deliver_orchestration_trace,
 )
 from vuzol.telegram.work_package_projections import (
@@ -1364,52 +1357,7 @@ async def _prepare_orchestration_trace(
             revision=1,
             message_role="trace_interpreter",
         )
-    if trace_kind != PLANNER_TRACE_KIND:
-        raise PermanentDeliveryError("invalid_orchestration_trace_kind")
-    step = await session.get(Step, item.linked_entity_id)
-    if step is None or step.step_type != "plan":
-        raise PermanentDeliveryError("orchestration_trace_planner_missing")
-    run = await session.get(Run, step.run_id)
-    if run is None or run.task_id != task.id:
-        raise PermanentDeliveryError("orchestration_trace_run_missing")
-    if not should_deliver_orchestration_trace(
-        task.id,
-        enabled=trace_enabled,
-        sample_percent=trace_sample_percent,
-        anomalous=planner_trace_is_anomalous(step),
-        always_include_anomalies=trace_always_include_anomalies,
-    ):
-        return PreparedDelivery(
-            DeliveryAction.NOOP,
-            chat_id=task.source_chat_id,
-            thread_id=None,
-        )
-    thread_id = await _resolve_system_trace_thread(session, task.source_chat_id, topics)
-    usage = await session.scalar(
-        select(UsageRecord)
-        .where(UsageRecord.step_id == step.id)
-        .order_by(UsageRecord.created_at.desc())
-        .limit(1)
-    )
-    reservation = None
-    raw_reservation_id = step.payload.get("budget_reservation_id")
-    try:
-        reservation_id = uuid.UUID(str(raw_reservation_id))
-    except (TypeError, ValueError):
-        reservation_id = None
-    if reservation_id is not None:
-        reservation = await session.get(ProviderBudgetReservation, reservation_id)
-    return PreparedDelivery(
-        DeliveryAction.SEND_STATUS,
-        chat_id=task.source_chat_id,
-        thread_id=thread_id,
-        html=build_planner_trace_html(task, step, usage=usage, reservation=reservation),
-        task_id=task.id,
-        run_id=run.id,
-        step_id=step.id,
-        revision=max(1, step.attempt_count),
-        message_role="trace_planner",
-    )
+    raise PermanentDeliveryError("invalid_orchestration_trace_kind")
 
 
 async def _prepare_task_history_report(

@@ -10,9 +10,6 @@ from vuzol.storage.types import RunStatus, StepStatus, WorkPackageStatus
 # roles/configuration. Keep in sync with service composition (covered by tests).
 SUPPORTED_STEP_TYPES = frozenset(
     {
-        "await_apply_or_complete",
-        "complete_or_block",
-        "format_result",
         "finalize",
         "prepare_context",
         "prepare_worktree",
@@ -24,7 +21,6 @@ SUPPORTED_STEP_TYPES = frozenset(
         "publish_static",
         "execute_code",
         "execute_agent",
-        "execute_model",
         "research_execute",
         "synthesize",
         "deliver_discussion_reply",

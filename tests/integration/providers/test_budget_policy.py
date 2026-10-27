@@ -759,7 +759,7 @@ def test_unknown_cost_continues_after_owner_accepts_uncertainty(
             assert held is not None
             await transition_step(session, held, StepStatus.RUNNING, actor_type="worker")
             await transition_step(session, held, StepStatus.COMPLETED, actor_type="worker")
-        later = await _add_step(factory, run_id, 2, "execute_model")
+        later = await _add_step(factory, run_id, 2, "research_execute")
         async with factory.begin() as session:
             session.add(
                 UsageRecord(
@@ -1004,7 +1004,7 @@ def test_owner_receipt_and_uncertainty_continue_without_erasing_history(
             assert held is not None
             await transition_step(session, held, StepStatus.RUNNING, actor_type="worker")
             await transition_step(session, held, StepStatus.COMPLETED, actor_type="worker")
-        later = await _add_step(factory, run_id, 2, "execute_model")
+        later = await _add_step(factory, run_id, 2, "research_execute")
         fresh_id = await _unknown_usage(
             factory, task_id=task_id, run_id=run_id, step_id=later.id, configured=configured
         )
@@ -1049,7 +1049,7 @@ def test_owner_receipt_and_uncertainty_continue_without_erasing_history(
             assert held is not None
             await transition_step(session, held, StepStatus.RUNNING, actor_type="worker")
             await transition_step(session, held, StepStatus.COMPLETED, actor_type="worker")
-        third = await _add_step(factory, run_id, 3, "execute_model")
+        third = await _add_step(factory, run_id, 3, "research_execute")
         async with factory.begin() as session:
             session.add(
                 UsageRecord(

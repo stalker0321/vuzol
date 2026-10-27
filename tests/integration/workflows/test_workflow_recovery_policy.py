@@ -301,7 +301,7 @@ async def test_backpressure_does_not_burn_attempt_and_is_bounded(postgres_dsn: s
     engine, factory = storage(postgres_dsn)
     _, run_id = await _seed_run(
         factory,
-        steps=[(1, "execute_model", StepStatus.QUEUED, {})],
+        steps=[(1, "research_execute", StepStatus.QUEUED, {})],
     )
     async with factory.begin() as session:
         step = await session.get(Step, (await _steps(factory, run_id))[0].id)

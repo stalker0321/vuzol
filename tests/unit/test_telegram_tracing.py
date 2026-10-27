@@ -1,5 +1,4 @@
 import uuid
-from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -15,29 +14,20 @@ from vuzol.interpretation.domain import (
 )
 from vuzol.storage.models import (
     Interpretation,
-    ProviderBudgetReservation,
-    Step,
     Task,
     TransactionalOutbox,
-    UsageRecord,
 )
 from vuzol.storage.types import (
-    IdempotencyClass,
-    QueueClass,
-    RetryClass,
     RiskLevel,
-    StepStatus,
     TaskStatus,
 )
 from vuzol.telegram.tracing import (
     INTERPRETER_TRACE_KIND,
     ORCHESTRATION_TRACE_ROLE,
     build_interpreter_trace_html,
-    build_planner_trace_html,
     enqueue_interpreter_trace,
     interpreter_trace_is_anomalous,
     orchestration_trace_sample_bucket,
-    planner_trace_is_anomalous,
     should_deliver_orchestration_trace,
 )
 
@@ -89,33 +79,6 @@ def _interpretation(task: Task, *, effective: TaskDraft | None = None) -> Interp
     )
 
 
-def _plan_step(*, status: StepStatus = StepStatus.COMPLETED) -> Step:
-    return Step(
-        id=uuid.uuid4(),
-        run_id=uuid.uuid4(),
-        ordinal=1,
-        dependency_metadata={},
-        step_type="plan",
-        queue_class=QueueClass.LIGHT,
-        status=status,
-        executor_profile_id="openai-planner-prod",
-        required_capabilities=[],
-        payload={"budget_reservation_id": str(uuid.uuid4())},
-        result={
-            "model": "gpt-5-nano-2025-08-07",
-            "profile_id": "openai-planner-prod",
-            "text": "",
-            "finish_reason": "length",
-            "structured_output": None,
-        },
-        retry_class=RetryClass.TRANSIENT,
-        idempotency_class=IdempotencyClass.READ_ONLY,
-        attempt_count=1,
-        max_attempts=3,
-        timeout_seconds=600,
-    )
-
-
 def test_interpreter_trace_shows_raw_and_policy_adjusted_drafts() -> None:
     task = _task()
     raw = _draft(summary="Raw <summary>")
@@ -138,71 +101,6 @@ def test_interpreter_trace_shows_raw_and_policy_adjusted_drafts() -> None:
     assert "После deterministic policy" in html
     assert "Raw &lt;summary&gt;" in html
     assert "Policy summary" in html
-
-
-def test_planner_trace_makes_empty_truncated_failure_visible() -> None:
-    task = _task()
-    step = _plan_step(status=StepStatus.QUEUED)
-    step.result = {
-        "model": "gpt-5-nano-2025-08-07",
-        "profile_id": "openai-planner-prod",
-        "text": "",
-        "finish_reason": "length",
-        "structured_output": None,
-        "handoff": {"status": "rejected", "reason": "planner_truncated"},
-    }
-    step.failure_category = "planner_truncated"
-    step.failure_summary = "planner output stopped at the token limit"
-    usage = cast(
-        UsageRecord,
-        SimpleNamespace(
-            model="gpt-5-nano-2025-08-07",
-            input_tokens=375,
-            output_tokens=1_000,
-        ),
-    )
-    reservation = cast(
-        ProviderBudgetReservation,
-        SimpleNamespace(reserved_output_tokens=1_000),
-    )
-    html = build_planner_trace_html(task, step, usage=usage, reservation=reservation)
-    assert "Планировщик · #730010" in html
-    assert "375 in / 1,000 out · лимит 1,000 out" in html
-    assert "finish_reason=length" in html
-    assert "Пустой вывод" in html
-    assert "planner_truncated" in html
-
-
-def test_planner_trace_reports_ready_handoff_on_completed_plan() -> None:
-    task = _task()
-    step = _plan_step()
-    step.result = {
-        "model": "gpt-5-nano-2025-08-07",
-        "profile_id": "openai-planner-prod",
-        "text": "1. Inspect\n2. Edit\n3. Validate",
-        "finish_reason": "stop",
-        "handoff": {"status": "ready"},
-    }
-    html = build_planner_trace_html(task, step, usage=None, reservation=None)
-    assert "1. Inspect" in html
-
-
-def test_planner_trace_bounds_structured_failure_output() -> None:
-    task = _task()
-    step = _plan_step(status=StepStatus.FAILED)
-    step.result = {
-        "text": "x" * 2_500,
-        "structured_output": {"steps": ["inspect", "edit", "verify"]},
-        "finish_reason": "stop",
-        "handoff": {"status": "rejected", "reason": "planner_invalid"},
-    }
-    step.failure_category = "planner_invalid"
-    step.failure_summary = "unsafe <shape>"
-    html = build_planner_trace_html(task, step, usage=None, reservation=None)
-    assert "planner_invalid" in html
-    assert "unsafe &lt;shape&gt;" in html
-    assert "Structured output" in html
-    assert "…</pre>" in html
 
 
 def test_interpreter_trace_handles_unknown_metrics_without_policy_change() -> None:
@@ -296,11 +194,3 @@ def test_trace_anomaly_classification_matches_visible_warnings() -> None:
         {**unchanged, "model_task_draft": {"task_type": "research"}},
     )
     assert interpreter_trace_is_anomalous(interpretation, {**unchanged, "repaired": True})
-
-    anomalous_plan = _plan_step()
-    assert planner_trace_is_anomalous(anomalous_plan)
-    anomalous_plan.result = {
-        "text": "Inspect, implement, verify.",
-        "finish_reason": "stop",
-    }
-    assert not planner_trace_is_anomalous(anomalous_plan)

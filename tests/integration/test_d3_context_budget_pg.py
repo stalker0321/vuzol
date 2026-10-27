@@ -352,7 +352,7 @@ async def test_d3_counters_and_allowance_exhaustion(postgres_dsn: str, tmp_path:
             second = await uow.steps.create(
                 run_id=run_id,
                 ordinal=2,
-                step_type="execute_model",
+                step_type="research_execute",
                 idempotency_class=IdempotencyClass.IDEMPOTENT,
                 status=StepStatus.QUEUED,
                 max_attempts=3,
@@ -703,7 +703,7 @@ async def test_d3_provider_call_counter_blocks_independently(
             second = await uow.steps.create(
                 run_id=run_id,
                 ordinal=2,
-                step_type="execute_model",
+                step_type="research_execute",
                 idempotency_class=IdempotencyClass.IDEMPOTENT,
                 status=StepStatus.QUEUED,
                 max_attempts=3,

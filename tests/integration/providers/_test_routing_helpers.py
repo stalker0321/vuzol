@@ -232,7 +232,7 @@ def pin_project(project_id: str = "bill-buddy") -> ProjectConfig:
 async def seed_provider_step(
     factory: async_sessionmaker[AsyncSession],
     *,
-    step_type: str = "execute_model",
+    step_type: str = "research_execute",
     capabilities: list[str] | None = None,
     queue_class: QueueClass = QueueClass.LIGHT,
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:

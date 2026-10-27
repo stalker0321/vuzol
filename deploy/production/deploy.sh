@@ -57,13 +57,22 @@ systemctl daemon-reload
 systemctl restart $UNITS
 
 echo "== verifying"
-sleep 10
+# A service that crashes at startup still reads "active"/"running" between
+# restarts, so restart counters are checked too (2026-10-27 outage).
+sleep 30
 systemctl is-active $UNITS vuzol-opencode-usage.timer
+for unit in $UNITS; do
+  restarts=$(systemctl show -p NRestarts --value "$unit")
+  [ "$restarts" = 0 ] || { echo "$unit restarted $restarts times" >&2; exit 1; }
+done
 for svc in $(/usr/local/bin/vuzol-compose config --services); do
   state=$(/usr/local/bin/vuzol-compose ps --format '{{.State}}' "$svc")
   image=$(/usr/local/bin/vuzol-compose ps --format '{{.Image}}' "$svc")
-  echo "$svc $state $image"
+  id=$(/usr/local/bin/vuzol-compose ps -q "$svc")
+  restarts=$(docker inspect -f '{{.RestartCount}}' "$id")
+  echo "$svc $state $image restarts=$restarts"
   [ "$state" = running ] || { echo "container $svc is not running" >&2; exit 1; }
+  [ "$restarts" = 0 ] || { echo "container $svc restarted $restarts times" >&2; exit 1; }
 done
 
 ls -1dt "$RELEASES"/*/.installed | tail -n +$((KEEP + 1)) | while read -r marker; do

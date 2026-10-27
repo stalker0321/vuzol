@@ -12,7 +12,6 @@ from vuzol.execution.egress import (
     AllowedConnectTarget,
     _extract_host,
     _normalize_hostname,
-    allowlist_stable_hash,
     compile_proxy_allowlist,
 )
 
@@ -272,19 +271,6 @@ def test_compile_deterministic_ordering() -> None:
     )
     targets = compile_proxy_allowlist(pol)
     assert [t.hostname for t in targets] == ["a.example.com", "m.example.com", "z.example.com"]
-
-
-def test_allowlist_stable_hash_is_deterministic() -> None:
-    """Compiled allowlist has stable hash (for revisioning if used)."""
-    pol = NetworkPolicy(enabled=True, destinations=(_dest("https://api.example.com"),))
-    ts = compile_proxy_allowlist(pol)
-    h1 = allowlist_stable_hash(ts)
-    h2 = allowlist_stable_hash(ts)
-    assert len(h1) == 64
-    assert h1 == h2
-    pol2 = NetworkPolicy(enabled=True, destinations=(_dest("https://other.example.com"),))
-    ts2 = compile_proxy_allowlist(pol2)
-    assert allowlist_stable_hash(ts) != allowlist_stable_hash(ts2)
 
 
 # --- New focused tests for explicit provider port parsing and closed AllowedConnectTarget ---

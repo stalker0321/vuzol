@@ -25,20 +25,6 @@ from vuzol.providers.ports import ProviderAdapter
 
 PROMPT_REVISION = "project-lead-prompt.v14"
 LEDGER_PURPOSE = "project_lead"
-_COMMANDS = (
-    "amend_goal",
-    "request_plan",
-    "revise_plan",
-    "start_task",
-    "cancel_task",
-    "accept_result",
-    "read_status",
-    "ask_owner",
-    "wait_for",
-    "propose_completion",
-    "pause_goal",
-    "cancel_goal",
-)
 
 
 class _Payload(BaseModel):

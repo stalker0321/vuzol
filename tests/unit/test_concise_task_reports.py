@@ -1,13 +1,4 @@
-from vuzol.telegram.projections import _concise_completion_report, task_progress_report
-
-
-def test_report_has_only_done_stop_cause() -> None:
-    assert task_progress_report(
-        completed="Код сайта сохранён.", stopped="Проверка.", reason="Нет Node.js."
-    ) == "\n".join(
-        ("Сделано: Код сайта сохранён.", "Остановка: Проверка.", "Причина: Нет Node.js.")
-    )
-    assert task_progress_report(completed="Код сайта сохранён.") == "Сделано: Код сайта сохранён."
+from vuzol.telegram.projections import _concise_completion_report
 
 
 def test_completion_report_drops_routine_assurances_and_unrequested_non_actions() -> None:

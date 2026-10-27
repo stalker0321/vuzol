@@ -14,8 +14,7 @@
 - [Обзор продукта](../README.md), [Telegram](TELEGRAM.md), [MCP](MCP.md).
 - [Настройка](CONFIGURATION.md), [профили и провайдеры](PROVIDERS.md).
 - [Исполнение кода](CODING_RUNTIME.md), [границы ревью](REVIEW_BOUNDARIES.md).
-- [Деплой](PRODUCTION_DEPLOY.md), [восстановление](RECOVERY_POLICY.md),
-  [операторские процедуры](PROCEDURE_RUNBOOK.md).
+- [Деплой](PRODUCTION_DEPLOY.md), [восстановление](RECOVERY_POLICY.md).
 - [Хранилище](STORAGE.md), [учёт расхода](ACCOUNTING_LEDGER.md), [тесты](TESTING.md).
 - [Инварианты](ARCHITECTURE_INVARIANTS.md), [решения и их история](decisions/).
 

@@ -21,8 +21,6 @@ per-task proxy/network lifecycle.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import unicodedata
 from collections.abc import Iterable
 from ipaddress import ip_address
@@ -330,9 +328,3 @@ def compile_proxy_allowlist(
     return tuple(sorted(seen.values(), key=lambda t: (t.hostname, t.port)))
 
 
-def allowlist_stable_hash(targets: tuple[AllowedConnectTarget, ...]) -> str:
-    """Deterministic hash of the compiled allowlist for revisioning."""
-    payload = json.dumps(
-        [t.model_dump() for t in targets], sort_keys=True, separators=(",", ":")
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()

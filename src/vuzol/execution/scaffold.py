@@ -152,12 +152,6 @@ def makefile_has_exact_scaffold_marker(makefile_text: str) -> bool:
     return any(raw.strip() == _EXACT_MARKER_LINE for raw in makefile_text.splitlines())
 
 
-def makefile_has_scaffold_gate(makefile_text: str) -> bool:
-    """Backward-compatible alias: exact dedicated marker line only."""
-
-    return makefile_has_exact_scaffold_marker(makefile_text)
-
-
 def makefile_has_scaffold_test_recipe(makefile_text: str) -> bool:
     """True when the ``test`` recipe is still the scaffold no-op implementation."""
 
@@ -281,24 +275,6 @@ def _is_product_txt_name(name: str) -> bool:
 
 def executable_product_paths(changed_files: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(path for path in changed_files if path_is_executable_product(path))
-
-
-def worktree_uses_scaffold_gate(worktree: Path) -> bool:
-    """True when the worktree still uses the scaffold make test implementation.
-
-    Scaffold status is detected from the exact marker line **or** the scaffold
-    test recipe template. Removing only the marker while leaving the no-op
-    recipe does not clear scaffold status.
-    """
-
-    makefile = worktree / "Makefile"
-    if not makefile.is_file():
-        return False
-    text = makefile.read_text(encoding="utf-8", errors="replace")
-    if makefile_has_scaffold_test_recipe(text):
-        return True
-    # Exact marker without a real test recipe still means scaffold mode.
-    return makefile_has_exact_scaffold_marker(text) and not makefile_has_real_test_recipe(text)
 
 
 def project_lacks_real_validation_gate(

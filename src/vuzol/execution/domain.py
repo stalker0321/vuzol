@@ -14,17 +14,6 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class CommandClass(StrEnum):
-    SYSTEM_GIT = "system_git"
-    PROVIDER_AGENT = "provider_agent"
-    PROJECT_READ = "project_read"
-    PROJECT_WRITE = "project_write"
-    NETWORK = "network"
-    DESTRUCTIVE_PROJECT = "destructive_project"
-    HOST_PRIVILEGED = "host_privileged"
-    PROHIBITED = "prohibited"
-
-
 class MountMode(StrEnum):
     READ_ONLY = "ro"
     READ_WRITE = "rw"

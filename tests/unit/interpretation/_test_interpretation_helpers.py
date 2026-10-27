@@ -27,10 +27,7 @@ from vuzol.interpretation.domain import (
     TranscriptionInput,
 )
 from vuzol.interpretation.evaluation import (
-    EvaluationFixture,
     EvaluationReport,
-    evaluate_interpreter,
-    load_fixtures,
     require_eligible_report,
 )
 from vuzol.interpretation.policy import enforce_interpretation_policy
@@ -44,7 +41,6 @@ from vuzol.storage.types import RiskLevel
 
 __all__ = [
     "Capability",
-    "EvaluationFixture",
     "EvaluationReport",
     "FakeInterpreter",
     "FakeTranscriber",
@@ -71,11 +67,9 @@ __all__ = [
     "asyncio",
     "draft",
     "enforce_interpretation_policy",
-    "evaluate_interpreter",
     "httpx",
     "interpret_with_recovery",
     "json",
-    "load_fixtures",
     "name_options",
     "pytest",
     "regenerate_project_names",

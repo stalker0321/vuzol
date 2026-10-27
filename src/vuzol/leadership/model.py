@@ -63,22 +63,6 @@ class LeadModel(Protocol):
     async def decide(self, snapshot: LeadSnapshot) -> LeadDecision: ...
 
 
-class UnconfiguredLeadModel:
-    """Records that no model is attached. It does not propose work."""
-
-    async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
-        del snapshot
-        raise LeadModelUnavailable("lead_model_unconfigured")
-
-
-class UnselectedLeadProfile:
-    """The feature is on, but configuration did not select a usable lead profile."""
-
-    async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
-        del snapshot
-        raise LeadModelUnavailable("lead_profile_unselected")
-
-
 def normalize_usage(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """Unknown cost stays unknown. Zero is not a measured amount."""
 
@@ -88,19 +72,6 @@ def normalize_usage(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     if isinstance(amount, bool) or not isinstance(amount, int | float) or amount <= 0:
         return {"cost_known": False}
     return {"cost_known": True, "cost_amount": amount}
-
-
-def decision_payload(decision: LeadDecision) -> dict[str, Any]:
-    usage = normalize_usage(decision.usage)
-    return {
-        "commands": [
-            {"name": command.name, "payload": dict(command.payload), "reason": command.reason}
-            for command in decision.commands
-        ],
-        "reply": decision.reply,
-        "profile_id": decision.profile_id,
-        "usage": usage,
-    }
 
 
 def freeze_decision(
@@ -141,27 +112,3 @@ def freeze_decision(
     }
 
 
-def decision_from_payload(raw: Mapping[str, Any] | None) -> LeadDecision:
-    if not isinstance(raw, Mapping):
-        return LeadDecision()
-    commands_raw = raw.get("commands")
-    commands: list[LeadCommandDraft] = []
-    if isinstance(commands_raw, list):
-        for item in commands_raw:
-            if not isinstance(item, dict) or not item.get("name"):
-                continue
-            payload = item.get("payload")
-            commands.append(
-                LeadCommandDraft(
-                    name=str(item["name"]),
-                    payload=dict(payload) if isinstance(payload, dict) else {},
-                    reason=str(item.get("reason") or ""),
-                )
-            )
-    usage = raw.get("usage")
-    return LeadDecision(
-        commands=tuple(commands),
-        reply=str(raw.get("reply") or ""),
-        profile_id=str(raw.get("profile_id") or "unconfigured"),
-        usage=dict(usage) if isinstance(usage, dict) else {"cost_known": False},
-    )

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from tests.integration.providers._test_routing_helpers import profile
-from vuzol.providers.control import ceiling_is_admission_only, ceiling_statement
+from vuzol.providers.control import ceiling_is_admission_only
 
 
 def test_cli_and_tool_ceilings_are_admission_only(tmp_path: Path) -> None:
@@ -19,5 +19,3 @@ def test_cli_and_tool_ceilings_are_admission_only(tmp_path: Path) -> None:
     assert ceiling_is_admission_only(cli)
     assert ceiling_is_admission_only(tool)
     assert ceiling_is_admission_only(api) is False
-    assert "running session" in ceiling_statement(cli)
-    assert "one inference" in ceiling_statement(api)

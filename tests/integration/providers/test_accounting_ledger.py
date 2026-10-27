@@ -8,17 +8,15 @@ from typing import Any
 
 from sqlalchemy import select, update
 
+from tests.integration.usage_totals import usage_totals_by_purpose
 from vuzol.providers.budgets import (
     accounting_for_profile,
     close_step_reservations,
     estimate_reservation,
     reconcile_usage,
-    record_intake_usage,
     record_late_receipt,
     release_orphan_reservations,
     reserve_budget,
-    usage_retry_subtotal,
-    usage_totals_by_purpose,
 )
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import ProviderBudgetReservation, Step, Task, UsageRecord
@@ -362,49 +360,6 @@ def test_lifetime_cost_survives_budget_epoch(postgres_dsn: str, tmp_path: Path) 
             total_count = sum(count for _purpose, _cost, count in rows)
             assert total_count == 2
             assert total_cost == Decimal("0.02")
-        await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-def test_intake_usage_and_breakdowns_use_same_rows(postgres_dsn: str, tmp_path: Path) -> None:
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        priced = profile(
-            "api",
-            input_cost_units_per_million=2.0,
-            output_cost_units_per_million=4.0,
-        )
-        async with factory.begin() as session:
-            known = await record_intake_usage(
-                session,
-                profile=priced,
-                usage=NormalizedUsage(input_tokens=1_000, output_tokens=500, duration_ms=3),
-                purpose="intake",
-                task_id=None,
-                attempt_kind="initial",
-            )
-            unknown = await record_intake_usage(
-                session,
-                profile=priced,
-                usage=None,
-                purpose="review",
-                task_id=None,
-                attempt_kind="retry",
-            )
-        assert known.cost_known is True and known.cost_units == Decimal("0.004")
-        assert unknown.cost_known is False
-        assert unknown.cost_units == Decimal("0.01")
-
-        async with factory() as session:
-            breakdown = {
-                purpose: cost for purpose, cost, _count in await usage_totals_by_purpose(session)
-            }
-            assert breakdown["intake"] == Decimal("0.004")
-            assert breakdown["review"] == Decimal("0.01")
-            retry_cost, retry_count = await usage_retry_subtotal(session)
-            assert retry_count == 1
-            assert retry_cost == Decimal("0.01")
         await engine.dispose()
 
     asyncio.run(scenario())

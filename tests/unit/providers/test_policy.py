@@ -14,7 +14,6 @@ from ._test_providers_helpers import (
     account_usage,
     estimate_reservation,
     profile,
-    public_select_profile,
     routing_request,
     select_profile,
 )
@@ -145,9 +144,7 @@ def test_policy_reports_every_static_security_exclusion() -> None:
         max_output_tokens=100,
         requires_sandbox=True,
     )
-    decision = public_select_profile(
-        request, (incompatible,), {"incompatible": EffectiveProfileState()}
-    )
+    decision = select_profile(request, (incompatible,), {"incompatible": EffectiveProfileState()})
     reasons = set(decision.evaluations[0].reasons)
     assert {
         ExclusionReason.ROLE,

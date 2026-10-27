@@ -8,19 +8,12 @@ import pytest
 
 from vuzol.projects.executor_preference import (
     ExecutorWorkerKey,
-    WorkerOption,
-    auto_callback_data,
     effort_callback_data,
-    worker_callback_data,
 )
 from vuzol.telegram.adapter import control_update
 from vuzol.telegram.domain import ControlUpdate, IngressStatus
 from vuzol.telegram.layout import is_model_command
-from vuzol.telegram.model_command import (
-    PROJECT_MODEL_PICKER_ROLE,
-    effort_keyboard,
-    worker_keyboard,
-)
+from vuzol.telegram.model_command import PROJECT_MODEL_PICKER_ROLE, effort_keyboard
 
 
 class _Message:
@@ -53,22 +46,6 @@ def test_is_model_command() -> None:
     assert not is_model_command("/model sol")
     assert not is_model_command("/update")
     assert not is_model_command(None)
-
-
-def test_worker_and_effort_keyboards() -> None:
-    workers = (
-        WorkerOption(ExecutorWorkerKey.SOL, "Sol", True),
-        WorkerOption(ExecutorWorkerKey.GROK, "Grok", False),
-    )
-    keyboard = worker_keyboard(revision=3, workers=workers)
-    assert keyboard[0] == (("Routing (auto)", auto_callback_data(3)),)
-    assert ("Sol", worker_callback_data(3, ExecutorWorkerKey.SOL)) in keyboard[1]
-    effort = effort_keyboard(revision=3, worker=ExecutorWorkerKey.TERRA)
-    assert any(
-        data == effort_callback_data(3, ExecutorWorkerKey.TERRA, "high")
-        for row in effort
-        for _, data in row
-    )
 
 
 def test_control_update_parses_model_callbacks() -> None:
@@ -869,3 +846,12 @@ async def test_controls_apply_model_action_without_workflow_outbox(
     assert result.action_id == action_id
     applied.assert_awaited_once()
     assert workflow_enqueues == []
+
+
+def test_effort_keyboard() -> None:
+    effort = effort_keyboard(revision=3, worker=ExecutorWorkerKey.TERRA)
+    assert any(
+        data == effort_callback_data(3, ExecutorWorkerKey.TERRA, "high")
+        for row in effort
+        for _, data in row
+    )

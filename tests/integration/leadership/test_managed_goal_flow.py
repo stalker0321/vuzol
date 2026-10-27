@@ -58,8 +58,8 @@ from vuzol.leadership.commands import LeadCommand
 from vuzol.leadership.model import (
     LeadCommandDraft,
     LeadDecision,
+    LeadModelUnavailable,
     LeadSnapshot,
-    UnconfiguredLeadModel,
 )
 from vuzol.leadership.persistence import GoalDelegation, LeadershipTurn, ManagedGoal
 from vuzol.leadership.service import LeadershipCommandService
@@ -103,6 +103,14 @@ def _plan(title: str, summary: str, criteria: list[str], scope: str) -> dict[str
             }
         ],
     }
+
+
+class UnconfiguredLeadModel:
+    """A lead whose model is missing: every turn fails before proposing work."""
+
+    async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
+        del snapshot
+        raise LeadModelUnavailable("lead_model_unconfigured")
 
 
 def _decision(*commands: LeadCommandDraft, usage: dict[str, Any] | None = None) -> LeadDecision:

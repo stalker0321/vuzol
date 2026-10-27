@@ -10,7 +10,6 @@ from vuzol.storage.models import WorkPackage
 from vuzol.storage.types import StepStatus, WorkPackagePauseReason
 from vuzol.telegram.work_package_projections import (
     _environment_delta_lines,
-    _route_provider_label,
     package_retry_available,
 )
 
@@ -67,25 +66,6 @@ def test_environment_delta_projection_ignores_missing_or_invalid_sections(
     body: dict[str, object],
 ) -> None:
     assert _environment_delta_lines(body) == ()
-
-
-@pytest.mark.parametrize(
-    ("route", "label"),
-    [
-        (None, None),
-        ({}, None),
-        ({"profile_id": 7}, None),
-        ({"executor_worker_key": "terra-worker"}, "Terra"),
-        ({"model_override": "luna-1"}, "Luna"),
-        ({"trusted_profile_id": "sol-main"}, "Sol"),
-        ({"profile_id": "grok-b"}, "Grok"),
-        ({"executor": "kimi"}, "Kimi"),
-        ({"executor": "openai-codex"}, "Codex"),
-        ({"executor": "custom"}, "custom"),
-    ],
-)
-def test_route_provider_labels(route: object, label: str | None) -> None:
-    assert _route_provider_label(route) == label
 
 
 @pytest.mark.anyio

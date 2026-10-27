@@ -1430,67 +1430,6 @@ async def record_late_receipt(
     return record
 
 
-async def record_intake_usage(
-    session: AsyncSession,
-    *,
-    profile: ProviderProfileConfig,
-    usage: NormalizedUsage | None,
-    purpose: str,
-    task_id: uuid.UUID | None,
-    provider_request_id: str | None = None,
-    outcome: str = "succeeded",
-    attempt_kind: str = AttemptKind.INITIAL.value,
-    horizon_id: uuid.UUID | None = None,
-    invocation_id: uuid.UUID | None = None,
-) -> UsageRecord:
-    """Write one intake/review invocation that has no workflow reservation.
-
-    Uses the same ledger table as workflow calls so intake cost is visible in
-    the shared breakdown. Because there is no reservation, an unknown price is
-    charged the profile's conservative unknown floor and marked ``cost_known =
-    false`` instead of being silently treated as zero.
-    """
-
-    accounted = account_usage(profile, usage) if usage is not None else None
-    cost_known = accounted is not None and accounted.cost_units is not None
-    cost = (
-        accounted.cost_units
-        if accounted is not None and accounted.cost_units is not None
-        else Decimal(str(profile.minimum_unknown_usage_cost)).quantize(
-            MONEY_QUANTUM, rounding=ROUND_UP
-        )
-    )
-    quota = accounted.quota_units if accounted is not None else None
-    record = UsageRecord(
-        provider=profile.provider,
-        profile_id=profile.id,
-        model=profile.model,
-        task_id=task_id,
-        run_id=None,
-        step_id=None,
-        input_tokens=usage.input_tokens if usage is not None else None,
-        output_tokens=usage.output_tokens if usage is not None else None,
-        cached_tokens=usage.cached_tokens if usage is not None else None,
-        cost_units=cost,
-        quota_units=quota,
-        duration_ms=usage.duration_ms if usage is not None else 0,
-        provider_request_id=provider_request_id,
-        reservation_id=None,
-        outcome=outcome,
-        purpose=purpose,
-        attempt_kind=attempt_kind,
-        horizon_id=horizon_id,
-        invocation_id=invocation_id,
-        pricing_revision=content_revision(profile),
-        currency=DEFAULT_ACCOUNTING_CURRENCY,
-        cost_known=cost_known,
-        late_receipt=False,
-    )
-    session.add(record)
-    await session.flush()
-    return record
-
-
 async def release_reservation(
     session: AsyncSession, *, reservation_id: uuid.UUID, token: LeaseToken
 ) -> None:
@@ -1754,37 +1693,3 @@ async def release_orphan_reservations(
     return closed
 
 
-async def usage_totals_by_purpose(
-    session: AsyncSession, *, task_id: uuid.UUID | None = None
-) -> list[tuple[str | None, Decimal, int]]:
-    """Purpose breakdown and invocation count (one projection of the rows)."""
-
-    statement = select(
-        UsageRecord.purpose,
-        func.coalesce(func.sum(UsageRecord.cost_units), 0),
-        func.count(),
-    ).group_by(UsageRecord.purpose)
-    if task_id is not None:
-        statement = statement.where(UsageRecord.task_id == task_id)
-    rows = (await session.execute(statement)).all()
-    return [
-        (str(row[0]) if row[0] is not None else None, Decimal(row[1]), int(row[2])) for row in rows
-    ]
-
-
-async def usage_retry_subtotal(
-    session: AsyncSession, *, task_id: uuid.UUID | None = None
-) -> tuple[Decimal, int]:
-    """Retry/repair subtotal: another projection of the same rows, never an addend."""
-
-    statement = select(
-        func.coalesce(func.sum(UsageRecord.cost_units), 0),
-        func.count(),
-    ).where(
-        UsageRecord.attempt_kind.is_not(None),
-        UsageRecord.attempt_kind != AttemptKind.INITIAL.value,
-    )
-    if task_id is not None:
-        statement = statement.where(UsageRecord.task_id == task_id)
-    row = (await session.execute(statement)).one()
-    return Decimal(row[0]), int(row[1])

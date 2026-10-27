@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import select
 
 from tests.integration.storage.helpers import seed_task_run_step, storage
+from tests.integration.usage_totals import usage_totals_by_purpose
 from tests.integration.workflows.stored_workflows import stored_workflow
 from vuzol.config import LaunchMode
 from vuzol.config.models import Capability, CostClass, ProviderProfileConfig
@@ -34,7 +35,6 @@ from vuzol.providers.budgets import (
     estimate_reservation,
     reserve_invocation_budget,
     settle_invocation_budget,
-    usage_totals_by_purpose,
 )
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.leasing import claim_step, start_step

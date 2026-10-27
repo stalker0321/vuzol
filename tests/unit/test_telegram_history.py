@@ -22,7 +22,6 @@ from vuzol.telegram.projections import (
     _envelope_review_warnings,
     _failure_details,
     _format_count,
-    _format_duration,
     _history_work_seconds,
     _one_line_summary,
     _review_warning_html,
@@ -36,15 +35,6 @@ from vuzol.telegram.projections import (
 def test_history_topic_is_changelog() -> None:
     assert HISTORY_TOPIC_KIND.value == "changelog"
     assert TASK_HISTORY_ROLE == "task_history"
-
-
-def test_format_count_and_duration() -> None:
-    assert _format_count(141_387) == "141,387"
-    assert _format_count(0) == "0"
-    assert _format_duration(0) == "0s"
-    assert _format_duration(45) == "45s"
-    assert _format_duration(125) == "2m 5s"
-    assert _format_duration(3723) == "1h 2m 3s"
 
 
 def test_one_line_summary_truncates() -> None:
@@ -519,3 +509,8 @@ async def test_build_and_enqueue_history_report() -> None:
         f"telegram:{TASK_HISTORY_ROLE}:task:{task_id}:outcome:completed"
     )
     assert outbox.payload["terminal_status"] == "completed"
+
+
+def test_format_count() -> None:
+    assert _format_count(141_387) == "141,387"
+    assert _format_count(0) == "0"

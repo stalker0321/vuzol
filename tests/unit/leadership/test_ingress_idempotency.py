@@ -39,11 +39,11 @@ def test_enable_goal_retry_preserves_legacy_semantic_hash():
     assert payload_hash(changed) != payload_hash(command)
 
 
-def test_amendment_alias_and_saved_reply_roundtrip():
+def test_amendment_alias_and_saved_reply():
     import uuid
 
     from vuzol.leadership.commands import LeadCommandName, parse_command_name
-    from vuzol.leadership.model import decision_from_payload, freeze_decision
+    from vuzol.leadership.model import freeze_decision
     from vuzol.leadership.provider_model import parse_lead_response
 
     assert parse_command_name("request_revision") is LeadCommandName.AMEND_GOAL
@@ -80,7 +80,6 @@ def test_amendment_alias_and_saved_reply_roundtrip():
         input_scope=1,
         input_lease_epoch=2,
     )
-    assert decision_from_payload(frozen) == decision
     assert frozen["commands"][0]["expected_version"] == 3
 
 

@@ -1241,22 +1241,6 @@ def _report_facts_only(text: str) -> str:
     return " ".join(kept)
 
 
-def task_progress_report(
-    *, completed: str | None = None, stopped: str | None = None, reason: str | None = None
-) -> str:
-    """Plain factual report for existing notices: done, stop point, cause only."""
-
-    return "\n".join(
-        f"{label}: {_bounded_report(value, 700)}"
-        for label, value in (
-            ("Сделано", completed),
-            ("Остановка", stopped),
-            ("Причина", reason),
-        )
-        if value and value.strip()
-    )
-
-
 async def _task_worker_label(session: AsyncSession, task_id: uuid.UUID) -> str | None:
     """Return the actual execution worker model, excluding planners and reviewers."""
 
@@ -1342,17 +1326,6 @@ def _one_line_summary(text: str, *, limit: int = 280) -> str:
 
 def _format_count(value: int) -> str:
     return f"{max(0, int(value)):,}"
-
-
-def _format_duration(seconds: int) -> str:
-    total = max(0, int(seconds))
-    hours, rem = divmod(total, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours:
-        return f"{hours}h {minutes}m {secs}s"
-    if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
 
 
 def _format_duration_ru(seconds: int) -> str:
@@ -1628,13 +1601,6 @@ def _bounded_callback(data: str) -> str:
     if len(data.encode()) > 64:
         raise ValueError("owner callback exceeds Telegram bound")
     return data
-
-
-def _short_button_text(text: str, limit: int = 36) -> str:
-    compact = " ".join(text.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "..."
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from tests.integration.storage.helpers import seed_task_run_step, storage
+from tests.integration.usage_totals import usage_retry_subtotal, usage_totals_by_purpose
 from vuzol.config.settings import HardLimits
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.providers.budgets import (
@@ -19,8 +20,6 @@ from vuzol.providers.budgets import (
     estimate_reservation,
     reserve_invocation_budget,
     settle_invocation_budget,
-    usage_retry_subtotal,
-    usage_totals_by_purpose,
 )
 from vuzol.providers.domain import NormalizedUsage
 from vuzol.storage.attempts import record_work_attempt, snapshot_task_spec
@@ -37,67 +36,6 @@ from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.service import commit_step_outcome
 
 pytestmark = pytest.mark.postgresql
-
-
-def test_repair_replan_share_one_denominator(postgres_dsn: str) -> None:
-    async def scenario() -> None:
-        from vuzol.config import LaunchMode
-        from vuzol.config.models import Capability, CostClass, ProviderProfileConfig
-
-        engine, factory = storage(postgres_dsn)
-        profile = ProviderProfileConfig(
-            id="test-cheap",
-            provider="test",
-            model="cheap-1",
-            launch_mode=LaunchMode.TOOL,
-            credential_required=False,
-            capabilities=frozenset({Capability.REPOSITORY_READ}),
-            concurrency_limit=1,
-            context_limit=10_000,
-            output_limit=1_000,
-            cost_class=CostClass.CHEAP,
-            supported_task_types=frozenset({"general"}),
-            input_cost_units_per_million=100.0,
-            output_cost_units_per_million=200.0,
-            quota_units_per_call=1.0,
-        )
-        limits = HardLimits()
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            first = await uow.tasks.create(
-                user_id=1, chat_id=-100, original_text="probe", task_type="general"
-            )
-            for attempt_kind in ("initial", "retry"):
-                estimate = estimate_reservation(profile, input_tokens=100, output_tokens=50)
-                reservation = await reserve_invocation_budget(
-                    uow.session,
-                    invocation_id=uuid.uuid4(),
-                    profile=profile,
-                    estimate=estimate,
-                    limits=limits,
-                    task_id=first.id,
-                    accounting=AccountingContext(
-                        purpose="execute", attempt_kind=attempt_kind, pricing_revision="t1"
-                    ),
-                )
-                await settle_invocation_budget(
-                    uow.session,
-                    reservation=reservation,
-                    profile=profile,
-                    usage=NormalizedUsage(input_tokens=100, output_tokens=50, duration_ms=5),
-                    provider_request_id=f"req-{attempt_kind}",
-                    outcome="succeeded",
-                )
-            totals = await usage_totals_by_purpose(uow.session, task_id=first.id)
-            retry_cost, retry_count = await usage_retry_subtotal(uow.session, task_id=first.id)
-            by_purpose = {purpose: (cost, count) for purpose, cost, count in totals}
-            assert by_purpose["execute"][1] == 2
-            # Retry rows are a projection of the same rows, never an addend.
-            assert retry_count == 1
-            assert retry_cost <= by_purpose["execute"][0]
-        await engine.dispose()
-
-    asyncio.run(scenario())
 
 
 def test_exhaustion_blocks_spend(postgres_dsn: str) -> None:
@@ -286,6 +224,67 @@ def test_attempt_history_is_append_only(postgres_dsn: str) -> None:
             ).all()
             assert {row.id for row in rows} == {first.id, second.id}
             assert second.parent_attempt_id == first.id
+        await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_repair_replan_share_one_denominator(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        from vuzol.config import LaunchMode
+        from vuzol.config.models import Capability, CostClass, ProviderProfileConfig
+
+        engine, factory = storage(postgres_dsn)
+        profile = ProviderProfileConfig(
+            id="test-cheap",
+            provider="test",
+            model="cheap-1",
+            launch_mode=LaunchMode.TOOL,
+            credential_required=False,
+            capabilities=frozenset({Capability.REPOSITORY_READ}),
+            concurrency_limit=1,
+            context_limit=10_000,
+            output_limit=1_000,
+            cost_class=CostClass.CHEAP,
+            supported_task_types=frozenset({"general"}),
+            input_cost_units_per_million=100.0,
+            output_cost_units_per_million=200.0,
+            quota_units_per_call=1.0,
+        )
+        limits = HardLimits()
+        async with UnitOfWork(factory) as uow:
+            assert uow.session is not None
+            first = await uow.tasks.create(
+                user_id=1, chat_id=-100, original_text="probe", task_type="general"
+            )
+            for attempt_kind in ("initial", "retry"):
+                estimate = estimate_reservation(profile, input_tokens=100, output_tokens=50)
+                reservation = await reserve_invocation_budget(
+                    uow.session,
+                    invocation_id=uuid.uuid4(),
+                    profile=profile,
+                    estimate=estimate,
+                    limits=limits,
+                    task_id=first.id,
+                    accounting=AccountingContext(
+                        purpose="execute", attempt_kind=attempt_kind, pricing_revision="t1"
+                    ),
+                )
+                await settle_invocation_budget(
+                    uow.session,
+                    reservation=reservation,
+                    profile=profile,
+                    usage=NormalizedUsage(input_tokens=100, output_tokens=50, duration_ms=5),
+                    provider_request_id=f"req-{attempt_kind}",
+                    outcome="succeeded",
+                )
+            totals = await usage_totals_by_purpose(uow.session, task_id=first.id)
+            retry_cost, retry_count = await usage_retry_subtotal(uow.session, task_id=first.id)
+            by_purpose = {purpose: (cost, count) for purpose, cost, count in totals}
+            assert by_purpose["execute"][1] == 2
+            # Retry rows are a projection of the same rows, never an addend.
+            assert retry_count == 1
+            assert retry_cost <= by_purpose["execute"][0]
         await engine.dispose()
 
     asyncio.run(scenario())

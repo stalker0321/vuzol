@@ -13,12 +13,10 @@ from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.config.registries import ConfigurationBundle, RegistryError
 from vuzol.storage.models import ProjectExecutorPreference
 
-PREFERENCE_SCHEMA_VERSION = "project-executor-preference.v1"
 DEFAULT_CODEX_MODEL_FAMILY = "gpt-5.6"
 DEFAULT_REASONING_EFFORT = "medium"
 REASONING_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 CODEX_WORKERS: tuple[str, ...] = ("sol", "terra", "luna")
-ALL_WORKERS: tuple[str, ...] = (*CODEX_WORKERS, "grok", "kimi")
 
 PAYLOAD_MODEL_OVERRIDE = "executor_model_override"
 PAYLOAD_EFFORT_OVERRIDE = "executor_reasoning_effort"

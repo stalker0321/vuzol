@@ -21,20 +21,10 @@ def continuation_wakeup_key(goal_id: uuid.UUID, version: int) -> str:
     return f"lead:wakeup:{goal_id}:continue:{version}"
 
 
-def completed_wakeup_key(goal_id: uuid.UUID, package_id: uuid.UUID) -> str:
-    return f"lead:wakeup:{goal_id}:{package_id}:completed"
-
-
 def resume_wakeup_key(goal_id: uuid.UUID, fence_epoch: int) -> str:
     """One wakeup per resume generation. The eternal enabled key is not reopened."""
 
     return f"lead:wakeup:{goal_id}:resume:{fence_epoch}"
-
-
-def terminal_wakeup_key(goal_id: uuid.UUID, package_id: uuid.UUID, generation: int) -> str:
-    """One durable wakeup for a package generation: completed, blocked, or failed."""
-
-    return f"lead:wakeup:{goal_id}:{package_id}:terminal:{generation}"
 
 
 async def enqueue_goal_wakeup(

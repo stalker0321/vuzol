@@ -13,17 +13,3 @@ def ceiling_is_admission_only(profile: ProviderProfileConfig) -> bool:
     return profile.launch_mode in {LaunchMode.CLI, LaunchMode.TOOL}
 
 
-def ceiling_statement(profile: ProviderProfileConfig) -> str:
-    """Owner-facing limit of the adapter, checked before launch."""
-
-    if ceiling_is_admission_only(profile):
-        return (
-            "This adapter can be refused before launch and its process can be "
-            "stopped. It cannot cap tokens of a running session. An explicit "
-            "money ceiling checked at admission is not a promise to the cent."
-        )
-    return (
-        "This adapter admits one inference. Per-call context and output limits "
-        "apply to that request. A cumulative session total is not a property "
-        "of the call."
-    )

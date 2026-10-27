@@ -4,18 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vuzol.config import Settings
 from vuzol.projects.capabilities import CapabilityState, preflight_capabilities
 from vuzol.projects.descriptors import (
     CAPABILITY_DESCRIPTORS_SCHEMA,
-    LOCAL_NODE_SCHEMA,
     CapabilityDescriptor,
     CapabilityKind,
     builtin_descriptors,
     descriptor_for,
     descriptor_for_capability,
     host_executables,
-    local_node_descriptor,
 )
 
 
@@ -49,23 +46,6 @@ def test_descriptors_carry_no_permission_grant() -> None:
             "grants",
             "allowed_capabilities",
         }.intersection(serialized)
-
-
-def test_local_node_descriptor_uses_settings_and_refs_only() -> None:
-    from vuzol.config.settings import CapabilityProvisioningSettings
-
-    settings = Settings(
-        environment="test",
-        capability_provisioning=CapabilityProvisioningSettings(
-            node_id="node-a", secret_refs=("env:GITHUB_TOKEN",)
-        ),
-    )
-    node = local_node_descriptor(settings)
-    assert node.schema_version == LOCAL_NODE_SCHEMA
-    assert node.node_id == "node-a"
-    assert node.secret_refs == ("env:GITHUB_TOKEN",)
-    assert all(ref.startswith(("env:", "file:")) for ref in node.secret_refs)
-    assert node.descriptor_hash == local_node_descriptor(settings).descriptor_hash
 
 
 CONTRACT: dict[str, object] = {

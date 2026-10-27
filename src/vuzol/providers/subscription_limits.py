@@ -633,9 +633,6 @@ def _snapshot_entry_to_subscription(
     )
 
 
-_BAR_WIDTH = 10
-_BAR_FILLED = "█"
-_BAR_EMPTY = "░"
 
 
 def format_subscription_limits_html(
@@ -698,16 +695,6 @@ def _safe_unavailable_detail(detail: str) -> str:
     return _SAFE_UNAVAILABLE_DETAILS.get(
         detail, "Не удалось получить данные. Проверьте состояние профиля."
     )
-
-
-def progress_bar(remaining_percent: int, *, width: int = _BAR_WIDTH) -> str:
-    """Filled bar for used capacity; empty cells are still remaining."""
-
-    remaining = max(0, min(100, int(remaining_percent)))
-    used = 100 - remaining
-    filled = max(0, min(width, round(used * width / 100)))
-    empty = width - filled
-    return f"[{_BAR_FILLED * filled}{_BAR_EMPTY * empty}]"
 
 
 def _format_window_block(

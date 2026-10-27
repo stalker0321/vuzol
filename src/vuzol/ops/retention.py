@@ -1496,6 +1496,9 @@ class RetentionSweeper:
 
     def _artifact_path(self, artifact: Artifact) -> Path:
         assert self._artifact_root is not None
+        if Path(artifact.content_uri).is_absolute():
+            # Telegram attachments are stored by absolute path under the artifact root.
+            return contained(self._artifact_root, Path(artifact.content_uri), must_exist=False)
         if not artifact.content_uri.startswith(ARTIFACT_URI_PREFIX):
             raise ValueError("unsupported artifact content_uri")
         relative = Path(artifact.content_uri.removeprefix(ARTIFACT_URI_PREFIX))

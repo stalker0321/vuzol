@@ -1,0 +1,30 @@
+# Managed by deploy/production. Do not add drop-ins; edit this file and redeploy.
+[Unit]
+Description=Vuzol daily encrypted database backup with off-host copies
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# Root: pg_dump runs through `docker exec` in the postgres container, and the
+# key and ssh identity in /etc/vuzol/backup are root-only.
+User=root
+EnvironmentFile=/etc/vuzol/vuzol.env
+EnvironmentFile=/etc/vuzol/backup.env
+EnvironmentFile=/etc/vuzol/secrets.env
+WorkingDirectory=/opt/vuzol/current
+ExecStart=/opt/vuzol/current/deploy/production/vuzol-backup-run.sh
+TimeoutStartSec=1h
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/vuzol/backups
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true

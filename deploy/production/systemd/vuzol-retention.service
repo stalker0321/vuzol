@@ -1,0 +1,29 @@
+# Managed by deploy/production. Do not add drop-ins; edit this file and redeploy.
+[Unit]
+Description=Vuzol retention sweep of expired worktrees and artifacts
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=vuzol-executor
+Group=vuzol-executor
+EnvironmentFile=/etc/vuzol/vuzol.env
+EnvironmentFile=/etc/vuzol/secrets.env
+WorkingDirectory=/opt/vuzol/current
+ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.retention --apply
+TimeoutStartSec=30m
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/vuzol /var/lib/vuzol/registry
+ReadWritePaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /srv/vuzol/repositories
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native

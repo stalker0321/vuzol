@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up the Vuzol database every night
+
+[Timer]
+OnCalendar=*-*-* 03:30
+RandomizedDelaySec=15m
+Persistent=true
+Unit=vuzol-backup.service
+
+[Install]
+WantedBy=timers.target

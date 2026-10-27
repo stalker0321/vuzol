@@ -8,6 +8,7 @@ REPO=${VUZOL_SOURCE_REPO:-/srv/vuzol/repo}
 UV=${UV:-/usr/local/bin/uv}
 RELEASES=/opt/vuzol/releases
 UNITS="vuzol-executor.service vuzol-applier.service vuzol-static-publisher-worker.service"
+TIMERS="vuzol-opencode-usage.timer vuzol-backup.timer vuzol-retention.timer"
 KEEP=3
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
@@ -20,14 +21,14 @@ IMAGE=vuzol:$TAG
 exec 9>/run/vuzol-deploy.lock
 flock -n 9 || { echo "another deploy is running" >&2; exit 1; }
 
-for unit in $UNITS vuzol-opencode-usage.service; do
+for unit in $UNITS vuzol-opencode-usage.service vuzol-backup.service vuzol-retention.service; do
   if [ -d "/etc/systemd/system/$unit.d" ]; then
     echo "drop-ins found in /etc/systemd/system/$unit.d; fold them into deploy/production/systemd" >&2
     exit 1
   fi
 done
 
-for env in vuzol executor applier static-publisher secrets; do
+for env in vuzol executor applier static-publisher backup secrets; do
   [ -f "/etc/vuzol/$env.env" ] || { echo "/etc/vuzol/$env.env is missing" >&2; exit 1; }
 done
 
@@ -56,6 +57,7 @@ install -m 0755 "$REL/deploy/production/vuzol-compose" /usr/local/bin/vuzol-comp
 install -m 0644 "$REL"/deploy/production/systemd/*.service "$REL"/deploy/production/systemd/*.timer \
   /etc/systemd/system/
 systemctl daemon-reload
+systemctl enable --quiet --now $TIMERS
 /usr/local/bin/vuzol-compose up -d --remove-orphans --wait postgres
 /usr/local/bin/vuzol-compose up -d --remove-orphans
 systemctl restart $UNITS
@@ -64,7 +66,7 @@ echo "== verifying"
 # A service that crashes at startup still reads "active"/"running" between
 # restarts, so restart counters are checked too (2026-10-27 outage).
 sleep 30
-systemctl is-active $UNITS vuzol-opencode-usage.timer
+systemctl is-active $UNITS $TIMERS
 for unit in $UNITS; do
   restarts=$(systemctl show -p NRestarts --value "$unit")
   [ "$restarts" = 0 ] || { echo "$unit restarted $restarts times" >&2; exit 1; }

@@ -872,7 +872,7 @@ def test_dashboard_resolves_executors_pins_and_subscription_limits(postgres_dsn:
             grok_step = await uow.steps.create(
                 run_id=grok_run,
                 ordinal=1,
-                step_type="execute_model",
+                step_type="research_execute",
                 status=StepStatus.RUNNING,
                 idempotency_class=IdempotencyClass.ISOLATED_RETRYABLE,
             )
@@ -891,14 +891,14 @@ def test_dashboard_resolves_executors_pins_and_subscription_limits(postgres_dsn:
             junk_step = await uow.steps.create(
                 run_id=model_run,
                 ordinal=1,
-                step_type="execute_model",
+                step_type="research_execute",
                 status=StepStatus.COMPLETED,
                 idempotency_class=IdempotencyClass.READ_ONLY,
             )
             good_step = await uow.steps.create(
                 run_id=model_run,
                 ordinal=2,
-                step_type="execute_model",
+                step_type="research_execute",
                 status=StepStatus.COMPLETED,
                 idempotency_class=IdempotencyClass.READ_ONLY,
             )

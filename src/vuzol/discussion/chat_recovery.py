@@ -312,9 +312,7 @@ async def retry_chat_turn(
             .join(Run)
             .where(
                 Run.task_id == work_task.id,
-                Step.step_type.in_(
-                    ["execute_model", "execute_agent", "execute_code", "format_result"]
-                ),
+                Step.step_type.in_(["execute_agent", "execute_code"]),
                 Step.result.is_not(None),
             )
             .order_by(Step.created_at.desc())

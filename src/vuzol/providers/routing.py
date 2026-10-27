@@ -75,7 +75,6 @@ from vuzol.telegram.projections import (
 from vuzol.workflows.transitions import transition_run, transition_step, transition_task
 
 PROVIDER_STEP_ROLES: dict[str, ProviderRole] = {
-    "execute_model": ProviderRole.EXECUTOR,
     "research_execute": ProviderRole.EXECUTOR,
     "synthesize": ProviderRole.SUMMARIZER,
     "review": ProviderRole.REVIEWER,

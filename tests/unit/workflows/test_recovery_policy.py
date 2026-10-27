@@ -71,10 +71,12 @@ def test_backpressure_waits_then_attention() -> None:
     from vuzol.workflows.recovery_policy import decide_recovery
 
     policy = RecoveryPolicy(backpressure_wait_cap=2)
-    waiting = _repairable(category="rate_limited", step_type="execute_model", backpressure_count=1)
+    waiting = _repairable(
+        category="rate_limited", step_type="research_execute", backpressure_count=1
+    )
     assert decide_recovery(waiting, policy) is RecoveryAction.WAIT
     exhausted = _repairable(
-        category="rate_limited", step_type="execute_model", backpressure_count=2
+        category="rate_limited", step_type="research_execute", backpressure_count=2
     )
     assert decide_recovery(exhausted, policy) is RecoveryAction.ATTENTION
 
@@ -92,7 +94,7 @@ def test_transient_retryable_retries() -> None:
     state = RecoveryState(
         outcome_kind="transient_failure",
         category="timeout",
-        step_type="execute_model",
+        step_type="research_execute",
         unknown_effects=False,
         retryable=True,
     )
@@ -100,7 +102,7 @@ def test_transient_retryable_retries() -> None:
     blocked = RecoveryState(
         outcome_kind="transient_failure",
         category="timeout",
-        step_type="execute_model",
+        step_type="research_execute",
         unknown_effects=False,
         retryable=False,
     )

@@ -314,7 +314,7 @@ def test_pre_provider_unwind_is_idempotent_and_fenced(postgres_dsn: str, tmp_pat
             task_id=task_id,
             run_id=run_id,
             step_id=step_id,
-            step_type="execute_model",
+            step_type="research_execute",
             payload={"budget_reservation_id": "malformed", "provider_attempt": 1},
             timeout_seconds=60,
             lease=token,

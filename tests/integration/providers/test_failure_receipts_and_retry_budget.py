@@ -71,7 +71,7 @@ def test_failed_call_after_lease_loss_keeps_measured_receipt(postgres_dsn, tmp_p
                     task_id=reservation.task_id,
                     run_id=reservation.run_id,
                     step_id=step_id,
-                    step_type="execute_model",
+                    step_type="research_execute",
                     payload=step.payload,
                     timeout_seconds=60,
                     lease=token,

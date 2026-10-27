@@ -1,8 +1,8 @@
 {
   "simple_model.v1": [
     {"ordinal": 0, "key": "interpret", "step_type": "interpret", "predecessor_ordinals": [], "queue_class": "light", "capabilities": [], "retry_class": "never", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "completed", "payload": {"interpretation_id": "00000000-0000-0000-0000-000000000000"}},
-    {"ordinal": 1, "key": "execute_model", "step_type": "execute_model", "predecessor_ordinals": [0], "queue_class": "light", "capabilities": [], "retry_class": "transient", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 3, "priority": 100, "status": "pending", "payload": {}},
-    {"ordinal": 2, "key": "format_result", "step_type": "format_result", "predecessor_ordinals": [1], "queue_class": "light", "capabilities": [], "retry_class": "never", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "pending", "payload": {}},
+    {"ordinal": 1, "key": "research_execute", "step_type": "research_execute", "predecessor_ordinals": [0], "queue_class": "light", "capabilities": [], "retry_class": "transient", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 3, "priority": 100, "status": "pending", "payload": {}},
+    {"ordinal": 2, "key": "prepare_context", "step_type": "prepare_context", "predecessor_ordinals": [1], "queue_class": "light", "capabilities": [], "retry_class": "never", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "pending", "payload": {}},
     {"ordinal": 3, "key": "finalize", "step_type": "finalize", "predecessor_ordinals": [2], "queue_class": "control", "capabilities": [], "retry_class": "never", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "pending", "payload": {}}
   ],
   "coding.v1": [
@@ -23,7 +23,7 @@
     {"ordinal": 1, "key": "prepare_context", "step_type": "prepare_context", "predecessor_ordinals": [0], "queue_class": "light", "capabilities": ["repository_read"], "retry_class": "never", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "pending", "payload": {}},
     {"ordinal": 2, "key": "prepare_worktree", "step_type": "prepare_worktree", "predecessor_ordinals": [1], "queue_class": "heavy", "capabilities": ["filesystem_write", "git"], "retry_class": "never", "idempotency_class": "isolated_retryable", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "pending", "payload": {}},
     {"ordinal": 3, "key": "execute_agent", "step_type": "execute_agent", "predecessor_ordinals": [2], "queue_class": "heavy", "capabilities": ["repository_read"], "retry_class": "transient", "idempotency_class": "read_only", "timeout_seconds": 3600, "max_attempts": 3, "priority": 100, "status": "pending", "payload": {}},
-    {"ordinal": 4, "key": "format_result", "step_type": "format_result", "predecessor_ordinals": [3], "queue_class": "light", "capabilities": [], "retry_class": "never", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "pending", "payload": {}},
+    {"ordinal": 4, "key": "prepare_context", "step_type": "prepare_context", "predecessor_ordinals": [3], "queue_class": "light", "capabilities": [], "retry_class": "never", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "pending", "payload": {}},
     {"ordinal": 5, "key": "finalize", "step_type": "finalize", "predecessor_ordinals": [4], "queue_class": "control", "capabilities": [], "retry_class": "never", "idempotency_class": "read_only", "timeout_seconds": 600, "max_attempts": 1, "priority": 100, "status": "pending", "payload": {}}
   ],
   "research.v1": [

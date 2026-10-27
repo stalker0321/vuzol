@@ -658,14 +658,7 @@ class InterpretationPipeline:
                             .where(
                                 Run.task_id == task.id,
                                 Step.result.is_not(None),
-                                Step.step_type.in_(
-                                    [
-                                        "execute_model",
-                                        "execute_agent",
-                                        "execute_code",
-                                        "format_result",
-                                    ]
-                                ),
+                                Step.step_type.in_(["execute_agent", "execute_code"]),
                             )
                             .order_by(Step.created_at.desc())
                             .limit(1)

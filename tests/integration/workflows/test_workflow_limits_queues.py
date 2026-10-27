@@ -160,7 +160,7 @@ def test_profile_limit_is_transactional(postgres_dsn: str) -> None:
                 step = await uow.steps.create(
                     run_id=run_id,
                     ordinal=1,
-                    step_type="execute_model",
+                    step_type="research_execute",
                     idempotency_class=IdempotencyClass.READ_ONLY,
                     status=StepStatus.QUEUED,
                 )

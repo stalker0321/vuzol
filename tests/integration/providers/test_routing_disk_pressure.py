@@ -53,7 +53,7 @@ def test_routed_heavy_claim_skipped_when_disk_low_no_budget_or_attempt(
         _, registries = bundle(tmp_path, profile("api"))
         _task_id, _run_id, step_id = await seed_provider_step(
             factory,
-            step_type="execute_model",
+            step_type="research_execute",
             queue_class=QueueClass.HEAVY,
         )
         async with factory.begin() as session:
@@ -108,7 +108,7 @@ def test_routed_heavy_claim_recovers_after_disk_returns(postgres_dsn: str, tmp_p
         _, registries = bundle(tmp_path, profile("api"))
         _task_id, _run_id, step_id = await seed_provider_step(
             factory,
-            step_type="execute_model",
+            step_type="research_execute",
             queue_class=QueueClass.HEAVY,
         )
         async with factory.begin() as session:

@@ -16,6 +16,7 @@
 - [Исполнение кода](CODING_RUNTIME.md), [границы ревью](REVIEW_BOUNDARIES.md).
 - [Деплой](PRODUCTION_DEPLOY.md), [восстановление](RECOVERY_POLICY.md).
 - [Хранилище](STORAGE.md), [учёт расхода](ACCOUNTING_LEDGER.md), [тесты](TESTING.md).
+- [Память руководителя проекта](LEAD_MEMORY.md).
 - [Инварианты](ARCHITECTURE_INVARIANTS.md), [решения и их история](decisions/).
 
 Эти руководства тоже могут отставать от живой установки. Датированные отчёты ниже

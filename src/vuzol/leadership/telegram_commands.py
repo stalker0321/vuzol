@@ -495,3 +495,57 @@ async def apply_goal_button(
             else IngressStatus.REJECTED,
             reason=result.reason or result.status,
         )
+
+
+async def undo_notebook_note(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    project_id: str,
+    update: ControlUpdate,
+) -> IngressResult:
+    """Undo only the note bound to this delivered notice, under the ingress owner policy."""
+    from vuzol.storage.models import TelegramMessageLink
+    from vuzol.storage.types import MemoryScope
+    from vuzol.telegram.policy import TelegramPolicyError, authorize
+
+    try:
+        authorize(settings, chat_id=update.chat_id, user_id=update.user_id)
+    except TelegramPolicyError:
+        return IngressResult(status=IngressStatus.REJECTED, reason="outside_scope")
+    if update.note_id is None or update.message_id is None or update.message_thread_id is None:
+        return IngressResult(status=IngressStatus.REJECTED, reason="control_binding_missing")
+    async with UnitOfWork(session_factory) as uow:
+        assert uow.session is not None
+        link = await uow.session.scalar(
+            select(TelegramMessageLink).where(
+                TelegramMessageLink.chat_id == update.chat_id,
+                TelegramMessageLink.message_thread_id == update.message_thread_id,
+                TelegramMessageLink.message_id == update.message_id,
+                TelegramMessageLink.message_role == f"mu:{update.note_id.hex}",
+            )
+        )
+        if link is None:
+            return IngressResult(status=IngressStatus.REJECTED, reason="control_binding_missing")
+        note = await uow.memory_units.lock_note(update.note_id)
+        goal = await uow.session.get(ManagedGoal, note.goal_id) if note and note.goal_id else None
+        if (
+            note is None
+            or goal is None
+            or goal.project_id != project_id
+            or goal.owner_user_id != update.user_id
+            or (goal.source_chat_id, goal.source_thread_id)
+            != (update.chat_id, update.message_thread_id)
+            or not (
+                (note.scope == MemoryScope.GLOBAL and note.project_id is None)
+                or (note.scope == MemoryScope.PROJECT and note.project_id == project_id)
+            )
+        ):
+            return IngressResult(status=IngressStatus.REJECTED, reason="outside_scope")
+        changed = await uow.memory_units.retract_note(note)
+        if changed:
+            await uow.memory_units.restore_replaced_note(note)
+        return IngressResult(
+            status=IngressStatus.HANDLED,
+            reason="memory_undone" if changed else "memory_already_undone",
+        )

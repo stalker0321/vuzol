@@ -5,7 +5,15 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
+
+from vuzol.leadership.commands import MAX_MEMORY_COMMANDS, MEMORY_COMMANDS
+
+
+class NotebookNote(TypedDict):
+    id: str
+    text: str
+    created_at: str
 
 
 class LeadModelUnavailable(RuntimeError):
@@ -40,6 +48,8 @@ class LeadSnapshot:
     superseded_request: str | None = None
     invocation_id: uuid.UUID | None = None
     result_context: dict[str, Any] = field(default_factory=dict)
+    project_notebook: tuple[NotebookNote, ...] = ()
+    global_notebook: tuple[NotebookNote, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +96,8 @@ def freeze_decision(
 ) -> dict[str, Any]:
     """Immutable command list. Keys and expected versions do not follow later state."""
 
+    if sum(command.name in MEMORY_COMMANDS for command in decision.commands) > MAX_MEMORY_COMMANDS:
+        raise LeadModelUnavailable("lead_response_invalid")
     usage = normalize_usage(decision.usage)
     commands = []
     for ordinal, command in enumerate(decision.commands):
@@ -110,5 +122,3 @@ def freeze_decision(
         "input_lease_epoch": input_lease_epoch,
         "planning_outcome": decision.planning_outcome,
     }
-
-

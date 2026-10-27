@@ -257,6 +257,12 @@ class AcceptedDecisionStatus(StrEnum):
     RETRACTED = "retracted"
 
 
+class MemoryScope(StrEnum):
+    SESSION = "session"
+    PROJECT = "project"
+    GLOBAL = "global"
+
+
 class MemoryUnitStatus(StrEnum):
     """Derived-memory lifecycle (D5). Only observation/verified are recalled."""
 

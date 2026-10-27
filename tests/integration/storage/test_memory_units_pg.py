@@ -39,6 +39,7 @@ from vuzol.storage.types import (
     ConversationTurnSource,
     DeliveryStatus,
     InteractionMode,
+    MemoryScope,
     MemoryUnitStatus,
     TaskStatus,
     WorktreeDeliveryState,
@@ -139,15 +140,35 @@ async def test_decision_extracts_verified_template_and_recalls(postgres_dsn: str
     assert "stack" in unit.text and "Use Postgres for storage" in unit.text
 
     async with UnitOfWork(factory) as uow:
-        found = await uow.memory_units.recall(RecallQuery(project_id="demo", query="postgres"))
+        found = await uow.memory_units.recall(
+            RecallQuery(scope=MemoryScope.PROJECT, project_id="demo", query="postgres")
+        )
         assert [row.id for row in found] == [unit.id]
-        assert await uow.memory_units.recall(RecallQuery(query="postgres")) != ()
-        assert await uow.memory_units.recall(RecallQuery(project_id="foreign")) == ()
+        assert await uow.memory_units.recall(RecallQuery(scope=MemoryScope.GLOBAL)) == ()
         assert (
-            await uow.memory_units.recall(RecallQuery(unit_types=frozenset({"outcome_template"})))
+            await uow.memory_units.recall(
+                RecallQuery(scope=MemoryScope.PROJECT, project_id="foreign")
+            )
             == ()
         )
-        assert await uow.memory_units.recall(RecallQuery(query="unrelated words here")) == ()
+        assert (
+            await uow.memory_units.recall(
+                RecallQuery(
+                    scope=MemoryScope.PROJECT,
+                    project_id="demo",
+                    unit_types=frozenset({"outcome_template"}),
+                )
+            )
+            == ()
+        )
+        assert (
+            await uow.memory_units.recall(
+                RecallQuery(
+                    scope=MemoryScope.PROJECT, project_id="demo", query="unrelated words here"
+                )
+            )
+            == ()
+        )
     await engine.dispose()
 
 
@@ -269,7 +290,10 @@ async def test_retraction_excludes_recall_but_keeps_row(postgres_dsn: str) -> No
     assert rows[0].status is MemoryUnitStatus.RETRACTED
     assert rows[0].source_decision_id == decision_id
     async with UnitOfWork(factory) as uow:
-        assert await uow.memory_units.recall(RecallQuery(project_id="demo")) == ()
+        assert (
+            await uow.memory_units.recall(RecallQuery(scope=MemoryScope.PROJECT, project_id="demo"))
+            == ()
+        )
         # Addressable by id with provenance intact.
         same = await uow.memory_units.get(rows[0].id)
         assert same is not None and same.text != ""
@@ -290,7 +314,10 @@ async def test_tombstone_and_artifact_redaction_keep_provenance(postgres_dsn: st
         assert row.status is MemoryUnitStatus.TOMBSTONED
         assert row.text == "[tombstoned]"
         assert row.tombstone_event_id == event_id
-        assert await uow.memory_units.recall(RecallQuery(project_id="demo")) == ()
+        assert (
+            await uow.memory_units.recall(RecallQuery(scope=MemoryScope.PROJECT, project_id="demo"))
+            == ()
+        )
 
     task_record, run_id, _step = await seed_task_run_step(factory)
     async with UnitOfWork(factory) as uow:
@@ -439,10 +466,22 @@ async def test_hypotheses_and_filters_in_recall(postgres_dsn: str) -> None:
             project_id="demo",
             session_id=session_id,
         )
-        found = await uow.memory_units.recall(RecallQuery(project_id="demo"))
+        found = await uow.memory_units.recall(
+            RecallQuery(scope=MemoryScope.PROJECT, project_id="demo")
+        )
         assert [row.unit_type for row in found] == ["observation"]
-        assert await uow.memory_units.recall(RecallQuery(project_id="demo", query="sqlite")) == ()
-        assert await uow.memory_units.recall(RecallQuery(project_id="other")) == ()
+        assert (
+            await uow.memory_units.recall(
+                RecallQuery(scope=MemoryScope.PROJECT, project_id="demo", query="sqlite")
+            )
+            == ()
+        )
+        assert (
+            await uow.memory_units.recall(
+                RecallQuery(scope=MemoryScope.PROJECT, project_id="other")
+            )
+            == ()
+        )
     await engine.dispose()
 
 

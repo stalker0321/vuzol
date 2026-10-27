@@ -86,6 +86,15 @@
       "scenario": "goal"
     },
     {
+      "id": "callback:ControlUpdate:memory_undo",
+      "sources": [
+        "src/vuzol/telegram/domain.py:51"
+      ],
+      "producers": [],
+      "consumers": [],
+      "scenario": "lead-memory"
+    },
+    {
       "id": "callback:ControlUpdate:pause",
       "sources": [
         "src/vuzol/telegram/domain.py:51"
@@ -921,10 +930,10 @@
       "producers": [
         "src/vuzol/leadership/events.py:340",
         "src/vuzol/leadership/planning.py:119",
-        "src/vuzol/leadership/planning.py:468",
+        "src/vuzol/leadership/planning.py:472",
         "src/vuzol/leadership/wakeups.py:52",
         "src/vuzol/leadership/wakeups.py:102",
-        "src/vuzol/leadership/worker.py:904",
+        "src/vuzol/leadership/worker.py:913",
         "src/vuzol/workflows/lead_events.py:104",
         "src/vuzol/workflows/lead_events.py:130",
         "src/vuzol/workflows/lead_events.py:206"
@@ -969,14 +978,14 @@
         "src/vuzol/interpretation/service.py:1532",
         "src/vuzol/interpretation/service.py:1324",
         "src/vuzol/interpretation/service.py:1466",
-        "src/vuzol/leadership/worker.py:673",
+        "src/vuzol/leadership/worker.py:682",
         "src/vuzol/projects/naming.py:86",
         "src/vuzol/projects/naming.py:180",
         "src/vuzol/projects/naming.py:207",
         "src/vuzol/projects/provisioning.py:435",
         "src/vuzol/projects/provisioning.py:452",
         "src/vuzol/telegram/attention.py:103",
-        "src/vuzol/telegram/controls.py:239",
+        "src/vuzol/telegram/controls.py:255",
         "src/vuzol/telegram/delivery.py:215",
         "src/vuzol/telegram/delivery.py:988",
         "src/vuzol/telegram/delivery.py:1811",
@@ -1042,9 +1051,9 @@
         "src/vuzol/discussion/sequencer.py:680",
         "src/vuzol/discussion/service.py:1155",
         "src/vuzol/discussion/service.py:1288",
-        "src/vuzol/leadership/service.py:1060",
-        "src/vuzol/telegram/controls.py:519",
-        "src/vuzol/telegram/controls.py:631",
+        "src/vuzol/leadership/service.py:1078",
+        "src/vuzol/telegram/controls.py:535",
+        "src/vuzol/telegram/controls.py:647",
         "src/vuzol/telegram/ingress.py:1303",
         "src/vuzol/telegram/ingress.py:1311",
         "src/vuzol/telegram/model_command.py:369",
@@ -1075,7 +1084,7 @@
       "id": "outbox:workflow_control",
       "sources": [],
       "producers": [
-        "src/vuzol/telegram/controls.py:405"
+        "src/vuzol/telegram/controls.py:421"
       ],
       "consumers": [
         "src/vuzol/workflows/controls.py:88"
@@ -1135,7 +1144,7 @@
     {
       "id": "telegram-handler:filters.ALL",
       "sources": [
-        "src/vuzol/telegram/adapter.py:862"
+        "src/vuzol/telegram/adapter.py:882"
       ],
       "producers": [],
       "consumers": [],

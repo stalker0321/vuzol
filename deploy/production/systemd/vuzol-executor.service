@@ -29,26 +29,11 @@ RestrictRealtime=true
 SystemCallArchitectures=native
 ReadWritePaths=/srv/vuzol/worktrees /srv/vuzol/artifacts /var/lib/vuzol-provider-state /var/lib/vuzol/dependency-environments
 ReadOnlyPaths=/srv/vuzol/repositories /etc/vuzol /var/lib/vuzol/toolchains
-EnvironmentFile=/etc/vuzol/executor-t091.env
-Environment=VUZOL_CHAT__RICH_MESSAGES=true
-Environment=VUZOL_CHAT__MEMORY_ENABLED=true
-EnvironmentFile=/etc/vuzol/t108-review.env
-Environment=VUZOL_ARTIFACT_DELIVERY_UID=1000
-Environment=VUZOL_CAPABILITY_PROVISIONING__ENABLED=true
-Environment=VUZOL_DEPENDENCY_PROVISIONING__ENABLED=true
-EnvironmentFile=/etc/vuzol/t109c-provisioning.env
-EnvironmentFile=/etc/vuzol/t110-executor-route.env
-EnvironmentFile=/etc/vuzol/t117-proxy.env
-EnvironmentFile=/etc/vuzol/t124-proxy.env
-EnvironmentFile=/etc/vuzol/t129-model-roles.env
-EnvironmentFile=/etc/vuzol/t131-inference-timeout.env
-EnvironmentFile=/etc/vuzol/t133-lead.env
-Environment=VUZOL_EXECUTION__JOURNAL_KEY_FILE=/etc/vuzol/execution-journal.key
-Environment=VUZOL_EXECUTION__JOURNAL_ROOT=/srv/vuzol/runtime-journal
+EnvironmentFile=/etc/vuzol/vuzol.env
+EnvironmentFile=/etc/vuzol/executor.env
+EnvironmentFile=/etc/vuzol/secrets.env
 ReadWritePaths=/srv/vuzol/runtime-journal
-Environment=VUZOL_EXECUTION__PROVIDER_PARALLELISM=2
 WorkingDirectory=/opt/vuzol/current
-EnvironmentFile=/etc/vuzol/t138-usage.env
 ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.executor
 
 [Install]

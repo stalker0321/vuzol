@@ -86,7 +86,7 @@ expired → CLI → durable token → новое чтение и ошибки re
 ## Эксплуатация
 
 Конфигурация без секретов: `/etc/vuzol/opencode-usage-c.json`.
-Executor binding: `/etc/vuzol/t138-usage.env`.
+Executor binding: `VUZOL_SUBSCRIPTION_LIMITS__OPENCODE_SNAPSHOTS` in `/etc/vuzol/executor.env`.
 
 ```sh
 systemctl status vuzol-opencode-usage.timer

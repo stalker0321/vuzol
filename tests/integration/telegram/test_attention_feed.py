@@ -420,8 +420,7 @@ async def test_delegation_attention_is_reconciled_and_cancel_resolves(postgres_d
     from datetime import UTC, datetime, timedelta
 
     from tests.integration.leadership.test_lead_review_regressions import control
-    from tests.integration.leadership.test_managed_goal_flow import _worker
-    from vuzol.leadership.model import UnconfiguredLeadModel
+    from tests.integration.leadership.test_managed_goal_flow import UnconfiguredLeadModel, _worker
     from vuzol.leadership.persistence import GoalDelegation
 
     async with _factory(postgres_dsn) as factory:

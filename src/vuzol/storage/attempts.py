@@ -242,25 +242,6 @@ async def validate_source_turn(
         raise ValueError("source turn does not belong to the discussion session")
 
 
-async def bind_task_source(
-    session: AsyncSession,
-    task: Task,
-    turn_id: uuid.UUID,
-    *,
-    session_id: uuid.UUID,
-) -> None:
-    """Bind a typed source-turn ref with session-membership validation.
-
-    Fail-closed like ``accept_decision``: a turn from another session raises
-    instead of recording a false provenance link. The     original user turn is
-    never replaced by generated text — only referenced.
-    """
-
-    await validate_source_turn(session, turn_id, session_id=session_id)
-    task.source_turn_id = turn_id
-    await session.flush()
-
-
 def review_acceptance_key(verdict: dict[str, Any]) -> str:
     """Acceptance key for a review outcome (lead consent on T048 REDO).
 

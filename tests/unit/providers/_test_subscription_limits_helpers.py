@@ -29,7 +29,6 @@ from vuzol.providers.subscription_limits import (
     collect_profile_limits,
     collect_subscription_limits,
     format_subscription_limits_html,
-    progress_bar,
     subscription_profiles,
 )
 from vuzol.telegram.projections import telegram_html
@@ -59,7 +58,6 @@ __all__ = [
     "datetime",
     "format_subscription_limits_html",
     "json",
-    "progress_bar",
     "pytest",
     "subscription_profiles",
     "telegram_html",

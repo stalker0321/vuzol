@@ -34,7 +34,6 @@ from vuzol.providers.openai import OpenAICompatibleAdapter
 from vuzol.providers.policy import ExclusionReason, RoutingRequest, select_profile
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.providers.registry import AdapterRegistry
-from vuzol.routing import select_profile as public_select_profile
 from vuzol.workflows.ports import CancellationContext
 
 __all__ = [
@@ -80,7 +79,6 @@ __all__ = [
     "json",
     "profile",
     "provider_request",
-    "public_select_profile",
     "pytest",
     "routing_request",
     "select_profile",

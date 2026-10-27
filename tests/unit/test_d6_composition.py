@@ -254,7 +254,6 @@ def test_ast_no_call_diagnostic_with_pinned_allowlist() -> None:
         "ops/backup/postgres_restore.py",
         "ops/production_deploy.py",
         "projects/provisioning.py",
-        "projects/runner.py",
         "scout.py",
         "workflows/runtime_preview.py",
     }

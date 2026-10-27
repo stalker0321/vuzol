@@ -13,10 +13,7 @@ import json
 from dataclasses import dataclass
 from enum import StrEnum
 
-from vuzol.config.settings import Settings
-
 CAPABILITY_DESCRIPTORS_SCHEMA = "capability-descriptors.v1"
-LOCAL_NODE_SCHEMA = "local-node.v1"
 
 
 class CapabilityKind(StrEnum):
@@ -225,42 +222,3 @@ def host_executables() -> dict[str, str]:
     }
 
 
-@dataclass(frozen=True, slots=True)
-class LocalNodeDescriptor:
-    node_id: str
-    labels: tuple[str, ...]
-    trust_class: str
-    capability_keys: tuple[str, ...]
-    approved_toolchain_root: str
-    secret_refs: tuple[str, ...] = ()
-    schema_version: str = LOCAL_NODE_SCHEMA
-
-    def canonical(self) -> dict[str, object]:
-        return {
-            "schema_version": self.schema_version,
-            "node_id": self.node_id,
-            "labels": list(self.labels),
-            "trust_class": self.trust_class,
-            "capability_keys": list(self.capability_keys),
-            "approved_toolchain_root": self.approved_toolchain_root,
-            "secret_refs": list(self.secret_refs),
-        }
-
-    @property
-    def descriptor_hash(self) -> str:
-        encoded = json.dumps(self.canonical(), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode()).hexdigest()
-
-
-def local_node_descriptor(settings: Settings) -> LocalNodeDescriptor:
-    """Build the single static local node descriptor from configuration."""
-
-    provisioning = settings.capability_provisioning
-    return LocalNodeDescriptor(
-        node_id=provisioning.node_id,
-        labels=("linux", "local"),
-        trust_class="local",
-        capability_keys=tuple(sorted(_DESCRIPTORS_BY_KEY)),
-        approved_toolchain_root=str(provisioning.toolchain_root),
-        secret_refs=provisioning.secret_refs,
-    )

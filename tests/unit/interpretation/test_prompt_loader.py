@@ -11,7 +11,6 @@ from vuzol.interpretation.prompt_loader import (
     compose_prompt,
     load_prompt,
     prompt_hash,
-    require_active,
 )
 
 
@@ -31,11 +30,6 @@ def test_compose_prompt_is_base_plus_rubric_and_deterministic() -> None:
     assert composed == compose_prompt(PromptKind.INTAKE)
     assert prompt_hash(PromptKind.INTAKE) == prompt_hash(PromptKind.INTAKE)
     assert prompt_hash(PromptKind.INTAKE) != prompt_hash(PromptKind.TARGET_RESOLUTION)
-
-
-def test_require_active_rejects_draft() -> None:
-    with pytest.raises(PromptError):
-        require_active(load_prompt(PromptKind.INTAKE))
 
 
 def test_unknown_prompt_fails_closed() -> None:

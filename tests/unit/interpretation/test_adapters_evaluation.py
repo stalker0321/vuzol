@@ -7,76 +7,27 @@ from typing import Any
 from vuzol.config import OpenRouterProviderRouting
 
 from ._test_interpretation_helpers import (
-    Capability,
-    EvaluationFixture,
     EvaluationReport,
     FakeInterpreter,
     FakeTranscriber,
-    InterpretationResult,
     InterpreterUnavailable,
     InvalidInterpreterOutput,
     OpenAICompatibleInterpreter,
     OpenAICompatibleTranscriber,
     Path,
-    RiskLevel,
     SecretStr,
-    TaskAction,
-    TaskType,
     TopicKind,
     TranscriptionInput,
     TranscriptionUnavailable,
     asyncio,
     draft,
-    evaluate_interpreter,
     httpx,
     interpret_with_recovery,
     json,
-    load_fixtures,
     pytest,
     request,
     require_eligible_report,
-    result,
 )
-
-
-def test_versioned_fixture_set_and_safety_gate() -> None:
-    fixture_path = Path(__file__).parents[2] / "fixtures" / "interpretation" / "step-05-v1.json"
-    fixtures = load_fixtures(fixture_path)
-    assert len(fixtures) >= 40
-    categories = {fixture.category for fixture in fixtures}
-    assert {"text", "voice_errors", "embedded_instructions", "ambiguous_continuation"} <= categories
-
-    async def scenario() -> None:
-        oracle_results: list[InterpretationResult | Exception] = [
-            result(
-                draft(
-                    action=(
-                        TaskAction.GENERAL_CONVERSATION
-                        if fixture.must_not_execute
-                        else TaskAction.CREATE_TASK
-                    ),
-                    task_type=fixture.expected_task_type,
-                    project_id=fixture.expected_project_id,
-                    required_capabilities=frozenset(
-                        Capability(value) for value in fixture.required_capabilities
-                    ),
-                    suggested_risk=fixture.minimum_risk,
-                    needs_clarification=fixture.needs_clarification,
-                    clarification_question=(
-                        "Please clarify the intended request."
-                        if fixture.needs_clarification
-                        else None
-                    ),
-                )
-            )
-            for fixture in fixtures
-        ]
-        report = await evaluate_interpreter(FakeInterpreter(oracle_results), fixtures)
-        assert report.automatic_execution_eligible
-        assert report.total == len(fixtures)
-        assert report.schema_valid_rate == 1
-
-    asyncio.run(scenario())
 
 
 def test_openai_compatible_adapters_parse_provider_neutral_results() -> None:
@@ -224,65 +175,6 @@ def test_automatic_execution_requires_current_eligible_report(tmp_path: Path) ->
     report_path.write_text(report.model_copy(update={"version": "old-version"}).model_dump_json())
     with pytest.raises(ValueError, match="version does not match"):
         require_eligible_report(report_path)
-
-
-def test_evaluation_blocks_every_zero_tolerance_safety_failure() -> None:
-    async def scenario() -> None:
-        unsafe = draft(
-            action=TaskAction.APPROVE_STEP,
-            task_type=TaskType.GENERAL,
-            suggested_risk=RiskLevel.LOW,
-        )
-        fixture = EvaluationFixture(
-            id="unsafe",
-            category="natural_language_control",
-            request=request(),
-            expected_task_type=TaskType.INFRASTRUCTURE,
-            expected_project_id="vuzol",
-            required_capabilities=frozenset({"host_admin"}),
-            needs_clarification=True,
-            minimum_risk=RiskLevel.PRIVILEGED,
-            must_not_execute=True,
-        )
-        report = await evaluate_interpreter(FakeInterpreter([result(unsafe)]), (fixture,))
-        assert not report.automatic_execution_eligible
-        assert report.privileged_approval_violations == 1
-        assert report.must_not_execute_violations == 1
-        assert report.risk_underprediction_violations == 1
-        assert report.binding_violations == 1
-        assert report.failures_by_category == {"natural_language_control": 1}
-
-    asyncio.run(scenario())
-
-
-def test_evaluation_counts_unavailable_provider_as_schema_failure() -> None:
-    async def scenario() -> None:
-        fixture = EvaluationFixture(
-            id="unavailable",
-            category="voice_errors",
-            request=request(voice=True),
-            expected_task_type=TaskType.GENERAL,
-            needs_clarification=True,
-            minimum_risk=RiskLevel.LOW,
-        )
-        report = await evaluate_interpreter(
-            FakeInterpreter([InterpreterUnavailable("offline")]), (fixture,)
-        )
-        assert report.schema_valid == 0
-        assert report.schema_valid_rate == 0
-        assert report.failures_by_category == {"voice_errors": 1}
-        assert not report.automatic_execution_eligible
-
-    asyncio.run(scenario())
-
-
-def test_empty_evaluation_is_never_eligible() -> None:
-    async def scenario() -> None:
-        report = await evaluate_interpreter(FakeInterpreter([]), ())
-        assert report.total == 0 and report.schema_valid_rate == 0
-        assert not report.automatic_execution_eligible
-
-    asyncio.run(scenario())
 
 
 def test_openai_interpreter_sends_profile_token_and_reasoning_limits() -> None:

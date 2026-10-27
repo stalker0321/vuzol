@@ -24,14 +24,11 @@ from vuzol.projects.installations import (
     InstallationState,
     enforce_run_pins,
     installation_states,
-    pin_capability,
-    pin_matches,
     probe_toolchain,
-    receipt_digest,
     record_installation,
 )
 from vuzol.projects.toolchains import ToolchainSpec
-from vuzol.storage.models import CapabilityInstallation, Run, Task
+from vuzol.storage.models import CapabilityInstallation, Task
 from vuzol.storage.types import RunStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
@@ -197,44 +194,6 @@ def test_post_install_probe_records_installation(postgres_dsn: str, tmp_path: Pa
         async with factory() as session:
             states = await installation_states(session)
             assert states["node-runtime"] == "failed"
-        await engine.dispose()
-
-    asyncio.run(scenario())
-
-
-def test_run_pin_blocks_silent_version_change(postgres_dsn: str, tmp_path: Path) -> None:
-    async def scenario() -> None:
-        engine, factory = storage(postgres_dsn)
-        async with UnitOfWork(factory) as uow:
-            task = await uow.tasks.create(
-                user_id=1, chat_id=-100, original_text="pin", task_type="coding"
-            )
-            assert uow.session is not None
-            stored = await uow.session.get(Task, task.id)
-            assert stored is not None
-            stored.status = TaskStatus.EXECUTING
-            run_id = await uow.runs.create(
-                task_id=task.id,
-                workflow_type="coding",
-                workflow_version="1",
-                budget_mode="balanced",
-                configuration_revision="a" * 64,
-                policy_revision="b" * 64,
-                status=RunStatus.RUNNING,
-            )
-        spec_v1 = _spec("1.0.0")
-        spec_v2 = _spec("2.0.0")
-        async with factory.begin() as session:
-            pin = await pin_capability(session, run_id=run_id, spec=spec_v1)
-            assert pin.version == "1.0.0"
-        async with factory.begin() as session:
-            assert await pin_matches(session, run_id=run_id, spec=spec_v1) is True
-            # A downgrade/upgrade must not silently change an in-flight run.
-            assert await pin_matches(session, run_id=run_id, spec=spec_v2) is False
-        async with factory() as session:
-            run = await session.get(Run, run_id)
-            assert run is not None
-            assert receipt_digest(spec_v1) != receipt_digest(spec_v2)
         await engine.dispose()
 
     asyncio.run(scenario())

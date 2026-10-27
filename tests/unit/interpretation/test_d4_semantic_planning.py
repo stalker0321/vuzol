@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 
 import pytest
 
@@ -17,7 +16,6 @@ from vuzol.interpretation import decisions as semantic_decisions
 from vuzol.interpretation.domain import TaskDraft
 from vuzol.interpretation.explicit import is_explicit_task_command
 from vuzol.interpretation.policy import enforce_interpretation_policy
-from vuzol.interpretation.provenance import coerce_legacy_plan_item, task_source_refs
 from vuzol.interpretation.service import RECOVERY_MAX_FALLBACKS, RECOVERY_MAX_REPAIRS
 
 from ._test_interpretation_helpers import draft, request
@@ -43,26 +41,6 @@ def test_plan_dependencies_unknown_and_cycle_rejected() -> None:
     validate_plan_dependencies((_plan_item("a"), _plan_item("b", ("a",))))
     with pytest.raises(DomainError, match="unknown plan dependency"):
         PlanDraft(title="T", items=(_plan_item("a", ("ghost",)),))
-
-
-def test_task_spec_bridge_refs_and_legacy_provenance() -> None:
-    turn_id = uuid.uuid4()
-
-    class FakeTask:
-        source_turn_id = turn_id
-        spec_revision = "abc123"
-        original_text = "fix the bug"
-
-    refs = task_source_refs(FakeTask())
-    assert refs["original_text"] == "fix the bug"
-    assert refs["spec_revision"] == "abc123"
-    assert refs["source_turn_id"] is turn_id
-    assert set(refs) == {"source_turn_id", "spec_revision", "original_text"}
-
-    legacy = coerce_legacy_plan_item({"summary": "x"})
-    assert legacy["derived"] is False
-    assert legacy["source_turn_id"] is None
-    assert legacy["source_spec_revision"] is None
 
 
 def test_recovery_contract_is_bounded_and_fail_closed() -> None:

@@ -12,23 +12,12 @@ from vuzol.execution.scaffold import (
     executable_product_paths,
     makefile_has_exact_scaffold_marker,
     makefile_has_real_test_recipe,
-    makefile_has_scaffold_gate,
     makefile_has_scaffold_test_recipe,
     path_is_docs_only,
     path_is_executable_product,
     project_lacks_real_validation_gate,
     scaffold_gate_violation,
-    worktree_uses_scaffold_gate,
 )
-
-
-def test_scaffold_makefile_contains_machine_marker() -> None:
-    assert makefile_has_scaffold_gate(PROJECT_SCAFFOLD_MAKEFILE)
-    assert makefile_has_exact_scaffold_marker(PROJECT_SCAFFOLD_MAKEFILE)
-    assert makefile_has_scaffold_test_recipe(PROJECT_SCAFFOLD_MAKEFILE)
-    assert not makefile_has_real_test_recipe(PROJECT_SCAFFOLD_MAKEFILE)
-    assert SCAFFOLD_GATE_MARKER in PROJECT_SCAFFOLD_MAKEFILE
-    assert "scaffold: no project tests yet" in PROJECT_SCAFFOLD_MAKEFILE
 
 
 def test_docs_only_paths_do_not_require_real_gate() -> None:
@@ -252,32 +241,6 @@ async def test_result_validation_fails_scaffold_on_code_transition(
     assert raised.value.category == "validation_scaffold_gate"
 
 
-def test_worktree_uses_scaffold_from_recipe_or_exact_marker(tmp_path: Path) -> None:
-    """worktree_uses_scaffold_gate: recipe OR exact marker (no real recipe)."""
-
-    assert not worktree_uses_scaffold_gate(tmp_path)
-    (tmp_path / "Makefile").write_text(PROJECT_SCAFFOLD_MAKEFILE)
-    assert worktree_uses_scaffold_gate(tmp_path)
-
-    # Recipe alone (marker removed) still counts as scaffold.
-    (tmp_path / "Makefile").write_text(
-        '.PHONY: test\ntest:\n\t@echo "scaffold: no project tests yet (ok)"\n'
-    )
-    assert worktree_uses_scaffold_gate(tmp_path)
-
-    # Exact marker without real recipe keeps scaffold mode.
-    (tmp_path / "Makefile").write_text(
-        f"# {SCAFFOLD_GATE_MARKER}\n.PHONY: test\n# no test target body\n"
-    )
-    assert worktree_uses_scaffold_gate(tmp_path)
-
-    # Real recipe clears scaffold even with exact marker line present.
-    (tmp_path / "Makefile").write_text(
-        f"# {SCAFFOLD_GATE_MARKER}\n.PHONY: test\ntest:\n\t/usr/bin/pytest -q\n"
-    )
-    assert not worktree_uses_scaffold_gate(tmp_path)
-
-
 def test_recipe_edge_cases_inline_blank_comments_and_echoes() -> None:
     """Exercise makefile recipe parser edge cases for real vs scaffold detection."""
 
@@ -348,3 +311,11 @@ def test_scaffold_violation_lists_ellipsis_for_many_product_files(tmp_path: Path
     assert reason is not None
     assert "..." in reason
     assert "src/mod0.py" in reason
+
+
+def test_scaffold_makefile_contains_machine_marker() -> None:
+    assert makefile_has_exact_scaffold_marker(PROJECT_SCAFFOLD_MAKEFILE)
+    assert makefile_has_scaffold_test_recipe(PROJECT_SCAFFOLD_MAKEFILE)
+    assert not makefile_has_real_test_recipe(PROJECT_SCAFFOLD_MAKEFILE)
+    assert SCAFFOLD_GATE_MARKER in PROJECT_SCAFFOLD_MAKEFILE
+    assert "scaffold: no project tests yet" in PROJECT_SCAFFOLD_MAKEFILE

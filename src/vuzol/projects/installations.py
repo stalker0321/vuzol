@@ -222,46 +222,6 @@ def _installation_target_exists(root: Path, capability_key: str) -> bool:
     return root.is_dir() and contained(root, root / capability_key, must_exist=False).exists()
 
 
-async def pin_capability(
-    session: AsyncSession, *, run_id: uuid.UUID, spec: ToolchainSpec
-) -> CapabilityRunPin:
-    """Pin the exact verified toolchain version a run resolved (idempotent)."""
-
-    digest = receipt_digest(spec)
-    existing = await session.scalar(
-        select(CapabilityRunPin).where(
-            CapabilityRunPin.run_id == run_id,
-            CapabilityRunPin.capability_key == spec.capability_key,
-        )
-    )
-    if existing is not None:
-        return existing
-    pin = CapabilityRunPin(
-        run_id=run_id,
-        capability_key=spec.capability_key,
-        version=spec.version,
-        receipt_hash=digest,
-        pinned_at=datetime.now(UTC),
-    )
-    session.add(pin)
-    await session.flush()
-    return pin
-
-
-async def pin_matches(session: AsyncSession, *, run_id: uuid.UUID, spec: ToolchainSpec) -> bool:
-    """A downgrade/upgrade must not silently change an already-pinned run."""
-
-    pin = await session.scalar(
-        select(CapabilityRunPin).where(
-            CapabilityRunPin.run_id == run_id,
-            CapabilityRunPin.capability_key == spec.capability_key,
-        )
-    )
-    if pin is None:
-        return True
-    return pin.receipt_hash == receipt_digest(spec)
-
-
 async def enforce_run_pins(
     session: AsyncSession,
     *,

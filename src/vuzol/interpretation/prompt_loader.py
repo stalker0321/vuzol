@@ -147,14 +147,6 @@ def load_prompt(kind: PromptKind, version: str = "v1") -> PromptTemplate:
     return prompt
 
 
-def require_active(prompt: PromptTemplate) -> PromptTemplate:
-    """A draft prompt must not run a production path; shadow may use it explicitly."""
-
-    if prompt.status is not PromptStatus.ACTIVE:
-        raise PromptError(f"prompt {prompt.kind.value}:{prompt.version} is still draft")
-    return prompt
-
-
 def compose_prompt(kind: PromptKind, version: str = "v1") -> str:
     """Compose ``base + rubric`` for a decision kind (deterministic)."""
 

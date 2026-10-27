@@ -718,35 +718,6 @@ async def build_work_package_action_card(
     return await build_work_package_plan_card(session, package_id, _action_card=True)
 
 
-def _route_provider_label(route: object) -> str | None:
-    if not isinstance(route, dict):
-        return None
-    values = (
-        route.get("executor_worker_key"),
-        route.get("model_override"),
-        route.get("trusted_profile_id"),
-        route.get("profile_id"),
-        route.get("executor"),
-    )
-    value = next((candidate for candidate in values if isinstance(candidate, str)), None)
-    if value is None:
-        return None
-    lowered = value.lower()
-    if "terra" in lowered:
-        return "Terra"
-    if "luna" in lowered:
-        return "Luna"
-    if "sol" in lowered:
-        return "Sol"
-    if "grok" in lowered:
-        return "Grok"
-    if "kimi" in lowered or "tokenrouter" in lowered:
-        return "Kimi"
-    if "codex" in lowered or "openai" in lowered:
-        return "Codex"
-    return value
-
-
 async def _work_package_token_totals(
     session: AsyncSession, package_id: uuid.UUID
 ) -> tuple[int, int, int]:

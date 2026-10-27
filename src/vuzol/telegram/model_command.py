@@ -14,8 +14,6 @@ from vuzol.projects.executor_preference import (
     REASONING_EFFORTS,
     ExecutorPreferenceError,
     ExecutorWorkerKey,
-    WorkerOption,
-    auto_callback_data,
     connection_label,
     effort_callback_data,
     executor_connections,
@@ -23,7 +21,6 @@ from vuzol.projects.executor_preference import (
     load_preference,
     set_auto_preference,
     set_worker_preference,
-    worker_callback_data,
     workers_for_profile,
 )
 from vuzol.storage.models import TransactionalOutbox
@@ -45,14 +42,6 @@ class ModelPickerStage(StrEnum):
 class ModelCommandOutcome:
     project_id: str
     stage: ModelPickerStage
-
-
-def build_worker_picker_html(*, project_id: str, current_label: str) -> str:
-    return (
-        f"<b>Модель проекта</b> <code>{telegram_html(project_id)}</code>\n"
-        f"Сейчас: <b>{telegram_html(current_label)}</b>\n\n"
-        "Выберите подключение. Настройка применяется к новым задачам, пока вы её не измените."
-    )
 
 
 def build_effort_picker_html(*, project_id: str, worker_label: str) -> str:
@@ -77,34 +66,6 @@ def build_confirm_html(*, project_id: str, label: str) -> str:
         f"Воркер: <b>{telegram_html(label)}</b>\n\n"
         "Выбор применяется к новым задачам проекта."
     )
-
-
-def worker_keyboard(
-    *,
-    revision: int,
-    connections: tuple[ProviderProfileConfig, ...] = (),
-    workers: tuple[WorkerOption, ...] = (),
-) -> tuple[tuple[tuple[str, str], ...], ...]:
-    rows: list[tuple[tuple[str, str], ...]] = [
-        (("Routing (auto)", auto_callback_data(revision)),),
-    ]
-    current: list[tuple[str, str]] = []
-    choices = (
-        tuple(
-            (connection_label(profile), f"v2:pm:c:{revision}:{profile.id}")
-            for profile in connections
-        )
-        if connections
-        else tuple((option.label, worker_callback_data(revision, option.key)) for option in workers)
-    )
-    for label, callback in choices:
-        current.append((label, callback))
-        if len(current) == 2:
-            rows.append(tuple(current))
-            current = []
-    if current:
-        rows.append(tuple(current))
-    return tuple(rows)
 
 
 def effort_keyboard(

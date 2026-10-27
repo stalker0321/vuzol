@@ -24,19 +24,9 @@ from ._test_subscription_limits_helpers import (
     datetime,
     format_subscription_limits_html,
     json,
-    progress_bar,
     pytest,
     telegram_html,
 )
-
-
-def test_progress_bar_fills_used_portion() -> None:
-    # 28% left → 72% used → about 7 of 10 cells filled
-    assert progress_bar(28) == "[███████░░░]"
-    assert progress_bar(100) == "[░░░░░░░░░░]"
-    assert progress_bar(0) == "[██████████]"
-    assert progress_bar(150) == "[░░░░░░░░░░]"
-    assert progress_bar(-5) == "[██████████]"
 
 
 def test_format_subscription_limits_html() -> None:

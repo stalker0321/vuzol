@@ -14,7 +14,7 @@ from vuzol.config.models import (
     ProviderRole,
 )
 from vuzol.config.registries import ConfigurationBundle, RegistryError
-from vuzol.config.revision import content_revision
+from vuzol.config.revision import assignment_matches
 from vuzol.config.settings import Settings
 from vuzol.context.execution import execution_constraints_context
 from vuzol.ops.disk_pressure import (
@@ -328,8 +328,8 @@ async def claim_routed_step(
                 )
                 continue
             responder = next((p for p in profiles if p.id == value), None)
-            if responder is None or run.selected_route.get("profile_revision") != content_revision(
-                responder
+            if responder is None or not assignment_matches(
+                responder, run.selected_route.get("profile_revision")
             ):
                 await _block_route(
                     session,

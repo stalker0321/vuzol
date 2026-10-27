@@ -239,6 +239,7 @@ def test_worker_main_composes_runtime_and_handles_stop(
         )
         monkeypatch.setattr(worker_cli, "synchronize_profiles", AsyncMock())
         monkeypatch.setattr(worker_cli, "RoutedWorkflowWorker", MagicMock())
+    monkeypatch.setattr(worker_cli, "upgrade_assignment_revisions", AsyncMock())
     handlers: dict[int, Callable[[int, FrameType | None], None]] = {}
     calls: dict[str, object] = {}
 

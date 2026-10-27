@@ -9,7 +9,6 @@ from contextlib import suppress
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, DeliveryMode, RuntimeConfiguration, get_runtime_configuration
-from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.effect_reconciliation import EffectReconciler
 from vuzol.execution.git import LocalGit, require_writable_directory
 from vuzol.execution.result_apply import ResultApplyHandler
@@ -22,7 +21,6 @@ from vuzol.projects.capability_provisioning import (
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.types import QueueClass
-from vuzol.workflows.acceptance import AcceptanceGateHandler
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.ports import StepHandler
 from vuzol.workflows.upgrade import require_workflow_upgrade
@@ -68,15 +66,6 @@ def applier_handlers(
             registries=runtime.registries,
             worktree_root=settings.worktree_root,
             apply_access_check=git.require_apply_access,
-        ),
-        "acceptance": AcceptanceGateHandler(
-            factory,
-            artifacts=ArtifactStore(
-                settings.artifact_root,
-                max_bytes=settings.limits.artifact_bytes,
-                retention_days=settings.retention.artifact_days,
-                redaction_patterns=settings.redaction_patterns,
-            ),
         ),
     }
 

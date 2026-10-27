@@ -411,31 +411,14 @@ def _callback(data: str, update_id: int = 11) -> Update:
     )
 
 
-def test_package_card_callback_keeps_the_composite_revision_and_criterion_token() -> None:
+def test_owner_choice_callback_keeps_the_composite_revision() -> None:
     task_id = uuid.uuid4()
     admit = control_update(_callback(f"v2:admit:{task_id.hex}:40004:2"), "main")
     assert isinstance(admit, ControlUpdate)
     assert admit.action_kind == "admit"
     assert admit.expected_task_version == 40004
     assert admit.retry_step_ordinal == 2
-    assert admit.criterion_token is None
-
-    chosen = control_update(_callback(f"v2:c:{task_id.hex}:40004:2:ab12cd34", update_id=12), "main")
-    assert isinstance(chosen, ControlUpdate)
-    assert chosen.action_kind == "criterion"
-    assert chosen.expected_task_version == 40004
-    assert chosen.criterion_token == "ab12cd34"  # noqa: S105
-    assert control_update(_callback(f"v2:c:{task_id.hex}:40004:2:AB12CD34"), "main") is None
-    assert control_update(_callback(f"v2:c:{task_id.hex}:40004:2:short"), "main") is None
-
-    page = control_update(_callback(f"v2:cp:{task_id.hex}:40004:2", update_id=13), "main")
-    assert isinstance(page, ControlUpdate)
-    assert page.action_kind == "cpage"
-    assert page.expected_task_version == 40004
-    assert page.criterion_page == 2
-    assert page.criterion_token is None
-    assert page.retry_step_ordinal is None
-    assert control_update(_callback(f"v2:cp:{task_id.hex}:40004:0"), "main") is None
+    assert control_update(_callback(f"v2:c:{task_id.hex}:40004:2:ab12cd34"), "main") is None
 
 
 def test_python_telegram_client_builds_custom_markup_and_best_effort_delete() -> None:

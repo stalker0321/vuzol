@@ -27,23 +27,13 @@ from vuzol.providers.budgets import (
 )
 from vuzol.storage.models import (
     Event,
-    MaterializationLink,
     Run,
     Step,
     Task,
     UsageRecord,
-    WorkPackage,
-    Worktree,
 )
 from vuzol.storage.types import RunStatus, StepStatus
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.workflows.acceptance import (
-    criterion_choice_token,
-    load_stored_proofs,
-    record_owner_criterion_acceptance,
-    required_criterion_ids,
-    unproven_criterion_ids,
-)
 from vuzol.workflows.controls import (
     _locked_context,
     cancel_task,
@@ -71,14 +61,12 @@ class TaskCommand(StrEnum):
     ADMIT_CEILING = "admit_ceiling"
     ACCEPT_UNCERTAINTY = "accept_uncertainty"
     RECONCILE_COST = "reconcile_cost"
-    ACCEPT_CRITERION = "accept_criterion"
 
 
 _OWNER_CATEGORY = {
     TaskCommand.ADMIT_CEILING: "admission_only_consent_required",
     TaskCommand.ACCEPT_UNCERTAINTY: "money_cap_uncertified",
     TaskCommand.RECONCILE_COST: "money_cap_uncertified",
-    TaskCommand.ACCEPT_CRITERION: "acceptance_evidence_missing",
 }
 
 
@@ -89,8 +77,6 @@ class OwnerDecision:
     reason: str
     cost_units: Decimal | None = None
     usage_id: uuid.UUID | None = None
-    criterion_id: str | None = None
-    criterion_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,57 +155,6 @@ async def _unknown_usage_id(
     return rows[0]
 
 
-async def _accept_named_criterion(
-    session: AsyncSession,
-    *,
-    task: Task,
-    run_id: uuid.UUID,
-    principal: Principal,
-    decision: OwnerDecision,
-) -> None:
-    link = await session.scalar(
-        select(MaterializationLink).where(MaterializationLink.task_id == task.id)
-    )
-    package = None if link is None else await session.get(WorkPackage, link.work_package_id)
-    if package is None:
-        raise ValueError("criterion acceptance requires a work package")
-    worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run_id))
-    if worktree is None or not worktree.result_commit:
-        raise ValueError("criterion acceptance requires the retained result commit")
-    proofs = await load_stored_proofs(session, package_id=package.id)
-    missing = unproven_criterion_ids(
-        result_commit=worktree.result_commit,
-        required_ids=required_criterion_ids(package.exit_criteria),
-        gates=proofs.gates,
-        findings=proofs.findings,
-        owner_decisions=proofs.owner_decisions,
-    )
-    chosen = decision.criterion_id
-    if chosen is None and decision.criterion_token:
-        matches = [
-            criterion_id
-            for criterion_id in missing
-            if criterion_choice_token(criterion_id) == decision.criterion_token
-        ]
-        if len(matches) != 1:
-            raise ValueError("criterion token does not match one unproven criterion")
-        chosen = matches[0]
-    elif chosen is None:
-        if len(missing) != 1:
-            raise ValueError("criterion acceptance needs exactly one unproven criterion")
-        chosen = missing[0]
-    elif chosen not in missing:
-        raise ValueError("criterion is not an unproven required criterion")
-    await record_owner_criterion_acceptance(
-        session,
-        package_id=package.id,
-        criterion_id=chosen,
-        result_commit=worktree.result_commit,
-        principal_user_id=principal.user_id,
-        reason=decision.reason,
-    )
-
-
 async def _continue_owner_decision(
     session: AsyncSession,
     *,
@@ -264,7 +199,7 @@ async def _continue_owner_decision(
             principal_user_id=principal.user_id,
             reason=decision.reason,
         )
-    elif action is TaskCommand.RECONCILE_COST:
+    else:
         if decision.cost_units is None or decision.cost_units <= 0:
             raise ValueError("reconciliation requires a measured receipt")
         usage_id = await _unknown_usage_id(session, task.id, decision.usage_id)
@@ -273,14 +208,6 @@ async def _continue_owner_decision(
             usage_id=usage_id,
             cost_units=decision.cost_units,
             principal_user_id=principal.user_id,
-        )
-    else:
-        await _accept_named_criterion(
-            session,
-            task=task,
-            run_id=run.id,
-            principal=principal,
-            decision=decision,
         )
     await retry_blocked_step(session, target.id, actor_id=str(principal.user_id))
 

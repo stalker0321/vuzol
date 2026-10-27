@@ -132,24 +132,7 @@ def decision_template(*, key: str, statement: str, accepted_by_user_id: int) -> 
     """Deterministic verified template for an explicit accepted decision."""
 
     return ensure_memory_safe(
-        f"Decision {key.strip()}: {statement.strip()} "
-        f"(accepted by user {accepted_by_user_id})"
-    )[:MAX_TEXT_CHARS]
-
-
-def outcome_template(
-    *,
-    package_id: uuid.UUID,
-    revision_number: int,
-    accepted_by_user_id: int,
-    evidence_hash: str | None,
-) -> str:
-    """Deterministic verified template for a goal-acceptance outcome."""
-
-    evidence = f" evidence {evidence_hash[:16]}" if evidence_hash else " waiver acceptance"
-    return ensure_memory_safe(
-        f"Accepted package {package_id} revision {revision_number}"
-        f" by user {accepted_by_user_id}:{evidence}."
+        f"Decision {key.strip()}: {statement.strip()} (accepted by user {accepted_by_user_id})"
     )[:MAX_TEXT_CHARS]
 
 

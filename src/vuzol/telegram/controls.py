@@ -1,7 +1,6 @@
 """Persisted idempotent Telegram callback handling."""
 
 import hashlib
-import uuid
 from typing import Any
 
 from sqlalchemy import select
@@ -61,8 +60,6 @@ _MUTATING_PACKAGE_KINDS = {
     WorkPackageCallbackKind.STOP_PACKAGE: PackageControlAction.STOP_PACKAGE,
     WorkPackageCallbackKind.FINISH_PACKAGE: PackageControlAction.FINISH_PACKAGE,
     WorkPackageCallbackKind.RESTART_PACKAGE: PackageControlAction.RESTART_PACKAGE,
-    WorkPackageCallbackKind.ACCEPT_PACKAGE: PackageControlAction.ACCEPT_PACKAGE,
-    WorkPackageCallbackKind.REJECT_PACKAGE: PackageControlAction.REJECT_PACKAGE,
 }
 
 
@@ -80,76 +77,6 @@ async def _status_card_revision(session: AsyncSession, task: Task) -> int:
         if package is not None:
             package_version = package.version
     return task_card_revision(task.version, package_version)
-
-
-async def _queue_criterion_page(
-    uow: UnitOfWork,
-    update: ControlUpdate,
-    inbox_id: uuid.UUID,
-) -> IngressResult:
-    """Show another page of criterion wording. This does not confirm or continue the step."""
-
-    assert uow.session is not None
-    if (
-        update.task_id is None
-        or update.criterion_page is None
-        or update.expected_task_version is None
-    ):
-        raise TelegramPolicyError("task_retry_version_required")
-    task = await uow.session.get(Task, update.task_id)
-    if (
-        task is None
-        or task.source_thread_id is None
-        or (task.user_id, task.source_chat_id, task.source_thread_id)
-        != (update.user_id, update.chat_id, update.message_thread_id)
-    ):
-        raise TelegramPolicyError("task_retry_scope_mismatch")
-    button_revision = update.expected_task_version
-    card_revision = await _status_card_revision(uow.session, task)
-    link = await uow.session.scalar(
-        select(TelegramMessageLink).where(
-            TelegramMessageLink.chat_id == update.chat_id,
-            TelegramMessageLink.message_id == update.message_id,
-            TelegramMessageLink.task_id == task.id,
-            TelegramMessageLink.message_role.in_(
-                ("task_status", "task_control_snapshot", "task_status_archived")
-            ),
-        )
-    )
-    if link is None or (
-        card_revision == button_revision and link.projection_revision != button_revision
-    ):
-        raise TelegramPolicyError("task_retry_message_mismatch")
-    if card_revision != button_revision:
-        from vuzol.telegram.projections import enqueue_task_control_snapshot
-
-        assert update.message_thread_id is not None
-        await enqueue_task_control_snapshot(
-            uow.session,
-            task=task,
-            chat_id=update.chat_id,
-            thread_id=update.message_thread_id,
-            user_id=update.user_id,
-            key=f"task:criterion-page-stale:{update.callback_query_id}",
-        )
-        await uow.inbox.mark_processed(inbox_id, entity_type="task", entity_id=task.id)
-        return IngressResult(status=IngressStatus.REJECTED, reason="task_retry_stale")
-    await uow.outbox.enqueue(
-        destination="telegram",
-        operation_type="send_message",
-        entity_type="task",
-        entity_id=task.id,
-        idempotency_key=f"task:criterion-page:{update.callback_query_id}",
-        payload={
-            "role": "intake_ack",
-            "task_id": str(task.id),
-            "chat_id": update.chat_id,
-            "message_thread_id": update.message_thread_id,
-            "criterion_page": update.criterion_page,
-        },
-    )
-    await uow.inbox.mark_processed(inbox_id, entity_type="task", entity_id=task.id)
-    return IngressResult(status=IngressStatus.HANDLED)
 
 
 class TelegramControlService:
@@ -332,8 +259,6 @@ class TelegramControlService:
                         raise EntityNotFound(f"approval not found: {update.approval_id}")
                 action_payload: dict[str, Any] = {}
                 target_step = update.step_id
-                if update.action_kind == "cpage":
-                    return await _queue_criterion_page(uow, update, inbox_id)
                 if (
                     update.action_kind in {"start", "pause", "resume", "cancel"}
                     and update.expected_task_version is not None
@@ -385,7 +310,7 @@ class TelegramControlService:
                             status=IngressStatus.REJECTED, reason="task_retry_stale"
                         )
                     action_payload = {"expected_task_version": update.expected_task_version}
-                if update.action_kind in {"retry", "admit", "uncertain", "criterion"}:
+                if update.action_kind in {"retry", "admit", "uncertain"}:
                     assert uow.session is not None
                     task = await uow.session.get(Task, update.task_id)
                     if (
@@ -465,8 +390,6 @@ class TelegramControlService:
                         )
                     target_step = step.id
                     action_payload = {"expected_task_version": task.version}
-                    if update.criterion_token is not None:
-                        action_payload["criterion_token"] = update.criterion_token
                 action = TelegramControlAction(
                     external_action_id=update.callback_query_id,
                     action_kind=update.action_kind,

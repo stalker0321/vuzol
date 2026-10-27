@@ -9,63 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vuzol.storage.records import LeaseToken, StepRecord
 from vuzol.storage.types import StepStatus
-from vuzol.workflows.acceptance import (
-    AcceptanceGateHandler,
-    evidence_hash,
-    validate_evidence,
-)
-from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
-
-
-def _doc(**overrides: object) -> dict[str, Any]:
-    base: dict[str, Any] = {
-        "schema": "acceptance-evidence.v1",
-        "package_id": str(uuid.uuid4()),
-        "plan_revision_id": str(uuid.uuid4()),
-        "plan_content_hash": "ab" * 32,
-        "goal": "ship it",
-        "goal_revision": 1,
-        "spec_revision": None,
-        "configuration_revision": "c" * 64,
-        "policy_revision": "d" * 64,
-        "integration_base_head": "e" * 40,
-        "result_commit": "f" * 40,
-        "criteria": [{"criterion_id": "a", "satisfied": True}],
-        "test_results": [{"name": "gate", "exit_code": 0}],
-        "review_refs": ["aa" * 32],
-        "unresolved_caveats": [],
-        "unresolved_effects": [],
-        "created_at": "2026-09-30T00:00:00+00:00",
-    }
-    base.update(overrides)
-    return base
-
-
-def test_d2_evidence_schema_file_matches_validator() -> None:
-    """L2: the frozen schema file and the code validator agree."""
-
-    import json
-    from pathlib import Path
-
-    schema = json.loads(Path("docs/schemas/acceptance-evidence.v1.schema.json").read_text())
-    assert schema["title"] == "Acceptance evidence v1"
-    assert set(schema["required"]) >= {
-        "package_id",
-        "criteria",
-        "review_refs",
-        "integration_base_head",
-        "result_commit",
-    }
-    assert validate_evidence(_doc()) == ()
-    assert validate_evidence([]) == ("evidence_not_object",)
-    assert validate_evidence({}) == ("evidence_schema_mismatch",)
-    assert validate_evidence(_doc(criteria=[])) == ("evidence_criteria_missing",)
-    assert validate_evidence(_doc(review_refs=[])) == ("evidence_review_refs_missing",)
-    frozen = _doc()
-    assert evidence_hash(frozen) == evidence_hash(dict(frozen))
-    assert evidence_hash(frozen) != evidence_hash(_doc())
 
 
 @pytest.mark.anyio
@@ -74,7 +18,7 @@ async def test_d2_decide_rejects_config_drift() -> None:
 
     from datetime import UTC, datetime, timedelta
 
-    from vuzol.storage.types import ApprovalStatus, StepStatus
+    from vuzol.storage.types import ApprovalStatus
     from vuzol.workflows.controls import decide_result
     from vuzol.workflows.result_approval import envelope_hash
 
@@ -198,85 +142,3 @@ class _Ctx:
 
     async def __aexit__(self, *_args: object) -> None:
         return None
-
-
-def _accept_request() -> tuple[StepExecutionRequest, LeaseToken, CancellationContext]:
-    import uuid as _uuid
-
-    lease = LeaseToken(
-        step=StepRecord(
-            id=_uuid.uuid4(),
-            run_id=_uuid.uuid4(),
-            status=StepStatus.RUNNING,
-            lease_generation=1,
-            lease_owner="owner",
-            lease_expires_at=None,
-        ),
-        owner="owner",
-        generation=1,
-    )
-    return (
-        StepExecutionRequest(
-            task_id=_uuid.uuid4(),
-            run_id=lease.step.run_id,
-            step_id=lease.step.id,
-            step_type="acceptance",
-            payload={},
-            timeout_seconds=60,
-            lease=lease,
-        ),
-        lease,
-        CancellationContext(),
-    )
-
-
-@pytest.mark.anyio
-async def test_d2_acceptance_passes_through_without_link() -> None:
-    """L1: plain coding tasks (no package link) pass the acceptance step."""
-
-    request, _lease, cancellation = _accept_request()
-    step = SimpleNamespace(
-        status="running",
-        lease_owner="owner",
-        lease_generation=1,
-        run_id=request.run_id,
-    )
-    run = SimpleNamespace(task_id=request.task_id)
-    task = SimpleNamespace(id=request.task_id)
-    session = MagicMock()
-    session.get = AsyncMock(
-        side_effect=[step, run, task],
-    )
-    session.scalar = AsyncMock(return_value=None)
-    handler = AcceptanceGateHandler(MagicMock(return_value=_Ctx(session)))
-    outcome = await handler.execute(request, cancellation)
-    assert outcome.kind.value == "succeeded"
-    assert outcome.result["acceptance_evidence_id"] is None
-
-
-@pytest.mark.anyio
-async def test_d2_acceptance_lease_mismatch_blocked() -> None:
-    """L1: unfenced acceptance execution fails closed."""
-
-    from vuzol.workflows.acceptance import AcceptanceGateHandler
-    from vuzol.workflows.domain import OutcomeKind
-
-    request, _lease, cancellation = _accept_request()
-    step = SimpleNamespace(
-        status="running",
-        lease_owner="someone-else",
-        lease_generation=1,
-        run_id=request.run_id,
-    )
-    session = MagicMock()
-    session.get = AsyncMock(
-        side_effect=[
-            step,
-            SimpleNamespace(),
-            SimpleNamespace(),
-        ]
-    )
-    handler = AcceptanceGateHandler(MagicMock(return_value=_Ctx(session)))
-    outcome = await handler.execute(request, cancellation)
-    assert outcome.kind is OutcomeKind.BLOCKED
-    assert outcome.category == "acceptance_evidence_missing"

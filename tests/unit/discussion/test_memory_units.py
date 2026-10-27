@@ -22,7 +22,6 @@ from vuzol.discussion.memory_units import (
     job_idempotency_key,
     lesson_text,
     observation_text,
-    outcome_template,
     should_supersede,
 )
 from vuzol.interpretation.domain import TaskAction
@@ -105,15 +104,6 @@ def test_templates_are_deterministic_and_secret_safe() -> None:
     text = decision_template(key="stack", statement="Use Postgres", accepted_by_user_id=7)
     assert "stack" in text and "Use Postgres" in text and "7" in text
     assert decision_template(key="stack", statement="Use Postgres", accepted_by_user_id=7) == text
-    package_id = uuid.uuid4()
-    outcome = outcome_template(
-        package_id=package_id, revision_number=3, accepted_by_user_id=7, evidence_hash="ab" * 32
-    )
-    assert str(package_id) in outcome and "revision 3" in outcome
-    waived = outcome_template(
-        package_id=package_id, revision_number=3, accepted_by_user_id=7, evidence_hash=None
-    )
-    assert "waiver" in waived
     with pytest.raises(DomainError, match="secrets"):
         decision_template(key="stack", statement="api_key = abcdef123456", accepted_by_user_id=7)
     assert observation_text(body="  hello  ") == "hello"

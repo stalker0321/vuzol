@@ -93,7 +93,6 @@ _TASK_DONE = {
     "retry": "🔁 Повторяю шаг.",
     "admit": "✅ Записал.",
     "uncertain": "✅ Записал.",
-    "criterion": "✅ Записал.",
     "lead_resume": "▶️ Лид продолжает работу.",
     "lead_cancel": "⏹ Цель отменена.",
     "lead_answer": "✅ Ответ передан лиду.",
@@ -485,55 +484,6 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
             task_id=control_task_id,
             expected_task_version=version,
         )
-    if len(parts) == 6 and parts[0] == "v2" and parts[1] == "c":
-        try:
-            criterion_task_id = uuid.UUID(parts[2])
-            version, ordinal = int(parts[3]), int(parts[4])
-            token = parts[5]
-            if (
-                version < 1
-                or ordinal < 0
-                or len(token) != 8
-                or any(char not in "0123456789abcdef" for char in token)
-            ):
-                return None
-        except ValueError:
-            return None
-        return ControlUpdate(
-            bot_id=bot_id,
-            update_id=update.update_id,
-            callback_query_id=query.id,
-            chat_id=query.message.chat.id,
-            user_id=user.id,
-            message_thread_id=message_thread_id,
-            message_id=message_id,
-            action_kind="criterion",
-            task_id=criterion_task_id,
-            expected_task_version=version,
-            retry_step_ordinal=ordinal,
-            criterion_token=token,
-        )
-    if len(parts) == 5 and parts[0] == "v2" and parts[1] == "cp":
-        try:
-            page_task_id = uuid.UUID(parts[2])
-            version, page = int(parts[3]), int(parts[4])
-            if version < 1 or page < 1:
-                return None
-        except ValueError:
-            return None
-        return ControlUpdate(
-            bot_id=bot_id,
-            update_id=update.update_id,
-            callback_query_id=query.id,
-            chat_id=query.message.chat.id,
-            user_id=user.id,
-            message_thread_id=message_thread_id,
-            message_id=message_id,
-            action_kind="cpage",
-            task_id=page_task_id,
-            expected_task_version=version,
-            criterion_page=page,
-        )
     if (
         len(parts) == 5
         and parts[0] == "v2"
@@ -542,7 +492,6 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
             "retry",
             "admit",
             "uncertain",
-            "criterion",
         }
     ):
         try:

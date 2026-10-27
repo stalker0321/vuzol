@@ -3,8 +3,8 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from vuzol.storage.models import Run, Step, WorkPackage
-from vuzol.storage.types import RunStatus, StepStatus, WorkPackageStatus
+from vuzol.storage.models import Run, Step
+from vuzol.storage.types import RunStatus, StepStatus
 
 # The union of consumers shipped in this release, independent of local process
 # roles/configuration. Keep in sync with service composition (covered by tests).
@@ -27,7 +27,6 @@ SUPPORTED_STEP_TYPES = frozenset(
         "review",
         "approval",
         "ensure_capabilities",
-        "acceptance",
     }
 )
 
@@ -56,18 +55,6 @@ async def check_stored_handlers(
         raise RuntimeError(
             f"workflow upgrade refused: pending steps need removed handlers: {details}"
         )
-    # No such packages exist in the supplied production inventory. Fail closed
-    # on a different installation rather than silently bypassing old semantics.
-    package = await session.scalar(
-        select(WorkPackage.id)
-        .where(
-            WorkPackage.status.not_in((WorkPackageStatus.COMPLETED, WorkPackageStatus.DISCARDED)),
-            WorkPackage.execution_contract_version == "horizon-v1:enabled",
-        )
-        .limit(1)
-    )
-    if package is not None:
-        raise RuntimeError(f"workflow upgrade refused: horizon package {package} needs conversion")
 
 
 async def require_workflow_upgrade(engine: AsyncEngine) -> None:

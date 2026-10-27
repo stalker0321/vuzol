@@ -40,5 +40,4 @@ def test_command_vocabulary_covers_lifecycle() -> None:
         "admit_ceiling",
         "accept_uncertainty",
         "reconcile_cost",
-        "accept_criterion",
     }

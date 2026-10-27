@@ -84,7 +84,6 @@ CODING_HANDLERS = {
     "produce_artifacts": CompleteHandler(),
     "build_static": CompleteHandler(),
     "publish_preview": CompleteHandler(),
-    "acceptance": CompleteHandler(),
     "publish_static": CompleteHandler(),
     "finalize": CompleteHandler(),
 }

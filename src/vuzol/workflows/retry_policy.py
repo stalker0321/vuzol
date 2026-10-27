@@ -15,7 +15,6 @@ EXPLICITLY_RETRYABLE_FAILURES = frozenset(
         "admission_only_consent_required",
         "money_cap_reached",
         "money_cap_uncertified",
-        "acceptance_evidence_missing",
         "quota_exhausted",
         "rate_limited",
         "timeout",

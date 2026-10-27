@@ -207,13 +207,6 @@ class ResultApplyHandler:
                 pinned_revision = envelope.get(field)
                 if pinned_revision is not None and pinned_revision != getattr(run, field):
                     raise ValueError(f"approval envelope {field} drifted since approval")
-            # D2 Q1 final gate: promotion of the last item into the real
-            # target requires acceptance evidence (or a waiver). Intermediate
-            # applies and legacy packages pass through unchanged.
-            from vuzol.workflows.acceptance import promotion_gate
-
-            if envelope.get("result_kind") != "report":
-                await promotion_gate(session, task_id=request.task_id, envelope=envelope)
             return approval_id, envelope, worktree
 
     async def _accept_report(

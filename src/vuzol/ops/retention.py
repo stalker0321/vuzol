@@ -34,7 +34,6 @@ from vuzol.config.settings import RetentionDefaults
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.paths import PathViolation, contained, trusted_root
 from vuzol.storage.models import (
-    AcceptanceEvidence,
     Approval,
     Artifact,
     Event,
@@ -44,7 +43,6 @@ from vuzol.storage.models import (
     SupervisedProcess,
     Task,
     ValidationResult,
-    WorkPackage,
     Worktree,
 )
 from vuzol.storage.types import (
@@ -1460,29 +1458,10 @@ class RetentionSweeper:
             )
             if live_worktree is not None:
                 return "referenced_by_worktree", {"worktree_id": str(live_worktree)}
-        # D5 REDO: provenance pins for acceptance, effect and memory
+        # D5 REDO: provenance pins for effect and memory
         # (ARCHITECTURE_REVIEW checklist AR :447): an artifact referenced by
         # live provenance survives the sweep regardless of status — refs are
         # evidence, tombstones/redaction hide text without deleting rows.
-        # Acceptance: evidence rows and the accepted package pointer.
-        acceptance_ref = await session.scalar(
-            select(AcceptanceEvidence.id)
-            .where(AcceptanceEvidence.artifact_id == artifact.id)
-            .limit(1)
-            .with_for_update(skip_locked=True)
-        )
-        if acceptance_ref is not None:
-            return "referenced_by_acceptance_evidence", {
-                "acceptance_evidence_id": str(acceptance_ref)
-            }
-        package_ref = await session.scalar(
-            select(WorkPackage.id)
-            .where(WorkPackage.acceptance_artifact_id == artifact.id)
-            .limit(1)
-            .with_for_update(skip_locked=True)
-        )
-        if package_ref is not None:
-            return "referenced_by_package_acceptance", {"package_id": str(package_ref)}
         # Effect: worktree diff artifacts and validation gate artifacts keep
         # their bytes while any row points at them — including rows of
         # already cleaned worktrees (live ones are caught above).
@@ -1504,9 +1483,7 @@ class RetentionSweeper:
             .with_for_update(skip_locked=True)
         )
         if validation_ref is not None:
-            return "referenced_by_validation_result", {
-                "validation_result_id": str(validation_ref)
-            }
+            return "referenced_by_validation_result", {"validation_result_id": str(validation_ref)}
         memory_refs = await session.scalar(
             select(MemoryUnit.id)
             .where(MemoryUnit.source_artifact_id == artifact.id)

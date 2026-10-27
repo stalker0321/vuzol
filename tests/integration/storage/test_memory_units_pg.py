@@ -25,14 +25,12 @@ from vuzol.discussion.memory_writer import (
 from vuzol.execution.git import LocalGit
 from vuzol.ops.retention import RetentionSweeper
 from vuzol.storage.models import (
-    AcceptanceEvidence,
     Artifact,
     Event,
     MemoryUnit,
     Task,
     TransactionalOutbox,
     ValidationResult,
-    WorkPackage,
     Worktree,
 )
 from vuzol.storage.types import (
@@ -492,55 +490,6 @@ async def _expired_terminal_artifact(
         uow.session.add(artifact)
         await uow.session.flush()
         return artifact
-
-
-async def test_acceptance_evidence_pins_artifact_against_sweep(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
-    engine, factory = storage(postgres_dsn)
-    artifact = await _expired_terminal_artifact(factory, content_hash="e" * 64)
-    async with UnitOfWork(factory) as uow:
-        assert uow.session is not None
-        session_id = await uow.discussions.create_session(
-            project_id="demo", chat_id=-100, message_thread_id=7
-        )
-        package = WorkPackage(session_id=session_id, project_id="demo", title="Test package")
-        uow.session.add(package)
-        await uow.session.flush()
-        uow.session.add(
-            AcceptanceEvidence(
-                package_id=package.id,
-                evidence_hash="e" * 64,
-                evidence={"verdict": "pass"},
-                artifact_id=artifact.id,
-            )
-        )
-        await uow.session.flush()
-        reason = await _sweeper_for(factory, tmp_path)._artifact_skip_reason(uow.session, artifact)
-        assert reason is not None
-        assert reason[0] == "referenced_by_acceptance_evidence"
-    await engine.dispose()
-
-
-async def test_package_acceptance_pointer_pins_artifact_against_sweep(
-    postgres_dsn: str, tmp_path: Path
-) -> None:
-    engine, factory = storage(postgres_dsn)
-    artifact = await _expired_terminal_artifact(factory, content_hash="f" * 64)
-    async with UnitOfWork(factory) as uow:
-        assert uow.session is not None
-        session_id = await uow.discussions.create_session(
-            project_id="demo", chat_id=-100, message_thread_id=7
-        )
-        package = WorkPackage(session_id=session_id, project_id="demo", title="Test package")
-        uow.session.add(package)
-        await uow.session.flush()
-        package.acceptance_artifact_id = artifact.id
-        await uow.session.flush()
-        reason = await _sweeper_for(factory, tmp_path)._artifact_skip_reason(uow.session, artifact)
-        assert reason is not None
-        assert reason[0] == "referenced_by_package_acceptance"
-    await engine.dispose()
 
 
 async def test_cleaned_worktree_diff_pins_artifact_against_sweep(

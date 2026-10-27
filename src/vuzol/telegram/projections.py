@@ -67,7 +67,6 @@ TASK_CONTROL_SNAPSHOT_NOTE = (
     "Показано состояние сохранённой задачи. Ничего не запущено; спецификация не изменена.\n\n"
 )
 _OWNER_DECISION_LINE = "Решение владельца сохраняется и продолжает этот этап."
-_ONE_CRITERION_LINE = "Каждая кнопка подтверждает только один критерий."
 _RECEIPT_LINE = "Сверка известной суммы: команда /receipt СУММА."
 
 _ACTIVE_PROVIDER_STEPS = frozenset(
@@ -180,7 +179,6 @@ _STEP_TYPE_LABELS = {
     "produce_artifacts": "Подготовка артефактов",
     "build_static": "Сборка сайта",
     "approval": "Решение / апрув",
-    "acceptance": "Приёмка",
     "publish_static": "Публикация прототипа",
     "publish_preview": "Публикация preview",
     "execute_agent": "Агент",
@@ -1643,216 +1641,13 @@ def _short_button_text(text: str, limit: int = 36) -> str:
 class _OwnerContinuation:
     buttons: tuple[tuple[str, str], ...] = ()
     lines: tuple[str, ...] = ()
-    navigation: tuple[tuple[str, str], ...] = ()
 
 
-def _criterion_line(criterion_id: str, statement: str | None) -> str:
-    shown_id = telegram_html(criterion_id)
-    if statement:
-        return f"Критерий {shown_id}: {telegram_html(statement)}"
-    return f"Критерий {shown_id}"
-
-
-def _shrink_html_text(raw: str, budget: int) -> str:
-    """Cut raw text, then escape, so a Telegram entity is never split."""
-
-    if budget < 1:
-        return ""
-    if len(telegram_html(raw)) <= budget:
-        return telegram_html(raw)
-    lowest = 0
-    highest = len(raw)
-    best = ""
-    while lowest <= highest:
-        middle = (lowest + highest) // 2
-        piece = raw[:middle].rstrip()
-        candidate = f"{piece}..." if middle < len(raw) else piece
-        escaped = telegram_html(candidate)
-        if len(escaped) <= budget:
-            best = escaped
-            lowest = middle + 1
-        else:
-            highest = middle - 1
-    return best
-
-
-def _fit_criterion_line(criterion_id: str, statement: str | None, budget: int) -> str:
-    if budget < 1:
-        return ""
-    full = _criterion_line(criterion_id, statement)
-    if len(full) <= budget:
-        return full
-    if not statement:
-        return _shrink_html_text(f"Критерий {criterion_id}", budget)
-    lowest = 0
-    highest = len(statement)
-    best = ""
-    while lowest <= highest:
-        middle = (lowest + highest) // 2
-        piece = statement[:middle].rstrip()
-        candidate = f"{piece}..." if middle < len(statement) else piece
-        line = _criterion_line(criterion_id, candidate or None)
-        if len(line) <= budget:
-            best = line
-            lowest = middle + 1
-        else:
-            highest = middle - 1
-    if best:
-        return best
-    return _shrink_html_text(f"Критерий {criterion_id}", budget)
-
-
-def _joined(parts: Sequence[str]) -> str:
-    return "\n".join(parts)
-
-
-def _line_room(head: Sequence[str], tail: Sequence[str], limit: int) -> int:
-    chrome = _joined((*head, *tail))
-    if not chrome:
-        return limit
-    return limit - len(chrome) - 1
-
-
-def _card_fits(head: Sequence[str], lines: Sequence[str], tail: Sequence[str], limit: int) -> bool:
-    return len(_joined((*head, *lines, *tail))) <= limit
-
-
-def _paginate_criterion_lines(
-    *,
-    head: Sequence[str],
-    entries: Sequence[tuple[str, str | None]],
-    suffix: Sequence[str],
-    limit: int,
-) -> tuple[tuple[tuple[int, str], ...], ...]:
-    """One page of (entry index, html line). Each rendered page stays within limit."""
-
-    full_rows = tuple(
-        (index, _criterion_line(criterion_id, statement))
-        for index, (criterion_id, statement) in enumerate(entries)
-    )
-    full_lines = tuple(line for _index, line in full_rows)
-    if _card_fits(head, full_lines, suffix, limit):
-        return (full_rows,)
-    ceiling = max(len(entries), 1)
-    reserved_tail = (*suffix, f"Страница {ceiling}/{ceiling}")
-    room = _line_room(head, reserved_tail, limit)
-    fitted: list[tuple[int, str]] = []
-    for index, (criterion_id, statement) in enumerate(entries):
-        line = _fit_criterion_line(criterion_id, statement, room)
-        if line and _card_fits(head, (line,), reserved_tail, limit):
-            fitted.append((index, line))
-    pages: list[tuple[tuple[int, str], ...]] = []
-    current: list[tuple[int, str]] = []
-    for row in fitted:
-        trial = tuple(line for _index, line in (*current, row))
-        if _card_fits(head, trial, reserved_tail, limit):
-            current.append(row)
-            continue
-        if current:
-            pages.append(tuple(current))
-        current = [row]
-    if current:
-        pages.append(tuple(current))
-    return tuple(pages)
-
-
-async def _criterion_choice_buttons(
-    session: AsyncSession,
-    task: Task,
-    run: Run,
-    step: Step,
-    package: WorkPackage | None,
-    card_revision: int,
-    *,
-    criterion_page: int,
-    base_lines: Sequence[str],
-    text_limit: int,
-) -> _OwnerContinuation:
-    """Buttons for the criteria whose wording is on this page. Never a confirm-all button."""
-
-    if package is None:
-        return _OwnerContinuation()
-    from vuzol.workflows.acceptance import (
-        criterion_choice_token,
-        exit_criterion_specs,
-        load_stored_proofs,
-        required_criterion_ids,
-        unproven_criterion_ids,
-    )
-
-    worktree = await session.scalar(select(Worktree).where(Worktree.run_id == run.id))
-    if worktree is None or not worktree.result_commit:
-        return _OwnerContinuation()
-    proofs = await load_stored_proofs(session, package_id=package.id)
-    missing = set(
-        unproven_criterion_ids(
-            result_commit=worktree.result_commit,
-            required_ids=required_criterion_ids(package.exit_criteria),
-            gates=proofs.gates,
-            findings=proofs.findings,
-            owner_decisions=proofs.owner_decisions,
-        )
-    )
-    specs = [
-        spec for spec in exit_criterion_specs(package.exit_criteria) if spec.criterion_id in missing
-    ]
-    if not specs:
-        return _OwnerContinuation()
-    suffix = (_ONE_CRITERION_LINE,) if len(specs) > 1 else ()
-    head = (*base_lines, "", _OWNER_DECISION_LINE)
-    pages = _paginate_criterion_lines(
-        head=head,
-        entries=tuple((spec.criterion_id, spec.statement) for spec in specs),
-        suffix=suffix,
-        limit=text_limit,
-    )
-    if not pages:
-        return _OwnerContinuation()
-    page_number = min(max(criterion_page, 1), len(pages))
-    visible = pages[page_number - 1]
-    buttons: list[tuple[str, str]] = []
-    for index, _line in visible:
-        spec = specs[index]
-        wording = spec.statement or spec.criterion_id
-        token = criterion_choice_token(spec.criterion_id)
-        data = _bounded_callback(f"v2:c:{task.id.hex}:{card_revision}:{step.ordinal}:{token}")
-        buttons.append((f"Подтвердить: {_short_button_text(wording)}", data))
-    navigation: list[tuple[str, str]] = []
-    if len(pages) > 1:
-        if page_number > 1:
-            navigation.append(
-                (
-                    "←",
-                    _bounded_callback(f"v2:cp:{task.id.hex}:{card_revision}:{page_number - 1}"),
-                )
-            )
-        if page_number < len(pages):
-            navigation.append(
-                (
-                    "→",
-                    _bounded_callback(f"v2:cp:{task.id.hex}:{card_revision}:{page_number + 1}"),
-                )
-            )
-    footer = (f"Страница {page_number}/{len(pages)}",) if len(pages) > 1 else ()
-    lines = ("", _OWNER_DECISION_LINE, *(line for _index, line in visible), *suffix, *footer)
-    return _OwnerContinuation(
-        buttons=tuple(buttons),
-        lines=lines,
-        navigation=tuple(navigation),
-    )
-
-
-async def _owner_continuation_buttons(
-    session: AsyncSession,
+def _owner_continuation_buttons(
     task: Task,
     run: Run | None,
     step: Step | None,
-    package: WorkPackage | None,
     card_revision: int,
-    *,
-    criterion_page: int,
-    base_lines: Sequence[str],
-    text_limit: int,
 ) -> _OwnerContinuation:
     """Owner actions for a stop that a plain retry would only repeat."""
 
@@ -1864,18 +1659,6 @@ async def _owner_continuation_buttons(
         or not blocked_step_is_retryable(step)
     ):
         return _OwnerContinuation()
-    if (step.failure_category or "") == "acceptance_evidence_missing":
-        return await _criterion_choice_buttons(
-            session,
-            task,
-            run,
-            step,
-            package,
-            card_revision,
-            criterion_page=criterion_page,
-            base_lines=base_lines,
-            text_limit=text_limit,
-        )
     choice = {
         "admission_only_consent_required": ("admit", "Согласиться на потолок"),
         "money_cap_uncertified": ("uncertain", "Принять неизвестный расход"),
@@ -1893,14 +1676,9 @@ async def _owner_continuation_buttons(
 async def build_status_card(
     session: AsyncSession,
     task_id: uuid.UUID,
-    *,
-    criterion_page: int = 1,
-    text_limit: int = TELEGRAM_TEXT_LIMIT,
 ) -> StatusCard:
     """Build presentation solely from canonical database state."""
 
-    if text_limit < 1:
-        raise ValueError("message limit must be positive")
     task = await session.get(Task, task_id)
     if task is None:
         raise LookupError(f"task not found: {task_id}")
@@ -2020,8 +1798,6 @@ async def build_status_card(
         status_label = "Остановлена: неизвестный расход нужно сверить"
     elif step is not None and step.failure_category == "admission_only_consent_required":
         status_label = "Остановлена: нужно согласие на неточный потолок"
-    elif step is not None and step.failure_category == "acceptance_evidence_missing":
-        status_label = "Остановлена: критерий без доказательства"
     elif step is not None and step.failure_category == "budget_exhausted":
         status_label = "Остановлена: внутренний бюджет этапа исчерпан"
     if not lead_task:
@@ -2165,17 +1941,7 @@ async def build_status_card(
             if action in labels
         )
     card_revision = task_card_revision(task.version, None if package is None else package.version)
-    owner = await _owner_continuation_buttons(
-        session,
-        task,
-        run,
-        step,
-        package,
-        card_revision,
-        criterion_page=criterion_page,
-        base_lines=tuple(lines),
-        text_limit=text_limit,
-    )
+    owner = _owner_continuation_buttons(task, run, step, card_revision)
     if (
         package is None
         and approval is None
@@ -2237,8 +2003,6 @@ async def build_status_card(
                 *callback_buttons,
                 *((button,) for button in owner.buttons),
             )
-        if owner.navigation:
-            callback_buttons = (*callback_buttons, owner.navigation)
     if owner.lines:
         lines.extend(owner.lines)
     projection_revision = card_revision

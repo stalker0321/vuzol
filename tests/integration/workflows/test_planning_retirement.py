@@ -49,7 +49,7 @@ async def seed(factory, name):
         return task_id, run.id
 
 
-@pytest.mark.parametrize("name", ["coding.v4", "discussion_agent.v1", "adaptive_worker_trial.v1"])
+@pytest.mark.parametrize("name", ["coding.v3", "discussion_agent.v1", "adaptive_worker_trial.v1"])
 @pytest.mark.parametrize("status", [RunStatus.PAUSED, RunStatus.BLOCKED])
 async def test_stored_runs_render_recover_and_cancel(postgres_dsn, name, status):
     engine, factory = storage(postgres_dsn)
@@ -90,11 +90,10 @@ async def test_upgrade_refuses_removal_needed_by_paused_run(postgres_dsn, step_s
             )
             step.status = step_status
             await session.flush()
+            # The retired acceptance gate has no handler any more.
             with pytest.raises(RuntimeError, match=f"run={run_id}.*handler=acceptance"):
-                await check_stored_handlers(
-                    session, supported=SUPPORTED_STEP_TYPES - {"acceptance"}
-                )
-            await check_stored_handlers(session)
+                await check_stored_handlers(session)
+            await check_stored_handlers(session, supported=SUPPORTED_STEP_TYPES | {"acceptance"})
             step.step_type = "plan"
             await session.flush()
             with pytest.raises(RuntimeError, match="handler=plan"):
@@ -107,10 +106,10 @@ async def test_upgrade_refuses_removal_needed_by_paused_run(postgres_dsn, step_s
         await engine.dispose()
 
 
-async def test_stored_coding_v4_resumes_and_finishes_with_saved_steps(postgres_dsn, tmp_path):
+async def test_stored_coding_v3_resumes_and_finishes_with_saved_steps(postgres_dsn, tmp_path):
     engine, factory = storage(postgres_dsn)
     try:
-        task_id, run_id = await seed(factory, "coding.v4")
+        task_id, run_id = await seed(factory, "coding.v3")
         async with factory.begin() as session:
             session.add(
                 Worktree(
@@ -192,7 +191,7 @@ async def test_stored_coding_v4_resumes_and_finishes_with_saved_steps(postgres_d
                 await start_step(session, token)
                 await commit_step_outcome(session, token, StepOutcome.succeeded(result))
         assert "plan" not in seen
-        assert {"acceptance", "publish_preview", "approval"} <= set(seen)
+        assert {"publish_preview", "approval"} <= set(seen)
         async with factory() as session:
             assert (await session.get(Run, run_id)).status is RunStatus.COMPLETED
             assert (await session.get(Task, task_id)).status is TaskStatus.COMPLETED
@@ -200,7 +199,7 @@ async def test_stored_coding_v4_resumes_and_finishes_with_saved_steps(postgres_d
         await engine.dispose()
 
 
-@pytest.mark.parametrize("name", ["coding.v4", "discussion_agent.v1", "adaptive_worker_trial.v1"])
+@pytest.mark.parametrize("name", ["coding.v3", "discussion_agent.v1", "adaptive_worker_trial.v1"])
 async def test_stored_run_retains_lease_recovery(postgres_dsn, name):
     engine, factory = storage(postgres_dsn)
     try:
@@ -225,10 +224,10 @@ async def test_stored_run_retains_lease_recovery(postgres_dsn, name):
         await engine.dispose()
 
 
-async def test_stored_coding_v4_failed_task_can_cancel_paused_run(postgres_dsn):
+async def test_stored_coding_v3_failed_task_can_cancel_paused_run(postgres_dsn):
     engine, factory = storage(postgres_dsn)
     try:
-        task_id, run_id = await seed(factory, "coding.v4")
+        task_id, run_id = await seed(factory, "coding.v3")
         async with factory.begin() as session:
             task = await session.get(Task, task_id)
             run = await session.get(Run, run_id)
@@ -245,29 +244,5 @@ async def test_stored_coding_v4_failed_task_can_cancel_paused_run(postgres_dsn):
             assert (await session.get(Run, run_id)).status is RunStatus.CANCELLED
             steps = await session.scalars(select(Step).where(Step.run_id == run_id))
             assert all(s.status in {StepStatus.COMPLETED, StepStatus.CANCELLED} for s in steps)
-    finally:
-        await engine.dispose()
-
-
-async def test_upgrade_refuses_live_pinned_horizon_without_rewriting_history(postgres_dsn):
-    from tests.integration.test_d2_acceptance_pg import _horizon_package
-    from vuzol.storage.models import WorkPackage
-    from vuzol.storage.types import WorkPackageStatus
-
-    engine, factory = storage(postgres_dsn)
-    try:
-        package_id, _, _ = await _horizon_package(factory, start=False)
-        async with factory.begin() as session:
-            with pytest.raises(RuntimeError, match=f"horizon package {package_id}"):
-                await check_stored_handlers(session)
-            package = await session.get(WorkPackage, package_id)
-            package.status = WorkPackageStatus.STOPPED
-            await session.flush()
-            with pytest.raises(RuntimeError, match="needs conversion"):
-                await check_stored_handlers(session)
-            package.status = WorkPackageStatus.COMPLETED
-            await session.flush()
-            await check_stored_handlers(session)
-            assert package.execution_contract_version == "horizon-v1:enabled"
     finally:
         await engine.dispose()

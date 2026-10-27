@@ -2,11 +2,10 @@
 
 import asyncio
 import uuid
-from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -68,7 +67,6 @@ from vuzol.telegram.projections import (
     PROJECT_STATUS_DASHBOARD_ROLE,
     TASK_CONTROL_SNAPSHOT_NOTE,
     TASK_HISTORY_ROLE,
-    TELEGRAM_TEXT_LIMIT,
     LostTelegramResponse,
     RichMessageRejected,
     TelegramClient,
@@ -236,17 +234,6 @@ async def _prepare_attention(
 
 class DeliveryRunner(Protocol):
     async def deliver_one(self) -> bool: ...
-
-
-def _criterion_page_argument(payload: Mapping[str, Any]) -> tuple[int, bool]:
-    """Page requested by a view callback. Absent means the default first page."""
-
-    if "criterion_page" not in payload:
-        return 1, False
-    raw = payload.get("criterion_page")
-    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
-        return raw, True
-    return 1, True
 
 
 async def prepare_delivery(
@@ -447,11 +434,7 @@ async def _prepare_delivery(
             )
         ):
             raise PermanentDeliveryError("task_control_snapshot_scope_mismatch")
-        card = await build_status_card(
-            session,
-            task.id,
-            text_limit=max(1, TELEGRAM_TEXT_LIMIT - len(TASK_CONTROL_SNAPSHOT_NOTE)),
-        )
+        card = await build_status_card(session, task.id)
         return PreparedDelivery(
             DeliveryAction.SEND_STATUS,
             chat_id=task.source_chat_id,
@@ -768,10 +751,8 @@ async def _prepare_delivery(
     approval_projection = role == "approval_card"
     if approval_projection:
         card = await build_approval_card(session, task_id)
-        page_requested = False
     else:
-        criterion_page, page_requested = _criterion_page_argument(item.payload)
-        card = await build_status_card(session, task_id, criterion_page=criterion_page)
+        card = await build_status_card(session, task_id)
     message_role = "approval_card" if approval_projection else "task_status"
     if approval_projection:
         destination = topics.system_topic(chat_id, TopicKind.APPROVALS) if topics else None
@@ -789,7 +770,7 @@ async def _prepare_delivery(
             ),
         )
     )
-    if link is not None and card.revision <= link.projection_revision and not page_requested:
+    if link is not None and card.revision <= link.projection_revision:
         return PreparedDelivery(
             DeliveryAction.NOOP,
             chat_id=chat_id,

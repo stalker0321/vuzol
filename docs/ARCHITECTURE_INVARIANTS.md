@@ -137,8 +137,7 @@ These rules are non-negotiable unless explicitly changed through an ADR.
   sandbox CLI execution, dependency preflight, validation and review. Change results
   also prepare delivery artifacts before the existing immutable approval boundary.
   Only the lead's `accept_result` authorizes managed delivery. Applier and static
-  publisher remain the consumers after approval. New chains do not publish previews
-  or invoke the legacy horizon acceptance handler.
+  publisher remain the consumers after approval. New chains do not publish previews.
 - Read-only/research work uses the same stages with `execute_agent` and a
   `task-report.v1` output contract. Worktree mounts remain read-only; technical
   installers skip report tasks. Validation requires unchanged Git state and a
@@ -165,15 +164,13 @@ These rules are non-negotiable unless explicitly changed through an ADR.
 - Before worker/executor/applier queues start, `workflows/upgrade.py` checks stored
   steps of every non-terminal run, including paused/blocked runs and failed steps.
   An unsupported handler aborts startup with run/step IDs. Completed/cancelled steps
-  and terminal runs remain readable. Non-terminal pinned horizon packages also
-  refuse startup until explicitly converted; the supplied production inventory has none.
-  No DDL or history rewrite is required.
-- `acceptance`, `publish_preview` and the other stored-run consumers remain.
+  and terminal runs remain readable. The retired `acceptance` step has no handler;
+  cancel any non-terminal run that still holds one before upgrading.
+- `publish_preview` and the other stored-run consumers remain.
   Cancellation and lease recovery use stored steps. Resume preserves existing
   fences: a failed task paired with a paused run requires explicit operator recovery
   to resume. Cancellation can settle that run while retaining the task failure and
   incrementing its projection version; it does not roll back effects.
 - Provider lifetime caps read managed-goal `constraints.work_limits.max_cost` and
   `max_attempts`, including historical package-scoped receipts across that goal.
-  Epoch/revision changes never reset spend. Historical columns, evidence and card
-  projections remain readable.
+  Epoch/revision changes never reset spend.

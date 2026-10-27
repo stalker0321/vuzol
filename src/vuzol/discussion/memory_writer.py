@@ -15,7 +15,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.discussion.domain import DomainError
@@ -27,7 +26,6 @@ from vuzol.discussion.memory_units import (
     extraction_identity,
     extraction_scope,
     job_idempotency_key,
-    outcome_template,
     should_supersede,
 )
 from vuzol.observability import get_logger
@@ -39,7 +37,6 @@ from vuzol.storage.leasing import (
 from vuzol.storage.models import (
     AcceptedDecision,
     Artifact,
-    Event,
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
@@ -51,7 +48,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from vuzol.storage.repositories.memory_units import MemoryUnitRepository
 
 DECISION_OPERATION = "extract_decision"
-OUTCOME_OPERATION = "extract_outcome"
 RETRACT_OPERATION = "retract_units"
 
 
@@ -262,8 +258,6 @@ class MemoryWriterService:
             raise MemoryWriterError("stale memory extractor version")
         if item.operation_type == DECISION_OPERATION:
             await _extract_decision(session, payload)
-        elif item.operation_type == OUTCOME_OPERATION:
-            await _extract_outcome(session, payload)
         elif item.operation_type == RETRACT_OPERATION:
             await _retract_decision_units(session, payload)
         else:
@@ -361,81 +355,6 @@ async def _extract_decision(session: AsyncSession, payload: dict[str, Any]) -> u
         event_type="memory_unit.written",
         actor_type="memory_writer",
         payload={"extraction_identity": identity, "source_decision_id": str(decision.id)},
-    )
-    return unit.id
-
-
-async def _extract_outcome(session: AsyncSession, payload: dict[str, Any]) -> uuid.UUID:
-    """Verified template unit for a goal-acceptance outcome."""
-
-    from vuzol.storage.models import AcceptanceEvidence
-
-    units = _units(session)
-    events = EventRepository(session)
-    raw_trigger = payload.get("trigger_event_id")
-    raw_package = payload.get("package_id")
-    if raw_trigger is None or raw_package is None:
-        raise MemoryWriterError("outcome extraction requires trigger and package refs")
-    package_id = uuid.UUID(str(raw_package))
-    revision_number = int(payload.get("revision_number") or 0)
-    accepted_by = int(payload.get("accepted_by_user_id") or 0)
-    raw_artifact = payload.get("artifact_id")
-    artifact_id = uuid.UUID(str(raw_artifact)) if raw_artifact is not None else None
-    evidence_id: uuid.UUID | None = None
-    evidence_hash: str | None = None
-    if artifact_id is not None:
-        artifact = await session.get(Artifact, artifact_id)
-        if artifact is None or artifact.verified_at is None:
-            raise MemoryWriterError("outcome evidence artifact is missing or unverified")
-        evidence = await session.scalar(
-            select(AcceptanceEvidence)
-            .where(
-                AcceptanceEvidence.package_id == package_id,
-                AcceptanceEvidence.artifact_id == artifact_id,
-            )
-            .order_by(AcceptanceEvidence.created_at.desc())
-            .limit(1)
-        )
-        if evidence is not None:
-            evidence_id = evidence.id
-            evidence_hash = evidence.evidence_hash
-    project_id, session_id, scope = _scope_parts(payload)
-    unit_key = f"outcome:{package_id}:{revision_number}"
-    identity = extraction_identity(
-        trigger_event_id=uuid.UUID(str(raw_trigger)),
-        scope=scope,
-        unit_type="outcome_template",
-        unit_key=unit_key,
-    )
-    trigger_event = await session.get(Event, uuid.UUID(str(raw_trigger)))
-    effective_at = trigger_event.created_at if trigger_event is not None else datetime.now(UTC)
-    text = outcome_template(
-        package_id=package_id,
-        revision_number=revision_number,
-        accepted_by_user_id=accepted_by,
-        evidence_hash=evidence_hash,
-    )
-    unit = await units.create_unit(
-        text=text,
-        unit_type="outcome_template",
-        status=MemoryUnitStatus.VERIFIED,
-        extractor_version=EXTRACTOR_VERSION,
-        extraction_identity=identity,
-        effective_at=effective_at,
-        project_id=project_id,
-        session_id=session_id,
-        trigger_event_id=uuid.UUID(str(raw_trigger)),
-        source_event_id=uuid.UUID(str(raw_trigger)),
-        source_artifact_id=artifact_id,
-        source_acceptance_evidence_id=evidence_id,
-        source_key=f"package:{package_id}",
-    )
-    await events.append(
-        entity_type="memory_unit",
-        entity_id=unit.id,
-        event_type="memory_unit.written",
-        actor_type="memory_writer",
-        payload={"extraction_identity": identity, "package_id": str(package_id)},
     )
     return unit.id
 

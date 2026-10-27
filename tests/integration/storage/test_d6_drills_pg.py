@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import uuid
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,9 +12,6 @@ from sqlalchemy import select
 
 from tests.integration.storage.helpers import seed_task_run_step, storage
 from vuzol.config.settings import HardLimits
-from vuzol.discussion.domain import PlanDraft, PlanItemDraft
-from vuzol.discussion.sequencer import WorkPackageSequencer
-from vuzol.discussion.service import WorkPackageService
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.providers.budgets import (
     AccountingContext,
@@ -31,160 +27,16 @@ from vuzol.storage.attempts import record_work_attempt, snapshot_task_spec
 from vuzol.storage.leasing import claim_step
 from vuzol.storage.migration_preflight import require_migration_head
 from vuzol.storage.models import (
-    MaterializationLink,
     Step,
     Task,
     TaskSpecRevision,
     WorkAttempt,
-    WorkPackage,
-)
-from vuzol.storage.types import (
-    IdempotencyClass,
-    PlanRevisionCreatedBy,
-    RunStatus,
-    StepStatus,
-    TaskStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.workflows.acceptance import record_evidence
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.service import commit_step_outcome
 
 pytestmark = pytest.mark.postgresql
-
-
-def _plan() -> PlanDraft:
-    return PlanDraft(
-        title="Horizon plan",
-        items=tuple(
-            PlanItemDraft(
-                local_id=f"item-{ordinal}",
-                summary=f"Step {ordinal}",
-                goal=f"Goal {ordinal}",
-                expected_outcome=f"Outcome {ordinal}",
-                completion_criteria=(f"Check {ordinal}",),
-                allowed_scope="src/**",
-            )
-            for ordinal in (1, 2)
-        ),
-    )
-
-
-async def _horizon_package(factory: object) -> tuple[uuid.UUID, uuid.UUID]:
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-    assert isinstance(factory, async_sessionmaker)
-    typed: async_sessionmaker[AsyncSession] = factory
-    async with UnitOfWork(typed) as uow:
-        session_id = await uow.discussions.create_session(
-            project_id="vuzol", chat_id=-100, message_thread_id=10
-        )
-        service = WorkPackageService(uow)
-        created = await service.create_draft(
-            session_id=session_id,
-            project_id="vuzol",
-            plan=_plan(),
-            created_by=PlanRevisionCreatedBy.PLANNER_MODEL,
-            actor_type="planner_model",
-            goal="ship the horizon",
-            exit_criteria=[{"criterion_id": "done"}],
-        )
-        generation = await service.approve(
-            package_id=created.package_id,
-            revision_number=1,
-            h8=created.content_hash[:8],
-            expected_status_generation=1,
-            user_id=42,
-        )
-        await WorkPackageSequencer(uow).start(
-            package_id=created.package_id,
-            revision_number=1,
-            h8=created.content_hash[:8],
-            expected_status_generation=generation,
-            user_id=42,
-        )
-        return created.package_id, created.revision_id
-
-
-async def _to_evaluating(factory: object, package_id: uuid.UUID) -> None:
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-    assert isinstance(factory, async_sessionmaker)
-    typed: async_sessionmaker[AsyncSession] = factory
-    for _ in range(6):
-        async with UnitOfWork(typed) as uow:
-            assert uow.session is not None
-            package = await uow.session.get(WorkPackage, package_id)
-            assert package is not None
-            if package.horizon_phase == "evaluating":
-                return
-            assert package.cursor_ordinal is not None
-            link = await uow.session.scalar(
-                select(MaterializationLink).where(
-                    MaterializationLink.work_package_id == package_id,
-                    MaterializationLink.ordinal == package.cursor_ordinal,
-                )
-            )
-            assert link is not None
-            task = await uow.session.get(Task, link.task_id, with_for_update=True)
-            assert task is not None
-            task.status = TaskStatus.COMPLETED
-            await WorkPackageSequencer(uow).observe_terminal(task_id=link.task_id)
-    raise AssertionError("package did not reach evaluating")
-
-
-async def _prove_promotion(factory: object, *, package_id: uuid.UUID) -> None:
-    """Record a CONSUMED approval envelope for the last item (D2 proof pattern)."""
-
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-    from vuzol.storage.models import Approval as ApprovalRow
-    from vuzol.storage.types import ApprovalStatus as ApprovalStatusRow
-
-    assert isinstance(factory, async_sessionmaker)
-    typed: async_sessionmaker[AsyncSession] = factory
-    async with UnitOfWork(typed) as uow:
-        assert uow.session is not None
-        links = (
-            await uow.session.scalars(
-                select(MaterializationLink).where(MaterializationLink.work_package_id == package_id)
-            )
-        ).all()
-        last = max(links, key=lambda link: link.ordinal or 0)
-        run_id = await uow.runs.create(
-            task_id=last.task_id,
-            workflow_type="coding",
-            workflow_version="4",
-            budget_mode="balanced",
-            configuration_revision="c" * 64,
-            policy_revision="d" * 64,
-            status=RunStatus.COMPLETED,
-        )
-        step_record = await uow.steps.create(
-            run_id=run_id,
-            ordinal=3,
-            step_type="approval",
-            idempotency_class=IdempotencyClass.IDEMPOTENT,
-        )
-        db_step = await uow.session.get(Step, step_record.id, with_for_update=True)
-        assert db_step is not None
-        db_step.status = StepStatus.COMPLETED
-        db_step.payload = {
-            **db_step.payload,
-            "action_envelope": {"result_commit": "b" * 40},
-        }
-        uow.session.add(
-            ApprovalRow(
-                step_id=db_step.id,
-                action_envelope_hash="dd" * 32,
-                requested_action="apply_result",
-                normalized_target="vuzol:main",
-                human_summary="apply",
-                token_hash=f"ee{uuid.uuid4().hex[:56]}",
-                status=ApprovalStatusRow.CONSUMED,
-                expires_at=datetime.now(UTC) + timedelta(days=1),
-            )
-        )
 
 
 def test_repair_replan_share_one_denominator(postgres_dsn: str) -> None:
@@ -248,7 +100,7 @@ def test_repair_replan_share_one_denominator(postgres_dsn: str) -> None:
     asyncio.run(scenario())
 
 
-def test_exhaustion_blocks_spend_but_keeps_final_evidence(postgres_dsn: str) -> None:
+def test_exhaustion_blocks_spend(postgres_dsn: str) -> None:
     async def scenario() -> None:
         from vuzol.config import LaunchMode
         from vuzol.config.models import Capability, CostClass, ProviderProfileConfig
@@ -287,33 +139,6 @@ def test_exhaustion_blocks_spend_but_keeps_final_evidence(postgres_dsn: str) -> 
                     task_id=task.id,
                     accounting=AccountingContext(purpose="execute", pricing_revision="t1"),
                 )
-            # Final evidence is a durable DB record, not an unreserved paid check.
-            package_id, _revision_id = await _horizon_package(factory)
-            row = await record_evidence(
-                uow.session,
-                package_id=package_id,
-                plan_revision_id=None,
-                document={
-                    "schema": "acceptance-evidence.v1",
-                    "package_id": str(package_id),
-                    "plan_revision_id": str(_revision_id),
-                    "plan_content_hash": "ab" * 32,
-                    "goal": "ship the horizon",
-                    "integration_base_head": "a" * 40,
-                    "result_commit": "b" * 40,
-                    "criteria": [
-                        {
-                            "criterion_id": "done",
-                            "satisfied": True,
-                            "evidence_ref": "gate:done:" + ("b" * 40),
-                        }
-                    ],
-                    "test_results": [],
-                    "review_refs": ["aa" * 32],
-                },
-                artifact_id=None,
-            )
-            assert row.package_id == package_id
         await engine.dispose()
 
     asyncio.run(scenario())

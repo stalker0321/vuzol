@@ -27,6 +27,10 @@ for unit in $UNITS vuzol-opencode-usage.service; do
   fi
 done
 
+for env in vuzol executor applier static-publisher secrets; do
+  [ -f "/etc/vuzol/$env.env" ] || { echo "/etc/vuzol/$env.env is missing" >&2; exit 1; }
+done
+
 if [ ! -f "$REL/.installed" ]; then
   echo "== building release $TAG"
   rm -rf "$REL"

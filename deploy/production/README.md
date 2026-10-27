@@ -27,7 +27,11 @@ commit. Migrations are not downgraded, so they must stay compatible with the pre
 - Deploy only committed code. No `PYTHONPATH` overrides, no image patching.
 - No systemd drop-ins and no extra compose overlays: change these files and redeploy.
   `deploy.sh` refuses to run if drop-ins exist.
-- Secrets stay in `/srv/vuzol/.env` and `/etc/vuzol/*.env`; they are referenced, never committed.
+- Host units read three files, later ones overriding earlier ones:
+  `/etc/vuzol/vuzol.env` (shared settings), `/etc/vuzol/<service>.env` (`executor`, `applier`,
+  `static-publisher`) and `/etc/vuzol/secrets.env` (`0600`, secrets only). Put a setting in
+  `vuzol.env` unless one service needs a different value. Containers take theirs from
+  `compose.yaml` and `/srv/vuzol/.env`. None of these files are committed: the repository is public.
 - Account profiles live in `/var/lib/vuzol/registry/account-profiles.toml`
   (`vodkolyan:vuzol-executor 0640`). Edit it in place and keep that group: host services
   cannot read it otherwise and crash-loop. Containers bind-mount it by inode, so after an
@@ -42,6 +46,4 @@ commit. Migrations are not downgraded, so they must stay compatible with the pre
 
 ## Not cleaned up yet
 
-- Host services still read the historical env files listed in their units
-  (`executor-t091.env`, `t1xx-*.env`); merge them into one file per service.
 - Postgres uses the default password and services run with `VUZOL_ENVIRONMENT=development`.

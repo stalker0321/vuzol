@@ -31,7 +31,7 @@ from ._test_providers_helpers import (
     ],
 )
 def test_grok_review_rejects_malformed_report(reply):
-    from vuzol.providers.grok import _step09a_structured_output
+    from vuzol.providers.grok import _structured_output
     from vuzol.review.independent import _OUTPUT_JSON_SCHEMA
 
     request = provider_request().model_copy(
@@ -41,7 +41,7 @@ def test_grok_review_rejects_malformed_report(reply):
         }
     )
     with pytest.raises(ProviderFailure) as error:
-        _step09a_structured_output(request, reply)
+        _structured_output(request, reply)
     assert error.value.request_sent
     assert error.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
 
@@ -225,34 +225,34 @@ async def test_grok_adapter_validates_discussion_agent_reply(
 
 def test_grok_adapter_rejects_invalid_discussion_agent_reply() -> None:
     from vuzol.providers.domain import ProviderRequest
-    from vuzol.providers.grok import _step09a_structured_output
+    from vuzol.providers.grok import _structured_output
 
     request = provider_request().model_copy(
         update={"output_schema_version": "discussion-agent-reply.v1"}
     )
     assert isinstance(request, ProviderRequest)
     with pytest.raises(ValueError, match="invalid discussion agent reply"):
-        _step09a_structured_output(request, json.dumps({"summary": "wrong field"}))
+        _structured_output(request, json.dumps({"summary": "wrong field"}))
 
 
 def test_grok_adapter_accepts_plain_discussion_reply() -> None:
-    from vuzol.providers.grok import _step09a_structured_output
+    from vuzol.providers.grok import _structured_output
 
     request = provider_request().model_copy(
         update={"output_schema_version": "discussion-agent-reply.v1"}
     )
-    assert _step09a_structured_output(request, "  Обычный ответ Grok.  ") == {
+    assert _structured_output(request, "  Обычный ответ Grok.  ") == {
         "reply": "Обычный ответ Grok."
     }
 
 
 def test_grok_adapter_preserves_long_plain_discussion_reply() -> None:
-    from vuzol.providers.grok import _step09a_structured_output
+    from vuzol.providers.grok import _structured_output
 
     request = provider_request().model_copy(
         update={"output_schema_version": "discussion-agent-reply.v1"}
     )
-    result = _step09a_structured_output(request, "слово " * 700)
+    result = _structured_output(request, "слово " * 700)
     assert result is not None
     assert result["reply"] == ("слово " * 700).strip()
 
@@ -358,110 +358,6 @@ async def test_grok_adapter_classifies_structured_provider_cancellation(tmp_path
         )
     assert captured.value.category is ProviderErrorCategory.CANCELLED
     assert captured.value.retryable is True
-
-
-@pytest.mark.anyio
-async def test_grok_adapter_validates_step09a_edit_report(tmp_path: Path) -> None:
-    manifest = {
-        "schema_version": "step09a-worker-edit-report.v1",
-        "experiment_id": "experiment",
-        "task_id": "task",
-        "claimed_complete": True,
-        "implementation_summary": "Implemented the requested change.",
-        "agent_checks": [
-            {
-                "name": "make test",
-                "status": "unavailable",
-                "detail": "Dependencies are not present in the iteration image.",
-            }
-        ],
-        "usage": {
-            "input_tokens": None,
-            "cached_input_tokens": None,
-            "output_tokens": None,
-            "reasoning_tokens": None,
-            "unavailable_reason": "The worker does not receive provider accounting.",
-        },
-        "failure_classification": None,
-        "limitations": [],
-        "attempt": 1,
-    }
-
-    invocations: list[CodexInvocation] = []
-
-    class ManifestTransport:
-        async def run(
-            self, invocation: CodexInvocation, cancellation: CancellationContext
-        ) -> CodexProcessResult:
-            del cancellation
-            invocations.append(invocation)
-            return CodexProcessResult(
-                0,
-                "\n".join(
-                    (
-                        json.dumps({"type": "text", "data": json.dumps(manifest)}),
-                        json.dumps({"type": "end", "stopReason": "EndTurn"}),
-                    )
-                ),
-                "",
-                10,
-            )
-
-    configured = profile(
-        "grok-a",
-        provider="grok",
-        model="grok-build",
-        api_base_url=None,
-        launch_mode=LaunchMode.CLI,
-        credential_reference=None,
-        credential_required=False,
-        runtime_identity="grok-a",
-        state_directory=tmp_path / "grok-a",
-    )
-    request = provider_request().model_copy(
-        update={
-            "sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001",
-            "output_schema_version": "step09a-worker-edit-report.v1",
-        }
-    )
-    result = await GrokCliAdapter(ManifestTransport()).execute(
-        request, configured, CancellationContext()
-    )
-    assert result.structured_output == manifest
-    from vuzol.providers.grok import _step09a_structured_output
-
-    assert (
-        _step09a_structured_output(
-            request, "I'll make the exact requested edit." + json.dumps(manifest)
-        )
-        == manifest
-    )
-    with pytest.raises(ProviderFailure):
-        _step09a_structured_output(request, json.dumps(manifest) + " trailing prose")
-    argv = invocations[-1].argv
-    assert argv[argv.index("--disallowed-tools") + 1] == "run_terminal_cmd"
-    prompt = json.loads(invocations[-1].stdin)
-    instruction = prompt["execution_policy"]["result_manifest"]
-    assert "Do not invoke shell commands" in instruction
-    assert "trusted validation" in instruction
-    assert "one agent_checks entry for each relevant local check" in instruction
-    assert "Never present agent_checks as trusted gates" in instruction
-    shell_instruction = prompt["execution_policy"]["shell_invocation"]
-    assert "shell tool is unavailable" in shell_instruction
-    assert "native List, Read, and Grep" in shell_instruction
-    assert "trusted gates" in shell_instruction
-
-    usage = manifest["usage"]
-    assert isinstance(usage, dict)
-    invalid = {**manifest, "usage": {**usage, "unavailable_reason": None}}
-    manifest.clear()
-    manifest.update(invalid)
-    with pytest.raises(ProviderFailure) as captured:
-        await GrokCliAdapter(ManifestTransport()).execute(
-            request, configured, CancellationContext()
-        )
-    assert captured.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
-    assert captured.value.retryable is False
 
 
 def test_grok_event_summary_is_content_free_for_completed_response() -> None:

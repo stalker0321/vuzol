@@ -10,7 +10,7 @@ from vuzol.providers.grok import (
     GrokProviderCancelled,
     _decode_output,
     _result_contract_instruction,
-    _step09a_structured_output,
+    _structured_output,
 )
 from vuzol.review.independent import _OUTPUT_JSON_SCHEMA
 
@@ -83,7 +83,7 @@ def test_review_after_tools_does_not_include_intermediate_prose():
     decoded = _decode_output(stdout, final_response_only=True)
     assert decoded["text"] == report
     assert decoded["usage"] == END["usage"]
-    assert _step09a_structured_output(review_request(), str(decoded["text"])) == REVIEW
+    assert _structured_output(review_request(), str(decoded["text"])) == REVIEW
     # Plain-text consumers retain the whole turn; no global text stripping.
     assert str(_decode_output(stdout)["text"]).startswith("I'll inspect the code first.")
 
@@ -114,7 +114,7 @@ def test_final_response_is_not_repaired_by_extracting_embedded_json(reply):
     )
     decoded = _decode_output(stdout, final_response_only=True)
     with pytest.raises(ProviderFailure) as error:
-        _step09a_structured_output(review_request(), str(decoded["text"]))
+        _structured_output(review_request(), str(decoded["text"]))
     assert error.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
 
 

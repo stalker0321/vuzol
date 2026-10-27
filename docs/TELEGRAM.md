@@ -344,7 +344,7 @@ Approve queues the exact result for the separate `vuzol-applier` process. The ap
 project policy and repository identity, fetches the retained commit locally, and advances the
 configured branch with Git compare-and-swap. Target drift blocks the step; it never falls back to a
 merge, push, or deployment. Redo rejects and closes the current result, then asks the user to send
-corrected instructions in the project topic; `/sol` remains an optional explicit route. Reject
+corrected instructions in the project topic. Reject
 cancels the result without applying it.
 
 Status cards are rebuilt from tasks, runs, steps, and events in PostgreSQL. External text is escaped
@@ -391,20 +391,3 @@ configuration, run `docker compose --profile telegram up`.
 7. Temporarily break network access, restore it, and confirm bounded retry. Simulate an unknown
    send outcome only in a controlled environment and confirm the row remains `ambiguous` without
    automatic resend.
-
-## Bounded coding dogfood
-
-The first production coding slice is deliberately explicit. In a project topic configured with
-`default_workflow = "adaptive_worker_trial"`, an allowlisted user may submit:
-
-```text
-/sol src/vuzol/example.py tests/unit/test_example.py
-Implement the bounded task described here.
-```
-
-The first line is the complete allowed-file scope; one to ten contained repository-relative paths
-are accepted. The remaining lines are the goal. Vuzol fixes the worker profile to
-`codex-a` (a local overlay account profile), uses the current managed project revision, runs every trusted repository
-gate, permits no automatic LLM repair, retains the result, and requests the exact-result Telegram
-decision described above. An approved result may advance only the local managed branch; it is never
-pushed or deployed. Ordinary messages and non-project topics do not enter this coding path.

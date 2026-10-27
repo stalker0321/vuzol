@@ -11,7 +11,6 @@ from vuzol.config import (
     InterpretationSettings,
     Settings,
     SubscriptionLimitSettings,
-    TelegramDogfoodSettings,
     TelegramSettings,
 )
 
@@ -58,25 +57,6 @@ def test_capability_provisioning_is_default_off_and_uses_separate_absolute_roots
         )
     with raises(ValidationError, match="unsafe key"):
         CapabilityProvisioningSettings(allowed_capabilities=("Bad SDK",))
-
-
-def test_telegram_dogfood_requires_explicit_safe_allowlist() -> None:
-    assert not TelegramDogfoodSettings().enabled
-    configured = TelegramDogfoodSettings(
-        enabled=True,
-        fault_injection_enabled=True,
-        allowed_project_ids=("vuzol-test",),
-    )
-    assert configured.allowed_project_ids == ("vuzol-test",)
-    with raises(ValidationError):
-        TelegramDogfoodSettings(enabled=True)
-    with raises(ValidationError):
-        TelegramDogfoodSettings(
-            fault_injection_enabled=True,
-            allowed_project_ids=("vuzol-test",),
-        )
-    with raises(ValidationError):
-        TelegramDogfoodSettings(enabled=True, allowed_project_ids=("Bad Project",))
 
 
 def test_settings_reject_invalid_log_level() -> None:

@@ -73,8 +73,7 @@ def test_mvp_check_clean_durable_state_passes_and_preserves_qualification_check(
     monkeypatch.setattr(module, "_run", run)
     module._durable_state()
     sql = calls[0][-1]
-    assert "qualification_reserved_budget" in sql
-    assert "LIKE '%qual%'" in sql
+    assert "terminal_reserved_budget" in sql
     assert "LIMIT 10" in sql
 
 

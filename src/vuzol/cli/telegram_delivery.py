@@ -57,7 +57,6 @@ async def run() -> None:
                 trace_always_include_anomalies=(
                     delivery.orchestration_trace_always_include_anomalies
                 ),
-                dogfood_settings=settings.telegram_dogfood,
                 rich_messages=settings.chat.rich_messages,
                 project_lead_enabled=settings.project_lead.enabled,
                 artifacts=ArtifactStore(

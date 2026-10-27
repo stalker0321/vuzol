@@ -17,7 +17,6 @@ from vuzol.execution.domain import GitInspection
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.execution.scaffold import path_is_docs_only, path_is_executable_product
-from vuzol.experiments.review import scan_suspicious_patterns
 from vuzol.providers.budgets import (
     ADMISSION_ONLY_CONSENT_SUMMARY,
     EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY,
@@ -38,6 +37,7 @@ from vuzol.review.policy import (
     requires_independent,
     resolve_review_plan,
 )
+from vuzol.review.signals import scan_suspicious_patterns
 from vuzol.storage.models import Run, Step, Task, Worktree
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import RiskLevel, StepStatus, WorktreeDeliveryState

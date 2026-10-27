@@ -9,10 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.execution.access import WorktreeAccessLease, WorktreeAccessManager
-from vuzol.execution.finalization import GateExecutionContext, GateRunner
+from vuzol.execution.gates import GateExecutionContext, GateRunner, RequiredGate
 from vuzol.execution.git import LocalGit
 from vuzol.execution.paths import contained, trusted_root
-from vuzol.experiments.domain import RequiredGate
 from vuzol.ops.static_publish import StaticPublishError, measure_static_tree
 from vuzol.storage.models import Run, Step, Task, Worktree
 from vuzol.storage.types import StepStatus

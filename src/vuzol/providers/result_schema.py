@@ -18,15 +18,7 @@ def result_schema_for_step(
             "discussion-text-reply.v2",
             None,
         )
-    if step_type != "execute_code" or "step09a_capsule" not in task_draft:
-        return None, None, None
-    from vuzol.experiments.domain import WorkerEditReport
-
-    return (
-        "WorkerEditReport",
-        "step09a-worker-edit-report.v1",
-        WorkerEditReport.model_json_schema(),
-    )
+    return None, None, None
 
 
 def schema_char_count(schema: dict[str, Any] | None) -> int:

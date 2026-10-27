@@ -20,7 +20,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.execution.artifacts import ArtifactStore
-from vuzol.execution.finalization import TRUSTED_GATE_COMMANDS
+from vuzol.execution.gates import TRUSTED_GATE_COMMANDS
 from vuzol.projects.installations import CapabilityPinMismatch
 from vuzol.projects.procedures import ProcedureRegistry
 from vuzol.projects.receipts import GateResult, ProcedureReceipt

@@ -6,44 +6,9 @@ from ._execution_helpers import (
     AsyncMock,
     CancellationContext,
     MagicMock,
-    _certified_codex_profile,
     pytest,
     uuid,
 )
-
-
-@pytest.mark.anyio
-async def test_uncertified_exact_runtime_fails_before_provider_invocation() -> None:
-    from vuzol.providers.handlers import ProviderStepHandler
-
-    profile = _certified_codex_profile()
-    registries = MagicMock()
-    registries.profiles.get.return_value = profile
-    handler = ProviderStepHandler(
-        MagicMock(),
-        registries,
-        MagicMock(),
-        worktrees=MagicMock(),
-        finalizer=MagicMock(),
-        worktree_access=MagicMock(),
-        agent_certificates=MagicMock(),
-    )
-    provider_request = MagicMock(task_draft={"step09a_capsule": {}})
-    handler._build_request = AsyncMock(  # type: ignore[method-assign]
-        return_value=(provider_request, profile.id, uuid.uuid4(), "revision")
-    )
-    handler._require_agent_certificate = AsyncMock(  # type: ignore[method-assign]
-        side_effect=ValueError("agent runtime is uncertified")
-    )
-    handler._unwind_pre_provider = AsyncMock()  # type: ignore[method-assign]
-    handler._grant_worktree_access = AsyncMock()  # type: ignore[method-assign]
-    handler._execute_built = AsyncMock()  # type: ignore[method-assign]
-
-    outcome = await handler.execute(MagicMock(step_type="execute_code"), CancellationContext())
-
-    assert outcome.category == "agent_runtime_uncertified"
-    handler._grant_worktree_access.assert_not_awaited()
-    handler._execute_built.assert_not_awaited()
 
 
 @pytest.mark.anyio

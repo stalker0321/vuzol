@@ -14,8 +14,7 @@ from vuzol.context.decision_binding import (
     DecisionOutput,
     DecisionStatus,
 )
-from vuzol.experiments.canary import CanaryPolicy
-from vuzol.experiments.decision import WhitelistGate
+from vuzol.experiments.canary import CanaryPolicy, WhitelistGate
 from vuzol.interpretation.decision_chain import LATE_DECISION_EVENT, record_late_decision
 from vuzol.storage.models import Event, Run, Task, UsageRecord, WorkPackage
 

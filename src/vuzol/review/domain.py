@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import Field
 
-from vuzol.experiments.domain import FrozenModel
+from vuzol.execution.domain import FrozenModel
 
 
 class ReviewVerdictKind(StrEnum):

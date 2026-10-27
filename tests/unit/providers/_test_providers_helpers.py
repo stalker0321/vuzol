@@ -18,7 +18,6 @@ from vuzol.config import (
     ProviderRole,
     ScopedSecretResolver,
 )
-from vuzol.experiments.domain import WorkerEditReport
 from vuzol.providers.budgets import account_usage, estimate_reservation
 from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.domain import (
@@ -67,7 +66,6 @@ __all__ = [
     "ScopedSecretResolver",
     "SecretStr",
     "StaticCodexTransport",
-    "WorkerEditReport",
     "_grok_diagnostic_events",
     "_grok_tool_updates",
     "account_usage",

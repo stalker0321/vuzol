@@ -25,19 +25,19 @@ from vuzol.execution.commit_messages import (
     DatabaseCommitMessageResolver,
 )
 from vuzol.execution.domain import GitInspection
-from vuzol.execution.finalization import (
+from vuzol.execution.gates import (
     MANDATORY_SECURITY_GATE,
     TRUSTED_GATE_COMMANDS,
     GateEvidence,
     GateExecutionContext,
     GateRun,
+    RequiredGate,
     TrustedGateRunner,
 )
 from vuzol.execution.git import GitError, LocalGit
 from vuzol.execution.paths import contained, trusted_root
 from vuzol.execution.scaffold import scaffold_gate_violation
-from vuzol.experiments.domain import RequiredGate
-from vuzol.experiments.review import scan_suspicious_patterns
+from vuzol.review.signals import scan_suspicious_patterns
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import Run, Step, ValidationResult, Worktree
 from vuzol.storage.types import StepStatus, WorktreeDeliveryState

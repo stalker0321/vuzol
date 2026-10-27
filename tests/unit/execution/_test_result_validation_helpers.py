@@ -12,7 +12,7 @@ import pytest
 from vuzol.config.models import CommandDefinition
 from vuzol.execution.artifacts import ArtifactSecretError
 from vuzol.execution.domain import GitInspection
-from vuzol.execution.finalization import CapturedOutput, GateEvidence, GateRun
+from vuzol.execution.gates import CapturedOutput, GateEvidence, GateRun
 from vuzol.execution.git import GitError
 from vuzol.execution.result_validation import (
     RESULT_VALIDATION_SCHEMA,

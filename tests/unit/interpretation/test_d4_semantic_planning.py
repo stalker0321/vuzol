@@ -13,7 +13,6 @@ from vuzol.discussion.domain import (
     PlanItemDraft,
     validate_plan_dependencies,
 )
-from vuzol.experiments import decision as repair_triage
 from vuzol.interpretation import decisions as semantic_decisions
 from vuzol.interpretation.discussion import (
     ControlOverride,
@@ -176,21 +175,3 @@ def test_semantic_hints_never_grant_capabilities() -> None:
         semantic_decisions.EffectIntent.ANSWER_QUESTION,
         semantic_decisions.EffectIntent.DISCUSS_ONLY,
     }
-
-
-def test_repair_triage_rejects_other_decision_kinds() -> None:
-    other_kind = {
-        "schema": "decision.v2",
-        "decision_kind": "target_selection",
-        "state_revision": 3,
-        "choice": "select",
-        "candidate_id": "auth-fix",
-        "evidence_refs": ["artifact:build-log:sha256:" + "b" * 64],
-        "reason_code": "clear_match",
-        "abstain": False,
-        "input_fingerprint": "a" * 64,
-    }
-    with pytest.raises(repair_triage.DecisionInvalid):
-        repair_triage.interpret_output(other_kind)
-    # No auto-promotion concept: the whitelist is default-off.
-    assert not repair_triage.WhitelistGate().allows("repair_triage")

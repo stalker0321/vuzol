@@ -50,8 +50,6 @@ Environment=VUZOL_EXECUTION__PROVIDER_PARALLELISM=2
 WorkingDirectory=/opt/vuzol/current
 EnvironmentFile=/etc/vuzol/t138-usage.env
 ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.executor
-Environment=VUZOL_TELEGRAM_DOGFOOD__ENABLED=true
-Environment="VUZOL_TELEGRAM_DOGFOOD__ALLOWED_PROJECT_IDS=[\"vuzol-dogfood\"]"
 
 [Install]
 WantedBy=multi-user.target

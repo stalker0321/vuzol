@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from vuzol.config import OpenRouterProviderRouting
-from vuzol.interpretation.discussion import DiscussionInterpretRequest
 
 from ._test_interpretation_helpers import (
     Capability,
@@ -148,76 +147,6 @@ def test_openai_compatible_adapters_parse_provider_neutral_results() -> None:
     asyncio.run(scenario())
 
 
-def test_openai_compatible_discussion_adapter_uses_separate_schema() -> None:
-    async def scenario() -> None:
-        async def handler(provider_request: httpx.Request) -> httpx.Response:
-            body = json.loads(provider_request.content)
-            assert "do not execute" in body["messages"][0]["content"]
-            assert "separate project-pinned worker" in body["messages"][0]["content"]
-            user_payload = json.loads(body["messages"][1]["content"])
-            assert body["provider"] == {
-                "sort": {"by": "price", "partition": "none"},
-                "preferred_min_throughput": {"p90": 70},
-                "quantizations": ["int8", "fp8"],
-                "allow_fallbacks": True,
-            }
-            assert body["reasoning"] == {"effort": "none"}
-            assert user_payload["prompt_version"] == "project-discussion-v1"
-            assert user_payload["input"]["project_id"] == "vuzol"
-            assert user_payload["discussion_schema"]["additionalProperties"] is False
-            reply_schema = user_payload["discussion_schema"]["properties"]["user_visible_summary"]
-            assert "not the project worker" in reply_schema["description"]
-            return httpx.Response(
-                200,
-                json={
-                    "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(
-                                    {
-                                        "interaction_mode": "discussion",
-                                        "confidence": 0.91,
-                                        "user_visible_summary": "Обсуждаем вариант интерфейса.",
-                                    }
-                                )
-                            }
-                        }
-                    ]
-                },
-            )
-
-        async with httpx.AsyncClient(
-            base_url="https://provider.example/v1",
-            transport=httpx.MockTransport(handler),
-        ) as client:
-            interpreter = OpenAICompatibleInterpreter(
-                base_url="https://provider.example/v1",
-                credential=SecretStr("key"),
-                profile_id="profile",
-                model="model",
-                provider_routing=OpenRouterProviderRouting.model_validate(
-                    {
-                        "sort": {"by": "price", "partition": "none"},
-                        "preferred_min_throughput": {"p90": 70},
-                        "quantizations": ["int8", "fp8"],
-                        "allow_fallbacks": True,
-                    }
-                ),
-                client=client,
-            )
-            result = await interpreter.interpret_discussion(
-                DiscussionInterpretRequest(
-                    original_input="как лучше сделать карточку?",
-                    project_id="vuzol",
-                    user_id=42,
-                )
-            )
-            assert result.interaction_mode.value == "discussion"
-            assert not result.should_create_task
-
-    asyncio.run(scenario())
-
-
 def test_provider_errors_and_fake_transcriber_are_explicit() -> None:
     async def scenario() -> None:
         async def invalid_handler(_request: httpx.Request) -> httpx.Response:
@@ -267,67 +196,6 @@ def test_provider_errors_and_fake_transcriber_are_explicit() -> None:
         unavailable = FakeInterpreter([InterpreterUnavailable("offline")])
         with pytest.raises(InterpreterUnavailable, match="all_interpreters_unavailable"):
             await interpret_with_recovery(unavailable, [], request())
-
-    asyncio.run(scenario())
-
-
-def test_discussion_invalid_output_gets_one_schema_repair() -> None:
-    async def scenario() -> None:
-        requests: list[dict[str, object]] = []
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            body = json.loads(request.content)
-            user_payload = json.loads(body["messages"][1]["content"])
-            requests.append(user_payload)
-            if len(requests) == 1:
-                content = {
-                    "interaction_mode": "discussion",
-                    "confidence": 0.9,
-                    "user_visible_summary": "Создать задачу.",
-                    "task_request": {
-                        "summary": "Обновить оформление",
-                        "goal": "Оформить сайт в неоновых цветах.",
-                    },
-                }
-            else:
-                content = {
-                    "interaction_mode": "task_request",
-                    "confidence": 0.9,
-                    "should_create_task": True,
-                    "user_visible_summary": "Создать задачу.",
-                    "task_request": {
-                        "summary": "Обновить оформление",
-                        "goal": "Оформить сайт в неоновых цветах.",
-                    },
-                }
-            return httpx.Response(
-                200,
-                json={"choices": [{"message": {"content": json.dumps(content)}}]},
-            )
-
-        async with httpx.AsyncClient(
-            base_url="https://provider.example/v1",
-            transport=httpx.MockTransport(handler),
-        ) as client:
-            interpreter = OpenAICompatibleInterpreter(
-                base_url="https://provider.example/v1",
-                credential=SecretStr("key"),
-                profile_id="profile",
-                model="model",
-                client=client,
-            )
-            result = await interpreter.interpret_discussion(
-                DiscussionInterpretRequest(
-                    original_input="сделай оформление сайта в неоновых цветах",
-                    project_id="vuzol",
-                    user_id=42,
-                )
-            )
-
-        assert result.should_create_task
-        assert len(requests) == 2
-        assert requests[0]["repair_error"] is None
-        assert "payload does not match interaction_mode" in str(requests[1]["repair_error"])
 
     asyncio.run(scenario())
 

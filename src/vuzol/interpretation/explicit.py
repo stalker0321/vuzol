@@ -23,14 +23,3 @@ def is_explicit_task_command(text: str | None) -> bool:
         return False
     normalized = text.strip().casefold()
     return normalized.startswith(_EXPLICIT_PREFIXES)
-
-
-def explicit_task_body(text: str) -> str:
-    """Strip the explicit prefix, keeping the raw task body."""
-
-    stripped = text.strip()
-    lowered = stripped.casefold()
-    for prefix in _EXPLICIT_PREFIXES:
-        if lowered.startswith(prefix):
-            return stripped[len(prefix) :].strip()
-    return stripped

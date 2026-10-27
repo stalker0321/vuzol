@@ -11,24 +11,8 @@ import pytest
 
 from vuzol.discussion.domain import PlanDraft, PlanItemDraft, canonical_plan_body
 from vuzol.discussion.service import WorkPackageService
-from vuzol.interpretation.adapters import discussion_schema_for_model
 from vuzol.interpretation.decisions import classify_decision
-from vuzol.interpretation.discussion import (
-    ControlOverride,
-    ControlOverrideKind,
-    DiscussionInterpretation,
-    DiscussionInterpretRequest,
-    DiscussionPlanItem,
-    PlanRequestIntent,
-    PlanRequestPayload,
-    TaskRequestPayload,
-    enforce_discussion_policy,
-    explicit_task_interpretation,
-    is_explicit_fast_path,
-    stamp_plan_provenance,
-)
-from vuzol.interpretation.domain import SuggestedComplexity
-from vuzol.interpretation.explicit import explicit_task_body, is_explicit_task_command
+from vuzol.interpretation.discussion import ControlOverrideKind
 from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.provenance import (
     extract_plan_item_source,
@@ -37,11 +21,10 @@ from vuzol.interpretation.provenance import (
 from vuzol.interpretation.service import (
     RECOVERY_MAX_FALLBACKS,
     RECOVERY_MAX_REPAIRS,
-    interpret_discussion_with_recovery,
     interpret_with_recovery,
 )
 from vuzol.review.handler import _task_scope_text
-from vuzol.storage.types import InteractionMode, RiskLevel
+from vuzol.storage.types import RiskLevel
 from vuzol.telegram.work_packages import ContinueDiscussionOverrides
 
 from ._test_interpretation_helpers import (
@@ -54,99 +37,6 @@ from ._test_interpretation_helpers import (
     request,
     result,
 )
-
-
-def _plan_item(**changes: object) -> DiscussionPlanItem:
-    values: dict[str, object] = {
-        "local_id": "item-a",
-        "summary": "Do the thing",
-        "goal": "Achieve the thing",
-        "expected_outcome": "Done",
-        "completion_criteria": ("done",),
-        "allowed_scope": "repo",
-        "suggested_risk": RiskLevel.LOW,
-        "needs_approval": False,
-        "estimated_complexity": SuggestedComplexity.SMALL,
-    }
-    values.update(changes)
-    return DiscussionPlanItem(**values)  # type: ignore[arg-type]
-
-
-def _discussion_request(**changes: object) -> DiscussionInterpretRequest:
-    values: dict[str, object] = {
-        "original_input": "do the thing",
-        "project_id": "demo",
-        "user_id": 1,
-    }
-    values.update(changes)
-    return DiscussionInterpretRequest(**values)  # type: ignore[arg-type]
-
-
-def test_model_schema_hides_plan_provenance() -> None:
-    schema = discussion_schema_for_model()
-    properties = schema["$defs"]["DiscussionPlanItem"]["properties"]
-    assert "derived" not in properties
-    assert "source_turn_ref" not in properties
-    assert "source_spec_revision" not in properties
-    # Internal model still carries the system-stamped fields.
-    internal = DiscussionInterpretation.model_json_schema()
-    internal_properties = internal["$defs"]["DiscussionPlanItem"]["properties"]
-    assert "derived" in internal_properties
-
-
-def test_enforce_discards_model_provenance() -> None:
-    forged = DiscussionInterpretation(
-        interaction_mode=InteractionMode.PLAN_REQUEST,
-        confidence=0.9,
-        user_visible_summary="plan",
-        should_mutate_plan=True,
-        plan_request=PlanRequestPayload(
-            intent=PlanRequestIntent.CREATE_DRAFT,
-            title="Plan",
-            items=(
-                _plan_item(
-                    derived=False,
-                    source_turn_ref="forged-turn",
-                    source_spec_revision="forged-rev",
-                ),
-            ),
-        ),
-    )
-    enforced = enforce_discussion_policy(_discussion_request(), forged)
-    assert enforced.plan_request is not None
-    (item,) = enforced.plan_request.items
-    assert item.derived is True
-    assert item.source_turn_ref is None
-    assert item.source_spec_revision is None
-
-
-def test_stamp_plan_provenance_writes_system_refs() -> None:
-    pending = DiscussionInterpretation(
-        interaction_mode=InteractionMode.PLAN_REQUEST,
-        confidence=0.9,
-        user_visible_summary="plan",
-        should_mutate_plan=True,
-        plan_request=PlanRequestPayload(
-            intent=PlanRequestIntent.CREATE_DRAFT,
-            title="Plan",
-            items=(_plan_item(),),
-        ),
-    )
-    enforced = enforce_discussion_policy(_discussion_request(), pending)
-    turn_id = uuid.uuid4()
-    stamped = stamp_plan_provenance(enforced, source_turn_id=turn_id, source_spec_revision="abc123")
-    assert stamped.plan_request is not None
-    (item,) = stamped.plan_request.items
-    assert item.derived is True
-    assert item.source_turn_ref == str(turn_id)
-    assert item.source_spec_revision == "abc123"
-    # No plan payload passes through unchanged.
-    bare = DiscussionInterpretation(
-        interaction_mode=InteractionMode.DISCUSSION,
-        confidence=0.9,
-        user_visible_summary="chat",
-    )
-    assert stamp_plan_provenance(bare, source_turn_id=turn_id, source_spec_revision=None) is bare
 
 
 def test_extract_plan_item_source() -> None:
@@ -225,36 +115,6 @@ def test_policy_decision_is_bound_to_verdict() -> None:
     )
     assert control.decision.policy_allowed is False
     assert "natural_language_control_never_consumes_approval" in control.reasons
-
-
-def test_explicit_fast_path_needs_no_provider_call() -> None:
-    text = "/task fix the bug"
-    assert is_explicit_task_command(text)
-    req = _discussion_request(
-        original_input=text,
-        control_override=ControlOverride(kind=ControlOverrideKind.EXPLICIT_TASK),
-    )
-    assert is_explicit_fast_path(req) is True
-    assert is_explicit_fast_path(_discussion_request()) is False
-
-    calls: list[str] = []
-
-    class CountingInterpreter:
-        profile_id = "must-not-be-called"
-        model = "must-not-be-called"
-
-        async def interpret_discussion(
-            self, request: DiscussionInterpretRequest
-        ) -> DiscussionInterpretation:
-            calls.append("called")
-            raise AssertionError("provider must not be called on the fast path")
-
-    result = explicit_task_interpretation(req, body=explicit_task_body(req.original_input))
-    enforced = enforce_discussion_policy(req, result)
-    assert enforced.interaction_mode is InteractionMode.TASK_REQUEST
-    assert enforced.should_create_task is False
-    assert enforced.task_request is not None
-    assert calls == []
 
 
 @pytest.mark.anyio
@@ -435,43 +295,3 @@ def test_false_act_and_wrong_binding_tracked_separately() -> None:
     assert agreements == len(cases)
     assert false_act == 0
     assert wrong_binding == 0
-
-
-def test_offline_parity_model_vs_deterministic_path() -> None:
-    text = "/task fix the bug"
-
-    class StubModel:
-        profile_id = "stub"
-        model = "stub"
-
-        async def interpret_discussion(
-            self, request: DiscussionInterpretRequest
-        ) -> DiscussionInterpretation:
-            return DiscussionInterpretation(
-                interaction_mode=InteractionMode.TASK_REQUEST,
-                confidence=0.8,
-                user_visible_summary="model classification",
-                task_request=TaskRequestPayload(summary="fix the bug", goal="fix the bug"),
-            )
-
-    async def scenario() -> None:
-        req = _discussion_request(original_input=text)
-        model_result = await interpret_discussion_with_recovery(StubModel(), [], req)
-        deterministic = enforce_discussion_policy(
-            _discussion_request(
-                original_input=text,
-                control_override=ControlOverride(kind=ControlOverrideKind.EXPLICIT_TASK),
-            ),
-            explicit_task_interpretation(
-                _discussion_request(original_input=text),
-                body=explicit_task_body(text),
-            ),
-        )
-        # Same contract on both paths: TASK_REQUEST, confirm-first, no task.
-        assert model_result.interaction_mode is InteractionMode.TASK_REQUEST
-        for outcome in (model_result, deterministic):
-            assert outcome.should_create_task is False
-            assert outcome.should_mutate_plan is False
-            assert outcome.task_request is not None
-
-    asyncio.run(scenario())

@@ -21,7 +21,7 @@ def test_remote_has_no_flag_and_no_production_callers() -> None:
     callers: list[str] = []
     for path in root.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
-        for name in ("claim_node_step", "claim_slot", "pull_artifact"):
+        for name in ("claim_node_step", "pull_artifact"):
             if name in text and "def " + name not in text and "test" not in str(path):
                 callers.append(f"{path.relative_to(root)}:{name}")
     # Definitions and the slot/node primitives themselves are allowed; only
@@ -29,8 +29,6 @@ def test_remote_has_no_flag_and_no_production_callers() -> None:
     production = [
         entry
         for entry in callers
-        if not entry.startswith(
-            ("projects/node_claim.py", "storage/slots.py", "execution/remote.py")
-        )
+        if not entry.startswith(("projects/node_claim.py", "execution/remote.py"))
     ]
     assert production == []

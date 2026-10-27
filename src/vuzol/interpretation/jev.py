@@ -26,13 +26,6 @@ from vuzol.experiments.intake_shadow import (
     parse_intake_output,
 )
 from vuzol.interpretation.adapters import OpenAICompatibleInterpreter
-from vuzol.interpretation.discussion import (
-    ControlOverrideKind,
-    DiscussionInterpretation,
-    DiscussionInterpretRequest,
-    RefusalCode,
-    TaskRequestPayload,
-)
 from vuzol.interpretation.domain import (
     InterpretationInput,
     InterpretationResult,
@@ -50,7 +43,7 @@ from vuzol.interpretation.work_contract import (
     capabilities_for_work,
     work_contract_error,
 )
-from vuzol.storage.types import InteractionMode, RiskLevel
+from vuzol.storage.types import RiskLevel
 
 JEV_MODEL = "typesafe/jev-1.13"
 JEV_PROMPT_VERSION = "jev-intake-native-v6"
@@ -451,102 +444,4 @@ class JevDecisionsInterpreter:
             output_tokens=attempt.get("output_tokens"),
             provider_request_id=attempt.get("provider_request_id"),
             repaired=repair_error is not None,
-        )
-
-    async def interpret_discussion(
-        self, request: DiscussionInterpretRequest
-    ) -> DiscussionInterpretation:
-        targets = {
-            "no_target": "Self-contained turn with no existing object reference.",
-            "unresolved": "Referenced object is missing or ambiguous.",
-        }
-        if request.plan_snapshot is not None:
-            targets[str(request.plan_snapshot.revision_id)] = request.plan_snapshot.title
-        decision, choices = await self._classify(
-            {"current_turn": request.original_input, "context": request.model_dump(mode="json")},
-            targets,
-        )
-        common: dict[str, Any] = {
-            "confidence": 1.0,
-            "should_create_task": False,
-            "should_mutate_plan": False,
-            "user_visible_summary": "Запрос классифицирован Jev.",
-        }
-        if (
-            work_contract_error(
-                choices["effect"],
-                TaskType(choices["task_type"]),
-                TaskOperation(choices["operation"]),
-            )
-            is not None
-        ):
-            return DiscussionInterpretation(
-                **common,
-                interaction_mode=InteractionMode.QUERY_REFUSE,
-                refusal_code=RefusalCode.CLARIFY_REQUIRED,
-                clarification_question=WORK_CONTRACT_QUESTION,
-            )
-        # Existing downstream modes cannot preserve a mixed turn as one action.
-        # Do not invoke the structurer, apply a control override or create partial work.
-        if decision.effect is IntakeEffect.MIXED:
-            return DiscussionInterpretation(
-                **common,
-                interaction_mode=InteractionMode.QUERY_REFUSE,
-                refusal_code=RefusalCode.CLARIFY_REQUIRED,
-                clarification_question=(
-                    "Текущий маршрут не может обработать все действия запроса целиком. "
-                    "Ничего не запущено. Уточни порядок и цели действий; управление прогоном "
-                    "доступно кнопками карточки."
-                ),
-            )
-        if decision.abstain:
-            return DiscussionInterpretation(
-                **common,
-                interaction_mode=InteractionMode.QUERY_REFUSE,
-                refusal_code=RefusalCode.CLARIFY_REQUIRED,
-                clarification_question="Уточни, к какой задаче или плану относится запрос.",
-            )
-        if decision.effect is IntakeEffect.CONTROL_REQUEST:
-            return DiscussionInterpretation(
-                **common,
-                interaction_mode=InteractionMode.QUERY_REFUSE,
-                refusal_code=RefusalCode.CONTROL_REQUIRES_BUTTON,
-                clarification_question="Подтверждение и управление — кнопками карточки.",
-            )
-        if decision.effect is IntakeEffect.PLAN or (
-            request.control_override is not None
-            and request.control_override.kind
-            in {
-                ControlOverrideKind.CREATE_OR_UPDATE_PLAN,
-                ControlOverrideKind.REPLAN,
-            }
-        ):
-            return DiscussionInterpretation(
-                **common,
-                interaction_mode=InteractionMode.PLAN_REQUEST,
-            )
-        if decision.effect is IntakeEffect.EXECUTE_REQUEST:
-            text = request.original_input.strip()
-            if len(text) > 4000:
-                # This downstream payload has no separate raw-turn field. Never
-                # truncate a trailing condition into an unconditional task request.
-                return DiscussionInterpretation(
-                    **common,
-                    interaction_mode=InteractionMode.QUERY_REFUSE,
-                    refusal_code=RefusalCode.CLARIFY_REQUIRED,
-                    clarification_question=(
-                        "Запрос длиннее допустимого описания задачи. Ничего не запущено. "
-                        "Сократи запрос, сохранив все условия и ограничения."
-                    ),
-                )
-            return DiscussionInterpretation(
-                **common,
-                interaction_mode=InteractionMode.TASK_REQUEST,
-                task_request=TaskRequestPayload(summary=_bounded_line(text, 240), goal=text),
-            )
-        return DiscussionInterpretation(
-            **common,
-            interaction_mode=InteractionMode.QUERY_ONLY
-            if decision.effect is IntakeEffect.STATUS
-            else InteractionMode.DISCUSSION,
         )

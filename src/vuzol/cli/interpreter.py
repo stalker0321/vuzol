@@ -172,8 +172,6 @@ async def run() -> None:
                 create_session_factory(engine),
                 interpreter=interpreter,
                 fallback_interpreters=fallbacks,
-                discussion_interpreter=interpreter,
-                fallback_discussion_interpreters=fallbacks,
                 downloader=PythonTelegramClient(bot),
                 transcriber=transcriber,
                 owner=owner,

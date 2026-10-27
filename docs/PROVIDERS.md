@@ -157,7 +157,12 @@ deduplication, and revision compare-and-set apply to every callback; old buttons
 overwrite a newer selection. "По умолчанию" removes the explicit choice.
 
 Explicit choices never fall back to a different model or account. Unavailable, disabled,
-or revised profiles fail closed with a visible unresolved-choice error. Workflow run creation
+or revised profiles fail closed with a visible unresolved-choice error. A choice pins the
+profile's *assignment revision*: model, reasoning settings, account, endpoint, launch mode and
+runtime identity/state directory (`vuzol.config.revision.assignment_revision`). Editing limits,
+prices, routing priority, fallbacks, network policy, roles or capabilities does not invalidate
+it; those are checked whenever a profile is chosen. Pins made with the older full revision are
+still accepted and are rewritten to the assignment revision when the worker starts. Workflow run creation
 freezes profile/model/reasoning/content revision; retries preserve it. Lead turns freeze both
 lead and goal-reviewer assignments before inference. Changes affect new runs and new turns,
 not already-started work. Changing `/model` does not unpause a goal or resume a waiting goal:

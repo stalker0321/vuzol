@@ -18,7 +18,7 @@ from tests.integration.storage.helpers import seed_task_run_step, storage
 from tests.integration.telegram.helpers import telegram_runtime
 from vuzol.config import Capability, ProviderRole, ScopedSecretResolver
 from vuzol.config.registries import ProfileRegistry
-from vuzol.config.revision import content_revision
+from vuzol.config.revision import assignment_revision
 from vuzol.execution.domain import GitInspection
 from vuzol.projects.model_matrix import MATRIX_KEY, ModelAssignment
 from vuzol.providers.catalog import credential_access_policy
@@ -151,7 +151,7 @@ def _pin(configured):
         profile_id=configured.id,
         model=configured.model,
         reasoning_effort=configured.model_reasoning_effort,
-        content_revision=content_revision(configured),
+        content_revision=assignment_revision(configured),
     ).model_dump(mode="json")
 
 

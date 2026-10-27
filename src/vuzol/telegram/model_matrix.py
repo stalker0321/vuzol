@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.config.models import ProviderProfileConfig
-from vuzol.config.revision import content_revision
+from vuzol.config.revision import assignment_matches, content_revision
 from vuzol.projects.executor_preference import ExecutorPreferenceError, ensure_preference_row
 from vuzol.projects.model_matrix import (
     SLOT_LABELS,
@@ -79,7 +79,7 @@ async def enqueue_matrix(
             pinned = ModelAssignment.model_validate(selected)
             try:
                 profile = runtime.registries.profiles.get(pinned.profile_id)
-                current = content_revision(profile) == pinned.content_revision
+                current = assignment_matches(profile, pinned.content_revision)
             except (RegistryError, LookupError):
                 current = False
             value = (

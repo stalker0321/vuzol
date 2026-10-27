@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config import RegistryError, RuntimeConfiguration
 from vuzol.config.models import ProviderProfileConfig, ProviderRole, SandboxNetworkMode
-from vuzol.config.revision import content_revision
+from vuzol.config.revision import assignment_revision
 from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.model_matrix import ModelAssignment, assignment_profile, assignment_snapshot
 from vuzol.providers.catalog import conversation_compatible
@@ -109,7 +109,7 @@ async def select_conversation_route(
             profile_id=profile.id,
             model=profile.model,
             reasoning_effort=profile.model_reasoning_effort,
-            content_revision=content_revision(profile),
+            content_revision=assignment_revision(profile),
         )
     route = ConversationRoute(conversation_mode=mode, assignment=assignment)
     route.validate_profile(runtime, project_id=project_id)

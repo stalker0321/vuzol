@@ -107,3 +107,49 @@ class SnapshotCompatibility(BaseModel):
 
     allowed: bool
     reasons: tuple[str, ...] = ()
+
+
+# What a stored model choice means: which model, how it reasons, through which account
+# and endpoint. Limits, prices, routing order, fallbacks, network policy, roles and
+# capabilities are left out: they are checked when a profile is chosen, and editing them
+# must not invalidate the owner's choices (2026-10-27: dropping a dead fallback did).
+_ASSIGNMENT_FIELDS = frozenset(
+    {
+        "id",
+        "account_id",
+        "account",
+        "provider",
+        "model",
+        "model_reasoning_effort",
+        "max_reasoning_tokens",
+        "reasoning_enabled",
+        "api_base_url",
+        "provider_routing",
+        "launch_mode",
+        "credential_reference",
+        "runtime_identity",
+        "state_directory",
+    }
+)
+_ACCOUNT_QUOTA_FIELDS = (
+    "subscription_limits_visible",
+    "quota_collector",
+    "quota_scope_id",
+    "quota_oauth",
+)
+
+
+def assignment_revision(profile: ProviderProfileConfig) -> str:
+    """Revision pinned by durable model assignments; see _ASSIGNMENT_FIELDS."""
+
+    raw = profile.model_dump(mode="python", include=set(_ASSIGNMENT_FIELDS))
+    if isinstance(raw.get("account"), dict):
+        for field in _ACCOUNT_QUOTA_FIELDS:
+            raw["account"].pop(field, None)
+    return content_revision(raw)
+
+
+def assignment_matches(profile: ProviderProfileConfig, revision: str | None) -> bool:
+    """A pin made before assignment revisions existed carries the full revision."""
+
+    return revision in {assignment_revision(profile), content_revision(profile)}

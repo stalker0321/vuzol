@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import ProviderProfileConfig
 from vuzol.config.registries import ProfileRegistry
-from vuzol.config.revision import content_revision
+from vuzol.config.revision import assignment_matches, assignment_revision
 from vuzol.config.settings import Settings
 from vuzol.leadership.fencing import TurnClaim
 from vuzol.leadership.invocation_context import current_turn, invocation_current
@@ -119,7 +119,7 @@ class _TurnModels:
                             profile_id=profile.id,
                             model=profile.model,
                             reasoning_effort=profile.model_reasoning_effort,
-                            content_revision=content_revision(profile),
+                            content_revision=assignment_revision(profile),
                         ).model_dump(mode="json")
                 turn.model_assignments = pins
             return {
@@ -137,7 +137,7 @@ class _TurnModels:
                 not profile.enabled
                 or role not in profile.roles
                 or not supported_profile(profile)
-                or content_revision(profile) != pin.content_revision
+                or not assignment_matches(profile, pin.content_revision)
                 or profile.model != pin.model
                 or profile.model_reasoning_effort != pin.reasoning_effort
             ):

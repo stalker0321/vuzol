@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, RuntimeConfiguration
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
-from vuzol.config.revision import content_revision
+from vuzol.config.revision import assignment_matches, content_revision
 from vuzol.execution.access import RootlessIdentityResolver, WorktreeAccessManager
 from vuzol.projects.model_matrix import ModelAssignment
 from vuzol.providers.catalog import supported_profile
@@ -113,7 +113,7 @@ class ReadOnlyCliAdapter:
                 )
                 if (
                     assignment.profile_id != profile.id
-                    or assignment.content_revision != pin["profile_revision"]
+                    or not assignment_matches(profile, assignment.content_revision)
                     or assignment.model != profile.model
                     or assignment.reasoning_effort != profile.model_reasoning_effort
                 ):

@@ -1007,7 +1007,7 @@ class ProviderStepHandler:
             profile = self._registries.profiles.get(step.executor_profile_id)
             provider_role = PROVIDER_STEP_ROLES[step.step_type]
             if run.selected_route.get("schema_version") == "discussion-chat-route.v1":
-                from vuzol.config.revision import content_revision
+                from vuzol.config.revision import assignment_matches
                 from vuzol.discussion.conversation import conversation_provider_role
                 from vuzol.providers.catalog import conversation_compatible
 
@@ -1018,7 +1018,7 @@ class ProviderStepHandler:
                     or step.step_type != "execute_agent"
                     or set(step.required_capabilities) != {Capability.REPOSITORY_READ.value}
                     or profile.id != run.selected_route.get("trusted_profile_id")
-                    or content_revision(profile) != run.selected_route.get("profile_revision")
+                    or not assignment_matches(profile, run.selected_route.get("profile_revision"))
                     or not conversation_compatible(profile, provider_role)
                 ):
                     raise LookupError("conversation route changed or invalid")

@@ -6,8 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
-from vuzol.config.registries import ConfigurationBundle
-from vuzol.config.revision import content_revision
+from vuzol.config.registries import ConfigurationBundle, ProfileRegistry, RegistryError
+from vuzol.config.revision import assignment_matches, assignment_revision, content_revision
 from vuzol.projects.executor_preference import (
     ExecutorPreferenceError,
     ExecutorPreferenceMode,
@@ -119,7 +119,7 @@ def assignment_profile(
     if profile is None:
         raise ExecutorPreferenceError("selected model profile is unavailable; send /model")
     if (
-        content_revision(profile) != assignment.content_revision
+        not assignment_matches(profile, assignment.content_revision)
         or profile.model != assignment.model
         or profile.model_reasoning_effort != assignment.reasoning_effort
     ):
@@ -171,7 +171,7 @@ async def set_assignment(
             profile_id=chosen.id,
             model=chosen.model,
             reasoning_effort=chosen.model_reasoning_effort,
-            content_revision=content_revision(chosen),
+            content_revision=assignment_revision(chosen),
         ).model_dump(mode="json")
     row.model_assignments = assignments
     if slot == "executor":
@@ -183,3 +183,43 @@ async def set_assignment(
     row.revision += 1
     row.updated_by_user_id = user_id
     await session.flush()
+
+
+async def upgrade_assignment_revisions(session: AsyncSession, profiles: ProfileRegistry) -> int:
+    """Re-pin choices made with full profile revisions to assignment revisions.
+
+    Only a pin that still matches its profile exactly is rewritten, so the owner's
+    choice keeps its meaning; afterwards edits outside the assignment fields no longer
+    invalidate it. Returns the number of rewritten pins.
+    """
+    from sqlalchemy import select
+
+    from vuzol.storage.models import ProjectExecutorPreference
+
+    rewritten = 0
+    rows = await session.scalars(select(ProjectExecutorPreference).with_for_update())
+    for row in rows:
+        assignments = assignment_snapshot(row.model_assignments or {})
+        changed = False
+        for slot, raw in assignments.items():
+            pin = ModelAssignment.model_validate(raw)
+            try:
+                profile = profiles.get(pin.profile_id)
+            except RegistryError:
+                continue
+            revision = assignment_revision(profile)
+            if (
+                pin.content_revision != revision
+                and pin.content_revision == content_revision(profile)
+                and profile.model == pin.model
+                and profile.model_reasoning_effort == pin.reasoning_effort
+            ):
+                assignments[slot] = pin.model_copy(
+                    update={"content_revision": revision}
+                ).model_dump(mode="json")
+                changed = True
+                rewritten += 1
+        if changed:
+            row.model_assignments = assignments
+    await session.flush()
+    return rewritten

@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.config.registries import ConfigurationBundle
-from vuzol.config.revision import content_revision
+from vuzol.config.revision import assignment_matches, assignment_revision
 from vuzol.config.settings import HardLimits
 from vuzol.execution.domain import GitInspection
 from vuzol.providers.budgets import (
@@ -424,10 +424,20 @@ class IndependentModelReviewer:
                             or not profile.roles.intersection(
                                 {ProviderRole.PLANNER, ProviderRole.REVIEWER}
                             )
-                            or content_revision(profile) != pinned.content_revision
+                            or not assignment_matches(profile, pinned.content_revision)
                             or profile.model != pinned.model
                             or profile.model_reasoning_effort != pinned.reasoning_effort
-                            or (assignment is not None and assignment != pinned)
+                            or (
+                                assignment is not None
+                                and (
+                                    (assignment.profile_id, assignment.model)
+                                    != (pinned.profile_id, pinned.model)
+                                    or assignment.reasoning_effort != pinned.reasoning_effort
+                                    # Pins frozen before assignment revisions carry the
+                                    # full revision; compare meaning, not the hash text.
+                                    or not assignment_matches(profile, assignment.content_revision)
+                                )
+                            )
                         ):
                             raise ValueError("reviewer pin changed")
                     elif assignment is not None:
@@ -481,7 +491,7 @@ class IndependentModelReviewer:
                 profile_id=profile.id,
                 model=profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
-                content_revision=content_revision(profile),
+                content_revision=assignment_revision(profile),
             ).model_dump(mode="json")
             async with self._factory.begin() as session:
                 run = await session.get(Run, request_ids[1], with_for_update=True)

@@ -22,6 +22,7 @@ from vuzol.discussion.sequencer import WorkPackageSequenceConsumer
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.git import LocalGit
 from vuzol.observability import configure_logging, get_logger
+from vuzol.projects.model_matrix import upgrade_assignment_revisions
 from vuzol.providers.catalog import credential_access_policy
 from vuzol.providers.handlers import ProviderStepHandler, provider_handlers
 from vuzol.providers.health import synchronize_profiles
@@ -99,6 +100,7 @@ async def run() -> None:
                 runtime.registries.profiles.items(),
                 configuration_revision=runtime.registries.revision,
             )
+            await upgrade_assignment_revisions(session, runtime.registries.profiles)
         owner = f"{socket.gethostname()}:{os.getpid()}"
         dispatcher = WorkflowDispatcher(runtime, factory, owner=f"{owner}:dispatch")
         control_processors: list[Processor] = [

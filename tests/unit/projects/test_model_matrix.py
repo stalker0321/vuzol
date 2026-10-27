@@ -6,7 +6,7 @@ import pytest
 
 from vuzol.config.models import LaunchMode, ProviderRole
 from vuzol.config.registries import RegistryError
-from vuzol.config.revision import content_revision
+from vuzol.config.revision import assignment_revision
 from vuzol.projects.executor_preference import ExecutorPreferenceError
 from vuzol.projects.model_matrix import (
     MATRIX_KEY,
@@ -56,7 +56,7 @@ def assignment(profile):
         profile_id=profile.id,
         model=profile.model,
         reasoning_effort=profile.model_reasoning_effort,
-        content_revision=content_revision(profile),
+        content_revision=assignment_revision(profile),
     )
 
 
@@ -100,8 +100,8 @@ def test_assignment_accepts_provider_native_model_and_pins_full_revision():
     [
         {"model": "changed"},
         {"model_reasoning_effort": "high"},
-        {"routing_priority": 999},
         {"account_id": "new-account"},
+        {"runtime_identity": "other-identity"},
     ],
 )
 def test_assignment_rejects_changed_configuration_without_fallback(changes):
@@ -110,6 +110,30 @@ def test_assignment_rejects_changed_configuration_without_fallback(changes):
         assignment_profile(
             assignment(profile), bundle(profile.model_copy(update=changes)), "executor"
         )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"routing_priority": 999},
+        {"fallback_profile_ids": ()},
+        {"concurrency_limit": 7},
+        {"cost_class": "strong"},
+        {"context_limit": 123_456},
+    ],
+)
+def test_assignment_survives_edits_outside_the_choice(changes):
+    profile = configured()
+    edited = profile.model_copy(update=changes)
+    assert assignment_profile(assignment(profile), bundle(edited), "executor") == edited
+
+
+def test_pin_made_with_the_full_revision_still_resolves():
+    from vuzol.config.revision import content_revision
+
+    profile = configured()
+    legacy = assignment(profile).model_copy(update={"content_revision": content_revision(profile)})
+    assert assignment_profile(legacy, bundle(profile), "executor") == profile
 
 
 @pytest.mark.parametrize(

@@ -1543,27 +1543,6 @@ class Node(IdentityMixin, TimestampMixin, Base):
     detail: Mapped[str | None] = mapped_column(String(500))
 
 
-class NodeSlot(IdentityMixin, TimestampMixin, Base):
-    """Exclusive device slot lease on one node (WP12).
-
-    Claim/release mirror the step-claim fencing pattern: one advisory lock,
-    single-row claim, generation fencing so a stale holder can never release
-    or reuse a slot taken over by a newer generation.
-    """
-
-    __tablename__ = "node_slots"
-    __table_args__ = (UniqueConstraint("node_id", "slot_name", name="uq_node_slot"),)
-
-    node_id: Mapped[str] = mapped_column(
-        ForeignKey("nodes.node_id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    slot_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    claimed_by: Mapped[str | None] = mapped_column(String(200))
-    claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class UsageRecord(IdentityMixin, Base):
     __tablename__ = "usage_records"
     provider: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -1783,18 +1762,6 @@ class ProviderBudgetReservation(IdentityMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class ConfigurationRevision(IdentityMixin, Base):
-    __tablename__ = "configuration_revisions"
-
-    revision: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    kind: Mapped[str] = mapped_column(String(50), nullable=False)
-    normalized_content: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    artifact_reference: Mapped[str | None] = mapped_column(String(500))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
-    )
 
 
 class Worktree(IdentityMixin, TimestampMixin, Base):

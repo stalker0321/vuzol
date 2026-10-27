@@ -8,12 +8,10 @@ from pydantic import SecretStr
 
 from tests.unit.interpretation.test_jev_live import intake, response
 from vuzol.config import Capability
-from vuzol.interpretation.discussion import DiscussionInterpretRequest
 from vuzol.interpretation.domain import TaskOperation, TaskType
 from vuzol.interpretation.jev import JevDecisionsInterpreter
 from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.work_contract import work_contract_error
-from vuzol.storage.types import InteractionMode
 
 
 def choices(task_type: str, operation: str, effect: str = "execute_request") -> dict:
@@ -91,27 +89,6 @@ async def test_work_kind_is_preserved_or_clarified_not_guessed(raw, kind, operat
         elif kind == "infrastructure":
             assert Capability.HOST_ADMIN in policy.draft.required_capabilities
             assert not policy.automatic_execution_eligible  # Risk/approval boundary remains.
-
-
-@pytest.mark.anyio
-async def test_legacy_discussion_port_also_rejects_inconsistent_work():
-    body = choices("general", "create")
-    body["answers"]["target"]["choice"] = "no_target"
-    body["answers"]["relation"]["choice"] = "new"
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
-    ) as client:
-        jev = JevDecisionsInterpreter(
-            credential=SecretStr("test-key"),
-            profile_id="jev",
-            admitted=lambda _: True,
-            client=client,
-        )
-        result = await jev.interpret_discussion(
-            DiscussionInterpretRequest(original_input="Сделай сайт", project_id="books", user_id=1)
-        )
-        assert result.interaction_mode is InteractionMode.QUERY_REFUSE
-        assert result.task_request is None
 
 
 @pytest.mark.anyio

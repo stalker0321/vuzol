@@ -746,7 +746,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:192"
+        "src/vuzol/cli/interpreter.py:190"
       ],
       "producers": [],
       "consumers": [],
@@ -876,7 +876,7 @@
         "src/vuzol/telegram/ingress.py:951"
       ],
       "consumers": [
-        "src/vuzol/interpretation/service.py:473"
+        "src/vuzol/interpretation/service.py:407"
       ],
       "scenario": "intake"
     },
@@ -895,12 +895,12 @@
       "id": "outbox:interpretation",
       "sources": [],
       "producers": [
-        "src/vuzol/interpretation/service.py:1918",
+        "src/vuzol/interpretation/service.py:1514",
         "src/vuzol/projects/naming.py:96",
         "src/vuzol/telegram/ingress.py:364"
       ],
       "consumers": [
-        "src/vuzol/interpretation/service.py:473"
+        "src/vuzol/interpretation/service.py:407"
       ],
       "scenario": "intake"
     },
@@ -966,11 +966,9 @@
         "src/vuzol/discussion/handoff.py:149",
         "src/vuzol/discussion/sequencer.py:708",
         "src/vuzol/execution/artifact_production.py:331",
-        "src/vuzol/interpretation/service.py:1936",
-        "src/vuzol/interpretation/service.py:1302",
-        "src/vuzol/interpretation/service.py:1655",
-        "src/vuzol/interpretation/service.py:1241",
-        "src/vuzol/interpretation/service.py:1797",
+        "src/vuzol/interpretation/service.py:1532",
+        "src/vuzol/interpretation/service.py:1324",
+        "src/vuzol/interpretation/service.py:1466",
         "src/vuzol/leadership/worker.py:673",
         "src/vuzol/projects/naming.py:86",
         "src/vuzol/projects/naming.py:180",
@@ -1019,7 +1017,7 @@
         "src/vuzol/telegram/ingress.py:811"
       ],
       "consumers": [
-        "src/vuzol/interpretation/service.py:473"
+        "src/vuzol/interpretation/service.py:407"
       ],
       "scenario": "intake"
     },
@@ -1038,9 +1036,7 @@
       "id": "outbox:work_package_projection",
       "sources": [],
       "producers": [
-        "src/vuzol/discussion/application.py:135",
-        "src/vuzol/discussion/application.py:143",
-        "src/vuzol/discussion/application.py:374",
+        "src/vuzol/discussion/application.py:283",
         "src/vuzol/discussion/sequencer.py:688",
         "src/vuzol/discussion/sequencer.py:696",
         "src/vuzol/discussion/sequencer.py:680",
@@ -1092,8 +1088,8 @@
       "producers": [
         "src/vuzol/discussion/sequencer.py:470",
         "src/vuzol/discussion/sequencer.py:642",
-        "src/vuzol/interpretation/service.py:1558",
-        "src/vuzol/interpretation/service.py:990"
+        "src/vuzol/interpretation/service.py:1227",
+        "src/vuzol/interpretation/service.py:924"
       ],
       "consumers": [
         "src/vuzol/workflows/dispatch.py:70"

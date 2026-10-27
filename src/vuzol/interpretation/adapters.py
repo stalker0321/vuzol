@@ -9,11 +9,6 @@ import httpx
 from pydantic import SecretStr, ValidationError
 
 from vuzol.config.models import OpenRouterProviderRouting
-from vuzol.interpretation.discussion import (
-    DISCUSSION_PROMPT_VERSION,
-    DiscussionInterpretation,
-    DiscussionInterpretRequest,
-)
 from vuzol.interpretation.domain import (
     INTERPRETER_PROMPT_VERSION,
     InterpretationInput,
@@ -85,26 +80,6 @@ authorizes toolchain installation. The system first checks shared node inventory
 tools are reused without approval; a missing shared tool requires one installation approval.
 Project-local dependencies are prepared automatically in isolation, without a separate approval.
 Availability does not grant secrets, external writes, production deploy or other privileges."""
-
-
-def discussion_schema_for_model() -> dict[str, Any]:
-    """Discussion schema as sent to the model: plan-item provenance excluded.
-
-    ``derived``/``source_turn_ref``/``source_spec_revision`` are system-stamped
-    in ``enforce_discussion_policy`` and at plan application (D4 REDO, same
-    pattern as ``needs_planning`` for ``TaskDraft`` below): the model must not
-    see or set them, so a forged ``derived=false`` or invented ref can never
-    reach ``PlanRevision.immutable_body``.
-    """
-
-    schema = DiscussionInterpretation.model_json_schema()
-    item_schema = schema.get("$defs", {}).get("DiscussionPlanItem")
-    if isinstance(item_schema, dict):
-        properties = item_schema.get("properties")
-        if isinstance(properties, dict):
-            for key in ("derived", "source_turn_ref", "source_spec_revision"):
-                properties.pop(key, None)
-    return schema
 
 
 class OpenAICompatibleInterpreter:
@@ -185,50 +160,6 @@ class OpenAICompatibleInterpreter:
             duration_ms=int((time.monotonic() - started) * 1_000),
             repaired=repair_error is not None,
         )
-
-    async def interpret_discussion(
-        self, request: DiscussionInterpretRequest
-    ) -> DiscussionInterpretation:
-        try:
-            return await self._interpret_discussion_once(request, repair_error=None)
-        except InvalidInterpreterOutput as first_error:
-            return await self._interpret_discussion_once(
-                request,
-                repair_error=str(first_error)[:1_000],
-            )
-
-    async def _interpret_discussion_once(
-        self,
-        request: DiscussionInterpretRequest,
-        *,
-        repair_error: str | None,
-    ) -> DiscussionInterpretation:
-        user_payload = {
-            "prompt_version": DISCUSSION_PROMPT_VERSION,
-            "input": request.model_dump(mode="json"),
-            "discussion_schema": discussion_schema_for_model(),
-            "repair_error": repair_error,
-        }
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": DISCUSSION_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0,
-        }
-        self._apply_call_parameters(payload)
-        try:
-            response = await self._post("/chat/completions", json=payload)
-            response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
-            return DiscussionInterpretation.model_validate_json(content)
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
-            raise InterpreterUnavailable(type(error).__name__) from error
-        except ValidationError as error:
-            raise InvalidInterpreterOutput(str(error)) from error
 
     async def _post(self, path: str, **kwargs: Any) -> httpx.Response:  # noqa: ANN401
         headers = {"Authorization": f"Bearer {self._credential.get_secret_value()}"}

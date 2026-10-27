@@ -11,7 +11,6 @@ from vuzol.storage.models import (
     Approval,
     Artifact,
     ClarificationDecision,
-    ConfigurationRevision,
     InputBinding,
     Interpretation,
     ProfileHealthObservation,
@@ -39,7 +38,6 @@ class ModelRepository:
         | ValidationResult
         | RoutingDecision
         | ProfileHealthObservation
-        | ConfigurationRevision
         | Worktree
         | SupervisedProcess,
     ) -> uuid.UUID:

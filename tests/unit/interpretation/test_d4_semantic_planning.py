@@ -14,22 +14,11 @@ from vuzol.discussion.domain import (
     validate_plan_dependencies,
 )
 from vuzol.interpretation import decisions as semantic_decisions
-from vuzol.interpretation.discussion import (
-    ControlOverride,
-    ControlOverrideKind,
-    DecisionCandidate,
-    DiscussionInterpretation,
-    DiscussionInterpretRequest,
-    enforce_discussion_policy,
-    explicit_task_interpretation,
-    resolve_discussion_candidate,
-)
 from vuzol.interpretation.domain import TaskDraft
-from vuzol.interpretation.explicit import explicit_task_body, is_explicit_task_command
+from vuzol.interpretation.explicit import is_explicit_task_command
 from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.provenance import coerce_legacy_plan_item, task_source_refs
 from vuzol.interpretation.service import RECOVERY_MAX_FALLBACKS, RECOVERY_MAX_REPAIRS
-from vuzol.storage.types import InteractionMode
 
 from ._test_interpretation_helpers import draft, request
 
@@ -54,28 +43,6 @@ def test_plan_dependencies_unknown_and_cycle_rejected() -> None:
     validate_plan_dependencies((_plan_item("a"), _plan_item("b", ("a",))))
     with pytest.raises(DomainError, match="unknown plan dependency"):
         PlanDraft(title="T", items=(_plan_item("a", ("ghost",)),))
-
-
-def test_explicit_fast_path_needs_no_provider_and_stays_confirm_first() -> None:
-    assert is_explicit_task_command("/task fix the bug")
-    assert is_explicit_task_command("task: fix the bug")
-    assert not is_explicit_task_command("maybe discuss the bug?")
-    assert not is_explicit_task_command(None)
-    assert explicit_task_body("/task fix the bug") == "fix the bug"
-
-    req = DiscussionInterpretRequest(
-        original_input="/task fix the bug",
-        project_id="demo",
-        user_id=1,
-        control_override=ControlOverride(kind=ControlOverrideKind.EXPLICIT_TASK),
-    )
-    result = explicit_task_interpretation(req, body=explicit_task_body(req.original_input))
-    assert result.interaction_mode is InteractionMode.TASK_REQUEST
-    assert result.task_request is not None
-    assert result.should_create_task is False
-    enforced = enforce_discussion_policy(req, result)
-    assert enforced.interaction_mode is InteractionMode.TASK_REQUEST
-    assert enforced.should_create_task is False
 
 
 def test_task_spec_bridge_refs_and_legacy_provenance() -> None:
@@ -121,47 +88,6 @@ def test_recovery_contract_is_bounded_and_fail_closed() -> None:
     asyncio.run(scenario())
 
 
-def test_candidates_stale_rejected_and_resolved() -> None:
-    good = draft(target_candidate_id="auth-fix")
-    policy = enforce_interpretation_policy(
-        request(),
-        good,
-        known_project_ids=frozenset(),
-        allowed_candidate_ids=frozenset({"auth-fix"}),
-    )
-    assert not policy.draft.needs_clarification
-    stale = enforce_interpretation_policy(
-        request(), good, known_project_ids=frozenset(), allowed_candidate_ids=frozenset({"other"})
-    )
-    assert stale.draft.needs_clarification
-    assert "stale_or_unknown_candidate" in stale.reasons
-
-    interp = DiscussionInterpretation(
-        interaction_mode=InteractionMode.DISCUSSION,
-        confidence=0.9,
-        user_visible_summary="x",
-        decision_candidates=(
-            DecisionCandidate(key="auth-fix", statement="Fix auth"),
-            DecisionCandidate(key="migrate-db", statement="Migrate"),
-        ),
-    )
-    assert resolve_discussion_candidate(interp, "auth-fix").stable_id == "auth-fix"
-    with pytest.raises(ValueError, match="unknown discussion candidate"):
-        resolve_discussion_candidate(interp, "ghost")
-    with pytest.raises(ValueError, match="duplicate discussion candidate"):
-        enforce_discussion_policy(
-            DiscussionInterpretRequest(original_input="hi", project_id="demo", user_id=1),
-            interp.model_copy(
-                update={
-                    "decision_candidates": (
-                        DecisionCandidate(key="dup", statement="A"),
-                        DecisionCandidate(key="dup", statement="B"),
-                    )
-                }
-            ),
-        )
-
-
 def test_semantic_hints_never_grant_capabilities() -> None:
     decision = semantic_decisions.classify_decision(draft(), explicit=True)
     assert decision.context.value == "explicit_command"
@@ -175,3 +101,26 @@ def test_semantic_hints_never_grant_capabilities() -> None:
         semantic_decisions.EffectIntent.ANSWER_QUESTION,
         semantic_decisions.EffectIntent.DISCUSS_ONLY,
     }
+
+
+def test_explicit_task_command_is_recognised_only_when_explicit() -> None:
+    assert is_explicit_task_command("/task fix the bug")
+    assert is_explicit_task_command("task: fix the bug")
+    assert not is_explicit_task_command("maybe discuss the bug?")
+    assert not is_explicit_task_command(None)
+
+
+def test_stale_candidate_is_rejected() -> None:
+    good = draft(target_candidate_id="auth-fix")
+    policy = enforce_interpretation_policy(
+        request(),
+        good,
+        known_project_ids=frozenset(),
+        allowed_candidate_ids=frozenset({"auth-fix"}),
+    )
+    assert not policy.draft.needs_clarification
+    stale = enforce_interpretation_policy(
+        request(), good, known_project_ids=frozenset(), allowed_candidate_ids=frozenset({"other"})
+    )
+    assert stale.draft.needs_clarification
+    assert "stale_or_unknown_candidate" in stale.reasons

@@ -13,16 +13,9 @@ from vuzol.discussion import (
 )
 from vuzol.discussion.application import (
     AuthoritativeControlCommand,
-    DiscussionPlanApplicationService,
     PackageControlIngress,
     PackageControlResultCode,
     PackageControlSource,
-)
-from vuzol.interpretation.discussion import (
-    DiscussionInterpretation,
-    DiscussionInterpretRequest,
-    EditSessionContext,
-    ItemEditPayload,
 )
 from vuzol.storage.models import (
     Interpretation,
@@ -33,7 +26,6 @@ from vuzol.storage.models import (
     WorkPackage,
 )
 from vuzol.storage.types import (
-    InteractionMode,
     PlanRevisionCreatedBy,
     TaskStatus,
     WorkPackageStatus,
@@ -69,42 +61,6 @@ def plan(
     )
 
 
-def plan_interpretation(
-    *,
-    intent: str,
-    title: str,
-    base_revision_id: uuid.UUID | None = None,
-    base_revision_hash: str | None = None,
-) -> DiscussionInterpretation:
-    return DiscussionInterpretation(
-        interaction_mode=InteractionMode.PLAN_REQUEST,
-        confidence=0.95,
-        should_mutate_plan=True,
-        user_visible_summary="План подготовлен.",
-        plan_request={  # type: ignore[arg-type]
-            "intent": intent,
-            "base_revision_id": base_revision_id,
-            "base_revision_hash": base_revision_hash,
-            "title": title,
-            "items": [
-                {
-                    "local_id": "discussion",
-                    "summary": "Implement discussion plan",
-                    "goal": "Apply a fenced plan change",
-                    "expected_outcome": "A new immutable revision exists",
-                    "completion_criteria": ["Application tests pass"],
-                    "allowed_scope": "src/vuzol/discussion/**",
-                    "out_of_scope": ["Task materialization"],
-                    "trusted_checks": ["pytest"],
-                    "suggested_risk": "low",
-                    "needs_approval": False,
-                    "estimated_complexity": "medium",
-                }
-            ],
-        },
-    )
-
-
 async def create_package(factory: object) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, str]:
     async with UnitOfWork(factory) as uow:  # type: ignore[arg-type]
         session_id = await uow.discussions.create_session(
@@ -118,72 +74,6 @@ async def create_package(factory: object) -> tuple[uuid.UUID, uuid.UUID, uuid.UU
             actor_type="planner_model",
         )
     return session_id, created.package_id, created.revision_id, created.content_hash
-
-
-async def test_item_edit_application_rejects_changes_outside_fenced_item(
-    postgres_dsn: str,
-) -> None:
-    engine, factory = storage(postgres_dsn)
-    _, package_id, revision_id, content_hash = await create_package(factory)
-    async with UnitOfWork(factory) as uow:
-        service = WorkPackageService(uow)
-        edit = await service.open_edit_session(
-            package_id=package_id,
-            revision_number=1,
-            h8=content_hash[:8],
-            ordinal=1,
-            user_id=42,
-        )
-        revision = await uow.work_packages.get_revision(revision_id)
-        item_id = uuid.UUID(str(revision.immutable_body["items"][0]["item_id"]))
-    context = EditSessionContext(
-        edit_session_id=edit.id,
-        package_id=package_id,
-        revision_id=revision_id,
-        revision_number=1,
-        revision_hash=content_hash,
-        session_generation=1,
-        item_id=item_id,
-        opened_by_user_id=42,
-    )
-    request = DiscussionInterpretRequest(
-        original_input="shorten the item",
-        project_id="vuzol",
-        user_id=42,
-        edit_session=context,
-    )
-    interpretation = DiscussionInterpretation(
-        interaction_mode=InteractionMode.ITEM_EDIT,
-        confidence=0.9,
-        should_mutate_plan=True,
-        user_visible_summary="Изменение подготовлено.",
-        item_edit=ItemEditPayload(
-            edit_session_id=edit.id,
-            package_id=package_id,
-            revision_id=revision_id,
-            revision_number=1,
-            revision_hash=content_hash,
-            item_id=item_id,
-            refinement_text="shorten",
-        ),
-    )
-    application = DiscussionPlanApplicationService(factory, enabled=True)
-    with pytest.raises(DomainError) as scope:
-        await application.apply_item_edit(
-            request=request,
-            interpretation=interpretation,
-            replacement=plan("Changed package title", item_id=item_id, summary="Short item"),
-        )
-    assert scope.value.code == "item_edit_scope_violation"
-    revised = await application.apply_item_edit(
-        request=request,
-        interpretation=interpretation,
-        replacement=plan(item_id=item_id, summary="Short item"),
-    )
-    assert revised.revision_number == 2
-    async with factory() as session:
-        assert await session.scalar(select(func.count()).select_from(Task)) == 0
-    await engine.dispose()
 
 
 def command(
@@ -363,90 +253,4 @@ async def test_control_ingress_rejects_stale_fences_before_persisting_action(
         assert await session.scalar(select(func.count()).select_from(TelegramControlAction)) == 0
         package = await session.get(WorkPackage, package_id)
         assert package is not None and package.version == 1
-    await engine.dispose()
-
-
-async def test_item_edit_vs_approve_race_has_one_revision_epoch_winner(
-    postgres_dsn: str,
-) -> None:
-    engine, factory = storage(postgres_dsn)
-    _, package_id, revision_id, content_hash = await create_package(factory)
-    async with UnitOfWork(factory) as uow:
-        edit = await WorkPackageService(uow).open_edit_session(
-            package_id=package_id,
-            revision_number=1,
-            h8=content_hash[:8],
-            ordinal=1,
-            user_id=42,
-        )
-        revision = await uow.work_packages.get_revision(revision_id)
-        item_id = uuid.UUID(str(revision.immutable_body["items"][0]["item_id"]))
-    context = EditSessionContext(
-        edit_session_id=edit.id,
-        package_id=package_id,
-        revision_id=revision_id,
-        revision_number=1,
-        revision_hash=content_hash,
-        session_generation=1,
-        item_id=item_id,
-        opened_by_user_id=42,
-    )
-    request = DiscussionInterpretRequest(
-        original_input="edit item",
-        project_id="vuzol",
-        user_id=42,
-        edit_session=context,
-    )
-    interpretation = DiscussionInterpretation(
-        interaction_mode=InteractionMode.ITEM_EDIT,
-        confidence=0.9,
-        should_mutate_plan=True,
-        user_visible_summary="Edit ready.",
-        item_edit={  # type: ignore[arg-type]
-            "edit_session_id": edit.id,
-            "package_id": package_id,
-            "revision_id": revision_id,
-            "revision_number": 1,
-            "revision_hash": content_hash,
-            "item_id": item_id,
-            "refinement_text": "shorten",
-        },
-    )
-    application = DiscussionPlanApplicationService(factory, enabled=True)
-    controls = PackageControlIngress(factory, enabled=True, authorized_user_ids=frozenset({42}))
-
-    async def apply_edit() -> str:
-        try:
-            await application.apply_item_edit(
-                request=request,
-                interpretation=interpretation,
-                replacement=plan(item_id=item_id, summary="Short item"),
-            )
-        except DomainError as error:
-            return error.code
-        return "edited"
-
-    async def approve() -> str:
-        try:
-            await controls.apply(
-                command(
-                    action=PackageControlAction.APPROVE,
-                    package_id=package_id,
-                    content_hash=content_hash,
-                    generation=1,
-                    key="approve-racing-edit",
-                )
-            )
-        except DomainError as error:
-            return error.code
-        return "approved"
-
-    outcomes = await asyncio.gather(apply_edit(), approve())
-    assert len({"edited", "approved"}.intersection(outcomes)) == 1
-    assert any(outcome in {"stale_generation", "stale_revision"} for outcome in outcomes)
-    async with factory() as session:
-        package = await session.get(WorkPackage, package_id)
-        assert package is not None and package.version == 2
-        assert package.status in {WorkPackageStatus.DRAFT, WorkPackageStatus.APPROVED}
-        assert await session.scalar(select(func.count()).select_from(Task)) == 0
     await engine.dispose()

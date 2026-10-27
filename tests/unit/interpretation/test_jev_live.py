@@ -11,16 +11,11 @@ import pytest
 from pydantic import SecretStr
 
 from vuzol.config import Capability, TopicKind
-from vuzol.interpretation.discussion import DiscussionInterpretRequest, RefusalCode
 from vuzol.interpretation.domain import InterpretationInput, TaskAction, TaskContext
 from vuzol.interpretation.jev import JEV_ENDPOINT, JevDecisionsInterpreter
 from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.ports import InterpreterUnavailable, InvalidInterpreterOutput
-from vuzol.interpretation.service import (
-    interpret_discussion_with_recovery,
-    interpret_with_recovery,
-)
-from vuzol.storage.types import InteractionMode
+from vuzol.interpretation.service import interpret_with_recovery
 
 
 def response(
@@ -82,52 +77,6 @@ def test_native_endpoint_and_task_request_are_bound_to_jev() -> None:
             assert attempts[0]["input_tokens"] == 120
             assert adapter.receipt is not None
             assert adapter.receipt["effect"] == "execute_request"
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    "effect,mode",
-    [
-        ("respond", InteractionMode.DISCUSSION),
-        ("execute_request", InteractionMode.TASK_REQUEST),
-        ("status", InteractionMode.QUERY_ONLY),
-        ("control_request", InteractionMode.QUERY_REFUSE),
-        ("abstain", InteractionMode.QUERY_REFUSE),
-    ],
-)
-def test_discussion_never_authorizes_execution_or_approval(
-    effect: str,
-    mode: InteractionMode,
-) -> None:
-    async def scenario() -> None:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(200, json=response(effect=effect)),
-            )
-        ) as client:
-            adapter = JevDecisionsInterpreter(
-                credential=SecretStr("test-key"),
-                profile_id="jev",
-                admitted=lambda _: True,
-                client=client,
-            )
-            attempts: list[dict[str, Any]] = []
-
-            async def observe(**values: Any) -> None:
-                attempts.append(values)
-
-            result = await interpret_discussion_with_recovery(
-                adapter,
-                (),
-                DiscussionInterpretRequest(original_input="да", project_id="books", user_id=1),
-                on_attempt=observe,
-            )
-            assert result.interaction_mode is mode
-            assert not result.should_create_task
-            assert not result.should_mutate_plan
-            assert len(attempts) == 1
-            assert attempts[0]["input_tokens"] == 120
 
     asyncio.run(scenario())
 
@@ -440,80 +389,6 @@ def test_mixed_intake_clarifies_whole_turn_without_partial_action(
     asyncio.run(scenario())
 
 
-def test_mixed_discussion_cannot_be_overridden_into_partial_plan() -> None:
-    from vuzol.interpretation.discussion import ControlOverride, ControlOverrideKind
-
-    async def scenario() -> None:
-        calls = 0
-
-        def handler(_request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return httpx.Response(200, json=response("mixed", "null"))
-
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            structurer = MagicMock()
-            structurer.interpret_discussion = AsyncMock(
-                side_effect=AssertionError("mixed must not structure a partial plan")
-            )
-            adapter = JevDecisionsInterpreter(
-                credential=SecretStr("test-key"),
-                profile_id="jev",
-                admitted=lambda _: True,
-                client=client,
-                structurer=structurer,
-            )
-            result = await adapter.interpret_discussion(
-                DiscussionInterpretRequest(
-                    original_input="Останови прогон и переделай план, пока не запускай",
-                    project_id="books",
-                    user_id=1,
-                    control_override=ControlOverride(kind=ControlOverrideKind.REPLAN),
-                )
-            )
-            assert result.interaction_mode is InteractionMode.QUERY_REFUSE
-            assert result.refusal_code is RefusalCode.CLARIFY_REQUIRED
-            assert result.clarification_question
-            assert not result.should_create_task
-            assert not result.should_mutate_plan
-            assert result.task_request is None
-            assert result.plan_request is None
-            assert result.plan_control is None
-            assert calls == 1
-            structurer.interpret_discussion.assert_not_awaited()
-
-    asyncio.run(scenario())
-
-
-def test_single_coherent_conditional_goal_keeps_execute_route() -> None:
-    async def scenario() -> None:
-        raw = (
-            "Проверь тесты; если упали, исправь только поиск. "
-            "Иначе ничего не меняй и сообщи результат."
-        )
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=response()))
-        ) as client:
-            adapter = JevDecisionsInterpreter(
-                credential=SecretStr("test-key"),
-                profile_id="jev",
-                admitted=lambda _: True,
-                client=client,
-            )
-            result = await adapter.interpret(intake(raw))
-            assert result.draft.action is TaskAction.CREATE_TASK
-            assert not result.draft.needs_clarification
-            assert result.draft.goal == raw
-            assert Capability.CODE_EDIT in result.draft.required_capabilities
-            discussion = await adapter.interpret_discussion(
-                DiscussionInterpretRequest(original_input=raw, project_id="books", user_id=1)
-            )
-            assert discussion.task_request is not None
-            assert discussion.task_request.goal == raw
-
-    asyncio.run(scenario())
-
-
 def test_null_relation_is_rejected_outside_mixed() -> None:
     async def scenario() -> None:
         async with httpx.AsyncClient(
@@ -559,12 +434,11 @@ def test_non_execution_turn_cannot_resume_work_via_continue_relation(effect: str
     asyncio.run(scenario())
 
 
-def test_bounded_discussion_task_cannot_silently_drop_trailing_condition() -> None:
+def test_single_coherent_conditional_goal_keeps_execute_route() -> None:
     async def scenario() -> None:
         raw = (
-            "Проверь поиск: "
-            + "подробности " * 400
-            + "только если сломан; пока не запускай деплой."
+            "Проверь тесты; если упали, исправь только поиск. "
+            "Иначе ничего не меняй и сообщи результат."
         )
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(lambda _: httpx.Response(200, json=response()))
@@ -575,44 +449,10 @@ def test_bounded_discussion_task_cannot_silently_drop_trailing_condition() -> No
                 admitted=lambda _: True,
                 client=client,
             )
-            result = await adapter.interpret_discussion(
-                DiscussionInterpretRequest(original_input=raw, project_id="books", user_id=1)
-            )
-            assert result.interaction_mode is InteractionMode.QUERY_REFUSE
-            assert result.refusal_code is RefusalCode.CLARIFY_REQUIRED
-            assert result.task_request is None
-            assert not result.should_create_task
-            assert not result.should_mutate_plan
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("configured_structurer", [False, True])
-def test_plan_intent_never_invokes_legacy_planner(configured_structurer: bool) -> None:
-    async def scenario() -> None:
-        structurer = MagicMock()
-        structurer.interpret_discussion = AsyncMock(
-            side_effect=AssertionError("planning belongs to the lead")
-        )
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=response("plan")))
-        ) as client:
-            adapter = JevDecisionsInterpreter(
-                credential=SecretStr("test-key"),
-                profile_id="jev",
-                admitted=lambda _: True,
-                structurer=structurer if configured_structurer else None,
-                client=client,
-            )
-            result = await adapter.interpret_discussion(
-                DiscussionInterpretRequest(
-                    original_input="Составь план изменений", project_id="books", user_id=1
-                )
-            )
-            assert result.interaction_mode is InteractionMode.PLAN_REQUEST
-            assert result.plan_request is None
-            assert not result.should_create_task and not result.should_mutate_plan
-            structurer.interpret_discussion.assert_not_awaited()
-            assert len(adapter.drain_attempts()) == 1
+            result = await adapter.interpret(intake(raw))
+            assert result.draft.action is TaskAction.CREATE_TASK
+            assert not result.draft.needs_clarification
+            assert result.draft.goal == raw
+            assert Capability.CODE_EDIT in result.draft.required_capabilities
 
     asyncio.run(scenario())

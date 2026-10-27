@@ -7,7 +7,6 @@ import os
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,10 +15,8 @@ from vuzol.config import Capability, RuntimeConfiguration, TopicKind
 from vuzol.discussion.agent import (
     DISCUSSION_INTERNAL_TASK_TYPE,
     schedule_discussion_agent,
-    unwrap_agent_reply,
 )
 from vuzol.discussion.context_budget import ChatContextError, context_failure_text
-from vuzol.discussion.domain import DomainError
 from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.discussion.work_context import freeze_work_context
 from vuzol.experiments.intake_shadow import IntakeEffect
@@ -31,19 +28,6 @@ from vuzol.interpretation.chat_documents import (
 )
 from vuzol.interpretation.discussion import (
     DISCUSSION_CLASSIFY_DESTINATION,
-    DISCUSSION_REPLY_DESTINATION,
-    DISCUSSION_THINKING_ROLE,
-    ControlOverride,
-    ControlOverrideKind,
-    DiscussionInterpretation,
-    DiscussionInterpretRequest,
-    EditSessionContext,
-    PlanSnapshot,
-    PlanSnapshotItem,
-    SemanticDiscussionInterpreter,
-    enforce_discussion_policy,
-    explicit_task_interpretation,
-    is_explicit_fast_path,
 )
 from vuzol.interpretation.documents import DocumentError
 from vuzol.interpretation.domain import (
@@ -82,11 +66,8 @@ from vuzol.storage.models import (
     Artifact,
     ClarificationDecision,
     ConversationTurn,
-    EditSession,
     Event,
     Interpretation,
-    PlanRevision,
-    PlanRevisionItem,
     ProjectNamingRequest,
     Run,
     Step,
@@ -95,8 +76,6 @@ from vuzol.storage.models import (
     TelegramMessageLink,
     TopicMapping,
     TransactionalOutbox,
-    WorkItemDraft,
-    WorkPackage,
 )
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.repositories import TelegramIntakeRepository
@@ -105,7 +84,6 @@ from vuzol.storage.types import (
     ConversationTurnRole,
     ConversationTurnSource,
     DeliveryStatus,
-    EditSessionStatus,
     IntakeStatus,
     InteractionMode,
     ProjectNamingStatus,
@@ -219,46 +197,6 @@ async def interpret_with_recovery(
     raise InterpreterUnavailable("all_interpreters_unavailable")
 
 
-async def interpret_discussion_with_recovery(
-    primary: SemanticDiscussionInterpreter,
-    fallbacks: Sequence[SemanticDiscussionInterpreter],
-    request: DiscussionInterpretRequest,
-    *,
-    on_attempt: InterpreterAttemptObserver | None = None,
-) -> DiscussionInterpretation:
-    for index, interpreter in enumerate((primary, *fallbacks)):
-        attempt_kind = "initial" if index == 0 else "retry"
-        try:
-            candidate = await interpreter.interpret_discussion(request)
-            result = enforce_discussion_policy(request, candidate)
-        except (InvalidInterpreterOutput, InterpreterUnavailable):
-            if on_attempt is not None:
-                if isinstance(interpreter, JevDecisionsInterpreter):
-                    for attempt in interpreter.drain_attempts():
-                        await on_attempt(attempt_kind=attempt_kind, **attempt)
-                else:
-                    await on_attempt(
-                        profile_id=getattr(interpreter, "profile_id", None),
-                        model=getattr(interpreter, "model", None),
-                        attempt_kind=attempt_kind,
-                        outcome="failed",
-                    )
-            continue
-        if on_attempt is not None:
-            if isinstance(interpreter, JevDecisionsInterpreter):
-                for attempt in interpreter.drain_attempts():
-                    await on_attempt(attempt_kind=attempt_kind, **attempt)
-            else:
-                await on_attempt(
-                    profile_id=getattr(interpreter, "profile_id", None),
-                    model=getattr(interpreter, "model", None),
-                    attempt_kind=attempt_kind,
-                    outcome="succeeded",
-                )
-        return result
-    raise InterpreterUnavailable("all_discussion_interpreters_unavailable")
-
-
 async def regenerate_project_names(
     primary: SemanticInterpreter,
     fallbacks: Sequence[SemanticInterpreter],
@@ -329,8 +267,6 @@ class InterpretationPipeline:
         *,
         interpreter: SemanticInterpreter,
         fallback_interpreters: Sequence[SemanticInterpreter] = (),
-        discussion_interpreter: SemanticDiscussionInterpreter | None = None,
-        fallback_discussion_interpreters: Sequence[SemanticDiscussionInterpreter] = (),
         downloader: AttachmentDownloader | None = None,
         transcriber: Transcriber | None = None,
         owner: str,
@@ -339,8 +275,6 @@ class InterpretationPipeline:
         self._factory = session_factory
         self._interpreter = interpreter
         self._fallbacks = tuple(fallback_interpreters)
-        self._discussion_interpreter = discussion_interpreter
-        self._discussion_fallbacks = tuple(fallback_discussion_interpreters)
         self._downloader = downloader
         self._transcriber = transcriber
         self._owner = owner
@@ -1053,274 +987,9 @@ class InterpretationPipeline:
             await complete_outbox_item(session, token)
 
     async def _process_discussion(self, token: OutboxLeaseToken) -> None:
-        if self._runtime.settings.chat.enabled:
-            await self._process_chat(token)
-            return
-        if not self._runtime.settings.project_discussion_enabled:
-            raise PermanentPipelineError("project_discussion_disabled")
-        if self._discussion_interpreter is None:
-            raise InterpreterUnavailable("discussion_interpreter_unavailable")
-        async with self._factory() as session:
-            item = await session.get(TransactionalOutbox, token.item_id)
-            assert item is not None
-            intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
-            if (
-                intake is None
-                or intake.task_id is not None
-                or intake.affinity_kind != "discussion"
-                or not intake.original_text
-            ):
-                raise PermanentPipelineError("discussion_intake_invalid")
-            session_id = _required_uuid(item.payload, "discussion_session_id")
-            project_id = _required_string(item.payload, "project_id")
-            if (
-                project_id
-                not in {project.id for project in self._runtime.registries.projects.items()}
-                or _required_int(item.payload, "chat_id") != intake.chat_id
-                or _required_int(item.payload, "message_thread_id") != intake.message_thread_id
-                or _required_int(item.payload, "user_id") != intake.user_id
-            ):
-                raise PermanentPipelineError("discussion_context_mismatch")
-            older_unfinished = await session.scalar(
-                select(TransactionalOutbox.id)
-                .join(
-                    TelegramIntakeMessage,
-                    TelegramIntakeMessage.id == TransactionalOutbox.linked_entity_id,
-                )
-                .where(
-                    TransactionalOutbox.destination == DISCUSSION_CLASSIFY_DESTINATION,
-                    TransactionalOutbox.id != item.id,
-                    TransactionalOutbox.status.in_(
-                        [
-                            DeliveryStatus.PENDING,
-                            DeliveryStatus.LEASED,
-                            DeliveryStatus.AMBIGUOUS,
-                        ]
-                    ),
-                    TelegramIntakeMessage.chat_id == intake.chat_id,
-                    TelegramIntakeMessage.message_thread_id == intake.message_thread_id,
-                    TelegramIntakeMessage.message_id < intake.message_id,
-                )
-                .limit(1)
-            )
-            if older_unfinished is not None:
-                raise DiscussionContextChanged
-            active_agent = await session.scalar(
-                select(Task.id)
-                .where(
-                    Task.task_type == DISCUSSION_INTERNAL_TASK_TYPE,
-                    Task.task_draft["discussion_session_id"].as_string() == str(session_id),
-                    Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
-                )
-                .limit(1)
-            )
-            if active_agent is not None:
-                raise DiscussionContextChanged
-        async with UnitOfWork(self._factory) as uow:
-            try:
-                discussion = await uow.discussions.get_session(session_id)
-            except LookupError as error:
-                raise PermanentPipelineError("discussion_session_missing") from error
-            if (
-                discussion.project_id != project_id
-                or discussion.chat_id != intake.chat_id
-                or discussion.message_thread_id != intake.message_thread_id
-            ):
-                raise PermanentPipelineError("discussion_session_mismatch")
-            expected_session_version = discussion.version
-            memory_pack = await DiscussionMemoryService(uow).load_context(session_id=session_id)
-            plan_snapshot, edit_context = await _load_discussion_plan_context(
-                uow.session,
-                discussion.active_work_package_id,
-                user_id=intake.user_id,
-            )
-        request = DiscussionInterpretRequest(
-            original_input=intake.original_text,
-            project_id=project_id,
-            user_id=intake.user_id,
-            memory_pack=memory_pack,
-            plan_snapshot=plan_snapshot,
-            edit_session=edit_context,
-            control_override=(
-                None
-                if item.payload.get("control_override") is None
-                else ControlOverride(kind=ControlOverrideKind(item.payload["control_override"]))
-            ),
-        )
-        if request.control_override is not None and request.control_override.kind in {
-            ControlOverrideKind.CREATE_OR_UPDATE_PLAN,
-            ControlOverrideKind.REPLAN,
-        }:
-            from vuzol.leadership.wakeups import enqueue_legacy_plan_request
-
-            async with self._factory.begin() as session:
-                try:
-                    await enqueue_legacy_plan_request(
-                        session,
-                        project_id=project_id,
-                        user_id=intake.user_id,
-                        source_id=str(intake.id),
-                        text=intake.original_text,
-                    )
-                except DomainError as error:
-                    raise PermanentPipelineError(f"discussion_plan_{error}") from error
-                await TelegramIntakeRepository(session).set_status(
-                    intake.id, IntakeStatus.COMPLETED
-                )
-                await complete_outbox_item(session, token)
-            return
-        if is_explicit_fast_path(request):
-            from vuzol.interpretation.explicit import explicit_task_body
-
-            result = explicit_task_interpretation(
-                request, body=explicit_task_body(request.original_input)
-            )
-        else:
-            result = await interpret_discussion_with_recovery(
-                self._discussion_interpreter,
-                self._discussion_fallbacks,
-                request,
-                on_attempt=self._attempt_observer(task_id=intake.task_id, intake_id=intake.id),
-            )
-        self._logger.info(
-            "Discussion interpretation completed",
-            extra={
-                "event": "discussion.interpretation.completed",
-                "discussion_session_id": str(session_id),
-                "intake_id": str(intake.id),
-                "project_id": project_id,
-                "interaction_mode": result.interaction_mode.value,
-                "confidence": result.confidence,
-                "prompt_version": result.prompt_version,
-                "schema_version": result.schema_version,
-                "should_create_task": result.should_create_task,
-                "should_mutate_plan": result.should_mutate_plan,
-                "refusal_code": (
-                    result.refusal_code.value if result.refusal_code is not None else None
-                ),
-            },
-        )
-        async with UnitOfWork(self._factory) as uow:
-            current = await uow.discussions.get_session(session_id, for_update=True)
-            if current.version != expected_session_version:
-                raise DiscussionContextChanged
-            memory = DiscussionMemoryService(uow)
-            assert uow.session is not None
-            if not is_explicit_fast_path(request) and isinstance(
-                self._discussion_interpreter, JevDecisionsInterpreter
-            ):
-                _record_jev_receipt(uow.session, self._discussion_interpreter, intake.id)
-            existing_user_turn = await uow.session.scalar(
-                select(ConversationTurn).where(ConversationTurn.intake_message_id == intake.id)
-            )
-            if existing_user_turn is None:
-                user_turn_id, _ = await memory.append_turn(
-                    session_id=session_id,
-                    role=ConversationTurnRole.USER,
-                    source=ConversationTurnSource.TELEGRAM_USER,
-                    content=intake.original_text,
-                    classifier_mode=result.interaction_mode,
-                    classifier_confidence=Decimal(str(result.confidence)),
-                    classifier_prompt_version=result.prompt_version,
-                    should_create_task=result.should_create_task,
-                    intake_message_id=intake.id,
-                )
-            elif (
-                existing_user_turn.session_id != session_id
-                or existing_user_turn.role is not ConversationTurnRole.USER
-                or existing_user_turn.content != intake.original_text.strip()
-            ):
-                raise PermanentPipelineError("discussion_turn_idempotency_conflict")
-            else:
-                user_turn_id = existing_user_turn.id
-            if result.interaction_mode in {
-                InteractionMode.DISCUSSION,
-                InteractionMode.QUERY_ONLY,
-            }:
-                assert uow.session is not None
-                await uow.outbox.enqueue(
-                    destination="telegram",
-                    operation_type="send_message",
-                    entity_type="conversation_turn",
-                    entity_id=user_turn_id,
-                    idempotency_key=f"{DISCUSSION_THINKING_ROLE}:{user_turn_id}",
-                    payload={
-                        "role": DISCUSSION_THINKING_ROLE,
-                        "session_id": str(session_id),
-                    },
-                )
-                fresh_memory = await memory.load_context(session_id=session_id)
-                await schedule_discussion_agent(
-                    uow.session,
-                    runtime=self._runtime,
-                    session_id=session_id,
-                    source_turn_id=user_turn_id,
-                    project_id=project_id,
-                    chat_id=intake.chat_id,
-                    thread_id=intake.message_thread_id,
-                    user_id=intake.user_id,
-                    interaction_mode=result.interaction_mode,
-                    classifier_confidence=result.confidence,
-                    memory_pack=fresh_memory,
-                )
-                await TelegramIntakeRepository(uow.session).set_status(
-                    intake.id, IntakeStatus.COMPLETED
-                )
-                await complete_outbox_item(uow.session, token)
-                return
-            if (
-                result.interaction_mode is InteractionMode.PLAN_REQUEST
-                and result.refusal_code is None
-            ):
-                assert uow.session is not None
-                from vuzol.leadership.wakeups import enqueue_legacy_plan_request
-
-                try:
-                    await enqueue_legacy_plan_request(
-                        uow.session,
-                        project_id=project_id,
-                        user_id=intake.user_id,
-                        source_id=str(intake.id),
-                        text=intake.original_text,
-                    )
-                except DomainError as error:
-                    raise PermanentPipelineError(f"discussion_plan_{error}") from error
-                await TelegramIntakeRepository(uow.session).set_status(
-                    intake.id, IntakeStatus.COMPLETED
-                )
-                await complete_outbox_item(uow.session, token)
-                return
-            assistant_turn_id, _ = await memory.append_turn(
-                session_id=session_id,
-                role=ConversationTurnRole.ASSISTANT,
-                source=ConversationTurnSource.MODEL,
-                content=_discussion_reply_text(result),
-                classifier_mode=result.interaction_mode,
-                classifier_confidence=Decimal(str(result.confidence)),
-                classifier_prompt_version=result.prompt_version,
-            )
-            await uow.outbox.enqueue(
-                destination="telegram",
-                operation_type="send_message",
-                entity_type="conversation_turn",
-                entity_id=assistant_turn_id,
-                idempotency_key=f"{DISCUSSION_REPLY_DESTINATION}:{assistant_turn_id}",
-                payload={
-                    "role": DISCUSSION_REPLY_DESTINATION,
-                    "session_id": str(session_id),
-                    "source_turn_id": str(user_turn_id),
-                    "mode": result.interaction_mode.value,
-                    "confidence": result.confidence,
-                    "refusal_code": (
-                        result.refusal_code.value if result.refusal_code is not None else None
-                    ),
-                },
-            )
-            assert uow.session is not None
-            await TelegramIntakeRepository(uow.session).set_status(
-                intake.id, IntakeStatus.COMPLETED
-            )
-            await complete_outbox_item(uow.session, token)
+        if not self._runtime.settings.chat.enabled:
+            raise PermanentPipelineError("chat_disabled")
+        await self._process_chat(token)
 
     async def _process_attachment(self, token: OutboxLeaseToken) -> None:
         if self._downloader is None:
@@ -1818,72 +1487,6 @@ def _required_string(payload: dict[str, object], key: str) -> str:
     return value
 
 
-async def _load_discussion_plan_context(
-    session: AsyncSession | None,
-    package_id: uuid.UUID | None,
-    *,
-    user_id: int,
-) -> tuple[PlanSnapshot | None, EditSessionContext | None]:
-    if session is None or package_id is None:
-        return None, None
-    package = await session.get(WorkPackage, package_id)
-    if package is None or package.head_revision_id is None:
-        return None, None
-    revision = await session.get(PlanRevision, package.head_revision_id)
-    if revision is None or revision.work_package_id != package.id:
-        raise PermanentPipelineError("discussion_plan_context_missing")
-    rows = (
-        await session.execute(
-            select(PlanRevisionItem, WorkItemDraft.local_id)
-            .join(WorkItemDraft, WorkItemDraft.id == PlanRevisionItem.item_id)
-            .where(PlanRevisionItem.plan_revision_id == revision.id)
-            .order_by(PlanRevisionItem.ordinal)
-        )
-    ).all()
-    snapshot = PlanSnapshot(
-        package_id=package.id,
-        revision_id=revision.id,
-        revision_number=revision.revision_number,
-        revision_hash=revision.content_hash,
-        status_generation=package.version,
-        title=package.title,
-        items=tuple(
-            PlanSnapshotItem(
-                item_id=item.item_id,
-                local_id=local_id,
-                ordinal=item.ordinal,
-                summary=item.summary,
-            )
-            for item, local_id in rows
-        ),
-    )
-    edit = await session.scalar(
-        select(EditSession).where(
-            EditSession.package_id == package.id,
-            EditSession.opened_by_user_id == user_id,
-            EditSession.status == EditSessionStatus.OPEN,
-            EditSession.expires_at > datetime.now(UTC),
-        )
-    )
-    if edit is None:
-        return snapshot, None
-    local_id = next(
-        (local_id for item, local_id in rows if item.item_id == edit.item_id),
-        None,
-    )
-    return snapshot, EditSessionContext(
-        edit_session_id=edit.id,
-        package_id=edit.package_id,
-        revision_id=edit.plan_revision_id,
-        revision_number=edit.plan_revision_number,
-        revision_hash=edit.content_hash,
-        session_generation=edit.session_generation,
-        item_id=edit.item_id,
-        item_local_id=local_id,
-        opened_by_user_id=edit.opened_by_user_id,
-    )
-
-
 def _required_int(payload: dict[str, object], key: str) -> int:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, str)):
@@ -1899,13 +1502,6 @@ def _required_uuid(payload: dict[str, object], key: str) -> uuid.UUID:
         return uuid.UUID(_required_string(payload, key))
     except ValueError as error:
         raise PermanentPipelineError(f"invalid_{key}") from error
-
-
-def _discussion_reply_text(result: DiscussionInterpretation) -> str:
-    summary = unwrap_agent_reply(result.user_visible_summary)
-    if not result.clarification_question:
-        return summary
-    return f"{summary}\n\n{unwrap_agent_reply(result.clarification_question)}"
 
 
 async def _enqueue_interpretation(

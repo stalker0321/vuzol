@@ -12,22 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vuzol.discussion.domain import (
     DomainError,
     PackageControlAction,
-    PlanDraft,
-    canonical_plan_body,
 )
 from vuzol.discussion.sequencer import WorkPackageSequencer
-from vuzol.discussion.service import RevisionResult, WorkPackageService
-from vuzol.interpretation.discussion import (
-    DiscussionInterpretation,
-    DiscussionInterpretRequest,
-    enforce_discussion_policy,
-)
+from vuzol.discussion.service import WorkPackageService
 from vuzol.interpretation.domain import FrozenModel
 from vuzol.leadership.fence import legacy_package_is_fenced
 from vuzol.storage.models import TelegramControlAction
 from vuzol.storage.types import (
     ControlActionStatus,
-    InteractionMode,
     WorkPackagePauseReason,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -65,89 +57,6 @@ class PackageControlResult(FrozenModel):
     status_generation: int
     revision_id: uuid.UUID | None = None
     duplicate: bool = False
-
-
-class DiscussionPlanApplicationService:
-    """Apply only policy-tightened draft hints; model controls have no edge here."""
-
-    def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        *,
-        enabled: bool,
-    ) -> None:
-        self._factory = session_factory
-        self._enabled = enabled
-
-    async def apply_item_edit(
-        self,
-        *,
-        request: DiscussionInterpretRequest,
-        interpretation: DiscussionInterpretation,
-        replacement: PlanDraft,
-    ) -> RevisionResult:
-        self._require_enabled()
-        result = enforce_discussion_policy(request, interpretation)
-        context = request.edit_session
-        if (
-            result.interaction_mode is not InteractionMode.ITEM_EDIT
-            or result.item_edit is None
-            or not result.should_mutate_plan
-            or context is None
-            or context.opened_by_user_id != request.user_id
-        ):
-            raise DomainError("item_edit_not_authorized")
-        async with UnitOfWork(self._factory) as uow:
-            edit = await uow.work_packages.get_edit_session(
-                context.edit_session_id, for_update=True
-            )
-            if (
-                edit.package_id != context.package_id
-                or edit.plan_revision_id != context.revision_id
-                or edit.plan_revision_number != context.revision_number
-                or edit.content_hash != context.revision_hash
-                or edit.item_id != context.item_id
-                or edit.session_generation != context.session_generation
-                or edit.opened_by_user_id != request.user_id
-            ):
-                raise DomainError("edit_session_context_mismatch")
-            revision = await uow.work_packages.get_revision(edit.plan_revision_id)
-            _require_item_scoped_replacement(
-                replacement,
-                current_body=revision.immutable_body,
-                target_item_id=edit.item_id,
-            )
-            revision_result = await WorkPackageService(uow).apply_item_edit(
-                edit_session_id=edit.id,
-                expected_session_generation=context.session_generation,
-                replacement=replacement,
-                user_id=request.user_id,
-            )
-            await enqueue_plan_projection(uow, revision_result)
-            return revision_result
-
-    def _require_enabled(self) -> None:
-        if not self._enabled:
-            raise DomainError("project_discussion_disabled")
-
-
-async def enqueue_plan_projection(uow: UnitOfWork, result: RevisionResult) -> None:
-    await uow.outbox.enqueue(
-        destination="work_package_projection",
-        operation_type="render_plan",
-        entity_type="work_package",
-        entity_id=result.package_id,
-        idempotency_key=f"wp:projection:revision:{result.revision_id}",
-        payload={"package_id": str(result.package_id)},
-    )
-    await uow.outbox.enqueue(
-        destination="work_package_projection",
-        operation_type="render_status",
-        entity_type="work_package",
-        entity_id=result.package_id,
-        idempotency_key=f"wp:projection:revision-status:{result.revision_id}",
-        payload={"package_id": str(result.package_id)},
-    )
 
 
 class PackageControlIngress:
@@ -419,33 +328,3 @@ def _duplicate_result(
         revision_id=revision_id,
         duplicate=True,
     )
-
-
-def _require_item_scoped_replacement(
-    replacement: PlanDraft,
-    *,
-    current_body: dict[str, object],
-    target_item_id: uuid.UUID,
-) -> None:
-    current_title = current_body.get("title")
-    current_items = current_body.get("items")
-    if current_title != replacement.title.strip() or not isinstance(current_items, list):
-        raise DomainError("item_edit_scope_violation")
-    item_ids = tuple(item.item_id for item in replacement.items)
-    if any(item_id is None for item_id in item_ids):
-        raise DomainError("item_edit_scope_violation")
-    resolved_ids = tuple(item_id for item_id in item_ids if item_id is not None)
-    replacement_body = canonical_plan_body(replacement, resolved_ids)
-    replacement_items = replacement_body["items"]
-    if len(current_items) != len(replacement_items):
-        raise DomainError("item_edit_scope_violation")
-    target_seen = False
-    for current, updated in zip(current_items, replacement_items, strict=True):
-        if not isinstance(current, dict) or current.get("item_id") != updated.get("item_id"):
-            raise DomainError("item_edit_scope_violation")
-        if current.get("item_id") == str(target_item_id):
-            target_seen = True
-        elif current != updated:
-            raise DomainError("item_edit_scope_violation")
-    if not target_seen:
-        raise DomainError("item_edit_scope_violation")

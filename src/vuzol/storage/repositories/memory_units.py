@@ -6,6 +6,7 @@ checks; derived writers resolve supersession from source revisions.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -347,7 +348,15 @@ class MemoryUnitRepository:
                 )
             )
         )
-        search = func.plainto_tsquery("simple", query)
+        # The index has no stemming and the lead asks in its own words, so any
+        # query word may match and each word matches its other forms by prefix.
+        words = [word for word in re.findall(r"\w+", query.lower()) if len(word) >= 3]
+        if not words:
+            return ()
+        search = func.to_tsquery(
+            "simple",
+            " | ".join(sorted({f"{word[: max(4, len(word) - 2)]}:*" for word in words})),
+        )
         conditions = [
             MemoryUnit.scope == MemoryScope.PROJECT,
             MemoryUnit.project_id.in_(owned),

@@ -27,9 +27,10 @@ async def test_recall_uses_one_ownership_scoped_ranked_query():
     statement = session.scalars.call_args.args[0]
     compiled = statement.compile(dialect=postgresql.dialect())
     sql = str(compiled)
-    assert "@@ plainto_tsquery(" in sql
+    assert "@@ to_tsquery(" in sql
     assert "simple" in compiled.params.values()
-    assert "durable choice" in compiled.params.values()
+    # Any word may match, each by prefix, so other word forms are found too.
+    assert "choi:* | durab:*" in compiled.params.values()
     assert "ORDER BY ts_rank(" in sql
     assert "created_at DESC" in sql and "LIMIT" in sql
     assert 2 in compiled.params.values()

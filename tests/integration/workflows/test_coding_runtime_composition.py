@@ -7,6 +7,8 @@ fixture is deliberately docs-only: trusted sandbox gates have separate tests.
 # ruff: noqa: ASYNC240 -- bounded local test fixtures.
 
 import asyncio
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 from typing import Any, cast
@@ -16,6 +18,7 @@ import pytest
 from sqlalchemy import func, select
 
 from tests.integration.storage.helpers import storage
+from tests.integration.storage.test_work_package_sequencer import _approved
 from tests.integration.workflows._test_runtime_helpers import planned_coding_draft, seed_interpreted
 from tests.integration.workflows.stored_workflows import stored_workflow
 from vuzol.cli.applier import applier_handlers
@@ -31,6 +34,7 @@ from vuzol.config import (
     Settings,
     build_bundle,
 )
+from vuzol.discussion.sequencer import WorkPackageSequencer
 from vuzol.execution.artifact_production import ArtifactProductionHandler
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.git import LocalGit
@@ -44,11 +48,13 @@ from vuzol.review import ResultReviewHandler
 from vuzol.review.domain import ReviewVerdict, ReviewVerdictKind
 from vuzol.storage.models import (
     Approval,
+    Interpretation,
     ProjectEnvironmentRevision,
     Run,
     Step,
     Task,
     TransactionalOutbox,
+    WorkPackage,
     Worktree,
 )
 from vuzol.storage.types import (
@@ -58,7 +64,9 @@ from vuzol.storage.types import (
     RunStatus,
     StepStatus,
     TaskStatus,
+    WorkPackageStatus,
 )
+from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.projections import build_status_card, step_status_label
 from vuzol.workflows.application import Principal, apply_task_command
 from vuzol.workflows.compiler import compile_workflow
@@ -72,7 +80,7 @@ from vuzol.workflows.worker import BASE_INTERNAL_HANDLERS, WorkflowWorker
 pytestmark = pytest.mark.postgresql
 
 
-@pytest.mark.parametrize("kind", ["fixed", "coding.v3", "report"])
+@pytest.mark.parametrize("kind", ["fixed", "coding.v3", "report", "no_change"])
 def test_real_handlers_wait_for_approval_then_finish(
     postgres_dsn: str, tmp_path: Path, kind: str
 ) -> None:
@@ -144,7 +152,37 @@ def test_real_handlers_wait_for_approval_then_finish(
             draft = draft.model_copy(
                 update={"task_type": TaskType.RESEARCH, "operation": TaskOperation.INSPECT}
             )
-        task_id, interpretation_id = await seed_interpreted(factory, draft)
+        package_id = None
+        if kind == "no_change":
+            created = await _approved(factory)
+            package_id = created.package_id
+            # This item runs on an existing package target, as live no-op apply requires.
+            branch = f"vuzol/package/{package_id.hex}/existing"
+            await git.fast_forward(repository, branch=branch, commit=base)
+            async with factory.begin() as session:
+                package = await session.get(WorkPackage, package_id)
+                package.integration_branch = branch
+                package.integration_target_branch = "main"
+                package.integration_base_commit = base
+                package.integration_head_commit = base
+            async with UnitOfWork(factory) as uow:
+                first = await WorkPackageSequencer(uow).start(
+                    package_id=package_id,
+                    revision_number=1,
+                    h8=created.content_hash[:8],
+                    expected_status_generation=2,
+                    user_id=42,
+                )
+            task_id = first.task_id
+            assert task_id is not None
+            async with factory() as session:
+                interpretation = await session.scalar(
+                    select(Interpretation).where(Interpretation.task_id == task_id)
+                )
+                assert interpretation is not None
+                interpretation_id = interpretation.id
+        else:
+            task_id, interpretation_id = await seed_interpreted(factory, draft)
         async with factory.begin() as session:
             task = await session.get(Task, task_id)
             assert task is not None
@@ -202,6 +240,8 @@ def test_real_handlers_wait_for_approval_then_finish(
                         select(Worktree).where(Worktree.run_id == request.run_id)
                     )
                     assert wt is not None
+                    if kind == "no_change":
+                        return StepOutcome.succeeded({"text": "README уже содержит Before."})
                     if kind == "report":
                         return StepOutcome.succeeded(
                             {
@@ -216,14 +256,25 @@ def test_real_handlers_wait_for_approval_then_finish(
                     Path(wt.path, "README.md").write_text("# After\n\nRequested fixture change.\n")
                 return StepOutcome.succeeded({"implementation_summary": "Updated fixture docs."})
 
+        reviews = []
+
         class ReportReviewer:
             async def review(self, **kwargs: Any) -> ReviewVerdict:
                 from vuzol.review.partitions import verify_chunk_receipts
 
-                assert kind == "report"
+                assert kind in {"report", "no_change"}
+                reviews.append(kwargs)
                 verify_chunk_receipts(kwargs["work_context"])
-                assert kwargs["work_context"][0].source == "task_report"
-                assert "README.md:1" in kwargs["work_context"][0].content
+                context = kwargs["work_context"][0]
+                if kind == "no_change":
+                    assert context.source == "no_change_result"
+                    assert json.loads(context.content) == {
+                        "no_change": True,
+                        "no_change_reason": "README уже содержит Before.",
+                    }
+                else:
+                    assert context.source == "task_report"
+                    assert "README.md:1" in context.content
                 assert kwargs["inspection"].changed_files == ()
                 return ReviewVerdict(
                     verdict=ReviewVerdictKind.PASSED,
@@ -335,6 +386,17 @@ def test_real_handlers_wait_for_approval_then_finish(
                 assert all(
                     s.status is StepStatus.PENDING for s in steps if s.ordinal > boundary.ordinal
                 )
+                if kind == "no_change":
+                    assert len(reviews) == 1
+                    envelope = boundary.payload["action_envelope"]
+                    assert envelope["no_change"] is True
+                    assert envelope["result_commit"] == base
+                    assert envelope["changed_files"] == []
+                    assert envelope["no_change_reason"] == "README уже содержит Before."
+                    assert approval.human_summary.startswith("Изменений не потребовалось")
+                    validation = next(s for s in steps if s.step_type == "validate")
+                    assert validation.result["no_change"] is True
+                    assert validation.result["diff_hash"] == hashlib.sha256(b"").hexdigest()
                 if kind == "report":
                     assert boundary.payload["action_envelope"]["report_hash"]
                     from vuzol.workflows.result_approval import _validation_evidence
@@ -387,13 +449,24 @@ def test_real_handlers_wait_for_approval_then_finish(
                 card = await build_status_card(session, task_id)
                 assert f"Завершение ({step_status_label(StepStatus.COMPLETED)})" in card.html
                 assert not card.buttons
-            if kind == "report":
+            if kind in {"report", "no_change"}:
                 assert await git.resolve_commit(repository, "main") == base
                 assert (repository / "README.md").read_text() == "# Before\n"
             else:
                 assert await git.resolve_commit(repository, "main") != base
                 assert (repository / "README.md").read_text().startswith("# After")
             assert not settings.static_site_root.exists()
+            if kind == "no_change":
+                async with UnitOfWork(factory) as uow:
+                    advanced = await WorkPackageSequencer(uow).observe_terminal(task_id=task_id)
+                    assert advanced is not None and advanced.ordinal == 2
+                    assert advanced.task_id is not None and advanced.task_id != task_id
+                async with factory() as session:
+                    package = await session.get(WorkPackage, package_id)
+                    assert package.status is WorkPackageStatus.RUNNING
+                    assert package.cursor_ordinal == 2
+                    assert package.pause_reason is None
+                    assert package.integration_head_commit == base
         finally:
             await registry.close()
             await engine.dispose()

@@ -936,7 +936,11 @@ def _approval_fact_lines(
     if envelope.get("schema_version") == "dependency-provisioning-approval.v1":
         return _dependency_approval_fact_lines(envelope, human_summary)
 
-    display_summary = _approval_display_summary(human_summary)
+    display_summary = (
+        human_summary[:2_000]
+        if envelope.get("no_change") is True
+        else _approval_display_summary(human_summary)
+    )
     lines = ["<b>Что изменится</b>", f"• {telegram_html(display_summary)}"]
     raw_paths = envelope.get("changed_files")
     paths = (

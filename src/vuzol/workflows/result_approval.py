@@ -97,6 +97,11 @@ async def ensure_result_approval(
         "agent_checks": agent_checks,
         "gates": gates,
         "changed_files": list(evidence["changed_files"]),
+        **(
+            {"no_change": True, "no_change_reason": evidence["no_change_reason"]}
+            if evidence.get("no_change") is True
+            else {}
+        ),
         "validation_evidence_hash": evidence["validation_evidence_hash"],
         "review_evidence": evidence["review_evidence"],
         "review_evidence_hash": evidence["review_evidence_hash"],
@@ -393,7 +398,14 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
         if isinstance(candidate, str) and candidate.strip():
             summary = " ".join(candidate.split()).strip()
             break
-    if summary is None:
+    no_change = manifest.get("no_change") is True
+    raw_reason = manifest.get("no_change_reason")
+    reason = raw_reason[:2_000] if isinstance(raw_reason, str) else ""
+    if no_change:
+        summary = "Изменений не потребовалось."
+        if reason:
+            summary += f" Объяснение исполнителя: {reason}"
+    elif summary is None:
         changed_files = manifest.get("changed_files")
         changed_count = len(changed_files) if isinstance(changed_files, list) else 0
         summary = f"Изменено файлов: {changed_count}. Результат прошёл все настроенные проверки."
@@ -402,6 +414,7 @@ def _validation_evidence(steps_by_ordinal: dict[int, Step], worktree: Worktree) 
         "gates": gates,
         "report_hash": report_hash,
         "summary": summary[:2_000],
+        **({"no_change": True, "no_change_reason": reason} if no_change else {}),
         "changed_files": tuple(
             str(path) for path in manifest.get("changed_files", []) if isinstance(path, str)
         ),

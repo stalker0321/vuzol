@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vuzol.storage.models import Step
+from vuzol.storage.models import Step, Task
 from vuzol.storage.types import StepStatus
 from vuzol.workflows.result_approval import (
     _plan_approval_covers_intermediate_result,
@@ -644,3 +644,93 @@ async def test_last_item_of_a_lead_goal_applies_at_the_branch_head(managed: bool
     else:
         assert envelope["target_branch"] == "main"
         assert envelope["expected_target_head"] == package_base
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reason", ["README уже содержит нужный раздел.", "x" * 2500])
+async def test_no_change_approval_preserves_claim_and_explains_result(reason):
+    base = "a" * 40
+    from hashlib import sha256
+
+    digest = sha256(b"").hexdigest()
+    validate = _step(
+        step_type="validate",
+        ordinal=5,
+        result={
+            "structured_output": {
+                "base_commit": base,
+                "result_commit": base,
+                "diff_hash": digest,
+                "changed_files": [],
+                "gates": [{"name": "tests", "exit_code": 0}],
+                "no_change": True,
+                "no_change_reason": reason,
+            }
+        },
+    )
+    review = _step(
+        step_type="review",
+        ordinal=6,
+        result={
+            "structured_output": {
+                "base_commit": base,
+                "result_commit": base,
+                "diff_hash": digest,
+                "verdict": "pass",
+                "review_kind": "independent",
+                "findings": [],
+            }
+        },
+    )
+    worktree = SimpleNamespace(
+        result_commit=base,
+        base_commit=base,
+        diff_hash=digest,
+        project_id="vuzol",
+        repository_identity_hash="d" * 64,
+        default_branch="main",
+        expected_target_head=base,
+    )
+    session = MagicMock(
+        scalar=AsyncMock(side_effect=(None, worktree, None)),
+        execute=AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None)),
+        flush=AsyncMock(),
+    )
+    step = MagicMock(id=uuid.uuid4(), payload={"requested_action": "apply_result"})
+    run = MagicMock(
+        task_id=uuid.uuid4(),
+        id=uuid.uuid4(),
+        configuration_revision="e" * 64,
+        policy_revision="f" * 64,
+    )
+
+    approval = await ensure_result_approval(
+        session, run=run, approval_step=step, steps_by_ordinal={5: validate, 6: review}
+    )
+
+    assert approval is not None
+    envelope = step.payload["action_envelope"]
+    assert envelope["no_change"] is True
+    assert envelope["no_change_reason"] == reason[:2000]
+    assert approval.human_summary.startswith("Изменений не потребовалось")
+    assert reason[:1900] in approval.human_summary
+    assert "Изменено файлов: 0" not in approval.human_summary
+    assert len(approval.human_summary) <= 2000
+    assert envelope_hash(envelope) == approval.action_envelope_hash
+
+    from vuzol.telegram.projections import build_approval_card
+
+    task = Task(
+        id=run.task_id,
+        project_id="vuzol",
+        task_draft={},
+        original_text="Review base",
+        version=1,
+        public_task_number=None,
+    )
+    session.get = AsyncMock(side_effect=(task, step))
+    session.scalar = AsyncMock(return_value=approval)
+    card = await build_approval_card(session, task.id)
+    assert "Изменений не потребовалось" in card.html
+    assert reason[:500] in card.html
+    assert "Изменения подготовлены" not in card.html

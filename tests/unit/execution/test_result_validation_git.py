@@ -157,7 +157,8 @@ async def test_validate_empty_change_keeps_guards(tmp_path: Path, bad: str) -> N
 
 
 @pytest.mark.anyio
-async def test_validate_commits_measured_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize("repair_no_change", [False, True])
+async def test_validate_commits_measured_result(tmp_path: Path, repair_no_change: bool) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
     base = "a" * 40
@@ -180,13 +181,18 @@ async def test_validate_commits_measured_result(tmp_path: Path) -> None:
     git.stage_paths = AsyncMock()
     git.require_diff_check = AsyncMock()
     git.create_commit = AsyncMock(return_value=result)
-    git.commit_parent = AsyncMock(return_value=base)
+    git.commit_parent = AsyncMock(
+        side_effect=lambda _path, commit: base if commit == result else "0" * 40
+    )
     git.require_clean_worktree = AsyncMock()
     worktree = _worktree(worktree_path, base_commit=base, result_commit=base)
     handler = _handler(git=git, worktree_root=tmp_path)
     handler._load = AsyncMock(return_value=(worktree, _project(tmp_path), worktree_path))  # type: ignore[method-assign]
     handler._persist = AsyncMock()  # type: ignore[method-assign]
-    outcome = await handler.execute(_request(worktree), CancellationContext())
+    request = _request(worktree)
+    if repair_no_change:
+        request.payload["amend_repaired_result"] = True
+    outcome = await handler.execute(request, CancellationContext())
     assert outcome.kind is OutcomeKind.SUCCEEDED
     assert outcome.result["result_commit"] == result
     assert all(gate["exit_code"] == 0 for gate in outcome.result["structured_output"]["gates"])

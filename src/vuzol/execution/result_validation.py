@@ -233,7 +233,9 @@ class ResultValidationHandler:
         await self._git.require_no_remotes(path)
         inspection = await self._git.inspect(path, worktree.base_commit)
         system_checks: list[SystemCheck] = []
-        amend_repair = request.payload.get("amend_repaired_result") is True
+        repair_result = request.payload.get("amend_repaired_result") is True
+        # A rejected no-change result has no host-created commit to amend.
+        amend_repair = repair_result and worktree.result_commit != worktree.base_commit
 
         if inspection.branch != worktree.branch:
             raise ResultValidationError(
@@ -305,7 +307,7 @@ class ResultValidationHandler:
                         detail=f"files={len(normalized)}",
                     )
                 )
-        no_change = not inspection.changed_files and not is_finalized and not amend_repair
+        no_change = not inspection.changed_files and not is_finalized and not repair_result
         if no_change:
             await self._git.require_clean_worktree(path)
         elif not inspection.changed_files:

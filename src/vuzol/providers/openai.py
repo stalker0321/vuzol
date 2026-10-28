@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
+from jsonschema.exceptions import SchemaError, best_match
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import SecretStr
 
@@ -164,7 +164,10 @@ class OpenAICompatibleAdapter:
                         ),
                     )
                 try:
-                    Draft202012Validator(request.output_json_schema).validate(decoded)
+                    # best_match keeps a oneOf failure pointing at the specific field.
+                    validator = Draft202012Validator(request.output_json_schema)
+                    if (failure := best_match(validator.iter_errors(decoded))) is not None:
+                        raise failure
                 except JsonSchemaValidationError as error:
                     _log_structured_output_failure(
                         request=request,

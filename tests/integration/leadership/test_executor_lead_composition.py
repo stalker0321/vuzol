@@ -213,7 +213,9 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
             if invalid:
                 assert phase.result["failure"]["category"] == "invalid_structured_output"
                 assert phase.result["failure"]["diagnostic"]["schema_path"] == (
-                    "properties/notebook/type" if retrospective else "properties/commands/type"
+                    "properties/notebook/type"
+                    if retrospective
+                    else "oneOf/0/properties/commands/type"
                 )
                 assert "private-invalid-value" not in json.dumps(phase.result)
                 assert usage.outcome == "failed" and usage.input_tokens == 50

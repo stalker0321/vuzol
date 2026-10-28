@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
+from jsonschema.exceptions import SchemaError, best_match
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 
 from vuzol.config.models import Capability, ProviderProfileConfig, ProviderRole
@@ -301,7 +301,10 @@ class PiCliAdapter:
                 decoded_json = json.loads(decoded.text)
                 if not isinstance(decoded_json, dict):
                     raise ValueError("structured Pi response is not an object")
-                validator.validate(decoded_json)
+                # The first error of a oneOf schema names only "oneOf"; best_match
+                # descends into the branches and keeps the diagnostic specific.
+                if (failure := best_match(validator.iter_errors(decoded_json))) is not None:
+                    raise failure
             except (json.JSONDecodeError, JsonSchemaValidationError, ValueError) as error:
                 raise ProviderFailure(
                     ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,

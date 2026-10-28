@@ -62,6 +62,7 @@ async def invoke(
     *,
     purpose: str,
     limits: HardLimits,
+    round: int = 0,
 ) -> ProviderResult:
     context = current_turn.get()
     # Runtime authority is kept out of the model's prompt. The CLI adapter
@@ -101,6 +102,7 @@ async def invoke(
                     select(LeadershipInference).where(
                         LeadershipInference.turn_id == context.turn_id,
                         LeadershipInference.phase == phase,
+                        LeadershipInference.round == round,
                     )
                 )
                 if prior is not None:
@@ -159,6 +161,7 @@ async def invoke(
                         id=request.task_id,
                         turn_id=context.turn_id,
                         phase=phase,
+                        round=round,
                         profile_id=profile.id,
                         profile_revision=content_revision(profile),
                         input_hash=input_hash,

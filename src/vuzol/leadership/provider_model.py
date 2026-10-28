@@ -8,12 +8,14 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import ProviderProfileConfig, ProviderRole
 from vuzol.config.settings import HardLimits
 from vuzol.leadership.commands import MAX_MEMORY_COMMANDS, MEMORY_COMMANDS
 from vuzol.leadership.inference import invoke
+from vuzol.leadership.invocation_context import current_turn
 from vuzol.leadership.model import (
     LeadCommandDraft,
     LeadDecision,
@@ -21,8 +23,8 @@ from vuzol.leadership.model import (
     LeadSnapshot,
 )
 from vuzol.leadership.notebooks import ForgetPayload, RememberPayload, render_notebooks
-from vuzol.leadership.persistence import POLICY_REVISION
-from vuzol.leadership.read_tools import ToolBatch
+from vuzol.leadership.persistence import POLICY_REVISION, LeadershipInference
+from vuzol.leadership.read_tools import ToolBatch, run_tool_batch
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
@@ -216,7 +218,7 @@ def parse_lead_response(payload: object) -> LeadDecision:
 
 
 class ProviderLeadModel:
-    """One provider call per turn. Usage is written to the shared intake ledger."""
+    """Bounded read rounds, each with its own durable invocation and usage receipt."""
 
     def __init__(
         self,
@@ -234,58 +236,150 @@ class ProviderLeadModel:
         self._timeout_seconds = timeout_seconds
 
     async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
-        invocation_id = snapshot.invocation_id or uuid.uuid4()
-        try:
-            request = _request(snapshot, invocation_id)
-        except ValueError as error:
-            raise LeadModelUnavailable("lead_context_limit") from error
-        input_tokens = (len((request.original_input or "").encode()) + 2) // 3 + 1500
+        root_id = snapshot.invocation_id or uuid.uuid4()
+        request = await self._stored_request(0)
+        if request is None:
+            try:
+                request = _request(snapshot, root_id)
+            except ValueError as error:
+                raise LeadModelUnavailable("lead_context_limit") from error
+            if self._limits.lead_tool_rounds == 0:
+                request = self._final_request(request)
+            request = self._prepare(request)
+        total_cost = Decimal(0)
+        cost_known = True
+        round = 0
+        while True:
+            # invoke checks the current claim before replay/reservation and again
+            # before sending. Every round uses the same settlement/reconciliation path.
+            result = await invoke(
+                self._factory,
+                self._profile,
+                self._adapter,
+                request,
+                purpose=LEDGER_PURPOSE,
+                limits=self._limits,
+                round=round,
+            )
+            if result.status is not ProviderResultStatus.SUCCEEDED:
+                raise LeadModelUnavailable("lead_model_unavailable")
+            cost = result.usage.cost_units
+            cost_known &= cost is not None and cost > 0
+            if cost is not None:
+                total_cost += cost
+            payload = result.structured_output
+            if payload is None and result.text:
+                try:
+                    payload = json.loads(result.text)
+                except json.JSONDecodeError:
+                    payload = None
+            if not isinstance(payload, dict) or "tool_calls" not in payload:
+                decision = parse_lead_response(payload)
+                if snapshot.owner_event is not None and not decision.reply.strip():
+                    raise LeadModelUnavailable("lead_response_invalid")
+                return LeadDecision(
+                    commands=decision.commands,
+                    reply=decision.reply,
+                    profile_id=self._profile.id,
+                    usage={"cost_known": True, "cost_amount": float(total_cost)}
+                    if cost_known
+                    else {"cost_known": False},
+                )
+            try:
+                batch = ToolBatch.model_validate(payload)
+            except ValidationError as error:
+                raise LeadModelUnavailable("lead_response_invalid") from error
+            if (
+                request.task_draft.get("lead_tools_exhausted")
+                or round >= self._limits.lead_tool_rounds
+            ):
+                raise LeadModelUnavailable("lead_response_invalid")
+            # Read the next immutable request before executing tools. A receipt
+            # survives a crash even when the projection/memory has since changed.
+            following = await self._stored_request(round + 1)
+            if following is None:
+                items, used, exhausted = await run_tool_batch(
+                    self._factory,
+                    snapshot,
+                    batch,
+                    round=round,
+                    used_bytes=int(request.task_draft.get("lead_tool_result_bytes", 0)),
+                    limits=self._limits,
+                )
+                identity = uuid.uuid5(root_id, f"lead:{round + 1}")
+                following = request.model_copy(
+                    update={
+                        "task_id": identity,
+                        "run_id": identity,
+                        "step_id": identity,
+                        "context": request.context + items,
+                        "task_draft": {"lead_tool_result_bytes": used},
+                    }
+                )
+                if exhausted or round + 1 >= self._limits.lead_tool_rounds:
+                    following = self._final_request(following)
+                following = self._prepare(following)
+            request = following
+            round += 1
+
+    async def _stored_request(self, round: int) -> ProviderRequest | None:
+        context = current_turn.get()
+        if context is None:
+            return None
+        async with self._factory() as session:
+            prior = await session.scalar(
+                select(LeadershipInference).where(
+                    LeadershipInference.turn_id == context.turn_id,
+                    LeadershipInference.phase == "lead",
+                    LeadershipInference.round == round,
+                )
+            )
+            if prior is None:
+                return None
+            return ProviderRequest.model_validate(
+                {
+                    **prior.request,
+                    "reserved_cost_units": 0,
+                    "reserved_quota_units": 0,
+                }
+            )
+
+    def _final_request(self, request: ProviderRequest) -> ProviderRequest:
+        return request.model_copy(
+            update={
+                "original_input": (request.original_input or "")
+                + "\nRead limit reached: decide now. "
+                "Return a final decision; tools are disallowed.",
+                "output_json_schema": decision_schema(tools_allowed=False),
+                "task_draft": {**request.task_draft, "lead_tools_exhausted": True},
+            }
+        )
+
+    def _prepare(self, request: ProviderRequest) -> ProviderRequest:
+        context_bytes = sum(len(item.content.encode()) for item in request.context)
+        input_tokens = (
+            len((request.original_input or "").encode()) + context_bytes + 2
+        ) // 3 + 1500
         output_tokens = min(
             self._profile.output_limit or self._limits.provider_call_output_tokens,
             self._limits.provider_call_output_tokens,
             2000,
         )
-        if input_tokens + output_tokens > (
-            self._profile.context_limit or self._limits.provider_call_input_tokens + output_tokens
+        if (
+            input_tokens > self._limits.provider_call_input_tokens
+            or input_tokens + output_tokens
+            > (
+                self._profile.context_limit
+                or self._limits.provider_call_input_tokens + output_tokens
+            )
         ):
             raise LeadModelUnavailable("lead_context_limit")
-        request = request.model_copy(
+        return request.model_copy(
             update={
                 "max_input_tokens": input_tokens,
                 "max_output_tokens": output_tokens,
                 "timeout_seconds": self._timeout_seconds,
             }
-        )
-        result = await invoke(
-            self._factory,
-            self._profile,
-            self._adapter,
-            request,
-            purpose=LEDGER_PURPOSE,
-            limits=self._limits,
-        )
-        if result.status is not ProviderResultStatus.SUCCEEDED:
-            raise LeadModelUnavailable("lead_model_unavailable")
-        payload = result.structured_output
-        if payload is None and result.text:
-            try:
-                payload = json.loads(result.text)
-            except json.JSONDecodeError:
-                payload = None
-        decision = parse_lead_response(payload)
-        if snapshot.owner_event is not None and not decision.reply.strip():
-            raise LeadModelUnavailable("lead_response_invalid")
-        usage = result.usage
-        known = usage.cost_units is not None and usage.cost_units > 0
-        return LeadDecision(
-            commands=decision.commands,
-            reply=decision.reply,
-            profile_id=self._profile.id,
-            usage=(
-                {"cost_known": True, "cost_amount": float(usage.cost_units)}
-                if known and usage.cost_units is not None
-                else {"cost_known": False}
-            ),
         )
 
 

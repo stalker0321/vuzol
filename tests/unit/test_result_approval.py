@@ -647,7 +647,11 @@ async def test_last_item_of_a_lead_goal_applies_at_the_branch_head(managed: bool
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("reason", ["README уже содержит нужный раздел.", "x" * 2500])
+@pytest.mark.parametrize(
+    "reason",
+    ["README уже содержит нужный раздел.", "x" * 2500],
+    ids=["explanation", "bounded"],
+)
 async def test_no_change_approval_preserves_claim_and_explains_result(reason):
     base = "a" * 40
     from hashlib import sha256

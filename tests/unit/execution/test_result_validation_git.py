@@ -61,7 +61,11 @@ def test_normalize_blank_lines_at_eof_is_bounded_to_changed_text(tmp_path: Path)
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("reason", ["Already implemented in base.", "x" * 2500, None])
+@pytest.mark.parametrize(
+    "reason",
+    ["Already implemented in base.", "x" * 2500, None],
+    ids=["explanation", "bounded", "missing"],
+)
 async def test_validate_empty_change_passes_with_gates(tmp_path: Path, reason: str | None) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()

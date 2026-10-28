@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.discussion.domain import DomainError
 from vuzol.leadership.evidence import new_effect_blocker, package_has_unknown_effects
+from vuzol.leadership.feedback import no_change_claim
 from vuzol.leadership.persistence import ManagedGoal
 from vuzol.storage.models import (
     Approval,
@@ -313,10 +314,29 @@ async def task_context(session: AsyncSession, goal: ManagedGoal) -> dict[str, An
         )
         if digest is not None
     }
+    validations: dict[uuid.UUID, dict[str, Any]] = {}
+    for run_id, manifest in await session.execute(
+        select(Step.run_id, Step.result["structured_output"])
+        .where(
+            Step.run_id.in_([run.id for _task, run, _tree in tasks if run]),
+            Step.step_type == "validate",
+            Step.status == StepStatus.COMPLETED,
+        )
+        .order_by(Step.ordinal.desc())
+    ):
+        # The newest validation supersedes an earlier no-change claim after repair.
+        validations.setdefault(run_id, manifest if isinstance(manifest, dict) else {})
     context["tasks"] = [
         {
             "task_id": str(task.id),
             "status": task.status.value,
+            **(
+                no_change_claim(validations.get(run.id, {}))
+                if run
+                and tree
+                and validations.get(run.id, {}).get("result_commit") == tree.result_commit
+                else {}
+            ),
             "accept_spec": {
                 "task_id": str(task.id),
                 "scope_revision": (run.selected_route.get("managed_task") or {}).get(

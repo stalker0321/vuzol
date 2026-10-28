@@ -96,3 +96,35 @@ async def test_recall_ranking_scope_lifecycle_and_details(postgres_dsn):
             )
             assert {u.id for u in hits} == set(ids[:2])
             assert all(isinstance(u, MemoryUnit) for u in hits)
+
+
+async def test_recall_matches_russian_word_forms_and_any_query_word(postgres_dsn):
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            repo = MemoryUnitRepository(session)
+            weeks = await repo.create_decision(
+                project_id=PROJECT,
+                goal_id=goal_id,
+                text="Решили показывать недели в длительностях; парсер понимает «нед».",
+                details={},
+                extraction_identity=str(uuid.uuid4()),
+            )
+            other = await repo.create_decision(
+                project_id=PROJECT,
+                goal_id=goal_id,
+                text="Коммиты пишем по-русски.",
+                details={},
+                extraction_identity=str(uuid.uuid4()),
+            )
+        async with factory() as session:
+            repo = MemoryUnitRepository(session)
+
+            async def recall(query):
+                return [u.id for u in await repo.recall_lead(goal_id=goal_id, query=query)]
+
+            # The lead asks in its own words: other inflections, extra words.
+            assert await recall("неделя") == [weeks.id]
+            assert await recall("как мы решали про недели в длительности?") == [weeks.id]
+            assert await recall("коммит") == [other.id]
+            assert await recall("кенгуру") == []

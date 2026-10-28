@@ -913,7 +913,12 @@ class MemoryUnit(IdentityMixin, TimestampMixin, Base):
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)
     text_search: Mapped[str] = mapped_column(
-        TSVECTOR, Computed("to_tsvector('simple', text)", persisted=True)
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', text || CASE WHEN unit_type = 'decision_entry' "
+            "THEN ' ' || coalesce(details::text, '') ELSE '' END)",
+            persisted=True,
+        ),
     )
     trigger_event_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     extractor_version: Mapped[str] = mapped_column(String(30), nullable=False)

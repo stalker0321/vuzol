@@ -12,11 +12,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from vuzol.storage.models import MemoryUnit
+from vuzol.storage.models import MemoryUnit, ProjectProvisioning
 from vuzol.storage.types import MemoryScope, MemoryUnitStatus
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -311,6 +312,75 @@ class MemoryUnitRepository:
             .where(*conditions)
             .order_by(MemoryUnit.effective_at.desc(), MemoryUnit.id.desc())
             .limit(clamp_recall_limit(query.limit))
+        )
+        return tuple((await self._session.scalars(statement)).all())
+
+    async def recall_lead(
+        self,
+        *,
+        goal_id: uuid.UUID,
+        query: str,
+        project: str = "this",
+        limit: int = 8,
+    ) -> tuple[MemoryUnit, ...]:
+        """Search stored lead memory, scoped by server-owned goal ownership.
+
+        Topic mappings have no owner. Managed goals and provisioning requests do;
+        use those records rather than trusting a model-supplied project/user id.
+        Unlike discussion recall, an empty search never returns recent rows.
+        """
+        from vuzol.leadership.persistence import ManagedGoal
+
+        if not query.strip():
+            return ()
+        if project not in {"this", "all"} or len(query) > 200 or not 1 <= limit <= 8:
+            raise ValueError("invalid lead recall scope or bounds")
+        current = aliased(ManagedGoal)
+        source = aliased(ManagedGoal)
+        owner = select(current.owner_user_id).where(current.id == goal_id).scalar_subquery()
+        owned = (
+            select(ManagedGoal.project_id)
+            .where(ManagedGoal.owner_user_id == owner)
+            .union(
+                select(ProjectProvisioning.project_id).where(
+                    ProjectProvisioning.requested_by_user_id == owner
+                )
+            )
+        )
+        search = func.plainto_tsquery("simple", query)
+        conditions = [
+            MemoryUnit.scope == MemoryScope.PROJECT,
+            MemoryUnit.project_id.in_(owned),
+            MemoryUnit.unit_type.in_(("decision_entry", "notebook_note")),
+            MemoryUnit.status.in_((MemoryUnitStatus.OBSERVATION, MemoryUnitStatus.VERIFIED)),
+            MemoryUnit.superseded_by.is_(None),
+            MemoryUnit.text_search.op("@@")(search),
+            # Do not expose another owner's memory after a project's ownership changes.
+            or_(
+                MemoryUnit.goal_id.is_(None),
+                select(source.id)
+                .where(
+                    source.id == MemoryUnit.goal_id,
+                    source.owner_user_id == owner,
+                    source.project_id == MemoryUnit.project_id,
+                )
+                .exists(),
+            ),
+        ]
+        if project == "this":
+            conditions.append(
+                MemoryUnit.project_id
+                == select(current.project_id).where(current.id == goal_id).scalar_subquery()
+            )
+        statement = (
+            select(MemoryUnit)
+            .where(*conditions)
+            .order_by(
+                func.ts_rank(MemoryUnit.text_search, search).desc(),
+                MemoryUnit.created_at.desc(),
+                MemoryUnit.id.desc(),
+            )
+            .limit(limit)
         )
         return tuple((await self._session.scalars(statement)).all())
 

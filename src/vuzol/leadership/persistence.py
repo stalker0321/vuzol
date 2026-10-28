@@ -232,7 +232,8 @@ class LeadershipInference(TimestampMixin, Base):
             "state IN ('sending', 'received', 'unknown', 'not_sent')",
             name="leadership_inference_state",
         ),
-        Index("uq_leadership_inference_phase", "turn_id", "phase", unique=True),
+        CheckConstraint("round >= 0", name="leadership_inference_round_nonnegative"),
+        Index("uq_leadership_inference_phase", "turn_id", "phase", "round", unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -240,6 +241,7 @@ class LeadershipInference(TimestampMixin, Base):
         ForeignKey("leadership_turns.id", ondelete="RESTRICT"), nullable=False
     )
     phase: Mapped[str] = mapped_column(String(20), nullable=False)
+    round: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
     profile_revision: Mapped[str] = mapped_column(String(64), nullable=False)
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)

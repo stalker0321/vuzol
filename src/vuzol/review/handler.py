@@ -302,6 +302,31 @@ class ResultReviewHandler:
                     for index, item in enumerate(batch, start=1)
                 )
 
+        if structured.get("no_change") is True:
+            reason = structured.get("no_change_reason")
+            claim = json.dumps(
+                {
+                    "no_change": True,
+                    "no_change_reason": reason[:2_000] if isinstance(reason, str) else "",
+                },
+                ensure_ascii=True,
+            )
+            batch = (
+                *work_context,
+                ContextItem(
+                    source="no_change_result",
+                    reference=f"validation:{request.run_id}",
+                    content=claim,
+                    content_hash=hashlib.sha256(claim.encode()).hexdigest(),
+                ),
+            )
+            work_context = tuple(
+                item.model_copy(
+                    update={"reference": f"{item.reference}:part-{index}-of-{len(batch)}"}
+                )
+                for index, item in enumerate(batch, start=1)
+            )
+
         await self._git.require_clean_worktree(path)
         await self._git.require_no_remotes(path)
         inspection = await self._git.inspect(path, base_commit)

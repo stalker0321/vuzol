@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -623,3 +624,95 @@ async def test_review_fails_without_worktree(tmp_path: Path) -> None:
     outcome = await handler.execute(_request(task_id, run_id, lease), CancellationContext())
     assert outcome.kind is OutcomeKind.BLOCKED
     assert outcome.category == "review_failed"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("verdict_kind", ["pass", "blocked", "missing"])
+async def test_no_change_handler_requires_independent_review(tmp_path, verdict_kind):
+    from vuzol.review.domain import ReviewVerdict
+    from vuzol.review.partitions import verify_chunk_receipts
+
+    lease = _lease()
+    task_id, run_id = uuid.uuid4(), uuid.uuid4()
+    inspection = GitInspection(head="a" * 40, branch="task", changed_files=(), diff=b"")
+    validate = SimpleNamespace(
+        step_type="validate",
+        status=StepStatus.COMPLETED,
+        result={
+            "structured_output": {
+                "base_commit": inspection.head,
+                "result_commit": inspection.head,
+                "gates": [{"exit_code": 0}],
+                "no_change": True,
+                "no_change_reason": "x" * 2500,
+            },
+        },
+    )
+    step = SimpleNamespace(
+        status=StepStatus.RUNNING,
+        lease_owner=lease.owner,
+        lease_generation=lease.generation,
+        run_id=run_id,
+        payload={},
+        dependency_metadata={"predecessor_ordinals": [5]},
+    )
+    task = SimpleNamespace(risk=RiskLevel.LOW, task_draft={}, original_text="Already done")
+    tree = SimpleNamespace(
+        path=str(tmp_path),
+        delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
+        base_commit=inspection.head,
+        result_commit=inspection.head,
+        diff_hash=inspection.diff_hash,
+        branch=inspection.branch,
+    )
+    session = MagicMock(
+        get=AsyncMock(side_effect=[step, SimpleNamespace(task_id=task_id), task]),
+        scalar=AsyncMock(side_effect=[validate, tree, None]),
+    )
+    git = MagicMock(
+        require_clean_worktree=AsyncMock(),
+        require_no_remotes=AsyncMock(),
+        inspect=AsyncMock(return_value=inspection),
+    )
+    independent = (
+        None
+        if verdict_kind == "missing"
+        else MagicMock(
+            review=AsyncMock(
+                return_value=ReviewVerdict(
+                    verdict=ReviewVerdictKind(verdict_kind),
+                    review_kind="independent",
+                    risk="low",
+                    base_commit=inspection.head,
+                    result_commit=inspection.head,
+                    diff_hash=inspection.diff_hash,
+                    changed_files=(),
+                    findings=(),
+                    summary="Reviewed base",
+                )
+            )
+        )
+    )
+    handler = ResultReviewHandler(
+        MagicMock(return_value=AsyncContext(session)),
+        git,
+        worktree_root=tmp_path,
+        independent_reviewer=independent,
+    )
+
+    outcome = await handler.execute(_request(task_id, run_id, lease), CancellationContext())
+
+    assert outcome.kind is (
+        OutcomeKind.SUCCEEDED if verdict_kind == "pass" else OutcomeKind.BLOCKED
+    )
+    if independent is None:
+        assert outcome.category == "independent_review_required"
+    else:
+        independent.review.assert_awaited_once()
+        context = independent.review.await_args.kwargs["work_context"]
+        verify_chunk_receipts(context)
+        claim = json.loads(
+            next(item.content for item in context if item.source == "no_change_result")
+        )
+        assert claim["no_change"] is True
+        assert claim["no_change_reason"] == "x" * 2000

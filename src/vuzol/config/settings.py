@@ -241,6 +241,10 @@ class HardLimits(BaseModel):
     step_output_tokens: int = Field(default=25_000, ge=1)
     provider_call_input_tokens: int = Field(default=100_000, ge=1)
     provider_call_output_tokens: int = Field(default=25_000, ge=1)
+    lead_tool_rounds: int = Field(default=3, ge=0, le=10)
+    lead_tool_calls_per_round: int = Field(default=4, ge=1, le=16)
+    lead_tool_result_bytes: int = Field(default=8192, ge=128)
+    lead_tool_total_bytes: int = Field(default=24576, ge=128)
     # Primary plus bounded fallbacks. Four leaves room for a provider-originated
     # cancellation followed by a quota-triggered account failover.
     provider_attempts: int = Field(default=6, ge=1, le=20)

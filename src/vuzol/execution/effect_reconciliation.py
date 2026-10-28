@@ -223,6 +223,10 @@ class EffectReconciler:
         if repository is None:
             return EffectObservation.UNCERTAIN, ""
         try:
+            if result_commit == expected_head:
+                # A no-op is only valid while the target remains clean at base,
+                # just as in LocalGit.apply_result. The ref check below binds HEAD.
+                await self._git.require_clean_source(repository)
             observed = await self._git.read_ref(repository, branch)
         except GitError:
             return EffectObservation.UNCERTAIN, ""

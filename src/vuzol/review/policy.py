@@ -143,7 +143,9 @@ def resolve_review_plan(
     levels = tuple(
         level_for(risk, classify_file(path), l1_enabled=l1_enabled) for path in changed_files
     )
-    overall = max(levels, key=lambda level: _LEVEL_ORDER[level], default=ReviewLevel.L0)
+    # With no diff, only a model can judge whether the item was already satisfied.
+    empty_level = ReviewLevel.L3 if risk is RiskLevel.PRIVILEGED else ReviewLevel.L2
+    overall = max(levels, key=lambda level: _LEVEL_ORDER[level], default=empty_level)
     return {
         "policy_revision": REVIEW_POLICY_REVISION,
         "level": overall.value,

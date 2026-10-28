@@ -575,3 +575,77 @@ def test_effect_settle_helper_is_idempotent() -> None:
     settle_applied(effect, external_ref="refs/heads/main@abc")
     assert effect.status == "settled"
     assert effect.receipt_status == "applied"
+
+
+@pytest.mark.parametrize("state", ["clean", "drifted", "dirty"])
+def test_no_change_reconciliation_requires_unchanged_clean_target(postgres_dsn, tmp_path, state):
+    async def scenario():
+        engine, factory = storage(postgres_dsn)
+        try:
+            seed = await _seed(factory, tmp_path)
+            git = LocalGit()
+            # Simulate a retained no-op and an apply process that died before settlement.
+            await asyncio.to_thread(
+                subprocess.run,
+                ("git", "-C", str(tmp_path / "result-worktree"), "reset", "--hard", seed.base),
+                capture_output=True,
+                check=True,
+            )
+            if state == "drifted":
+                await asyncio.to_thread(
+                    subprocess.run,
+                    (
+                        "git",
+                        "-C",
+                        str(seed.repository),
+                        "update-ref",
+                        "refs/heads/main",
+                        seed.result_commit,
+                    ),
+                    capture_output=True,
+                    check=True,
+                )
+            if state == "dirty":
+                (seed.repository / "value.txt").write_text("uncommitted target change\n")
+            async with factory.begin() as session:
+                worktree = await session.get(Worktree, seed.worktree_id)
+                worktree.result_commit = seed.base
+                session.add(
+                    Effect(
+                        schema_version="effect.v1",
+                        operation_key=seed.operation_key,
+                        step_id=seed.step_id,
+                        task_id=seed.task_id,
+                        run_id=seed.run_id,
+                        effect_class="isolated_mutation",
+                        target_kind="git_ref",
+                        target_reference="refs/heads/main",
+                        idempotency="reconcilable",
+                        payload_hash="a" * 64,
+                        lease_generation=1,
+                        status="dispatched",
+                        context={
+                            "project_id": "vuzol",
+                            "worktree_id": str(seed.worktree_id),
+                            "target_branch": "main",
+                            "expected_head": seed.base,
+                            "result_commit": seed.base,
+                        },
+                    )
+                )
+            report = await EffectReconciler(
+                factory, git, _registries(seed.repository), owner="test-no-change"
+            ).reconcile_startup()
+            assert report.confirmed_count == (1 if state == "clean" else 0)
+            assert report.uncertain_count == (0 if state == "clean" else 1)
+            async with factory() as session:
+                worktree = await session.get(Worktree, seed.worktree_id)
+                assert worktree.delivery_state is (
+                    WorktreeDeliveryState.APPLIED
+                    if state == "clean"
+                    else WorktreeDeliveryState.WORKTREE_RETAINED
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

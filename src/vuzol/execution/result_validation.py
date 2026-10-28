@@ -305,7 +305,10 @@ class ResultValidationHandler:
                         detail=f"files={len(normalized)}",
                     )
                 )
-        if not inspection.changed_files:
+        no_change = not inspection.changed_files and not is_finalized and not amend_repair
+        if no_change:
+            await self._git.require_clean_worktree(path)
+        elif not inspection.changed_files:
             raise ResultValidationError(
                 "validation_empty_change",
                 "implementation produced no changes",
@@ -419,6 +422,40 @@ class ResultValidationHandler:
                     "validation_gate_mutated_worktree",
                     "required gates changed measured Git facts",
                 )
+
+        if no_change:
+            # Gates may leave index-only changes invisible in the diff against base.
+            await self._git.require_clean_worktree(path)
+            async with self._factory() as session:
+                worker = await session.scalar(
+                    select(Step)
+                    .where(
+                        Step.run_id == request.run_id,
+                        Step.step_type.in_(("execute_code", "execute_agent")),
+                        Step.status == StepStatus.COMPLETED,
+                    )
+                    .order_by(Step.ordinal.desc())
+                    .limit(1)
+                )
+            raw = worker.result.get("text") if worker and isinstance(worker.result, dict) else None
+            claim = {
+                "no_change": True,
+                # This is the executor's claim, not a validation of completion criteria.
+                "no_change_reason": raw[:2_000] if isinstance(raw, str) else "",
+            }
+            evidence = _success_payload(
+                base_commit=worktree.base_commit,
+                result_commit=worktree.base_commit,
+                branch=inspection.branch,
+                changed_files=(),
+                diff_hash=inspection.diff_hash,
+                system_checks=system_checks,
+                gates=tuple(run.evidence for run in gate_runs),
+                gate_runs=gate_runs,
+            )
+            evidence.update(claim)
+            evidence["structured_output"].update(claim)
+            return evidence
 
         if is_finalized:
             system_checks.append(

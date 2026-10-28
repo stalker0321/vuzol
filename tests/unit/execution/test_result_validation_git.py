@@ -8,11 +8,16 @@ from ._test_result_validation_helpers import (
     ArtifactSecretError,
     AsyncMock,
     CancellationContext,
+    CommandDefinition,
+    GateRun,
     GitError,
     GitInspection,
     MagicMock,
     OutcomeKind,
     Path,
+    SimpleNamespace,
+    _captured,
+    _gate_evidence,
     _handler,
     _inspection,
     _project,
@@ -56,20 +61,98 @@ def test_normalize_blank_lines_at_eof_is_bounded_to_changed_text(tmp_path: Path)
 
 
 @pytest.mark.anyio
-async def test_validate_empty_change_blocks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reason", ["Already implemented in base.", "x" * 2500, None])
+async def test_validate_empty_change_passes_with_gates(tmp_path: Path, reason: str | None) -> None:
+    worktree_path = tmp_path / "wt"
+    worktree_path.mkdir()
+    git = MagicMock()
+    git.require_clean_source = AsyncMock()
+    git.require_clean_worktree = AsyncMock()
+    git.require_no_remotes = AsyncMock()
+    git.inspect = AsyncMock(return_value=_inspection(files=(), diff=b""))
+    git.create_commit = AsyncMock()
+    worktree = _worktree(worktree_path)
+    session = MagicMock(scalar=AsyncMock(return_value=SimpleNamespace(result={"text": reason})))
+    gates = MagicMock(
+        run=AsyncMock(
+            return_value=(
+                GateRun(evidence=_gate_evidence(), stdout=_captured(), stderr=_captured()),
+            )
+        )
+    )
+    project = _project(
+        tmp_path, validation_commands=(CommandDefinition(name="tests", argv=("make", "test")),)
+    )
+    handler = _handler(git=git, worktree_root=tmp_path, session=session, gate_runner=gates)
+    handler._grant_access = AsyncMock(return_value=None)
+    handler._load = AsyncMock(return_value=(worktree, project, worktree_path))
+    handler._persist = AsyncMock()
+
+    outcome = await handler.execute(_request(worktree), CancellationContext())
+
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    for evidence in (outcome.result, outcome.result["structured_output"]):
+        assert evidence["no_change"] is True
+        assert evidence["no_change_reason"] == (reason or "")[:2000]
+        assert evidence["result_commit"] == worktree.base_commit
+        assert evidence["changed_files"] == []
+        assert evidence["diff_hash"] == _inspection(files=(), diff=b"").diff_hash
+    gates.run.assert_awaited_once()
+    git.require_clean_worktree.assert_awaited()
+    git.create_commit.assert_not_awaited()
+    handler._persist.assert_awaited_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bad", ["head", "dirty", "gate_dirty", "gate_failed"])
+async def test_validate_empty_change_keeps_guards(tmp_path: Path, bad: str) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
     git = MagicMock()
     git.require_clean_source = AsyncMock()
     git.require_no_remotes = AsyncMock()
-    git.inspect = AsyncMock(return_value=_inspection(files=(), diff=b""))
+    git.require_clean_worktree = AsyncMock(
+        side_effect=GitError("dirty")
+        if bad == "dirty"
+        else [None, GitError("dirty after gates")]
+        if bad == "gate_dirty"
+        else None
+    )
+    git.inspect = AsyncMock(
+        return_value=_inspection(head="b" * 40 if bad == "head" else "a" * 40, files=(), diff=b"")
+    )
+    gates = MagicMock(
+        run=AsyncMock(
+            return_value=(
+                GateRun(
+                    evidence=_gate_evidence(exit_code=1 if bad == "gate_failed" else 0),
+                    stdout=_captured(),
+                    stderr=_captured(),
+                ),
+            )
+        )
+    )
     worktree = _worktree(worktree_path)
-    handler = _handler(git=git, worktree_root=tmp_path)
-    handler._load = AsyncMock(return_value=(worktree, _project(tmp_path), worktree_path))  # type: ignore[method-assign]
-    handler._persist = AsyncMock()  # type: ignore[method-assign]
+    project = _project(
+        tmp_path, validation_commands=(CommandDefinition(name="tests", argv=("make", "test")),)
+    )
+    handler = _handler(git=git, worktree_root=tmp_path, gate_runner=gates)
+    handler._grant_access = AsyncMock(return_value=None)
+    handler._load = AsyncMock(return_value=(worktree, project, worktree_path))
+    handler._persist = AsyncMock()
+
     outcome = await handler.execute(_request(worktree), CancellationContext())
+
     assert outcome.kind is OutcomeKind.BLOCKED
-    assert outcome.category == "validation_empty_change"
+    assert (
+        outcome.category
+        == {
+            "head": "validation_precommitted",
+            "dirty": "validation_failed",
+            "gate_dirty": "validation_failed",
+            "gate_failed": "validation_gate_failed",
+        }[bad]
+    )
     handler._persist.assert_not_awaited()
 
 

@@ -1061,6 +1061,8 @@ def _build_request(
             no_change=True,
             no_change_reason=reason[:2_000] if isinstance(reason, str) else "",
             no_change_reason_untrusted=True,
+            requested_outcomes=draft.get("requested_outcomes", []),
+            constraints=draft.get("constraints", []),
         )
         payload["instruction"] += (
             " This is a no-change result. The no_change_reason is the executor's unverified "

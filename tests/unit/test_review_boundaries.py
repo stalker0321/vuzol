@@ -1104,8 +1104,13 @@ async def test_no_change_review_calls_model_with_untrusted_executor_claim(accept
         ),
     )
     inspection = GitInspection(head="a" * 40, branch="task", changed_files=(), diff=b"")
+    task = _task()
+    task.task_draft.update(
+        requested_outcomes=["README contains the setup section"],
+        constraints=["Only README.md is in scope"],
+    )
     verdict = await reviewer.review(
-        task=_task(),
+        task=task,
         risk=RiskLevel.LOW,
         inspection=inspection,
         base_commit=inspection.head,
@@ -1137,3 +1142,5 @@ async def test_no_change_review_calls_model_with_untrusted_executor_claim(accept
     assert "completion criteria" in bundle["instruction"]
     assert "repository at base" in bundle["instruction"]
     assert bundle["diff"] == ""
+    assert bundle["requested_outcomes"] == task.task_draft["requested_outcomes"]
+    assert bundle["constraints"] == task.task_draft["constraints"]

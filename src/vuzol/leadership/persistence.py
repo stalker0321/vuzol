@@ -248,6 +248,9 @@ class LeadershipInference(TimestampMixin, Base):
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     state: Mapped[str] = mapped_column(String(20), nullable=False)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    tool_audit: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=JSON_ARRAY
+    )
     reservation_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("provider_budget_reservations.id", ondelete="RESTRICT"), nullable=False
     )

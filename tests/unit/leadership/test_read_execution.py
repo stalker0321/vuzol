@@ -77,3 +77,32 @@ async def test_reads_require_server_turn_context():
         await execute_read(
             Factory(AsyncMock()), snapshot(), parse_tool_call({"name": "read_result", "args": {}})
         )
+
+
+@pytest.mark.anyio
+async def test_tool_audit_is_idempotent_and_attached_to_its_originating_round():
+    from vuzol.leadership.read_tools import record_tool_audit
+
+    row = SimpleNamespace(state="received", tool_audit=[])
+    session = AsyncMock()
+    session.scalar.return_value = row
+    context = SimpleNamespace(turn_id=uuid.uuid4())
+    token = current_turn.set(context)
+    entry = {
+        "call": 0,
+        "name": "recall",
+        "args": {"query": "choice"},
+        "hit_count": 2,
+        "result_bytes": 80,
+        "result": {"hits": ["stored data"]},
+    }
+    try:
+        await record_tool_audit(Factory(session), 2, entry)
+        await record_tool_audit(Factory(session), 2, entry)
+    finally:
+        current_turn.reset(token)
+    assert len(row.tool_audit) == 1 and "result" not in row.tool_audit[0]
+    assert row.tool_audit[0]["args"] == entry["args"]
+    query = session.scalar.call_args.args[0].compile()
+    assert query.params["round_1"] == 2
+    assert query.params["turn_id_1"] == context.turn_id

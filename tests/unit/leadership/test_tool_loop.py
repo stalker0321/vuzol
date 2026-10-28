@@ -420,3 +420,51 @@ async def test_malformed_oversized_arguments_return_a_bounded_error(monkeypatch)
     assert entry["error"] == "invalid_tool_call"
     assert entry["args"]["truncated"] is True
     assert len(script.requests[-1].context[0].content) < 4000
+
+
+@pytest.mark.anyio
+async def test_completed_read_is_audited_before_a_fenced_reinvoke(monkeypatch):
+    from vuzol.leadership import read_tools
+
+    script = Scripted({"tool_calls": [read("recall", query="choice")]})
+    lead = model(monkeypatch, script)
+    audit = AsyncMock()
+    monkeypatch.setattr(read_tools, "record_tool_audit", audit, raising=False)
+    monkeypatch.setattr(
+        read_tools, "execute_read", AsyncMock(return_value={"hits": [{"text": "fact"}]})
+    )
+    initial = script.invoke
+
+    async def invoke(*args, **kwargs):
+        if kwargs["round"] == 1:
+            # Revocation prevents creation of the following inference row.
+            raise LeadModelUnavailable("lead_model_unavailable")
+        return await initial(*args, **kwargs)
+
+    monkeypatch.setattr("vuzol.leadership.provider_model.invoke", invoke)
+    with pytest.raises(LeadModelUnavailable):
+        await lead.decide(snapshot())
+    audit.assert_awaited_once()
+    entry = audit.call_args.args[-1]
+    assert entry["name"] == "recall" and entry["args"] == {"query": "choice"}
+    assert entry["hit_count"] == 1 and entry["result_bytes"] > 0
+
+
+@pytest.mark.anyio
+async def test_denied_read_keeps_an_audit_without_a_second_provider_call(monkeypatch):
+    from vuzol.leadership import read_tools
+
+    script = Scripted({"tool_calls": [read()]})
+    lead = model(monkeypatch, script)
+    audit = AsyncMock()
+    monkeypatch.setattr(read_tools, "record_tool_audit", audit, raising=False)
+    monkeypatch.setattr(
+        read_tools,
+        "execute_read",
+        AsyncMock(side_effect=LeadModelUnavailable("lead_model_unavailable")),
+    )
+    with pytest.raises(LeadModelUnavailable):
+        await lead.decide(snapshot())
+    assert script.rounds == [0]
+    audit.assert_awaited_once()
+    assert audit.call_args.args[-1]["error"] == "read_authority_unavailable"

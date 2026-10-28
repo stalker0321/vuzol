@@ -53,9 +53,9 @@ def test_existing_receipt_and_decision_backfill_round_trip(postgres_dsn, monkeyp
                 ).fetchall()
                 == before
             )
-            assert connection.execute('SELECT "round" FROM leadership_inferences').fetchall() == [
-                (0,)
-            ]
+            assert connection.execute(
+                'SELECT "round", tool_audit FROM leadership_inferences'
+            ).fetchall() == [(0, [])]
             assert connection.execute(
                 "SELECT text_search @@ plainto_tsquery('simple', 'clementine') FROM memory_units"
             ).fetchall() == [(True,)]

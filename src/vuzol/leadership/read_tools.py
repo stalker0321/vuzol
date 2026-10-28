@@ -7,14 +7,14 @@ import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.settings import HardLimits
 from vuzol.leadership.commands import LeadCommandName
 from vuzol.leadership.invocation_context import current_turn, invocation_current
 from vuzol.leadership.model import LeadModelUnavailable, LeadSnapshot
-from vuzol.leadership.persistence import GoalDelegation, ManagedGoal
+from vuzol.leadership.persistence import GoalDelegation, LeadershipInference, ManagedGoal
 from vuzol.providers.domain import ContextItem
 from vuzol.storage.repositories.memory_units import MemoryUnitRepository
 
@@ -169,7 +169,12 @@ async def run_tool_batch(
                 audit["error"] = "invalid_tool_call"
                 value = {"error": "invalid_tool_call"}
             else:
-                value = await execute_read(factory, snapshot, call)
+                try:
+                    value = await execute_read(factory, snapshot, call)
+                except LeadModelUnavailable:
+                    audit["error"] = "read_authority_unavailable"
+                    await record_tool_audit(factory, round, audit)
+                    raise
             audit["hit_count"] = len(value.get("hits", []))
             bounded, size, truncated = bounded_result(
                 value, min(remaining, limits.lead_tool_result_bytes, 16000)
@@ -178,8 +183,43 @@ async def run_tool_batch(
             used_bytes += size
             byte_exhausted = truncated or used_bytes >= limits.lead_tool_total_bytes
             exhausted |= byte_exhausted
+        await record_tool_audit(
+            factory,
+            round,
+            {
+                **audit,
+                # Preserve exact attempted arguments in the receipt, even when the
+                # model context needs a bounded preview of an invalid call.
+                "name": raw.get("name") if isinstance(raw, dict) else None,
+                "args": raw.get("args") if isinstance(raw, dict) else raw,
+            },
+        )
         audits.append(audit)
     return _pack_audits(audits, round), used_bytes, exhausted
+
+
+async def record_tool_audit(
+    factory: async_sessionmaker[AsyncSession], round: int, audit: dict[str, Any]
+) -> None:
+    """Receipt bookkeeping survives revocation; it grants no command authority."""
+    context = current_turn.get()
+    if context is None:
+        return
+    receipt = {key: value for key, value in audit.items() if key != "result"}
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(LeadershipInference)
+            .where(
+                LeadershipInference.turn_id == context.turn_id,
+                LeadershipInference.phase == "lead",
+                LeadershipInference.round == round,
+            )
+            .with_for_update()
+        )
+        if row is None or row.state != "received":
+            raise LeadModelUnavailable("lead_inference_reconciliation")
+        if receipt not in row.tool_audit:
+            row.tool_audit = [*row.tool_audit, receipt]
 
 
 def _pack_audits(audits: list[dict[str, Any]], round: int) -> tuple[ContextItem, ...]:

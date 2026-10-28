@@ -2,7 +2,7 @@
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 
 revision = "f2c8a4e6b901"  # pragma: allowlist secret
 down_revision = "e1b7c9d4a6f2"  # pragma: allowlist secret
@@ -26,6 +26,10 @@ def _search(expression: str) -> None:
 def upgrade() -> None:
     op.add_column(
         "leadership_inferences",
+        sa.Column("tool_audit", JSONB, nullable=False, server_default=sa.text("'[]'::jsonb")),
+    )
+    op.add_column(
+        "leadership_inferences",
         sa.Column("round", sa.Integer(), nullable=False, server_default="0"),
     )
     op.drop_index("uq_leadership_inference_phase", table_name="leadership_inferences")
@@ -47,10 +51,15 @@ def upgrade() -> None:
 def downgrade() -> None:
     if (
         op.get_bind()
-        .execute(sa.text('SELECT count(*) FROM leadership_inferences WHERE "round" > 0'))
+        .execute(
+            sa.text(
+                'SELECT count(*) FROM leadership_inferences WHERE "round" > 0 '
+                "OR jsonb_array_length(tool_audit) > 0"
+            )
+        )
         .scalar_one()
     ):
-        raise RuntimeError("archive additional inference rounds before downgrade")
+        raise RuntimeError("archive tool audits and additional inference rounds before downgrade")
     _search("to_tsvector('simple', text)")
     op.drop_constraint(
         "leadership_inference_round_nonnegative", "leadership_inferences", type_="check"
@@ -60,3 +69,4 @@ def downgrade() -> None:
         "uq_leadership_inference_phase", "leadership_inferences", ["turn_id", "phase"], unique=True
     )
     op.drop_column("leadership_inferences", "round")
+    op.drop_column("leadership_inferences", "tool_audit")

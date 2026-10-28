@@ -592,16 +592,14 @@ def test_no_change_reconciliation_requires_unchanged_clean_target(postgres_dsn, 
                 check=True,
             )
             if state == "drifted":
+                # The result commit lives only in the isolated worktree, so move
+                # the target with a commit of its own.
+                (seed.repository / "value.txt").write_text("target moved on\n")
+                await git.stage_paths(seed.repository, ("value.txt",))
+                moved = await git.create_commit(seed.repository, "target moved on")
                 await asyncio.to_thread(
                     subprocess.run,
-                    (
-                        "git",
-                        "-C",
-                        str(seed.repository),
-                        "update-ref",
-                        "refs/heads/main",
-                        seed.result_commit,
-                    ),
+                    ("git", "-C", str(seed.repository), "update-ref", "refs/heads/main", moved),
                     capture_output=True,
                     check=True,
                 )

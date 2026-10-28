@@ -311,16 +311,7 @@ class LeadershipCommandService:
         }:
             return _Outcome(CommandStatus.DENIED, "goal_paused", {}, goal)
         if name in READ_COMMANDS:
-            body = _view(name, goal, delegation)
-            if name in {
-                LeadCommandName.GET_GOAL,
-                LeadCommandName.GET_RESULT,
-                LeadCommandName.GET_PROJECT_STATE,
-            }:
-                from vuzol.leadership.tasks import task_context
-
-                body.update(await _goal_projection(uow.session, goal))
-                body["task_control"] = await task_context(uow.session, goal)
+            body = await read_projection(uow.session, name, goal, delegation)
             return _Outcome(CommandStatus.APPLIED, None, body, goal)
         if name in MEMORY_COMMANDS:
             from vuzol.leadership.notebooks import apply_memory_command
@@ -1202,6 +1193,23 @@ def _next_operation(goal: ManagedGoal, package: WorkPackage | None, question: st
     if package is not None:
         return f"пакет {package.status.value}"
     return "решение руководителя"
+
+
+async def read_projection(
+    session: AsyncSession, name: LeadCommandName, goal: ManagedGoal, delegation: GoalDelegation
+) -> dict[str, Any]:
+    """Shared pure projection for commands and in-turn read-only tools."""
+    body = _view(name, goal, delegation)
+    if name in {
+        LeadCommandName.GET_GOAL,
+        LeadCommandName.GET_RESULT,
+        LeadCommandName.GET_PROJECT_STATE,
+    }:
+        from vuzol.leadership.tasks import task_context
+
+        body.update(await _goal_projection(session, goal))
+        body["task_control"] = await task_context(session, goal)
+    return body
 
 
 def _view(name: LeadCommandName, goal: ManagedGoal, delegation: GoalDelegation) -> dict[str, Any]:

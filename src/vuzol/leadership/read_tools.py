@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from vuzol.config.settings import HardLimits
+from vuzol.leadership.commands import LeadCommandName
+from vuzol.leadership.invocation_context import current_turn, invocation_current
+from vuzol.leadership.model import LeadModelUnavailable, LeadSnapshot
+from vuzol.leadership.persistence import GoalDelegation, ManagedGoal
+from vuzol.providers.domain import ContextItem
+from vuzol.storage.repositories.memory_units import MemoryUnitRepository
 
 
 class _Object(BaseModel):
@@ -40,3 +52,153 @@ class ToolBatch(_Object):
 
 def parse_tool_call(raw: object) -> ReadCall | RecallCall:
     return TypeAdapter(ReadCall | RecallCall).validate_python(raw)
+
+
+async def execute_read(
+    factory: async_sessionmaker[AsyncSession],
+    snapshot: LeadSnapshot,
+    call: ReadCall | RecallCall,
+) -> dict[str, Any]:
+    context = current_turn.get()
+    if (
+        context is None
+        or context.claim.goal_id != snapshot.goal_id
+        or context.project_id != snapshot.project_id
+    ):
+        raise LeadModelUnavailable("lead_model_unavailable")
+    async with factory.begin() as session:
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        if not await invocation_current(session, context, lock=False):
+            raise LeadModelUnavailable("lead_model_unavailable")
+        if isinstance(call, RecallCall):
+            units = await MemoryUnitRepository(session).recall_lead(
+                goal_id=snapshot.goal_id, **call.args.model_dump()
+            )
+            hits = [
+                {
+                    "kind": unit.unit_type,
+                    "project_id": unit.project_id,
+                    "text": unit.text.encode("utf-8")[:4000].decode("utf-8", errors="ignore"),
+                    "created_at": unit.created_at.isoformat(),
+                    "goal_id": str(unit.goal_id)
+                    if unit.goal_id
+                    else (unit.details or {}).get("goal_id"),
+                    "links": (unit.details or {}).get("links"),
+                }
+                for unit in units
+            ]
+            return {"hits": hits, "message": "matches" if hits else "no matches"}
+        from vuzol.leadership.service import read_projection
+
+        goal = await session.get(ManagedGoal, snapshot.goal_id)
+        if goal is None:
+            raise LeadModelUnavailable("lead_model_unavailable")
+        delegation = await session.get(GoalDelegation, goal.delegation_id)
+        if delegation is None:
+            raise LeadModelUnavailable("lead_model_unavailable")
+        name = (
+            LeadCommandName.GET_PROJECT_STATE
+            if call.name == "read_status"
+            else LeadCommandName.GET_RESULT
+        )
+        return await read_projection(session, name, goal, delegation)
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def bounded_result(value: dict[str, Any], budget: int) -> tuple[dict[str, Any], int, bool]:
+    """Count serialized UTF-8 bytes, including JSON escaping and truncation markers."""
+    rendered = _json(value)
+    size = len(rendered.encode("utf-8"))
+    if size <= budget:
+        return value, size, False
+    # Preserve a readable prefix of oversized projections without claiming it is complete.
+    low, high = 0, len(rendered)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = {"truncated": True, "text": rendered[:middle]}
+        if len(_json(candidate).encode("utf-8")) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    truncated = {"truncated": True, "text": rendered[:low]}
+    return truncated, len(_json(truncated).encode("utf-8")), True
+
+
+async def run_tool_batch(
+    factory: async_sessionmaker[AsyncSession],
+    snapshot: LeadSnapshot,
+    batch: ToolBatch,
+    *,
+    round: int,
+    used_bytes: int,
+    limits: HardLimits,
+) -> tuple[tuple[ContextItem, ...], int, bool]:
+    audits = []
+    exhausted = len(batch.tool_calls) >= limits.lead_tool_calls_per_round
+    byte_exhausted = False
+    for ordinal, raw in enumerate(batch.tool_calls):
+        name = raw.get("name") if isinstance(raw, dict) else None
+        args = raw.get("args") if isinstance(raw, dict) else raw
+        # The full attempted call is already in this round's provider receipt.
+        # Echo only a bounded preview of malformed/overlong arguments to the model.
+        if len(_json(args).encode()) > 2048:
+            args = {"truncated": True, "text": _json(args)[:1000]}
+        if not isinstance(name, str | type(None)) or (name is not None and len(name) > 100):
+            name = _json(name)[:100]
+        audit: dict[str, Any] = {
+            "round": round,
+            "call": ordinal,
+            "name": name,
+            "args": args,
+            "result_bytes": 0,
+            "hit_count": 0,
+        }
+        remaining = limits.lead_tool_total_bytes - used_bytes
+        if ordinal >= limits.lead_tool_calls_per_round:
+            audit["error"] = "tool_call_limit"
+        elif byte_exhausted or remaining < 128:
+            audit["error"] = "tool_byte_limit"
+            exhausted = True
+        else:
+            try:
+                call = parse_tool_call(raw)
+            except ValidationError:
+                audit["error"] = "invalid_tool_call"
+                value = {"error": "invalid_tool_call"}
+            else:
+                value = await execute_read(factory, snapshot, call)
+            audit["hit_count"] = len(value.get("hits", []))
+            bounded, size, truncated = bounded_result(
+                value, min(remaining, limits.lead_tool_result_bytes, 16000)
+            )
+            audit.update(result=bounded, result_bytes=size, truncated=truncated)
+            used_bytes += size
+            byte_exhausted = truncated or used_bytes >= limits.lead_tool_total_bytes
+            exhausted |= byte_exhausted
+        audits.append(audit)
+    return _pack_audits(audits, round), used_bytes, exhausted
+
+
+def _pack_audits(audits: list[dict[str, Any]], round: int) -> tuple[ContextItem, ...]:
+    # Group small/error results so an overlong call list cannot exceed the
+    # provider's 50 context-item limit and make a saved request unreplayable.
+    chunks: list[list[dict[str, Any]]] = [[]]
+    for audit in audits:
+        if len(_json({"tool_results": [*chunks[-1], audit]})) > 20000 and chunks[-1]:
+            chunks.append([])
+        chunks[-1].append(audit)
+    items = []
+    for index, chunk in enumerate(chunks):
+        content = _json({"tool_results": chunk})
+        items.append(
+            ContextItem(
+                source="untrusted_lead_tool_result",
+                reference=f"lead-round:{round}:results:{index}",
+                content=content,
+                content_hash=hashlib.sha256(content.encode()).hexdigest(),
+            )
+        )
+    return tuple(items)

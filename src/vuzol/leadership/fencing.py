@@ -21,7 +21,12 @@ class TurnClaim:
 
 
 async def claim_current(
-    session: AsyncSession, goal: ManagedGoal, claim: TurnClaim, turn: LeadershipTurn | None = None
+    session: AsyncSession,
+    goal: ManagedGoal,
+    claim: TurnClaim,
+    turn: LeadershipTurn | None = None,
+    *,
+    lock: bool = True,
 ) -> bool:
     now = datetime.now(UTC)
     if (
@@ -38,7 +43,7 @@ async def claim_current(
         or turn.wakeup_id != claim.wakeup_id
     ):
         return False
-    item = await session.get(TransactionalOutbox, claim.wakeup_id, with_for_update=True)
+    item = await session.get(TransactionalOutbox, claim.wakeup_id, with_for_update=lock)
     return (
         item is not None
         and item.status is DeliveryStatus.LEASED

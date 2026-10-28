@@ -38,14 +38,16 @@ class TurnInvocationContext:
 current_turn: ContextVar[TurnInvocationContext | None] = ContextVar("lead_turn", default=None)
 
 
-async def invocation_current(session: AsyncSession, context: TurnInvocationContext) -> bool:
+async def invocation_current(
+    session: AsyncSession, context: TurnInvocationContext, *, lock: bool = True
+) -> bool:
     """Recheck delegation and both leases, including before a process is started."""
     if not context.enabled():
         return False
     if context.retrospective:
-        return await _retrospective_current(session, context)
-    goal = await session.get(ManagedGoal, context.claim.goal_id, with_for_update=True)
-    turn = await session.get(LeadershipTurn, context.turn_id, with_for_update=True)
+        return await _retrospective_current(session, context, lock=lock)
+    goal = await session.get(ManagedGoal, context.claim.goal_id, with_for_update=lock)
+    turn = await session.get(LeadershipTurn, context.turn_id, with_for_update=lock)
     if (
         goal is None
         or turn is None
@@ -62,7 +64,7 @@ async def invocation_current(session: AsyncSession, context: TurnInvocationConte
         or turn.goal_version != context.version
         or turn.fence_epoch != context.fence_epoch
         or turn.scope_revision != context.scope_revision
-        or not await claim_current(session, goal, context.claim, turn)
+        or not await claim_current(session, goal, context.claim, turn, lock=lock)
     ):
         return False
     delegation = await session.scalar(
@@ -78,14 +80,16 @@ async def invocation_current(session: AsyncSession, context: TurnInvocationConte
     )
 
 
-async def _retrospective_current(session: AsyncSession, context: TurnInvocationContext) -> bool:
+async def _retrospective_current(
+    session: AsyncSession, context: TurnInvocationContext, *, lock: bool = True
+) -> bool:
     """A terminal goal's read-only inference is authorized solely by its outbox lease."""
     from vuzol.storage.models import TransactionalOutbox
     from vuzol.storage.types import DeliveryStatus
 
     claim = context.claim
-    item = await session.get(TransactionalOutbox, claim.wakeup_id, with_for_update=True)
-    turn = await session.get(LeadershipTurn, context.turn_id, with_for_update=True)
+    item = await session.get(TransactionalOutbox, claim.wakeup_id, with_for_update=lock)
+    turn = await session.get(LeadershipTurn, context.turn_id, with_for_update=lock)
     goal = await session.get(ManagedGoal, claim.goal_id)
     return (
         item is not None

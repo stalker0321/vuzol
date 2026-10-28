@@ -136,6 +136,11 @@ async def test_planner_assignment_commit_reads_and_owner_approval(
         assert len(transport.requests) == 1
         request = transport.requests[0]
         assert request.role is ProviderRole.PLANNER
+        assert request.prompt_revision == "project-planner.v6"
+        # A verify-only item has no diff and used to block the package (prod 2026-10-28).
+        assert "including its final check" not in request.original_input
+        assert "Every item must change project files" in request.original_input
+        assert "goal is verified automatically" in request.original_input
         assert request.task_draft["source_repo_commit"] == commit
         observed = json.loads("".join(item.content for item in request.context))
         assert observed["contents"]["KNOWN.txt"] == "committed source\n"
@@ -448,7 +453,7 @@ async def test_strong_planner_receives_both_complete_notebooks(postgres_dsn, tmp
         assert result.status == "applied"
         assert await worker.process_one()
         request = transport.requests[0]
-        assert request.prompt_revision == "project-planner.v5"
+        assert request.prompt_revision == "project-planner.v6"
         notes = [*request.task_draft["project_notebook"], *request.task_draft["global_notebook"]]
         assert [(note["id"], note["text"]) for note in notes] == [
             (str(note_id), text) for note_id, text in expected

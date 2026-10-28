@@ -16,6 +16,19 @@ MAX_CONTEXT_BYTES = 16_000
 MAX_ROWS = 8
 
 
+def no_change_claim(structured: dict[str, Any]) -> dict[str, Any]:
+    """Project the bounded executor claim without presenting it as verified fact."""
+
+    if structured.get("no_change") is not True:
+        return {}
+    reason = structured.get("no_change_reason")
+    return {
+        "no_change": True,
+        "no_change_reason": reason[:2_000] if isinstance(reason, str) else "",
+        "no_change_reason_untrusted": True,
+    }
+
+
 def _text(value: object, limit: int = 512) -> str | None:
     if not isinstance(value, str):
         return None
@@ -267,6 +280,7 @@ async def result_context(
                     "ordinal": row.ordinal,
                     "type": row.step_type,
                     "status": row.status.value,
+                    **no_change_claim(structured),
                     "run_status": row.run_status.value,
                     "implementation_summary": _text(
                         row.implementation_summary or structured.get("implementation_summary")

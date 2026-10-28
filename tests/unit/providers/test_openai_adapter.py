@@ -446,3 +446,45 @@ async def test_openai_adapter_normalizes_timeout_and_invalid_shape() -> None:
                 provider_request(), profile("profile"), CancellationContext()
             )
     assert captured.value.category is ProviderErrorCategory.UNKNOWN
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_lead_response_union_uses_json_mode_and_strict_local_validation(mixed):
+    from vuzol.leadership.provider_model import decision_schema
+
+    answer = {"tool_calls": [{"name": "recall", "args": {"query": "previous choice"}}]}
+    if mixed:
+        answer.update(reply="", commands=[])
+
+    def respond(request):
+        payload = json.loads(request.content)
+        # OpenAI's strict API schemas do not support a union at the root.
+        assert payload["response_format"] == {"type": "json_object"}
+        assert "json" in " ".join(m["content"] for m in payload["messages"]).lower()
+        assert json.loads(payload["messages"][1]["content"])["output_schema"] == schema
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(answer)}, "finish_reason": "stop"}]
+            },
+        )
+
+    schema = decision_schema(tools_allowed=True)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="https://api.openai.com/v1"
+    ) as client:
+        adapter = OpenAICompatibleAdapter(credential=SecretStr("fixture"), client=client)
+        request = provider_request(structured=True).model_copy(
+            update={"output_json_schema": schema}
+        )
+        selected = profile("profile").model_copy(
+            update={"api_base_url": "https://api.openai.com/v1", "model": "gpt-5-nano-2025-08-07"}
+        )
+        if mixed:
+            with pytest.raises(ProviderFailure) as captured:
+                await adapter.execute(request, selected, CancellationContext())
+            assert captured.value.category is ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT
+        else:
+            result = await adapter.execute(request, selected, CancellationContext())
+            assert result.structured_output == answer

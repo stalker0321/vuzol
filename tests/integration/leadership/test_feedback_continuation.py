@@ -355,6 +355,10 @@ async def test_repeated_proposals_park_with_a_real_question(postgres_dsn, change
             assert goal.waiting_reason == "continuation_without_progress"
             assert goal.wakeup_condition["kind"] == "owner"
             assert goal.wakeup_condition["asked_version"] == goal.version
+            # The owner is told what happened and what to send, not "clarify the next step".
+            question = goal.wakeup_condition["question"]
+            assert "Уточни" not in question
+            assert "запусти следующий шаг" in question and "закрой цель" in question
 
 
 @pytest.mark.parametrize("point", ["before_ack", "after_enqueue", "after_commit"])

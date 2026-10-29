@@ -215,6 +215,7 @@ class ProjectLeadWorker:
             item = await session.get(TransactionalOutbox, claim.wakeup_id)
             conversational = item is not None and item.payload.get("wakeup_kind") in {
                 "owner_message",
+                "owner_routing_answer",
                 *PLAN_EVENTS,
                 "planning_requested",
             }
@@ -258,10 +259,15 @@ class ProjectLeadWorker:
                 return None
             owner_event = item.payload.get("wakeup_kind") == "owner_message"
             if owner_event and goal.lifecycle in _TERMINAL_GOAL:
-                if goal.constraints.get("restart_handoff", {}).get("source_event_id") == str(
-                    item.id
+                restart_source = item.payload.get("restart_from_event_id")
+                if (
+                    goal.constraints.get("restart_handoff", {}).get("source_event_id")
+                    == str(item.id)
+                ) or (
+                    restart_source is not None
+                    and goal.constraints.get("restart_from_event_id") == restart_source
                 ):
-                    # This input already seeded its successor, even if its turn was never acked.
+                    # Neither side of a committed handoff may admit the same request again.
                     await self._complete(uow.session, token)
                     return None
                 previous_turn = await uow.session.scalar(

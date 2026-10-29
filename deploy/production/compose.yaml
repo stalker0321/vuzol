@@ -121,6 +121,8 @@ services:
       VUZOL_INTERPRETATION__PROFILE_ID: jev-intake-prod
       VUZOL_INTERPRETATION__FALLBACK_PROFILE_IDS: "[]"
       VUZOL_INTERPRETATION__MANUAL_PROJECT_CREATION: "true"
+      # OpenAI speech-to-text for voice notes (owner 2026-10-29).
+      VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID: openai-transcribe
       VUZOL_OPENAI_INTERPRETER_API_KEY: ${VUZOL_OPENAI_INTERPRETER_API_KEY:-}
       VUZOL_OPENAI_TRANSCRIPTION_API_KEY: ${VUZOL_OPENAI_TRANSCRIPTION_API_KEY:-}
       VUZOL_OPENROUTER_INTERPRETER_API_KEY: ${VUZOL_OPENROUTER_INTERPRETER_API_KEY:-}
@@ -132,6 +134,7 @@ services:
       - *registry
       - *accounts
       - /var/lib/vuzol/secrets/jev-openrouter.key:/run/vuzol-secrets/jev-openrouter.key:ro
+      - /var/lib/vuzol/secrets/openai-transcription.key:/run/vuzol-secrets/openai-transcription.key:ro
       - /srv/vuzol/repositories:/srv/vuzol/repositories:ro
 
   memory-writer:

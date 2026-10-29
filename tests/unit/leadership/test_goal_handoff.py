@@ -226,7 +226,9 @@ async def test_paused_goal_can_ask_routing_without_resuming(handoff):
 
 
 @pytest.mark.anyio
-async def test_paused_handoff_answer_wakes_lead_without_resuming(handoff, monkeypatch):
+@pytest.mark.parametrize("answer", [CHOICE, "Дополнение к текущей"])
+async def test_paused_routing_answer_wakes_lead_without_resuming(handoff, monkeypatch, answer):
+    # Any answer to a routing question needs a lead turn, not only the restart choice.
     h = handoff
     h.goal.lifecycle = "paused"
     h.goal.wakeup_condition = {
@@ -238,7 +240,7 @@ async def test_paused_handoff_answer_wakes_lead_without_resuming(handoff, monkey
     }
     wakeup = AsyncMock()
     monkeypatch.setattr("vuzol.leadership.service.enqueue_goal_wakeup", wakeup)
-    await perform(h, "answer_permission", {"answer": CHOICE, "question_version": 2})
+    await perform(h, "answer_permission", {"answer": answer, "question_version": 2})
     assert h.goal.lifecycle == "paused"
     wakeup.assert_awaited_once()
     assert wakeup.call_args.kwargs["kind"] == "owner_routing_answer"

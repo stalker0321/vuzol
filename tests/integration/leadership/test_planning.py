@@ -210,7 +210,8 @@ async def test_failure_notifies_lead_and_owner_and_allows_retry(
                 )
             )
             assert any(
-                "План не подготовлен" in json.dumps(row.payload, ensure_ascii=False)
+                "Планировщик:" in json.dumps(row.payload, ensure_ascii=False)
+                and "продолжай" in json.dumps(row.payload, ensure_ascii=False)
                 for row in notices
             )
             assert (await session.get(ManagedGoal, goal_id)).lifecycle == "active"

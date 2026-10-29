@@ -258,6 +258,12 @@ class ProjectLeadWorker:
                 return None
             owner_event = item.payload.get("wakeup_kind") == "owner_message"
             if owner_event and goal.lifecycle in _TERMINAL_GOAL:
+                if goal.constraints.get("restart_handoff", {}).get("source_event_id") == str(
+                    item.id
+                ):
+                    # This input already seeded its successor, even if its turn was never acked.
+                    await self._complete(uow.session, token)
+                    return None
                 previous_turn = await uow.session.scalar(
                     select(LeadershipTurn).where(
                         LeadershipTurn.goal_id == goal.id,
@@ -474,6 +480,7 @@ class ProjectLeadWorker:
             if (
                 not owner_event
                 and not planning_event
+                and item.payload.get("wakeup_kind") != "owner_routing_answer"
                 and (
                     goal.lifecycle == "paused"
                     or (
@@ -601,6 +608,7 @@ class ProjectLeadWorker:
                 global_notebook=tuple(note_view(note) for note in global_notebook.notes),
                 result_context={
                     **await result_context(uow.session, goal, package),
+                    "owner_answer": goal.constraints.get("owner_answer"),
                     "work_limits": goal.constraints.get("work_limits", {}),
                     "conversation": history,
                     "task_control": await task_context(uow.session, goal),

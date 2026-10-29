@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.discussion.domain import DomainError, PlanDraft
@@ -137,6 +138,7 @@ class LeadershipCommandService:
                 LeadCommandName.REVISE_PLAN,
                 LeadCommandName.START_BATCH,
                 LeadCommandName.START_TASK,
+                LeadCommandName.CANCEL_GOAL,
             }:
                 await lock_project_admission(uow.session, command.project_id)
             receipt_key = (
@@ -296,6 +298,13 @@ class LeadershipCommandService:
             return await self._enable(uow, actor, command)
         if goal is None or delegation is None:
             return _Outcome(CommandStatus.DENIED, "goal_not_found", {}, None)
+        handoff = goal.constraints.get("restart_handoff")
+        if (
+            name is LeadCommandName.CANCEL_GOAL
+            and isinstance(handoff, dict)
+            and handoff.get("source_event_id") == command.payload.get("restart_from_event_id")
+        ):
+            return _Outcome(CommandStatus.DUPLICATE, "duplicate", handoff, goal)
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
         if goal.lifecycle == "paused" and name not in READ_COMMANDS | MEMORY_COMMANDS | {
@@ -308,6 +317,7 @@ class LeadershipCommandService:
             LeadCommandName.CANCEL_GOAL,
             LeadCommandName.REVOKE_DELEGATION,
             LeadCommandName.ANSWER_PERMISSION,
+            LeadCommandName.REQUEST_PERMISSION,
         }:
             return _Outcome(CommandStatus.DENIED, "goal_paused", {}, goal)
         if name in READ_COMMANDS:
@@ -400,13 +410,35 @@ class LeadershipCommandService:
             )
             return outcome
         if name is LeadCommandName.CANCEL_GOAL:
+            from vuzol.leadership.handoff import confirmed_restart_source, restart_draft
             from vuzol.leadership.retrospective import enqueue_retrospective
 
-            await _settle_children(uow.session, goal, actor, stop=True)
-            outcome = _transition(goal, actor, "cancelled", "cancelled", CommandStatus.APPLIED)
-            await enqueue_retrospective(
-                uow.session, goal, outcome="cancelled", reason=command.reason or "cancelled"
+            source_id = command.payload.get("restart_from_event_id")
+            source = (
+                await confirmed_restart_source(uow.session, goal, source_id)
+                if source_id is not None
+                else None
             )
+            try:
+                async with uow.session.begin_nested():
+                    await _settle_children(uow.session, goal, actor, stop=True)
+                    reason = "closed_for_new_task" if source is not None else "cancelled"
+                    outcome = _transition(goal, actor, "cancelled", reason, CommandStatus.APPLIED)
+                    await enqueue_retrospective(
+                        uow.session, goal, outcome="cancelled", reason=command.reason or reason
+                    )
+                    if source is not None:
+                        # Release both partial unique indexes before normal draft admission.
+                        await uow.session.flush()
+                        outcome.result.update(
+                            await restart_draft(
+                                uow.session, goal, source, branch_prefix=self._branch_prefix
+                            )
+                        )
+            except (SQLAlchemyError, ValueError, PermissionError) as error:
+                if source is None:
+                    raise
+                raise DomainError("restart_draft_unavailable") from error
             return outcome
         if name is LeadCommandName.REVOKE_DELEGATION:
             delegation.revoked_at = datetime.now(UTC)
@@ -431,7 +463,26 @@ class LeadershipCommandService:
                 "asked_version": asked_version,
                 "options": question_options(question, command.payload.get("options")),
             }
-            outcome = _transition(goal, actor, "waiting", "owner", CommandStatus.WAITING)
+            from vuzol.leadership.handoff import routing_question_source
+
+            source_id = await routing_question_source(
+                uow.session,
+                goal,
+                goal.wakeup_condition["options"],
+                wakeup_id=claim.wakeup_id if claim else None,
+            )
+            if source_id is not None:
+                goal.wakeup_condition = {
+                    **goal.wakeup_condition,
+                    "restart_from_event_id": source_id,
+                }
+            outcome = _transition(
+                goal,
+                actor,
+                "paused" if goal.lifecycle == "paused" else "waiting",
+                "owner",
+                CommandStatus.WAITING,
+            )
             await _enqueue_owner_question(uow.session, goal, question, asked_version)
             return outcome
         if name is LeadCommandName.ANSWER_PERMISSION:
@@ -883,11 +934,26 @@ async def _answer_permission(
         "scope_revision": goal.scope_revision,
         "question_version": condition.get("asked_version"),
         "version": goal.version,
+        **(
+            {"restart_from_event_id": condition["restart_from_event_id"]}
+            if condition.get("restart_from_event_id")
+            else {}
+        ),
     }
     goal.constraints = constraints
     goal.wakeup_condition = None
     if goal.lifecycle == "paused":
         _bump(goal, actor)
+        from vuzol.leadership.handoff import RESTART_CHOICE
+
+        if answer == RESTART_CHOICE and condition.get("restart_from_event_id"):
+            await enqueue_goal_wakeup(
+                session,
+                goal_id=goal.id,
+                idempotency_key=resume_wakeup_key(goal.id, goal.fence_epoch),
+                package_id=goal.current_package_id,
+                kind="owner_routing_answer",
+            )
         return _Outcome(
             CommandStatus.APPLIED,
             None,

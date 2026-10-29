@@ -32,6 +32,7 @@ class TurnInvocationContext:
     scope_revision: int
     conversational: bool = False
     retrospective: bool = False
+    job: bool = False
     enabled: Callable[[], bool] = lambda: True
 
 
@@ -44,6 +45,8 @@ async def invocation_current(
     """Recheck delegation and both leases, including before a process is started."""
     if not context.enabled():
         return False
+    if context.job:
+        return await _job_current(session, context, lock=lock)
     if context.retrospective:
         return await _retrospective_current(session, context, lock=lock)
     goal = await session.get(ManagedGoal, context.claim.goal_id, with_for_update=lock)
@@ -111,4 +114,47 @@ async def _retrospective_current(
         and turn.owner == claim.owner
         and turn.lease_epoch == claim.outbox_generation
         and turn.wakeup_id == uuid.uuid5(item.id, str(claim.outbox_generation))
+    )
+
+
+async def _job_current(
+    session: AsyncSession, context: TurnInvocationContext, *, lock: bool = True
+) -> bool:
+    """Read-only research follows its job lease, independent of lead turn versions."""
+    from vuzol.leadership.jobs import JobClaim, claim_matches
+    from vuzol.leadership.persistence import LeadJob
+
+    claim = context.claim
+    goal = await session.get(ManagedGoal, claim.goal_id, with_for_update=lock)
+    turn = await session.get(LeadershipTurn, context.turn_id, with_for_update=lock)
+    job = await session.get(LeadJob, claim.wakeup_id, with_for_update=lock)
+    if (
+        goal is None
+        or job is None
+        or turn is None
+        or goal.project_id != context.project_id
+        or goal.lifecycle not in {"draft", "active", "waiting"}
+        or not claim_matches(
+            job,
+            goal,
+            JobClaim(job.id, goal.id, claim.owner, claim.lease_epoch),
+            now=datetime.now(UTC),
+        )
+        or turn.id != uuid.uuid5(job.id, f"attempt:{claim.lease_epoch}")
+        or turn.wakeup_id != turn.id
+        or turn.goal_id != goal.id
+        or turn.status != "claimed"
+        or turn.owner != claim.owner
+        or turn.lease_epoch != claim.lease_epoch
+        or claim.outbox_generation != claim.lease_epoch
+    ):
+        return False
+    delegation = await session.get(GoalDelegation, goal.delegation_id)
+    return (
+        delegation is not None
+        and delegation.project_id == goal.project_id
+        and delegation.policy_revision == POLICY_REVISION
+        and delegation.agent_principal_id == server_agent_principal(goal.project_id)
+        and delegation.revoked_at is None
+        and not delegation_is_expired(delegation.expires_at, now=datetime.now(UTC))
     )

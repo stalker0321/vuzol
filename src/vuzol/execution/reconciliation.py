@@ -464,22 +464,43 @@ class TurnStartupReconciler:
             # outbox, then process); missing evidence is not revocation proof.
             goal = await session.get(ManagedGoal, context.claim.goal_id, with_for_update=True)
             turn = await session.get(LeadershipTurn, context.turn_id, with_for_update=True)
-            wakeup = await session.get(
-                TransactionalOutbox, context.claim.wakeup_id, with_for_update=True
-            )
+            if context.job:
+                from vuzol.leadership.persistence import LeadJob
+
+                job = await session.get(LeadJob, context.claim.wakeup_id, with_for_update=True)
+                authority_missing = (
+                    job is None
+                    or job.goal_id != context.claim.goal_id
+                    or job.lease_generation < context.claim.lease_epoch
+                    or turn is None
+                    or turn.wakeup_id != turn.id
+                    or turn.id
+                    != uuid.uuid5(context.claim.wakeup_id, f"attempt:{context.claim.lease_epoch}")
+                )
+                current_generation = job.lease_generation if job is not None else 0
+            else:
+                wakeup = await session.get(
+                    TransactionalOutbox, context.claim.wakeup_id, with_for_update=True
+                )
+                authority_missing = (
+                    wakeup is None
+                    or turn is None
+                    or turn.wakeup_id != context.claim.wakeup_id
+                    or goal is None
+                    or goal.lease_epoch < context.claim.lease_epoch
+                    or wakeup.lease_generation < context.claim.outbox_generation
+                )
+                current_generation = goal.lease_epoch if goal is not None else 0
             phase = await session.get(LeadershipInference, process.invocation_id)
             if (
                 goal is None
                 or turn is None
-                or wakeup is None
                 or phase is None
+                or authority_missing
                 or goal.project_id != context.project_id
                 or turn.goal_id != goal.id
-                or turn.wakeup_id != context.claim.wakeup_id
                 or phase.turn_id != turn.id
                 or phase.profile_id != process.profile_id
-                or goal.lease_epoch < context.claim.lease_epoch
-                or wakeup.lease_generation < context.claim.outbox_generation
             ):
                 return await self._record(
                     session, process, ReconciliationClassification.PRESERVED_AMBIGUOUS
@@ -501,7 +522,7 @@ class TurnStartupReconciler:
             mark_reaped(process)
             classification = (
                 ReconciliationClassification.REMOVED_OLD_GENERATION
-                if goal.lease_epoch > context.claim.lease_epoch
+                if current_generation > context.claim.lease_epoch
                 else ReconciliationClassification.REMOVED_TERMINAL_LEFTOVER
                 if goal.lifecycle != "active" or turn.status != "claimed" or not self._enabled()
                 else ReconciliationClassification.REMOVED_EXPIRED_LEASE
@@ -549,6 +570,8 @@ def recovered_turn_binding(
         raise ValueError("malformed recovered turn conversational binding")
     if type(payload.get("retrospective", False)) is not bool:
         raise ValueError("malformed recovered turn retrospective binding")
+    if type(payload.get("job", False)) is not bool:
+        raise ValueError("malformed recovered job binding")
     context = TurnInvocationContext(
         claim=TurnClaim(
             goal_id=uuid.UUID(payload["goal_id"]),
@@ -564,6 +587,7 @@ def recovered_turn_binding(
         scope_revision=payload["scope_revision"],
         conversational=payload.get("conversational", False),
         retrospective=payload.get("retrospective", False),
+        job=payload.get("job", False),
         enabled=enabled,
     )
     envelope = ProcessEnvelope.model_validate(

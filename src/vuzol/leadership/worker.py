@@ -23,6 +23,7 @@ from vuzol.leadership.evidence import assess_completion
 from vuzol.leadership.feedback import result_context
 from vuzol.leadership.fencing import TurnClaim, claim_current
 from vuzol.leadership.invocation_context import TurnInvocationContext, current_turn
+from vuzol.leadership.job_runner import ResearchJobRunner
 from vuzol.leadership.model import (
     LeadDecision,
     LeadModel,
@@ -101,6 +102,7 @@ class ProjectLeadWorker:
         default_branches: Mapping[str, str] | None = None,
         repository_paths: Mapping[str, Path] | None = None,
         verifier: GoalVerification | None = None,
+        job_runner: ResearchJobRunner | None = None,
     ) -> None:
         self._factory = session_factory
         self._owner = owner
@@ -112,8 +114,15 @@ class ProjectLeadWorker:
         self._default_branches = dict(default_branches or {})
         self._repository_paths = dict(repository_paths or {})
         self._verifier = verifier
+        self.job_runner = job_runner
+
+    async def aclose(self) -> None:
+        if self.job_runner is not None:
+            await self.job_runner.aclose()
 
     async def process_one(self) -> bool:
+        if self.job_runner is not None:
+            self.job_runner.start()
         if not self._enabled():
             return False
         async with self._factory.begin() as session:

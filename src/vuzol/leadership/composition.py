@@ -15,8 +15,9 @@ from vuzol.config.revision import assignment_matches, assignment_revision
 from vuzol.config.settings import Settings
 from vuzol.leadership.fencing import TurnClaim
 from vuzol.leadership.invocation_context import current_turn, invocation_current
+from vuzol.leadership.job_runner import ResearchJobRunner
 from vuzol.leadership.model import LeadDecision, LeadModelUnavailable, LeadSnapshot
-from vuzol.leadership.persistence import LeadershipTurn
+from vuzol.leadership.persistence import LeadershipTurn, LeadJob
 from vuzol.leadership.provider_model import ProviderLeadModel
 from vuzol.leadership.retrospective import GoalRetrospectiveConsumer
 from vuzol.leadership.retrospective_model import RetrospectiveResponse, generate_retrospective
@@ -65,6 +66,14 @@ def build_project_lead_worker(
         default_branches=default_branches,
         repository_paths=repository_paths,
         verifier=selection,
+        job_runner=ResearchJobRunner(
+            session_factory,
+            owner=f"{owner}:jobs",
+            model=selection,
+            enabled=lambda: settings.project_lead.enabled,
+            concurrency=settings.project_lead.job_concurrency,
+            lease_seconds=settings.project_lead.lease_seconds,
+        ),
     )
 
 
@@ -154,6 +163,25 @@ class _TurnModels:
                 slot: ModelAssignment.model_validate(raw)
                 for slot, raw in turn.model_assignments.items()
             }
+
+    async def research(self, job: LeadJob) -> tuple[str, dict[str, Any]]:
+        from vuzol.leadership.research import generate_research
+
+        pins = await self._pins()
+        if "planner_strong" not in pins:
+            raise LeadModelUnavailable("planner_profile_unselected")
+        profile, adapter = self._resolve(pins["planner_strong"], "planner_strong")
+        context = current_turn.get()
+        assert context is not None
+        return await generate_research(
+            self._factory,
+            job,
+            profile,
+            adapter,
+            repository=self._repositories.get(context.project_id),
+            limits=self._settings.limits,
+            timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
+        )
 
     async def retrospect(
         self, project_id: str, context: dict[str, Any], *, invocation_id: uuid.UUID

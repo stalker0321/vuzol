@@ -56,6 +56,12 @@ class ProcessorChain:
                 return True
         return False
 
+    async def aclose(self) -> None:
+        for processor in self._processors:
+            close = getattr(processor, "aclose", None)
+            if close is not None:
+                await close()
+
 
 def run_worker(*, poll_interval_seconds: float, stop_event: threading.Event) -> None:
     """Wait for future workflow work without owning in-memory business state."""
@@ -310,6 +316,9 @@ async def run_runtime(
     await asyncio.gather(execution_task, return_exceptions=True)
     stopping.cancel()
     await asyncio.gather(stopping, return_exceptions=True)
+    close = getattr(controls, "aclose", None)
+    if close is not None:
+        await close()
     if failure is not None:
         raise failure
 

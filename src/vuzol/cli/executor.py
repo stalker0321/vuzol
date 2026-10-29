@@ -594,6 +594,10 @@ async def _run_loop(
         for task in lanes:
             task.cancel()
         await asyncio.gather(*lanes, return_exceptions=True)
+        for lane in processor.lanes():
+            close = getattr(lane, "aclose", None)
+            if close is not None:
+                await close()
     get_logger(__name__).info("executor stopped", extra={"event": "executor.stopped"})
 
 

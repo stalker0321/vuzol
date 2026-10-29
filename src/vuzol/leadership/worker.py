@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -24,6 +25,7 @@ from vuzol.leadership.feedback import result_context
 from vuzol.leadership.fencing import TurnClaim, claim_current
 from vuzol.leadership.invocation_context import TurnInvocationContext, current_turn
 from vuzol.leadership.job_runner import ResearchJobRunner
+from vuzol.leadership.limits import parse_work_limits
 from vuzol.leadership.model import (
     LeadDecision,
     LeadModel,
@@ -49,6 +51,7 @@ from vuzol.leadership.wakeups import (
     enabled_wakeup_key,
     enqueue_goal_wakeup,
 )
+from vuzol.providers.budgets import goal_cost_totals
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, defer_outbox_item
 from vuzol.storage.models import Event, TransactionalOutbox, WorkPackage
@@ -241,9 +244,23 @@ class ProjectLeadWorker:
             )
         token = current_turn.set(context)
         try:
+            review_failure = None
             if self._verifier is not None and not conversational:
-                await self._verifier.verify(claim.goal_id, claim=claim)
+                try:
+                    await self._verifier.verify(claim.goal_id, claim=claim)
+                except LeadModelUnavailable as error:
+                    if str(error) != "goal_budget_exhausted":
+                        raise
+                    review_failure = str(error)
             snapshot = await self._snapshot(claim.goal_id, wakeup_id=claim.wakeup_id)
+            if review_failure is not None:
+                snapshot = replace(
+                    snapshot,
+                    result_context={
+                        **snapshot.result_context,
+                        "goal_review_failure": review_failure,
+                    },
+                )
             return await self._model.decide(snapshot)
         finally:
             current_turn.reset(token)
@@ -617,6 +634,7 @@ class ProjectLeadWorker:
                 scope=MemoryScope.PROJECT, project_id=goal.project_id
             )
             global_notebook = await uow.memory_units.notebook(scope=MemoryScope.GLOBAL)
+            spent, reserved = await goal_cost_totals(uow.session, goal.id)
             return LeadSnapshot(
                 goal_id=goal.id,
                 project_id=goal.project_id,
@@ -640,6 +658,11 @@ class ProjectLeadWorker:
                 invocation_id=wakeup_id,
                 project_notebook=tuple(note_view(note) for note in project_notebook.notes),
                 global_notebook=tuple(note_view(note) for note in global_notebook.notes),
+                budget={
+                    "spent": float(spent),
+                    "reserved": float(reserved),
+                    "cap": parse_work_limits(goal.constraints.get("work_limits", {})).max_cost,
+                },
                 result_context={
                     **await result_context(uow.session, goal, package),
                     "owner_answer": goal.constraints.get("owner_answer"),

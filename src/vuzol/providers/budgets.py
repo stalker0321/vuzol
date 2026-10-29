@@ -956,6 +956,28 @@ async def reserve_budget(
     return reservation
 
 
+async def goal_cost_totals(session: AsyncSession, goal_id: uuid.UUID) -> tuple[Decimal, Decimal]:
+    """Settled and outstanding goal costs across every package and budget epoch."""
+    scopes = {
+        goal_id,
+        *await session.scalars(
+            select(WorkPackage.id).where(WorkPackage.managed_goal_id == goal_id)
+        ),
+    }
+    spent = await session.scalar(
+        select(func.coalesce(func.sum(UsageRecord.cost_units), 0)).where(
+            UsageRecord.horizon_id.in_(scopes)
+        )
+    )
+    reserved = await session.scalar(
+        select(func.coalesce(func.sum(ProviderBudgetReservation.reserved_cost_units), 0)).where(
+            ProviderBudgetReservation.horizon_id.in_(scopes),
+            ProviderBudgetReservation.status == BudgetReservationStatus.RESERVED,
+        )
+    )
+    return Decimal(spent or 0), Decimal(reserved or 0)
+
+
 async def _enforce_lifetime_budget(
     session: AsyncSession,
     *,
@@ -978,25 +1000,19 @@ async def _enforce_lifetime_budget(
     budget = parse_work_limits(goal.constraints.get("work_limits", {}))
     if budget.max_cost is None and budget.max_attempts is None:
         return
-    scopes = {
-        goal.id,
-        *await session.scalars(
-            select(WorkPackage.id).where(WorkPackage.managed_goal_id == goal.id)
-        ),
-    }
-    spent_cost = Decimal(0)
-    for scope in scopes:
-        totals = await _lifetime_totals(session, scope)
-        spent_cost += totals[2]
-    if budget.max_cost is not None and spent_cost + estimate.cost_units > Decimal(
-        str(budget.max_cost)
-    ):
-        raise GoalBudgetExceeded("lifetime owner cost budget exhausted")
-    if (
-        budget.max_attempts is not None
-        and await _lifetime_task_count(session, scopes) >= budget.max_attempts
-    ):
-        raise BudgetExceeded("lifetime owner attempt budget exhausted")
+    if budget.max_cost is not None:
+        spent, reserved = await goal_cost_totals(session, goal.id)
+        if spent + reserved + estimate.cost_units > Decimal(str(budget.max_cost)):
+            raise GoalBudgetExceeded("lifetime owner cost budget exhausted")
+    if budget.max_attempts is not None:
+        scopes = {
+            goal.id,
+            *await session.scalars(
+                select(WorkPackage.id).where(WorkPackage.managed_goal_id == goal.id)
+            ),
+        }
+        if await _lifetime_task_count(session, scopes) >= budget.max_attempts:
+            raise BudgetExceeded("lifetime owner attempt budget exhausted")
 
 
 async def reserve_invocation_budget(

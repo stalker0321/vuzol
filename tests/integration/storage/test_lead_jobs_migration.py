@@ -1,5 +1,6 @@
 """The additive jobs table enforces bounded input/results and downgrades cleanly."""
 
+import asyncio
 import uuid
 
 import psycopg
@@ -10,15 +11,10 @@ from alembic.config import Config
 from tests.integration.leadership.test_managed_goal_flow import _enable, _factory, _session
 from vuzol.config.settings import get_settings
 
-pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
+pytestmark = [pytest.mark.postgresql]
 
 
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
-async def test_jobs_migration_upgrade_constraints_and_downgrade(postgres_dsn, monkeypatch):
+def test_jobs_migration_upgrade_constraints_and_downgrade(postgres_dsn, monkeypatch):
     monkeypatch.setenv("VUZOL_DATABASE_DSN_REFERENCE", "env:VUZOL_DATABASE_DSN")
     monkeypatch.setenv("VUZOL_DATABASE_DSN", postgres_dsn)
     get_settings.cache_clear()
@@ -26,8 +22,13 @@ async def test_jobs_migration_upgrade_constraints_and_downgrade(postgres_dsn, mo
     dsn = postgres_dsn.replace("postgresql+psycopg://", "postgresql://")
     try:
         command.upgrade(config, "head")
-        async with _factory(postgres_dsn) as factory:
-            goal_id = await _enable(factory, await _session(factory))
+
+        async def goal():
+            # Alembic's env runs its own event loop, so only this setup is async.
+            async with _factory(postgres_dsn) as factory:
+                return await _enable(factory, await _session(factory))
+
+        goal_id = asyncio.run(goal())
         with psycopg.connect(dsn) as connection:
 
             def insert(question, result=None, state="queued", kind="research"):

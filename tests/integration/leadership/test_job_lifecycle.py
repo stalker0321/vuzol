@@ -208,6 +208,8 @@ async def test_cancel_is_idempotent_and_cancel_goal_cancels_queued_and_running(p
             assert (
                 await cancel_job(session, goal_id=goal_id, job_id=first)
             ).finished_at == finished
+        async with factory() as session:
+            version = (await session.get(ManagedGoal, goal_id)).version
         result = await _lead_service(factory).apply_human(
             Principal(OWNER, "telegram"),
             LeadCommand(
@@ -215,6 +217,7 @@ async def test_cancel_is_idempotent_and_cancel_goal_cancels_queued_and_running(p
                 project_id=PROJECT,
                 goal_id=goal_id,
                 idempotency_key="cancel-jobs",
+                expected_version=version,
                 payload={},
             ),
         )
@@ -254,12 +257,16 @@ async def test_goal_completion_cancels_jobs_in_the_same_transaction(postgres_dsn
     monkeypatch.setattr(
         "vuzol.leadership.service.assess_completion",
         AsyncMock(
-            return_value=SimpleNamespace(satisfied=True, covered=("requested-outcome",)),
+            return_value=SimpleNamespace(
+                satisfied=True, covered=("requested-outcome",), missing=()
+            ),
         ),
     )
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         job_id = await _enqueue(factory, goal_id)
+        async with factory() as session:
+            version = (await session.get(ManagedGoal, goal_id)).version
         result = await _lead_service(factory).apply_human(
             Principal(OWNER, "telegram"),
             LeadCommand(
@@ -267,6 +274,7 @@ async def test_goal_completion_cancels_jobs_in_the_same_transaction(postgres_dsn
                 project_id=PROJECT,
                 goal_id=goal_id,
                 idempotency_key="complete-with-job",
+                expected_version=version,
                 payload={},
             ),
         )

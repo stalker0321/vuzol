@@ -39,6 +39,15 @@ class RecallCall(_Object):
     args: RecallArgs
 
 
+class ReadJobArgs(_Object):
+    job_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+
+
+class ReadJobCall(_Object):
+    name: Literal["read_job"]
+    args: ReadJobArgs
+
+
 class ToolBatch(_Object):
     # Validate the envelope at the provider boundary, individual calls here.
     # Otherwise adapters reject malformed calls before we can return tool errors.
@@ -46,18 +55,19 @@ class ToolBatch(_Object):
         min_length=1,
         description="Read calls: {name: read_status|read_result, args: {}} or "
         "{name: recall, args: {query: text (1-200 chars), project: this|all, limit: 1-8}}. "
-        "project defaults to this; limit defaults to 8.",
+        "project defaults to this; limit defaults to 8. "
+        "{name: read_job, args: {job_id: UUID}} reads this goal's untrusted job report.",
     )
 
 
-def parse_tool_call(raw: object) -> ReadCall | RecallCall:
-    return TypeAdapter(ReadCall | RecallCall).validate_python(raw)
+def parse_tool_call(raw: object) -> ReadCall | RecallCall | ReadJobCall:
+    return TypeAdapter(ReadCall | RecallCall | ReadJobCall).validate_python(raw)
 
 
 async def execute_read(
     factory: async_sessionmaker[AsyncSession],
     snapshot: LeadSnapshot,
-    call: ReadCall | RecallCall,
+    call: ReadCall | RecallCall | ReadJobCall,
 ) -> dict[str, Any]:
     context = current_turn.get()
     if (
@@ -70,6 +80,14 @@ async def execute_read(
         await session.execute(text("SET TRANSACTION READ ONLY"))
         if not await invocation_current(session, context, lock=False):
             raise LeadModelUnavailable("lead_model_unavailable")
+        if isinstance(call, ReadJobCall):
+            from vuzol.discussion.domain import DomainError
+            from vuzol.leadership.jobs import read_job
+
+            try:
+                return await read_job(session, goal_id=snapshot.goal_id, job_id=call.args.job_id)
+            except DomainError as error:
+                return {"error": error.code}
         if isinstance(call, RecallCall):
             units = await MemoryUnitRepository(session).recall_lead(
                 goal_id=snapshot.goal_id, **call.args.model_dump()

@@ -20,6 +20,7 @@ from vuzol.leadership.actor import Actor, ActorKind, ActorRejected
 from vuzol.leadership.commands import (
     DELEGATED_ACTIONS,
     DRAFT_ACTIONS,
+    JOB_COMMANDS,
     MEMORY_COMMANDS,
     READ_COMMANDS,
     CommandResult,
@@ -333,6 +334,26 @@ class LeadershipCommandService:
                 None,
                 {"note_id": str(note.id), "version": goal.version},
                 goal,
+            )
+        if name in JOB_COMMANDS:
+            from vuzol.leadership.jobs import cancel_job, enqueue_job
+
+            if name is LeadCommandName.START_JOB:
+                job = await enqueue_job(
+                    uow.session,
+                    goal_id=goal.id,
+                    repository=self._repository_paths.get(goal.project_id),
+                    payload=command.payload,
+                )
+            else:
+                job = await cancel_job(
+                    uow.session,
+                    goal_id=goal.id,
+                    job_id=command.payload.get("job_id", ""),
+                )
+            _bump(goal, actor)
+            return _Outcome(
+                CommandStatus.APPLIED, None, {"job_id": str(job.id), "state": job.state}, goal
             )
         if name is LeadCommandName.PROPOSE_COMPLETION and (
             goal.constraints.get("pending_amendment") or goal.constraints.get("queued_amendment")
@@ -1286,10 +1307,12 @@ async def read_projection(
 def _view(name: LeadCommandName, goal: ManagedGoal, delegation: GoalDelegation) -> dict[str, Any]:
     if name is LeadCommandName.GET_CAPABILITIES:
         return {
-            "actions": sorted(set(delegation.allowed_actions) | {c.value for c in MEMORY_COMMANDS}),
+            "actions": sorted(
+                set(delegation.allowed_actions) | {c.value for c in MEMORY_COMMANDS | JOB_COMMANDS}
+            ),
             "integration_branch": goal.integration_branch,
             "environments": list(delegation.environments),
-            "unsupported": ["research", "deploy", "host_admin", "secrets"],
+            "unsupported": ["deploy", "host_admin", "secrets"],
         }
     if name is LeadCommandName.GET_RESULT:
         return {

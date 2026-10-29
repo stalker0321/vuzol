@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from vuzol.leadership.actor import Actor, ActorKind
 from vuzol.leadership.commands import (
     DELEGATED_ACTIONS,
+    JOB_COMMANDS,
     MEMORY_COMMANDS,
     OWNER_ONLY_COMMANDS,
     READ_COMMANDS,
@@ -81,8 +82,8 @@ def authorize(
         return PolicyDecision(False, "denied", "delegation_expired")
     if delegation_policy_revision != POLICY_REVISION:
         return PolicyDecision(False, "denied", "policy_revision_mismatch")
-    # Saved notes are intrinsic to the lead; existing grants need no migration.
-    if command in MEMORY_COMMANDS:
+    # Notes and read-only research are intrinsic to a valid lead delegation.
+    if command in MEMORY_COMMANDS | JOB_COMMANDS:
         return PolicyDecision(True, "applied")
     delegation_actions = delegation_actions | frozenset(
         {

@@ -56,12 +56,12 @@ def harness(monkeypatch):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("failure", [None, "rate_limited", "goal_budget_exhausted"])
 async def test_runner_publishes_once_and_finishes_its_attempt(harness, failure):
     factory, rows, _, claims, complete = harness
     model = AsyncMock()
     if failure:
-        model.research.side_effect = LeadModelUnavailable("rate_limited")
+        model.research.side_effect = LeadModelUnavailable(failure)
     else:
         model.research.return_value = ("Исследование", {"input_tokens": 4})
     runner = ResearchJobRunner(factory, owner="runner", model=model, enabled=lambda: True)
@@ -72,7 +72,7 @@ async def test_runner_publishes_once_and_finishes_its_attempt(harness, failure):
     assert complete.await_count == 1
     assert complete.call_args.kwargs == {
         "result_text": None if failure else "Исследование",
-        "failure_reason": "rate_limited" if failure else None,
+        "failure_reason": failure,
         "usage": {} if failure else {"input_tokens": 4},
     }
     assert rows[LeadershipTurn].status == "applied"

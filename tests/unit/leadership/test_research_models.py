@@ -22,6 +22,7 @@ from vuzol.leadership.job_runner import ResearchJobRunner
 from vuzol.leadership.model import LeadModelUnavailable
 from vuzol.leadership.persistence import LeadershipInference, LeadJob
 from vuzol.projects.model_matrix import ModelAssignment
+from vuzol.providers.budgets import GoalBudgetExceeded
 from vuzol.providers.domain import (
     NormalizedUsage,
     ProviderErrorCategory,
@@ -242,6 +243,24 @@ async def test_unknown_outcome_fails_job_without_fallback_even_on_replay(chain, 
         await chain.model.research(chain.job)
     assert first.execute.await_count == 1
     chain.adapters[chain.fallback.id].execute.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_goal_budget_refusal_fails_research_without_trying_fallback(chain, monkeypatch):
+    reserve = AsyncMock(side_effect=GoalBudgetExceeded("lifetime owner cost budget exhausted"))
+    monkeypatch.setattr(inference, "reserve_invocation_budget", reserve)
+    get = chain.store.get
+
+    async def lookup(model, identity, **kwargs):
+        return chain.job if model is LeadJob else await get(model, identity, **kwargs)
+
+    chain.store.get = AsyncMock(side_effect=lookup)
+    runner = ResearchJobRunner(chain.store, owner="runner", model=chain.model, enabled=lambda: True)
+    report, reason, _ = await runner._research(chain.claim)
+    assert report is None and reason == "goal_budget_exhausted"
+    reserve.assert_awaited_once()
+    for adapter in chain.adapters.values():
+        adapter.execute.assert_not_awaited()
 
 
 @pytest.mark.anyio

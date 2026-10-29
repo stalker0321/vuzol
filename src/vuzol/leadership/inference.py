@@ -24,6 +24,7 @@ from vuzol.observability import get_logger
 from vuzol.projects.executor_preference import PAYLOAD_MODEL_OVERRIDE
 from vuzol.providers.budgets import (
     BudgetExceeded,
+    GoalBudgetExceeded,
     accounting_for_profile,
     estimate_reservation,
     release_unsent_invocation,
@@ -179,7 +180,14 @@ async def invoke(
                 profile=profile,
                 estimate=estimate,
                 limits=limits,
-                accounting=accounting_for_profile(profile, purpose=purpose),
+                accounting=accounting_for_profile(
+                    profile,
+                    purpose=purpose,
+                    horizon_id=context.claim.goal_id if context is not None else None,
+                ),
+                # Keep the owner conversation and terminal reflection available
+                # after exhaustion, but count their receipts against the goal.
+                enforce_lifetime_budget=purpose not in {"project_lead", "lead_retrospective"},
             )
             reservation_id = reservation.id
             if context is not None:
@@ -198,6 +206,8 @@ async def invoke(
                     )
                 )
     except BudgetExceeded as error:
+        if isinstance(error, GoalBudgetExceeded):
+            raise LeadModelUnavailable("goal_budget_exhausted", retryable=False) from error
         # No durable attempt receipt exists yet: advancing a research chain here
         # would let crash replay revisit this choice after a later paid attempt.
         raise LeadModelUnavailable(

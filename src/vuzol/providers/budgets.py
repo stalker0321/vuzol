@@ -50,6 +50,10 @@ class BudgetExceeded(RuntimeError):
     """A hard budget cannot accommodate another provider call."""
 
 
+class GoalBudgetExceeded(BudgetExceeded):
+    """The owner's lifetime goal cost cap cannot fit another provider call."""
+
+
 EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY = (
     "Явный денежный потолок исчерпан. Сделанная работа сохранена. "
     "Увеличение потолка продолжает остаток и не стирает историю."
@@ -987,7 +991,7 @@ async def _enforce_lifetime_budget(
     if budget.max_cost is not None and spent_cost + estimate.cost_units > Decimal(
         str(budget.max_cost)
     ):
-        raise BudgetExceeded("lifetime owner cost budget exhausted")
+        raise GoalBudgetExceeded("lifetime owner cost budget exhausted")
     if (
         budget.max_attempts is not None
         and await _lifetime_task_count(session, scopes) >= budget.max_attempts
@@ -1005,13 +1009,15 @@ async def reserve_invocation_budget(
     accounting: AccountingContext,
     task_id: uuid.UUID | None = None,
     run_id: uuid.UUID | None = None,
+    enforce_lifetime_budget: bool = True,
 ) -> ProviderBudgetReservation:
     """Reserve a step-less invocation (D3, lead Q3): intake/planning/scout.
 
     Same atomic lock and idempotency as workflow reserves, keyed by
     ``invocation_id`` (partial unique) instead of ``(step_id, attempt)``.
     No fake Step is created. Task/step caps apply only when a task is bound;
-    call, daily and lifetime-owner caps always apply.
+    Call and daily caps always apply. A lead's conversation and retrospective
+    can explicitly bypass the lifetime gate while retaining goal attribution.
     """
 
     await session.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK_KEY)))
@@ -1080,7 +1086,7 @@ async def reserve_invocation_budget(
             dimension="task_cost_units",
             detail="task cost limit exceeded",
         )
-    if accounting.horizon_id is not None:
+    if accounting.horizon_id is not None and enforce_lifetime_budget:
         await _enforce_lifetime_budget(
             session,
             horizon_id=accounting.horizon_id,
@@ -1691,5 +1697,3 @@ async def release_orphan_reservations(
         closed += 1
     await session.flush()
     return closed
-
-

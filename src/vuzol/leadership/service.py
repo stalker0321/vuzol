@@ -1065,7 +1065,12 @@ async def _enqueue_owner_question(
         chat_id=goal.source_chat_id,
         thread_id=goal.source_thread_id,
         key=f"lead:question:{goal.id}:{version}",
-        text=render_question(question, version, has_options=bool(question_buttons(goal))),
+        text=render_question(
+            question,
+            version,
+            has_options=bool(question_buttons(goal)),
+            model_failure="model_failure" in (goal.wakeup_condition or {}),
+        ),
         markdown=True,
         projection_role=f"lq:{goal.id.hex}:{version}",
         revision=version,
@@ -1165,12 +1170,20 @@ async def _stopped_item_question(session: AsyncSession, goal: ManagedGoal) -> st
     return f"{name} остановился: {why}. {action}"
 
 
-async def request_owner_recovery(session: AsyncSession, goal: ManagedGoal, reason: str) -> None:
-    from vuzol.leadership.card import reason_text
+async def request_owner_recovery(
+    session: AsyncSession,
+    goal: ManagedGoal,
+    reason: str,
+    *,
+    failure_category: str | None = None,
+    retries: int = 0,
+) -> None:
+    from vuzol.leadership.card import model_failure_text, reason_text
     from vuzol.storage.models import TransactionalOutbox
     from vuzol.storage.types import DeliveryStatus
 
-    stopped = await _stopped_item_question(session, goal)
+    model_text = model_failure_text(reason, category=failure_category, retries=retries)
+    stopped = None if model_text else await _stopped_item_question(session, goal)
     if stopped is not None:
         assert goal.current_package_id is not None
         # Live pilot: the card with "Повторить" was far up the topic, and the
@@ -1186,19 +1199,26 @@ async def request_owner_recovery(session: AsyncSession, goal: ManagedGoal, reaso
                 status=DeliveryStatus.PENDING,
             )
         )
-    if stopped is not None:
+    if model_text:
+        question = model_text
+    elif stopped is not None:
         question = stopped
     elif reason == "continuation_without_progress":
         question = (
             "Несколько ходов подряд нет нового результата и запуска работы. Уточните следующий шаг."
         )
     else:
-        question = f"{reason_text(reason)} Уточни следующий шаг после устранения причины."
+        question = f"{reason_text(reason)} Напиши, как продолжить."
     goal.wakeup_condition = {
         "kind": "owner",
         "question": question,
         "scope_revision": goal.scope_revision,
         "asked_version": goal.version,
+        **(
+            {"model_failure": {"category": failure_category, "retries": retries}}
+            if model_text
+            else {}
+        ),
     }
     await _enqueue_owner_question(session, goal, question, goal.version)
 
@@ -1340,6 +1360,7 @@ def _view(name: LeadCommandName, goal: ManagedGoal, delegation: GoalDelegation) 
         "scope_revision": goal.scope_revision,
         "fence_epoch": goal.fence_epoch,
         "waiting_reason": goal.waiting_reason,
+        "model_failure": (goal.wakeup_condition or {}).get("model_failure"),
         "current_package_id": _uuid(goal.current_package_id),
         "integration_branch": goal.integration_branch,
     }

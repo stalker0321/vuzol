@@ -29,7 +29,9 @@ def anyio_backend():
 
 @pytest.fixture
 def ledger(monkeypatch):
-    goal = ManagedGoal(id=uuid.uuid4(), constraints={"work_limits": {"max_cost": 1.0}})
+    goal = ManagedGoal(
+        id=uuid.uuid4(), scope_revision=1, constraints={"work_limits": {"max_cost": 1.0}}
+    )
     rows = []
     session = AsyncMock()
     session.scalar.return_value = None
@@ -68,9 +70,13 @@ def ledger(monkeypatch):
         )
         return Mock(one=lambda: (*totals, len(selected)))
 
+    async def scalar(query):
+        return (await execute(query)).one()[2] if "sum(" in str(query) else None
+
     session.add = add
     session.get.side_effect = get
     session.execute.side_effect = execute
+    session.scalar.side_effect = scalar
     zero = (0, 0, Decimal(0), Decimal(0))
     monkeypatch.setattr(budgets, "_daily_usage_totals", AsyncMock(return_value=zero))
     monkeypatch.setattr(budgets, "_reserved_totals", AsyncMock(return_value=zero))
@@ -168,3 +174,99 @@ async def test_goal_exemption_preserves_provider_daily_limit(ledger, monkeypatch
     with pytest.raises(LeadModelUnavailable, match=r"^lead_budget_exceeded$"):
         await call(ledger, purpose)
     ledger.send.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_budget_totals_include_goal_and_all_packages_without_double_counting(ledger):
+    package_id = uuid.uuid4()
+    ledger.session.scalars.return_value = [package_id]
+    for scope, cost in [(ledger.goal.id, "0.2"), (package_id, "0.3"), (uuid.uuid4(), "99")]:
+        ledger.session.add(UsageRecord(horizon_id=scope, cost_units=Decimal(cost)))
+    for status, cost in [
+        (BudgetReservationStatus.RESERVED, "0.4"),
+        (BudgetReservationStatus.RECONCILED, "0.3"),
+        (BudgetReservationStatus.RELEASED, "99"),
+    ]:
+        ledger.session.add(
+            ProviderBudgetReservation(
+                horizon_id=package_id, status=status, reserved_cost_units=Decimal(cost)
+            )
+        )
+    assert await budgets.goal_cost_totals(ledger.session, ledger.goal.id) == (
+        Decimal("0.5"),
+        Decimal("0.4"),
+    )
+    estimate = budgets.estimate_reservation(profile(), input_tokens=1, output_tokens=1)
+    ledger.goal.constraints = {"work_limits": {"max_cost": 0.9}}
+    with pytest.raises(budgets.GoalBudgetExceeded):
+        await budgets._enforce_lifetime_budget(
+            ledger.session, horizon_id=ledger.goal.id, estimate=estimate
+        )
+
+
+@pytest.mark.anyio
+async def test_goal_review_refusal_reaches_the_leads_same_turn(ledger):
+    from vuzol.leadership.worker import ProjectLeadWorker
+
+    context = current_turn.get()
+    goal, turn = (
+        ledger.goal,
+        SimpleNamespace(id=context.turn_id, goal_version=1, fence_epoch=1, scope_revision=1),
+    )
+    goal.project_id = "p"
+    ledger.session.scalar.side_effect = None
+    ledger.session.scalar.return_value = turn
+    ledger.factory.__class__.__call__ = ledger.factory.__class__.begin
+    verifier, model = AsyncMock(), AsyncMock()
+    verifier.verify.side_effect = LeadModelUnavailable("goal_budget_exhausted", retryable=False)
+    worker = ProjectLeadWorker(
+        ledger.factory, owner="owner", model=model, verifier=verifier, enabled=lambda: True
+    )
+    worker._snapshot = AsyncMock(return_value=snapshot())
+    await worker._infer(context.claim)
+    model.decide.assert_awaited_once()
+    assert model.decide.call_args.args[0].result_context["goal_review_failure"] == (
+        "goal_budget_exhausted"
+    )
+
+
+@pytest.mark.anyio
+async def test_snapshot_budget_matches_lifetime_ledger(ledger, monkeypatch):
+    from vuzol.leadership.worker import ProjectLeadWorker
+
+    await call(ledger, "project_lead")
+    package_id = uuid.uuid4()
+    ledger.session.scalars.return_value = [package_id]
+    ledger.session.add(
+        ProviderBudgetReservation(
+            horizon_id=package_id,
+            status=BudgetReservationStatus.RESERVED,
+            reserved_cost_units=Decimal("0.3"),
+        )
+    )
+    ledger.goal.original_request = ledger.goal.scope_text = "task"
+    ledger.goal.criteria = []
+
+    @asynccontextmanager
+    async def uow(_factory):
+        yield SimpleNamespace(
+            session=ledger.session,
+            memory_units=SimpleNamespace(
+                notebook=AsyncMock(return_value=SimpleNamespace(notes=[]))
+            ),
+        )
+
+    monkeypatch.setattr("vuzol.leadership.worker.UnitOfWork", uow)
+    monkeypatch.setattr(
+        "vuzol.leadership.worker.assess_completion",
+        AsyncMock(return_value=SimpleNamespace(covered=())),
+    )
+    monkeypatch.setattr("vuzol.leadership.worker.result_context", AsyncMock(return_value={}))
+    monkeypatch.setattr("vuzol.leadership.planning.source_commit", AsyncMock(return_value=None))
+    monkeypatch.setattr("vuzol.leadership.jobs.list_jobs", AsyncMock(return_value=[]))
+    monkeypatch.setattr("vuzol.leadership.tasks.task_context", AsyncMock(return_value={}))
+    worker = ProjectLeadWorker(
+        ledger.factory, owner="owner", model=AsyncMock(), enabled=lambda: True
+    )
+    state = await worker._snapshot(ledger.goal.id)
+    assert state.budget == {"spent": 0.2, "reserved": 0.3, "cap": 1.0}

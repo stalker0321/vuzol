@@ -111,6 +111,20 @@ async def test_direct_decision_stays_one_invocation(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_prompt_exposes_goal_budget_and_explains_exhaustion_in_russian(monkeypatch):
+    script = Scripted(FINAL)
+    state = replace(snapshot(), budget={"spent": 1.2, "reserved": 0.2, "cap": 1.5})
+    await model(monkeypatch, script).decide(state)
+    prompt = script.requests[0].original_input
+    assert 'budget: {"spent": 1.2, "reserved": 0.2, "cap": 1.5}' in prompt
+    assert "nearly exhausted" in prompt
+    assert "spent of the cap" in prompt
+    assert "/lead limits cost" in prompt
+    assert "close the goal" in prompt
+    assert "Do not retry refused work" in prompt
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "costs,expected", [([Decimal(".2"), Decimal(".3")], 0.5), ([None, Decimal(".3")], None)]
 )

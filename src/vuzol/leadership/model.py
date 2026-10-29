@@ -60,6 +60,7 @@ class LeadSnapshot:
     result_context: dict[str, Any] = field(default_factory=dict)
     project_notebook: tuple[NotebookNote, ...] = ()
     global_notebook: tuple[NotebookNote, ...] = ()
+    budget: dict[str, float | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

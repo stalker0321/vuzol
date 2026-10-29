@@ -839,6 +839,7 @@ async def test_executor_loop_stops_on_registered_signal(
     processor = MagicMock()
     processor.lanes.return_value = (processor,)
     processor.recover_if_due = AsyncMock()
+    processor.aclose = AsyncMock()
 
     async def process_one() -> bool:
         callbacks[signal.SIGTERM]()
@@ -848,6 +849,8 @@ async def test_executor_loop_stops_on_registered_signal(
     monkeypatch.setattr("vuzol.cli.executor.asyncio.get_running_loop", lambda: LoopProxy())
     await executor_cli._run_loop(processor, 0.01)
     assert set(callbacks) == {signal.SIGTERM, signal.SIGINT}
+    # Lanes owning background work (lead research jobs) are closed on shutdown.
+    processor.aclose.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -866,6 +869,7 @@ async def test_executor_loop_forwards_explicit_limit_settings(
     processor = MagicMock()
     processor.lanes.return_value = (processor,)
     processor.recover_if_due = AsyncMock()
+    processor.aclose = AsyncMock()
 
     async def process_one() -> bool:
         callbacks[signal.SIGTERM]()

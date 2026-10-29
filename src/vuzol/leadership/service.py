@@ -944,9 +944,8 @@ async def _answer_permission(
     goal.wakeup_condition = None
     if goal.lifecycle == "paused":
         _bump(goal, actor)
-        from vuzol.leadership.handoff import RESTART_CHOICE
-
-        if answer == RESTART_CHOICE and condition.get("restart_from_event_id"):
+        # A routing answer needs a lead turn even though the goal stays paused.
+        if condition.get("restart_from_event_id"):
             await enqueue_goal_wakeup(
                 session,
                 goal_id=goal.id,

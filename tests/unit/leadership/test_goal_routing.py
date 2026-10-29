@@ -5,7 +5,9 @@ import uuid
 import pytest
 from tests.unit.leadership.test_tool_loop import snapshot
 
+from vuzol.leadership.card import render_goal_card
 from vuzol.leadership.provider_model import PROMPT_REVISION, _prompt, parse_lead_response
+from vuzol.telegram.formatting import telegram_markdown_html
 
 
 def test_prompt_distinguishes_refinement_from_separate_work():
@@ -27,3 +29,19 @@ def test_cancel_payload_accepts_optional_handoff_source(source):
     payload = {} if source is None else {"restart_from_event_id": source}
     decision = parse_lead_response({"commands": [{"name": "cancel_goal", "payload": payload}]})
     assert decision.commands[0].payload.get("restart_from_event_id") == source
+
+
+def test_cancelled_card_explains_the_new_task_handoff():
+    card = telegram_markdown_html(
+        render_goal_card(
+            {
+                "lifecycle": "cancelled",
+                "waiting_reason": "closed_for_new_task",
+            }
+        )
+    )
+    assert "Цель закрыта для новой задачи" in card
+    assert "Сохранённые результаты не удалены" in card
+    assert "closed_for_new_task" not in card
+    plain = telegram_markdown_html(render_goal_card({"lifecycle": "cancelled"}))
+    assert "Работа отменена" in plain

@@ -132,6 +132,11 @@ async def test_handoff_replays_once_and_keeps_cancellation_semantics(
         assert wakeups[0].payload["text"] == REQUEST
         assert wakeups[0].payload["attachments"] == [{"file_id": "saved-document"}]
         assert len([o for o in outbox if o.destination == "goal_retrospective"]) == int(worked)
+        notices = [
+            o for o in outbox if o.idempotency_key == f"lead:finished:{old.id}:{old.version}"
+        ]
+        assert len(notices) == 1
+        assert "Цель закрыта для новой задачи" in notices[0].payload["html"]
         async with factory() as session:
             if worked:
                 assert (await session.scalar(select(Task))).status == TaskStatus.CANCELLED

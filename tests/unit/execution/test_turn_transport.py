@@ -252,14 +252,15 @@ async def invocation(setup):
 
 
 @pytest.mark.parametrize("wrong", [None, "model", "effort"])
-async def test_research_override_is_the_exact_verified_cli_assignment(setup, wrong):
+@pytest.mark.parametrize("profile_role", [ProviderRole.PLANNER, ProviderRole.EXECUTOR])
+async def test_research_override_is_the_exact_verified_cli_assignment(setup, wrong, profile_role):
     configured = setup.profile.model_copy(
         update={
             "id": "codex-a",
             "provider": "codex",
             "model": "gpt-6.1-sol",
             "model_reasoning_effort": "medium",
-            "roles": frozenset({ProviderRole.PLANNER}),
+            "roles": frozenset({profile_role}),
         }
     )
     payload = {
@@ -301,6 +302,32 @@ async def test_research_override_is_the_exact_verified_cli_assignment(setup, wro
         assert 'model_reasoning_effort="high"' in envelope.argv
     assert configured.model == "gpt-6.1-sol"
     assert configured.model_reasoning_effort == "medium"
+
+
+async def test_planner_on_codex_keeps_the_registry_model_and_effort(setup):
+    configured = setup.profile.model_copy(
+        update={
+            "id": "codex-a",
+            "provider": "codex",
+            "model": "gpt-6.1-sol",
+            "model_reasoning_effort": "medium",
+            "roles": frozenset({ProviderRole.PLANNER}),
+        }
+    )
+    setup.registries.profiles.get = lambda key: configured
+    setup.phase.profile_id = configured.id
+    setup.phase.profile_revision = content_revision(configured)
+    setup.phase.phase = "planner"
+    req = setup.request.model_copy(
+        update={"role": ProviderRole.PLANNER, "output_schema_name": "lead_plan"}
+    )
+    setup.phase.request = req.model_dump(mode="json")
+    capture = Capture()
+    with pytest.raises(Captured):
+        await CodexCliAdapter(capture).execute(req, configured, CancellationContext())
+    envelope, _, _ = await setup.transport._prepare(capture.invocation, setup.context)
+    assert "gpt-6.1-sol" in envelope.argv
+    assert 'model_reasoning_effort="medium"' in envelope.argv
 
 
 async def test_explicit_account_requires_matching_ticket_and_persists_before_launch(

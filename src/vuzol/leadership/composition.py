@@ -9,10 +9,10 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config.models import ProviderProfileConfig
+from vuzol.config.models import Capability, LaunchMode, ProviderProfileConfig
 from vuzol.config.registries import ProfileRegistry
 from vuzol.config.revision import assignment_matches, assignment_revision
-from vuzol.config.settings import Settings
+from vuzol.config.settings import ResearchModelChoice, Settings
 from vuzol.leadership.fencing import TurnClaim
 from vuzol.leadership.invocation_context import current_turn, invocation_current
 from vuzol.leadership.job_runner import ResearchJobRunner
@@ -23,6 +23,11 @@ from vuzol.leadership.retrospective import GoalRetrospectiveConsumer
 from vuzol.leadership.retrospective_model import RetrospectiveResponse, generate_retrospective
 from vuzol.leadership.verification import GoalVerifier
 from vuzol.leadership.worker import ProjectLeadWorker
+from vuzol.projects.executor_preference import (
+    PAYLOAD_EFFORT_OVERRIDE,
+    PAYLOAD_MODEL_OVERRIDE,
+    apply_profile_overrides,
+)
 from vuzol.projects.model_matrix import SLOT_ROLES, ModelAssignment, assignment_snapshot
 from vuzol.providers.catalog import supported_profile
 from vuzol.providers.ports import ProviderAdapter
@@ -167,6 +172,46 @@ class _TurnModels:
     async def research(self, job: LeadJob) -> tuple[str, dict[str, Any]]:
         from vuzol.leadership.research import generate_research
 
+        if self._settings.project_lead.research_models:
+            # Validate the whole chain before sending, including currently unused fallbacks.
+            choices = [
+                self._resolve_research(choice)
+                for choice in self._settings.project_lead.research_models
+            ]
+            failures = []
+            context = current_turn.get()
+            assert context is not None
+            for index, (profile, adapter) in enumerate(choices):
+                try:
+                    report, usage = await generate_research(
+                        self._factory,
+                        job,
+                        profile,
+                        adapter,
+                        repository=self._repositories.get(context.project_id),
+                        limits=self._settings.limits,
+                        timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
+                        choice_index=index,
+                    )
+                except LeadModelUnavailable as error:
+                    failures.append(
+                        {"profile_id": profile.id, "model": profile.model, "reason": str(error)}
+                    )
+                    if not error.definitive or index == len(choices) - 1:
+                        raise LeadModelUnavailable(
+                            str(error),
+                            retryable=error.retryable,
+                            usage={"failed_attempts": failures},
+                        ) from error
+                else:
+                    return report, {
+                        **usage,
+                        "profile_id": profile.id,
+                        "model": profile.model,
+                        "reasoning_effort": profile.model_reasoning_effort,
+                        "failed_attempts": failures,
+                    }
+            raise AssertionError("nonempty research chain exhausted without an outcome")
         pins = await self._pins()
         if "planner_strong" not in pins:
             raise LeadModelUnavailable("planner_profile_unselected")
@@ -182,6 +227,33 @@ class _TurnModels:
             limits=self._settings.limits,
             timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
         )
+
+    def _resolve_research(
+        self, choice: ResearchModelChoice
+    ) -> tuple[ProviderProfileConfig, ProviderAdapter]:
+        try:
+            profile = self._profiles.get(choice.profile_id)
+            if (
+                not profile.enabled
+                or Capability.REPOSITORY_READ not in profile.capabilities
+                or not supported_profile(profile)
+                or (profile.launch_mode is LaunchMode.CLI and not profile.sandbox_required)
+            ):
+                raise ValueError("research profile must support sandboxed repository reads")
+            overrides: dict[str, object] = {}
+            if choice.model is not None:
+                overrides[PAYLOAD_MODEL_OVERRIDE] = choice.model
+            if choice.reasoning_effort is not None:
+                overrides[PAYLOAD_EFFORT_OVERRIDE] = choice.reasoning_effort
+            profile = apply_profile_overrides(profile, overrides)
+            adapter = self._injected["planner_strong"]
+            if adapter is None and self._registry is not None:
+                adapter = self._registry.get(profile.id)
+            if adapter is None:
+                raise ValueError("research transport is unavailable")
+            return profile, adapter
+        except (ValueError, LookupError) as error:
+            raise LeadModelUnavailable("research_model_unavailable") from error
 
     async def retrospect(
         self, project_id: str, context: dict[str, Any], *, invocation_id: uuid.UUID

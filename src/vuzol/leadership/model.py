@@ -19,10 +19,20 @@ class NotebookNote(TypedDict):
 class LeadModelUnavailable(RuntimeError):
     """The lead has no model. Callers must not invent a plan."""
 
-    def __init__(self, reason: str, *, retryable: bool = True) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        retryable: bool = True,
+        definitive: bool = False,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(reason)
         # False when the provider said a resend cannot help (auth, a bad request).
         self.retryable = retryable
+        # Separate resend policy from positive evidence that no usable answer can arrive.
+        self.definitive = definitive
+        self.usage = usage or {}
 
 
 @dataclass(frozen=True, slots=True)

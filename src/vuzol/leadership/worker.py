@@ -1045,7 +1045,13 @@ class ProjectLeadWorker:
                 goal.version += 1
                 goal.fence_epoch += 1
                 _system_event(uow.session, goal, reason)
-                await request_owner_recovery(uow.session, goal, reason)
+                await request_owner_recovery(
+                    uow.session,
+                    goal,
+                    reason,
+                    failure_category=failure_category,
+                    retries=retry_count,
+                )
             turn.status = "lost"
             turn.usage = {"cost_known": False}
             turn.decision = None

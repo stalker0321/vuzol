@@ -494,3 +494,75 @@ async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, 
                 assert goal.waiting_reason is None and parked is None
             else:
                 assert goal.waiting_reason == reason and parked is not None
+
+
+@pytest.mark.parametrize("exhaust", [False, True])
+async def test_model_backoff_success_or_exhaustion_and_owner_continue(
+    postgres_dsn, runtime, exhaust
+):
+    from vuzol.leadership.model import LeadModelUnavailable
+    from vuzol.leadership.worker import ProjectLeadWorker
+
+    class Model:
+        def __init__(self):
+            self.calls = 0
+            self.failures = 4 if exhaust else 2
+
+        async def decide(self, snapshot):
+            self.calls += 1
+            if self.calls <= self.failures:
+                raise LeadModelUnavailable(
+                    "lead_model_unavailable",
+                    definitive=True,
+                    failure_category="provider_unavailable",
+                )
+            return LeadDecision(reply="Продолжаю.", profile_id="fixture")
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        model = Model()
+        worker = ProjectLeadWorker(
+            factory,
+            owner="retry-test",
+            model=model,
+            enabled=lambda: True,
+            model_retry_delays_seconds=(0, 0, 0),
+        )
+        # Use a conversational event so a success does not start idle continuation.
+        async with factory.begin() as session:
+            for item in await session.scalars(select(TransactionalOutbox)):
+                item.status = DeliveryStatus.DELIVERED
+        await TelegramIngressService(runtime, factory).accept_message(_message(903, "Запускай"))
+        for _ in range(4 if exhaust else 3):
+            assert await worker.process_one()
+        assert not await worker.process_one()
+        async with factory() as session:
+            questions = list(
+                await session.scalars(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.idempotency_key.like(f"lead:question:{goal_id}:%")
+                    )
+                )
+            )
+            goal = await session.get(ManagedGoal, goal_id)
+            if not exhaust:
+                assert not questions and goal.waiting_reason is None
+                return
+            assert len(questions) == 1 and goal.lifecycle == "waiting"
+            asked_version = goal.wakeup_condition["asked_version"]
+            assert "Повторил 3 раза" in goal.wakeup_condition["question"]
+        await _drain(factory)
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.message_role == f"lq:{goal_id.hex}:{asked_version}"
+                )
+            )
+            assert link is not None
+            message_id = link.message_id
+        reply = _message(904, "продолжай").model_copy(update={"reply_to_message_id": message_id})
+        assert (await TelegramIngressService(runtime, factory).accept_message(reply)).status == (
+            IngressStatus.HANDLED
+        )
+        assert await worker.process_one()
+        assert model.calls == 5

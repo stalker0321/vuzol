@@ -29,10 +29,10 @@ _REASONS = {
     "goal_review_context_limit": "Материалы не помещаются в доступный контекст проверки.",
     "lead_model_unconfigured": "Модель руководителя не подключена.",
     "lead_profile_unselected": "Нужно подключить доступную модель руководителя.",
-    "lead_model_unavailable": "Обращение к модели не завершилось успешно. Работа не продолжена.",
-    "lead_response_invalid": "Модель вернула ответ, который нельзя безопасно применить.",
-    "goal_review_invalid": "Независимая проверка не вернула пригодного заключения.",
-    "goal_review_unavailable": "Не удалось выполнить независимую приёмку цели. Результат сохранён.",
+    "lead_model_unavailable": "Модель руководителя: провайдер недоступен.",
+    "lead_response_invalid": "Модель руководителя: ответ не удалось разобрать.",
+    "goal_review_invalid": "Проверка цели: ответ не удалось разобрать.",
+    "goal_review_unavailable": "Проверка цели: провайдер недоступен.",
     "rework_pending": "Доработка ещё не сделана: результат тот же, что ты просил доработать.",
 }
 _ERROR_REASONS = {
@@ -41,6 +41,51 @@ _ERROR_REASONS = {
     "goal_review_invalid",
     "goal_review_unavailable",
 }
+_MODEL_PARTS = {
+    "lead_model_unavailable": ("Модель руководителя", "provider_unavailable"),
+    "lead_response_invalid": ("Модель руководителя", "invalid_structured_output"),
+    "lead_model_unconfigured": ("Модель руководителя", "profile_unselected"),
+    "lead_profile_unselected": ("Модель руководителя", "profile_unselected"),
+    "lead_budget_exceeded": ("Модель руководителя", "budget_exceeded"),
+    "lead_context_limit": ("Модель руководителя", "context_limit"),
+    "goal_review_unavailable": ("Проверка цели", "provider_unavailable"),
+    "goal_review_invalid": ("Проверка цели", "invalid_structured_output"),
+    "goal_review_context_limit": ("Проверка цели", "context_limit"),
+}
+_MODEL_REASONS = {
+    "provider_unavailable": "провайдер недоступен",
+    "unavailable": "провайдер недоступен",
+    "rate_limited": "лимит запросов",
+    "timeout": "таймаут",
+    "invalid_structured_output": "ответ не удалось разобрать",
+    "invalid_output": "ответ не удалось разобрать",
+    "output_truncated": "ответ обрезан",
+    "authentication": "нет доступа к модели",
+    "permanent_request": "модель отклонила запрос",
+    "quota_exhausted": "исчерпан лимит использования модели",
+    "budget_exceeded": "достигнут лимит расходов или одновременных запросов",
+    "profile_unselected": "модель не подключена",
+    "context_limit": "слишком много материалов для одного запроса",
+    "head_changed": "исходный код изменился во время подготовки плана",
+    "scope_changed": "цель изменилась во время подготовки плана",
+    "revision_changed": "план изменился во время подготовки",
+}
+
+
+def model_failure_text(reason: str, *, category: str | None = None, retries: int = 0) -> str | None:
+    part = _MODEL_PARTS.get(reason)
+    if part is None and reason.startswith("planner_"):
+        part = ("Планировщик", reason.removeprefix("planner_"))
+    if part is None:
+        return None
+    name, default_category = part
+    detail = _MODEL_REASONS.get(category or default_category, "не удалось получить ответ")
+    repeated = (
+        f"Повторил {retries} {'раз' if retries == 1 else 'раза'}."
+        if retries
+        else "Повторов ещё не было."
+    )
+    return f"{name}: {detail}. {repeated} Напиши «продолжай», чтобы попробовать снова."
 
 
 def literal_markdown(value: object) -> str:
@@ -140,9 +185,20 @@ def render_goal_card(view: Mapping[str, object]) -> str:
             if reason in _ERROR_REASONS
             else "🟡 **НУЖНО РЕШЕНИЕ · Руководитель**"
         )
-        now = reason_text(reason)
+        failure = view.get("model_failure") or {}
+        failure = failure if isinstance(failure, dict) else {}
+        model_text = model_failure_text(
+            str(reason), category=failure.get("category"), retries=failure.get("retries", 0)
+        )
+        now = model_text or reason_text(reason)
         action = (
-            "Ответь на сообщение с вопросом." if view.get("question") else "Уточни следующий шаг."
+            ""
+            if model_text
+            else (
+                "Ответь на сообщение с вопросом."
+                if view.get("question")
+                else "Уточни следующий шаг."
+            )
         )
     elif view.get("current_package_status") == "paused":
         heading = "🟡 **РАБОТА ПРИОСТАНОВЛЕНА · Руководитель**"
@@ -177,14 +233,22 @@ def render_goal_card(view: Mapping[str, object]) -> str:
                     "• " + _preview(item.get("goal") or item["summary"], 160) for item in done
                 )
             )
-    parts.append(action)
+    if action:
+        parts.append(action)
     return "\n\n".join(parts)
 
 
 def render_question(
-    question: str, version: int, *, goal_id: str = "", has_options: bool = False
+    question: str,
+    version: int,
+    *,
+    goal_id: str = "",
+    has_options: bool = False,
+    model_failure: bool = False,
 ) -> str:
     """Identity/version live in the delivery binding, never in the visible text."""
+    if model_failure:
+        return "🔴 **СБОЙ МОДЕЛИ**\n\n" + literal_markdown(owner_text(question))
     return "\n\n".join(
         (
             "🟡 **ВОПРОС · Руководитель**",

@@ -172,9 +172,8 @@ async def test_handoff_replays_once_and_keeps_cancellation_semantics(
         async with factory.begin() as session:
             (await session.get(ManagedGoal, new.id)).lifecycle = "cancelled"
             (await session.get(TransactionalOutbox, event.id)).status = DeliveryStatus.PENDING
-            (
-                await session.get(TransactionalOutbox, wakeups[0].id)
-            ).status = DeliveryStatus.DELIVERED
+            (await session.get(TransactionalOutbox, wakeups[0].id)).status = DeliveryStatus.PENDING
+        assert await worker.process_one()
         assert await worker.process_one()
         goals, outbox = await state(factory)
         assert len(goals) == 2

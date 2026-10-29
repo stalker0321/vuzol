@@ -13,6 +13,7 @@ from vuzol.leadership.actor import Actor
 from vuzol.leadership.commands import LeadCommand, LeadCommandName
 from vuzol.leadership.persistence import GoalDelegation, ManagedGoal
 from vuzol.leadership.service import LeadershipCommandService
+from vuzol.leadership.worker import ProjectLeadWorker
 from vuzol.storage.models import ProjectDiscussionSession, TransactionalOutbox
 from vuzol.storage.types import DiscussionSessionStatus
 
@@ -241,3 +242,50 @@ async def test_paused_handoff_answer_wakes_lead_without_resuming(handoff, monkey
     assert h.goal.lifecycle == "paused"
     wakeup.assert_awaited_once()
     assert wakeup.call_args.kwargs["kind"] == "owner_routing_answer"
+
+
+@pytest.mark.anyio
+async def test_paused_routing_answer_is_a_conversational_model_invocation(handoff, monkeypatch):
+    from vuzol.leadership.invocation_context import current_turn
+
+    h = handoff
+    h.goal.lifecycle = "paused"
+    h.source.payload = {"wakeup_kind": "owner_routing_answer"}
+    h.session.__aenter__.return_value = h.session
+    h.session.get.side_effect = lambda model, key: h.goal if model is ManagedGoal else h.source
+    turn = SimpleNamespace(id=uuid.uuid4(), goal_version=3, fence_epoch=3, scope_revision=1)
+    monkeypatch.setattr("vuzol.leadership.worker._turn", AsyncMock(return_value=turn))
+
+    class Model:
+        async def decide(self, snapshot):
+            assert current_turn.get().conversational is True
+
+    worker = ProjectLeadWorker(
+        MagicMock(return_value=h.session), owner="test", model=Model(), enabled=lambda: True
+    )
+    monkeypatch.setattr(worker, "_snapshot", AsyncMock())
+    await worker._infer(SimpleNamespace(goal_id=h.goal.id, wakeup_id=h.source.id))
+
+
+@pytest.mark.anyio
+async def test_cancelled_successor_cannot_readmit_its_unprocessed_handoff(handoff, monkeypatch):
+    h = handoff
+    h.goal.lifecycle = "cancelled"
+    origin = str(uuid.uuid4())
+    h.goal.constraints = {"restart_from_event_id": origin}
+    h.source.payload = {**h.source.payload, "restart_from_event_id": origin}
+    get = h.session.get.side_effect
+    h.session.get.side_effect = lambda model, key, **kwargs: (
+        h.goal if model is ManagedGoal else get(model, key, **kwargs)
+    )
+    h.session.scalar.side_effect = ["demo", None]
+    create = AsyncMock(side_effect=AssertionError("consumed handoff was readmitted"))
+    monkeypatch.setattr("vuzol.leadership.events.live_or_draft", create)
+    worker = ProjectLeadWorker(
+        MagicMock(return_value=h.session), owner="test", model=AsyncMock(), enabled=lambda: True
+    )
+    complete = AsyncMock()
+    monkeypatch.setattr(worker, "_complete", complete)
+    assert await worker._prepare_turn(SimpleNamespace(item_id=h.source.id)) is None
+    create.assert_not_awaited()
+    complete.assert_awaited_once()

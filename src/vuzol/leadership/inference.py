@@ -21,6 +21,7 @@ from vuzol.leadership.invocation_context import (
 from vuzol.leadership.model import LeadModelUnavailable
 from vuzol.leadership.persistence import LeadershipInference
 from vuzol.observability import get_logger
+from vuzol.projects.executor_preference import PAYLOAD_MODEL_OVERRIDE
 from vuzol.providers.budgets import (
     BudgetExceeded,
     accounting_for_profile,
@@ -30,6 +31,7 @@ from vuzol.providers.budgets import (
     settle_invocation_budget,
 )
 from vuzol.providers.domain import (
+    NormalizedUsage,
     ProviderErrorCategory,
     ProviderFailureDetails,
     ProviderRequest,
@@ -67,6 +69,7 @@ async def invoke(
     round: int = 0,
 ) -> ProviderResult:
     context = current_turn.get()
+    research_chain = purpose == "lead_research_job" and PAYLOAD_MODEL_OVERRIDE in request.task_draft
     # Runtime authority is kept out of the model's prompt. The CLI adapter
     # hands the reference to the supervised transport, which verifies it.
     if context is not None and profile.launch_mode is LaunchMode.CLI:
@@ -84,9 +87,16 @@ async def invoke(
             "reserved_quota_units",
         },
     )
+    # Chain receipts survive lease/turn replacement. Runtime authority is still checked
+    # before replay and before send, but is not part of the immutable research input.
+    hash_payload = (
+        {k: v for k, v in input_payload.items() if k != "sandbox_reference"}
+        if research_chain
+        else input_payload
+    )
     input_hash = hashlib.sha256(
         json.dumps(
-            input_payload,
+            hash_payload,
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -104,11 +114,15 @@ async def invoke(
             if context is not None:
                 if not await invocation_current(session, context):
                     raise LeadModelUnavailable("lead_model_unavailable")
-                prior = await session.scalar(
-                    select(LeadershipInference).where(
-                        LeadershipInference.turn_id == context.turn_id,
-                        LeadershipInference.phase == phase,
-                        LeadershipInference.round == round,
+                prior = (
+                    await session.get(LeadershipInference, request.task_id)
+                    if research_chain
+                    else await session.scalar(
+                        select(LeadershipInference).where(
+                            LeadershipInference.turn_id == context.turn_id,
+                            LeadershipInference.phase == phase,
+                            LeadershipInference.round == round,
+                        )
                     )
                 )
                 if prior is not None:
@@ -125,10 +139,17 @@ async def invoke(
                             raise LeadModelUnavailable(
                                 _failure_reason(replay.failure, purpose),
                                 retryable=replay.failure is None or replay.failure.retryable,
+                                definitive=replay.failure is not None
+                                and (
+                                    not replay.failure.request_sent
+                                    or replay.failure.execution_completed
+                                ),
                             )
                         return replay
                     if prior.state == "not_sent":
-                        raise LeadModelUnavailable("lead_model_unavailable")
+                        raise LeadModelUnavailable(
+                            "lead_model_unavailable", definitive=research_chain
+                        )
                     raise LeadModelUnavailable("lead_inference_reconciliation")
             # A durable invocation without a decision is an accounting/recovery case,
             # not permission to send the same paid request again.
@@ -177,8 +198,10 @@ async def invoke(
                     )
                 )
     except BudgetExceeded as error:
+        # No durable attempt receipt exists yet: advancing a research chain here
+        # would let crash replay revisit this choice after a later paid attempt.
         raise LeadModelUnavailable(
-            "planner_budget_exceeded" if phase == "planner" else "lead_budget_exceeded"
+            "planner_budget_exceeded" if phase == "planner" else "lead_budget_exceeded",
         ) from error
     request = request.model_copy(
         update={
@@ -187,6 +210,7 @@ async def invoke(
         }
     )
     result = None
+    failure_receipt = None
     not_sent = False
     try:
         async with asyncio.timeout(request.timeout_seconds):
@@ -195,6 +219,16 @@ async def invoke(
     except ProviderFailure as error:
         not_sent = not error.request_sent
         result = error.receipt_result()
+        definitive = not_sent or error.execution_completed
+        if research_chain and definitive and result is None:
+            # Keep structural failure evidence for replay even without measured usage.
+            # Accounting below still settles the missing receipt conservatively.
+            failure_receipt = ProviderResult(
+                status=ProviderResultStatus.FAILED,
+                usage=NormalizedUsage(duration_ms=0),
+                adapter_version="research-failure.v1",
+                failure=error.details(),
+            )
         _logger.warning(
             "Project model invocation failed",
             extra={
@@ -206,7 +240,9 @@ async def invoke(
             },
         )
         raise LeadModelUnavailable(
-            _failure_reason(error.details(), purpose), retryable=error.retryable
+            _failure_reason(error.details(), purpose),
+            retryable=error.retryable,
+            definitive=definitive,
         ) from error
     except Exception as error:
         _logger.warning(
@@ -255,10 +291,11 @@ async def invoke(
                     LeadershipInference, request.task_id, with_for_update=True
                 )
                 assert phase_row is not None
+                receipt = result or failure_receipt
                 phase_row.state = (
-                    "not_sent" if not_sent else "unknown" if result is None else "received"
+                    "not_sent" if not_sent else "unknown" if receipt is None else "received"
                 )
-                phase_row.result = None if result is None else result.model_dump(mode="json")
+                phase_row.result = None if receipt is None else receipt.model_dump(mode="json")
 
 
 async def _send_guarded(

@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
-from vuzol.config.models import LaunchMode, ProviderRole, SandboxNetworkMode
+from vuzol.config.models import Capability, LaunchMode, ProviderRole, SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.revision import content_revision
 from vuzol.config.settings import Settings
@@ -204,7 +204,8 @@ class TurnSandboxTransport:
             ):
                 raise ValueError("turn inference has no matching durable send intent")
             profile = self._registries.profiles.get(phase.profile_id)
-            if context.job and phase.request.get("output_schema_name") == "lead_research":
+            research = context.job and phase.request.get("output_schema_name") == "lead_research"
+            if research:
                 profile = apply_profile_overrides(profile, phase.request.get("task_draft", {}))
             expected_role = {
                 "lead": ProviderRole.LEAD,
@@ -214,7 +215,11 @@ class TurnSandboxTransport:
             if (
                 not profile.enabled
                 or profile.launch_mode is not LaunchMode.CLI
-                or expected_role not in profile.roles
+                or (
+                    Capability.REPOSITORY_READ not in profile.capabilities
+                    if research
+                    else expected_role not in profile.roles
+                )
                 or not profile.sandbox_required
                 or content_revision(profile) != phase.profile_revision
                 or profile.runtime_identity != invocation.runtime_identity

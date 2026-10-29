@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
@@ -19,6 +19,7 @@ from vuzol.leadership.inference import invoke
 from vuzol.leadership.model import LeadModelUnavailable
 from vuzol.leadership.persistence import POLICY_REVISION, LeadJob
 from vuzol.leadership.provider_model import strict_response_schema
+from vuzol.projects.executor_preference import PAYLOAD_EFFORT_OVERRIDE, PAYLOAD_MODEL_OVERRIDE
 from vuzol.providers.domain import ContextItem, ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
@@ -39,6 +40,7 @@ async def research_request(
     repository: Path | None,
     limits: HardLimits,
     timeout_seconds: int,
+    choice_index: int | None = None,
 ) -> ProviderRequest:
     contents = []
     if profile.launch_mode is not LaunchMode.CLI:
@@ -69,6 +71,13 @@ async def research_request(
         "source_repo_commit": job.pinned_commit,
         "scope_revision": job.scope_revision,
     }
+    if choice_index is not None:
+        data.update(
+            {
+                PAYLOAD_MODEL_OVERRIDE: profile.model,
+                PAYLOAD_EFFORT_OVERRIDE: profile.model_reasoning_effort,
+            }
+        )
     input_tokens = (
         len(json.dumps(data).encode())
         + sum(len(c.content.encode()) for c in contents)
@@ -83,7 +92,9 @@ async def research_request(
         profile.context_limit or input_tokens + output_tokens
     ):
         raise LeadModelUnavailable("research_context_limit")
-    invocation_id = uuid.uuid5(job.id, "research")
+    invocation_id = uuid.uuid5(
+        job.id, "research" if choice_index is None else f"research:{choice_index}:{profile.id}"
+    )
     return ProviderRequest(
         task_id=invocation_id,
         run_id=invocation_id,
@@ -115,16 +126,31 @@ async def generate_research(
     repository: Path | None,
     limits: HardLimits,
     timeout_seconds: int,
+    choice_index: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     request = await research_request(
-        job, profile, repository=repository, limits=limits, timeout_seconds=timeout_seconds
+        job,
+        profile,
+        repository=repository,
+        limits=limits,
+        timeout_seconds=timeout_seconds,
+        choice_index=choice_index,
     )
-    result = await invoke(factory, profile, adapter, request, purpose=PURPOSE, limits=limits)
+    result = await invoke(
+        factory, profile, adapter, request, purpose=PURPOSE, limits=limits, round=choice_index or 0
+    )
     if result.status is not ProviderResultStatus.SUCCEEDED:
         raise LeadModelUnavailable(
-            result.failure.category.value if result.failure else "unavailable"
+            result.failure.category.value if result.failure else "unavailable",
+            definitive=result.failure is not None
+            and (not result.failure.request_sent or result.failure.execution_completed),
         )
     if result.finish_reason in {"length", "max_tokens", "incomplete"}:
-        raise LeadModelUnavailable("output_truncated")
-    response = ResearchResponse.model_validate(result.structured_output)
+        raise LeadModelUnavailable("output_truncated", definitive=True)
+    try:
+        response = ResearchResponse.model_validate(result.structured_output)
+    except ValidationError as error:
+        if choice_index is None:
+            raise
+        raise LeadModelUnavailable("invalid_structured_output", definitive=True) from error
     return response.report, result.usage.model_dump(mode="json")

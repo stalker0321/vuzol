@@ -172,6 +172,6 @@ class ResearchJobRunner:
             report, usage = await self._model.research(job)
             return report, None, usage
         except LeadModelUnavailable as error:
-            return None, str(error), {}
+            return None, str(error), error.usage
         except (ValueError, GitError, OSError):
             return None, "invalid_output_or_repository_unavailable", {}

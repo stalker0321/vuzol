@@ -421,6 +421,9 @@ class LeadershipCommandService:
             )
             try:
                 async with uow.session.begin_nested():
+                    from vuzol.leadership.jobs import cancel_goal_jobs
+
+                    await cancel_goal_jobs(uow.session, goal_id=goal.id)
                     await _settle_children(uow.session, goal, actor, stop=True)
                     reason = "closed_for_new_task" if source is not None else "cancelled"
                     outcome = _transition(goal, actor, "cancelled", reason, CommandStatus.APPLIED)
@@ -635,6 +638,9 @@ class LeadershipCommandService:
                 return _Outcome(CommandStatus.DENIED, "rework_pending", {}, goal)
             assessment = await assess_completion(uow.session, goal, check_live_head=True)
             if assessment.satisfied:
+                from vuzol.leadership.jobs import cancel_goal_jobs
+
+                await cancel_goal_jobs(uow.session, goal_id=goal.id)
                 goal.constraints = {
                     key: value
                     for key, value in goal.constraints.items()

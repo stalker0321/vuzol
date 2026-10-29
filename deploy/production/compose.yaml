@@ -28,6 +28,8 @@ x-roles: &roles
   VUZOL_PROJECT_LEAD__PROFILE_ID: pi-opencode-go-c-muse
   VUZOL_PROJECT_LEAD__REVIEWER_PROFILE_ID: pi-opencode-go-c-mimo
   VUZOL_PROJECT_LEAD__INFERENCE_TIMEOUT_SECONDS: "180"
+  # Owner 2026-10-29: new goals get a $1 cost cap unless the request sets one.
+  VUZOL_PROJECT_LEAD__DEFAULT_GOAL_MAX_COST: "1.0"
 
 x-app: &app
   image: ${VUZOL_IMAGE:?set by vuzol-compose}

@@ -42,6 +42,7 @@ from vuzol.providers.budgets import (
     EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY,
     EXPLICIT_MONEY_CAP_UNKNOWN_SUMMARY,
     BudgetExceeded,
+    GoalBudgetExceeded,
     accounting_for_profile,
     attempt_kind_for_step,
     estimate_reservation,
@@ -537,6 +538,7 @@ async def claim_routed_step(
         money_cap_hit = False
         unknown_cost = False
         consent_required = False
+        goal_budget_hit = False
         for profile_id in ordered:
             profile = registries.profiles.get(profile_id)
             estimate = estimate_reservation(
@@ -567,6 +569,9 @@ async def claim_routed_step(
                 )
             except BudgetExceeded as error:
                 message = str(error)
+                if isinstance(error, GoalBudgetExceeded):
+                    goal_budget_hit = True
+                    break
                 if message.startswith("explicit money cap cannot cover"):
                     consent_required = True
                 elif message.startswith("explicit money cap cannot be certified"):
@@ -616,7 +621,20 @@ async def claim_routed_step(
                 request=policy_request,
                 pin_inputs=pin_decision_inputs,
             )
-            if consent_required:
+            if goal_budget_hit:
+                await _block_route(
+                    session,
+                    step=step,
+                    run=run,
+                    task=task,
+                    category="goal_budget_exhausted",
+                    quota=False,
+                    summary=(
+                        "Бюджет цели исчерпан. Расходы и результат сохранены. "
+                        "Увеличьте лимит через /lead limits cost или закройте цель."
+                    ),
+                )
+            elif consent_required:
                 await _block_route(
                     session,
                     step=step,

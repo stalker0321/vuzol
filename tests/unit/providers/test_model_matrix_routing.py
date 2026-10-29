@@ -12,6 +12,7 @@ from vuzol.config.models import Capability, LaunchMode
 from vuzol.config.settings import HardLimits
 from vuzol.projects.model_matrix import MATRIX_KEY
 from vuzol.providers import routing
+from vuzol.providers.budgets import GoalBudgetExceeded
 from vuzol.providers.domain import EffectiveProfileState
 from vuzol.storage.models import Run, Step, Task
 from vuzol.storage.types import QueueClass, RunStatus, StepStatus
@@ -132,6 +133,16 @@ async def test_changed_pinned_profile_blocks_without_spending(route_call):
     assert await claim(c) is None
     assert c.blocked.call_args.kwargs["category"] == "project_pin_unresolved"
     c.reserve.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_goal_cap_refusal_preserves_reason_for_the_lead(route_call):
+    c = route_call
+    c.reserve.side_effect = GoalBudgetExceeded("lifetime owner cost budget exhausted")
+    assert await claim(c) is None
+    assert c.blocked.call_args.kwargs["category"] == "goal_budget_exhausted"
+    assert c.blocked.call_args.kwargs["quota"] is False
+    assert "/lead limits cost" in c.blocked.call_args.kwargs["summary"]
 
 
 @pytest.mark.anyio

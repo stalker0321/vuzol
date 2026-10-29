@@ -3,6 +3,7 @@
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,11 @@ from vuzol.execution.turn_transport import TurnSandboxTransport, turn_runtime_lo
 from vuzol.leadership.fencing import TurnClaim
 from vuzol.leadership.invocation_context import TurnInvocationContext, current_turn
 from vuzol.leadership.persistence import LeadershipInference, LeadershipTurn, ManagedGoal
+from vuzol.projects.executor_preference import (
+    PAYLOAD_EFFORT_OVERRIDE,
+    PAYLOAD_MODEL_OVERRIDE,
+    apply_profile_overrides,
+)
 from vuzol.providers.accounts import AccountExecution
 from vuzol.providers.codex import CodexCliAdapter
 from vuzol.providers.grok import GrokCliAdapter
@@ -243,6 +249,58 @@ async def invocation(setup):
     with pytest.raises(Captured):
         await PiCliAdapter(capture).execute(setup.request, setup.profile, CancellationContext())
     return capture.invocation
+
+
+@pytest.mark.parametrize("wrong", [None, "model", "effort"])
+async def test_research_override_is_the_exact_verified_cli_assignment(setup, wrong):
+    configured = setup.profile.model_copy(
+        update={
+            "id": "codex-a",
+            "provider": "codex",
+            "model": "gpt-6.1-sol",
+            "model_reasoning_effort": "medium",
+            "roles": frozenset({ProviderRole.PLANNER}),
+        }
+    )
+    payload = {
+        PAYLOAD_MODEL_OVERRIDE: "gpt-6.1-terra",
+        PAYLOAD_EFFORT_OVERRIDE: "high",
+        "source_repo_commit": "a" * 40,
+    }
+    effective = apply_profile_overrides(configured, payload)
+    setup.registries.profiles.get = lambda key: configured
+    setup.phase.profile_id = configured.id
+    setup.phase.profile_revision = content_revision(effective)
+    setup.phase.phase = "planner"
+    req = setup.request.model_copy(
+        update={
+            "role": ProviderRole.PLANNER,
+            "output_schema_name": "lead_research",
+            "task_draft": payload,
+        }
+    )
+    setup.phase.request = req.model_dump(mode="json")
+    capture = Capture()
+    sent = effective
+    if wrong:
+        sent = effective.model_copy(
+            update={"model": "gpt-6.1-sol"}
+            if wrong == "model"
+            else {"model_reasoning_effort": "medium"}
+        )
+    with pytest.raises(Captured):
+        await CodexCliAdapter(capture).execute(req, sent, CancellationContext())
+    context = replace(setup.context, job=True)
+    if wrong:
+        with pytest.raises(ValueError, match="canonical read-only"):
+            await setup.transport._prepare(capture.invocation, context)
+        assert setup.store.process is None
+    else:
+        envelope, _, _ = await setup.transport._prepare(capture.invocation, context)
+        assert "gpt-6.1-terra" in envelope.argv
+        assert 'model_reasoning_effort="high"' in envelope.argv
+    assert configured.model == "gpt-6.1-sol"
+    assert configured.model_reasoning_effort == "medium"
 
 
 async def test_explicit_account_requires_matching_ticket_and_persists_before_launch(

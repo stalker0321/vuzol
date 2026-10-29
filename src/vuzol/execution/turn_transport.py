@@ -42,6 +42,7 @@ from vuzol.leadership.invocation_context import (
     invocation_current,
 )
 from vuzol.leadership.persistence import LeadershipInference
+from vuzol.projects.executor_preference import apply_profile_overrides
 from vuzol.providers.accounts import current_account_execution
 from vuzol.providers.ports import CodexInvocation, CodexProcessResult
 from vuzol.storage.errors import LeaseLost
@@ -203,6 +204,8 @@ class TurnSandboxTransport:
             ):
                 raise ValueError("turn inference has no matching durable send intent")
             profile = self._registries.profiles.get(phase.profile_id)
+            if context.job and phase.request.get("output_schema_name") == "lead_research":
+                profile = apply_profile_overrides(profile, phase.request.get("task_draft", {}))
             expected_role = {
                 "lead": ProviderRole.LEAD,
                 "goal_review": ProviderRole.REVIEWER,

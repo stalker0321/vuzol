@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -539,6 +539,10 @@ class ProjectLeadSettings(BaseModel):
     research_models: list[ResearchModelChoice] = Field(default_factory=list)
     # Wall-clock bound for each lead/review invocation, independent of model/provider.
     inference_timeout_seconds: int = Field(default=60, ge=1, le=600)
+    # Each entry schedules one safe resend; never more than three retries.
+    model_retry_delays_seconds: tuple[
+        Annotated[float, Field(ge=0, le=3600, allow_inf_nan=False)], ...
+    ] = Field(default=(30, 120, 600), max_length=3)
     repeat_limit: int = Field(default=2, ge=1, le=20)
     job_concurrency: int = Field(default=2, ge=1, le=100)
     lease_seconds: int = Field(default=120, ge=30, le=3600)

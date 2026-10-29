@@ -61,17 +61,8 @@ from vuzol.storage.unit_of_work import UnitOfWork
 
 # A refusal meaning "too early": the package answers it, not the owner.
 _NOT_YET_REASONS = frozenset({"result_not_ready", "project_task_running"})
-# One malformed answer or dropped call from a cheap model is noise. The goal
-# reviewer is the same kind of call (live pilot 2026-10-25: one bad verdict
-# stopped a finished goal).
-_RETRIED_ONCE = frozenset(
-    {
-        "lead_response_invalid",
-        "lead_model_unavailable",
-        "goal_review_invalid",
-        "goal_review_unavailable",
-    }
-)
+_RETRIED_ONCE = frozenset({"lead_response_invalid", "goal_review_invalid"})
+_INFRASTRUCTURE_FAILURES = frozenset({"provider_unavailable", "rate_limited", "timeout"})
 _TERMINAL_GOAL = frozenset({"cancelled", "completed"})
 _MODEL_BLOCKERS = frozenset(
     {
@@ -100,6 +91,7 @@ class ProjectLeadWorker:
         model: LeadModel,
         enabled: Callable[[], bool],
         lease_seconds: int = 120,
+        model_retry_delays_seconds: tuple[float, ...] = (30, 120, 600),
         repeat_limit: int = 2,
         branch_prefix: str = "vuzol-managed/",
         default_goal_max_cost: float | None = None,
@@ -113,6 +105,7 @@ class ProjectLeadWorker:
         self._model = model
         self._enabled = enabled
         self._lease_seconds = lease_seconds
+        self._model_retry_delays_seconds = model_retry_delays_seconds[:3]
         self._repeat_limit = repeat_limit
         self._branch_prefix = branch_prefix
         self._default_goal_max_cost = default_goal_max_cost
@@ -172,6 +165,8 @@ class ProjectLeadWorker:
                 reason = str(error)
                 if reason not in _MODEL_BLOCKERS:
                     reason = "lead_model_unavailable"
+                if error.failure_category is not None and not error.definitive:
+                    reason = "lead_inference_reconciliation"
                 await self._park_unconfigured(
                     goal_id,
                     wakeup_id,
@@ -179,6 +174,8 @@ class ProjectLeadWorker:
                     reason=reason,
                     claim=claim,
                     retryable=error.retryable,
+                    definitive=error.definitive,
+                    failure_category=error.failure_category,
                 )
                 return
             saved = await self._save_decision(goal_id, wakeup_id, decision, claim=claim)
@@ -965,6 +962,8 @@ class ProjectLeadWorker:
         reason: str,
         claim: TurnClaim,
         retryable: bool = False,
+        definitive: bool = False,
+        failure_category: str | None = None,
     ) -> None:
         async with UnitOfWork(self._factory) as uow:
             assert uow.session is not None
@@ -992,25 +991,42 @@ class ProjectLeadWorker:
                 await self._complete(uow.session, token)
                 return
             item = await uow.session.get(TransactionalOutbox, wakeup_id)
-            if (
+            retry_count = int(item.payload.get("model_retry_count", 0)) if item else 0
+            delays = self._model_retry_delays_seconds
+            infrastructure_retry = (
+                definitive
+                and failure_category in _INFRASTRUCTURE_FAILURES
+                and retry_count < len(delays)
+            )
+            invalid_retry = (
                 reason in _RETRIED_ONCE
                 and item is not None
                 and "retry_of" not in item.payload
+                and (failure_category is None or definitive)
+            )
+            if (
+                item is not None
+                and (infrastructure_retry or invalid_retry)
                 and retryable
                 and goal.lifecycle not in {"cancelled", "completed", "paused"}
             ):
-                # One malformed answer or dropped call from a cheap model is noise,
-                # not a blocker (live pilot 2026-10-24). A turn makes one call, so the
-                # same event gets one fresh turn; a second failure parks the goal.
+                # A fresh wakeup gives the same event a fresh invocation identity.
+                # Keep it durable and unclaimable until its backoff has elapsed.
+                delay = delays[retry_count] if infrastructure_retry else 0
                 uow.session.add(
                     TransactionalOutbox(
                         destination="project_lead",
                         operation_type="lead_wakeup",
                         linked_entity_type="managed_goal",
                         linked_entity_id=goal.id,
-                        idempotency_key=f"lead:retry-invalid:{wakeup_id}",
-                        payload={**item.payload, "retry_of": str(wakeup_id)},
+                        idempotency_key=f"lead:retry-model:{wakeup_id}",
+                        payload={
+                            **item.payload,
+                            "retry_of": str(wakeup_id),
+                            "model_retry_count": retry_count + 1,
+                        },
                         status=DeliveryStatus.PENDING,
+                        available_at=datetime.now(UTC) + timedelta(seconds=delay),
                     )
                 )
                 turn.status = "lost"

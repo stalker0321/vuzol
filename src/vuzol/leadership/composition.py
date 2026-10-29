@@ -66,6 +66,7 @@ def build_project_lead_worker(
         model=selection,
         enabled=lambda: settings.project_lead.enabled,
         lease_seconds=settings.project_lead.lease_seconds,
+        model_retry_delays_seconds=settings.project_lead.model_retry_delays_seconds,
         repeat_limit=settings.project_lead.repeat_limit,
         branch_prefix=settings.project_lead.integration_branch_prefix,
         default_goal_max_cost=settings.project_lead.default_goal_max_cost,

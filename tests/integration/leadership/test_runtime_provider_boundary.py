@@ -113,7 +113,7 @@ async def test_cli_composes_actual_http_provider_and_settles_its_reservation(
                 assert usage.cost_known is False and usage.cost_units > 0
                 assert usage.outcome == "unknown"
                 if status == 429:
-                    # A retryable refusal gets one fresh turn; auth and bad requests park.
+                    # A definitive transient refusal gets a deferred fresh turn.
                     assert goal.waiting_reason is None
                 else:
                     assert goal.waiting_reason == "lead_model_unavailable"
@@ -165,10 +165,7 @@ async def test_transport_exception_preserves_unknown_usage_and_parks(postgres_ds
             assert usage is not None and usage.cost_known is False
             assert usage.cost_units > 0
             assert reservation.status is not BudgetReservationStatus.RESERVED
-            # A call cut off without a receipt gets one fresh turn before the goal parks.
-            assert goal.waiting_reason is None
-        await worker.process_one()
-        async with factory() as session:
-            goal = await session.scalar(select(ManagedGoal))
-            assert goal.waiting_reason == "lead_model_unavailable"
+            # A missing receipt is ambiguous, even if the local timeout has elapsed.
+            assert goal.waiting_reason == "lead_inference_reconciliation"
             assert goal.wakeup_condition["kind"] == "owner"
+        assert not await worker.process_one()

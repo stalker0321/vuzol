@@ -25,6 +25,7 @@ class LeadModelUnavailable(RuntimeError):
         *,
         retryable: bool = True,
         definitive: bool = False,
+        failure_category: str | None = None,
         usage: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(reason)
@@ -32,6 +33,7 @@ class LeadModelUnavailable(RuntimeError):
         self.retryable = retryable
         # Separate resend policy from positive evidence that no usable answer can arrive.
         self.definitive = definitive
+        self.failure_category = failure_category
         self.usage = usage or {}
 
 

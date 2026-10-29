@@ -221,23 +221,25 @@ def test_normalized_failed_result_releases_ticket() -> None:
     asyncio.run(scenario())
 
 
-def test_success_with_unresolved_process_preserves_ticket_and_surfaces_reason(
+def test_success_with_unresolved_process_returns_answer_and_preserves_admission(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
         database, adapter = Database(), Adapter()
         configured = codex_profile(tmp_path).model_copy(update={"account_id": "shared"})
+        wrapper = bound(database, adapter, configured)
         task = asyncio.create_task(
-            bound(database, adapter, configured).execute(
-                provider_request(), configured, CancellationContext()
-            )
+            wrapper.execute(provider_request(), configured, CancellationContext())
         )
         await wait_for(adapter.started)
         database.records = [{"account_id": "shared", "account_slot": 0}]
         adapter.finish.set()
-        with pytest.raises(ProviderFailure, match="cleanup unresolved; ticket retained"):
-            await task
+        result = await task
+        assert result.text == "ok" and result.usage is not None
         assert database.tickets and not database.locks
+        with pytest.raises(ProviderFailure, match="ticket"):
+            await wrapper.execute(provider_request(), configured, CancellationContext())
+        assert len(adapter.executions) == 1
 
     asyncio.run(scenario())
 

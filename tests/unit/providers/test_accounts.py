@@ -336,18 +336,16 @@ def test_other_accounts_are_independent_and_health_does_not_take_a_slot() -> Non
 
 
 @pytest.mark.parametrize("failure", ["error", "false"])
-def test_unlock_failure_invalidates_connection(failure: str) -> None:
+def test_unlock_failure_invalidates_connection_and_returns_receipt(failure: str) -> None:
     async def scenario() -> None:
         database, adapter = Database(), Adapter()
         database.unlock_failure = failure
         adapter.finish.set()
         configured = profile("first", account_id="shared")
-        with pytest.raises(ProviderFailure, match="unlock failed after receipt") as failure_info:
-            await bound(database, adapter, configured).execute(
-                provider_request(), configured, CancellationContext()
-            )
-        assert failure_info.value.request_sent and failure_info.value.usage is not None
-        assert not failure_info.value.retryable
+        result = await bound(database, adapter, configured).execute(
+            provider_request(), configured, CancellationContext()
+        )
+        assert result.text == "ok" and result.usage is not None
         assert database.connections[0].invalidated
         assert not database.locks
 
@@ -426,6 +424,13 @@ def test_watchdog_cancels_runtime_and_drains_cleanup_on_connection_loss(
         with pytest.raises(ProviderFailure, match="lock connection lost") as error:
             await task
         assert error.value.request_sent and not error.value.retryable
+        assert not error.value.execution_completed
+        assert database.tickets
+        with pytest.raises(ProviderFailure, match="ticket"):
+            await bound(database, adapter, configured).execute(
+                provider_request(), configured, CancellationContext()
+            )
+        assert len(adapter.executions) == 1
         assert adapter.cleaned.is_set()
         assert not database.locks
 
@@ -559,15 +564,9 @@ def test_simultaneous_receipt_and_monitor_failure_keeps_usage(monkeypatch, lose_
             raise ConnectionError("watcher failed at the same time as receipt")
 
         monkeypatch.setattr(wrapper, "_monitor", failed_monitor)
-        if lose_connection:
-            with pytest.raises(ProviderFailure, match="cleanup unresolved") as raised:
-                await wrapper.execute(provider_request(), configured, CancellationContext())
-            assert raised.value.request_sent and raised.value.usage is not None
-            assert database.tickets
-        else:
-            result = await wrapper.execute(provider_request(), configured, CancellationContext())
-            assert result.text == "ok" and result.usage is not None
-            assert not database.tickets
+        result = await wrapper.execute(provider_request(), configured, CancellationContext())
+        assert result.text == "ok" and result.usage is not None
+        assert bool(database.tickets) == lose_connection
         assert not database.locks
 
     asyncio.run(scenario())

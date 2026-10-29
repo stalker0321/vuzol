@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
+from vuzol.observability import get_logger
 from vuzol.providers.account_persistence import (
     account_slot_key as account_slot_key,
 )
@@ -42,6 +43,7 @@ from vuzol.workflows.ports import CancellationContext
 
 ACCOUNT_LOCK_POLL_SECONDS = 1.0
 ACCOUNT_LOCK_QUERY_TIMEOUT_SECONDS = 5.0
+_logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +139,10 @@ class AccountBoundAdapter:
                     except ProviderFailure as failure:
                         if not failure.request_sent or failure.execution_completed:
                             await self._release_if_confirmed(
-                                connection, backend_pid, execution, cancellation,
+                                connection,
+                                backend_pid,
+                                execution,
+                                cancellation,
                                 settled=not failure.request_sent,
                             )
                         raise
@@ -149,13 +154,12 @@ class AccountBoundAdapter:
                     if not await self._release_if_confirmed(
                         connection, backend_pid, execution, cancellation
                     ):
-                        raise ProviderFailure(
-                            ProviderErrorCategory.PROVIDER_UNAVAILABLE,
-                            retryable=False,
-                            request_sent=True,
-                            safe_summary="provider account cleanup unresolved; ticket retained",
-                            usage=result.usage,
-                            provider_request_id=result.provider_request_id,
+                        # The receipt and slot ownership are separate facts. Keep
+                        # admission blocked until the reaper proves cleanup; do
+                        # not discard an answer that already reached the caller.
+                        _logger.warning(
+                            "Provider account cleanup unresolved after receipt; ticket retained",
+                            extra={"event": "provider_account.cleanup_unresolved"},
                         )
                     return result
                 finally:
@@ -169,16 +173,14 @@ class AccountBoundAdapter:
                         unlock_account_slot(connection, self._account_id, execution.slot)
                     )
                 except Exception:
-                    if primary is None:
-                        if result is not None:
-                            raise ProviderFailure(
-                                ProviderErrorCategory.PROVIDER_UNAVAILABLE,
-                                retryable=False,
-                                request_sent=True,
-                                safe_summary="provider account unlock failed after receipt",
-                                usage=result.usage,
-                                provider_request_id=result.provider_request_id,
-                            ) from None
+                    if result is not None:
+                        # unlock_account_slot invalidates uncertain connections,
+                        # so no session lock can leak into the pool.
+                        _logger.warning(
+                            "Provider account unlock failed after receipt",
+                            extra={"event": "provider_account.unlock_failed"},
+                        )
+                    elif primary is None:
                         raise
 
     async def _release_if_confirmed(

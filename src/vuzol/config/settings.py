@@ -512,6 +512,18 @@ class BackupSettings(BaseModel):
         return self
 
 
+class ResearchModelChoice(BaseModel):
+    """A per-call research assignment on an existing provider account."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile_id: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
+    model: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+    reasoning_effort: str | None = Field(
+        default=None, pattern=r"^(low|medium|high|xhigh|max|ultra)$"
+    )
+
+
 class ProjectLeadSettings(BaseModel):
     """Opt-in project-lead overlay. Off leaves legacy sequencing as the only path."""
 
@@ -522,6 +534,8 @@ class ProjectLeadSettings(BaseModel):
     # then parks the goal with an explicit blocker instead of inventing a plan.
     profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     reviewer_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    # Empty preserves the project's planner_strong assignment.
+    research_models: list[ResearchModelChoice] = Field(default_factory=list)
     # Wall-clock bound for each lead/review invocation, independent of model/provider.
     inference_timeout_seconds: int = Field(default=60, ge=1, le=600)
     repeat_limit: int = Field(default=2, ge=1, le=20)

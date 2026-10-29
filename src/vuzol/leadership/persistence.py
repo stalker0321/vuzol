@@ -333,3 +333,72 @@ class ManagedGoalEvidence(IdentityMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class LeadJob(IdentityMixin, Base):
+    """Read-only background work, independent of the single live work package."""
+
+    __tablename__ = "lead_jobs"
+    __table_args__ = (
+        CheckConstraint("kind = 'research'", name="lead_job_kind"),
+        CheckConstraint(
+            "state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')",
+            name="lead_job_state",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(input) = 'object' AND input ? 'question' "
+            "AND jsonb_typeof(input->'question') = 'string' "
+            "AND char_length(btrim(input->>'question')) BETWEEN 1 AND 2000",
+            name="lead_job_input",
+        ),
+        CheckConstraint("scope_revision >= 1", name="lead_job_scope_revision"),
+        CheckConstraint("lease_generation >= 0", name="lead_job_lease_generation"),
+        CheckConstraint("octet_length(result_text) <= 16384", name="lead_job_result_bytes"),
+        CheckConstraint("jsonb_typeof(usage) = 'object'", name="lead_job_usage"),
+        CheckConstraint(
+            "(state = 'running' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (state <> 'running' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            name="lead_job_lease",
+        ),
+        CheckConstraint(
+            "(state IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)",
+            name="lead_job_finished",
+        ),
+        Index(
+            "ix_lead_jobs_queued",
+            "created_at",
+            "id",
+            postgresql_where=text("state = 'queued'"),
+        ),
+        Index(
+            "ix_lead_jobs_running_expiry",
+            "lease_expires_at",
+            postgresql_where=text("state = 'running'"),
+        ),
+    )
+
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("managed_goals.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    input: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    pinned_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="queued", server_default="queued"
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    result_text: Mapped[str | None] = mapped_column(Text)
+    failure_reason: Mapped[str | None] = mapped_column(String(512))
+    usage: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

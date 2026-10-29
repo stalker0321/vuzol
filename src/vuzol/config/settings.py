@@ -241,6 +241,8 @@ class HardLimits(BaseModel):
     step_output_tokens: int = Field(default=25_000, ge=1)
     provider_call_input_tokens: int = Field(default=100_000, ge=1)
     provider_call_output_tokens: int = Field(default=25_000, ge=1)
+    lead_jobs_nonterminal_per_goal: int = Field(default=2, ge=1, le=100)
+    lead_jobs_total_per_goal: int = Field(default=10, ge=1, le=1000)
     lead_tool_rounds: int = Field(default=3, ge=0, le=10)
     lead_tool_calls_per_round: int = Field(default=4, ge=1, le=16)
     lead_tool_result_bytes: int = Field(default=8192, ge=128)

@@ -68,6 +68,7 @@ def build_project_lead_worker(
         lease_seconds=settings.project_lead.lease_seconds,
         repeat_limit=settings.project_lead.repeat_limit,
         branch_prefix=settings.project_lead.integration_branch_prefix,
+        default_goal_max_cost=settings.project_lead.default_goal_max_cost,
         default_branches=default_branches,
         repository_paths=repository_paths,
         verifier=selection,

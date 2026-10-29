@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sqlalchemy import Column, MetaData, Numeric, Table, Uuid, create_engine
 from tests.unit.leadership.test_tool_loop import profile, snapshot
 
 from vuzol.config.settings import HardLimits
@@ -270,3 +271,64 @@ async def test_snapshot_budget_matches_lifetime_ledger(ledger, monkeypatch):
     )
     state = await worker._snapshot(ledger.goal.id)
     assert state.budget == {"spent": 0.2, "reserved": 0.3, "cap": 1.0}
+
+
+@pytest.mark.anyio
+async def test_goal_cost_queries_sum_only_its_scopes_and_open_reservations():
+    # Execute the production aggregate SQL on a minimal, disposable ledger.
+    metadata = MetaData()
+    packages = Table(
+        WorkPackage.__tablename__,
+        metadata,
+        Column("id", Uuid),
+        Column("managed_goal_id", Uuid),
+    )
+    usage = Table(
+        UsageRecord.__tablename__,
+        metadata,
+        Column("horizon_id", Uuid),
+        Column("cost_units", Numeric),
+    )
+    reservations = Table(
+        ProviderBudgetReservation.__tablename__,
+        metadata,
+        Column("horizon_id", Uuid),
+        Column("reserved_cost_units", Numeric),
+        Column("status", ProviderBudgetReservation.__table__.c.status.type),
+    )
+    goal_id, package_id, other_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    engine = create_engine("sqlite://")
+    try:
+        metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(packages.insert(), [{"id": package_id, "managed_goal_id": goal_id}])
+            connection.execute(
+                usage.insert(),
+                [
+                    {"horizon_id": scope, "cost_units": Decimal(cost)}
+                    for scope, cost in [(goal_id, "0.2"), (package_id, "0.3"), (other_id, "99")]
+                ],
+            )
+            connection.execute(
+                reservations.insert(),
+                [
+                    {"horizon_id": scope, "reserved_cost_units": Decimal(cost), "status": status}
+                    for scope, cost, status in [
+                        (goal_id, "0.1", BudgetReservationStatus.RESERVED),
+                        (package_id, "0.4", BudgetReservationStatus.RESERVED),
+                        (package_id, "0.3", BudgetReservationStatus.RECONCILED),
+                        (goal_id, "99", BudgetReservationStatus.RELEASED),
+                        (other_id, "99", BudgetReservationStatus.RESERVED),
+                    ]
+                ],
+            )
+            session = SimpleNamespace(
+                scalar=AsyncMock(side_effect=connection.scalar),
+                scalars=AsyncMock(side_effect=connection.scalars),
+            )
+            assert await budgets.goal_cost_totals(session, goal_id) == (
+                Decimal("0.5"),
+                Decimal("0.5"),
+            )
+    finally:
+        engine.dispose()

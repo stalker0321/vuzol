@@ -102,6 +102,7 @@ class ProjectLeadWorker:
         lease_seconds: int = 120,
         repeat_limit: int = 2,
         branch_prefix: str = "vuzol-managed/",
+        default_goal_max_cost: float | None = None,
         default_branches: Mapping[str, str] | None = None,
         repository_paths: Mapping[str, Path] | None = None,
         verifier: GoalVerification | None = None,
@@ -114,6 +115,7 @@ class ProjectLeadWorker:
         self._lease_seconds = lease_seconds
         self._repeat_limit = repeat_limit
         self._branch_prefix = branch_prefix
+        self._default_goal_max_cost = default_goal_max_cost
         self._default_branches = dict(default_branches or {})
         self._repository_paths = dict(repository_paths or {})
         self._verifier = verifier
@@ -334,6 +336,7 @@ class ProjectLeadWorker:
                             ),
                         },
                         branch_prefix=self._branch_prefix,
+                        default_goal_max_cost=self._default_goal_max_cost,
                     )
                     item.linked_entity_id = goal.id
                     item.payload = {
@@ -1212,6 +1215,7 @@ class ProjectLeadWorker:
             self._factory,
             enabled=self._enabled(),
             branch_prefix=self._branch_prefix,
+            default_goal_max_cost=self._default_goal_max_cost,
             repeat_limit=self._repeat_limit,
             default_branches=self._default_branches,
             batch_executor=execute_batch,

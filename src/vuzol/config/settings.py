@@ -530,6 +530,7 @@ class ProjectLeadSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = False
+    default_goal_max_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # Empty means the feature can be on while no model is selected. The worker
     # then parks the goal with an explicit blocker instead of inventing a plan.
     profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")

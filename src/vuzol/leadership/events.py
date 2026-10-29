@@ -61,6 +61,7 @@ async def live_or_draft(
     criteria: list[dict[str, Any]],
     constraints: dict[str, Any],
     branch_prefix: str,
+    default_goal_max_cost: float | None = None,
 ) -> ManagedGoal:
     """Caller holds project admission before locking goal or discussion rows."""
     goal = await session.scalar(
@@ -75,6 +76,11 @@ async def live_or_draft(
         if goal.owner_user_id != owner_user_id:
             raise PermissionError("goal_not_available")
         return goal
+    from vuzol.leadership.limits import parse_work_limits
+
+    limits = parse_work_limits(
+        constraints.get("work_limits", {}), default_max_cost=default_goal_max_cost
+    )
     goal_id = uuid.uuid4()
     branch = f"{branch_prefix}{project_id}/{goal_id.hex}"
     delegation = GoalDelegation(
@@ -99,7 +105,7 @@ async def live_or_draft(
         original_request=text,
         scope_text=scope,
         criteria=criteria or [{"id": "requested-outcome", "description": scope}],
-        constraints={**constraints, "mandate_required": True},
+        constraints={**constraints, "work_limits": limits.model_dump(), "mandate_required": True},
         lifecycle="draft",
         integration_branch=branch,
     )
@@ -165,7 +171,8 @@ class ProjectEventService:
             raise PermissionError("event_outside_scope")
         from vuzol.leadership.limits import parse_work_limits
 
-        limits = parse_work_limits(work_limits or {}).model_dump()
+        # Preserve an explicit unlimited cap through delayed admission/restart.
+        limits = parse_work_limits(work_limits or {}).model_dump(exclude_unset=True)
         body = {
             "session_id": str(session_id),
             "text": text,
@@ -215,6 +222,7 @@ class ProjectEventService:
                 "request_origin": provenance,
             },
             branch_prefix=settings.project_lead.integration_branch_prefix,
+            default_goal_max_cost=settings.project_lead.default_goal_max_cost,
         )
         # Use one database clock across ingress nodes, after admission serialized them.
         received_at = await session.scalar(select(func.clock_timestamp()))

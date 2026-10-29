@@ -178,8 +178,14 @@ async def test_plain_cancel_retains_existing_behavior(handoff):
 
 
 @pytest.mark.anyio
-async def test_confirmed_handoff_creates_a_draft_and_one_source_keyed_wakeup(handoff, monkeypatch):
+@pytest.mark.parametrize("default_cost", [None, 1.5])
+async def test_confirmed_handoff_creates_a_draft_and_one_source_keyed_wakeup(
+    handoff, monkeypatch, default_cost
+):
     h = handoff
+    h.service = LeadershipCommandService(
+        AsyncMock(), enabled=True, default_goal_max_cost=default_cost
+    )
     new = ManagedGoal(id=uuid.uuid4(), version=1, scope_revision=1, delegation_id=uuid.uuid4())
     create = AsyncMock(return_value=new)
     monkeypatch.setattr("vuzol.leadership.events.live_or_draft", create)
@@ -189,6 +195,7 @@ async def test_confirmed_handoff_creates_a_draft_and_one_source_keyed_wakeup(han
     assert h.goal.lifecycle == "cancelled"
     create.assert_awaited_once()
     assert create.call_args.kwargs["text"] == "New request"
+    assert create.call_args.kwargs["default_goal_max_cost"] == default_cost
     wakeup = h.session.add.call_args.args[0]
     assert wakeup.linked_entity_id == new.id
     assert wakeup.idempotency_key == f"lead:restart:{h.source.id}"

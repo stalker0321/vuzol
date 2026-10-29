@@ -88,6 +88,7 @@ class LeadershipCommandService:
         *,
         enabled: bool,
         branch_prefix: str = "vuzol-managed/",
+        default_goal_max_cost: float | None = None,
         repeat_limit: int = 2,
         default_branches: Mapping[str, str] | None = None,
         batch_executor: BatchExecutor | None = None,
@@ -96,6 +97,7 @@ class LeadershipCommandService:
         self._factory = session_factory
         self._enabled = enabled
         self._branch_prefix = branch_prefix
+        self._default_goal_max_cost = default_goal_max_cost
         self._repeat_limit = repeat_limit
         self._default_branches = dict(default_branches or {})
         self._batch_executor = batch_executor
@@ -392,7 +394,10 @@ class LeadershipCommandService:
         if name is LeadCommandName.SET_WORK_LIMITS:
             from vuzol.leadership.limits import parse_work_limits
 
-            limits = parse_work_limits(command.payload.get("work_limits"))
+            patch = parse_work_limits(command.payload.get("work_limits")).model_dump(
+                exclude_unset=True
+            )
+            limits = parse_work_limits({**goal.constraints.get("work_limits", {}), **patch})
             goal.constraints = {**goal.constraints, "work_limits": limits.model_dump()}
             # Changing a grant never resumes work or answers an outstanding question.
             _bump(goal, actor)
@@ -456,7 +461,11 @@ class LeadershipCommandService:
                         await uow.session.flush()
                         outcome.result.update(
                             await restart_draft(
-                                uow.session, goal, source, branch_prefix=self._branch_prefix
+                                uow.session,
+                                goal,
+                                source,
+                                branch_prefix=self._branch_prefix,
+                                default_goal_max_cost=self._default_goal_max_cost,
                             )
                         )
             except (SQLAlchemyError, ValueError, PermissionError) as error:
@@ -774,7 +783,10 @@ class LeadershipCommandService:
             return _Outcome(CommandStatus.DENIED, "scope_required", {}, None)
         from vuzol.leadership.limits import parse_work_limits
 
-        work_limits = parse_work_limits(command.payload.get("work_limits", {}))
+        work_limits = parse_work_limits(
+            command.payload.get("work_limits", {}),
+            default_max_cost=self._default_goal_max_cost,
+        )
         principal = f"agent:project-lead:{command.project_id}"
         delegation = GoalDelegation(
             project_id=command.project_id,

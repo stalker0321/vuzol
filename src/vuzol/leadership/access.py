@@ -123,7 +123,7 @@ class ProjectApplication:
                     {"id": f"outcome-{i}", "description": item}
                     for i, item in enumerate(request.criteria, 1)
                 ],
-                work_limits=request.work_limits.model_dump(),
+                work_limits=request.work_limits.model_dump(exclude_unset=True),
                 origin=origin
                 or RequestOrigin(
                     channel="api", display_name="API", request_id=str(request.request_id)

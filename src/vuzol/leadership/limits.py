@@ -18,11 +18,14 @@ class WorkLimits(BaseModel):
     max_items_per_package: int | None = Field(default=None, ge=1)
 
 
-def parse_work_limits(raw: object) -> WorkLimits:
+def parse_work_limits(raw: object, *, default_max_cost: float | None = None) -> WorkLimits:
     try:
-        return WorkLimits.model_validate(raw)
+        limits = WorkLimits.model_validate(raw)
     except ValidationError as error:
         raise DomainError("invalid_work_limits") from error
+    if default_max_cost is not None and "max_cost" not in limits.model_fields_set:
+        limits = limits.model_copy(update={"max_cost": default_max_cost})
+    return limits
 
 
 async def check_batch_limits(

@@ -92,7 +92,12 @@ async def confirmed_restart_source(
 
 
 async def restart_draft(
-    session: AsyncSession, goal: ManagedGoal, source: TransactionalOutbox, *, branch_prefix: str
+    session: AsyncSession,
+    goal: ManagedGoal,
+    source: TransactionalOutbox,
+    *,
+    branch_prefix: str,
+    default_goal_max_cost: float | None = None,
 ) -> dict[str, Any]:
     """Caller cancelled under project admission and a savepoint; failures roll it all back."""
     from vuzol.leadership.events import live_or_draft
@@ -122,6 +127,7 @@ async def restart_draft(
             "restart_from_event_id": str(source.id),
         },
         branch_prefix=branch_prefix,
+        default_goal_max_cost=default_goal_max_cost,
     )
     wakeup_id = uuid.uuid5(source.id, "restart")
     session.add(

@@ -11,7 +11,9 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.settings import Settings
+from vuzol.discussion.domain import DomainError
 from vuzol.leadership.commands import CommandResult, LeadCommand
+from vuzol.leadership.limits import parse_work_limits
 from vuzol.leadership.persistence import CONTRACT_VERSION, LeadershipCommandReceipt, ManagedGoal
 from vuzol.leadership.service import LeadershipCommandService
 from vuzol.storage.models import TransactionalOutbox
@@ -57,6 +59,7 @@ async def apply_telegram_lead(
         session_factory,
         enabled=settings.project_lead.enabled,
         branch_prefix=settings.project_lead.integration_branch_prefix,
+        default_goal_max_cost=settings.project_lead.default_goal_max_cost,
         repeat_limit=settings.project_lead.repeat_limit,
         default_branches={project_id: default_branch},
     )
@@ -165,14 +168,18 @@ def _command(
     answer_payload: dict[str, Any] = {}
     if kind == "limits":
         try:
-            packages, items = argument.split()
-            answer_payload = {
-                "work_limits": {
-                    "max_packages": None if packages == "unlimited" else int(packages),
-                    "max_items_per_package": None if items == "unlimited" else int(items),
+            first, second = argument.split()
+            if first == "cost":
+                patch = {"max_cost": None if second == "unlimited" else float(second)}
+            else:
+                patch = {
+                    "max_packages": None if first == "unlimited" else int(first),
+                    "max_items_per_package": None if second == "unlimited" else int(second),
                 }
+            answer_payload = {
+                "work_limits": parse_work_limits(patch).model_dump(exclude_unset=True)
             }
-        except ValueError:
+        except (ValueError, DomainError):
             return None
     if kind == "answer":
         try:

@@ -225,6 +225,7 @@ class ProjectLeadWorker:
             conversational = item is not None and item.payload.get("wakeup_kind") in {
                 "owner_message",
                 "owner_routing_answer",
+                "job_finished",
                 *PLAN_EVENTS,
                 "planning_requested",
             }
@@ -267,6 +268,10 @@ class ProjectLeadWorker:
                 await self._complete(uow.session, token)
                 return None
             owner_event = item.payload.get("wakeup_kind") == "owner_message"
+            job_event = item.payload.get("wakeup_kind") == "job_finished"
+            if job_event and goal.lifecycle == "paused":
+                await self._complete(uow.session, token)
+                return None
             if owner_event and goal.lifecycle in _TERMINAL_GOAL:
                 restart_source = item.payload.get("restart_from_event_id")
                 if (
@@ -487,7 +492,7 @@ class ProjectLeadWorker:
                 ):
                     await WorkPackageSequencer(uow).observe_terminal(task_id=task.id)
             await apply_pending_amendment(uow.session, goal)
-            if goal.constraints.get("pending_amendment") and not owner_event:
+            if goal.constraints.get("pending_amendment") and not owner_event and not job_event:
                 if item.payload.get("wakeup_kind") == "plan_requested":
                     await publish_outcome(uow.session, goal, item.id, reason="amendment_pending")
                 await self._complete(uow.session, token)
@@ -495,6 +500,7 @@ class ProjectLeadWorker:
             if (
                 not owner_event
                 and not planning_event
+                and not job_event
                 and item.payload.get("wakeup_kind") != "owner_routing_answer"
                 and (
                     goal.lifecycle == "paused"
@@ -506,7 +512,12 @@ class ProjectLeadWorker:
             ):
                 await self._complete(uow.session, token)
                 return None
-            if goal.lifecycle == "waiting" and not owner_event and not planning_event:
+            if (
+                goal.lifecycle == "waiting"
+                and not owner_event
+                and not planning_event
+                and not job_event
+            ):
                 from vuzol.leadership.persistence import has_owner_mandate
 
                 goal.lifecycle = "active" if has_owner_mandate(goal) else "draft"
@@ -551,6 +562,14 @@ class ProjectLeadWorker:
             assessment = await assess_completion(uow.session, goal, check_live_head=True)
             status = None if package is None else package.status.value
             head = None if package is None else package.integration_head_commit
+            from vuzol.discussion.domain import DomainError
+            from vuzol.execution.git import GitError
+            from vuzol.leadership.jobs import list_jobs
+            from vuzol.leadership.planning import source_commit
+
+            job_head = None
+            with suppress(DomainError, GitError, OSError):
+                job_head = await source_commit(self._repository_paths.get(goal.project_id), goal)
             criteria = tuple(item for item in goal.criteria if isinstance(item, dict))
             completed = await uow.session.scalar(
                 select(func.count())
@@ -627,6 +646,7 @@ class ProjectLeadWorker:
                     "work_limits": goal.constraints.get("work_limits", {}),
                     "conversation": history,
                     "task_control": await task_context(uow.session, goal),
+                    "jobs": await list_jobs(uow.session, goal_id=goal.id, current_head=job_head),
                     "event": dict(item.payload) if item is not None else None,
                     "pending_amendment": goal.constraints.get("pending_amendment"),
                     "queued_amendment": goal.constraints.get("queued_amendment"),
@@ -784,8 +804,16 @@ class ProjectLeadWorker:
         async with self._factory() as session:
             item = await session.get(TransactionalOutbox, wakeup_id)
             owner_event = item is not None and item.payload.get("wakeup_kind") == "owner_message"
+            keep_wait = False
+            if (
+                not commands
+                and item is not None
+                and item.payload.get("wakeup_kind") == "job_finished"
+            ):
+                goal = await session.get(ManagedGoal, goal_id)
+                keep_wait = goal is not None and goal.lifecycle == "waiting"
         if not commands:
-            if owner_event:
+            if owner_event or keep_wait:
                 return
             await self._mark_waiting(goal_id, "model_idle", claim=claim)
             return

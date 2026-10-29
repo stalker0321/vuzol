@@ -25,6 +25,8 @@ class LeadCommandName(StrEnum):
     START_BATCH = "start_batch"
     START_TASK = "start_task"
     CANCEL_TASK = "cancel_task"
+    START_JOB = "start_job"
+    CANCEL_JOB = "cancel_job"
     ACCEPT_RESULT = "accept_result"
     AMEND_GOAL = "amend_goal"
     REQUEST_REVISION = "request_revision"
@@ -62,6 +64,7 @@ READ_COMMANDS = frozenset(
 
 MEMORY_COMMANDS = frozenset({LeadCommandName.REMEMBER, LeadCommandName.FORGET})
 MAX_MEMORY_COMMANDS = 3
+JOB_COMMANDS = frozenset({LeadCommandName.START_JOB, LeadCommandName.CANCEL_JOB})
 
 
 OWNER_ONLY_COMMANDS = frozenset(
@@ -90,6 +93,8 @@ DELEGATED_ACTIONS = frozenset(
         LeadCommandName.START_BATCH.value,
         LeadCommandName.START_TASK.value,
         LeadCommandName.CANCEL_TASK.value,
+        LeadCommandName.START_JOB.value,
+        LeadCommandName.CANCEL_JOB.value,
         LeadCommandName.ACCEPT_RESULT.value,
         LeadCommandName.REQUEST_REVISION.value,
         LeadCommandName.AMEND_GOAL.value,
@@ -105,6 +110,8 @@ DELEGATED_ACTIONS = frozenset(
 # A conversation may plan and clarify, but only the owner's plan approval grants execution.
 DRAFT_ACTIONS = frozenset(c.value for c in READ_COMMANDS) | frozenset(
     {
+        "start_job",
+        "cancel_job",
         "request_plan",
         "revise_plan",
         "amend_goal",

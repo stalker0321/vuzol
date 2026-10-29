@@ -62,3 +62,13 @@ def test_recall_defaults_and_hard_limits():
     assert limits.lead_tool_calls_per_round == 4
     assert limits.lead_tool_result_bytes == 8192
     assert limits.lead_tool_total_bytes == 24576
+
+
+def test_read_job_is_a_strict_scoped_read():
+    job_id = str(uuid.uuid4())
+    call = parse_tool_call({"name": "read_job", "args": {"job_id": job_id}})
+    assert call.args.model_dump() == {"job_id": job_id}
+    for args in ({}, {"job_id": "bad"}, {"job_id": job_id, "goal_id": str(uuid.uuid4())}):
+        with pytest.raises(ValidationError):
+            parse_tool_call({"name": "read_job", "args": args})
+    assert "read_job" in json.dumps(decision_schema(tools_allowed=True))

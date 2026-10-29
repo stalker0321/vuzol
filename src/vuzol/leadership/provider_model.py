@@ -28,7 +28,7 @@ from vuzol.leadership.read_tools import ToolBatch, run_tool_batch
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v16"
+PROMPT_REVISION = "project-lead-prompt.v17"
 LEDGER_PURPOSE = "project_lead"
 
 
@@ -66,8 +66,17 @@ class _Command(BaseModel):
 
 
 class _ResponseCommand(_Command):
-    name: Literal["read_status", "propose_completion", "pause_goal", "cancel_goal"]
+    name: Literal["read_status", "propose_completion", "pause_goal"]
     payload: _Payload = Field(default_factory=_Payload)
+
+
+class _CancelGoalPayload(_Payload):
+    restart_from_event_id: str | None = Field(default=None, pattern=r"^[0-9a-f-]{36}$")
+
+
+class _CancelGoalCommand(_Command):
+    name: Literal["cancel_goal"]
+    payload: _CancelGoalPayload = Field(default_factory=_CancelGoalPayload)
 
 
 class _ProposalCommand(_Command):
@@ -163,6 +172,7 @@ class _Response(BaseModel):
     reply: str = Field(default="", max_length=20000)
     commands: list[
         _ResponseCommand
+        | _CancelGoalCommand
         | _ProposalCommand
         | _RevisionCommand
         | _QuestionCommand
@@ -471,8 +481,21 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "A draft is a conversation, not an execution mandate. Answer ordinary questions with "
         "reply and no commands. For a work request, clarify if needed and request_plan; the "
         "owner must approve the plan before execution, including a single small task. "
-        "If the current request differs from the new message, first amend_goal using its "
-        "source_event_id to record the current scope and observable criteria.",
+        "Use amend_goal only for refining the SAME goal: clarification, scope changes of the "
+        "same intent, and owner corrections. For a separate task unrelated to the current "
+        "request, if there is any approved/proposed plan, task, result, or waiting question, "
+        "do not amend_goal. First ask_owner in plain Russian whether this is an addition or "
+        "a new task and whether to close the current goal. Use options "
+        "['Дополнение к текущей', 'Новая задача, текущую закрыть', 'Новая задача после текущей']. "
+        "A bare draft with no plan and no work may simply be amended using the new message's "
+        "source_event_id, scope and observable criteria. "
+        "After the explicit owner answer 'Новая задача, текущую закрыть', use cancel_goal "
+        "{restart_from_event_id: result_context.owner_answer.restart_from_event_id} to close "
+        "this goal and start a normal draft from the saved request, including attachments. "
+        "The server requires that exact answer to the question bound to that source event; "
+        "never use plain cancel_goal as a fallback for a denied handoff. "
+        "For 'Новая задача после текущей', reply that you will finish the current goal first "
+        "and the owner can resend the request later; do not build a queue.",
         "Reply to owner_event in reply; describe intended actions, not unexecuted success. "
         "Waiting/paused goals permit conversation and amendments, never start or resume. "
         "amend_goal uses scope, criteria, supplied source_event_id, reason and inflight_policy: "

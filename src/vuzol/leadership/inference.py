@@ -145,6 +145,9 @@ async def invoke(
                                     not replay.failure.request_sent
                                     or replay.failure.execution_completed
                                 ),
+                                failure_category=(
+                                    replay.failure.category.value if replay.failure else "unknown"
+                                ),
                             )
                         return replay
                     if prior.state == "not_sent":
@@ -225,6 +228,17 @@ async def invoke(
     try:
         async with asyncio.timeout(request.timeout_seconds):
             result = await _send_guarded(factory, adapter, request, profile, context)
+        if result.status is not ProviderResultStatus.SUCCEEDED and result.failure is not None:
+            failure = result.failure
+            raise ProviderFailure(
+                failure.category,
+                retryable=failure.retryable,
+                request_sent=failure.request_sent,
+                execution_completed=failure.execution_completed,
+                usage=result.usage,
+                provider_request_id=result.provider_request_id,
+                diagnostic=failure.diagnostic,
+            )
         return result
     except ProviderFailure as error:
         not_sent = not error.request_sent
@@ -253,6 +267,7 @@ async def invoke(
             _failure_reason(error.details(), purpose),
             retryable=error.retryable,
             definitive=definitive,
+            failure_category=error.category.value,
         ) from error
     except Exception as error:
         _logger.warning(
@@ -268,7 +283,10 @@ async def invoke(
             },
             exc_info=error,
         )
-        raise LeadModelUnavailable(_failure_reason(None, purpose)) from error
+        raise LeadModelUnavailable(
+            _failure_reason(None, purpose),
+            failure_category="timeout" if isinstance(error, TimeoutError) else "unknown",
+        ) from error
     finally:
         async with factory.begin() as session:
             stored = await session.get(

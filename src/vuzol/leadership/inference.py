@@ -46,6 +46,8 @@ _logger = get_logger(__name__)
 
 
 def _failure_reason(failure: ProviderFailureDetails | None, purpose: str) -> str:
+    if purpose == "lead_research_job":
+        return failure.category.value if failure else "unavailable"
     if purpose == "planning":
         return "planner_" + (failure.category.value if failure else "unavailable")
     review = purpose == "project_goal_review"
@@ -89,7 +91,11 @@ async def invoke(
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
-    phase = {"project_goal_review": "goal_review", "planning": "planner"}.get(purpose, "lead")
+    phase = {
+        "project_goal_review": "goal_review",
+        "planning": "planner",
+        "lead_research_job": "planner",
+    }.get(purpose, "lead")
     estimate = estimate_reservation(
         profile, input_tokens=request.max_input_tokens, output_tokens=request.max_output_tokens
     )

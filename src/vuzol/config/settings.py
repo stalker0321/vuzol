@@ -525,6 +525,7 @@ class ProjectLeadSettings(BaseModel):
     # Wall-clock bound for each lead/review invocation, independent of model/provider.
     inference_timeout_seconds: int = Field(default=60, ge=1, le=600)
     repeat_limit: int = Field(default=2, ge=1, le=20)
+    job_concurrency: int = Field(default=2, ge=1, le=100)
     lease_seconds: int = Field(default=120, ge=30, le=3600)
     integration_branch_prefix: str = Field(default="vuzol-managed/", min_length=1, max_length=80)
 

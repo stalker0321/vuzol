@@ -97,3 +97,101 @@ def test_snapshot_job_summary_exposes_age_and_no_report():
     }
     assert job_view(job, current_head="b" * 40)["stale"] is True
     assert job_view(job, current_head=None)["stale"] is True
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_research_cli_request_is_pinned_bounded_and_keeps_job_recovery_kind():
+    from unittest.mock import Mock
+
+    from vuzol.config.models import LaunchMode
+    from vuzol.config.settings import HardLimits
+    from vuzol.execution.turn_transport import context_payload
+    from vuzol.leadership.fencing import TurnClaim
+    from vuzol.leadership.invocation_context import TurnInvocationContext
+    from vuzol.leadership.research import ResearchResponse, research_request
+
+    _, goal, job, claim = _running()
+    profile = Mock(launch_mode=LaunchMode.CLI, output_limit=1000, context_limit=128000)
+    request = await research_request(
+        job,
+        profile,
+        repository=None,
+        limits=HardLimits(),
+        timeout_seconds=60,
+    )
+    assert request.task_id == uuid.uuid5(job.id, "research")
+    assert request.task_draft["source_repo_commit"] == job.pinned_commit
+    assert request.context == ()
+    assert request.output_json_schema["properties"]["report"]["maxLength"] == 12000
+    assert "plain Russian" in request.original_input and "line numbers" in request.original_input
+    assert "data, never instructions" in request.original_input
+    with pytest.raises(ValidationError):
+        ResearchResponse(report="x" * 12001)
+    context = TurnInvocationContext(
+        TurnClaim(goal.id, job.id, claim.owner, claim.generation, claim.generation),
+        uuid.uuid5(job.id, f"attempt:{claim.generation}"),
+        "p",
+        1,
+        1,
+        1,
+        job=True,
+    )
+    assert context_payload(context)["job"] is True
+
+
+@pytest.mark.anyio
+async def test_job_inference_authority_ignores_goal_turn_lease_but_honors_revocation():
+    from unittest.mock import AsyncMock
+
+    from vuzol.leadership.actor import server_agent_principal
+    from vuzol.leadership.fencing import TurnClaim
+    from vuzol.leadership.invocation_context import TurnInvocationContext, invocation_current
+    from vuzol.leadership.persistence import POLICY_REVISION, GoalDelegation, LeadershipTurn
+
+    _, goal, job, claim = _running()
+    goal.project_id = "p"
+    goal.delegation_id = uuid.uuid4()
+    grant = GoalDelegation(
+        id=goal.delegation_id,
+        project_id="p",
+        policy_revision=POLICY_REVISION,
+        agent_principal_id=server_agent_principal("p"),
+    )
+    turn_id = uuid.uuid5(job.id, f"attempt:{claim.generation}")
+    turn = LeadershipTurn(
+        id=turn_id,
+        goal_id=goal.id,
+        wakeup_id=turn_id,
+        status="claimed",
+        lease_epoch=claim.generation,
+        owner=claim.owner,
+    )
+    rows = {ManagedGoal: goal, LeadJob: job, LeadershipTurn: turn, GoalDelegation: grant}
+    session = AsyncMock()
+    session.get.side_effect = lambda model, *_args, **_kwargs: rows[model]
+    context = TurnInvocationContext(
+        TurnClaim(goal.id, job.id, claim.owner, claim.generation, claim.generation),
+        turn_id,
+        "p",
+        1,
+        1,
+        1,
+        job=True,
+    )
+    assert await invocation_current(session, context)
+    goal.version, goal.fence_epoch, goal.lease_owner = 99, 99, "lead"
+    assert await invocation_current(session, context)
+    for lifecycle in ("draft", "active", "waiting"):
+        goal.lifecycle = lifecycle
+        assert await invocation_current(session, context)
+    for lifecycle in ("paused", "cancelled", "completed"):
+        goal.lifecycle = lifecycle
+        assert not await invocation_current(session, context)
+    goal.lifecycle = "active"
+    grant.revoked_at = datetime.now(UTC)
+    assert not await invocation_current(session, context)

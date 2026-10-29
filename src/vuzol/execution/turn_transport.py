@@ -439,6 +439,7 @@ def context_payload(context: TurnInvocationContext) -> dict[str, str | int]:
         "scope_revision": context.scope_revision,
         "conversational": context.conversational,
         "retrospective": context.retrospective,
+        "job": context.job,
     }
 
 

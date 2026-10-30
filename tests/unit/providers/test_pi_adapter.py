@@ -278,9 +278,38 @@ def test_decoded_session_id_present_in_fixture() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
+    "content",
+    [
+        '```json\n{"answer": "ok"}\n```',
+        'Notes.\n\n```json\n{"answer": "bad"}\n```\nFinal:\n```json\n{"answer": "ok"}\n```',
+    ],
+)
+async def test_fenced_json_after_prose_is_the_structured_output(content) -> None:
+    """Live 2026-10-30: a reviewer's valid "pass" after its notes blocked the final check."""
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    message = {
+        "role": "assistant",
+        "stopReason": "stop",
+        "content": [{"type": "text", "text": content}],
+        "usage": {"input": 1, "output": 1},
+    }
+    stdout = json.dumps({"type": "agent_end", "messages": [message]}) + '\n{"type":"agent_settled"}'
+    result = await PiCliAdapter(Transport(stdout)).execute(
+        request(output_json_schema=schema), profile(), CancellationContext()
+    )
+    assert result.structured_output == {"answer": "ok"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
     ("content", "stage", "path", "fenced"),
     [
-        ('```json\n{"answer":"ok"}\n```', "json_parse", None, True),
+        ('```json\n{"answer":\n```', "json_parse", None, True),
         ('{"answer":', "json_parse", None, False),
         ('["secret-response-value"]', "non_object", None, False),
         (

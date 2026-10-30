@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
@@ -298,7 +299,7 @@ class PiCliAdapter:
         structured: dict[str, Any] | None = None
         if validator is not None:
             try:
-                decoded_json = json.loads(decoded.text)
+                decoded_json = _load_json_object(decoded.text)
                 if not isinstance(decoded_json, dict):
                     raise ValueError("structured Pi response is not an object")
                 # The first error of a oneOf schema names only "oneOf"; best_match
@@ -384,6 +385,28 @@ def _output_diagnostic(
         ),
         json_fenced=content.lstrip().startswith("```"),
     )
+
+
+_FENCED_JSON = re.compile(r"```(?:json)?[ \t]*\n(.*?)\n[ \t]*```", re.DOTALL)
+
+
+def _load_json_object(text: str) -> object:
+    """Parse the response, or the last fenced JSON object after the model's prose.
+
+    Live 2026-10-30: the reviewer wrote its findings, then a ```json block with a
+    valid "pass" verdict; three such answers blocked the final check.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        for block in reversed(_FENCED_JSON.findall(text)):
+            try:
+                candidate = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                return candidate
+        raise
 
 
 def _optional_int(value: object) -> int | None:

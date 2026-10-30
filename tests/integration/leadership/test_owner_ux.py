@@ -456,6 +456,7 @@ async def test_waiting_lead_wait_keeps_plan_approval_and_approval_always_resumes
             # A goal already parked under another reason by the old behavior.
             goal.waiting_reason = "goal_waiting"
             goal.wakeup_condition = None
+            goal.constraints = {**goal.constraints, "owner_answer": {"answer": "убери шаг"}}
             card = await build_work_package_plan_card(session, package_id)
         client = FakeTelegramClient()
         await drain(factory, client)
@@ -483,6 +484,8 @@ async def test_waiting_lead_wait_keeps_plan_approval_and_approval_always_resumes
         async with factory() as session:
             goal = await session.get(ManagedGoal, goal_id)
             assert goal.lifecycle == "active" and goal.waiting_reason is None
+            # Live 2026-10-30: an old answer re-planned after every approval.
+            assert goal.constraints["owner_answer"]["superseded"] is True
 
 
 async def test_delegated_item_results_send_the_owner_no_card(postgres_dsn, runtime):

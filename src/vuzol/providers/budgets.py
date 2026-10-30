@@ -915,11 +915,23 @@ async def reserve_budget(
     if limits.max_replans > 0:
         package_id = await resolve_package_id(session, task_id)
         if package_id is not None:
+            # The owner approving a revision resets the loop guard: only replans
+            # since the owner's last approval count. Live 2026-10-30: twelve
+            # revisions, several owner-approved, blocked the approved next item.
+            owner_approved = await session.scalar(
+                select(func.max(PlanRevision.revision_number)).where(
+                    PlanRevision.work_package_id == package_id,
+                    PlanRevision.approved_by_user_id.is_not(None),
+                )
+            )
             revisions = (
                 await session.scalar(
                     select(func.count())
                     .select_from(PlanRevision)
-                    .where(PlanRevision.work_package_id == package_id)
+                    .where(
+                        PlanRevision.work_package_id == package_id,
+                        PlanRevision.revision_number > (owner_approved or 0),
+                    )
                 )
             ) or 0
             if int(revisions) >= limits.max_replans:

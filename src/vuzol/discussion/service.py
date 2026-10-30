@@ -393,6 +393,15 @@ class WorkPackageService:
                     raise DomainError("delegation_inactive")
             if content_hash != revision.content_hash or scope_revision != goal.scope_revision:
                 raise DomainError("stale_revision")
+            answer = goal.constraints.get("owner_answer")
+            if isinstance(answer, dict) and not answer.get("superseded"):
+                # Approving a plan is newer owner input than any earlier answer.
+                # Live 2026-10-30: each approval woke the lead, which replanned
+                # from a day-old "убери проверку" and asked for approval again.
+                goal.constraints = {
+                    **goal.constraints,
+                    "owner_answer": {**answer, "superseded": True},
+                }
         if (
             package.status is WorkPackageStatus.APPROVED
             and package.approved_revision_id == revision.id

@@ -1024,5 +1024,21 @@ async def test_d3_replan_counter_fires_on_package_revisions(
                     estimate=estimate,
                     limits=settings.limits,
                 )
+        # The owner approving that revision resets the loop guard.
+        async with factory.begin() as session:
+            approved = await session.get(PlanRevision, created.revision_id)
+            assert approved is not None
+            approved.approved_by_user_id = 1
+        async with factory.begin() as session:
+            await reserve_budget(
+                session,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=step,
+                profile_id="api",
+                provider_attempt=1,
+                estimate=estimate,
+                limits=settings.limits,
+            )
     finally:
         await engine.dispose()

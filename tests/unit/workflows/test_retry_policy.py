@@ -55,3 +55,9 @@ def test_dependency_setup_failure_is_retryable_after_source_registration() -> No
             max_attempts=2,
         )
     )
+
+
+def test_malformed_reviewer_answers_are_retryable_after_exhaustion() -> None:
+    assert blocked_step_is_retryable(
+        _step(attempt_count=3, max_attempts=3, failure_category="reviewer_output_invalid")
+    )

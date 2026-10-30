@@ -20,6 +20,9 @@ EXPLICITLY_RETRYABLE_FAILURES = frozenset(
         "timeout",
         "provider_unavailable",
         "provider_attempts_exhausted",
+        # Review is read-only. Live 2026-10-30: three malformed reviewer answers
+        # blocked the final check with no way to retry it.
+        "reviewer_output_invalid",
     }
 )
 

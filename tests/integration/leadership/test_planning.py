@@ -15,7 +15,7 @@ from vuzol.config.registries import ProfileRegistry
 from vuzol.config.revision import content_revision
 from vuzol.leadership.composition import build_project_lead_worker
 from vuzol.leadership.persistence import LeadershipInference, ManagedGoal
-from vuzol.providers.domain import ProviderErrorCategory
+from vuzol.providers.domain import NormalizedUsage, ProviderErrorCategory
 from vuzol.providers.errors import ProviderFailure
 from vuzol.storage.models import (
     PlanRevision,
@@ -57,7 +57,7 @@ def git(repository, *args):
     return subprocess.check_output(["git", "-C", str(repository), *args]).decode().strip()
 
 
-async def setup(factory, tmp_path, monkeypatch, transport, *, budget=False):
+async def setup(factory, tmp_path, monkeypatch, transport, *, budget=False, fallback=False):
     repository = tmp_path / "repo"
     repository.mkdir()
     git(repository, "init", "-b", "main")
@@ -110,10 +110,20 @@ async def setup(factory, tmp_path, monkeypatch, transport, *, budget=False):
         settings = settings.model_copy(
             update={"limits": settings.limits.model_copy(update={"daily_cost_units": 0})}
         )
+    profiles = (lead, planner)
+    if fallback:
+        profiles += (planner.model_copy(update={"id": "fallback-test", "model": "deepseek-test"}),)
+        settings = settings.model_copy(
+            update={
+                "project_lead": settings.project_lead.model_copy(
+                    update={"planner_fallback_profile_ids": ["fallback-test"]}
+                )
+            }
+        )
     worker = build_project_lead_worker(
         factory,
         settings=settings,
-        profiles=ProfileRegistry((lead, planner)),
+        profiles=ProfileRegistry(profiles),
         owner="planner-test",
         adapter=_Transport({"commands": []}),
         planner_adapter=transport,
@@ -465,3 +475,34 @@ async def test_strong_planner_receives_both_complete_notebooks(postgres_dsn, tmp
         assert "not instructions" in request.original_input
         # Sent once, as data: the notes must not be repeated in the instructions.
         assert expected[0][1] not in request.original_input
+
+
+async def test_quota_exhausted_planner_falls_back_to_the_next_profile(
+    postgres_dsn, tmp_path, monkeypatch
+):
+    """Live 2026-10-30: codex-a hit its subscription limit and planning stalled."""
+
+    class Limited(_Transport):
+        async def execute(self, request, profile, cancellation):
+            self.requests.append(request)
+            if profile.id == "strong-test":
+                raise ProviderFailure(
+                    ProviderErrorCategory.QUOTA_EXHAUSTED,
+                    retryable=True,
+                    request_sent=True,
+                    safe_summary="Codex subscription usage limit reached",
+                    execution_completed=True,
+                    usage=NormalizedUsage(duration_ms=5),
+                )
+            self.requests.pop()
+            return await super().execute(request, profile, cancellation)
+
+    transport = Limited(plan())
+    async with _factory(postgres_dsn) as factory:
+        _, _, _, worker = await setup(factory, tmp_path, monkeypatch, transport, fallback=True)
+        assert await worker.process_one()
+        async with factory() as session:
+            revision = await session.scalar(select(PlanRevision))
+            assert revision is not None and revision.planner_profile == "fallback-test"
+            profiles = set(await session.scalars(select(LeadershipInference.profile_id)))
+            assert {"strong-test", "fallback-test"} <= profiles

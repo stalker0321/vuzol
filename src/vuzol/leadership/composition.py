@@ -34,6 +34,17 @@ from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.storage.models import ProjectExecutorPreference
 
+# Account or transport failures, not a bad plan: another planner may succeed.
+_FALLBACK_PLANNER_REASONS = frozenset(
+    {
+        "planner_quota_exhausted",
+        "planner_provider_unavailable",
+        "planner_rate_limited",
+        "planner_timeout",
+        "planner_authentication",
+    }
+)
+
 
 def build_project_lead_worker(
     session_factory: async_sessionmaker[AsyncSession],
@@ -274,6 +285,24 @@ class _TurnModels:
             timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
         )
 
+    def _fallback_planner(self, profile_id: str) -> tuple[ProviderProfileConfig, ProviderAdapter]:
+        try:
+            profile = self._profiles.get(profile_id)
+            if (
+                not profile.enabled
+                or SLOT_ROLES["planner_strong"] not in profile.roles
+                or not supported_profile(profile)
+            ):
+                raise ValueError("fallback planner is disabled or unsupported")
+            adapter = self._injected["planner_strong"]
+            if adapter is None and self._registry is not None:
+                adapter = self._registry.get(profile.id)
+            if adapter is None:
+                raise ValueError("fallback planner transport is unavailable")
+            return profile, adapter
+        except (ValueError, LookupError) as error:
+            raise LeadModelUnavailable("planner_fallback_unavailable") from error
+
     def _resolve(
         self, pin: ModelAssignment, slot: str
     ) -> tuple[ProviderProfileConfig, ProviderAdapter]:
@@ -309,7 +338,7 @@ class _TurnModels:
                 profile, adapter = self._resolve(pins["planner_strong"], "planner_strong")
             except LeadModelUnavailable:
                 return outcome_decision(snapshot, {"reason": "planner_profile_unselected"})
-            return await generate_plan(
+            decision = await generate_plan(
                 self._factory,
                 snapshot,
                 profile,
@@ -318,6 +347,25 @@ class _TurnModels:
                 limits=self._settings.limits,
                 timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
             )
+            fallbacks = self._settings.project_lead.planner_fallback_profile_ids
+            for index, fallback_id in enumerate(fallbacks, start=1):
+                reason = (decision.planning_outcome or {}).get("reason")
+                if reason not in _FALLBACK_PLANNER_REASONS:
+                    break
+                try:
+                    fallback = self._fallback_planner(fallback_id)
+                except LeadModelUnavailable:
+                    continue
+                decision = await generate_plan(
+                    self._factory,
+                    snapshot,
+                    *fallback,
+                    repository=self._repositories.get(snapshot.project_id),
+                    limits=self._settings.limits,
+                    timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
+                    fallback_round=index,
+                )
+            return decision
         pins = await self._pins()
         if "lead" not in pins:
             raise LeadModelUnavailable("lead_profile_unselected")

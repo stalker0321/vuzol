@@ -308,3 +308,49 @@ def test_only_readers_skip_the_git_repository_check() -> None:
 
     assert "--skip-git-repo-check" in canonical_codex_argv(model="gpt-6.1-sol", read_only=True)
     assert "--skip-git-repo-check" not in canonical_codex_argv(model="gpt-6.1-sol")
+
+
+@pytest.mark.anyio
+async def test_codex_usage_limit_is_quota_exhausted_not_unavailable(tmp_path: Path) -> None:
+    """Live 2026-10-30: a subscription limit read as "provider unavailable"."""
+    limit = (
+        "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), "  # noqa: RUF001
+        "visit https://chatgpt.com/settings/usage to purchase more credits or try again at 3:00 PM."
+    )
+
+    class LimitedTransport:
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            del invocation, cancellation
+            stdout = "\n".join(
+                json.dumps(event)
+                for event in (
+                    {"type": "thread.started", "thread_id": "t1"},
+                    {"type": "turn.started"},
+                    {"type": "error", "message": limit},
+                    {"type": "turn.failed", "error": {"message": limit}},
+                )
+            )
+            return CodexProcessResult(1, stdout, "", 2)
+
+    configured = profile(
+        "codex-a",
+        provider="codex",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="codex-a",
+        state_directory=tmp_path / "codex-a",
+    )
+    with pytest.raises(ProviderFailure) as caught:
+        await CodexCliAdapter(LimitedTransport()).execute(
+            provider_request().model_copy(
+                update={"sandbox_reference": "worktree:00000000-0000-0000-0000-000000000001"}
+            ),
+            configured,
+            CancellationContext(),
+        )
+    assert caught.value.category is ProviderErrorCategory.QUOTA_EXHAUSTED
+    assert "3:00 PM" in caught.value.safe_summary

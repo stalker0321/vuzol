@@ -26,6 +26,7 @@ class LeadCommandName(StrEnum):
     REVISE_PLAN = "revise_plan"
     START_BATCH = "start_batch"
     START_TASK = "start_task"
+    SKIP_ITEM = "skip_item"
     CANCEL_TASK = "cancel_task"
     START_JOB = "start_job"
     CANCEL_JOB = "cancel_job"

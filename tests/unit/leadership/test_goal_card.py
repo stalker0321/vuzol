@@ -188,12 +188,14 @@ def test_provider_response_accepts_vocabulary_commands() -> None:
             "commands": [
                 {"name": "add_vocabulary", "payload": {"terms": ["Вузол"]}, "reason": "просил"},
                 {"name": "remove_vocabulary", "payload": {"term": "лид"}},
+                {"name": "skip_item", "payload": {}, "reason": "владелец попросил"},
             ],
         }
     )
     assert [command.name for command in decision.commands] == [
         "add_vocabulary",
         "remove_vocabulary",
+        "skip_item",
     ]
     with pytest.raises(LeadModelUnavailable):
         parse_lead_response(

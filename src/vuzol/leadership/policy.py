@@ -85,6 +85,9 @@ def authorize(
     # Notes and read-only research are intrinsic to a valid lead delegation.
     if command in MEMORY_COMMANDS | JOB_COMMANDS:
         return PolicyDecision(True, "applied")
+    if command is LeadCommandName.SKIP_ITEM:
+        # Only on the owner's own request; the service checks the triggering message.
+        return PolicyDecision(True, "applied")
     delegation_actions = delegation_actions | frozenset(
         {
             "propose_plan": "request_plan",

@@ -646,6 +646,14 @@ async def build_work_package_plan_card(
             controls.append(
                 ("Повторить", _callback(WorkPackageCallbackKind.RETRY_ITEM, package, revision))
             )
+        if package.managed_goal_id is not None and package.cursor_ordinal is not None:
+            # Owner 2026-10-30: leave the stuck step undone; the lead goes on.
+            controls.append(
+                (
+                    "⏭ Пропустить шаг",
+                    _callback(WorkPackageCallbackKind.SKIP_ITEM, package, revision),
+                )
+            )
         controls.extend(
             (
                 (

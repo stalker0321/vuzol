@@ -197,6 +197,26 @@ class PackageControlIngress:
                     )
                 code = PackageControlResultCode.APPLIED
                 revision_id = None
+            elif (
+                command.action is PackageControlAction.SKIP_ITEM
+                and (await uow.work_packages.get_package(command.package_id)).managed_goal_id
+            ):
+                from vuzol.leadership.skip import skip_goal_item
+
+                # Goal before package, as everywhere else.
+                goal = await service._lock_managed_goal(command.package_id)
+                await service.validate_control_fence(
+                    package_id=command.package_id,
+                    revision_number=command.plan_revision_number,
+                    h8=command.h8,
+                    expected_status_generation=command.expected_status_generation,
+                )
+                if goal is None or goal.owner_user_id != command.user_id:
+                    raise DomainError("outside_scope")
+                await skip_goal_item(uow, goal, actor_type="user", actor_id=str(command.user_id))
+                generation = (await uow.work_packages.get_package(command.package_id)).version
+                code = PackageControlResultCode.APPLIED
+                revision_id = None
             elif command.action is PackageControlAction.SKIP_ITEM:
                 generation = await service.skip_item(
                     package_id=command.package_id,

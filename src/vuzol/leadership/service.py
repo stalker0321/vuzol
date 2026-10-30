@@ -364,6 +364,21 @@ class LeadershipCommandService:
             return _Outcome(
                 CommandStatus.APPLIED, None, {"job_id": str(job.id), "state": job.state}, goal
             )
+        if name is LeadCommandName.SKIP_ITEM:
+            from vuzol.leadership.skip import skip_goal_item
+            from vuzol.storage.models import TransactionalOutbox
+
+            source = await uow.session.get(TransactionalOutbox, claim.wakeup_id) if claim else None
+            if actor.kind is not ActorKind.HUMAN and (
+                source is None or source.payload.get("wakeup_kind") != "owner_message"
+            ):
+                # Leaving work undone is the owner's call, never the lead's own.
+                return _Outcome(CommandStatus.DENIED, "owner_request_required", {}, goal)
+            skipped = await skip_goal_item(
+                uow, goal, actor_type=actor.kind.value, actor_id=actor.subject
+            )
+            _bump(goal, actor)
+            return _Outcome(CommandStatus.APPLIED, None, {**skipped, "version": goal.version}, goal)
         if name is LeadCommandName.PROPOSE_COMPLETION and (
             goal.constraints.get("pending_amendment") or goal.constraints.get("queued_amendment")
         ):

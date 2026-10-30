@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config import Capability, RuntimeConfiguration, TopicKind
@@ -1086,7 +1087,8 @@ class InterpretationPipeline:
                     filename=filename,
                     language_hint=self._runtime.settings.interpretation.language_hint,
                     keywords=transcription_keywords(
-                        self._runtime.settings.interpretation.transcription_keywords_file
+                        self._runtime.settings.interpretation.transcription_keywords_file,
+                        await self._vocabulary(),
                     ),
                 )
             )
@@ -1174,6 +1176,21 @@ class InterpretationPipeline:
                     transcription_uncertain=uncertain,
                 )
             await complete_outbox_item(session, token)
+
+    async def _vocabulary(self) -> tuple[str, ...]:
+        from vuzol.storage.models import TranscriptionTerm
+
+        try:
+            async with self._factory() as session:
+                rows = await session.scalars(
+                    select(TranscriptionTerm.term)
+                    .where(TranscriptionTerm.removed_at.is_(None))
+                    .order_by(TranscriptionTerm.created_at, TranscriptionTerm.id)
+                )
+                return tuple(rows)
+        except SQLAlchemyError:
+            # Hints only: a database hiccup must not cost the owner the voice note.
+            return ()
 
     def _persist_attachment(self, item_id: uuid.UUID, content: bytes) -> str:
         digest = hashlib.sha256(content).hexdigest()
@@ -1632,23 +1649,24 @@ def voice_heard_text(transcript: str, *, uncertain: bool) -> str:
 _MAX_KEYWORDS = 200
 
 
-def transcription_keywords(path: Path | None) -> tuple[str, ...]:
-    """The owner's vocabulary file; a missing or unreadable file means no hints.
+def transcription_keywords(path: Path | None, added: Sequence[str] = ()) -> tuple[str, ...]:
+    """The owner's vocabulary file, then terms added through the lead.
 
-    OpenAI rejects the whole request for a keyword containing <, > or a line
-    break, so such lines are dropped rather than sent.
+    A missing or unreadable file means no file hints. OpenAI rejects the whole
+    request for a keyword containing <, > or a line break, so such lines are
+    dropped rather than sent.
     """
-    if path is None:
-        return ()
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ()
+    lines: list[str] = []
+    if path is not None:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
     keywords: list[str] = []
-    for line in lines:
+    for line in [*lines, *added]:
         term = line.strip()
         if not term or term.startswith("#") or "<" in term or ">" in term or len(term) > 100:
             continue
-        if term not in keywords:
+        if term.lower() not in {keyword.lower() for keyword in keywords}:
             keywords.append(term)
     return tuple(keywords[:_MAX_KEYWORDS])

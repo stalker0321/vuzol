@@ -26,6 +26,7 @@ from vuzol.leadership.model import (
 from vuzol.leadership.notebooks import ForgetPayload, RememberPayload, render_notebooks
 from vuzol.leadership.persistence import POLICY_REVISION, LeadershipInference
 from vuzol.leadership.read_tools import ToolBatch, run_tool_batch
+from vuzol.leadership.vocabulary import AddVocabularyPayload, RemoveVocabularyPayload
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
@@ -167,6 +168,17 @@ class _ForgetCommand(_Command):
     payload: ForgetPayload
 
 
+class _AddVocabularyCommand(_Command):
+    name: Literal["add_vocabulary"]
+    payload: AddVocabularyPayload
+    reason: str = Field(min_length=1)
+
+
+class _RemoveVocabularyCommand(_Command):
+    name: Literal["remove_vocabulary"]
+    payload: RemoveVocabularyPayload
+
+
 class _ResearchPayload(ResearchInput):
     kind: Literal["research"]
 
@@ -202,6 +214,8 @@ class _Response(BaseModel):
         | _AcceptCommand
         | _RememberCommand
         | _ForgetCommand
+        | _AddVocabularyCommand
+        | _RemoveVocabularyCommand
         | _StartJobCommand
         | _CancelJobCommand
     ] = Field(default_factory=list, max_length=8)
@@ -521,7 +535,7 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "Only server grants authorize effects; never approve publish/deploy/install.",
         "Commands: request_plan, revise_plan, start_task, cancel_task, accept_result, "
         "ask_owner, wait_for, propose_completion, pause_goal, cancel_goal, amend_goal, "
-        "remember, forget, start_job, cancel_job.",
+        "remember, forget, add_vocabulary, remove_vocabulary, start_job, cancel_job.",
         'Return EITHER {"reply": ..., "commands": [...]} OR {"tool_calls": [...]}, never both. '
         'Read tools use {"name": ..., "args": {...}}: read_status {} reads this goal\'s '
         "project state; read_result {} reads its result; recall {query, project:'this'|'all', "
@@ -544,6 +558,15 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "Prefer replaces over near-duplicates. On notebook_full, replace or forget notes first. "
         "forget {note_id} retracts an active note. When the owner says remember or forget, do it. "
         "Use at most three memory commands per decision; they also work in draft/paused goals.",
+        "Owner voice notes reach you as speech-to-text transcripts (a voice attachment); "
+        "vocabulary lists the owner's work slang the recognizer is told to expect. "
+        "add_vocabulary {terms:[1..10 words or short phrases, spelled as the owner writes "
+        "them]} adds terms; remove_vocabulary {term} removes one. Explain why in reason. "
+        "When the owner asks to add or remove a word in the dictionary (словарь), do it. "
+        "When the owner corrects a misheard voice note, or a transcript is clearly garbled "
+        "around a work term, offer in reply to add the correct spelling to the dictionary; "
+        "add it only after the owner asks or agrees. Never add ordinary words or names "
+        "that are not the owner's work vocabulary.",
         "Request a strong planner with request_plan {goal, constraints:[...]}; "
         "revise_plan {reason} replans only future work using prior results and owner corrections. "
         "Planning is the only command in its turn. Wait for plan_ready or plan_failed; "
@@ -618,6 +641,7 @@ def _prompt(snapshot: LeadSnapshot) -> str:
     if snapshot.waiting_reason:
         lines.append(f"waiting: {snapshot.waiting_reason}")
     lines.append(render_notebooks(snapshot.project_notebook, snapshot.global_notebook))
+    lines.append("vocabulary: " + json.dumps(list(snapshot.vocabulary), ensure_ascii=False))
     lines.append("result_context: " + json.dumps(snapshot.result_context, ensure_ascii=False))
     return "\n".join(lines)
 

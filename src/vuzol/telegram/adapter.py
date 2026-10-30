@@ -125,6 +125,13 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
         ),
         "goal_accepted": "✅ Уже принято.",
         "quota_wait_over": "Ожидание лимита уже закончилось.",
+        "goal_parked": "🅿️ Цель отложена. Можно начинать другую.",
+        "goal_unparked": "▶️ Возвращаюсь к цели.",
+        "goal_live_blocks_return": (
+            "В проекте уже идёт другая цель: сначала отложи или закрой её."  # noqa: RUF001
+        ),
+        "goal_not_parked": "Цель уже не отложена.",
+        "goal_not_parkable": "Эту цель нельзя отложить.",
         "goal_accept_queued": "⏳ Вливаю результат в main. Карточка обновится через пару секунд.",
         "goal_rework_requested": "✏️ Напиши следующим сообщением, что доработать.",
         "target_moved": (
@@ -539,7 +546,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
     if (
         len(parts) == 4
         and parts[:2] == ["v1", "lg"]
-        and parts[3] in {"resume", "cancel", "accept", "rework", "fallback"}
+        and parts[3] in {"resume", "cancel", "accept", "rework", "fallback", "park", "unpark"}
     ):
         try:
             version = int(parts[2])

@@ -70,7 +70,8 @@ from vuzol.storage.unit_of_work import UnitOfWork
 _NOT_YET_REASONS = frozenset({"result_not_ready", "project_task_running"})
 _RETRIED_ONCE = frozenset({"lead_response_invalid", "goal_review_invalid"})
 _INFRASTRUCTURE_FAILURES = frozenset({"provider_unavailable", "rate_limited", "timeout"})
-_TERMINAL_GOAL = frozenset({"cancelled", "completed"})
+# A parked goal is set aside: its wakeups end like a finished goal's until it returns.
+_TERMINAL_GOAL = frozenset({"cancelled", "completed", "parked"})
 _MODEL_BLOCKERS = frozenset(
     {
         "lead_model_unconfigured",

@@ -69,7 +69,7 @@ class ManagedGoal(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "managed_goals"
     __table_args__ = (
         CheckConstraint(
-            "lifecycle IN ('draft','active','waiting','paused','completed','cancelled')",
+            "lifecycle IN ('draft','active','waiting','paused','parked','completed','cancelled')",
             name="managed_goal_lifecycle",
         ),
         CheckConstraint("version >= 1", name="managed_goal_version_positive"),

@@ -73,7 +73,7 @@ class _ResponseCommand(_Command):
 
 
 class _SkipItemCommand(_Command):
-    name: Literal["skip_item"]
+    name: Literal["skip_item", "park_goal"]
     payload: _Payload = Field(default_factory=_Payload)
     reason: str = Field(min_length=1)
 
@@ -252,7 +252,14 @@ def parse_lead_response(payload: object) -> LeadDecision:
         and len(parsed.commands) != 1
     ):
         raise LeadModelUnavailable("lead_response_invalid")
-    terminal = {"wait_for", "ask_owner", "propose_completion", "pause_goal", "cancel_goal"}
+    terminal = {
+        "wait_for",
+        "ask_owner",
+        "propose_completion",
+        "pause_goal",
+        "cancel_goal",
+        "park_goal",
+    }
     terminal.update({"amend_goal", "request_revision", "read_status"})
     if any(command.name in terminal for command in parsed.commands[:-1]):
         raise LeadModelUnavailable("lead_response_invalid")
@@ -542,7 +549,8 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "Only server grants authorize effects; never approve publish/deploy/install.",
         "Commands: request_plan, revise_plan, start_task, cancel_task, accept_result, "
         "ask_owner, wait_for, propose_completion, pause_goal, cancel_goal, amend_goal, "
-        "remember, forget, add_vocabulary, remove_vocabulary, skip_item, start_job, cancel_job.",
+        "remember, forget, add_vocabulary, remove_vocabulary, skip_item, park_goal, start_job, "
+        "cancel_job.",
         'Return EITHER {"reply": ..., "commands": [...]} OR {"tool_calls": [...]}, never both. '
         'Read tools use {"name": ..., "args": {...}}: read_status {} reads this goal\'s '
         "project state; read_result {} reads its result; recall {query, project:'this'|'all', "
@@ -602,7 +610,12 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "skip_item {} with a reason leaves the current plan item undone (its live task is "
         "cancelled) and moves to the next one; skipping the last item finishes the plan. Use it "
         "only when the owner asks in this very message to skip the step; never on your own. "
-        "After an item_skipped event, start the next item or propose completion.",
+        "After an item_skipped event, start the next item or propose completion. "
+        "park_goal {} with a reason sets this goal aside (a running step is stopped) so the "
+        "owner can start another goal; the owner returns to it with a button. Use it only when "
+        "the owner asks in this very message to postpone or set the goal aside; it must be the "
+        "last command. After an unparked event, check the state and continue: a step stopped "
+        "by parking failed and needs revise_plan or the owner's skip.",
         "cancel_task {task_id}; ask_owner {question}; "
         "wait_for {condition:{kind:'package',package_id}} waits for the next task decision. "
         "Read result_context for concrete independent review failures. Historical/truncated "

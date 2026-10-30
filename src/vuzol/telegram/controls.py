@@ -128,6 +128,8 @@ class TelegramControlService:
                 "lead_accept",
                 "lead_rework",
                 "lead_fallback",
+                "lead_park",
+                "lead_unpark",
             }:
                 from vuzol.leadership.telegram_commands import apply_goal_button
 

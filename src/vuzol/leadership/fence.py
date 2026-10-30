@@ -25,6 +25,11 @@ async def legacy_package_is_fenced(session: AsyncSession, package: WorkPackage) 
     feature is turned off; only its current package remains eligible.
     """
 
+    if package.managed_goal_id is not None:
+        owner_goal = await session.get(ManagedGoal, package.managed_goal_id)
+        if owner_goal is not None and owner_goal.lifecycle == "parked":
+            # A parked goal's plan resumes only by returning to the goal.
+            return True
     goal = await session.scalar(
         select(ManagedGoal)
         .where(

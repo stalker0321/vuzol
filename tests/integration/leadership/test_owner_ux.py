@@ -80,7 +80,12 @@ async def test_question_answer_uses_delivered_version_and_does_not_resume_pause(
         link = await question_link(factory, goal_id, asked.version)
         assert link is not None
         assert sum("Нужен ли отдельный вход?" in body for _, _, body in client.sent) == 1
-        keyboard = next(keys for keys in client.sent_keyboards if keys)
+        # The goal card carries its own park button; this is the question's keyboard.
+        keyboard = next(
+            keys
+            for keys in client.sent_keyboards
+            if any(label == "Да" for row in keys for label, _ in row)
+        )
         assert [label for row in keyboard for label, _ in row] == ["Да", "Нет"]
         assert all(len(data.encode()) <= 64 for row in keyboard for _, data in row)
         await control(factory, goal_id, "pause_goal")
@@ -891,3 +896,46 @@ async def test_planner_quota_switch_button_requeues_the_plan_on_the_fallback(pos
             assert retried.payload["request"] == {"goal": "README", "constraints": []}
         again = await controls.accept(button.model_copy(update={"callback_query_id": "again"}))
         assert again.status is IngressStatus.REJECTED and again.reason == "quota_wait_over"
+
+
+async def test_park_and_return_buttons_on_the_goal_card(postgres_dsn, runtime):
+    """Owner 2026-10-30: set a goal aside from its card and come back to it."""
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            goal.lifecycle = "active"
+            goal.version += 1
+            from vuzol.leadership.service import enqueue_goal_status
+
+            await enqueue_goal_status(session, goal)
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.message_role == f"ls:{goal_id.hex}"
+                )
+            )
+        press = ControlUpdate(
+            bot_id="test",
+            update_id=940,
+            callback_query_id="park",
+            chat_id=CHAT,
+            message_thread_id=THREAD,
+            message_id=link.message_id,
+            user_id=OWNER,
+            action_kind="lead_park",
+            goal_version=1,
+        )
+        controls = TelegramControlService(runtime, factory)
+        parked = await controls.accept(press)
+        assert parked.status is IngressStatus.HANDLED and parked.reason == "goal_parked"
+        async with factory() as session:
+            assert (await session.get(ManagedGoal, goal_id)).lifecycle == "parked"
+        back = await controls.accept(
+            press.model_copy(update={"callback_query_id": "back", "action_kind": "lead_unpark"})
+        )
+        assert back.status is IngressStatus.HANDLED and back.reason == "goal_unparked"
+        async with factory() as session:
+            assert (await session.get(ManagedGoal, goal_id)).lifecycle == "active"

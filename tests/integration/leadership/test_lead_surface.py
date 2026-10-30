@@ -863,3 +863,70 @@ async def test_project_messages_from_two_chats_reply_to_their_source_topic(postg
             (CHAT, THREAD),
             (CHAT - 1, THREAD + 1),
         ]
+
+
+async def test_voice_without_live_goal_starts_a_lead_draft(postgres_dsn, tmp_path):
+    """Live 2026-10-30: a goal-less voice note went to the legacy task pipeline."""
+    from tests.integration.interpretation.test_pipeline import FakeDownloader
+
+    from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
+    from vuzol.interpretation.domain import TranscriptionResult
+    from vuzol.interpretation.service import InterpretationPipeline
+    from vuzol.leadership.persistence import ManagedGoal
+    from vuzol.storage.models import TransactionalOutbox
+    from vuzol.telegram.domain import AttachmentKind, TelegramAttachment
+
+    repository = tmp_path / "repositories" / PROJECT
+    repository.mkdir(parents=True)
+    runtime = _runtime(tmp_path, repository, lead=True, discussion=False)
+    async with _factory(postgres_dsn) as factory:
+        voice = _message(920, None).model_copy(
+            update={
+                "attachments": (
+                    TelegramAttachment(
+                        file_id="telegram-file",
+                        file_unique_id="voice-new-goal",
+                        kind=AttachmentKind.VOICE,
+                        file_size=len(b"voice-content"),
+                        media_type="audio/ogg",
+                    ),
+                )
+            }
+        )
+        accepted = await TelegramIngressService(runtime, factory).accept_message(voice)
+        assert accepted.status is IngressStatus.HANDLED and accepted.task_id is None
+        interpreter = FakeInterpreter([])
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=interpreter,
+            downloader=FakeDownloader(),
+            transcriber=FakeTranscriber(
+                TranscriptionResult(
+                    transcript="Добавь пример в README",
+                    profile_id="fake-transcriber",
+                    model="fake-audio",
+                    duration_ms=3,
+                )
+            ),
+            owner="lead-transcriber",
+        )
+        assert await pipeline.process_one()
+        assert interpreter.requests == []
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(Task)) == 0
+            goal = await session.scalar(select(ManagedGoal))
+            assert goal is not None and goal.lifecycle == "draft"
+            event = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "project_lead",
+                    TransactionalOutbox.payload["wakeup_kind"].as_string() == "owner_message",
+                )
+            )
+            assert event.payload["text"] == "Добавь пример в README"
+            heard = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("telegram:voice-heard:%")
+                )
+            )
+            assert "Добавь пример в README" in heard.payload["html"]

@@ -506,9 +506,21 @@ async def test_lead_adds_and_removes_owner_vocabulary(postgres_dsn):
 
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
+
+        async def cards():
+            async with factory() as session:
+                return await session.scalar(
+                    select(func.count())
+                    .select_from(TransactionalOutbox)
+                    .where(TransactionalOutbox.idempotency_key.like("lead:state:%"))
+                )
+
+        before = await cards()
         added = await command(
             factory, goal_id, "add_vocabulary", {"terms": ["Вузол", " пулл  реквест "]}, key="a"
         )
+        # Live 2026-10-30: one confirmation, not a redrawn goal card on top of it.
+        assert await cards() == before
         assert added.status == "applied" and added.result["added"] == ["Вузол", "пулл реквест"]
         again = await command(factory, goal_id, "add_vocabulary", {"terms": ["вузол"]}, key="b")
         assert again.status == "applied" and again.result["added"] == []

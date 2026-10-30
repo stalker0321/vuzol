@@ -1565,7 +1565,9 @@ async def _store(
         if outcome.status in {
             CommandStatus.APPLIED,
             CommandStatus.WAITING,
-        } and command.name not in {item.value for item in READ_COMMANDS}:
+        } and command.name not in {item.value for item in READ_COMMANDS | MEMORY_COMMANDS}:
+            # Live 2026-10-30: «добавь в словарь» also redrew the goal card; notes
+            # and vocabulary confirm themselves and leave the goal unchanged.
             await enqueue_goal_status(session, outcome.goal)
     await session.flush()
     return CommandResult(

@@ -566,7 +566,8 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "When the owner corrects a misheard voice note, or a transcript is clearly garbled "
         "around a work term, offer in reply to add the correct spelling to the dictionary; "
         "add it only after the owner asks or agrees. Never add ordinary words or names "
-        "that are not the owner's work vocabulary.",
+        "that are not the owner's work vocabulary. The server confirms every note and "
+        "dictionary change in the topic itself: when that is all you did, leave reply empty.",
         "Request a strong planner with request_plan {goal, constraints:[...]}; "
         "revise_plan {reason} replans only future work using prior results and owner corrections. "
         "Planning is the only command in its turn. Wait for plan_ready or plan_failed; "

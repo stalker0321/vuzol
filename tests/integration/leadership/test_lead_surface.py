@@ -711,6 +711,16 @@ async def test_voice_is_transcribed_before_later_owner_text(postgres_dsn, tmp_pa
                     TransactionalOutbox.destination.in_(("interpretation", "discussion_classify"))
                 )
             )
+            heard = (
+                await session.scalars(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.idempotency_key.like("telegram:voice-heard:%")
+                    )
+                )
+            ).all()
+            assert len(heard) == 1
+            assert "Расслышал" in heard[0].payload["html"]
+            assert "Change the scope" in heard[0].payload["html"]
 
 
 @pytest.mark.parametrize("case", ["no_live_goal", "think", "other_owner"])

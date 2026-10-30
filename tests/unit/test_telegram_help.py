@@ -29,7 +29,13 @@ def test_project_help_is_concise_and_context_aware() -> None:
     assert "не команда запуска" in html
     assert all(
         command in html
-        for command in ("/lead_status", "/lead_goal", "/lead_details", "/lead_debug")
+        for command in (
+            "/lead_status",
+            "/lead_goal",
+            "/lead_details",
+            "/lead_debug",
+            "/lead_memory",
+        )
     )
     assert "/update" not in html
     assert "голосом" in html

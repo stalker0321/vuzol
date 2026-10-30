@@ -939,3 +939,67 @@ async def test_park_and_return_buttons_on_the_goal_card(postgres_dsn, runtime):
         assert back.status is IngressStatus.HANDLED and back.reason == "goal_unparked"
         async with factory() as session:
             assert (await session.get(ManagedGoal, goal_id)).lifecycle == "active"
+
+
+async def test_lead_memory_lists_notes_and_forgets_one_in_place(postgres_dsn, runtime):
+    """Owner 2026-10-30 (memory step 4): see the lead's memory and drop a wrong note."""
+    from vuzol.storage.models import MemoryUnit
+    from vuzol.storage.repositories.memory_units import MemoryUnitRepository
+    from vuzol.storage.types import MemoryScope, MemoryUnitStatus
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            units = MemoryUnitRepository(session)
+            wrong = await units.create_note(
+                scope=MemoryScope.PROJECT,
+                project_id=PROJECT,
+                goal_id=goal_id,
+                text="Тесты гоняем через make test",
+                extraction_identity="lead-note:test-1",
+            )
+            await units.create_note(
+                scope=MemoryScope.GLOBAL,
+                project_id=None,
+                goal_id=goal_id,
+                text="Отвечать коротко и по-русски",
+                extraction_identity="lead-note:test-2",
+            )
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        sent_before = len(client.sent)
+        ingress = TelegramIngressService(runtime, factory)
+        shown = await ingress.accept_message(_message(950, "/lead_memory"))
+        assert shown.status is IngressStatus.HANDLED and shown.reason == "memory_shown"
+        await drain(factory, client)
+        assert len(client.sent) == sent_before + 1
+        body = client.sent[-1][2]
+        assert "Тесты гоняем через make test" in body and "Отвечать коротко" in body
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.message_role.startswith("lm:")
+                )
+            )
+        press = ControlUpdate(
+            bot_id="test",
+            update_id=951,
+            callback_query_id="forget",
+            chat_id=CHAT,
+            message_thread_id=THREAD,
+            message_id=link.message_id,
+            user_id=OWNER,
+            action_kind="memory_forget",
+            note_id=wrong.id,
+        )
+        controls = TelegramControlService(runtime, factory)
+        forgot = await controls.accept(press)
+        assert forgot.status is IngressStatus.HANDLED and forgot.reason == "memory_forgotten"
+        async with factory() as session:
+            note = await session.get(MemoryUnit, wrong.id)
+            assert note.status is not MemoryUnitStatus.OBSERVATION
+        await drain(factory, client)
+        # The list is redrawn in place, without the forgotten note.
+        assert len(client.sent) == sent_before + 1
+        edited = [body for _, message_id, body in client.edited if message_id == link.message_id]
+        assert edited and "make test" not in edited[-1]

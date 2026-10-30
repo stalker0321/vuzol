@@ -353,4 +353,26 @@ async def test_codex_usage_limit_is_quota_exhausted_not_unavailable(tmp_path: Pa
             CancellationContext(),
         )
     assert caught.value.category is ProviderErrorCategory.QUOTA_EXHAUSTED
-    assert "3:00 PM" in caught.value.safe_summary
+    retry_at = caught.value.retry_at
+    assert retry_at is not None and retry_at.astimezone().strftime("%H:%M") == "15:00"
+    assert caught.value.details().retry_at == retry_at
+
+
+def test_codex_usage_limit_reset_reads_the_cli_wall_clock() -> None:
+    from datetime import UTC, datetime, timedelta, timezone
+
+    from vuzol.providers.codex import usage_limit_reset
+
+    now = datetime(2026, 10, 30, 12, 58, tzinfo=UTC)
+    assert usage_limit_reset("try again at 3:00 PM.", now) == now.replace(hour=15, minute=0)
+    # Already past today: the next occurrence.
+    assert usage_limit_reset("try again at 9:05 AM", now) == datetime(
+        2026, 10, 31, 9, 5, tzinfo=UTC
+    )
+    assert usage_limit_reset("try again at Nov 2nd, 2026 3:00 PM.", now) == datetime(
+        2026, 11, 2, 15, tzinfo=UTC
+    )
+    # The CLI prints its own zone: 3 PM in UTC+1 is 14:00 UTC.
+    cet = now.astimezone(timezone(timedelta(hours=1)))
+    assert usage_limit_reset("try again at 3:00 PM", cet) == now.replace(hour=14, minute=0)
+    assert usage_limit_reset("try again later", now) is None

@@ -122,7 +122,13 @@ class TelegramControlService:
                     project_id=topic.project_id,
                     update=update,
                 )
-            if update.action_kind in {"lead_resume", "lead_cancel", "lead_accept", "lead_rework"}:
+            if update.action_kind in {
+                "lead_resume",
+                "lead_cancel",
+                "lead_accept",
+                "lead_rework",
+                "lead_fallback",
+            }:
                 from vuzol.leadership.telegram_commands import apply_goal_button
 
                 if update.message_id is None or update.message_thread_id is None:

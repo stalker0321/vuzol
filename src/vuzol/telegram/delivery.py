@@ -1827,7 +1827,7 @@ class TelegramDeliveryService:
                     not in {PROJECT_STATUS_DASHBOARD_ROLE, WORK_PACKAGE_STATUS_ROLE}
                     and prepared.work_package_id is None
                     and not (prepared.message_role or "").startswith(
-                        ("ls:", "lq:", "lp:", "la:", "lf:", "mu:")
+                        ("ls:", "lq:", "lp:", "la:", "lf:", "lw:", "mu:")
                     )
                 ):
                     assert prepared.task_id is not None

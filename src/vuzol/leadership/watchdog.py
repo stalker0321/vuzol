@@ -29,6 +29,16 @@ async def watch_waiting_goal(session: AsyncSession, goal: ManagedGoal, *, now: d
         return False
     if await _outstanding_wakeup(session, goal):
         return False
+    from vuzol.leadership.quota_wait import quota_retry_at, resume_planning
+
+    retry_at = quota_retry_at(goal.wakeup_condition)
+    if retry_at is not None:
+        # A planner limit is a live wait until it resets; then planning repeats itself.
+        if retry_at > now:
+            return False
+        return await resume_planning(
+            session, goal, key=f"lead:planner-quota-retry:{goal.id}:{goal.version}"
+        )
     stuck = await _stuck_reason(session, goal)
     if stuck is None:
         return False

@@ -3,6 +3,7 @@
 import json
 import re
 from contextlib import suppress
+from datetime import UTC, date, datetime, timedelta
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -188,16 +189,17 @@ class CodexCliAdapter:
         ):
             # Live 2026-10-30: the subscription limit read as "provider unavailable"
             # and the planner was retried into it for ten minutes.
-            retry_at = _USAGE_LIMIT_RETRY.search(provider_error)
+            retry_at = usage_limit_reset(provider_error, datetime.now().astimezone())
             raise ProviderFailure(
                 ProviderErrorCategory.QUOTA_EXHAUSTED,
                 retryable=True,
                 request_sent=True,
                 safe_summary="Codex subscription usage limit reached"
-                + (f"; try again at {retry_at.group(1)}" if retry_at else ""),
+                + (f"; try again at {retry_at.isoformat()}" if retry_at else ""),
                 execution_completed=True,
                 usage=measured_usage,
                 provider_request_id=request_id,
+                retry_at=retry_at,
             )
         if result.exit_code != 0:
             raise ProviderFailure(
@@ -279,7 +281,39 @@ def _normalize_output(
     return None, decoded
 
 
-_USAGE_LIMIT_RETRY = re.compile(r"try again at ([0-9:]+\s*[AP]M)", re.IGNORECASE)
+_USAGE_LIMIT_RETRY = re.compile(
+    r"try again at (?:(?P<month>[A-Za-z]{3})[a-z]*\.? (?P<day>\d{1,2})(?:st|nd|rd|th)?,?"
+    r"(?: (?P<year>\d{4}))?,? )?(?P<time>\d{1,2}:\d{2}\s*[AP]M)",
+    re.IGNORECASE,
+)
+
+
+def usage_limit_reset(message: str, now: datetime) -> datetime | None:
+    """When Codex said its usage limit resets, in UTC.
+
+    The CLI prints wall time in its own (this process's) zone: "try again at
+    3:00 PM" or "try again at Oct 31st, 2026 3:00 PM".
+    """
+    match = _USAGE_LIMIT_RETRY.search(message)
+    if match is None:
+        return None
+    try:
+        clock = datetime.strptime(match["time"].replace(" ", "").upper(), "%I:%M%p").time()
+        if match["month"]:
+            month = datetime.strptime(match["month"].title(), "%b").month
+            year = int(match["year"]) if match["year"] else now.year
+            moment = datetime.combine(
+                date(year, month, int(match["day"])), clock, tzinfo=now.tzinfo
+            )
+            if not match["year"] and moment < now - timedelta(days=1):
+                moment = moment.replace(year=year + 1)
+        else:
+            moment = datetime.combine(now.date(), clock, tzinfo=now.tzinfo)
+            if moment <= now:
+                moment += timedelta(days=1)
+    except ValueError:
+        return None
+    return moment.astimezone(UTC)
 
 
 def _decode_output(stdout: str) -> dict[str, object]:

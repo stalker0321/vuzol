@@ -517,6 +517,7 @@ def test_task_controls_and_package_controls_share_one_card() -> None:
         ("v1:lq:36:1", "lead_answer"),
         ("v1:lg:36:resume", "lead_resume"),
         ("v1:lg:36:cancel", "lead_cancel"),
+        ("v1:lg:36:fallback", "lead_fallback"),
     ],
 )
 def test_lead_buttons_keep_message_and_version_binding(data, action):

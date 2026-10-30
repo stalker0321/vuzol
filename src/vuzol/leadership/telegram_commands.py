@@ -452,12 +452,32 @@ async def apply_goal_button(
                 or_(
                     TelegramMessageLink.message_role.startswith("ls:"),
                     TelegramMessageLink.message_role.startswith("lf:"),
+                    TelegramMessageLink.message_role.startswith("lw:"),
                 ),
             )
         )
         if link is None or update.goal_version is None:
             return IngressResult(status=IngressStatus.REJECTED, reason="control_binding_missing")
         goal_id = uuid.UUID(link.message_role[3:])
+        if update.action_kind == "lead_fallback":
+            from vuzol.leadership.fence import lock_project_admission
+            from vuzol.leadership.quota_wait import resume_planning
+
+            await lock_project_admission(uow.session, project_id)
+            goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
+            if goal is None or goal.project_id != project_id:
+                return IngressResult(status=IngressStatus.REJECTED, reason="goal_not_available")
+            condition = goal.wakeup_condition if isinstance(goal.wakeup_condition, dict) else {}
+            fallback = condition.get("fallback_profile_id")
+            # Any press while this wait lasts: the version on the button is informational.
+            if not fallback or not await resume_planning(
+                uow.session,
+                goal,
+                key=f"lead:planner-fallback:{goal.id}:{update.callback_query_id}",
+                planner_profile_id=str(fallback),
+            ):
+                return IngressResult(status=IngressStatus.REJECTED, reason="quota_wait_over")
+            return IngressResult(status=IngressStatus.HANDLED, reason="planner_fallback_queued")
         if update.action_kind in {"lead_accept", "lead_rework"}:
             from vuzol.leadership.acceptance import queue_accept, request_rework
             from vuzol.leadership.fence import lock_project_admission

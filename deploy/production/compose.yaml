@@ -117,6 +117,9 @@ services:
     environment:
       <<: *roles
       VUZOL_TELEGRAM_BOT_TOKEN_REFERENCE: env:VUZOL_TELEGRAM_BOT_TOKEN
+      # A goal-less lead voice note is admitted here, after transcription.
+      VUZOL_ALLOWED_CHAT_IDS: ${VUZOL_ALLOWED_CHAT_IDS:?}
+      VUZOL_ALLOWED_USER_IDS: ${VUZOL_ALLOWED_USER_IDS:?}
       VUZOL_EXECUTION__ENABLED: "false"
       VUZOL_INTERPRETATION__PROFILE_ID: jev-intake-prod
       VUZOL_INTERPRETATION__FALLBACK_PROFILE_IDS: "[]"

@@ -1023,16 +1023,21 @@ class InterpretationPipeline:
                     chat_id=intake.chat_id,
                     message_thread_id=intake.message_thread_id,
                 )
-            receipt = await ProjectEventService(self._runtime).submit_event(
-                uow,
-                Principal(user_id=intake.user_id, ingress_source="telegram"),
-                project_id=project_id,
-                session_id=session_id,
-                idempotency_key=f"lead:message:{intake.chat_id}:{intake.message_id}",
-                text=text,
-                intake=intake,
-                origin=RequestOrigin(channel="telegram", display_name="Telegram"),
-            )
+            try:
+                receipt = await ProjectEventService(self._runtime).submit_event(
+                    uow,
+                    Principal(user_id=intake.user_id, ingress_source="telegram"),
+                    project_id=project_id,
+                    session_id=session_id,
+                    idempotency_key=f"lead:message:{intake.chat_id}:{intake.message_id}",
+                    text=text,
+                    intake=intake,
+                    origin=RequestOrigin(channel="telegram", display_name="Telegram"),
+                )
+            except (PermissionError, ValueError) as error:
+                # PermissionError is an OSError: unhandled, it read as a storage
+                # outage and was retried (live 2026-10-30).
+                raise PermanentPipelineError(f"lead_voice_{error}"[:100]) from error
             if receipt.status not in {"accepted", "duplicate"}:
                 raise PermanentPipelineError(f"lead_voice_{receipt.reason or receipt.status}")
             await enqueue_chat_notice(

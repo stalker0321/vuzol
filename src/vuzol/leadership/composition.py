@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,6 @@ from vuzol.storage.models import ProjectExecutorPreference
 # Account or transport failures, not a bad plan: another planner may succeed.
 _FALLBACK_PLANNER_REASONS = frozenset(
     {
-        "planner_quota_exhausted",
         "planner_provider_unavailable",
         "planner_rate_limited",
         "planner_timeout",
@@ -331,6 +331,22 @@ class _TurnModels:
         if (snapshot.result_context.get("event") or {}).get("wakeup_kind") == "plan_requested":
             from vuzol.leadership.planning import generate_plan, outcome_decision
 
+            override = (snapshot.result_context.get("event") or {}).get("planner_profile_id")
+            if override:
+                # The owner pressed "switch" on a planner quota wait.
+                try:
+                    chosen = self._fallback_planner(str(override))
+                except LeadModelUnavailable:
+                    return outcome_decision(snapshot, {"reason": "planner_fallback_unavailable"})
+                return await generate_plan(
+                    self._factory,
+                    snapshot,
+                    *chosen,
+                    repository=self._repositories.get(snapshot.project_id),
+                    limits=self._settings.limits,
+                    timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
+                    fallback_round=1,
+                )
             try:
                 pins = await self._pins()
                 if "planner_strong" not in pins:
@@ -365,6 +381,22 @@ class _TurnModels:
                     timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
                     fallback_round=index,
                 )
+            outcome = decision.planning_outcome or {}
+            if outcome.get("reason") == "planner_quota_exhausted":
+                # Wait for the limit by default; offer the first usable fallback.
+                for fallback_id in fallbacks:
+                    try:
+                        fallback_profile, _ = self._fallback_planner(fallback_id)
+                    except LeadModelUnavailable:
+                        continue
+                    return replace(
+                        decision,
+                        planning_outcome={
+                            **outcome,
+                            "fallback_profile_id": fallback_profile.id,
+                            "fallback_label": planner_label(fallback_profile),
+                        },
+                    )
             return decision
         pins = await self._pins()
         if "lead" not in pins:
@@ -394,3 +426,8 @@ class _TurnModels:
             limits=self._settings.limits,
             timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
         ).verify(goal_id, claim=claim)
+
+
+def planner_label(profile: ProviderProfileConfig) -> str:
+    """A short owner-facing model name for the switch button."""
+    return "DeepSeek" if profile.model.lower().startswith("deepseek") else profile.model

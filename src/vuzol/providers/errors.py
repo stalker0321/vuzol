@@ -1,6 +1,7 @@
 """Closed provider failure taxonomy safe for business logic and logs."""
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 
 from vuzol.providers.domain import (
     NormalizedUsage,
@@ -33,6 +34,7 @@ class ProviderFailure(Exception):
     # does not waive account ownership or supervised-runtime cleanup checks.
     execution_completed: bool = False
     diagnostic: OutputDiagnostic | None = None
+    retry_at: datetime | None = None
 
     def details(self) -> ProviderFailureDetails:
         # Do not persist safe_summary: some adapters include response-derived
@@ -43,6 +45,7 @@ class ProviderFailure(Exception):
             request_sent=self.request_sent,
             execution_completed=self.execution_completed,
             diagnostic=self.diagnostic,
+            retry_at=self.retry_at,
         )
 
     def with_receipt(

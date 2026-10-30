@@ -175,7 +175,8 @@ async def test_planner_assignment_commit_reads_and_owner_approval(
         assert len(transport.requests) == 1
 
 
-@pytest.mark.parametrize("kind", ["budget", "quota", "unavailable", "malformed", "truncated"])
+# A subscription limit waits for its reset instead: see the planner quota tests below.
+@pytest.mark.parametrize("kind", ["budget", "unavailable", "malformed", "truncated"])
 async def test_failure_notifies_lead_and_owner_and_allows_retry(
     postgres_dsn, tmp_path, monkeypatch, kind
 ):
@@ -477,32 +478,119 @@ async def test_strong_planner_receives_both_complete_notebooks(postgres_dsn, tmp
         assert expected[0][1] not in request.original_input
 
 
-async def test_quota_exhausted_planner_falls_back_to_the_next_profile(
+class _Limited(_Transport):
+    """The strong planner hits its subscription limit once, then works again."""
+
+    def __init__(self, *args, retry_at=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.retry_at = retry_at
+        self.limited = True
+
+    async def execute(self, request, profile, cancellation):
+        self.requests.append(request)
+        if profile.id == "strong-test" and self.limited:
+            self.limited = False
+            raise ProviderFailure(
+                ProviderErrorCategory.QUOTA_EXHAUSTED,
+                retryable=True,
+                request_sent=True,
+                safe_summary="Codex subscription usage limit reached",
+                execution_completed=True,
+                usage=NormalizedUsage(duration_ms=5),
+                retry_at=self.retry_at,
+            )
+        self.requests.pop()
+        return await super().execute(request, profile, cancellation)
+
+
+async def _quota_wait(factory, goal_id):
+    async with factory() as session:
+        goal = await session.get(ManagedGoal, goal_id)
+        return goal, goal.wakeup_condition
+
+
+async def test_planner_quota_waits_for_reset_and_offers_the_fallback(
     postgres_dsn, tmp_path, monkeypatch
 ):
-    """Live 2026-10-30: codex-a hit its subscription limit and planning stalled."""
+    """Owner 2026-10-30: wait for the Codex limit by default, one button to switch."""
+    from datetime import UTC, datetime, timedelta
 
-    class Limited(_Transport):
-        async def execute(self, request, profile, cancellation):
-            self.requests.append(request)
-            if profile.id == "strong-test":
-                raise ProviderFailure(
-                    ProviderErrorCategory.QUOTA_EXHAUSTED,
-                    retryable=True,
-                    request_sent=True,
-                    safe_summary="Codex subscription usage limit reached",
-                    execution_completed=True,
-                    usage=NormalizedUsage(duration_ms=5),
-                )
-            self.requests.pop()
-            return await super().execute(request, profile, cancellation)
+    from vuzol.leadership.quota_wait import resume_planning
 
-    transport = Limited(plan())
+    reset = datetime.now(UTC) + timedelta(hours=2)
+    transport = _Limited(plan(), retry_at=reset)
     async with _factory(postgres_dsn) as factory:
-        _, _, _, worker = await setup(factory, tmp_path, monkeypatch, transport, fallback=True)
+        goal_id, _, _, worker = await setup(
+            factory, tmp_path, monkeypatch, transport, fallback=True
+        )
+        assert await worker.process_one()
+        goal, condition = await _quota_wait(factory, goal_id)
+        assert goal.lifecycle == "waiting" and goal.waiting_reason == "planner_quota"
+        assert condition["kind"] == "quota"
+        assert datetime.fromisoformat(condition["retry_at"]) == reset
+        assert condition["fallback_profile_id"] == "fallback-test"
+        async with factory() as session:
+            # No automatic switch, and the lead is not woken to explain a failure.
+            assert await session.scalar(select(PlanRevision)) is None
+            assert {"strong-test"} == set(
+                await session.scalars(
+                    select(LeadershipInference.profile_id).where(
+                        LeadershipInference.phase == "planner"
+                    )
+                )
+            )
+            failed = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.payload["wakeup_kind"].as_string() == "plan_failed"
+                )
+            )
+            assert failed is None
+            notice = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("lead:planner-quota:%")
+                )
+            )
+            assert "лимит" in notice.payload["html"]
+            assert "Переключиться на DeepSeek" in json.dumps(notice.payload, ensure_ascii=False)
+        # The owner presses the button: the held request runs on the fallback now.
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id, with_for_update=True)
+            assert await resume_planning(
+                session, goal, key="test:fallback", planner_profile_id="fallback-test"
+            )
+            assert goal.lifecycle != "waiting"
         assert await worker.process_one()
         async with factory() as session:
             revision = await session.scalar(select(PlanRevision))
             assert revision is not None and revision.planner_profile == "fallback-test"
-            profiles = set(await session.scalars(select(LeadershipInference.profile_id)))
-            assert {"strong-test", "fallback-test"} <= profiles
+
+
+async def test_planner_quota_resumes_by_itself_after_the_reset(postgres_dsn, tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    transport = _Limited(plan(), retry_at=datetime.now(UTC) + timedelta(hours=2))
+    async with _factory(postgres_dsn) as factory:
+        goal_id, _, _, worker = await setup(
+            factory, tmp_path, monkeypatch, transport, fallback=True
+        )
+        assert await worker.process_one()
+        assert not await worker.process_one()  # Still before the reset: nothing to do.
+        goal, condition = await _quota_wait(factory, goal_id)
+        assert goal.waiting_reason == "planner_quota"
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        async with factory.begin() as session:
+            await session.execute(
+                update(ManagedGoal)
+                .where(ManagedGoal.id == goal_id)
+                .values(
+                    wakeup_condition={**condition, "retry_at": past},
+                    updated_at=func.now() - func.make_interval(0, 0, 0, 0, 0, 10),
+                )
+            )
+        assert not await worker.process_one()  # The idle reconcile requeues the request.
+        assert await worker.process_one()
+        async with factory() as session:
+            revision = await session.scalar(select(PlanRevision))
+            assert revision is not None and revision.planner_profile == "strong-test"

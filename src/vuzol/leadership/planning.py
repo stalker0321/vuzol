@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -42,6 +43,7 @@ from vuzol.leadership.provider_model import (
     _RevisionPayload,
     strict_response_schema,
 )
+from vuzol.leadership.quota_wait import QUOTA_REASON, park_planner_for_quota
 from vuzol.providers.budgets import purpose_for_step_type
 from vuzol.providers.domain import ContextItem, ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
@@ -225,6 +227,7 @@ async def generate_plan(
     invocation_id = uuid.uuid5(
         context.turn_id, f"planner:fallback:{profile.id}" if fallback_round else "planner"
     )
+    retry_at: datetime | None = None
     try:
         async with factory() as session:
             prior = await session.get(LeadershipInference, invocation_id)
@@ -271,7 +274,9 @@ async def generate_plan(
         )
         if result.status is not ProviderResultStatus.SUCCEEDED:
             category = result.failure.category.value if result.failure else "unavailable"
-            raise LeadModelUnavailable(f"planner_{category}")
+            raise LeadModelUnavailable(
+                f"planner_{category}", retry_at=result.failure.retry_at if result.failure else None
+            )
         if result.finish_reason in {"length", "max_tokens", "incomplete"}:
             raise LeadModelUnavailable("planner_output_truncated")
         parsed = _PlanPayload.model_validate(result.structured_output).model_dump()
@@ -293,6 +298,8 @@ async def generate_plan(
             },
         )
     except (LeadModelUnavailable, DomainError, GitError, OSError, ValueError) as error:
+        if isinstance(error, LeadModelUnavailable):
+            retry_at = error.retry_at
         reason = (
             error.code
             if isinstance(error, DomainError)
@@ -302,7 +309,14 @@ async def generate_plan(
             if isinstance(error, ValueError)
             else "source_repository_unavailable"
         )
-        return outcome_decision(snapshot, {"reason": reason, "profile_id": profile.id})
+        return outcome_decision(
+            snapshot,
+            {
+                "reason": reason,
+                "profile_id": profile.id,
+                **({"retry_at": retry_at.isoformat()} if retry_at else {}),
+            },
+        )
 
 
 async def _request(
@@ -449,6 +463,11 @@ async def apply_outcome(
         except (DomainError, GitError, OSError, ValueError) as error:
             await uow.session.refresh(goal)
             reason = error.code if isinstance(error, DomainError) else "planner_invalid_output"
+    if reason == QUOTA_REASON:
+        request = await uow.session.get(TransactionalOutbox, claim.wakeup_id)
+        assert request is not None
+        await park_planner_for_quota(uow.session, goal, request=request, outcome=outcome)
+        return {"planner_status": "waiting_quota", "reason": reason}
     await publish_outcome(
         uow.session, goal, claim.wakeup_id, reason=reason, result=result, version=goal.version + 1
     )

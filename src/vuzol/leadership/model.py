@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol, TypedDict
 
 from vuzol.leadership.commands import MAX_MEMORY_COMMANDS, MEMORY_COMMANDS
@@ -27,8 +28,11 @@ class LeadModelUnavailable(RuntimeError):
         definitive: bool = False,
         failure_category: str | None = None,
         usage: dict[str, Any] | None = None,
+        retry_at: datetime | None = None,
     ) -> None:
         super().__init__(reason)
+        # When a provider subscription limit resets, if the provider said so.
+        self.retry_at = retry_at
         # False when the provider said a resend cannot help (auth, a bad request).
         self.retryable = retryable
         # Separate resend policy from positive evidence that no usable answer can arrive.

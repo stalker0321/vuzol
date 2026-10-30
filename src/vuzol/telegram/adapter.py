@@ -95,6 +95,7 @@ _TASK_DONE = {
     "uncertain": "✅ Записал.",
     "lead_resume": "▶️ Лид продолжает работу.",
     "lead_cancel": "⏹ Цель отменена.",
+    "lead_fallback": "🔁 Собираю план на запасной модели.",
     "lead_answer": "✅ Ответ передан лиду.",
 }
 
@@ -123,6 +124,7 @@ def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
             "Кнопка устарела. Напиши «продолжи» для актуальной карточки."
         ),
         "goal_accepted": "✅ Уже принято.",
+        "quota_wait_over": "Ожидание лимита уже закончилось.",
         "goal_accept_queued": "⏳ Вливаю результат в main. Карточка обновится через пару секунд.",
         "goal_rework_requested": "✏️ Напиши следующим сообщением, что доработать.",
         "target_moved": (
@@ -537,7 +539,7 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
     if (
         len(parts) == 4
         and parts[:2] == ["v1", "lg"]
-        and parts[3] in {"resume", "cancel", "accept", "rework"}
+        and parts[3] in {"resume", "cancel", "accept", "rework", "fallback"}
     ):
         try:
             version = int(parts[2])

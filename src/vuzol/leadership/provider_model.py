@@ -568,6 +568,10 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "add it only after the owner asks or agrees. Never add ordinary words or names "
         "that are not the owner's work vocabulary. The server confirms every note and "
         "dictionary change in the topic itself: when that is all you did, leave reply empty.",
+        "waiting planner_quota means the planner hit its subscription limit: the server "
+        "repeats the same planning request when the limit resets, and the owner can switch "
+        "to the fallback planner with the button on that message. Do not request_plan again "
+        "yourself while it waits; answer the owner in reply.",
         "Request a strong planner with request_plan {goal, constraints:[...]}; "
         "revise_plan {reason} replans only future work using prior results and owner corrections. "
         "Planning is the only command in its turn. Wait for plan_ready or plan_failed; "

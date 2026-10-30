@@ -238,6 +238,7 @@ async def invoke(
                 usage=result.usage,
                 provider_request_id=result.provider_request_id,
                 diagnostic=failure.diagnostic,
+                retry_at=failure.retry_at,
             )
         return result
     except ProviderFailure as error:
@@ -268,6 +269,7 @@ async def invoke(
             retryable=error.retryable,
             definitive=definitive,
             failure_category=error.category.value,
+            retry_at=error.retry_at,
         ) from error
     except Exception as error:
         _logger.warning(

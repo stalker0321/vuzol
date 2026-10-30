@@ -145,6 +145,8 @@ class ProviderFailureDetails(FrozenProviderModel):
     request_sent: bool
     execution_completed: bool
     diagnostic: OutputDiagnostic | None = None
+    # When the provider said its subscription limit resets (quota failures only).
+    retry_at: datetime | None = None
 
 
 class ProviderResult(FrozenProviderModel):

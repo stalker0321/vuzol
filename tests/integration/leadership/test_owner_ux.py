@@ -818,3 +818,76 @@ async def test_finished_package_offers_no_next_item(postgres_dsn, runtime):
             package.status = WorkPackageStatus.COMPLETED
             context = await task_context(session, goal)
             assert context["start_spec"] is None and "next_item" not in context
+
+
+async def test_planner_quota_switch_button_requeues_the_plan_on_the_fallback(postgres_dsn, runtime):
+    """Owner 2026-10-30: one button switches a planner limit wait to the fallback."""
+    from vuzol.leadership.quota_wait import park_planner_for_quota
+    from vuzol.storage.types import DeliveryStatus
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id, with_for_update=True)
+            request = TransactionalOutbox(
+                destination="project_lead",
+                operation_type="lead_wakeup",
+                linked_entity_type="managed_goal",
+                linked_entity_id=goal_id,
+                idempotency_key="test:plan-request",
+                payload={
+                    "goal_id": str(goal_id),
+                    "wakeup_kind": "plan_requested",
+                    "command_name": "request_plan",
+                    "request": {"goal": "README", "constraints": []},
+                },
+                status=DeliveryStatus.DELIVERED,
+            )
+            session.add(request)
+            await session.flush()
+            await park_planner_for_quota(
+                session,
+                goal,
+                request=request,
+                outcome={
+                    "reason": "planner_quota_exhausted",
+                    "profile_id": "codex-a",
+                    "fallback_profile_id": "deepseek",
+                    "fallback_label": "DeepSeek",
+                },
+            )
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        async with factory() as session:
+            link = await session.scalar(
+                select(TelegramMessageLink).where(
+                    TelegramMessageLink.message_role == f"lw:{goal_id.hex}"
+                )
+            )
+            assert link is not None
+        button = ControlUpdate(
+            bot_id="test",
+            update_id=931,
+            callback_query_id="switch",
+            chat_id=CHAT,
+            message_thread_id=THREAD,
+            message_id=link.message_id,
+            user_id=OWNER,
+            action_kind="lead_fallback",
+            goal_version=1,
+        )
+        controls = TelegramControlService(runtime, factory)
+        assert (await controls.accept(button)).status is IngressStatus.HANDLED
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle != "waiting" and goal.wakeup_condition is None
+            retried = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("lead:planner-fallback:%")
+                )
+            )
+            assert retried.payload["wakeup_kind"] == "plan_requested"
+            assert retried.payload["planner_profile_id"] == "deepseek"
+            assert retried.payload["request"] == {"goal": "README", "constraints": []}
+        again = await controls.accept(button.model_copy(update={"callback_query_id": "again"}))
+        assert again.status is IngressStatus.REJECTED and again.reason == "quota_wait_over"

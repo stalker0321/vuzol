@@ -217,10 +217,14 @@ async def generate_plan(
     repository: Path | None,
     limits: HardLimits,
     timeout_seconds: int,
+    fallback_round: int = 0,
 ) -> LeadDecision:
     context = current_turn.get()
     assert context is not None
-    invocation_id = uuid.uuid5(context.turn_id, "planner")
+    # A fallback planner is its own invocation and round, with its own receipt.
+    invocation_id = uuid.uuid5(
+        context.turn_id, f"planner:fallback:{profile.id}" if fallback_round else "planner"
+    )
     try:
         async with factory() as session:
             prior = await session.get(LeadershipInference, invocation_id)
@@ -263,6 +267,7 @@ async def generate_plan(
             request,
             purpose=purpose_for_step_type("planner"),
             limits=limits,
+            round=fallback_round,
         )
         if result.status is not ProviderResultStatus.SUCCEEDED:
             category = result.failure.category.value if result.failure else "unavailable"

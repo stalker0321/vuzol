@@ -539,6 +539,8 @@ class ProjectLeadSettings(BaseModel):
     reviewer_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     # Empty preserves the project's planner_strong assignment.
     research_models: list[ResearchModelChoice] = Field(default_factory=list)
+    # Tried in order when the assigned planner hits its quota or is unavailable.
+    planner_fallback_profile_ids: list[str] = Field(default_factory=list)
     # Wall-clock bound for each lead/review invocation, independent of model/provider.
     inference_timeout_seconds: int = Field(default=60, ge=1, le=600)
     # Each entry schedules one safe resend; never more than three retries.

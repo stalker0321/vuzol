@@ -1,6 +1,7 @@
 """Codex CLI adapter contract; production sandbox transport arrives in Step 08."""
 
 import json
+import re
 from contextlib import suppress
 
 from jsonschema import Draft202012Validator
@@ -179,6 +180,25 @@ class CodexCliAdapter:
         )
         request_id = body.get("request_id")
         request_id = request_id if isinstance(request_id, str) else None
+        provider_error = body.get("error")
+        if (
+            result.exit_code != 0
+            and isinstance(provider_error, str)
+            and "usage limit" in provider_error.lower()
+        ):
+            # Live 2026-10-30: the subscription limit read as "provider unavailable"
+            # and the planner was retried into it for ten minutes.
+            retry_at = _USAGE_LIMIT_RETRY.search(provider_error)
+            raise ProviderFailure(
+                ProviderErrorCategory.QUOTA_EXHAUSTED,
+                retryable=True,
+                request_sent=True,
+                safe_summary="Codex subscription usage limit reached"
+                + (f"; try again at {retry_at.group(1)}" if retry_at else ""),
+                execution_completed=True,
+                usage=measured_usage,
+                provider_request_id=request_id,
+            )
         if result.exit_code != 0:
             raise ProviderFailure(
                 ProviderErrorCategory.PROVIDER_UNAVAILABLE,
@@ -259,6 +279,9 @@ def _normalize_output(
     return None, decoded
 
 
+_USAGE_LIMIT_RETRY = re.compile(r"try again at ([0-9:]+\s*[AP]M)", re.IGNORECASE)
+
+
 def _decode_output(stdout: str) -> dict[str, object]:
     try:
         decoded = json.loads(stdout)
@@ -283,6 +306,8 @@ def _decode_output(stdout: str) -> dict[str, object]:
                 final["text"] = item["text"]
         if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
             usage = event["usage"]
+        if event.get("type") == "error" and isinstance(event.get("message"), str):
+            final["error"] = event["message"]
     if not final and not usage:
         raise ValueError("Codex JSONL contains no final agent message")
     final["usage"] = usage

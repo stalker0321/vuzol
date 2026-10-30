@@ -42,6 +42,10 @@ async def start_spec(
 ) -> dict[str, Any] | None:
     if package is None or package.head_revision_id is None:
         return None
+    if package.status in {WorkPackageStatus.COMPLETED, WorkPackageStatus.DISCARDED}:
+        # Live 2026-10-30: a finished package still offered its final check as
+        # the next item and the lead tried to start it instead of completing.
+        return None
     revision = await session.get(PlanRevision, package.head_revision_id)
     if revision is None:
         return None

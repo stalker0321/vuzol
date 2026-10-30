@@ -930,3 +930,64 @@ async def test_voice_without_live_goal_starts_a_lead_draft(postgres_dsn, tmp_pat
                 )
             )
             assert "Добавь пример в README" in heard.payload["html"]
+
+
+async def test_refused_goal_less_voice_is_a_clear_failure_not_a_storage_retry(
+    postgres_dsn, tmp_path
+):
+    """Live 2026-10-30: the interpreter lacked allowed ids and PermissionError, an
+    OSError, read as "artifact storage unavailable"."""
+    from tests.integration.interpretation.test_pipeline import FakeDownloader
+
+    from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
+    from vuzol.interpretation.domain import TranscriptionResult
+    from vuzol.interpretation.service import InterpretationPipeline
+    from vuzol.storage.models import TransactionalOutbox
+    from vuzol.telegram.domain import AttachmentKind, TelegramAttachment
+
+    repository = tmp_path / "repositories" / PROJECT
+    repository.mkdir(parents=True)
+    runtime = _runtime(tmp_path, repository, lead=True, discussion=False)
+    async with _factory(postgres_dsn) as factory:
+        voice = _message(921, None).model_copy(
+            update={
+                "attachments": (
+                    TelegramAttachment(
+                        file_id="telegram-file",
+                        file_unique_id="voice-refused",
+                        kind=AttachmentKind.VOICE,
+                        file_size=len(b"voice-content"),
+                        media_type="audio/ogg",
+                    ),
+                )
+            }
+        )
+        await TelegramIngressService(runtime, factory).accept_message(voice)
+        refusing = runtime.model_copy(
+            update={"settings": runtime.settings.model_copy(update={"allowed_user_ids": (99,)})}
+        )
+        pipeline = InterpretationPipeline(
+            refusing,
+            factory,
+            interpreter=FakeInterpreter([]),
+            downloader=FakeDownloader(),
+            transcriber=FakeTranscriber(
+                TranscriptionResult(
+                    transcript="Добавь пример", profile_id="t", model="m", duration_ms=1
+                )
+            ),
+            owner="lead-transcriber",
+        )
+        assert await pipeline.process_one()
+        async with factory() as session:
+            item = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "telegram_file"
+                )
+            )
+            assert item.last_error_category == "lead_voice_project_not_available"
+            assert await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("lead:voice-failed:%")
+                )
+            )

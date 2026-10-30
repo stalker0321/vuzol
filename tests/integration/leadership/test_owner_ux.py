@@ -780,3 +780,21 @@ async def test_denied_lead_command_keeps_plan_approval_and_reposts_plan(postgres
                     TransactionalOutbox.idempotency_key.like("wp:repost:pending:%")
                 )
             )
+
+
+async def test_finished_package_offers_no_next_item(postgres_dsn, runtime):
+    """Live 2026-10-30: a completed package still offered its final check as next."""
+    from tests.integration.leadership.planning_helpers import seed_plan
+
+    from vuzol.leadership.tasks import task_context
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": plan_items(2)})
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert (await task_context(session, goal))["start_spec"] is not None
+            package = await session.get(WorkPackage, goal.current_package_id)
+            package.status = WorkPackageStatus.COMPLETED
+            context = await task_context(session, goal)
+            assert context["start_spec"] is None and "next_item" not in context

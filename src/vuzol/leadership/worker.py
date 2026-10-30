@@ -653,6 +653,7 @@ class ProjectLeadWorker:
                     ]
 
             from vuzol.leadership.notebooks import note_view
+            from vuzol.leadership.vocabulary import active_terms
             from vuzol.storage.types import MemoryScope
 
             project_notebook = await uow.memory_units.notebook(
@@ -683,6 +684,7 @@ class ProjectLeadWorker:
                 invocation_id=wakeup_id,
                 project_notebook=tuple(note_view(note) for note in project_notebook.notes),
                 global_notebook=tuple(note_view(note) for note in global_notebook.notes),
+                vocabulary=await active_terms(uow.session),
                 budget={
                     "spent": float(spent),
                     "reserved": float(reserved),

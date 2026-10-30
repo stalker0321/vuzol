@@ -669,6 +669,11 @@ async def test_voice_is_transcribed_before_later_owner_text(postgres_dsn, tmp_pa
         assert await worker.process_one()
         assert model.seen == []  # The earlier voice event is still being transcribed.
         interpreter = FakeInterpreter([])
+        from vuzol.storage.models import TranscriptionTerm
+
+        async with factory.begin() as session:
+            session.add(TranscriptionTerm(term="Вузол"))
+            session.add(TranscriptionTerm(term="removed", removed_at=func.now()))
         transcriber = FakeTranscriber(
             TranscriptionResult(
                 transcript="Change the scope",
@@ -698,6 +703,9 @@ async def test_voice_is_transcribed_before_later_owner_text(postgres_dsn, tmp_pa
         assert await anyio.Path(transcription["content_uri"]).read_bytes() == b"voice-content"
         assert model.seen[0]["attachments"][0]["file_id"] == "telegram-file"
         assert len(transcriber.requests) == 1 and interpreter.requests == []
+        # Terms the lead added reach speech-to-text; removed ones do not.
+        assert "Вузол" in transcriber.requests[0].keywords
+        assert "removed" not in transcriber.requests[0].keywords
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(Task)) == 0
             assert (

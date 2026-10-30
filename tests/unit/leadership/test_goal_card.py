@@ -181,6 +181,26 @@ def test_provider_response_rejects_an_owner_waiver() -> None:
     assert decision.commands == ()
 
 
+def test_provider_response_accepts_vocabulary_commands() -> None:
+    decision = parse_lead_response(
+        {
+            "reply": "Добавил.",
+            "commands": [
+                {"name": "add_vocabulary", "payload": {"terms": ["Вузол"]}, "reason": "просил"},
+                {"name": "remove_vocabulary", "payload": {"term": "лид"}},
+            ],
+        }
+    )
+    assert [command.name for command in decision.commands] == [
+        "add_vocabulary",
+        "remove_vocabulary",
+    ]
+    with pytest.raises(LeadModelUnavailable):
+        parse_lead_response(
+            {"commands": [{"name": "add_vocabulary", "payload": {"terms": []}, "reason": "x"}]}
+        )
+
+
 def test_worker_entrypoint_uses_the_profile_factory() -> None:
     source = inspect.getsource(worker_cli.run)
     assert "build_project_lead_worker" in source

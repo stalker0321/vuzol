@@ -498,3 +498,36 @@ async def test_a_foreign_unfinished_task_asks_the_owner_instead_of_waiting(postg
             assert goal.lifecycle == "waiting"
             assert goal.wakeup_condition["kind"] == "owner"
             assert str(leftover.id)[:8] in goal.wakeup_condition["question"]
+
+
+async def test_lead_adds_and_removes_owner_vocabulary(postgres_dsn):
+    """Owner 2026-10-30: the lead keeps the speech-to-text slang dictionary."""
+    from vuzol.leadership.vocabulary import active_terms
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        added = await command(
+            factory, goal_id, "add_vocabulary", {"terms": ["Вузол", " пулл  реквест "]}, key="a"
+        )
+        assert added.status == "applied" and added.result["added"] == ["Вузол", "пулл реквест"]
+        again = await command(factory, goal_id, "add_vocabulary", {"terms": ["вузол"]}, key="b")
+        assert again.status == "applied" and again.result["added"] == []
+        removed = await command(
+            factory, goal_id, "remove_vocabulary", {"term": "пулл реквест".upper()}, key="c"
+        )
+        assert removed.status == "applied" and removed.result["removed"] == "пулл реквест"
+        missing = await command(factory, goal_id, "remove_vocabulary", {"term": "нет"}, key="d")
+        assert missing.status == "denied" and missing.reason == "vocabulary_term_missing"
+        bad = await command(factory, goal_id, "add_vocabulary", {"terms": ["<x>"]}, key="e")
+        assert bad.status == "denied" and bad.reason == "invalid_vocabulary_payload"
+        async with factory() as session:
+            assert await active_terms(session) == ("Вузол",)
+            notices = list(
+                await session.scalars(
+                    select(TransactionalOutbox.payload).where(
+                        TransactionalOutbox.idempotency_key.like("vocabulary:%")
+                    )
+                )
+            )
+            texts = " ".join(str(payload) for payload in notices)
+            assert "Добавил в словарь" in texts and "Убрал из словаря" in texts

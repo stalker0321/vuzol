@@ -17,6 +17,8 @@ class LeadCommandName(StrEnum):
     GET_RESULT = "get_result"
     REMEMBER = "remember"
     FORGET = "forget"
+    ADD_VOCABULARY = "add_vocabulary"
+    REMOVE_VOCABULARY = "remove_vocabulary"
     ENABLE_MANAGED_GOAL = "enable_managed_goal"
     SET_WORK_LIMITS = "set_work_limits"
     PROPOSE_BATCH = "propose_batch"
@@ -62,7 +64,10 @@ READ_COMMANDS = frozenset(
     }
 )
 
-MEMORY_COMMANDS = frozenset({LeadCommandName.REMEMBER, LeadCommandName.FORGET})
+VOCABULARY_COMMANDS = frozenset({LeadCommandName.ADD_VOCABULARY, LeadCommandName.REMOVE_VOCABULARY})
+MEMORY_COMMANDS = (
+    frozenset({LeadCommandName.REMEMBER, LeadCommandName.FORGET}) | VOCABULARY_COMMANDS
+)
 MAX_MEMORY_COMMANDS = 3
 JOB_COMMANDS = frozenset({LeadCommandName.START_JOB, LeadCommandName.CANCEL_JOB})
 

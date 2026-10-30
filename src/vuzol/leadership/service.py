@@ -23,6 +23,7 @@ from vuzol.leadership.commands import (
     JOB_COMMANDS,
     MEMORY_COMMANDS,
     READ_COMMANDS,
+    VOCABULARY_COMMANDS,
     CommandResult,
     CommandStatus,
     LeadCommand,
@@ -326,6 +327,12 @@ class LeadershipCommandService:
         if name in READ_COMMANDS:
             body = await read_projection(uow.session, name, goal, delegation)
             return _Outcome(CommandStatus.APPLIED, None, body, goal)
+        if name in VOCABULARY_COMMANDS:
+            from vuzol.leadership.vocabulary import apply_vocabulary_command
+
+            changed = await apply_vocabulary_command(uow.session, goal, command)
+            _bump(goal, actor)
+            return _Outcome(CommandStatus.APPLIED, None, {**changed, "version": goal.version}, goal)
         if name in MEMORY_COMMANDS:
             from vuzol.leadership.notebooks import apply_memory_command
 

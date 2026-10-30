@@ -2089,3 +2089,29 @@ class ReviewOutcomeHistory(IdentityMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class TranscriptionTerm(IdentityMixin, Base):
+    """Owner work slang sent to speech-to-text as keywords; curated through the lead."""
+
+    __tablename__ = "transcription_terms"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(term)) BETWEEN 1 AND 100 AND term !~ '[<>\\n\\r]'",
+            name="transcription_term_text",
+        ),
+        Index(
+            "uq_transcription_terms_active",
+            text("lower(term)"),
+            unique=True,
+            postgresql_where=text("removed_at IS NULL"),
+        ),
+    )
+
+    term: Mapped[str] = mapped_column(String(100), nullable=False)
+    added_by_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    goal_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

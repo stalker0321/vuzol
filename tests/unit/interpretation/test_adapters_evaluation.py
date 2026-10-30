@@ -267,6 +267,14 @@ def test_gpt_transcribe_sends_languages_and_owner_keywords(tmp_path) -> None:
     keywords = transcription_keywords(vocabulary)
     assert keywords == ("README", "лид", "деплой")
     assert transcription_keywords(tmp_path / "missing.txt") == ()
+    # Terms added through the lead follow the file; case-only repeats are dropped.
+    assert transcription_keywords(vocabulary, ("readme", "Вузол")) == (
+        "README",
+        "лид",
+        "деплой",
+        "Вузол",
+    )
+    assert transcription_keywords(None, ("Вузол",)) == ("Вузол",)
 
     seen: list[bytes] = []
 

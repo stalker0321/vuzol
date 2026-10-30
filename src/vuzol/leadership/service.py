@@ -309,6 +309,8 @@ class LeadershipCommandService:
             and handoff.get("source_event_id") == command.payload.get("restart_from_event_id")
         ):
             return _Outcome(CommandStatus.DUPLICATE, "duplicate", handoff, goal)
+        if goal.lifecycle == "parked" and name not in READ_COMMANDS:
+            return _Outcome(CommandStatus.DENIED, "goal_parked", {}, goal)
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
         if goal.lifecycle == "paused" and name not in READ_COMMANDS | MEMORY_COMMANDS | {
@@ -364,6 +366,17 @@ class LeadershipCommandService:
             return _Outcome(
                 CommandStatus.APPLIED, None, {"job_id": str(job.id), "state": job.state}, goal
             )
+        if name is LeadCommandName.PARK_GOAL:
+            from vuzol.leadership.parking import park_goal
+            from vuzol.storage.models import TransactionalOutbox
+
+            source = await uow.session.get(TransactionalOutbox, claim.wakeup_id) if claim else None
+            if actor.kind is not ActorKind.HUMAN and (
+                source is None or source.payload.get("wakeup_kind") != "owner_message"
+            ):
+                return _Outcome(CommandStatus.DENIED, "owner_request_required", {}, goal)
+            parked = await park_goal(uow, goal, actor_id=actor.subject)
+            return _Outcome(CommandStatus.APPLIED, None, {**parked, "version": goal.version}, goal)
         if name is LeadCommandName.SKIP_ITEM:
             from vuzol.leadership.skip import skip_goal_item
             from vuzol.storage.models import TransactionalOutbox
@@ -1073,6 +1086,25 @@ async def enqueue_goal_status(session: AsyncSession, goal: ManagedGoal) -> None:
             revision=goal.version,
             callback_buttons=final_card_buttons(goal, ready=await acceptance_ready(session, goal)),
         )
+        from vuzol.leadership.parking import parked_goals
+
+        for parked in (await parked_goals(session, goal.project_id))[:3]:
+            # A parked goal waits for the owner; remind once, when the topic frees up.
+            request = " ".join(parked.original_request.split())
+            await enqueue_chat_notice(
+                session,
+                chat_id=parked.source_chat_id,
+                thread_id=parked.source_thread_id,
+                key=f"lead:parked-reminder:{goal.id}:{parked.id}",
+                text=(
+                    "🅿️ Есть отложенная цель: «"
+                    + (request[:160] + "…" if len(request) > 160 else request)
+                    + "». Вернуться к ней?"
+                ),
+                projection_role=f"lr:{parked.id.hex}",
+                revision=1,
+                callback_buttons=((("▶️ Вернуться", f"v1:lg:{parked.version}:unpark"),),),
+            )
 
 
 async def _enqueue_owner_question(

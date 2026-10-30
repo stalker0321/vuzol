@@ -163,6 +163,8 @@
     "callback:ControlUpdate:lead_cancel": "goal",
     "callback:ControlUpdate:lead_rework": "goal",
     "callback:ControlUpdate:lead_fallback": "goal",
+    "callback:ControlUpdate:lead_park": "goal",
+    "callback:ControlUpdate:lead_unpark": "goal",
     "telegram:/lead_goal": "goal",
     "telegram:/lead_limits": "goal",
     "telegram:/lead_pause": "goal",

@@ -410,6 +410,11 @@ async def answer_question_message(
 
 
 def goal_status_buttons(goal: ManagedGoal) -> tuple[tuple[tuple[str, str], ...], ...]:
+    park = ("🅿️ Отложить", f"v1:lg:{goal.version}:park")
+    if goal.lifecycle == "parked":
+        return ((("▶️ Вернуться", f"v1:lg:{goal.version}:unpark"),),)
+    if goal.lifecycle in {"active", "waiting"}:
+        return ((park,),)
     if goal.lifecycle != "paused":
         return ()
     return (
@@ -417,6 +422,7 @@ def goal_status_buttons(goal: ManagedGoal) -> tuple[tuple[tuple[str, str], ...],
             ("▶️ Продолжить", f"v1:lg:{goal.version}:resume"),
             ("❌ Отменить", f"v1:lg:{goal.version}:cancel"),
         ),
+        (park,),
     )
 
 
@@ -453,12 +459,38 @@ async def apply_goal_button(
                     TelegramMessageLink.message_role.startswith("ls:"),
                     TelegramMessageLink.message_role.startswith("lf:"),
                     TelegramMessageLink.message_role.startswith("lw:"),
+                    TelegramMessageLink.message_role.startswith("lr:"),
                 ),
             )
         )
         if link is None or update.goal_version is None:
             return IngressResult(status=IngressStatus.REJECTED, reason="control_binding_missing")
         goal_id = uuid.UUID(link.message_role[3:])
+        if update.action_kind in {"lead_park", "lead_unpark"}:
+            from vuzol.leadership.fence import lock_project_admission
+            from vuzol.leadership.parking import park_goal, unpark_goal
+            from vuzol.leadership.service import enqueue_goal_status
+
+            await lock_project_admission(uow.session, project_id)
+            goal = await uow.session.get(ManagedGoal, goal_id, with_for_update=True)
+            if goal is None or goal.project_id != project_id:
+                return IngressResult(status=IngressStatus.REJECTED, reason="goal_not_available")
+            if goal.owner_user_id != update.user_id:
+                return IngressResult(status=IngressStatus.REJECTED, reason="outside_scope")
+            # Any press on the goal's card: parking is an intent, not a fenced edit.
+            try:
+                async with uow.session.begin_nested():
+                    if update.action_kind == "lead_park":
+                        await park_goal(uow, goal, actor_id=str(update.user_id))
+                    else:
+                        await unpark_goal(uow, goal)
+            except DomainError as error:
+                return IngressResult(status=IngressStatus.REJECTED, reason=error.code)
+            await enqueue_goal_status(uow.session, goal)
+            return IngressResult(
+                status=IngressStatus.HANDLED,
+                reason="goal_parked" if update.action_kind == "lead_park" else "goal_unparked",
+            )
         if update.action_kind == "lead_fallback":
             from vuzol.leadership.fence import lock_project_admission
             from vuzol.leadership.quota_wait import resume_planning

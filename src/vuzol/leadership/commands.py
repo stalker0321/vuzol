@@ -27,6 +27,7 @@ class LeadCommandName(StrEnum):
     START_BATCH = "start_batch"
     START_TASK = "start_task"
     SKIP_ITEM = "skip_item"
+    PARK_GOAL = "park_goal"
     CANCEL_TASK = "cancel_task"
     START_JOB = "start_job"
     CANCEL_JOB = "cancel_job"

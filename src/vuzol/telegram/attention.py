@@ -247,7 +247,7 @@ async def sync_goal_attention(
         reason,
         decision=decision,
         target=target,
-        resolve_all=goal.lifecycle in {"cancelled", "completed"}
+        resolve_all=goal.lifecycle in {"cancelled", "completed", "parked"}
         or (goal.lifecycle == "paused" and reason != "plan_approval"),
     )
 
@@ -259,7 +259,7 @@ async def pending_owner_plan(
     from vuzol.storage.models import PlanRevision
     from vuzol.storage.types import PlanRevisionState
 
-    if goal.lifecycle in {"completed", "cancelled"} or goal.current_package_id is None:
+    if goal.lifecycle in {"completed", "cancelled", "parked"} or goal.current_package_id is None:
         return None
     package = await session.get(WorkPackage, goal.current_package_id)
     # A goal pause also pauses its draft package; the revision state is what

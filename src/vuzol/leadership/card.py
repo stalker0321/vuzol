@@ -138,7 +138,11 @@ def owner_answer_text(constraints: object) -> str | None:
 def render_goal_card(view: Mapping[str, object]) -> str:
     """One live status: current work and the owner's next action."""
     lifecycle, reason = view.get("lifecycle"), view.get("waiting_reason")
-    if lifecycle == "paused":
+    if lifecycle == "parked":
+        heading = "🅿️ **ОТЛОЖЕНА · Руководитель**"
+        now = "Цель отложена: план и результаты сохранены, в проекте можно вести другую цель."
+        action = "Чтобы вернуться к ней, нажми «▶️ Вернуться»."
+    elif lifecycle == "paused":
         heading = "⏸ **НА ПАУЗЕ · Руководитель**"
         now = reason_text(reason or "owner_pause")
         action = "Когда будешь готов, разреши продолжить работу."

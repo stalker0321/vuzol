@@ -51,6 +51,7 @@ from vuzol.leadership.wakeups import (
     enabled_wakeup_key,
     enqueue_goal_wakeup,
 )
+from vuzol.leadership.watchdog import watch_waiting_goal
 from vuzol.providers.budgets import goal_cost_totals
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, defer_outbox_item
@@ -1246,6 +1247,8 @@ class ProjectLeadWorker:
                 if goal.constraints.get("pending_amendment"):
                     continue
             if goal.lifecycle == "paused":
+                continue
+            if await watch_waiting_goal(session, goal, now=now):
                 continue
             if goal.current_package_id is None:
                 if goal.lifecycle != "active":

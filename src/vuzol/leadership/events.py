@@ -27,14 +27,11 @@ from vuzol.leadership.persistence import (
 from vuzol.leadership.provenance import RequestOrigin
 from vuzol.storage.models import (
     Event,
-    MaterializationLink,
     ProjectDiscussionSession,
-    Task,
     TelegramIntakeMessage,
     TransactionalOutbox,
 )
 from vuzol.storage.types import (
-    USER_TERMINAL_TASK_STATUSES,
     ConversationTurnRole,
     ConversationTurnSource,
     DiscussionSessionStatus,
@@ -301,23 +298,6 @@ class ProjectEventService:
         return EventReceipt("accepted", event_id, goal.id, receipt.id)
 
 
-async def _package_has_live_task(session: AsyncSession, package_id: object) -> bool:
-    try:
-        package = uuid.UUID(str(package_id))
-    except ValueError:
-        return False
-    live = await session.scalar(
-        select(Task.id)
-        .join(MaterializationLink, MaterializationLink.task_id == Task.id)
-        .where(
-            MaterializationLink.work_package_id == package,
-            Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
-        )
-        .limit(1)
-    )
-    return live is not None
-
-
 async def write_owner_event(
     uow: UnitOfWork,
     *,
@@ -368,6 +348,8 @@ async def write_owner_event(
         # A newer owner message replaces an earlier answer. Live 2026-10-30: a
         # day-old "убери проверку" kept steering the lead after newer messages.
         goal.constraints = {**goal.constraints, "owner_answer": {**answer, "superseded": True}}
+    from vuzol.leadership.watchdog import package_has_live_task
+
     condition = goal.wakeup_condition if isinstance(goal.wakeup_condition, dict) else {}
     released = (
         goal.lifecycle == "waiting"
@@ -375,7 +357,7 @@ async def write_owner_event(
             condition.get("kind") == "owner"
             or (
                 condition.get("kind") == "package"
-                and not await _package_has_live_task(uow.session, condition.get("package_id"))
+                and not await package_has_live_task(uow.session, condition.get("package_id"))
             )
         )
         and not condition.get("restart_from_event_id")

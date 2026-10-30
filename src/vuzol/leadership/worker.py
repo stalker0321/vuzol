@@ -9,7 +9,7 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import and_, func, literal, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -665,7 +665,7 @@ class ProjectLeadWorker:
                 },
                 result_context={
                     **await result_context(uow.session, goal, package),
-                    "owner_answer": goal.constraints.get("owner_answer"),
+                    "owner_answer": _current_answer(goal.constraints),
                     "work_limits": goal.constraints.get("work_limits", {}),
                     "conversation": history,
                     "task_control": await task_context(uow.session, goal),
@@ -1105,9 +1105,9 @@ class ProjectLeadWorker:
                 raise LeaseLost("project lead idle claim expired")
             from vuzol.telegram.attention import pending_owner_plan
 
-            pending = (
-                await pending_owner_plan(uow.session, goal) if reason == "model_idle" else None
-            )
+            # Live 2026-10-30: a denied command replaced the plan-approval wait with
+            # "уточни следующий шаг", hiding the plan that only needed the button.
+            pending = await pending_owner_plan(uow.session, goal)
             goal.lifecycle = "waiting"
             goal.lease_owner = None
             goal.lease_until = None
@@ -1118,6 +1118,19 @@ class ProjectLeadWorker:
                 # decision, not stuck: no recovery prompt for the owner.
                 goal.waiting_reason = "plan_approval"
                 goal.wakeup_condition = {"kind": "plan_approval", "revision_id": pending[1]}
+                if reason != "model_idle":
+                    # Bring the card with the approve button back to the bottom.
+                    uow.session.add(
+                        TransactionalOutbox(
+                            destination="work_package_projection",
+                            operation_type="repost_plan",
+                            linked_entity_type="work_package",
+                            linked_entity_id=pending[0].id,
+                            idempotency_key=f"wp:repost:pending:{goal.id}:{goal.version}",
+                            payload={"package_id": str(pending[0].id)},
+                            status=DeliveryStatus.PENDING,
+                        )
+                    )
                 return
             if reason in _NOT_YET_REASONS and goal.current_package_id is not None:
                 # Live pilot 2026-10-25: the lead accepted a result a minute early and
@@ -1375,3 +1388,10 @@ def _system_event(session: AsyncSession, goal: ManagedGoal, reason: str) -> None
             payload={"reason": reason, "fence_epoch": goal.fence_epoch},
         )
     )
+
+
+def _current_answer(constraints: dict[str, Any]) -> dict[str, Any] | None:
+    answer = constraints.get("owner_answer")
+    if not isinstance(answer, dict) or answer.get("superseded"):
+        return None
+    return answer

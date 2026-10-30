@@ -22,6 +22,7 @@ from vuzol.leadership.persistence import (
     GoalDelegation,
     LeadershipCommandReceipt,
     ManagedGoal,
+    has_owner_mandate,
 )
 from vuzol.leadership.provenance import RequestOrigin
 from vuzol.storage.models import (
@@ -342,6 +343,28 @@ async def write_owner_event(
                             "plan": revision.immutable_body,
                         }
                     )
+    answer = goal.constraints.get("owner_answer")
+    if isinstance(answer, dict) and not answer.get("superseded"):
+        # A newer owner message replaces an earlier answer. Live 2026-10-30: a
+        # day-old "убери проверку" kept steering the lead after newer messages.
+        goal.constraints = {**goal.constraints, "owner_answer": {**answer, "superseded": True}}
+    condition = goal.wakeup_condition if isinstance(goal.wakeup_condition, dict) else {}
+    released = (
+        goal.lifecycle == "waiting"
+        and condition.get("kind") == "owner"
+        and not condition.get("restart_from_event_id")
+        and has_owner_mandate(goal)
+    )
+    if released:
+        # The owner's next topic message answers the open question even when it
+        # is not a reply to it. Live 2026-10-30: "Запусти итоговую проверку" left
+        # the goal waiting and the lead's start was denied. Routing questions
+        # still need their explicit answer.
+        goal.wakeup_condition = None
+        goal.lifecycle = "active"
+        goal.waiting_reason = None
+        goal.version += 1
+        goal.fence_epoch += 1
     event_id = uuid.uuid4()
     received = intake.created_at if intake else datetime.now(UTC)
     uow.session.add(
@@ -377,4 +400,10 @@ async def write_owner_event(
     if intake is not None:
         intake.status = IntakeStatus.COMPLETED
     await uow.session.flush()
+    if released:
+        from vuzol.leadership.service import enqueue_goal_status
+        from vuzol.telegram.attention import sync_attention
+
+        await sync_attention(uow.session, goal, None, scope="planner")
+        await enqueue_goal_status(uow.session, goal)
     return event_id

@@ -105,7 +105,7 @@ def _preview(value: object, limit: int = 110) -> str:
 
 
 def reason_text(reason: object) -> str:
-    return _REASONS.get(str(reason), "Продолжение остановлено. Нужно уточнить следующий шаг.")
+    return _REASONS.get(str(reason), "Руководитель остановился: следующее действие не прошло.")
 
 
 def open_question(condition: object) -> str | None:
@@ -125,7 +125,7 @@ def owner_answer_text(constraints: object) -> str | None:
     if not isinstance(constraints, dict):
         return None
     raw = constraints.get("owner_answer")
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or raw.get("superseded"):
         return None
     answer = raw.get("answer")
     if not isinstance(answer, str) or not answer.strip():

@@ -533,7 +533,9 @@ async def test_owner_reply_and_paid_inference_survive_restart(
         assert await replacement.process_one()
         assert len(transport.requests) == 1
         async with factory() as session:
-            assert (await session.get(ManagedGoal, goal_id)).lifecycle == lifecycle
+            # The owner's message answers the idle question; a pause stays a pause.
+            expected = "active" if lifecycle == "waiting" else lifecycle
+            assert (await session.get(ManagedGoal, goal_id)).lifecycle == expected
             assert (
                 await session.scalar(
                     select(func.count())

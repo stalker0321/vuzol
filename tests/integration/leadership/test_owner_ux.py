@@ -676,3 +676,104 @@ async def test_owner_retry_of_a_blocked_lead_item_resumes_the_waiting_goal(postg
             goal = await session.get(ManagedGoal, goal_id)
             assert goal.lifecycle == "active" and goal.waiting_reason is None
             assert goal.wakeup_condition is None
+
+
+async def test_plain_topic_message_answers_open_question_and_supersedes_old_answer(
+    postgres_dsn, runtime
+):
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        first = await command(factory, goal_id, "ask_owner", {"question": "Нужна ли проверка?"})
+        client = FakeTelegramClient()
+        await drain(factory, client)
+        link = await question_link(factory, goal_id, first.version)
+        ingress = TelegramIngressService(runtime, factory)
+        reply = _message(909, "Убери проверку").model_copy(
+            update={"reply_to_message_id": link.message_id}
+        )
+        assert (await ingress.accept_message(reply)).status is IngressStatus.HANDLED
+        await command(factory, goal_id, "ask_owner", {"question": "Как продолжить?"})
+        await drain(factory, client)
+        answered = await ingress.accept_message(_message(910, "Запусти проверку"))
+        assert answered.status is IngressStatus.HANDLED
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            # Not a reply, yet it answers the open question: the goal can act again.
+            assert goal.lifecycle == "active" and goal.wakeup_condition is None
+            # The day-old answer no longer steers the lead.
+            assert goal.constraints["owner_answer"]["superseded"] is True
+            event = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key == f"lead:message:{CHAT}:910"
+                )
+            )
+            assert event.payload["text"] == "Запусти проверку"
+            assert event.payload["goal_version"] == goal.version
+
+
+async def test_denied_lead_command_keeps_plan_approval_and_reposts_plan(postgres_dsn, runtime):
+    """Live 2026-10-30: a lead command denied on a goal waiting for plan approval
+    became "уточни следующий шаг" and the plan button was out of sight."""
+    from tests.integration.leadership.planning_helpers import seed_plan
+    from tests.integration.leadership.test_managed_goal_flow import _worker
+
+    from vuzol.leadership.model import LeadCommandDraft, LeadDecision
+    from vuzol.storage.types import DeliveryStatus
+
+    class Start:
+        async def decide(self, snapshot):
+            spec = snapshot.result_context.get("task_control", {}).get("start_spec")
+            return LeadDecision(
+                commands=(LeadCommandDraft(name="start_task", payload={"spec": spec}),)
+            )
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": plan_items(2)})
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            package_id = goal.current_package_id
+            goal.lifecycle = "waiting"
+            goal.waiting_reason = "plan_approval"
+            goal.wakeup_condition = {"kind": "plan_approval"}
+            session.add(
+                TransactionalOutbox(
+                    destination="project_lead",
+                    operation_type="lead_wakeup",
+                    linked_entity_type="managed_goal",
+                    linked_entity_id=goal_id,
+                    idempotency_key="test:plan-ready",
+                    payload={
+                        "goal_id": str(goal_id),
+                        "package_id": str(package_id),
+                        "wakeup_kind": "plan_ready",
+                        "goal_version": goal.version,
+                    },
+                    status=DeliveryStatus.PENDING,
+                )
+            )
+        worker = _worker(factory, Start())
+        for _ in range(3):
+            await worker.process_one()
+        async with factory() as session:
+            from vuzol.leadership.persistence import LeadershipCommandReceipt
+
+            denied = await session.scalar(
+                select(LeadershipCommandReceipt).where(
+                    LeadershipCommandReceipt.command_name == "start_task"
+                )
+            )
+            assert denied.status == "denied" and denied.reason == "goal_waiting"
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.waiting_reason == "plan_approval"
+            assert goal.wakeup_condition["kind"] == "plan_approval"
+            assert not await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("lead:question:%")
+                )
+            )
+            assert await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("wp:repost:pending:%")
+                )
+            )

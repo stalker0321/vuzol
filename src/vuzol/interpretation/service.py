@@ -991,6 +991,58 @@ class InterpretationPipeline:
             raise PermanentPipelineError("chat_disabled")
         await self._process_chat(token)
 
+    async def _submit_lead_voice(
+        self,
+        token: OutboxLeaseToken,
+        *,
+        project_id: str,
+        intake_id: uuid.UUID,
+        text: str,
+        heard: str,
+    ) -> None:
+        """A transcribed voice note with no live goal is a lead message, like text."""
+        from vuzol.leadership.events import ProjectEventService
+        from vuzol.leadership.fence import lock_project_admission
+        from vuzol.leadership.provenance import RequestOrigin
+        from vuzol.telegram.projections import enqueue_chat_notice
+        from vuzol.workflows.application import Principal
+
+        async with UnitOfWork(self._factory) as uow:
+            assert uow.session is not None
+            await lock_project_admission(uow.session, project_id)
+            intake = await uow.session.get(TelegramIntakeMessage, intake_id, with_for_update=True)
+            if intake is None:
+                raise PermanentPipelineError("lead_voice_intake_missing")
+            session_id = await uow.discussions.active_session_id(
+                chat_id=intake.chat_id, message_thread_id=intake.message_thread_id
+            )
+            if session_id is None:
+                session_id = await uow.discussions.create_session(
+                    project_id=project_id,
+                    chat_id=intake.chat_id,
+                    message_thread_id=intake.message_thread_id,
+                )
+            receipt = await ProjectEventService(self._runtime).submit_event(
+                uow,
+                Principal(user_id=intake.user_id, ingress_source="telegram"),
+                project_id=project_id,
+                session_id=session_id,
+                idempotency_key=f"lead:message:{intake.chat_id}:{intake.message_id}",
+                text=text,
+                intake=intake,
+                origin=RequestOrigin(channel="telegram", display_name="Telegram"),
+            )
+            if receipt.status not in {"accepted", "duplicate"}:
+                raise PermanentPipelineError(f"lead_voice_{receipt.reason or receipt.status}")
+            await enqueue_chat_notice(
+                uow.session,
+                chat_id=intake.chat_id,
+                thread_id=intake.message_thread_id,
+                key=f"telegram:voice-heard:{intake.id}",
+                text=heard,
+            )
+            await complete_outbox_item(uow.session, token)
+
     async def _process_attachment(self, token: OutboxLeaseToken) -> None:
         if self._downloader is None:
             raise TranscriptionUnavailable("attachment_downloader_unavailable")
@@ -1072,6 +1124,15 @@ class InterpretationPipeline:
                     text=voice_heard_text(transcript, uncertain=uncertain),
                 )
                 await complete_outbox_item(uow.session, token)
+            return
+        if transcript is not None and item.payload.get("lead_project_id"):
+            await self._submit_lead_voice(
+                token,
+                project_id=str(item.payload["lead_project_id"]),
+                intake_id=intake.id,
+                text="\n".join(filter(None, (intake.original_text, transcript))),
+                heard=voice_heard_text(transcript, uncertain=uncertain),
+            )
             return
         async with self._factory.begin() as session:
             if task_id is not None:
@@ -1451,7 +1512,9 @@ class InterpretationPipeline:
                         ),
                     )
                     intake.status = IntakeStatus.NEEDS_CLARIFICATION
-            if item is not None and item.payload.get("lead_goal_id"):
+            if item is not None and (
+                item.payload.get("lead_goal_id") or item.payload.get("lead_project_id")
+            ):
                 intake = await session.get(TelegramIntakeMessage, item.linked_entity_id)
                 if intake is not None:
                     intake.status = IntakeStatus.NEEDS_CLARIFICATION

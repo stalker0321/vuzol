@@ -766,8 +766,11 @@ class TelegramIngressService:
                 )
                 .with_for_update()
             )
-            if goal is None:
+            if goal is None and (voice is None or replied_goal_id is not None):
                 return None
+            # Live 2026-10-30: a voice note with no live goal went to the legacy
+            # task pipeline. In lead mode it starts a goal draft like text does,
+            # after transcription.
             inbox_id, created = await uow.inbox.receive_once(
                 source="telegram",
                 consumer=f"bot:{update.bot_id}",
@@ -800,6 +803,7 @@ class TelegramIngressService:
             )
             intake_id = await uow.telegram_intake.add(intake)
             if voice is None:
+                assert goal is not None
                 await enqueue_owner_message(
                     uow,
                     goal=goal,
@@ -820,7 +824,11 @@ class TelegramIngressService:
                         "media_type": voice.media_type,
                         "filename": voice.filename,
                         "kind": voice.kind.value,
-                        "lead_goal_id": str(goal.id),
+                        **(
+                            {"lead_goal_id": str(goal.id)}
+                            if goal is not None
+                            else {"lead_project_id": topic.project_id}
+                        ),
                         "intake_id": str(intake.id),
                         "received_at": intake.created_at.astimezone(UTC).isoformat(
                             timespec="microseconds"

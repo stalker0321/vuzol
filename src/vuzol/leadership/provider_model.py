@@ -308,6 +308,19 @@ class ProviderLeadModel:
                 decision = parse_lead_response(payload)
                 if snapshot.owner_event is not None and not decision.reply.strip():
                     raise LeadModelUnavailable("lead_response_invalid")
+                if (
+                    not decision.commands
+                    and not request.task_draft.get("lead_nudged")
+                    and _startable(snapshot)
+                ):
+                    # Live 2026-10-30: the lead answered "запускаю проверку" with no
+                    # command and the goal stalled. Ask once; its answer is final.
+                    following = await self._stored_request(round + 1)
+                    if following is None:
+                        following = self._prepare(self._nudge_request(request, root_id, round))
+                    request = following
+                    round += 1
+                    continue
                 return LeadDecision(
                     commands=decision.commands,
                     reply=decision.reply,
@@ -386,6 +399,25 @@ class ProviderLeadModel:
             }
         )
 
+    def _nudge_request(
+        self, request: ProviderRequest, root_id: uuid.UUID, round: int
+    ) -> ProviderRequest:
+        identity = uuid.uuid5(root_id, f"lead:{round + 1}")
+        return request.model_copy(
+            update={
+                "task_id": identity,
+                "run_id": identity,
+                "step_id": identity,
+                "original_input": (request.original_input or "") + "\n" + _NUDGE,
+                "output_json_schema": decision_schema(tools_allowed=False),
+                "task_draft": {
+                    **request.task_draft,
+                    "lead_tools_exhausted": True,
+                    "lead_nudged": True,
+                },
+            }
+        )
+
     def _prepare(self, request: ProviderRequest) -> ProviderRequest:
         context_bytes = sum(len(item.content.encode()) for item in request.context)
         input_tokens = (
@@ -412,6 +444,31 @@ class ProviderLeadModel:
                 "timeout_seconds": self._timeout_seconds,
             }
         )
+
+
+_NUDGE = (
+    "Your previous answer to the owner had a reply but no commands, while the next plan "
+    "item can be started now. If your reply says you will start, run, check, plan or "
+    "otherwise act, return that command now (copy task_control.start_spec to start_task "
+    "{spec:...} to start the next item). If the reply only answers a question or the owner "
+    "asked you to wait, return the same reply with commands []. Tools are disallowed."
+)
+_TERMINAL_TASK_STATUSES = frozenset({"blocked", "failed", "cancelled", "rolled_back", "completed"})
+
+
+def _startable(snapshot: LeadSnapshot) -> bool:
+    """An owner message on an active goal whose next item could start right now."""
+    if snapshot.owner_event is None or snapshot.lifecycle != "active":
+        return False
+    control = snapshot.result_context.get("task_control")
+    if not isinstance(control, dict) or not control.get("start_spec"):
+        return False
+    if not control.get("next_item"):
+        return False
+    tasks = control.get("tasks") or []
+    return all(
+        isinstance(task, dict) and task.get("status") in _TERMINAL_TASK_STATUSES for task in tasks
+    )
 
 
 def _request(snapshot: LeadSnapshot, invocation_id: uuid.UUID) -> ProviderRequest:

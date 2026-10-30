@@ -1210,7 +1210,10 @@ async def request_owner_recovery(
             "«покажи, что осталось» или «закрой цель»."
         )
     else:
-        question = f"{reason_text(reason)} Напиши, как продолжить."
+        question = (
+            f"{reason_text(reason)} Напиши, что делать: например, «запусти следующий шаг», "
+            "«покажи, что осталось» или «закрой цель»."
+        )
     goal.wakeup_condition = {
         "kind": "owner",
         "question": question,

@@ -151,7 +151,7 @@ def test_full_question_is_not_truncated_and_unknown_blockers_are_not_mislabelled
             )
         )
     )
-    assert "нужно уточнить" in text.lower()
+    assert "руководитель остановился" in text.lower()
     assert "new_internal_reason" not in text and "✅" not in text
 
 

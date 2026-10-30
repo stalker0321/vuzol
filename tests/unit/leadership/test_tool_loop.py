@@ -482,3 +482,73 @@ async def test_denied_read_keeps_an_audit_without_a_second_provider_call(monkeyp
     assert script.rounds == [0]
     audit.assert_awaited_once()
     assert audit.call_args.args[-1]["error"] == "read_authority_unavailable"
+
+
+START = {
+    "plan_revision_id": str(uuid.uuid4()),
+    "plan_hash": "a" * 64,
+    "scope_revision": 1,
+    "ordinal": 3,
+}
+
+
+def startable(**overrides):
+    control = {"start_spec": START, "next_item": {"ordinal": 3}, "tasks": []}
+    control.update(overrides)
+    return replace(
+        snapshot(),
+        owner_event={"text": "Запусти проверку"},
+        result_context={"task_control": control},
+    )
+
+
+@pytest.mark.anyio
+async def test_reply_without_command_is_nudged_once_when_next_item_can_start(monkeypatch):
+    promised = {"reply": "Запускаю проверку", "commands": []}
+    started = {
+        "reply": "Запускаю проверку",
+        "commands": [{"name": "start_task", "reason": "owner", "payload": {"spec": START}}],
+    }
+    script = Scripted(promised, started)
+    decision = await model(monkeypatch, script).decide(startable())
+    assert script.rounds == [0, 1]
+    assert "previous answer to the owner had a reply but no commands" in (
+        script.requests[1].original_input
+    )
+    assert "tool_calls" not in json.dumps(script.requests[1].output_json_schema)
+    assert [command.name for command in decision.commands] == ["start_task"]
+    assert decision.usage == {"cost_known": True, "cost_amount": 0.4}
+
+
+@pytest.mark.anyio
+async def test_nudged_answer_without_command_is_final(monkeypatch):
+    answer = {"reply": "Ответила на вопрос", "commands": []}
+    script = Scripted(answer, answer)
+    decision = await model(monkeypatch, script).decide(startable())
+    assert script.rounds == [0, 1]
+    assert decision.commands == () and decision.reply == "Ответила на вопрос"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "state",
+    [
+        "no_owner_event",
+        "waiting",
+        "running_task",
+        "no_next_item",
+    ],
+)
+async def test_no_nudge_when_nothing_can_start(monkeypatch, state):
+    source = startable()
+    if state == "no_owner_event":
+        source = replace(source, owner_event=None)
+    elif state == "waiting":
+        source = replace(source, lifecycle="waiting")
+    elif state == "running_task":
+        source = startable(tasks=[{"status": "executing"}])
+    else:
+        source = startable(next_item=None)
+    script = Scripted(FINAL)
+    await model(monkeypatch, script).decide(source)
+    assert script.rounds == [0]

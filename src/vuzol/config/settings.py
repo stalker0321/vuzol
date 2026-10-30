@@ -348,6 +348,8 @@ class InterpretationSettings(BaseModel):
     provider_timeout_seconds: float = Field(default=30, ge=1, le=300)
     transcription_timeout_seconds: float = Field(default=120, ge=1, le=600)
     language_hint: str | None = Field(default="ru", max_length=20)
+    # One term per line; read on every voice note, so edits apply without restart.
+    transcription_keywords_file: Path | None = None
     automatic_execution_enabled: bool = False
     evaluation_report_file: Path | None = None
 

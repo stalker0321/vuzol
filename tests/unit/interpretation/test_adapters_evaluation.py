@@ -254,3 +254,45 @@ def test_openai_interpreter_keeps_legacy_reasoning_default_for_openrouter() -> N
         assert bodies[0]["reasoning"] == {"effort": "none"}
 
     asyncio.run(scenario())
+
+
+def test_gpt_transcribe_sends_languages_and_owner_keywords(tmp_path) -> None:
+    from vuzol.interpretation.service import transcription_keywords
+
+    vocabulary = tmp_path / "keywords.txt"
+    vocabulary.write_text(
+        "# work slang\nREADME\nлид\n\nREADME\n<bad>\nдеплой\n",  # noqa: RUF001
+        encoding="utf-8",
+    )
+    keywords = transcription_keywords(vocabulary)
+    assert keywords == ("README", "лид", "деплой")
+    assert transcription_keywords(tmp_path / "missing.txt") == ()
+
+    seen: list[bytes] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.content)
+        return httpx.Response(200, json={"text": "Добавь пример в README"})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://provider.example/v1", transport=httpx.MockTransport(handler)
+        ) as client:
+            transcriber = OpenAICompatibleTranscriber(
+                base_url="https://provider.example/v1",
+                credential=SecretStr("key"),
+                profile_id="audio",
+                model="gpt-transcribe",
+                client=client,
+            )
+            result = await transcriber.transcribe(
+                TranscriptionInput(
+                    content=b"audio", media_type="audio/ogg", language_hint="ru", keywords=keywords
+                )
+            )
+            assert result.transcript == "Добавь пример в README"
+
+    asyncio.run(scenario())
+    body = seen[0].decode("utf-8", "replace")
+    assert 'name="languages[]"' in body and 'name="language"' not in body
+    assert body.count('name="keywords[]"') == 3 and "деплой" in body

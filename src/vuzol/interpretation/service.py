@@ -7,6 +7,7 @@ import os
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1079,6 +1080,9 @@ class InterpretationPipeline:
                     media_type=media_type,
                     filename=filename,
                     language_hint=self._runtime.settings.interpretation.language_hint,
+                    keywords=transcription_keywords(
+                        self._runtime.settings.interpretation.transcription_keywords_file
+                    ),
                 )
             )
             transcript = result.transcript
@@ -1618,3 +1622,28 @@ async def _enqueue_semantic_clarification(
 def voice_heard_text(transcript: str, *, uncertain: bool) -> str:
     note = " (не уверен в распознавании)" if uncertain else ""
     return f"🎙 Расслышал{note}: «{transcript}»\nЕсли не так — поправь текстом."  # noqa: RUF001
+
+
+_MAX_KEYWORDS = 200
+
+
+def transcription_keywords(path: Path | None) -> tuple[str, ...]:
+    """The owner's vocabulary file; a missing or unreadable file means no hints.
+
+    OpenAI rejects the whole request for a keyword containing <, > or a line
+    break, so such lines are dropped rather than sent.
+    """
+    if path is None:
+        return ()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    keywords: list[str] = []
+    for line in lines:
+        term = line.strip()
+        if not term or term.startswith("#") or "<" in term or ">" in term or len(term) > 100:
+            continue
+        if term not in keywords:
+            keywords.append(term)
+    return tuple(keywords[:_MAX_KEYWORDS])

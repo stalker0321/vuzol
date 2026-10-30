@@ -47,7 +47,6 @@ and hyphens. Avoid generic descriptive phrases and existing project IDs. Put the
 The user will explicitly select one option before provisioning."""
 
 
-
 class OpenAICompatibleInterpreter:
     def __init__(
         self,
@@ -182,8 +181,14 @@ class OpenAICompatibleTranscriber:
     async def transcribe(self, request: TranscriptionInput) -> TranscriptionResult:
         started = time.monotonic()
         filename = request.filename or _default_audio_filename(request.media_type)
-        data = {"model": self._model}
-        if request.language_hint:
+        data: dict[str, str | list[str]] = {"model": self._model}
+        if self._model.startswith("gpt-transcribe"):
+            # gpt-transcribe takes languages[] instead of language, plus keywords[].
+            if request.language_hint:
+                data["languages[]"] = [request.language_hint]
+            if request.keywords:
+                data["keywords[]"] = list(request.keywords)
+        elif request.language_hint:
             data["language"] = request.language_hint
         try:
             response = await self._post(

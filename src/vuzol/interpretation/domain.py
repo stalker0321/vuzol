@@ -151,7 +151,9 @@ class InterpretationInput(FrozenModel):
     conversational_context: bool = Field(default=False, exclude_if=lambda value: not value)
     discussion_context: str | None = Field(
         # JSON escaping can double the 40k chat + 50k document partitions.
-        default=None, max_length=2 * (40_000 + 50_000), exclude_if=lambda value: value is None
+        default=None,
+        max_length=2 * (40_000 + 50_000),
+        exclude_if=lambda value: value is None,
     )
 
 
@@ -173,6 +175,8 @@ class TranscriptionInput(FrozenModel):
     media_type: str = Field(min_length=1, max_length=200)
     filename: str | None = Field(default=None, max_length=255)
     language_hint: str | None = Field(default=None, max_length=20)
+    # Owner vocabulary: literal terms that may appear in the audio.
+    keywords: tuple[str, ...] = ()
 
 
 class TranscriptionResult(FrozenModel):

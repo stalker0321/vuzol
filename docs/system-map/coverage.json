@@ -993,7 +993,7 @@
         "src/vuzol/discussion/agent.py:466",
         "src/vuzol/discussion/chat_recovery.py:68",
         "src/vuzol/discussion/handoff.py:149",
-        "src/vuzol/discussion/sequencer.py:708",
+        "src/vuzol/discussion/sequencer.py:801",
         "src/vuzol/execution/artifact_production.py:331",
         "src/vuzol/interpretation/service.py:1630",
         "src/vuzol/interpretation/service.py:1420",
@@ -1065,13 +1065,13 @@
       "id": "outbox:work_package_projection",
       "sources": [],
       "producers": [
-        "src/vuzol/discussion/application.py:283",
-        "src/vuzol/discussion/sequencer.py:688",
-        "src/vuzol/discussion/sequencer.py:696",
-        "src/vuzol/discussion/sequencer.py:680",
+        "src/vuzol/discussion/application.py:303",
+        "src/vuzol/discussion/sequencer.py:781",
+        "src/vuzol/discussion/sequencer.py:789",
+        "src/vuzol/discussion/sequencer.py:773",
         "src/vuzol/discussion/service.py:1164",
         "src/vuzol/discussion/service.py:1297",
-        "src/vuzol/leadership/service.py:1200",
+        "src/vuzol/leadership/service.py:1215",
         "src/vuzol/leadership/worker.py:1151",
         "src/vuzol/telegram/controls.py:541",
         "src/vuzol/telegram/controls.py:653",
@@ -1097,7 +1097,7 @@
         "src/vuzol/workflows/lead_events.py:82"
       ],
       "consumers": [
-        "src/vuzol/discussion/sequencer.py:867"
+        "src/vuzol/discussion/sequencer.py:960"
       ],
       "scenario": "goal"
     },
@@ -1116,8 +1116,8 @@
       "id": "outbox:workflow_dispatch",
       "sources": [],
       "producers": [
-        "src/vuzol/discussion/sequencer.py:470",
-        "src/vuzol/discussion/sequencer.py:642",
+        "src/vuzol/discussion/sequencer.py:563",
+        "src/vuzol/discussion/sequencer.py:735",
         "src/vuzol/interpretation/service.py:1323",
         "src/vuzol/interpretation/service.py:926"
       ],

@@ -145,8 +145,29 @@ async def check_item_dependencies(
                 Task.status == TaskStatus.COMPLETED,
             )
         )
-        if not any(_same_plan_item(dependency, previous) for previous in completed):
+        if not any(
+            _same_plan_item(dependency, previous) for previous in completed
+        ) and not await item_was_skipped(session, package_id, dependency.item_id):
             raise DomainError("dependencies_unfinished")
+
+
+async def item_was_skipped(
+    session: AsyncSession, package_id: uuid.UUID, work_item_draft_id: uuid.UUID
+) -> bool:
+    """The owner skipped this item: work depending on it may go ahead."""
+    from vuzol.storage.models import Event
+
+    skipped = await session.scalar(
+        select(Event.id)
+        .where(
+            Event.entity_type == "work_package",
+            Event.entity_id == package_id,
+            Event.event_type == WorkPackageEvent.PACKAGE_ITEM_SKIPPED.value,
+            Event.payload["work_item_draft_id"].as_string() == str(work_item_draft_id),
+        )
+        .limit(1)
+    )
+    return skipped is not None
 
 
 class WorkPackageSequencer:
@@ -335,6 +356,78 @@ class WorkPackageSequencer:
             if remaining is not None:
                 await self._projection(package.id, package.version, "item_finished")
                 return SequenceResult(package.id, package.version, None, package.cursor_ordinal)
+        return await self._materialize_current(package, revision)
+
+    async def skip_current(
+        self, *, package_id: uuid.UUID, actor_type: str, actor_id: str | None
+    ) -> SequenceResult:
+        """Owner decision: leave the current item undone and move the cursor past it.
+
+        A still-live task of that item is cancelled first. The lead starts the next
+        item itself; skipping the last one completes the package.
+        """
+        from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES
+        from vuzol.workflows.controls import cancel_task
+
+        assert self._uow.session is not None
+        await self._lock_managed_goal(package_id)
+        package = await self._uow.work_packages.get_package(package_id, for_update=True)
+        if (
+            package.status not in {WorkPackageStatus.RUNNING, WorkPackageStatus.PAUSED}
+            or package.cursor_ordinal is None
+            or package.running_revision_id is None
+        ):
+            raise DomainError("nothing_to_skip")
+        revision = await self._uow.work_packages.get_revision(package.running_revision_id)
+        ordinal = package.cursor_ordinal
+        item = await self._uow.session.scalar(
+            select(PlanRevisionItem).where(
+                PlanRevisionItem.plan_revision_id == revision.id,
+                PlanRevisionItem.ordinal == ordinal,
+            )
+        )
+        if item is None:
+            raise DomainError("nothing_to_skip")
+        link = await self._uow.session.scalar(
+            select(MaterializationLink).where(
+                MaterializationLink.work_package_id == package.id,
+                MaterializationLink.plan_revision_id == revision.id,
+                MaterializationLink.ordinal == ordinal,
+            )
+        )
+        task = await self._uow.session.get(Task, link.task_id) if link is not None else None
+        if task is not None and task.status not in USER_TERMINAL_TASK_STATUSES:
+            await cancel_task(self._uow.session, task.id, actor_id=actor_id)
+        previous = package.status
+        package.cursor_ordinal = ordinal + 1
+        package.status = WorkPackageStatus.RUNNING
+        package.pause_reason = None
+        package.last_failure_task_id = None
+        package.version += 1
+        await self._uow.events.append(
+            entity_type="work_package",
+            entity_id=package.id,
+            event_type=WorkPackageEvent.PACKAGE_ITEM_SKIPPED.value,
+            actor_type=actor_type,
+            previous_state=previous.value,
+            new_state=WorkPackageStatus.RUNNING.value,
+            payload={
+                "revision_id": str(revision.id),
+                "ordinal": ordinal,
+                "work_item_draft_id": str(item.item_id),
+                "task_id": None if task is None else str(task.id),
+                "requested_by": actor_id,
+            },
+        )
+        following = await self._uow.session.scalar(
+            select(PlanRevisionItem.id).where(
+                PlanRevisionItem.plan_revision_id == revision.id,
+                PlanRevisionItem.ordinal == package.cursor_ordinal,
+            )
+        )
+        if following is not None:
+            await self._projection(package.id, package.version, "item_skipped")
+            return SequenceResult(package.id, package.version, None, package.cursor_ordinal)
         return await self._materialize_current(package, revision)
 
     async def materialize_running(self, *, package_id: uuid.UUID) -> SequenceResult:

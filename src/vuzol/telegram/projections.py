@@ -1967,6 +1967,12 @@ async def build_status_card(
             package_actions.insert(
                 0, ("Повторить", package_callback(WorkPackageCallbackKind.RETRY_ITEM))
             )
+            if package.managed_goal_id is not None:
+                # Owner 2026-10-30: a stuck step can be left undone; the lead goes on.
+                package_actions.insert(
+                    1,
+                    ("⏭ Пропустить шаг", package_callback(WorkPackageCallbackKind.SKIP_ITEM)),
+                )
         callback_buttons = (tuple(package_actions),)
         if owner.buttons:
             callback_buttons = (

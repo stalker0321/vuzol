@@ -72,6 +72,12 @@ class _ResponseCommand(_Command):
     payload: _Payload = Field(default_factory=_Payload)
 
 
+class _SkipItemCommand(_Command):
+    name: Literal["skip_item"]
+    payload: _Payload = Field(default_factory=_Payload)
+    reason: str = Field(min_length=1)
+
+
 class _CancelGoalPayload(_Payload):
     restart_from_event_id: str | None = Field(default=None, pattern=r"^[0-9a-f-]{36}$")
 
@@ -204,6 +210,7 @@ class _Response(BaseModel):
     commands: list[
         _ResponseCommand
         | _CancelGoalCommand
+        | _SkipItemCommand
         | _ProposalCommand
         | _RevisionCommand
         | _QuestionCommand
@@ -535,7 +542,7 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "Only server grants authorize effects; never approve publish/deploy/install.",
         "Commands: request_plan, revise_plan, start_task, cancel_task, accept_result, "
         "ask_owner, wait_for, propose_completion, pause_goal, cancel_goal, amend_goal, "
-        "remember, forget, add_vocabulary, remove_vocabulary, start_job, cancel_job.",
+        "remember, forget, add_vocabulary, remove_vocabulary, skip_item, start_job, cancel_job.",
         'Return EITHER {"reply": ..., "commands": [...]} OR {"tool_calls": [...]}, never both. '
         'Read tools use {"name": ..., "args": {...}}: read_status {} reads this goal\'s '
         "project state; read_result {} reads its result; recall {query, project:'this'|'all', "
@@ -592,6 +599,10 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "Review during repair is informational: all checks must finish for the exact commit. "
         "Acceptance permits the applier on the delegated integration branch; goal completion "
         "requires propose_completion and independent evidence for the current head/scope.",
+        "skip_item {} with a reason leaves the current plan item undone (its live task is "
+        "cancelled) and moves to the next one; skipping the last item finishes the plan. Use it "
+        "only when the owner asks in this very message to skip the step; never on your own. "
+        "After an item_skipped event, start the next item or propose completion.",
         "cancel_task {task_id}; ask_owner {question}; "
         "wait_for {condition:{kind:'package',package_id}} waits for the next task decision. "
         "Read result_context for concrete independent review failures. Historical/truncated "

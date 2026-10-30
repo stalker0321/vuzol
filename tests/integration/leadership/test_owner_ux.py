@@ -2,6 +2,7 @@
 # ruff: noqa: RUF001
 
 import re
+import uuid
 from dataclasses import replace
 
 import pytest
@@ -712,6 +713,25 @@ async def test_plain_topic_message_answers_open_question_and_supersedes_old_answ
             )
             assert event.payload["text"] == "Запусти проверку"
             assert event.payload["goal_version"] == goal.version
+
+
+async def test_topic_message_releases_a_goal_waiting_on_its_package(postgres_dsn, runtime):
+    """Live 2026-10-30: a denied start left the goal waiting on a package that never
+    started; the owner's «продолжай» did not wake it and the next start was denied."""
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            goal.lifecycle = "waiting"
+            goal.waiting_reason = "wait_for"
+            goal.wakeup_condition = {"kind": "package", "package_id": str(uuid.uuid4())}
+        ingress = TelegramIngressService(runtime, factory)
+        assert (
+            await ingress.accept_message(_message(911, "продолжай"))
+        ).status is IngressStatus.HANDLED
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "active" and goal.wakeup_condition is None
 
 
 async def test_denied_lead_command_keeps_plan_approval_and_reposts_plan(postgres_dsn, runtime):

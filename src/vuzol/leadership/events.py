@@ -27,11 +27,14 @@ from vuzol.leadership.persistence import (
 from vuzol.leadership.provenance import RequestOrigin
 from vuzol.storage.models import (
     Event,
+    MaterializationLink,
     ProjectDiscussionSession,
+    Task,
     TelegramIntakeMessage,
     TransactionalOutbox,
 )
 from vuzol.storage.types import (
+    USER_TERMINAL_TASK_STATUSES,
     ConversationTurnRole,
     ConversationTurnSource,
     DiscussionSessionStatus,
@@ -298,6 +301,23 @@ class ProjectEventService:
         return EventReceipt("accepted", event_id, goal.id, receipt.id)
 
 
+async def _package_has_live_task(session: AsyncSession, package_id: object) -> bool:
+    try:
+        package = uuid.UUID(str(package_id))
+    except ValueError:
+        return False
+    live = await session.scalar(
+        select(Task.id)
+        .join(MaterializationLink, MaterializationLink.task_id == Task.id)
+        .where(
+            MaterializationLink.work_package_id == package,
+            Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
+        )
+        .limit(1)
+    )
+    return live is not None
+
+
 async def write_owner_event(
     uow: UnitOfWork,
     *,
@@ -351,7 +371,13 @@ async def write_owner_event(
     condition = goal.wakeup_condition if isinstance(goal.wakeup_condition, dict) else {}
     released = (
         goal.lifecycle == "waiting"
-        and condition.get("kind") == "owner"
+        and (
+            condition.get("kind") == "owner"
+            or (
+                condition.get("kind") == "package"
+                and not await _package_has_live_task(uow.session, condition.get("package_id"))
+            )
+        )
         and not condition.get("restart_from_event_id")
         and has_owner_mandate(goal)
     )
@@ -359,7 +385,8 @@ async def write_owner_event(
         # The owner's next topic message answers the open question even when it
         # is not a reply to it. Live 2026-10-30: "Запусти итоговую проверку" left
         # the goal waiting and the lead's start was denied. Routing questions
-        # still need their explicit answer.
+        # still need their explicit answer. A package wait with no live task is
+        # stale (its start was denied) and yields too.
         goal.wakeup_condition = None
         goal.lifecycle = "active"
         goal.waiting_reason = None

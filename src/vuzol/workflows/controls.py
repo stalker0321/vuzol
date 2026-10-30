@@ -25,6 +25,7 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.types import (
+    USER_TERMINAL_TASK_STATUSES,
     ApprovalStatus,
     ControlActionStatus,
     ProcessStatus,
@@ -553,6 +554,8 @@ async def cancel_task(
     actor_id: str | None = None,
     expected_task_version: int | None = None,
 ) -> None:
+    if await _cancel_runless(session, task_id, actor_id, expected_task_version):
+        return
     task, run, steps = await _locked_context(session, task_id)
     _check_task_version(task, expected_task_version)
     if run.status is RunStatus.CANCELLED:
@@ -603,6 +606,38 @@ async def cancel_task(
         )
     )
     await _enqueue_telegram_projection(session, task, run)
+
+
+async def _cancel_runless(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    actor_id: str | None,
+    expected_task_version: int | None,
+) -> bool:
+    # Live pilot 2026-10-30: a voice task stuck in awaiting_user before any run
+    # blocked every new project task and could not be cancelled.
+    task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
+    if task is None:
+        raise ValueError(f"task not found: {task_id}")
+    if await session.scalar(select(Run.id).where(Run.task_id == task.id).limit(1)) is not None:
+        return False
+    _check_task_version(task, expected_task_version)
+    if task.status is TaskStatus.CANCELLED:
+        return True
+    if task.status in USER_TERMINAL_TASK_STATUSES:
+        raise ValueError(f"terminal task cannot cancel: {task.status.value}")
+    await transition_task(session, task, TaskStatus.CANCELLED, actor_type="user", actor_id=actor_id)
+    session.add(
+        Event(
+            entity_type="task",
+            entity_id=task.id,
+            event_type="task.cancel_requested",
+            actor_type="user",
+            actor_id=actor_id,
+            payload={"rollback_attempted": False, "runless": True},
+        )
+    )
+    return True
 
 
 async def retry_blocked_step(

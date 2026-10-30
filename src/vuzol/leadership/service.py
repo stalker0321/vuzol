@@ -50,7 +50,7 @@ from vuzol.leadership.policy import (
     integration_branch_rejection,
 )
 from vuzol.leadership.wakeups import enabled_wakeup_key, enqueue_goal_wakeup, resume_wakeup_key
-from vuzol.storage.models import Event, WorkPackage
+from vuzol.storage.models import Event, Task, WorkPackage
 from vuzol.storage.types import WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.workflows.application import Principal
@@ -1177,6 +1177,7 @@ async def request_owner_recovery(
     *,
     failure_category: str | None = None,
     retries: int = 0,
+    blocking_task: Task | None = None,
 ) -> None:
     from vuzol.leadership.card import model_failure_text, reason_text
     from vuzol.storage.models import TransactionalOutbox
@@ -1203,6 +1204,12 @@ async def request_owner_recovery(
         question = model_text
     elif stopped is not None:
         question = stopped
+    elif blocking_task is not None:
+        question = (
+            "Новую задачу не запустить: в проекте не закрыта другая задача "
+            f"{str(blocking_task.id)[:8]} ({blocking_task.status.value}). "
+            "Закрой её, потом напиши «продолжай»."
+        )
     elif reason == "continuation_without_progress":
         question = (
             "Руководитель несколько ходов подряд ничего не запустил и остановился, "

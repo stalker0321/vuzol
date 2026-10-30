@@ -54,7 +54,13 @@ from vuzol.leadership.wakeups import (
 from vuzol.providers.budgets import goal_cost_totals
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import claim_outbox_item, complete_outbox_item, defer_outbox_item
-from vuzol.storage.models import Event, TransactionalOutbox, WorkPackage
+from vuzol.storage.models import (
+    Event,
+    MaterializationLink,
+    Task,
+    TransactionalOutbox,
+    WorkPackage,
+)
 from vuzol.storage.records import OutboxLeaseToken
 from vuzol.storage.types import DeliveryStatus, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -78,6 +84,24 @@ _MODEL_BLOCKERS = frozenset(
         "lead_inference_reconciliation",
     }
 )
+
+
+async def _foreign_busy_task(session: AsyncSession, goal: ManagedGoal, reason: str) -> Task | None:
+    """The unfinished task outside the goal's package that blocks a new start."""
+    if reason != "project_task_running":
+        return None
+    from vuzol.leadership.batches import busy_project_task
+
+    task = await busy_project_task(session, goal.project_id)
+    if task is None or goal.current_package_id is None:
+        return task
+    linked = await session.scalar(
+        select(MaterializationLink.id).where(
+            MaterializationLink.task_id == task.id,
+            MaterializationLink.work_package_id == goal.current_package_id,
+        )
+    )
+    return None if linked is not None else task
 
 
 class ProjectLeadWorker:
@@ -1131,6 +1155,13 @@ class ProjectLeadWorker:
                             status=DeliveryStatus.PENDING,
                         )
                     )
+                return
+            foreign = await _foreign_busy_task(uow.session, goal, reason)
+            if foreign is not None:
+                # Live pilot 2026-10-30: a leftover voice task blocked the start and
+                # the goal waited on a package that would never move.
+                goal.waiting_reason = reason
+                await request_owner_recovery(uow.session, goal, reason, blocking_task=foreign)
                 return
             if reason in _NOT_YET_REASONS and goal.current_package_id is not None:
                 # Live pilot 2026-10-25: the lead accepted a result a minute early and

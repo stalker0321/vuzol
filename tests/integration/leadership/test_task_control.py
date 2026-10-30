@@ -456,3 +456,45 @@ async def test_an_early_accept_waits_for_the_task_instead_of_asking_the_owner(po
                 )
             )
             assert question is None
+
+
+async def test_a_foreign_unfinished_task_asks_the_owner_instead_of_waiting(postgres_dsn):
+    """Live pilot 2026-10-30: a leftover voice task in awaiting_user denied start_task;
+    the goal then waited on a package that could never move."""
+    from tests.integration.leadership.planning_helpers import seed_plan
+    from tests.integration.leadership.test_managed_goal_flow import _decision, _worker
+    from tests.integration.leadership.test_plan_revisions import plan_items
+
+    from vuzol.leadership.model import LeadCommandDraft
+    from vuzol.leadership.wakeups import enqueue_goal_wakeup
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": plan_items(1)})
+        async with UnitOfWork(factory) as uow:
+            leftover = await uow.tasks.create(
+                user_id=1, chat_id=-100, original_text="voice", task_type="coding"
+            )
+            row = await uow.session.get(Task, leftover.id)
+            row.project_id = PROJECT
+            row.status = TaskStatus.AWAITING_USER
+            goal = await uow.session.get(ManagedGoal, goal_id)
+            spec = (await task_context(uow.session, goal))["start_spec"]
+            await enqueue_goal_wakeup(
+                uow.session,
+                goal_id=goal_id,
+                idempotency_key="test:blocked-start",
+                package_id=goal.current_package_id,
+                kind="resume",
+            )
+
+        class Start:
+            async def decide(self, snapshot):
+                return _decision(LeadCommandDraft(name="start_task", payload={"spec": spec}))
+
+        assert await _worker(factory, Start()).process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "waiting"
+            assert goal.wakeup_condition["kind"] == "owner"
+            assert str(leftover.id)[:8] in goal.wakeup_condition["question"]

@@ -233,16 +233,7 @@ async def execute_batch(
         await check_start_spec(uow.session, goal, package, command.payload)
     if revision.immutable_body.get("scope_revision", goal.scope_revision) != goal.scope_revision:
         raise DomainError("task_spec_stale")
-    busy = await uow.session.scalar(
-        select(Task.id)
-        .where(
-            Task.project_id == goal.project_id,
-            Task.task_type != "discussion_agent_internal",
-            Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
-        )
-        .limit(1)
-    )
-    if busy is not None:
+    if await busy_project_task(uow.session, goal.project_id) is not None:
         raise DomainError("project_task_running")
     if await package_has_unknown_effects(uow.session, package.id):
         raise DomainError("unknown_effects_open")
@@ -313,3 +304,18 @@ async def execute_batch(
         "revision_id": str(revision.id),
         "task_id": str(observed.task_id),
     }
+
+
+async def busy_project_task(session: AsyncSession, project_id: str) -> Task | None:
+    """The unfinished task that stops a new one from starting in the project."""
+    task: Task | None = await session.scalar(
+        select(Task)
+        .where(
+            Task.project_id == project_id,
+            Task.task_type != "discussion_agent_internal",
+            Task.status.not_in(USER_TERMINAL_TASK_STATUSES),
+        )
+        .order_by(Task.created_at)
+        .limit(1)
+    )
+    return task

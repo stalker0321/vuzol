@@ -726,3 +726,30 @@ def test_unknown_task_id_rejected_uniformly(postgres_dsn: str) -> None:
         await engine.dispose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.postgresql
+def test_task_awaiting_user_without_run_can_be_cancelled(postgres_dsn: str) -> None:
+    async def scenario() -> None:
+        engine, factory = storage(postgres_dsn)
+        task_id, _ = await seed_interpreted(factory)
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            task.status = TaskStatus.AWAITING_USER
+        async with factory.begin() as session:
+            await cancel_task(session, task_id, actor_id="1")
+        async with factory.begin() as session:
+            await cancel_task(session, task_id, actor_id="1")
+        async with factory() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None and task.status is TaskStatus.CANCELLED
+            events = await session.scalar(
+                select(func.count())
+                .select_from(Event)
+                .where(Event.entity_id == task_id, Event.event_type == "task.cancel_requested")
+            )
+            assert events == 1
+        await engine.dispose()
+
+    asyncio.run(scenario())

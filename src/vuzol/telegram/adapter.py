@@ -111,6 +111,7 @@ def _done_answer(update: ControlUpdate | WorkPackageControlUpdate) -> str | None
 def _callback_answer(result: IngressResult | None) -> tuple[str | None, bool]:
     chat_messages = {
         "memory_undone": "Отменено",
+        "memory_forgotten": "🗑 Забыл",
         "memory_already_undone": "Уже отменено",
         "think_handoff_sent": "Передано лиду",
         "think_handoff_duplicate": "Уже передано",
@@ -458,6 +459,22 @@ def control_update(update: Update, bot_id: str) -> ControlUpdate | WorkPackageCo
     parts = query.data.split(":")
     message_thread_id = getattr(query.message, "message_thread_id", None)
     message_id = getattr(query.message, "message_id", None)
+    if len(parts) == 3 and parts[:2] == ["v1", "mf"] and len(parts[2]) == 32:
+        try:
+            forgotten = uuid.UUID(hex=parts[2])
+        except ValueError:
+            return None
+        return ControlUpdate(
+            bot_id=bot_id,
+            update_id=update.update_id,
+            callback_query_id=query.id,
+            chat_id=query.message.chat.id,
+            user_id=user.id,
+            message_thread_id=message_thread_id,
+            message_id=message_id,
+            action_kind="memory_forget",
+            note_id=forgotten,
+        )
     if len(parts) == 4 and parts[:2] == ["v1", "mu"] and parts[3] == "undo":
         if len(parts[2]) != 32:
             return None

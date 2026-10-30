@@ -179,6 +179,19 @@ class TelegramIngressService:
                     raise TelegramPolicyError("/lead is only available in a project topic")
                 if not topic.enabled:
                     raise TelegramPolicyError("project topic is disabled")
+                if lead[0] == "memory":
+                    from vuzol.leadership.memory_view import enqueue_memory_view
+
+                    async with UnitOfWork(self._session_factory) as uow:
+                        assert uow.session is not None
+                        await enqueue_memory_view(
+                            uow.session,
+                            project_id=topic.project_id,
+                            chat_id=update.chat_id,
+                            thread_id=update.message_thread_id,
+                            key=f"lead:memory:{update.bot_id}:{update.update_id}",
+                        )
+                    return IngressResult(status=IngressStatus.HANDLED, reason="memory_shown")
                 if lead[0] == "message":
                     from vuzol.leadership.telegram_commands import normalize_lead_message
 

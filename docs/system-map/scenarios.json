@@ -158,6 +158,8 @@
     "telegram:/lead_debug": "goal",
     "callback:ControlUpdate:lead_answer": "goal",
     "callback:ControlUpdate:memory_undo": "lead-memory",
+    "callback:ControlUpdate:memory_forget": "lead-memory",
+    "telegram:/lead_memory": "lead-memory",
     "callback:ControlUpdate:lead_resume": "goal",
     "callback:ControlUpdate:lead_accept": "goal",
     "callback:ControlUpdate:lead_cancel": "goal",

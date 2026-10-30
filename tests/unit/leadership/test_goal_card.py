@@ -165,6 +165,7 @@ def test_lead_answer_is_a_command_and_enable_still_needs_text() -> None:
     assert parse_lead_command("/lead_goal@bot") == ("goal", "")
     assert parse_lead_command("/lead_details") == ("details", "")
     assert parse_lead_command("/lead_debug") == ("debug", "")
+    assert parse_lead_command("/lead_memory") == ("memory", "")
     assert parse_lead_command("/lead_details unexpected") is None
     assert parse_lead_command("/lead") is None
     assert parse_lead_command("/lead@bot обсудим идею") == ("message", "обсудим идею")

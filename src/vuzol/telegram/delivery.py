@@ -473,7 +473,7 @@ async def _prepare_delivery(
         projection_role = item.payload.get("projection_role")
         link = None
         notice_revision = int(item.payload.get("revision", 0))
-        if projection_role and projection_role.startswith(("ls:", "la:", "lf:")):
+        if projection_role and projection_role.startswith(("ls:", "la:", "lf:", "lm:")):
             # Earlier versions must finish before another worker edits/sends this projection.
             earlier = await session.scalar(
                 select(TransactionalOutbox)
@@ -1827,7 +1827,7 @@ class TelegramDeliveryService:
                     not in {PROJECT_STATUS_DASHBOARD_ROLE, WORK_PACKAGE_STATUS_ROLE}
                     and prepared.work_package_id is None
                     and not (prepared.message_role or "").startswith(
-                        ("ls:", "lq:", "lp:", "la:", "lf:", "lw:", "lr:", "mu:")
+                        ("ls:", "lq:", "lp:", "la:", "lf:", "lw:", "lr:", "lm:", "mu:")
                     )
                 ):
                     assert prepared.task_id is not None

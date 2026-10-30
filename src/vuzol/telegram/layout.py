@@ -149,6 +149,7 @@ def parse_lead_command(text: str | None) -> tuple[str, str] | None:
         "/lead_goal": "goal",
         "/lead_details": "details",
         "/lead_debug": "debug",
+        "/lead_memory": "memory",
     }
     kind = kinds.get(command)
     if kind is None or len(parts) != 1:
@@ -176,15 +177,16 @@ def build_help_card(kind: TopicKind) -> str:
         lines.extend(
             (
                 "Задача: текстом, голосом или документом.",
-                "<code>/model</code> — модели ролей.",
+                "<code>/model</code> — модели.",
                 "<code>/think</code> — обсуждение; <code>/lead</code> — руководитель.",
-                "Выбор для топика, не команда запуска или паузы.",
+                "Режим топика, не команда запуска.",
                 "<code>/plan</code> — план.",
-                "<code>/lead_status</code> — статус цели.",
+                "<code>/lead_status</code> — статус.",
                 "<code>/lead_goal</code> — задание.",
                 "<code>/lead_details</code> — ход работы.",
                 "<code>/lead_debug</code> — диагностика.",
-                "<code>/source</code> — внешние источники.",
+                "<code>/lead_memory</code> — память.",
+                "<code>/source</code> — источники.",
             )
         )
     elif kind is TopicKind.INBOX:

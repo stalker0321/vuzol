@@ -1042,6 +1042,7 @@ class InterpretationPipeline:
         if transcript is not None and item.payload.get("lead_goal_id"):
             from vuzol.leadership.chat import enqueue_owner_message
             from vuzol.leadership.persistence import ManagedGoal
+            from vuzol.telegram.projections import enqueue_chat_notice
 
             async with UnitOfWork(self._factory) as uow:
                 assert uow.session is not None
@@ -1061,6 +1062,14 @@ class InterpretationPipeline:
                         "uncertain": uncertain,
                         "content_uri": reference,
                     },
+                )
+                # Echo what was heard so a misrecognized voice note is caught at once.
+                await enqueue_chat_notice(
+                    uow.session,
+                    chat_id=current_intake.chat_id,
+                    thread_id=current_intake.message_thread_id,
+                    key=f"telegram:voice-heard:{current_intake.id}",
+                    text=voice_heard_text(transcript, uncertain=uncertain),
                 )
                 await complete_outbox_item(uow.session, token)
             return
@@ -1541,3 +1550,8 @@ async def _enqueue_semantic_clarification(
             },
         )
     )
+
+
+def voice_heard_text(transcript: str, *, uncertain: bool) -> str:
+    note = " (не уверен в распознавании)" if uncertain else ""
+    return f"🎙 Расслышал{note}: «{transcript}»\nЕсли не так — поправь текстом."  # noqa: RUF001

@@ -36,6 +36,9 @@ x-roles: &roles
   VUZOL_INBOX__PROFILE_ID: inbox-flash-c
   VUZOL_INBOX__FALLBACK_PROFILE_IDS: '["inbox-flash-a"]'
   VUZOL_INBOX__OPENCODE_ORG_IDS: '{"inbox-flash-c": "org_01M4V72GGXDFR4KME3G3P13JG1"}'
+  # Web search for answers: Brave when its key file exists, else our SearXNG.
+  VUZOL_INBOX__BRAVE_KEY_FILE: /run/vuzol-secrets/inbox/brave.key
+  VUZOL_INBOX__SEARXNG_URL: http://searxng:8080
 
 x-app: &app
   image: ${VUZOL_IMAGE:?set by vuzol-compose}
@@ -150,6 +153,16 @@ services:
       # A directory, not the file: editors replace the file and a file bind keeps the old one.
       - /var/lib/vuzol/vocabulary:/run/vuzol-vocabulary:ro
       - /srv/vuzol/repositories:/srv/vuzol/repositories:ro
+
+  # Private metasearch for the inbox; reachable only inside this compose network.
+  searxng:
+    image: searxng/searxng@sha256:3619192d55f19eaec4b01892bdf10f80c67e8592fafd14b26ca504e52229210f # 2026.10.16
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      SEARXNG_SECRET: ${VUZOL_SEARXNG_SECRET:?}
+    volumes:
+      - /etc/vuzol/searxng:/etc/searxng
 
   memory-writer:
     <<: *app

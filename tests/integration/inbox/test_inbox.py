@@ -109,7 +109,7 @@ async def drain(worker):
             )
 
 
-def worker_for(factory, model, telegram=None, links=None):
+def worker_for(factory, model, telegram=None, links=None, search=None):
     telegram = telegram or Telegram()
 
     async def read_link(url):
@@ -123,6 +123,7 @@ def worker_for(factory, model, telegram=None, links=None):
             send=telegram.send,
             download=AsyncMock(return_value=b"\xff\xd8jpeg"),
             read_link=read_link,
+            search=search,
         ),
         telegram,
     )
@@ -259,3 +260,36 @@ async def test_model_failure_keeps_the_raw_message(postgres_dsn):
             )
             assert dead is None
         assert "Не смог разобрать" in telegram.sent[0]["html"]
+
+
+async def test_question_answer_searches_the_web_first(postgres_dsn):
+    from vuzol.inbox.schemas import Lookup
+    from vuzol.inbox.search import Hit
+
+    class Search:
+        async def search(self, query):
+            return [Hit("Superwhisper", "https://superwhisper.example", "voice app")]
+
+        async def github(self, query):
+            return [{"repo": "x/whisper-kb", "stars": 900}]
+
+    async with _factory(postgres_dsn) as factory:
+        await admit(
+            factory,
+            private(
+                30,
+                text="Есть альтернативы? https://github.com/a/b",
+                entities=[{"type": "url", "offset": 19, "length": 22}],
+            ),
+        )
+        model = FakeModel(
+            Cards(cards=[Card(kind="repo", title="b")], question="Есть альтернативы?"),
+            Lookup(queries=["android whisper dictation"], github=["whisper keyboard android"]),
+            Answer(text="Да: Superwhisper и x/whisper-kb (900★)."),
+        )
+        worker, telegram = worker_for(factory, model, search=Search())
+        await drain(worker)
+        answer_input = model.calls[-1]["user"]
+        assert "superwhisper.example" in answer_input and "x/whisper-kb" in answer_input
+        assert "[https://superwhisper.example] page" in answer_input  # the hit was opened
+        assert "Superwhisper" in telegram.sent[-1]["html"]

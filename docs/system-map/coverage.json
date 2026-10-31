@@ -585,7 +585,7 @@
       "sources": [],
       "producers": [],
       "consumers": [
-        "src/vuzol/inbox/service.py:85"
+        "src/vuzol/inbox/service.py:92"
       ],
       "scenario": "inbox"
     },
@@ -809,7 +809,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:326"
+        "src/vuzol/cli/interpreter.py:332"
       ],
       "producers": [],
       "consumers": [],

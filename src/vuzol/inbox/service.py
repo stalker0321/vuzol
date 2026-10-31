@@ -22,14 +22,17 @@ from vuzol.inbox.render import answer_html, card_html
 from vuzol.inbox.schemas import (
     ASK_PROMPT,
     CARD_PROMPT,
+    LOOKUP_PROMPT,
     ROUTE_PROMPT,
     SEARCH_PROMPT,
     Answer,
     Card,
     Cards,
+    Lookup,
     Patch,
     Route,
 )
+from vuzol.inbox.search import WebSearch
 from vuzol.observability import get_logger
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
@@ -47,6 +50,8 @@ _MAX_LINKS = 3
 _EVIDENCE_CHARS = 30_000
 _SEARCH_LIMIT = 40
 _ATTEMPTS = 3
+_PAGES = 3
+_PAGE_CHARS = 6_000
 
 
 class Sender(Protocol):
@@ -69,8 +74,10 @@ class InboxWorker:
         download: Downloader,
         transcribe: Transcriber | None = None,
         read_link: LinkReader = describe_link,
+        search: WebSearch | None = None,
         owner: str = "inbox",
     ) -> None:
+        self._web = search
         self._factory = factory
         self._settings = settings
         self._model = model
@@ -289,21 +296,20 @@ class InboxWorker:
         reply_to: int,
         key: str,
     ) -> None:
+        records = [
+            {
+                **_brief(item),
+                "evidence": item.evidence[:_EVIDENCE_CHARS],
+                "earlier_answers": item.answers[-3:],
+            }
+            for item in items
+        ]
+        web = await self._look_up(question, [_brief(item) for item in items])
         answer = await self._model.ask(
             Answer,
             system=self._prompt(ASK_PROMPT),
             user=json.dumps(
-                {
-                    "question": question,
-                    "records": [
-                        {
-                            **_brief(item),
-                            "evidence": item.evidence[:_EVIDENCE_CHARS],
-                            "earlier_answers": item.answers[-3:],
-                        }
-                        for item in items
-                    ],
-                },
+                {"question": question, "records": records, "web": web},
                 ensure_ascii=False,
                 default=str,
             ),
@@ -370,16 +376,39 @@ class InboxWorker:
                     select(InboxItem).where(*conditions).order_by(*order).limit(_SEARCH_LIMIT)
                 )
             )
+        web = await self._look_up(question, []) if not found else None
         answer = await self._model.ask(
             Answer,
             system=self._prompt(SEARCH_PROMPT),
             user=json.dumps(
-                {"question": question, "records": [_brief(item) for item in found]},
+                {"question": question, "records": [_brief(item) for item in found], "web": web},
                 ensure_ascii=False,
                 default=str,
             ),
         )
         await self._queue(chat_id, answer_html(answer.text), reply_to=reply_to, key=f"search:{key}")
+
+    async def _look_up(self, question: str, records: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Let the model pick searches, run them and open the best pages."""
+        if self._web is None:
+            return None
+        plan = await self._model.ask(
+            Lookup,
+            system=self._prompt(LOOKUP_PROMPT),
+            user=json.dumps({"question": question, "records": records}, ensure_ascii=False),
+        )
+        if not plan.queries and not plan.github:
+            return None
+        hits = {query: await self._web.search(query) for query in plan.queries}
+        seen: list[str] = []
+        for found in hits.values():
+            seen += [hit.url for hit in found[:2] if hit.url not in seen]
+        pages = [await self._read_link(url) for url in seen[:_PAGES]]
+        return {
+            "searches": {q: [hit.as_dict() for hit in found] for q, found in hits.items()},
+            "pages": [page[:_PAGE_CHARS] for page in pages],
+            "github": {query: await self._web.github(query) for query in plan.github},
+        }
 
     async def _update(
         self, item: InboxItem, patch: Patch, chat_id: int, *, reply_to: int, key: str

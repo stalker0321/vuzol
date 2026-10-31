@@ -76,6 +76,13 @@ class Route(_Model):
     reply: str | None = Field(default=None, max_length=1500)
 
 
+class Lookup(_Model):
+    # Web searches worth running before answering; empty when the records suffice.
+    queries: list[str] = Field(default_factory=list, max_length=3)
+    # GitHub repository searches, for alternatives to a tool or repo.
+    github: list[str] = Field(default_factory=list, max_length=2)
+
+
 class Answer(_Model):
     text: str = Field(min_length=1, max_length=3500)
 
@@ -124,16 +131,29 @@ ROUTE_PROMPT = (
     "latest record."
 )
 
+LOOKUP_PROMPT = (
+    _COMMON + "\nThe owner asked a question. Before answering, decide what to look up on the web. "
+    "Search when the answer depends on facts you may not know or that change: alternatives, "
+    "how popular or alive something is, prices, dates, reviews, recent news. Give short "
+    "search-engine queries (English is usually best for tech, the local language for local "
+    "events). Use github for repository searches such as alternatives to a tool. Return empty "
+    "lists when the records already hold the answer or it is a matter of opinion. Vuzol is the "
+    "owner's own private project: never search for it."
+)
+
 ASK_PROMPT = (
     _COMMON + "\nAnswer the owner's question about one record of their knowledge base. Use the "
-    "record, its evidence and earlier answers; add your own knowledge where it helps and say "
-    "which is which. If the question is about their project Vuzol (an AI project lead that "
+    "record, its evidence, earlier answers and web results (search hits, opened pages, GitHub "
+    "repositories with real stars and dates); add your own knowledge where it helps and say "
+    "which is which. Name sources for facts taken from the web. If the question is about "
+    "their project Vuzol (an AI project lead that "
     "plans and runs coding tasks via Telegram), judge concrete fit and effort. Be direct: give "
     "a verdict first, then the reasons. Telegram text, no tables, under 2500 characters."
 )
 
 SEARCH_PROMPT = (
-    _COMMON + "\nAnswer the owner's question using only the records found in their knowledge base. "
-    "List matching records compactly (for events: date, time, name, place). Say so plainly "
-    "if nothing matches. Telegram text, no tables, under 2500 characters."
+    _COMMON + "\nAnswer the owner's question using the records found in their knowledge base. "
+    "List matching records compactly (for events: date, time, name, place). If no record "
+    "matches, say so plainly; when web results are given, then answer from them and say they "
+    "come from the web, not from the base. Telegram text, no tables, under 2500 characters."
 )

@@ -146,3 +146,62 @@ async def test_chain_moves_to_the_next_account_on_quota_but_not_on_a_bad_answer(
         with pytest.raises(InboxModelError, match="invalid_model_output"):
             await ModelChain([model(c), model(a)]).ask(Answer, system="s", user="u")
     assert calls == ["c", "c"]
+
+
+async def test_search_uses_brave_when_its_key_appears_then_searxng(tmp_path):
+    from vuzol.inbox.search import WebSearch
+
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if request.url.host == "api.search.brave.com":
+            assert request.headers["X-Subscription-Token"] == "brave-key"
+            return httpx.Response(
+                200, json={"web": {"results": [{"title": "B", "url": "https://b.example"}]}}
+            )
+        if request.url.host == "searxng":
+            return httpx.Response(
+                200, json={"results": [{"title": "S", "url": "https://s.example", "content": "c"}]}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"full_name": "a/b", "stargazers_count": 7, "license": {"spdx_id": "MIT"}}
+                ]
+            },
+        )
+
+    key = tmp_path / "brave.key"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        search = WebSearch(brave_key_file=key, searxng_url="http://searxng:8080", client=client)
+        # No key yet: the private SearXNG answers.
+        assert [hit.url for hit in await search.search("q")] == ["https://s.example"]
+        key.write_text("brave-key\n")
+        assert [hit.url for hit in await search.search("q")] == ["https://b.example"]
+        assert (await search.github("whisper android"))[0] == {
+            "repo": "a/b",
+            "url": None,
+            "description": None,
+            "stars": 7,
+            "last_push": None,
+            "license": "MIT",
+            "archived": None,
+        }
+    assert seen == ["searxng", "api.search.brave.com", "api.github.com"]
+
+
+async def test_search_falls_back_when_brave_fails(tmp_path):
+    from vuzol.inbox.search import WebSearch
+
+    def handler(request):
+        if request.url.host == "api.search.brave.com":
+            return httpx.Response(429)
+        return httpx.Response(200, json={"results": [{"title": "S", "url": "https://s.example"}]})
+
+    key = tmp_path / "brave.key"
+    key.write_text("k")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        search = WebSearch(brave_key_file=key, searxng_url="http://searxng:8080", client=client)
+        assert [hit.url for hit in await search.search("q")] == ["https://s.example"]

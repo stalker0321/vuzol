@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 import resource
 import sys
 import xml.etree.ElementTree as ET
@@ -68,6 +69,30 @@ def _check_text(text: str) -> str:
     return text
 
 
+def _heading_levels(content: bytes, w: str) -> dict[str, int]:
+    """Paragraph style id -> heading level, so chapter structure survives as Markdown."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            info = archive.getinfo("word/styles.xml")
+            if info.file_size > MAX_XML_BYTES or info.flag_bits & 1:
+                return {}
+            xml_text = archive.read(info).decode("utf-8-sig")
+    except (KeyError, zipfile.BadZipFile, UnicodeDecodeError):
+        return {}
+    if "<!DOCTYPE" in xml_text.upper() or "<!ENTITY" in xml_text.upper():
+        return {}
+    levels: dict[str, int] = {}
+    for style in ET.fromstring(xml_text).iter(w + "style"):  # noqa: S314 - no DTD/entities
+        name = style.find(w + "name")
+        match = re.fullmatch(
+            r"(?:heading|заголовок)\s*([1-6])",
+            (name.get(w + "val", "") if name is not None else "").strip().lower(),
+        )
+        if match and style.get(w + "styleId"):
+            levels[str(style.get(w + "styleId"))] = int(match.group(1))
+    return levels
+
+
 def extract_text(content: bytes, kind: str) -> str:
     """Executed inside a resource-limited child for PDF/DOCX, not the event loop."""
     try:
@@ -94,19 +119,21 @@ def extract_text(content: bytes, kind: str) -> str:
                 raise DocumentError("document_binary_or_invalid")
             root = ET.fromstring(xml_text)  # noqa: S314 - no DTD/entities; bounded child/XML
             w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            levels = _heading_levels(content, w)
             paragraphs = []
             for paragraph in root.iter(w + "p"):
-                paragraphs.append(
-                    "".join(
-                        node.text or ""
-                        if node.tag == w + "t"
-                        else "\t"
-                        if node.tag == w + "tab"
-                        else "\n"
-                        for node in paragraph.iter()
-                        if node.tag in {w + "t", w + "tab", w + "br"}
-                    )
+                style = paragraph.find(f"{w}pPr/{w}pStyle")
+                level = levels.get(style.get(w + "val", "")) if style is not None else None
+                line = "".join(
+                    node.text or ""
+                    if node.tag == w + "t"
+                    else "\t"
+                    if node.tag == w + "tab"
+                    else "\n"
+                    for node in paragraph.iter()
+                    if node.tag in {w + "t", w + "tab", w + "br"}
                 )
+                paragraphs.append("#" * level + " " + line if level and line.strip() else line)
             return _check_text("\n".join(paragraphs))
         if kind == "pdf":
             from pypdf import PdfReader

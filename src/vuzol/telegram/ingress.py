@@ -738,6 +738,10 @@ class TelegramIngressService:
         voice = next((a for a in update.attachments if a.kind.value in {"voice", "audio"}), None)
         if not update.text and voice is None:
             return None
+        if any(a.kind.value == "document" for a in update.attachments):
+            # Owner 2026-10-31: this path carries only text, so a document sent to a live
+            # goal was lost. The document path extracts it and reaches the same goal.
+            return None
         async with UnitOfWork(self._session_factory) as uow:
             assert uow.session is not None
             mapping = await uow.session.scalar(

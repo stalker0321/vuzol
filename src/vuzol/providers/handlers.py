@@ -1091,6 +1091,9 @@ class ProviderStepHandler:
                 notes = await executor_notes_context(session, task)
                 if notes is not None:
                     context = (*context, notes)
+                from vuzol.leadership.goal_documents import goal_documents_context
+
+                context = (*context, *await goal_documents_context(session, task))
             original_input = task.transcript or task.original_text
             input_task = task
             original_reference = provenance_reference(task)

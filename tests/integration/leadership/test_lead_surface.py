@@ -999,3 +999,77 @@ async def test_refused_goal_less_voice_is_a_clear_failure_not_a_storage_retry(
                     TransactionalOutbox.idempotency_key.like("lead:voice-failed:%")
                 )
             )
+
+
+@pytest.mark.parametrize("live_goal", [False, True])
+async def test_long_document_reaches_the_lead_as_an_excerpt(postgres_dsn, tmp_path, live_goal):
+    """Owner 2026-10-31: a 37k-character chapter broke the lead's input; now it is kept aside."""
+    from tests.integration.leadership.test_managed_goal_flow import _worker
+
+    from vuzol.interpretation.adapters import FakeInterpreter
+    from vuzol.interpretation.service import InterpretationPipeline
+    from vuzol.leadership.model import LeadDecision
+    from vuzol.storage.models import GoalDocument
+    from vuzol.telegram.domain import AttachmentKind, TelegramAttachment
+
+    chapter = ("Глава 2. Анализ системы стратегического управления. " * 800).encode()
+
+    class Downloader:
+        async def download(self, file_id: str) -> bytes:
+            return chapter
+
+    class Reply:
+        def __init__(self):
+            self.seen = []
+
+        async def decide(self, snapshot):
+            if snapshot.owner_event is not None:
+                self.seen.append(snapshot.owner_event)
+            return LeadDecision()
+
+    repository = tmp_path / "repositories" / PROJECT
+    repository.mkdir(parents=True)
+    runtime = _runtime(tmp_path, repository, lead=True, discussion=True)
+    async with _factory(postgres_dsn) as factory:
+        session_id = await _session(factory)
+        # A document sent to a goal already running used to be dropped.
+        live_id = await _enable(factory, session_id) if live_goal else None
+        model = Reply()
+        worker = _worker(factory, model)
+        await worker.process_one()
+        message = _message(950, "Поправь вторую главу").model_copy(
+            update={
+                "attachments": (
+                    TelegramAttachment(
+                        file_id="chapter-file",
+                        file_unique_id="chapter-unique",
+                        kind=AttachmentKind.DOCUMENT,
+                        file_size=len(chapter),
+                        media_type="text/plain",
+                        filename="glava-2.txt",
+                    ),
+                )
+            }
+        )
+        accepted = await TelegramIngressService(runtime, factory).accept_message(message)
+        assert accepted.status is IngressStatus.HANDLED
+        pipeline = InterpretationPipeline(
+            runtime,
+            factory,
+            interpreter=FakeInterpreter([]),
+            downloader=Downloader(),
+            owner="lead-documents",
+        )
+        while await pipeline.process_one():
+            pass
+        for _ in range(4):
+            await worker.process_one()
+        text = model.seen[0]["text"]
+        assert text.startswith("Поправь вторую главу") and "glava-2.txt" in text
+        assert len(text) < 4_000
+        async with factory() as session:
+            stored = await session.scalar(select(GoalDocument))
+            assert stored.body == chapter.decode()
+            assert live_id is None or stored.goal_id == live_id
+            goal = await session.get(ManagedGoal, stored.goal_id)
+            assert len(goal.scope_text) < 4_000

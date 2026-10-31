@@ -2188,3 +2188,21 @@ class InboxLink(IdentityMixin, Base):
     item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("inbox_items.id", ondelete="CASCADE"), nullable=False, index=True
     )
+
+
+class GoalDocument(IdentityMixin, Base):
+    """A large document the owner attached to a goal: the lead sees an excerpt, workers all."""
+
+    __tablename__ = "goal_documents"
+    __table_args__ = (UniqueConstraint("goal_id", "sha256", name="uq_goal_document"),)
+
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("managed_goals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(200), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

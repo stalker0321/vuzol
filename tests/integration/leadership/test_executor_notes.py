@@ -66,3 +66,31 @@ async def test_goal_step_carries_project_and_owner_notes(postgres_dsn):
             # A task outside any goal gets no notes.
             loose = Task(id=uuid.uuid4(), project_id=PROJECT)
             assert await executor_notes_context(session, loose) is None
+
+
+async def test_goal_step_carries_the_goals_long_documents_in_parts(postgres_dsn):
+    """Owner 2026-10-31: the worker gets the whole attached chapter the lead only skimmed."""
+    from tests.integration.leadership.planning_helpers import seed_plan
+
+    from vuzol.leadership.goal_documents import goal_documents_context, store_goal_documents
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        await seed_plan(factory, goal_id, {"plan": plan_items(1)})
+        await approve_plan(factory, goal_id)
+        assert (await start(factory, goal_id)).status == "applied"
+        chapter = "Глава 2. " + "текст " * 6_000
+        async with factory.begin() as session:
+            document = {"filename": "glava.docx", "media_type": "x", "sha256": "b" * 64}
+            await store_goal_documents(session, goal_id, [{**document, "text": chapter}])
+            # The same file sent twice is kept once.
+            await store_goal_documents(session, goal_id, [{**document, "text": chapter}])
+        async with factory() as session:
+            task = await session.scalar(select(Task))
+            parts = await goal_documents_context(session, task)
+            loose = Task(id=uuid.uuid4(), project_id=PROJECT)
+            assert await goal_documents_context(session, loose) == ()
+        bodies = [json.loads(part.content) for part in parts]
+        assert [b["part"] for b in bodies] == ["1/3", "2/3", "3/3"]
+        assert "".join(b["text"] for b in bodies) == chapter
+        assert all(part.source == "goal_document" and len(part.content) <= 20_000 for part in parts)

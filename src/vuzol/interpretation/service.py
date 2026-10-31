@@ -481,17 +481,22 @@ class InterpretationPipeline:
                 intake = await uow.session.get(TelegramIntakeMessage, item.linked_entity_id)
                 if intake is None or intake.affinity_kind != "discussion" or not prepared["turn"]:
                     raise PermanentPipelineError("chat_intake_invalid")
-                await ProjectEventService(self._runtime).submit_event(
+                from vuzol.leadership.goal_documents import lead_turn, store_goal_documents
+
+                turn, kept = lead_turn(prepared)
+                event_receipt = await ProjectEventService(self._runtime).submit_event(
                     uow,
                     Principal(user_id=intake.user_id, ingress_source="telegram"),
                     project_id=_required_string(item.payload, "project_id"),
                     session_id=_required_uuid(item.payload, "discussion_session_id"),
                     idempotency_key=f"lead:message:{intake.chat_id}:{intake.message_id}",
-                    text=str(prepared["turn"]),
+                    text=turn,
                     intake=intake,
                     reply_to_message_id=item.payload.get("reply_to_message_id"),
                     origin=RequestOrigin(channel="telegram", display_name="Telegram"),
                 )
+                if kept and event_receipt.goal_id is not None:
+                    await store_goal_documents(uow.session, event_receipt.goal_id, kept)
                 await complete_outbox_item(uow.session, token)
             return
         if not isinstance(self._interpreter, JevDecisionsInterpreter):

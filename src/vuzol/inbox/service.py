@@ -261,6 +261,9 @@ class InboxWorker:
         elif route.action == "ask" and target is not None:
             await self._answer([target], words, chat_id, reply_to=anchor, key=str(batch_id))
 
+        elif route.action in {"ask", "web"}:
+            # A question for the internet, or one whose record could not be found.
+            await self._answer([], words, chat_id, reply_to=anchor, key=str(batch_id))
         elif route.action == "search":
             await self._search(route, words, chat_id, user_id, reply_to=anchor, key=str(batch_id))
         elif route.action == "update" and target is not None and route.patch is not None:
@@ -332,7 +335,7 @@ class InboxWorker:
                 answer_html(answer.text),
                 reply_to=reply_to,
                 key=f"answer:{key}",
-                item_ids=[items[0].id],
+                item_ids=[items[0].id] if items else [],
             )
 
     async def _search(
@@ -376,7 +379,7 @@ class InboxWorker:
                     select(InboxItem).where(*conditions).order_by(*order).limit(_SEARCH_LIMIT)
                 )
             )
-        web = await self._look_up(question, []) if not found else None
+        web = await self._look_up(question, [_brief(item) for item in found[:10]])
         answer = await self._model.ask(
             Answer,
             system=self._prompt(SEARCH_PROMPT),
@@ -632,6 +635,15 @@ class InboxWorker:
                     InboxLink.chat_id == chat_id, InboxLink.message_id.in_(replies)
                 )
             )
+            if item_id is None:
+                # A reply to the owner's own forward: the record built from its batch.
+                item_id = await session.scalar(
+                    select(InboxItem.id)
+                    .join(InboxMessage, InboxMessage.batch_id == InboxItem.batch_id)
+                    .where(InboxMessage.chat_id == chat_id, InboxMessage.message_id.in_(replies))
+                    .order_by(InboxItem.ordinal)
+                    .limit(1)
+                )
             item = await session.get(InboxItem, item_id) if item_id else None
             return item if item is not None and item.removed_at is None else None
 

@@ -339,6 +339,8 @@ class InterpretationSettings(BaseModel):
     structure_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     manual_project_creation: bool = False
     fallback_profile_ids: tuple[str, ...] = ()
+    # OpenCode Go routes a key to its workspace by this header; not a secret.
+    opencode_org_ids: dict[str, str] = Field(default_factory=dict)
     transcription_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=60)
     lease_seconds: int = Field(default=300, ge=10, le=3_600)
@@ -563,6 +565,8 @@ class InboxSettings(BaseModel):
     # next one is tried when an account is out of quota or unavailable.
     profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     fallback_profile_ids: tuple[str, ...] = ()
+    # OpenCode Go routes a key to its workspace by this header; not a secret.
+    opencode_org_ids: dict[str, str] = Field(default_factory=dict)
     # Telegram sends a comment and the forwarded post as separate messages.
     settle_seconds: float = Field(default=3.0, ge=0.5, le=30)
     # Words without a reply apply to the last record only this long after it.

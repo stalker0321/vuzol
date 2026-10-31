@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Bot, Update
 
 from vuzol.config import Settings
+from vuzol.inbox.ingress import accept_inbox_update, is_inbox_update
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
     claim_outbox_item,
@@ -70,7 +71,7 @@ class DurableTelegramIngress:
                 )
                 authorized = True
             except TelegramPolicyError:
-                pass
+                authorized = is_inbox_update(update, self._settings)
         payload = (
             {"rejected": "update_too_large", "payload_hash": digest}
             if len(encoded) > _MAX_UPDATE_BYTES
@@ -123,15 +124,21 @@ class DurableTelegramIngress:
             update = Update.de_json(json.loads(payload["update_json"]), bot)
             if update is None:
                 raise ValueError("empty persisted update")
-            await asyncio.wait_for(
-                dispatch_update(
-                    update,
-                    bot_id=self._bot_id,
-                    on_message=self._on_message,
-                    on_control=self._on_control,
-                ),
+            # The owner's private chat is the inbox, not a project topic.
+            handled = is_inbox_update(update, self._settings) and await asyncio.wait_for(
+                accept_inbox_update(self._factory, self._settings, update),
                 timeout=self._processing_seconds,
             )
+            if not handled:
+                await asyncio.wait_for(
+                    dispatch_update(
+                        update,
+                        bot_id=self._bot_id,
+                        on_message=self._on_message,
+                        on_control=self._on_control,
+                    ),
+                    timeout=self._processing_seconds,
+                )
         except asyncio.CancelledError:
             # Leave the lease recoverable after shutdown/crash.
             raise

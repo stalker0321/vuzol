@@ -132,6 +132,42 @@ async def test_reads_share_projections_and_have_separate_receipts(postgres_dsn, 
             assert turn.usage == {"cost_known": True, "cost_amount": 0.2}
 
 
+async def test_recall_finds_what_the_owner_saved_in_the_inbox(postgres_dsn, monkeypatch):
+    """Owner 2026-10-31: a tool forwarded to the private inbox is found by project leads."""
+    from vuzol.storage.models import InboxItem
+
+    settings = _settings(monkeypatch, "lead-local")
+    adapter = Scripted(
+        {"tool_calls": [read("recall", query="агентские инструменты")]},
+        {"reply": "", "commands": []},
+    )
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            for owner, title in ((goal.owner_user_id, "agent-kit"), (goal.owner_user_id + 1, "x")):
+                session.add(
+                    InboxItem(
+                        owner_user_id=owner,
+                        chat_id=owner,
+                        ordinal=0,
+                        kind="repo",
+                        title=title,
+                        summary="Агентские инструменты для лида",
+                        tags=["агенты"],
+                        fields={"verdict": "Годный, MIT"},
+                        evidence="",
+                        answers=[],
+                    )
+                )
+        lead = worker(factory, settings, adapter)
+        claim = await _claim(factory, lead, "reads")
+        await lead._infer(claim)
+        hits = audits(adapter.requests[1])[0]["result"]["hits"]
+        assert [hit["kind"] for hit in hits] == ["owner_inbox_repo"]
+        assert hits[0]["text"].startswith("agent-kit") and "Годный, MIT" in hits[0]["text"]
+
+
 @pytest.mark.parametrize("state", ["received", "sending", "unknown"])
 async def test_restart_preserves_followup_request_without_rereading_or_resending(
     postgres_dsn, monkeypatch, state

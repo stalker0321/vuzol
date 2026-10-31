@@ -99,6 +99,9 @@ ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S603", "S607"]
 "alembic/**" = ["ANN"]
+# Owner-facing Russian text throughout.
+"src/vuzol/inbox/**" = ["RUF001"]
+"tests/integration/inbox/**" = ["RUF001"]
 
 [tool.ruff.format]
 exclude = ["tests/fixtures/**"]

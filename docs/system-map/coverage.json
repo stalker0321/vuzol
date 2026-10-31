@@ -936,7 +936,7 @@
       "id": "outbox:discussion_classify",
       "sources": [],
       "producers": [
-        "src/vuzol/telegram/ingress.py:972"
+        "src/vuzol/telegram/ingress.py:976"
       ],
       "consumers": [
         "src/vuzol/interpretation/service.py:409"
@@ -967,7 +967,7 @@
       "id": "outbox:interpretation",
       "sources": [],
       "producers": [
-        "src/vuzol/interpretation/service.py:1612",
+        "src/vuzol/interpretation/service.py:1617",
         "src/vuzol/projects/naming.py:96",
         "src/vuzol/telegram/ingress.py:377"
       ],
@@ -1024,7 +1024,7 @@
       "id": "outbox:subscription_limits",
       "sources": [],
       "producers": [
-        "src/vuzol/telegram/ingress.py:1116"
+        "src/vuzol/telegram/ingress.py:1120"
       ],
       "consumers": [
         "src/vuzol/cli/executor.py:487"
@@ -1040,9 +1040,9 @@
         "src/vuzol/discussion/handoff.py:149",
         "src/vuzol/discussion/sequencer.py:801",
         "src/vuzol/execution/artifact_production.py:331",
-        "src/vuzol/interpretation/service.py:1630",
-        "src/vuzol/interpretation/service.py:1420",
-        "src/vuzol/interpretation/service.py:1564",
+        "src/vuzol/interpretation/service.py:1635",
+        "src/vuzol/interpretation/service.py:1425",
+        "src/vuzol/interpretation/service.py:1569",
         "src/vuzol/leadership/worker.py:776",
         "src/vuzol/projects/naming.py:86",
         "src/vuzol/projects/naming.py:180",
@@ -1058,13 +1058,13 @@
         "src/vuzol/telegram/ingress.py:471",
         "src/vuzol/telegram/ingress.py:577",
         "src/vuzol/telegram/ingress.py:590",
-        "src/vuzol/telegram/ingress.py:1062",
-        "src/vuzol/telegram/ingress.py:1075",
-        "src/vuzol/telegram/ingress.py:1126",
-        "src/vuzol/telegram/ingress.py:1166",
-        "src/vuzol/telegram/ingress.py:1340",
-        "src/vuzol/telegram/ingress.py:1427",
-        "src/vuzol/telegram/ingress.py:1440",
+        "src/vuzol/telegram/ingress.py:1066",
+        "src/vuzol/telegram/ingress.py:1079",
+        "src/vuzol/telegram/ingress.py:1130",
+        "src/vuzol/telegram/ingress.py:1170",
+        "src/vuzol/telegram/ingress.py:1344",
+        "src/vuzol/telegram/ingress.py:1431",
+        "src/vuzol/telegram/ingress.py:1444",
         "src/vuzol/telegram/model_command.py:312",
         "src/vuzol/telegram/model_command.py:189",
         "src/vuzol/telegram/model_command.py:246",
@@ -1088,7 +1088,7 @@
       "sources": [],
       "producers": [
         "src/vuzol/telegram/ingress.py:386",
-        "src/vuzol/telegram/ingress.py:828"
+        "src/vuzol/telegram/ingress.py:832"
       ],
       "consumers": [
         "src/vuzol/interpretation/service.py:409"
@@ -1120,8 +1120,8 @@
         "src/vuzol/leadership/worker.py:1152",
         "src/vuzol/telegram/controls.py:558",
         "src/vuzol/telegram/controls.py:670",
-        "src/vuzol/telegram/ingress.py:1324",
-        "src/vuzol/telegram/ingress.py:1332",
+        "src/vuzol/telegram/ingress.py:1328",
+        "src/vuzol/telegram/ingress.py:1336",
         "src/vuzol/telegram/model_command.py:369",
         "src/vuzol/telegram/model_command.py:397",
         "src/vuzol/telegram/projections.py:1558",
@@ -1163,8 +1163,8 @@
       "producers": [
         "src/vuzol/discussion/sequencer.py:563",
         "src/vuzol/discussion/sequencer.py:735",
-        "src/vuzol/interpretation/service.py:1323",
-        "src/vuzol/interpretation/service.py:926"
+        "src/vuzol/interpretation/service.py:1328",
+        "src/vuzol/interpretation/service.py:931"
       ],
       "consumers": [
         "src/vuzol/workflows/dispatch.py:70"

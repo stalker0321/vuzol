@@ -200,3 +200,28 @@ def test_parser_child_uses_fixed_args_and_does_not_inherit_credentials(monkeypat
         assert "private-fixture" not in repr(kwargs)
 
     asyncio.run(scenario())
+
+
+def test_docx_headings_become_markdown_even_with_localized_style_ids():
+    """Owner 2026-10-31: a thesis chapter keeps its sections when converted."""
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "word/styles.xml",
+            f"<w:styles {w}>"
+            '<w:style w:styleId="1"><w:name w:val="heading 1"/></w:style>'
+            '<w:style w:styleId="a3"><w:name w:val="Заголовок 2"/></w:style>'
+            '<w:style w:styleId="a4"><w:name w:val="Normal"/></w:style></w:styles>',
+        )
+        archive.writestr(
+            "word/document.xml",
+            f"<w:document {w}><w:body>"
+            '<w:p><w:pPr><w:pStyle w:val="1"/></w:pPr><w:r><w:t>Глава 2</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:pStyle w:val="a3"/></w:pPr><w:r><w:t>2.1. Ozon</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:pStyle w:val="a3"/></w:pPr></w:p>'
+            '<w:p><w:pPr><w:pStyle w:val="a4"/></w:pPr><w:r><w:t>Текст.</w:t></w:r></w:p>'
+            "</w:body></w:document>",
+        )
+    expected = "# Глава 2\n## 2.1. Ozon\n\nТекст."  # noqa: RUF001
+    assert extract_text(output.getvalue(), "docx") == expected

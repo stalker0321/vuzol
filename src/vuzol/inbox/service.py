@@ -17,7 +17,7 @@ from vuzol.config.settings import InboxSettings
 from vuzol.inbox import INBOX_DESTINATION
 from vuzol.inbox.fetch import describe_link
 from vuzol.inbox.ingress import schedule
-from vuzol.inbox.model import Image, InboxModel, InboxModelError
+from vuzol.inbox.model import Image, InboxModel, InboxModelError, ModelChain
 from vuzol.inbox.render import answer_html, card_html
 from vuzol.inbox.schemas import (
     ASK_PROMPT,
@@ -64,8 +64,7 @@ class InboxWorker:
         factory: async_sessionmaker[AsyncSession],
         settings: InboxSettings,
         *,
-        fast: InboxModel,
-        deep: InboxModel | None,
+        model: InboxModel | ModelChain,
         send: Sender,
         download: Downloader,
         transcribe: Transcriber | None = None,
@@ -74,8 +73,7 @@ class InboxWorker:
     ) -> None:
         self._factory = factory
         self._settings = settings
-        self._fast = fast
-        self._deep = deep or fast
+        self._model = model
         self._send = send
         self._download = download
         self._transcribe = transcribe
@@ -206,7 +204,7 @@ class InboxWorker:
         messages: Sequence[InboxMessage],
     ) -> None:
         evidence, images = await self._evidence(content)
-        cards = await self._fast.ask(
+        cards = await self._model.ask(
             Cards,
             system=self._prompt(CARD_PROMPT),
             user=json.dumps(
@@ -234,7 +232,7 @@ class InboxWorker:
         messages: Sequence[InboxMessage],
     ) -> None:
         recent = None if replied else await self._recent_item(chat_id)
-        route = await self._fast.ask(
+        route = await self._model.ask(
             Route,
             system=self._prompt(ROUTE_PROMPT),
             user=json.dumps(
@@ -291,7 +289,7 @@ class InboxWorker:
         reply_to: int,
         key: str,
     ) -> None:
-        answer = await self._deep.ask(
+        answer = await self._model.ask(
             Answer,
             system=self._prompt(ASK_PROMPT),
             user=json.dumps(
@@ -372,7 +370,7 @@ class InboxWorker:
                     select(InboxItem).where(*conditions).order_by(*order).limit(_SEARCH_LIMIT)
                 )
             )
-        answer = await self._fast.ask(
+        answer = await self._model.ask(
             Answer,
             system=self._prompt(SEARCH_PROMPT),
             user=json.dumps(

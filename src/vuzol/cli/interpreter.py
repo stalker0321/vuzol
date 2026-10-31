@@ -18,7 +18,7 @@ from vuzol.config import (
     get_runtime_configuration,
 )
 from vuzol.experiments.canary import canary_policy_from_settings
-from vuzol.inbox.model import InboxModel
+from vuzol.inbox.model import InboxModel, ModelChain
 from vuzol.inbox.service import InboxWorker
 from vuzol.interpretation.adapters import (
     OpenAICompatibleInterpreter,
@@ -110,22 +110,34 @@ def build_inbox_worker(
 ) -> InboxWorker:
     config = runtime.settings.inbox
     assert config.profile_id is not None
-    fast = build_inbox_model(
-        runtime.registries,
-        resolver,
-        profile_id=config.profile_id,
-        timeout_seconds=config.timeout_seconds,
-    )
-    deep = (
+    models = [
         build_inbox_model(
             runtime.registries,
             resolver,
-            profile_id=config.deep_profile_id,
+            profile_id=config.profile_id,
             timeout_seconds=config.timeout_seconds,
         )
-        if config.deep_profile_id
-        else None
-    )
+    ]
+    for profile_id in config.fallback_profile_ids:
+        try:
+            models.append(
+                build_inbox_model(
+                    runtime.registries,
+                    resolver,
+                    profile_id=profile_id,
+                    timeout_seconds=config.timeout_seconds,
+                )
+            )
+        except (LookupError, ValueError) as error:  # incl. a missing key file
+            # A spare account without its key yet must not stop the inbox.
+            get_logger(__name__).warning(
+                "inbox fallback profile unavailable",
+                extra={
+                    "event": "inbox.fallback_unavailable",
+                    "profile_id": profile_id,
+                    "error": type(error).__name__,
+                },
+            )
     client = PythonTelegramClient(bot)
     interpretation = runtime.settings.interpretation
 
@@ -158,8 +170,7 @@ def build_inbox_worker(
     return InboxWorker(
         factory,
         config,
-        fast=fast,
-        deep=deep,
+        model=ModelChain(models),
         send=send,
         download=client.download,
         transcribe=transcribe if transcriber is not None else None,

@@ -19,6 +19,7 @@ from vuzol.config import (
 )
 from vuzol.experiments.canary import canary_policy_from_settings
 from vuzol.inbox.model import InboxModel, ModelChain
+from vuzol.inbox.search import WebSearch
 from vuzol.inbox.service import InboxWorker
 from vuzol.interpretation.adapters import (
     OpenAICompatibleInterpreter,
@@ -175,6 +176,7 @@ def build_inbox_worker(
         factory,
         config,
         model=ModelChain(models),
+        search=WebSearch(brave_key_file=config.brave_key_file, searxng_url=config.searxng_url),
         send=send,
         download=client.download,
         transcribe=transcribe if transcriber is not None else None,

@@ -85,6 +85,7 @@ def build_inbox_model(
     *,
     profile_id: str,
     timeout_seconds: float,
+    org_id: str | None = None,
 ) -> InboxModel:
     profile = registries.profiles.get(profile_id)
     if profile.provider != "openai-compatible" or profile.api_base_url is None:
@@ -97,6 +98,7 @@ def build_inbox_model(
         model=profile.model,
         timeout_seconds=timeout_seconds,
         output_tokens=profile.output_limit or 8_000,
+        headers={"x-opencode-org-id": org_id} if org_id else None,
     )
 
 
@@ -116,6 +118,7 @@ def build_inbox_worker(
             resolver,
             profile_id=config.profile_id,
             timeout_seconds=config.timeout_seconds,
+            org_id=config.opencode_org_ids.get(config.profile_id),
         )
     ]
     for profile_id in config.fallback_profile_ids:
@@ -126,6 +129,7 @@ def build_inbox_worker(
                     resolver,
                     profile_id=profile_id,
                     timeout_seconds=config.timeout_seconds,
+                    org_id=config.opencode_org_ids.get(profile_id),
                 )
             )
         except (LookupError, ValueError) as error:  # incl. a missing key file

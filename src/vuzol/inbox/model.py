@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import json
 import re
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, SecretStr, ValidationError
@@ -39,8 +41,10 @@ class InboxModel:
         model: str,
         timeout_seconds: float = 120,
         output_tokens: int = 4_000,
+        headers: dict[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
+        self._headers = dict(headers or {})
         self._base_url = base_url.rstrip("/")
         self._credential = credential
         self.model = model
@@ -96,7 +100,14 @@ class InboxModel:
             "response_format": {"type": "json_object"},
             "max_tokens": self._output_tokens,
         }
-        headers = {"Authorization": f"Bearer {self._credential.get_secret_value()}"}
+        headers = {
+            **self._headers,
+            "Authorization": f"Bearer {self._credential.get_secret_value()}",
+        }
+        if urlsplit(self._base_url).hostname == "opencode.ai":
+            # OpenCode Go refuses requests without a per-conversation routing id.
+            headers["x-opencode-session"] = str(uuid.uuid4())
+            headers["x-opencode-client"] = "vuzol"
         try:
             if self._client is not None:
                 response = await self._client.post(

@@ -35,6 +35,7 @@ x-roles: &roles
   VUZOL_INBOX__ENABLED: ${VUZOL_INBOX_ENABLED:-false}
   VUZOL_INBOX__PROFILE_ID: inbox-flash-c
   VUZOL_INBOX__FALLBACK_PROFILE_IDS: '["inbox-flash-a"]'
+  VUZOL_INBOX__OPENCODE_ORG_IDS: '{"inbox-flash-c": "org_01M4V72GGXDFR4KME3G3P13JG1"}'
 
 x-app: &app
   image: ${VUZOL_IMAGE:?set by vuzol-compose}

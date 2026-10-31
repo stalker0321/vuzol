@@ -293,3 +293,64 @@ async def test_question_answer_searches_the_web_first(postgres_dsn):
         assert "superwhisper.example" in answer_input and "x/whisper-kb" in answer_input
         assert "[https://superwhisper.example] page" in answer_input  # the hit was opened
         assert "Superwhisper" in telegram.sent[-1]["html"]
+
+
+async def test_reply_to_own_forward_and_plain_web_question_search_online(postgres_dsn):
+    from vuzol.inbox.schemas import Lookup
+    from vuzol.inbox.search import Hit
+
+    class Search:
+        def __init__(self):
+            self.queries = []
+
+        async def search(self, query):
+            self.queries.append(query)
+            return [Hit("DictateKeyboard", "https://dk.example", "keyboard")]
+
+        async def github(self, query):
+            return []
+
+    def reply_to(number):
+        return {
+            "message_id": number,
+            "date": 1792000000,
+            "chat": {"id": OWNER, "type": "private", "first_name": "Owner"},
+            "text": "post",
+        }
+
+    async with _factory(postgres_dsn) as factory:
+        search = Search()
+        await admit(
+            factory,
+            private(
+                40,
+                text="Голосовой ввод для Android",
+                forward_origin={
+                    "type": "hidden_user",
+                    "date": 1792000000,
+                    "sender_user_name": "Anon",
+                },
+            ),
+        )
+        model = FakeModel(
+            Cards(cards=[Card(kind="tool", title="phone-whisper")]),
+            # Reply to the owner's own forward, not to the bot's card.
+            Route(action="ask", target="replied"),
+            Lookup(queries=["mature android dictation apps"]),
+            Answer(text="Зрелее: DictateKeyboard."),
+            Route(action="web"),
+            Lookup(queries=["android dictation privacy"]),
+            Answer(text="Нашёл в сети: DictateKeyboard."),
+        )
+        worker, telegram = worker_for(factory, model, search=search)
+        await drain(worker)
+        await admit(factory, private(41, text="поищи альтернативы", reply_to_message=reply_to(40)))
+        await drain(worker)
+        assert '"title": "phone-whisper"' in model.calls[2]["user"]  # the record was found
+        await admit(factory, private(42, text="не, поищи в инете"))
+        await drain(worker)
+        assert search.queries == ["mature android dictation apps", "android dictation privacy"]
+        assert "Нашёл в сети" in telegram.sent[-1]["html"]
+        async with factory() as session:
+            item = await session.scalar(select(InboxItem))
+            assert [a["answer"] for a in item.answers] == ["Зрелее: DictateKeyboard."]

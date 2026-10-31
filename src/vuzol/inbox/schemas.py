@@ -68,7 +68,7 @@ class Patch(_Model):
 
 
 class Route(_Model):
-    action: Literal["save", "ask", "search", "update", "delete", "chat"]
+    action: Literal["save", "ask", "search", "web", "update", "delete", "chat"]
     # Which record "ask", "update" and "delete" are about.
     target: Literal["replied", "recent", "none"] = "none"
     search: Search | None = None
@@ -115,14 +115,20 @@ CARD_PROMPT = (
 )
 
 ROUTE_PROMPT = (
-    _COMMON + "\nThe owner wrote to the inbox in their own words (text or a voice note). Decide:\n"
+    _COMMON + "\nThe owner wrote to the inbox in their own words (text or a voice note). "
+    "You can search the web and GitHub: the server runs the searches for ask, search and web. "
+    "Never say you cannot search the internet. Decide:\n"
     "- save: they give something to keep (a book or film name, a thought, a date, a link "
     "description). It becomes a new record.\n"
     "- ask: a question or request about a specific record: the one they replied to "
-    "(target=replied) or the latest one (target=recent) when the words clearly continue it.\n"
+    "(target=replied) or the latest one (target=recent) when the words clearly continue it, "
+    "including requests to find alternatives or look something about it up online.\n"
     '- search: a question about the base as a whole ("что у нас на ноябрь?", "какие книги я '
     'хотел прочитать?", "что было про бэкапы?"). Fill search: words to look for (null for '
     "a pure date or kind question), kinds, date range for events.\n"
+    '- web: a question that needs the internet and is not about one record ("поищи в инете", '
+    '"что сейчас лучше для X?"). When it continues the latest record, prefer ask with '
+    "target=recent.\n"
     "- update: a correction to a record (date, title, kind, tags...). Fill patch with only "
     "the changed fields.\n"
     "- delete: they ask to remove a record.\n"
@@ -142,7 +148,8 @@ LOOKUP_PROMPT = (
 )
 
 ASK_PROMPT = (
-    _COMMON + "\nAnswer the owner's question about one record of their knowledge base. Use the "
+    _COMMON + "\nAnswer the owner's question about a record of their knowledge base, or a general "
+    "question when no record is given. Use the "
     "record, its evidence, earlier answers and web results (search hits, opened pages, GitHub "
     "repositories with real stars and dates); add your own knowledge where it helps and say "
     "which is which. Name sources for facts taken from the web. If the question is about "

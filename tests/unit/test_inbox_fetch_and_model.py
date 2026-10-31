@@ -1,5 +1,6 @@
 """Inbox links are read safely; the model client sends images and repairs bad JSON."""
 
+import gzip
 import json
 
 import httpx
@@ -75,7 +76,12 @@ async def test_github_repo_reads_facts_readme_and_install_files(public_dns):
         if path == "/repos/acme/kit/contents":
             return httpx.Response(200, json=[{"name": "install.sh"}, {"name": "README.md"}])
         if path == "/repos/acme/kit/readme":
-            return httpx.Response(200, text="# Kit\nAgent tools")
+            # GitHub compresses its answers; the body must be decoded exactly once.
+            return httpx.Response(
+                200,
+                headers={"content-encoding": "gzip"},
+                content=gzip.compress(b"# Kit\nAgent tools"),
+            )
         if path == "/acme/kit/main/install.sh":
             return httpx.Response(200, text="curl https://x | sh")
         return httpx.Response(404)

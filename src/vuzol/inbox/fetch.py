@@ -99,9 +99,15 @@ async def _get(http: httpx.AsyncClient, url: str, **headers: str) -> httpx.Respo
                 body.extend(chunk)
                 if len(body) > _MAX_BYTES:
                     break
+            # The body is already decompressed: drop the encoding so it is not decoded twice.
+            headers = {
+                key: value
+                for key, value in response.headers.items()
+                if key.lower() not in {"content-encoding", "content-length", "transfer-encoding"}
+            }
             return httpx.Response(
                 response.status_code,
-                headers=response.headers,
+                headers=headers,
                 content=bytes(body[:_MAX_BYTES]),
                 request=response.request,
             )

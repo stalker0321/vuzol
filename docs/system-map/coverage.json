@@ -575,7 +575,7 @@
       "id": "dynamic-outbox:src/vuzol/inbox/ingress.py:INBOX_DESTINATION",
       "sources": [],
       "producers": [
-        "src/vuzol/inbox/ingress.py:112"
+        "src/vuzol/inbox/ingress.py:145"
       ],
       "consumers": [],
       "scenario": "inbox"
@@ -585,7 +585,7 @@
       "sources": [],
       "producers": [],
       "consumers": [
-        "src/vuzol/inbox/service.py:92"
+        "src/vuzol/inbox/service.py:110"
       ],
       "scenario": "inbox"
     },
@@ -809,7 +809,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:332"
+        "src/vuzol/cli/interpreter.py:347"
       ],
       "producers": [],
       "consumers": [],

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
+import time as time_module
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -18,7 +21,7 @@ from vuzol.inbox import INBOX_DESTINATION
 from vuzol.inbox.fetch import describe_link
 from vuzol.inbox.ingress import schedule
 from vuzol.inbox.model import Image, InboxModel, InboxModelError, ModelChain
-from vuzol.inbox.render import answer_html, card_html
+from vuzol.inbox.render import answer_html, card_buttons, card_html, digest_html
 from vuzol.inbox.schemas import (
     ASK_PROMPT,
     CARD_PROMPT,
@@ -33,6 +36,7 @@ from vuzol.inbox.schemas import (
     Route,
 )
 from vuzol.inbox.search import WebSearch
+from vuzol.interpretation.documents import DocumentError, document_format, read_document
 from vuzol.observability import get_logger
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
@@ -51,11 +55,24 @@ _EVIDENCE_CHARS = 30_000
 _SEARCH_LIMIT = 40
 _ATTEMPTS = 3
 _PAGES = 3
+_SWEEP_SECONDS = 600
+_REMIND_DAYS = 7
+_DOCUMENT_CHARS = 12_000
+_MAX_DOCUMENT_BYTES = 20_000_000
+ANALYZE_QUESTION = (
+    "Разбери подробно: что это, насколько стоящее и живое, риски, альтернативы, "
+    "и подходит ли это мне."
+)
 _PAGE_CHARS = 6_000
 
 
+Buttons = list[list[list[str]]]
+
+
 class Sender(Protocol):
-    async def __call__(self, *, chat_id: int, html: str, reply_to: int | None) -> int: ...
+    async def __call__(
+        self, *, chat_id: int, html: str, reply_to: int | None, buttons: Buttons
+    ) -> int: ...
 
 
 Downloader = Callable[[str], Awaitable[bytes]]
@@ -78,6 +95,7 @@ class InboxWorker:
         owner: str = "inbox",
     ) -> None:
         self._web = search
+        self._next_sweep = 0.0
         self._factory = factory
         self._settings = settings
         self._model = model
@@ -95,8 +113,17 @@ class InboxWorker:
                 lease_seconds=900,
                 allowed_destinations=frozenset({INBOX_DESTINATION}),
             )
-            if token is None:
-                return False
+        if token is None:
+            if time_module.monotonic() >= self._next_sweep:
+                self._next_sweep = time_module.monotonic() + _SWEEP_SECONDS
+                try:
+                    await self._sweep(datetime.now(UTC))
+                except Exception:  # a failed sweep retries on the next one
+                    _LOG.warning(
+                        "inbox sweep failed", extra={"event": "inbox.sweep_failed"}, exc_info=True
+                    )
+            return False
+        async with self._factory() as session:
             item = await session.get(TransactionalOutbox, token.item_id)
             assert item is not None
             operation, payload, attempts = (
@@ -112,6 +139,8 @@ class InboxWorker:
                 await self._analyze(uuid.UUID(payload["batch_id"]), final=attempts >= _ATTEMPTS)
             elif operation == "answer":
                 await self._answer_op(payload)
+            elif operation == "button":
+                await self._button(payload)
             elif operation == "reply":
                 await self._reply(payload)
             else:
@@ -434,6 +463,7 @@ class InboxWorker:
                 reply_to=reply_to,
                 key=f"update:{key}",
                 item_ids=[stored.id],
+                buttons=card_buttons(stored.id),
             )
 
     async def _delete(self, item: InboxItem, chat_id: int, *, reply_to: int, key: str) -> None:
@@ -448,6 +478,106 @@ class InboxWorker:
                 answer_html(f"🗑 Удалил: {stored.title}"),
                 reply_to=reply_to,
                 key=f"delete:{key}",
+                item_ids=[],
+            )
+
+    async def _button(self, payload: dict[str, Any]) -> None:
+        async with self._factory() as session:
+            item = await session.get(InboxItem, uuid.UUID(payload["item_id"]))
+        if item is None or item.removed_at is not None:
+            return
+        chat_id, message_id, key = (
+            int(payload["chat_id"]),
+            int(payload["message_id"]),
+            str(payload["callback_id"]),
+        )
+        if payload["action"] == "a":
+            await self._answer(
+                [item], ANALYZE_QUESTION, chat_id, reply_to=message_id, key=f"button:{key}"
+            )
+        elif payload["action"] == "d":
+            await self._delete(item, chat_id, reply_to=message_id, key=f"button:{key}")
+
+    async def _sweep(self, now: datetime) -> None:
+        """Week-ahead event reminders and the Sunday digest, at sensible local hours."""
+        tz = ZoneInfo(self._settings.timezone)
+        local = now.astimezone(tz)
+        if not 10 <= local.hour < 21:
+            return
+        async with self._factory.begin() as session:
+            upcoming = list(
+                await session.scalars(
+                    select(InboxItem).where(
+                        InboxItem.kind == "event",
+                        InboxItem.removed_at.is_(None),
+                        InboxItem.event_start > now,
+                        InboxItem.event_start <= now + timedelta(days=_REMIND_DAYS),
+                        # Saved within the last week before it: the owner just saw it.
+                        InboxItem.created_at
+                        <= InboxItem.event_start - timedelta(days=_REMIND_DAYS),
+                    )
+                )
+            )
+            for item in upcoming:
+                assert item.event_start is not None
+                days = (item.event_start.astimezone(tz).date() - local.date()).days
+                when_text = {0: "сегодня", 1: "завтра"}.get(days, f"через {days} дн.")
+                await self._enqueue(
+                    session,
+                    item.chat_id,
+                    card_html(
+                        item,
+                        self._settings.timezone,
+                        header=f"🗓 Напоминаю: {when_text}",
+                    ),
+                    reply_to=None,
+                    key=f"remind:{item.id}",
+                    item_ids=[item.id],
+                    buttons=card_buttons(item.id),
+                )
+            if local.weekday() == 6 and local.hour >= 11:
+                await self._digests(session, now, local)
+
+    async def _digests(self, session: AsyncSession, now: datetime, local: datetime) -> None:
+        week = local.isocalendar()
+        chats = list(
+            await session.scalars(
+                select(InboxItem.chat_id).where(InboxItem.removed_at.is_(None)).distinct()
+            )
+        )
+        for chat_id in chats:
+            saved = list(
+                await session.scalars(
+                    select(InboxItem)
+                    .where(
+                        InboxItem.chat_id == chat_id,
+                        InboxItem.removed_at.is_(None),
+                        InboxItem.created_at >= now - timedelta(days=7),
+                    )
+                    .order_by(InboxItem.created_at)
+                )
+            )
+            soon = list(
+                await session.scalars(
+                    select(InboxItem)
+                    .where(
+                        InboxItem.chat_id == chat_id,
+                        InboxItem.removed_at.is_(None),
+                        InboxItem.kind == "event",
+                        InboxItem.event_start > now,
+                        InboxItem.event_start <= now + timedelta(days=30),
+                    )
+                    .order_by(InboxItem.event_start)
+                )
+            )
+            if not saved and not soon:
+                continue
+            await self._enqueue(
+                session,
+                chat_id,
+                digest_html(saved, soon, self._settings.timezone),
+                reply_to=None,
+                key=f"digest:{chat_id}:{week.year}-{week.week}",
                 item_ids=[],
             )
 
@@ -495,13 +625,34 @@ class InboxWorker:
                     if attachment.get("size", 0) <= _MAX_IMAGE_BYTES:
                         images.append(Image(await self._download(attachment["file_id"])))
                         parts.append(f"[image {len(images)} attached]")
-                elif attachment["kind"] in {"document", "video", "audio"}:
+                elif attachment["kind"] == "document":
+                    parts.append(await self._document(attachment))
+                elif attachment["kind"] in {"video", "audio"}:
                     name = attachment.get("filename") or attachment["kind"]
                     parts.append(f"[{attachment['kind']}: {name}, {attachment.get('mime')}]")
             links += [url for url in message.urls if url not in links]
         for url in links[:_MAX_LINKS]:
             parts.append("--- link\n" + await self._read_link(url))
         return "\n".join(parts)[:_EVIDENCE_CHARS], tuple(images)
+
+    async def _document(self, attachment: dict[str, Any]) -> str:
+        name = attachment.get("filename") or "document"
+        head = f"[document: {name}, {attachment.get('mime')}]"
+        try:
+            kind = document_format(attachment.get("filename"), attachment.get("mime") or "")
+        except DocumentError:
+            return head
+        if attachment.get("size", 0) > _MAX_DOCUMENT_BYTES:
+            return head + " (too large to read)"
+        content = await self._download(attachment["file_id"])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "document"
+            path.write_bytes(content)
+            try:
+                text = await read_document(path, kind)
+            except DocumentError as error:
+                return f"{head} (not readable: {error.category})"
+        return f"{head}\n{text[:_DOCUMENT_CHARS]}"
 
     async def _transcribe_voices(self, messages: Sequence[InboxMessage]) -> None:
         if self._transcribe is None:
@@ -566,6 +717,7 @@ class InboxWorker:
                     reply_to=reply_to,
                     key=f"cards:{batch_id}:{item.ordinal}",
                     item_ids=[item.id],
+                    buttons=card_buttons(item.id),
                 )
             if question:
                 await schedule(
@@ -594,6 +746,7 @@ class InboxWorker:
         reply_to: int | None,
         key: str,
         item_ids: Sequence[uuid.UUID],
+        buttons: Buttons | None = None,
     ) -> None:
         await schedule(
             session,
@@ -604,13 +757,17 @@ class InboxWorker:
                 "html": html,
                 "reply_to": reply_to,
                 "item_ids": [str(item_id) for item_id in item_ids],
+                "buttons": buttons or [],
             },
         )
 
     async def _reply(self, payload: dict[str, Any]) -> None:
         html = payload.get("html") or answer_html(str(payload.get("text") or ""))
         message_id = await self._send(
-            chat_id=int(payload["chat_id"]), html=html, reply_to=payload.get("reply_to")
+            chat_id=int(payload["chat_id"]),
+            html=html,
+            reply_to=payload.get("reply_to"),
+            buttons=payload.get("buttons") or [],
         )
         async with self._factory.begin() as session:
             for raw in payload.get("item_ids") or []:

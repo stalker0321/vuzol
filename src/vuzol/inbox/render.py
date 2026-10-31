@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo
@@ -80,3 +82,24 @@ def card_html(item: InboxItem, tz: str, *, header: str = "📥 Сохранил"
 
 def answer_html(text: str) -> str:
     return escape(text)
+
+
+def card_buttons(item_id: uuid.UUID) -> list[list[list[str]]]:
+    return [[["🔍 Разобрать", f"ib:a:{item_id.hex}"], ["🗑 Удалить", f"ib:d:{item_id.hex}"]]]
+
+
+def digest_html(saved: Sequence[InboxItem], soon: Sequence[InboxItem], tz: str) -> str:
+    lines = ["🗂 <b>Неделя в инбоксе</b>"]
+    if saved:
+        lines.append(f"\nСохранено: {len(saved)}")
+        for item in saved[:15]:
+            icon = KIND_LABELS.get(item.kind, KIND_LABELS["other"])[0]
+            lines.append(f"{icon} {escape(item.title)}")
+        if len(saved) > 15:
+            lines.append(f"…и ещё {len(saved) - 15}")
+    if soon:
+        lines.append("\n📅 <b>В ближайший месяц</b>")
+        for item in soon[:15]:
+            assert item.event_start is not None
+            lines.append(f"{when(item.event_start, tz)} — {escape(item.title)}")
+    return "\n".join(lines)

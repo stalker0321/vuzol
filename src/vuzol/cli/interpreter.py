@@ -8,7 +8,13 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram import Bot, LinkPreviewOptions, ReplyParameters
+from telegram import (
+    Bot,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    ReplyParameters,
+)
 from telegram.constants import ParseMode
 
 from vuzol.config import (
@@ -146,11 +152,20 @@ def build_inbox_worker(
     client = PythonTelegramClient(bot)
     interpretation = runtime.settings.interpretation
 
-    async def send(*, chat_id: int, html: str, reply_to: int | None) -> int:
+    async def send(
+        *, chat_id: int, html: str, reply_to: int | None, buttons: list[list[list[str]]]
+    ) -> int:
+        markup = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(label, callback_data=data) for label, data in row]
+                for row in buttons
+            ]
+        )
         message = await bot.send_message(
             chat_id=chat_id,
             text=html,
             parse_mode=ParseMode.HTML,
+            reply_markup=markup if buttons else None,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
             reply_parameters=(
                 ReplyParameters(message_id=reply_to, allow_sending_without_reply=True)

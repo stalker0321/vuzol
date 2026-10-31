@@ -7,7 +7,9 @@ newest one finds the burst complete.
 
 from __future__ import annotations
 
+import re
 import uuid
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
@@ -23,6 +25,7 @@ from telegram import (
     MessageOriginUser,
     Update,
 )
+from telegram.error import TelegramError
 
 from vuzol.config import Settings
 from vuzol.inbox import INBOX_DESTINATION
@@ -72,6 +75,8 @@ async def accept_inbox_update(
     message, user = update.effective_message, update.effective_user
     if message is None or user is None or not is_inbox_update(update, settings):
         return False
+    if update.callback_query is not None:
+        return await _accept_button(factory, update)
     row = inbox_row(message, user.id)
     async with factory.begin() as session:
         if row is None:
@@ -93,6 +98,34 @@ async def accept_inbox_update(
             payload={"chat_id": message.chat_id},
             delay=settings.inbox.settle_seconds,
         )
+    return True
+
+
+_BUTTON = re.compile(r"^ib:([ad]):([0-9a-f]{32})$")
+_BUTTON_NOTES = {"a": "🔍 Разбираю…", "d": "🗑 Удаляю"}
+
+
+async def _accept_button(factory: async_sessionmaker[AsyncSession], update: Update) -> bool:
+    query = update.callback_query
+    assert query is not None and query.message is not None
+    match = _BUTTON.match(query.data or "")
+    if match is None:
+        return True
+    async with factory.begin() as session:
+        await schedule(
+            session,
+            operation="button",
+            key=f"inbox:button:{query.id}",
+            payload={
+                "chat_id": query.message.chat.id,
+                "message_id": query.message.message_id,
+                "callback_id": query.id,
+                "action": match.group(1),
+                "item_id": str(uuid.UUID(hex=match.group(2))),
+            },
+        )
+    with suppress(TelegramError):
+        await query.answer(text=_BUTTON_NOTES[match.group(1)])
     return True
 
 

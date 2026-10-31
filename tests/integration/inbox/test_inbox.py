@@ -70,8 +70,10 @@ class Telegram:
     def __init__(self):
         self.sent = []
 
-    async def send(self, *, chat_id, html, reply_to):
-        self.sent.append({"chat_id": chat_id, "html": html, "reply_to": reply_to})
+    async def send(self, *, chat_id, html, reply_to, buttons):
+        self.sent.append(
+            {"chat_id": chat_id, "html": html, "reply_to": reply_to, "buttons": buttons}
+        )
         return 9000 + len(self.sent)
 
 
@@ -109,7 +111,7 @@ async def drain(worker):
             )
 
 
-def worker_for(factory, model, telegram=None, links=None, search=None):
+def worker_for(factory, model, telegram=None, links=None, search=None, download=None):
     telegram = telegram or Telegram()
 
     async def read_link(url):
@@ -121,7 +123,7 @@ def worker_for(factory, model, telegram=None, links=None, search=None):
             INBOX,
             model=model,
             send=telegram.send,
-            download=AsyncMock(return_value=b"\xff\xd8jpeg"),
+            download=AsyncMock(return_value=download or b"\xff\xd8jpeg"),
             read_link=read_link,
             search=search,
         ),
@@ -354,3 +356,121 @@ async def test_reply_to_own_forward_and_plain_web_question_search_online(postgre
         async with factory() as session:
             item = await session.scalar(select(InboxItem))
             assert [a["answer"] for a in item.answers] == ["Зрелее: DictateKeyboard."]
+
+
+async def test_week_ahead_reminder_and_sunday_digest(postgres_dsn):
+    sunday_noon = datetime(2026, 11, 1, 11, 0, tzinfo=UTC)  # 12:00 in Amsterdam
+    async with _factory(postgres_dsn) as factory:
+        async with factory.begin() as session:
+            for title, start, saved in (
+                (
+                    "Forgotten rave",
+                    sunday_noon + timedelta(days=5),
+                    sunday_noon - timedelta(days=60),
+                ),
+                ("Just saved", sunday_noon + timedelta(days=3), sunday_noon - timedelta(days=1)),
+                ("Far away", sunday_noon + timedelta(days=40), sunday_noon - timedelta(days=2)),
+            ):
+                session.add(
+                    InboxItem(
+                        owner_user_id=OWNER,
+                        chat_id=OWNER,
+                        ordinal=0,
+                        kind="event",
+                        title=title,
+                        summary="",
+                        event_start=start,
+                        evidence="",
+                        answers=[],
+                        created_at=saved,
+                    )
+                )
+        worker, telegram = worker_for(factory, FakeModel())
+        await worker._sweep(sunday_noon)
+        await worker._sweep(sunday_noon + timedelta(minutes=10))  # no duplicates
+        await drain(worker)
+        reminders = [m for m in telegram.sent if "Напоминаю" in m["html"]]
+        assert len(reminders) == 1 and "Forgotten rave" in reminders[0]["html"]
+        assert "через 5 дн." in reminders[0]["html"]
+        assert reminders[0]["buttons"][0][0][1].startswith("ib:a:")
+        digests = [m for m in telegram.sent if "Неделя в инбоксе" in m["html"]]
+        assert len(digests) == 1
+        assert "Just saved" in digests[0]["html"] and "Far away" in digests[0]["html"]
+        # Night: nothing is sent.
+        before = len(telegram.sent)
+        await worker._sweep(datetime(2026, 11, 2, 23, 0, tzinfo=UTC))
+        await drain(worker)
+        assert len(telegram.sent) == before
+
+
+async def test_card_buttons_analyze_and_delete(postgres_dsn, monkeypatch):
+    from telegram import CallbackQuery
+
+    monkeypatch.setattr(CallbackQuery, "answer", AsyncMock())
+
+    def press(number, action, item_id):
+        return Update.de_json(
+            {
+                "update_id": number,
+                "callback_query": {
+                    "id": f"cb{number}",
+                    "from": {"id": OWNER, "is_bot": False, "first_name": "Owner"},
+                    "chat_instance": "ci",
+                    "data": f"ib:{action}:{item_id.hex}",
+                    "message": {
+                        "message_id": 9001,
+                        "date": 1792000000,
+                        "chat": {"id": OWNER, "type": "private", "first_name": "Owner"},
+                        "text": "card",
+                    },
+                },
+            },
+            BOT,
+        )
+
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, private(50, text="Дюна, Фрэнк Герберт"))
+        model = FakeModel(
+            Route(action="save"),
+            Cards(cards=[Card(kind="book", title="Дюна")]),
+            Answer(text="Классика, читать."),
+        )
+        worker, telegram = worker_for(factory, model)
+        await drain(worker)
+        assert telegram.sent[0]["buttons"][0][1][0] == "🗑 Удалить"
+        async with factory() as session:
+            item = await session.scalar(select(InboxItem))
+        await admit(factory, press(51, "a", item.id))
+        await drain(worker)
+        assert "Разбери подробно" in model.calls[-1]["user"]
+        assert (
+            telegram.sent[-1]["html"] == "Классика, читать."
+            and telegram.sent[-1]["reply_to"] == 9001
+        )
+        await admit(factory, press(52, "d", item.id))
+        await drain(worker)
+        assert "🗑 Удалил: Дюна" in telegram.sent[-1]["html"]
+        async with factory() as session:
+            assert (await session.get(InboxItem, item.id)).removed_at is not None
+
+
+async def test_documents_are_read_into_the_evidence(postgres_dsn):
+    async with _factory(postgres_dsn) as factory:
+        await admit(
+            factory,
+            private(
+                60,
+                caption="Программа фестиваля",
+                document={
+                    "file_id": "doc1",
+                    "file_unique_id": "d1",
+                    "file_name": "lineup.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 40,
+                },
+            ),
+        )
+        model = FakeModel(Cards(cards=[Card(kind="event", title="Fest")]))
+        worker, _ = worker_for(factory, model, download="Сцена A: Amelie Lens 23:00".encode())
+        await drain(worker)
+        assert "Amelie Lens 23:00" in model.calls[0]["user"]

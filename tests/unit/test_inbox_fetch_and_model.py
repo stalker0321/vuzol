@@ -8,7 +8,7 @@ from pydantic import SecretStr
 
 from vuzol.inbox import fetch
 from vuzol.inbox.fetch import describe_link, page_text
-from vuzol.inbox.model import Image, InboxModel, InboxModelError
+from vuzol.inbox.model import Image, InboxModel, InboxModelError, ModelChain
 from vuzol.inbox.schemas import Answer
 
 pytestmark = pytest.mark.anyio
@@ -115,3 +115,28 @@ async def test_model_http_failure_is_an_inbox_error():
         )
         with pytest.raises(InboxModelError, match="http_429"):
             await model.ask(Answer, system="s", user="u")
+
+
+async def test_chain_moves_to_the_next_account_on_quota_but_not_on_a_bad_answer():
+    calls = []
+
+    def account(name, status, content='{"text": "ok"}'):
+        def handler(request):
+            calls.append(name)
+            return httpx.Response(status, json={"choices": [{"message": {"content": content}}]})
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    def model(client):
+        return InboxModel(
+            base_url="https://llm.example/v1", credential=SecretStr("k"), model="m", client=client
+        )
+
+    async with account("c", 429) as c, account("a", 200) as a:
+        assert (await ModelChain([model(c), model(a)]).ask(Answer, system="s", user="u")).text
+    assert calls == ["c", "a"]
+    calls.clear()
+    async with account("c", 200, "nope") as c, account("a", 200) as a:
+        with pytest.raises(InboxModelError, match="invalid_model_output"):
+            await ModelChain([model(c), model(a)]).ask(Answer, system="s", user="u")
+    assert calls == ["c", "c"]

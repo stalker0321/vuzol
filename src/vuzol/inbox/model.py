@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -121,6 +122,36 @@ class InboxModel:
         if not isinstance(text, str) or not text.strip():
             raise InboxModelError("empty_model_output")
         return text
+
+
+class ModelChain:
+    """The same model on several accounts: on a provider failure, try the next one."""
+
+    def __init__(self, models: Sequence[InboxModel]) -> None:
+        if not models:
+            raise ValueError("inbox needs at least one model")
+        self._models = tuple(models)
+        self.model = self._models[0].model
+
+    async def ask(
+        self,
+        output: type[M],
+        *,
+        system: str,
+        user: str,
+        images: tuple[Image, ...] = (),
+    ) -> M:
+        failure: InboxModelError | None = None
+        for model in self._models:
+            try:
+                return await model.ask(output, system=system, user=user, images=images)
+            except InboxModelError as error:
+                # A bad answer is the model's, not the account's: another account won't help.
+                if str(error) == "invalid_model_output":
+                    raise
+                failure = error
+        assert failure is not None
+        raise failure
 
 
 def _unfenced(text: str) -> str:

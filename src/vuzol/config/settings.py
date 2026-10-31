@@ -559,9 +559,10 @@ class InboxSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = False
-    # OpenAI-compatible registry profiles: a fast one that sees images, a deep one.
+    # OpenAI-compatible registry profiles of one model on several accounts: the
+    # next one is tried when an account is out of quota or unavailable.
     profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
-    deep_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    fallback_profile_ids: tuple[str, ...] = ()
     # Telegram sends a comment and the forwarded post as separate messages.
     settle_seconds: float = Field(default=3.0, ge=0.5, le=30)
     # Words without a reply apply to the last record only this long after it.

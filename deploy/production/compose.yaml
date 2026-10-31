@@ -33,8 +33,8 @@ x-roles: &roles
   # Owner 2026-10-31: private-chat inbox. Ingress routes private messages, the
   # interpreter runs it. Off until the key exists in /var/lib/vuzol/secrets/inbox.
   VUZOL_INBOX__ENABLED: ${VUZOL_INBOX_ENABLED:-false}
-  VUZOL_INBOX__PROFILE_ID: inbox-flash
-  VUZOL_INBOX__DEEP_PROFILE_ID: inbox-pro
+  VUZOL_INBOX__PROFILE_ID: inbox-flash-c
+  VUZOL_INBOX__FALLBACK_PROFILE_IDS: '["inbox-flash-a"]'
 
 x-app: &app
   image: ${VUZOL_IMAGE:?set by vuzol-compose}

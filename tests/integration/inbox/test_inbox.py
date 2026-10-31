@@ -109,7 +109,7 @@ async def drain(worker):
             )
 
 
-def worker_for(factory, fast, deep=None, telegram=None, links=None):
+def worker_for(factory, model, telegram=None, links=None):
     telegram = telegram or Telegram()
 
     async def read_link(url):
@@ -119,8 +119,7 @@ def worker_for(factory, fast, deep=None, telegram=None, links=None):
         InboxWorker(
             factory,
             INBOX,
-            fast=fast,
-            deep=deep,
+            model=model,
             send=telegram.send,
             download=AsyncMock(return_value=b"\xff\xd8jpeg"),
             read_link=read_link,
@@ -161,12 +160,13 @@ async def test_comment_then_forward_is_one_record_with_an_answer(postgres_dsn):
             fields={"license": "MIT", "stars": "1200"},
             verdict="Живой, MIT, ставится через pip.",
         )
-        fast = FakeModel(Cards(cards=[card], question="Что думаешь, можно в Vuzol?"))
-        deep = FakeModel(Answer(text="Да, подходит для инструментов лида."))
+        fast = FakeModel(
+            Cards(cards=[card], question="Что думаешь, можно в Vuzol?"),
+            Answer(text="Да, подходит для инструментов лида."),
+        )
         worker, telegram = worker_for(
             factory,
             fast,
-            deep,
             links={"https://github.com/acme/agent-kit": "[GitHub acme/agent-kit] README"},
         )
         await drain(worker)

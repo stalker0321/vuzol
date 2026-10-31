@@ -105,6 +105,14 @@ async def execute_read(
                 }
                 for unit in units
             ]
+            # What the owner forwarded to the private inbox: tools, articles, ideas.
+            from vuzol.inbox.recall import inbox_hits
+
+            goal = await session.get(ManagedGoal, snapshot.goal_id)
+            if goal is not None:
+                hits += await inbox_hits(
+                    session, owner_user_id=goal.owner_user_id, query=call.args.query
+                )
             return {"hits": hits, "message": "matches" if hits else "no matches"}
         from vuzol.leadership.service import read_projection
 

@@ -2115,3 +2115,76 @@ class TranscriptionTerm(IdentityMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InboxMessage(IdentityMixin, Base):
+    """One message the owner sent to the bot in private: the raw inbox input."""
+
+    __tablename__ = "inbox_messages"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="uq_inbox_message"),)
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    body: Mapped[str | None] = mapped_column(Text)
+    # Channel/author of a forwarded post and its public link, when Telegram says.
+    forward_label: Mapped[str | None] = mapped_column(String(300))
+    forward_url: Mapped[str | None] = mapped_column(String(500))
+    urls: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    attachments: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    media_group_id: Mapped[str | None] = mapped_column(String(100))
+    reply_to_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    transcript: Mapped[str | None] = mapped_column(Text)
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class InboxItem(IdentityMixin, TimestampMixin, Base):
+    """A knowledge-base record built from inbox messages: an event, a book, a repo..."""
+
+    __tablename__ = "inbox_items"
+    __table_args__ = (
+        Index("ix_inbox_items_owner_kind", "owner_user_id", "kind"),
+        Index("ix_inbox_items_event_start", "event_start"),
+        Index("ix_inbox_items_search", "search", postgresql_using="gin"),
+        UniqueConstraint("batch_id", "ordinal", name="uq_inbox_item_batch"),
+    )
+
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    fields: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    event_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    event_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # What the card was built from: post text, page/repo excerpts. Reused for questions.
+    evidence: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    answers: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    search: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', kind || ' ' || title || ' ' || summary || ' ' "
+            "|| tags::text || ' ' || fields::text)",
+            persisted=True,
+        ),
+    )
+
+
+class InboxLink(IdentityMixin, Base):
+    """A bot message in the private chat and the record it shows, for replies."""
+
+    __tablename__ = "inbox_links"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="uq_inbox_link"),)
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("inbox_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )

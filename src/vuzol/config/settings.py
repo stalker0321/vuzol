@@ -553,6 +553,29 @@ class ProjectLeadSettings(BaseModel):
     integration_branch_prefix: str = Field(default="vuzol-managed/", min_length=1, max_length=80)
 
 
+class InboxSettings(BaseModel):
+    """Owner 2026-10-31: forward anything to the bot in private; it builds a knowledge base."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    # OpenAI-compatible registry profiles: a fast one that sees images, a deep one.
+    profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    deep_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    # Telegram sends a comment and the forwarded post as separate messages.
+    settle_seconds: float = Field(default=3.0, ge=0.5, le=30)
+    # Words without a reply apply to the last record only this long after it.
+    followup_minutes: int = Field(default=120, ge=1, le=1440)
+    timezone: str = "Europe/Amsterdam"
+    timeout_seconds: float = Field(default=120, ge=5, le=600)
+
+    @model_validator(mode="after")
+    def require_model(self) -> "InboxSettings":
+        if self.enabled and self.profile_id is None:
+            raise ValueError("inbox.enabled requires inbox.profile_id")
+        return self
+
+
 class ChatSettings(BaseModel):
     """Opt-in read-only conversation, independent of project executor preferences."""
 
@@ -595,6 +618,7 @@ class Settings(BaseSettings):
     project_discussion_enabled: bool = False
     project_lead: ProjectLeadSettings = ProjectLeadSettings()
     chat: ChatSettings = ChatSettings()
+    inbox: InboxSettings = InboxSettings()
     # J5 canary: at most one Jev decision kind in a small deterministic cohort.
     # Empty means disabled (the default); the kill switch freezes kinds.
     jev_enabled_kinds: tuple[str, ...] = ()

@@ -572,6 +572,24 @@
       "scenario": "execution"
     },
     {
+      "id": "dynamic-outbox:src/vuzol/inbox/ingress.py:INBOX_DESTINATION",
+      "sources": [],
+      "producers": [
+        "src/vuzol/inbox/ingress.py:112"
+      ],
+      "consumers": [],
+      "scenario": "inbox"
+    },
+    {
+      "id": "dynamic-outbox:src/vuzol/inbox/service.py:frozenset({INBOX_DESTINATION})",
+      "sources": [],
+      "producers": [],
+      "consumers": [
+        "src/vuzol/inbox/service.py:87"
+      ],
+      "scenario": "inbox"
+    },
+    {
       "id": "dynamic-outbox:src/vuzol/storage/repositories/delivery.py:destination",
       "sources": [],
       "producers": [
@@ -791,7 +809,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:190"
+        "src/vuzol/cli/interpreter.py:315"
       ],
       "producers": [],
       "consumers": [],
@@ -1081,10 +1099,10 @@
       "id": "outbox:telegram_ingress:{dynamic}",
       "sources": [],
       "producers": [
-        "src/vuzol/telegram/durable_ingress.py:97"
+        "src/vuzol/telegram/durable_ingress.py:98"
       ],
       "consumers": [
-        "src/vuzol/telegram/durable_ingress.py:108"
+        "src/vuzol/telegram/durable_ingress.py:109"
       ],
       "scenario": "delivery"
     },

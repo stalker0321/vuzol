@@ -30,6 +30,11 @@ x-roles: &roles
   VUZOL_PROJECT_LEAD__INFERENCE_TIMEOUT_SECONDS: "180"
   # Owner 2026-10-29: new goals get a $1 cost cap unless the request sets one.
   VUZOL_PROJECT_LEAD__DEFAULT_GOAL_MAX_COST: "1.0"
+  # Owner 2026-10-31: private-chat inbox. Ingress routes private messages, the
+  # interpreter runs it. Off until the key exists in /var/lib/vuzol/secrets/inbox.
+  VUZOL_INBOX__ENABLED: ${VUZOL_INBOX_ENABLED:-false}
+  VUZOL_INBOX__PROFILE_ID: inbox-flash
+  VUZOL_INBOX__DEEP_PROFILE_ID: inbox-pro
 
 x-app: &app
   image: ${VUZOL_IMAGE:?set by vuzol-compose}
@@ -140,6 +145,7 @@ services:
       - *accounts
       - /var/lib/vuzol/secrets/jev-openrouter.key:/run/vuzol-secrets/jev-openrouter.key:ro
       - /var/lib/vuzol/secrets/openai-transcription.key:/run/vuzol-secrets/openai-transcription.key:ro
+      - /var/lib/vuzol/secrets/inbox:/run/vuzol-secrets/inbox:ro
       # A directory, not the file: editors replace the file and a file bind keeps the old one.
       - /var/lib/vuzol/vocabulary:/run/vuzol-vocabulary:ro
       - /srv/vuzol/repositories:/srv/vuzol/repositories:ro

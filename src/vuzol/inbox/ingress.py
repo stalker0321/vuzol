@@ -29,10 +29,21 @@ from telegram.error import TelegramError
 
 from vuzol.config import Settings
 from vuzol.inbox import INBOX_DESTINATION
+from vuzol.observability import get_logger
 from vuzol.storage.models import InboxMessage, TransactionalOutbox
 from vuzol.storage.types import DeliveryStatus
 
+_LOG = get_logger(__name__)
 _MAX_URLS = 5
+# Message content the inbox cannot keep, named in the reply so the owner knows what failed.
+_UNSUPPORTED = {
+    "story": "истории",
+    "sticker": "стикеры",
+    "paid_media": "платные посты",
+    "video_note": "кружочки",
+    "giveaway": "розыгрыши",
+    "checklist": "чек-листы",
+}
 
 
 def is_inbox_update(update: Update, settings: Settings) -> bool:
@@ -49,7 +60,7 @@ def is_inbox_update(update: Update, settings: Settings) -> bool:
 
 def inbox_row(message: Message, user_id: int) -> dict[str, Any] | None:
     attachments = _attachments(message)
-    text = message.text or message.caption
+    text = message.text or message.caption or _poll_text(message)
     if not text and not attachments:
         return None
     label, link = _forward(message)
@@ -80,8 +91,16 @@ async def accept_inbox_update(
     row = inbox_row(message, user.id)
     async with factory.begin() as session:
         if row is None:
+            # Owner 2026-11-01: a forwarded post was refused with no trace of what it was.
+            present = sorted(key for key in message.to_dict() if key not in _ENVELOPE)
+            _LOG.warning(
+                "inbox message not supported",
+                extra={"event": "inbox.message_unsupported", "content": present},
+            )
             if message.text is None:
-                await _say(session, message.chat_id, "Такое пока не умею сохранять.")
+                names = [_UNSUPPORTED[key] for key in present if key in _UNSUPPORTED]
+                what = f" ({', '.join(names) if names else ', '.join(present) or 'пусто'})"
+                await _say(session, message.chat_id, f"Такое пока не умею сохранять{what}.")
             return True
         if (message.text or "").strip() in {"/start", "/help"}:
             await _say(session, message.chat_id, _HELLO)
@@ -170,6 +189,33 @@ _HELLO = (
     "сохраню. Вопрос можно написать до или после пересылки, или ответом на мою карточку. "
     "Спросить по базе: «что у нас на ноябрь?», «что я сохранял про бэкапы?»."
 )
+
+
+def _poll_text(message: Message) -> str | None:
+    if message.poll is None:
+        return None
+    options = "\n".join(f"- {option.text}" for option in message.poll.options)
+    return f"Опрос: {message.poll.question}\n{options}"
+
+
+_ENVELOPE = {
+    "message_id",
+    "date",
+    "chat",
+    "from",
+    "forward_origin",
+    "is_automatic_forward",
+    "has_protected_content",
+    "reply_to_message",
+    "edit_date",
+    "author_signature",
+    "entities",
+    "caption_entities",
+    "link_preview_options",
+    "media_group_id",
+    "message_thread_id",
+    "show_caption_above_media",
+}
 
 
 def _attachments(message: Message) -> list[dict[str, Any]]:

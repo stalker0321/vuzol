@@ -575,7 +575,7 @@
       "id": "dynamic-outbox:src/vuzol/inbox/ingress.py:INBOX_DESTINATION",
       "sources": [],
       "producers": [
-        "src/vuzol/inbox/ingress.py:145"
+        "src/vuzol/inbox/ingress.py:164"
       ],
       "consumers": [],
       "scenario": "inbox"

@@ -214,3 +214,31 @@ def test_answer_html_turns_model_markdown_into_telegram_html() -> None:
     assert answer_html(text) == (
         "Стоящее.\n\n<b>Аналоги</b>\n• <b>foo</b> &lt;x&gt;\n• bar\n<b>Плюсы</b>"
     )
+
+
+def test_inbox_row_keeps_a_poll_as_text_and_skips_a_story() -> None:
+    from telegram import Message
+
+    from vuzol.inbox.ingress import inbox_row
+
+    base = {"message_id": 7, "date": 0, "chat": {"id": 5, "type": "private"}}
+    poll = {
+        "id": "p",
+        "question": "Куда идём?",
+        "options": [
+            {"text": "Кино", "voter_count": 0, "persistent_id": "a"},
+            {"text": "Бар", "voter_count": 0, "persistent_id": "b"},
+        ],
+        "total_voter_count": 0,
+        "is_closed": False,
+        "is_anonymous": True,
+        "type": "regular",
+        "allows_multiple_answers": False,
+        "allows_revoting": False,
+        "members_only": False,
+    }
+    row = inbox_row(Message.de_json({**base, "poll": poll}, None), 5)
+    assert row is not None
+    assert row["body"] == "Опрос: Куда идём?\n- Кино\n- Бар"
+    story = {"chat": {"id": 9, "type": "channel"}, "id": 3}
+    assert inbox_row(Message.de_json({**base, "story": story}, None), 5) is None

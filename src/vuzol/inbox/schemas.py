@@ -158,8 +158,9 @@ ASK_PROMPT = (
     "how it compares with the main alternatives (name them, with stars or other hard facts "
     "when known), risks. The owner builds software projects of their own (one is Vuzol, an AI "
     "project lead that plans and runs coding tasks via Telegram); mention a project only when "
-    "the thing would clearly help it, in one line, and never say that something is not "
-    "needed for a project.\n"
+    "the thing would clearly help it, in one line. Do not bring up that something is not "
+    "needed for a project unless the owner asks whether it fits one; when they ask, answer "
+    "honestly, either way.\n"
     "Format for Telegram: start with a one-line verdict, then short sections, each a bold "
     "heading on its own line (**Что это**, **Плюсы**, **Минусы и риски**, **Аналоги**, "
     '**Кому пригодится** or what fits the question), with "• " bullet lines of one or two '

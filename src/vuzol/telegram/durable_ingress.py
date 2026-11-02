@@ -9,6 +9,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Bot, Update
 
+from vuzol.assistant.ingress import accept_assistant_update, is_assistant_update
 from vuzol.config import Settings
 from vuzol.inbox.ingress import accept_inbox_update, is_inbox_update
 from vuzol.storage.errors import LeaseLost
@@ -128,6 +129,14 @@ class DurableTelegramIngress:
             handled = is_inbox_update(update, self._settings) and await asyncio.wait_for(
                 accept_inbox_update(self._factory, self._settings, update),
                 timeout=self._processing_seconds,
+            )
+            # The assistant topic belongs to the assistant, not to a project lead.
+            handled = handled or (
+                is_assistant_update(update, self._settings)
+                and await asyncio.wait_for(
+                    accept_assistant_update(self._factory, self._settings, update),
+                    timeout=self._processing_seconds,
+                )
             )
             if not handled:
                 await asyncio.wait_for(

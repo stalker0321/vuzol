@@ -102,6 +102,8 @@ ignore = ["S101"]
 # Owner-facing Russian text throughout.
 "src/vuzol/inbox/**" = ["RUF001"]
 "tests/integration/inbox/**" = ["RUF001"]
+"src/vuzol/assistant/**" = ["RUF001"]
+"tests/integration/assistant/**" = ["RUF001"]
 
 [tool.ruff.format]
 exclude = ["tests/fixtures/**"]

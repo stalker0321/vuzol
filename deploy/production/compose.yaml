@@ -39,6 +39,14 @@ x-roles: &roles
   # Web search for answers: Brave when its key file exists, else our SearXNG.
   VUZOL_INBOX__BRAVE_KEY_FILE: /run/vuzol-secrets/inbox/brave.key
   VUZOL_INBOX__SEARXNG_URL: http://searxng:8080
+  # Owner 2026-11-02: the assistant topic. The model is any OpenAI-compatible
+  # registry profile, chosen in /srv/vuzol/.env without a code change.
+  VUZOL_ASSISTANT__ENABLED: ${VUZOL_ASSISTANT_ENABLED:-false}
+  VUZOL_ASSISTANT__CHAT_ID: ${VUZOL_ASSISTANT_CHAT_ID:-}
+  VUZOL_ASSISTANT__MESSAGE_THREAD_ID: ${VUZOL_ASSISTANT_THREAD_ID:-}
+  VUZOL_ASSISTANT__PROFILE_ID: ${VUZOL_ASSISTANT_PROFILE_ID:-inbox-flash-c}
+  VUZOL_ASSISTANT__FALLBACK_PROFILE_IDS: ${VUZOL_ASSISTANT_FALLBACK_PROFILE_IDS:-["inbox-flash-a"]}
+  VUZOL_ASSISTANT__OPENCODE_ORG_IDS: '{"inbox-flash-c": "org_EXAMPLE"}'
 
 x-app: &app
   image: ${VUZOL_IMAGE:?set by vuzol-compose}

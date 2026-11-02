@@ -205,3 +205,12 @@ async def test_search_falls_back_when_brave_fails(tmp_path):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         search = WebSearch(brave_key_file=key, searxng_url="http://searxng:8080", client=client)
         assert [hit.url for hit in await search.search("q")] == ["https://s.example"]
+
+
+def test_answer_html_turns_model_markdown_into_telegram_html() -> None:
+    from vuzol.inbox.render import answer_html
+
+    text = "Стоящее.\n\n## Аналоги\n- **foo** <x>\n* bar\n**Плюсы**"
+    assert answer_html(text) == (
+        "Стоящее.\n\n<b>Аналоги</b>\n• <b>foo</b> &lt;x&gt;\n• bar\n<b>Плюсы</b>"
+    )

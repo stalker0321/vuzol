@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Sequence
 from datetime import datetime
@@ -43,6 +44,9 @@ _MONTHS = (
     "ноября",
     "декабря",
 )
+_HEADING = re.compile(r"^#{1,6}\s+(.+)$")
+_BULLET = re.compile(r"^\s*[-*]\s+(.+)$")
+_BOLD = re.compile(r"\*\*(.+?)\*\*")
 # Fields shown on the card's second line, in this order.
 _SHOWN = ("author", "director", "year", "location", "venue", "city", "price", "license", "stars")
 
@@ -81,7 +85,15 @@ def card_html(item: InboxItem, tz: str, *, header: str = "📥 Сохранил"
 
 
 def answer_html(text: str) -> str:
-    return escape(text)
+    """Model text as Telegram HTML: headings and **bold** become bold, list marks become bullets."""
+    lines = []
+    for line in escape(text).splitlines():
+        if heading := _HEADING.match(line):
+            line = f"<b>{heading.group(1).strip(' *')}</b>"
+        elif bullet := _BULLET.match(line):
+            line = "• " + bullet.group(1)
+        lines.append(_BOLD.sub(r"<b>\1</b>", line))
+    return "\n".join(lines)
 
 
 def card_buttons(item_id: uuid.UUID) -> list[list[list[str]]]:

@@ -143,8 +143,9 @@ LOOKUP_PROMPT = (
     "how popular or alive something is, prices, dates, reviews, recent news. Give short "
     "search-engine queries (English is usually best for tech, the local language for local "
     "events). Use github for repository searches such as alternatives to a tool. Return empty "
-    "lists when the records already hold the answer or it is a matter of opinion. Vuzol is the "
-    "owner's own private project: never search for it."
+    "lists when the records already hold the answer or it is a matter of opinion. For a review "
+    "of a repo or tool, look for its alternatives. Vuzol is the owner's own private project: "
+    "never search for it."
 )
 
 ASK_PROMPT = (
@@ -152,15 +153,25 @@ ASK_PROMPT = (
     "question when no record is given. Use the "
     "record, its evidence, earlier answers and web results (search hits, opened pages, GitHub "
     "repositories with real stars and dates); add your own knowledge where it helps and say "
-    "which is which. Name sources for facts taken from the web. If the question is about "
-    "their project Vuzol (an AI project lead that "
-    "plans and runs coding tasks via Telegram), judge concrete fit and effort. Be direct: give "
-    "a verdict first, then the reasons. Telegram text, no tables, under 2500 characters."
+    "which is which. Name sources for facts taken from the web. Judge the thing on its own "
+    "merits: what it does, is it good, how alive it is, what it is useful for and for whom, "
+    "how it compares with the main alternatives (name them, with stars or other hard facts "
+    "when known), risks. The owner builds software projects of their own (one is Vuzol, an AI "
+    "project lead that plans and runs coding tasks via Telegram); mention a project only when "
+    "the thing would clearly help it, in one line, and never say that something is not "
+    "needed for a project.\n"
+    "Format for Telegram: start with a one-line verdict, then short sections, each a bold "
+    "heading on its own line (**Что это**, **Плюсы**, **Минусы и риски**, **Аналоги**, "
+    '**Кому пригодится** or what fits the question), with "• " bullet lines of one or two '
+    "sentences under it and a blank line between sections. Skip sections with nothing to say. "
+    "No tables, no other markdown, under 3000 characters. A short question gets a short "
+    "plain answer without sections."
 )
 
 SEARCH_PROMPT = (
     _COMMON + "\nAnswer the owner's question using the records found in their knowledge base. "
     "List matching records compactly (for events: date, time, name, place). If no record "
     "matches, say so plainly; when web results are given, then answer from them and say they "
-    "come from the web, not from the base. Telegram text, no tables, under 2500 characters."
+    "come from the web, not from the base. Telegram text: one item per line starting with a "
+    "bullet, **bold** allowed for names, no tables, under 2500 characters."
 )

@@ -2190,6 +2190,30 @@ class InboxLink(IdentityMixin, Base):
     )
 
 
+class AssistantEntry(IdentityMixin, Base):
+    """One turn in the assistant topic: the owner's words, or a reply with a dispatch plan."""
+
+    __tablename__ = "assistant_entries"
+    __table_args__ = (
+        Index("ix_assistant_entries_topic", "chat_id", "message_thread_id", "created_at"),
+        UniqueConstraint("chat_id", "telegram_message_id", name="uq_assistant_entry_message"),
+    )
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    role: Mapped[str] = mapped_column(String(10), nullable=False)  # owner | assistant
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    reply_to_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Tasks for project leads, sent only on the owner's button.
+    dispatches: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    # pending | sent | editing | superseded; null for a turn without dispatches.
+    plan_status: Mapped[str | None] = mapped_column(String(12))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class GoalDocument(IdentityMixin, Base):
     """A large document the owner attached to a goal: the lead sees an excerpt, workers all."""
 

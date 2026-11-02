@@ -587,6 +587,39 @@ class InboxSettings(BaseModel):
         return self
 
 
+class AssistantSettings(BaseModel):
+    """Owner 2026-11-02: a master topic that takes errands and hands tasks to project leads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    # The forum topic the assistant owns; every message there goes to it.
+    chat_id: int | None = None
+    message_thread_id: int | None = Field(default=None, ge=1)
+    # Any OpenAI-compatible registry profile; the model is the profile's, never fixed here.
+    profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    fallback_profile_ids: tuple[str, ...] = ()
+    opencode_org_ids: dict[str, str] = Field(default_factory=dict)
+    # Earlier turns of the topic the model sees, oldest dropped first.
+    history_turns: int = Field(default=12, ge=0, le=50)
+    timezone: str = "Europe/Amsterdam"
+    timeout_seconds: float = Field(default=180, ge=5, le=900)
+
+    @field_validator("chat_id", "message_thread_id", mode="before")
+    @classmethod
+    def blank_is_unset(cls, value: object) -> object:
+        # Compose passes an unset variable as an empty string.
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def require_topic_and_model(self) -> "AssistantSettings":
+        if self.enabled and (
+            self.profile_id is None or self.chat_id is None or self.message_thread_id is None
+        ):
+            raise ValueError("assistant.enabled requires profile_id, chat_id, message_thread_id")
+        return self
+
+
 class ChatSettings(BaseModel):
     """Opt-in read-only conversation, independent of project executor preferences."""
 
@@ -630,6 +663,7 @@ class Settings(BaseSettings):
     project_lead: ProjectLeadSettings = ProjectLeadSettings()
     chat: ChatSettings = ChatSettings()
     inbox: InboxSettings = InboxSettings()
+    assistant: AssistantSettings = AssistantSettings()
     # J5 canary: at most one Jev decision kind in a small deterministic cohort.
     # Empty means disabled (the default); the kill switch freezes kinds.
     jev_enabled_kinds: tuple[str, ...] = ()

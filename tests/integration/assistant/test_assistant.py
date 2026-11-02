@@ -1,0 +1,277 @@
+"""Owner 2026-11-02: a master topic that answers errands and hands tasks to project leads."""
+
+import json
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
+
+import pytest
+from sqlalchemy import select, update
+from telegram import Bot, CallbackQuery, Update
+
+from tests.integration.leadership.test_managed_goal_flow import CHAT, OWNER, _factory
+from vuzol.assistant.schemas import Dispatch, Turn
+from vuzol.assistant.service import EDIT_LABEL, SEND_LABEL, AssistantWorker, ProjectRef
+from vuzol.config import Settings
+from vuzol.config.settings import AssistantSettings
+from vuzol.inbox.search import Hit
+from vuzol.storage.models import AssistantEntry, ProjectDiscussionSession, TransactionalOutbox
+from vuzol.storage.types import DiscussionSessionStatus
+from vuzol.telegram.durable_ingress import DurableTelegramIngress
+
+pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
+THREAD = 77
+ASSISTANT = AssistantSettings(
+    enabled=True, profile_id="smart", chat_id=CHAT, message_thread_id=THREAD
+)
+SETTINGS = Settings(
+    environment="test", allowed_user_ids=(OWNER,), allowed_chat_ids=(CHAT,), assistant=ASSISTANT
+)
+BOT = Bot("123:FAKE_TOKEN_NOT_A_CREDENTIAL")
+PROJECTS = [ProjectRef("diplom", "Диплом"), ProjectRef("site", "Сайт")]
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+def topic(number, text, *, thread=THREAD):
+    return Update.de_json(
+        {
+            "update_id": number,
+            "message": {
+                "message_id": number,
+                "date": 1792000000,
+                "from": {"id": OWNER, "is_bot": False, "first_name": "Owner"},
+                "chat": {"id": CHAT, "type": "supergroup", "is_forum": True},
+                "message_thread_id": thread,
+                "is_topic_message": True,
+                "text": text,
+            },
+        },
+        BOT,
+    )
+
+
+def press(number, action, entry_id):
+    return Update.de_json(
+        {
+            "update_id": number,
+            "callback_query": {
+                "id": f"cb{number}",
+                "from": {"id": OWNER, "is_bot": False, "first_name": "Owner"},
+                "chat_instance": "ci",
+                "data": f"as:{action}:{entry_id.hex}",
+                "message": {
+                    "message_id": 9001,
+                    "date": 1792000000,
+                    "chat": {"id": CHAT, "type": "supergroup", "is_forum": True},
+                    "message_thread_id": THREAD,
+                    "is_topic_message": True,
+                    "text": "plan",
+                },
+            },
+        },
+        BOT,
+    )
+
+
+class FakeModel:
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    async def ask(self, output, *, system, user, images=()):
+        self.calls.append(json.loads(user))
+        return self.answers.pop(0)
+
+
+class Telegram:
+    def __init__(self):
+        self.sent = []
+        self.cleared = []
+
+    async def send(self, *, chat_id, thread_id, html, reply_to, buttons):
+        self.sent.append(
+            {"thread": thread_id, "html": html, "reply_to": reply_to, "buttons": buttons}
+        )
+        return 9000 + len(self.sent)
+
+    async def clear(self, *, chat_id, message_id):
+        self.cleared.append(message_id)
+
+
+class Leads:
+    def __init__(self):
+        self.calls = []
+
+    async def submit(self, *, user_id, project_id, session_id, request_id, text):
+        self.calls.append((project_id, request_id, text))
+        return {"status": "accepted"}
+
+
+class Search:
+    async def search(self, query):
+        return [Hit("Рейсы", "https://example.com/flights", f"дёшево: {query}")]
+
+
+async def admit(factory, *updates):
+    ingress = DurableTelegramIngress(
+        factory,
+        settings=SETTINGS,
+        bot_id="fixture",
+        on_message=AsyncMock(side_effect=AssertionError("project path")),
+        on_control=AsyncMock(side_effect=AssertionError("project controls")),
+    )
+    for item in updates:
+        await ingress.admit(item)
+    while await ingress.process_one(BOT):
+        pass
+
+
+async def drain(worker):
+    async def due():
+        async with worker._factory.begin() as session:
+            await session.execute(
+                update(TransactionalOutbox)
+                .where(TransactionalOutbox.destination == "assistant")
+                .values(available_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+
+    await due()
+    while await worker.process_one():
+        await due()
+
+
+def worker_for(factory, model, *, search=None):
+    telegram, leads = Telegram(), Leads()
+
+    async def read_link(url):
+        return f"[{url}] страница"
+
+    worker = AssistantWorker(
+        factory,
+        ASSISTANT,
+        model=model,
+        projects=lambda: PROJECTS,
+        submit=leads.submit,
+        send=telegram.send,
+        clear_buttons=telegram.clear,
+        search=search,
+        read_link=read_link,
+    )
+    return worker, telegram, leads
+
+
+async def sessions(factory):
+    async with factory.begin() as session:
+        for project_id, thread in (("diplom", 10), ("site", 11)):
+            session.add(
+                ProjectDiscussionSession(
+                    project_id=project_id,
+                    chat_id=CHAT,
+                    message_thread_id=thread,
+                    status=DiscussionSessionStatus.ACTIVE,
+                )
+            )
+
+
+async def test_plan_is_sent_to_project_leads_only_on_the_button(postgres_dsn, monkeypatch):
+    monkeypatch.setattr(CallbackQuery, "answer", AsyncMock())
+    async with _factory(postgres_dsn) as factory:
+        await sessions(factory)
+        await admit(factory, topic(1, "в дипломе поправь введение, а на сайте обнови футер"))
+        model = FakeModel(
+            Turn(
+                reply="Две задачи, по одной на проект.",
+                dispatches=[
+                    Dispatch(project_id="diplom", request="Поправь введение."),
+                    Dispatch(project_id="site", request="Обнови футер."),
+                    Dispatch(project_id="ghost", request="?"),
+                ],
+            )
+        )
+        worker, telegram, leads = worker_for(factory, model)
+        await drain(worker)
+
+        context = model.calls[0]
+        assert context["latest_owner_message"].startswith("в дипломе")
+        assert [p["project_id"] for p in context["projects"]] == ["diplom", "site"]
+        plan = telegram.sent[0]
+        assert plan["thread"] == THREAD and plan["reply_to"] == 1
+        assert "<b>→ Диплом</b>" in plan["html"] and "Не нашёл проекты: ghost" in plan["html"]
+        assert [b[0] for b in plan["buttons"][0]] == [SEND_LABEL, EDIT_LABEL]
+        assert leads.calls == []
+
+        async with factory() as session:
+            entry = await session.scalar(
+                select(AssistantEntry).where(AssistantEntry.role == "assistant")
+            )
+        assert entry.telegram_message_id == 9001 and entry.plan_status == "pending"
+        await admit(factory, press(2, "s", entry.id), press(3, "s", entry.id))
+        await drain(worker)
+
+        assert [(p, t) for p, _, t in leads.calls] == [
+            ("diplom", "Поправь введение."),
+            ("site", "Обнови футер."),
+        ]
+        assert "🚀 Отправил: Диплом, Сайт" in telegram.sent[1]["html"]
+        assert "уже не актуален" in telegram.sent[2]["html"]
+        assert telegram.cleared == [9001]
+
+
+async def test_edit_button_then_correction_replaces_the_plan(postgres_dsn, monkeypatch):
+    monkeypatch.setattr(CallbackQuery, "answer", AsyncMock())
+    async with _factory(postgres_dsn) as factory:
+        await sessions(factory)
+        await admit(factory, topic(1, "в диплом: перепиши выводы"))
+        model = FakeModel(
+            Turn(reply="Ок.", dispatches=[Dispatch(project_id="diplom", request="Выводы.")]),
+            Turn(
+                reply="Поправил.",
+                dispatches=[Dispatch(project_id="diplom", request="Выводы, коротко.")],
+            ),
+        )
+        worker, telegram, leads = worker_for(factory, model)
+        await drain(worker)
+        async with factory() as session:
+            first = await session.scalar(
+                select(AssistantEntry).where(AssistantEntry.role == "assistant")
+            )
+        await admit(factory, press(2, "e", first.id))
+        await drain(worker)
+        assert "Напиши, что поменять" in telegram.sent[1]["html"]
+
+        await admit(factory, topic(3, "пусть будет коротко"))
+        await drain(worker)
+        history = model.calls[1]["conversation"]
+        assert history[-1]["plan_status"] == "editing"
+        async with factory() as session:
+            statuses = sorted(
+                (e.body, e.plan_status)
+                for e in await session.scalars(
+                    select(AssistantEntry).where(AssistantEntry.role == "assistant")
+                )
+            )
+        assert statuses == [("Ок.", "superseded"), ("Поправил.", "pending")]
+        assert telegram.cleared == [9001]
+        assert leads.calls == []
+
+
+async def test_errand_searches_the_web_and_other_topics_are_untouched(postgres_dsn):
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "найди рейсы в Берлин на выходные"))
+        model = FakeModel(
+            Turn(reply="Ищу.", searches=["Amsterdam Berlin flights weekend"]),
+            Turn(reply="Нашёл дёшево на example.com."),
+        )
+        worker, telegram, _ = worker_for(factory, model, search=Search())
+        await drain(worker)
+        assert model.calls[1]["web"]["pages"] == ["[https://example.com/flights] страница"]
+        assert telegram.sent[0]["html"] == "Нашёл дёшево на example.com."
+        assert telegram.sent[0]["buttons"] == []
+
+        await admit(factory, topic(2, "это в проектный топик", thread=10))
+        async with factory() as session:
+            threads = set(await session.scalars(select(AssistantEntry.message_thread_id)))
+        assert threads == {THREAD}

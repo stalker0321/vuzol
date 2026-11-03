@@ -193,3 +193,61 @@ async def test_the_final_card_carries_the_decision_buttons(postgres_dsn, tmp_pat
             update=update.model_copy(update={"callback_query_id": "accept-2"}),
         )
         assert again.status is IngressStatus.DUPLICATE
+
+
+async def test_closing_a_goal_keeps_its_accepted_work_in_main(postgres_dsn, tmp_path, monkeypatch):
+    """Live 2026-11-03: «закрой цель» cancelled a goal and its reviewed README never
+    reached main; closing now merges, only «отмени» discards."""
+    import uuid
+
+    from tests.integration.leadership.test_task_control import command
+
+    from vuzol.leadership.acceptance import GoalAcceptanceConsumer
+    from vuzol.leadership.actor import Actor
+    from vuzol.leadership.commands import LeadCommand
+    from vuzol.workflows.application import Principal
+
+    await flow.run_managed_goal_flow(postgres_dsn, tmp_path, monkeypatch)
+    before = _main(tmp_path)
+    async with flow._factory(postgres_dsn) as factory:
+        async with factory.begin() as session:
+            goal = await session.scalar(select(ManagedGoal).with_for_update())
+            head = await _current_head(session, goal, check_live_head=True)
+            # As live: the work is on the goal branch, the goal itself never finished.
+            goal.lifecycle, goal.waiting_reason = "waiting", "evidence_not_recorded"
+            goal_id, owner = goal.id, goal.owner_user_id
+        refused = await command(factory, goal_id, "close_goal", {}, reason="сам решил")
+        assert refused.reason == "owner_request_required"
+        async with factory() as session:
+            version = (await session.get(ManagedGoal, goal_id)).version
+        closed = await flow._lead_service(factory).apply(
+            Actor.from_principal(Principal(owner, "telegram")),
+            LeadCommand(
+                name="close_goal",
+                project_id=flow.PROJECT,
+                goal_id=goal_id,
+                expected_version=version,
+                idempotency_key=str(uuid.uuid4()),
+                payload={},
+                reason="закрой цель",
+            ),
+        )
+        assert closed.status == "applied", closed.reason
+        assert _main(tmp_path) == before
+        consumer = GoalAcceptanceConsumer(
+            factory,
+            owner="test",
+            repositories={flow.PROJECT: tmp_path / "repositories" / flow.PROJECT},
+        )
+        assert await consumer.process_one()
+        assert _main(tmp_path) == head
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "cancelled" and goal.waiting_reason == "closed_by_owner"
+            assert goal.constraints["owner_acceptance"]["commit"] == head
+            notice = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("%lead:close-notice:%")
+                )
+            )
+            assert "влита в main" in notice.payload["html"]

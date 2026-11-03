@@ -8,6 +8,8 @@ the independently reviewed goal head; it never creates a merge commit.
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,60 @@ async def queue_accept(session: AsyncSession, goal: ManagedGoal, *, user_id: int
         )
     )
     return "accept_queued"
+
+
+def queue_close(session: AsyncSession, goal: ManagedGoal) -> None:
+    """The owner closed the goal: the applier merges whatever work it accepted."""
+    from vuzol.storage.models import TransactionalOutbox
+    from vuzol.storage.types import DeliveryStatus
+
+    session.add(
+        TransactionalOutbox(
+            destination=GOAL_ACCEPTANCE_DESTINATION,
+            operation_type="close_goal",
+            linked_entity_type="managed_goal",
+            linked_entity_id=goal.id,
+            idempotency_key=f"lead:owner-close:{goal.id}",
+            payload={"user_id": goal.owner_user_id},
+            status=DeliveryStatus.PENDING,
+        )
+    )
+
+
+async def merge_closed_goal(goal: ManagedGoal, repository: Path) -> tuple[str, str | None]:
+    """Fast-forward main to the goal branch. Returns an outcome and the merged commit.
+
+    The goal branch holds only results the lead accepted after review and checks.
+    """
+    from vuzol.execution.git import GitError, LocalGit
+
+    git = LocalGit()
+    branch = str(goal.constraints.get("project_default_branch") or "main")
+    try:
+        head = await git.read_ref(repository, goal.integration_branch)
+        if head is None:
+            return "nothing", None
+        main = await git.read_ref(repository, branch)
+        if main is not None and await git.is_ancestor(repository, head, main):
+            return "nothing", None
+        outcome = await git.fast_forward(repository, branch=branch, commit=head)
+    except (GitError, OSError):
+        return "merge_failed", head
+    return ("target_moved", head) if outcome == "diverged" else ("merged", head)
+
+
+_CLOSE_NOTICES = {
+    "merged": "✅ Цель закрыта, принятая работа влита в main ({commit}).",
+    "nothing": "Цель закрыта. Вливать в main было нечего.",
+    "target_moved": (
+        "Цель закрыта, но в main не влил: main изменился с начала работы. "
+        "Работа осталась на ветке {branch}."
+    ),
+    "merge_failed": (
+        "Цель закрыта, но в main не влил: репозиторий занят или изменён вручную. "
+        "Работа осталась на ветке {branch}."
+    ),
+}
 
 
 def owner_acceptance(goal: ManagedGoal) -> dict[str, Any] | None:
@@ -183,9 +239,16 @@ async def request_rework(session: AsyncSession, goal: ManagedGoal, *, user_id: i
 class GoalAcceptanceConsumer:
     """Applier-side consumer: fast-forward main for one queued owner acceptance."""
 
-    def __init__(self, factory: async_sessionmaker[AsyncSession], *, owner: str) -> None:
+    def __init__(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        *,
+        owner: str,
+        repositories: Mapping[str, Path] | None = None,
+    ) -> None:
         self._factory = factory
         self._owner = owner
+        self._repositories = dict(repositories or {})
 
     async def process_one(self) -> bool:
         from vuzol.leadership.fence import lock_project_admission
@@ -210,7 +273,9 @@ class GoalAcceptanceConsumer:
             if goal is not None:
                 await lock_project_admission(session, goal.project_id)
                 goal = await session.get(ManagedGoal, goal.id, with_for_update=True)
-            if goal is not None:
+            if goal is not None and item.operation_type == "close_goal":
+                await self._close(session, goal, token.item_id)
+            elif goal is not None:
                 outcome = await accept_goal(
                     session, goal, user_id=int(item.payload.get("user_id", 0))
                 )
@@ -226,3 +291,43 @@ class GoalAcceptanceConsumer:
                     )
             await complete_outbox_item(session, token)
         return True
+
+    async def _close(self, session: AsyncSession, goal: ManagedGoal, item_id: uuid.UUID) -> None:
+        from vuzol.telegram.projections import enqueue_chat_notice
+
+        repository = self._repositories.get(goal.project_id)
+        if repository is None:
+            outcome, commit = "merge_failed", None
+        else:
+            outcome, commit = await merge_closed_goal(goal, repository)
+        if outcome == "merged":
+            goal.constraints = {
+                **goal.constraints,
+                "owner_acceptance": {
+                    "commit": commit,
+                    "branch": str(goal.constraints.get("project_default_branch") or "main"),
+                    "user_id": goal.owner_user_id,
+                    "at": datetime.now(UTC).isoformat(),
+                    "closed_by_owner": True,
+                },
+            }
+            goal.version += 1
+            session.add(
+                Event(
+                    entity_type="managed_goal",
+                    entity_id=goal.id,
+                    event_type="managed_goal.closed_into_main",
+                    actor_type="user",
+                    actor_id=str(goal.owner_user_id),
+                    payload={"commit": commit},
+                )
+            )
+        await enqueue_chat_notice(
+            session,
+            chat_id=goal.source_chat_id,
+            thread_id=goal.source_thread_id,
+            key=f"lead:close-notice:{item_id}",
+            text=_CLOSE_NOTICES[outcome].format(
+                commit=(commit or "")[:8], branch=goal.integration_branch
+            ),
+        )

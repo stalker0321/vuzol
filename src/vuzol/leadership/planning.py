@@ -57,7 +57,7 @@ from vuzol.storage.models import (
 from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, DeliveryStatus, WorkPackageStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 
-PROMPT_REVISION = "project-planner.v6"
+PROMPT_REVISION = "project-planner.v7"
 PLAN_EVENTS = {"plan_requested", "plan_ready", "plan_failed", "planning_requested"}
 
 
@@ -355,7 +355,12 @@ async def _request(
         "known steps for later revisions. Every item must change project files: do not create "
         "items that only check, review or verify; put such checks into trusted_checks and "
         "completion_criteria of the item whose change they check. The whole goal is verified "
-        "automatically after the last item. Edits confined to project "
+        "automatically after the last item. Check in the repository now any fact the goal "
+        "depends on, and never write an item conditional on it (not 'add the license section "
+        "only if a license file exists'). When the goal needs a fact or choice that neither the "
+        "repository nor the request gives (which license, names, accounts), start the item's "
+        "summary with 'Нужно решение владельца:' and the question, and set needs_approval, so "
+        "the owner answers before any work starts. Edits confined to project "
         "files, docs and tests are suggested_risk low without needs_approval; reserve them for "
         "deploys, external effects, secrets, dependencies or deleting data. "
         "The owner's card shows one sentence per field, so start expected_outcome with what the "

@@ -148,11 +148,10 @@ def render_goal_card(view: Mapping[str, object]) -> str:
         action = "Когда будешь готов, разреши продолжить работу."
     elif lifecycle == "cancelled":
         heading = "⏹ **ОТМЕНЕНО · Руководитель**"
-        now = (
-            "Цель закрыта для новой задачи. Сохранённые результаты не удалены."
-            if reason == "closed_for_new_task"
-            else "Работа отменена. Сохранённые результаты не удалены."
-        )
+        now = {
+            "closed_for_new_task": "Цель закрыта для новой задачи. Принятая работа идёт в main.",
+            "closed_by_owner": "Цель закрыта. Принятая работа идёт в main.",
+        }.get(str(reason), "Работа отменена. Сохранённые результаты не удалены.")
         action = "Сейчас от тебя ничего не требуется."
     elif lifecycle == "completed" and isinstance(view.get("owner_acceptance"), dict):
         accepted = cast(Mapping[str, object], view["owner_acceptance"])

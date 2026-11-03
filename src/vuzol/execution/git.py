@@ -428,10 +428,10 @@ class LocalGit:
             if await self.resolve_commit(worktree, "HEAD") != result_commit:
                 raise GitError("no-change worktree differs from the approved base")
             await self.require_clean_source(repository)
-            if (
-                await self.resolve_commit(repository, f"refs/heads/{target_branch}")
-                != expected_head
-            ):
+            # A goal's first item has no integration branch yet; the base stands for it.
+            # Live 2026-11-03: a no-change README result was blocked on rev-parse here.
+            current = await self.read_ref(repository, target_branch)
+            if (current or expected_head) != expected_head:
                 raise GitError("target branch changed after the result was produced")
             return False
         result_parent = await self.commit_parent(worktree, result_commit)

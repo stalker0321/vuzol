@@ -123,7 +123,14 @@ async def run() -> None:
         )
         # The owner's accepted goal fast-forwards main here: this service owns the
         # project repositories (live pilot 2026-10-25: ingress/worker have no git).
-        acceptance = GoalAcceptanceConsumer(factory, owner=f"{owner}:goal-acceptance")
+        acceptance = GoalAcceptanceConsumer(
+            factory,
+            owner=f"{owner}:goal-acceptance",
+            repositories={
+                project.id: project.repository_path
+                for project in runtime.registries.projects.items()
+            },
+        )
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for signum in (signal.SIGTERM, signal.SIGINT):

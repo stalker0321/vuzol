@@ -1126,6 +1126,9 @@ def _provider_worker(factory, settings, *, owner, transport=None):
                     body["request"] == "ship the marker"
                     and files.get("MARKER.txt") == "marker-a\nrepaired\n"
                     and files.get("SECOND.txt") == "marker-b\n"
+                    # The whole goal's change, both packages, from where it started.
+                    and "+marker-b" in body.get("changes_since_goal_start", "")
+                    and "MARKER.txt" in body.get("changes_since_goal_start", "")
                 )
                 payload = {
                     "result_commit": body["result_commit"],

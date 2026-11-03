@@ -1016,7 +1016,7 @@
         "src/vuzol/leadership/quota_wait.py:114",
         "src/vuzol/leadership/wakeups.py:52",
         "src/vuzol/leadership/wakeups.py:102",
-        "src/vuzol/leadership/worker.py:1077",
+        "src/vuzol/leadership/worker.py:1081",
         "src/vuzol/workflows/lead_events.py:104",
         "src/vuzol/workflows/lead_events.py:130",
         "src/vuzol/workflows/lead_events.py:206"
@@ -1135,7 +1135,7 @@
         "src/vuzol/discussion/service.py:1161",
         "src/vuzol/discussion/service.py:1294",
         "src/vuzol/leadership/service.py:1247",
-        "src/vuzol/leadership/worker.py:1184",
+        "src/vuzol/leadership/worker.py:1188",
         "src/vuzol/telegram/controls.py:558",
         "src/vuzol/telegram/controls.py:670",
         "src/vuzol/telegram/ingress.py:1328",

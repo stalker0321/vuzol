@@ -27,3 +27,10 @@ def test_amended_goal_is_reviewed_against_the_current_scope():
     assert body["request"] == "Реализовать format_duration и примеры в README"
     assert body["original_request_superseded"] == "Добавить parse_duration"
     assert body["scope_revision"] == 4 and body["runtime_validation"] == []
+
+
+def test_the_goal_diff_reaches_the_reviewer_when_captured():
+    # Live 2026-11-03: «остальной README не переписывай» was unjudgeable without it.
+    body = review_body(goal(1), "a" * 40, {"README.md": "x"}, None, "+## Запуск\n")
+    assert body["changes_since_goal_start"] == "+## Запуск\n"
+    assert "changes_since_goal_start" not in review_body(goal(1), "a" * 40, {}, None)

@@ -901,6 +901,10 @@ class ProjectLeadWorker:
                 CommandStatus.STALE.value,
                 CommandStatus.UNSUPPORTED.value,
             }:
+                if result.reason == "planner_request_pending":
+                    # The plan already requested will wake the lead. Live 2026-11-03: a
+                    # second request_plan showed the owner «СБОЙ МОДЕЛИ» mid-planning.
+                    return
                 if not owner_event:
                     await self._mark_waiting(
                         goal_id, result.reason or "command_rejected", claim=claim

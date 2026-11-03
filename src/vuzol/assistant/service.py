@@ -22,6 +22,7 @@ from vuzol.inbox.fetch import describe_link
 from vuzol.inbox.model import InboxModel, ModelChain
 from vuzol.inbox.render import answer_html
 from vuzol.inbox.search import WebSearch
+from vuzol.interpretation.service import voice_heard_text
 from vuzol.leadership.persistence import LIVE_GOAL_LIFECYCLES, ManagedGoal
 from vuzol.observability import get_logger
 from vuzol.storage.errors import LeaseLost
@@ -41,6 +42,7 @@ from vuzol.storage.types import DiscussionSessionStatus
 _LOG = get_logger(__name__)
 _ATTEMPTS = 3
 _PAGES = 3
+_SEARCH_ROUNDS = 2
 _PAGE_CHARS = 6_000
 _GOAL_CHARS = 400
 SEND_LABEL = "🚀 Отправить"
@@ -182,8 +184,13 @@ class AssistantWorker:
         entry_id = uuid.UUID(payload["entry_id"])
         async with self._factory() as session:
             entry = await session.get(AssistantEntry, entry_id)
-            if entry is None:
-                return
+        if entry is None:
+            return
+        voice = payload.get("voice")
+        if voice and not entry.body.strip():
+            # Every voice in a burst is heard, even when a later message answers the burst.
+            entry = await self._hear(entry, voice)
+        async with self._factory() as session:
             newer = await session.scalar(
                 select(AssistantEntry.id).where(
                     AssistantEntry.chat_id == entry.chat_id,
@@ -193,20 +200,10 @@ class AssistantWorker:
             )
         if newer is not None:
             return  # A later message answers the whole burst, or it was answered already.
-        voice = payload.get("voice")
-        if voice and not entry.body.strip():
-            entry = await self._hear(entry, voice)
         refs = {ref.project_id: ref for ref in self._projects()}
         context = await self._context(entry, refs)
         try:
-            turn = await self._model.ask(
-                Turn, system=self._prompt(), user=json.dumps(context, ensure_ascii=False)
-            )
-            if turn.searches and self._web is not None:
-                context["web"] = await self._look_up(turn.searches)
-                turn = await self._model.ask(
-                    Turn, system=self._prompt(), user=json.dumps(context, ensure_ascii=False)
-                )
+            turn = await self._think(context)
         except Exception:
             if not final:
                 raise
@@ -218,6 +215,25 @@ class AssistantWorker:
             reply += "\n\nНе нашёл проекты: " + ", ".join(unknown)
         await self._answer(entry, reply, dispatches, {k: v.name for k, v in refs.items()})
 
+    async def _think(self, context: dict[str, Any]) -> Turn:
+        searches: list[str] = []
+        for round_ in range(_SEARCH_ROUNDS + 1):
+            if self._web is not None:
+                context["searches_left"] = _SEARCH_ROUNDS - round_
+            turn = await self._model.ask(
+                Turn, system=self._prompt(), user=json.dumps(context, ensure_ascii=False)
+            )
+            # Owner 2026-11-03: a second search request went out as "Секунду, уточню…".
+            fresh = [query for query in turn.searches if query not in searches]
+            if not fresh or self._web is None or round_ == _SEARCH_ROUNDS:
+                return turn
+            searches += fresh
+            found = await self._look_up(fresh)
+            web = context.setdefault("web", {"searches": {}, "pages": []})
+            web["searches"].update(found["searches"])
+            web["pages"] += found["pages"]
+        raise AssertionError("unreachable")
+
     async def _hear(self, entry: AssistantEntry, voice: dict[str, Any]) -> AssistantEntry:
         if self._download is None or self._transcribe is None:
             text = "[голосовое: расшифровка недоступна]"
@@ -228,6 +244,18 @@ class AssistantWorker:
             stored = await session.get(AssistantEntry, entry.id, with_for_update=True)
             assert stored is not None
             stored.body = text or "[пустое голосовое]"
+            await schedule(
+                session,
+                operation="reply",
+                key=f"assistant:heard:{entry.id}",
+                payload={
+                    "chat_id": entry.chat_id,
+                    "thread_id": entry.message_thread_id,
+                    "html": escape(voice_heard_text(stored.body, uncertain=False)),
+                    "reply_to": entry.telegram_message_id,
+                    "buttons": [],
+                },
+            )
         async with self._factory() as session:
             refreshed = await session.get(AssistantEntry, entry.id)
             assert refreshed is not None

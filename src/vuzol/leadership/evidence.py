@@ -57,12 +57,15 @@ def _digest(files: Mapping[str, str]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def observation_digest(files: Mapping[str, str], validation: object = None) -> str:
+def observation_digest(
+    files: Mapping[str, str], validation: object = None, changes: str | None = None
+) -> str:
     # Old captured commits have no runtime evidence; retain their original binding.
     if validation is None:
         return _digest(files)
     payload = json.dumps(
-        {"files": files, "runtime_validation": validation},
+        {"files": files, "runtime_validation": validation}
+        | ({"changes": changes} if changes is not None else {}),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -167,7 +170,9 @@ async def record_head_evidence(
     validation = await runtime_validation(
         session, package=package, result_commit=result_commit, scope_revision=goal.scope_revision
     )
-    digest = observation_digest(files, validation)
+    # The result is applied already; a task worktree lacks the goal's earlier history.
+    changes = await _goal_changes(session, goal, repository_path, result_commit)
+    digest = observation_digest(files, validation, changes)
     for item in goal.criteria:
         if not isinstance(item, dict) or not item.get("id"):
             continue
@@ -198,6 +203,7 @@ async def record_head_evidence(
                     "description": description,
                     "files": files,
                     "runtime_validation": validation,
+                    "changes": changes,
                     "capture_error": capture_error,
                     "repository_path": repository_path,
                 },
@@ -206,6 +212,38 @@ async def record_head_evidence(
             )
         )
     await session.flush()
+
+
+_CHANGES_CHARS = 40_000
+
+
+async def _goal_changes(
+    session: AsyncSession, goal: ManagedGoal, repository_path: str, result_commit: str
+) -> str | None:
+    """Everything the goal changed, from where its first package started.
+
+    Live 2026-11-03: «остальной README не переписывай» could not be judged from the
+    final files alone, and a correct result was held back as insufficient.
+    """
+    from vuzol.execution.git import GitError, LocalGit
+
+    base = await session.scalar(
+        select(WorkPackage.integration_base_commit)
+        .where(
+            WorkPackage.managed_goal_id == goal.id,
+            WorkPackage.integration_base_commit.is_not(None),
+        )
+        .order_by(WorkPackage.created_at)
+        .limit(1)
+    )
+    if base is None:
+        return None
+    try:
+        return await LocalGit().diff_text(
+            Path(repository_path), base, result_commit, max_chars=_CHANGES_CHARS
+        )
+    except (GitError, OSError):
+        return None
 
 
 async def _current_head(

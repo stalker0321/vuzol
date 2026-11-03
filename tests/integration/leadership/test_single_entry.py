@@ -693,3 +693,39 @@ async def test_an_assistant_request_folded_into_a_live_goal_brings_its_approval(
             updated = await session.get(ManagedGoal, goal.id)
             assert current_request(updated) == "Сделай справку"
             assert has_owner_mandate(updated) and updated.lifecycle == "active"
+
+
+async def test_asking_for_a_plan_already_on_its_way_is_not_a_model_failure(postgres_dsn, runtime):
+    """Live 2026-11-03: a second request_plan mid-planning showed «СБОЙ МОДЕЛИ»."""
+
+    class PlanAgain:
+        async def decide(self, snapshot):
+            return LeadDecision(commands=(LeadCommandDraft("request_plan", {"goal": "README"}),))
+
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            session.add(
+                TransactionalOutbox(
+                    destination="project_lead",
+                    operation_type="lead_wakeup",
+                    linked_entity_type="managed_goal",
+                    linked_entity_id=goal_id,
+                    idempotency_key="planner-in-flight",
+                    payload={"goal_id": str(goal_id), "wakeup_kind": "plan_requested"},
+                    # The planner is working on it, as live.
+                    status=DeliveryStatus.LEASED,
+                    lease_owner="planner",
+                    lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                )
+            )
+        assert await _worker(factory, PlanAgain()).process_one()
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal.lifecycle == "active" and goal.waiting_reason is None
+            receipt = await session.scalar(
+                select(LeadershipCommandReceipt).where(
+                    LeadershipCommandReceipt.actor_kind == "agent"
+                )
+            )
+            assert receipt.reason == "planner_request_pending"

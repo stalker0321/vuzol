@@ -365,6 +365,14 @@ class LocalGit:
     async def commit_parent(self, worktree: Path, commit: str) -> str:
         return await self.resolve_commit(worktree, f"{commit}^")
 
+    async def diff_text(self, repository: Path, base: str, commit: str, *, max_chars: int) -> str:
+        """The change between two commits as a unified diff, cut at ``max_chars``."""
+        raw = await self._run(
+            repository, "diff", "--no-color", "--no-ext-diff", "--find-renames", base, commit
+        )
+        text = raw.decode("utf-8", "replace")
+        return text if len(text) <= max_chars else text[:max_chars] + "\n[diff truncated]\n"
+
     async def is_ancestor(self, repository: Path, ancestor: str, descendant: str) -> bool:
         result = await self._optional(
             repository, "merge-base", "--is-ancestor", ancestor, descendant

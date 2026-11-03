@@ -101,7 +101,12 @@ class ProjectApplication:
             }
 
     async def submit(
-        self, access: ProjectAccess, request: WorkRequest, *, origin: RequestOrigin | None = None
+        self,
+        access: ProjectAccess,
+        request: WorkRequest,
+        *,
+        origin: RequestOrigin | None = None,
+        preapproved: bool = False,
     ) -> dict[str, Any]:
         self._project(access, request.project_id)
         if not access.allow_submit:
@@ -128,6 +133,7 @@ class ProjectApplication:
                 or RequestOrigin(
                     channel="api", display_name="API", request_id=str(request.request_id)
                 ),
+                preapproved=preapproved,
             )
         # Receipt is committed before the transport can acknowledge submission.
         return asdict(result)

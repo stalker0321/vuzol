@@ -263,6 +263,22 @@ def has_owner_mandate(goal: ManagedGoal) -> bool:
     )
 
 
+def grant_owner_mandate(
+    goal: ManagedGoal, delegation: GoalDelegation, grant: dict[str, Any]
+) -> None:
+    """The owner's go-ahead for the goal's current scope: approving its plan, or
+    sending the request from the assistant topic. A later scope change needs a new one.
+    """
+    from vuzol.leadership.commands import DELEGATED_ACTIONS
+
+    delegation.allowed_actions = sorted(DELEGATED_ACTIONS - {"propose_batch", "request_revision"})
+    delegation.version += 1
+    goal.constraints = {
+        **goal.constraints,
+        "owner_mandate": {"scope_revision": goal.scope_revision, **grant},
+    }
+
+
 async def lead_accepts_results(session: AsyncSession, goal: ManagedGoal) -> bool:
     """The owner delegated item acceptance: the lead accepts each item, the owner the goal.
 

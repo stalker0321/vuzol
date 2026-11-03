@@ -215,6 +215,8 @@ def build_assistant_worker(
                 display_name="Ассистент",
                 request_id=str(request_id),
             ),
+            # Only the owner's own button press reaches here (assistant/ingress.py).
+            preapproved=True,
         )
 
     async def send(

@@ -129,6 +129,10 @@ async def restart_draft(
         branch_prefix=branch_prefix,
         default_goal_max_cost=default_goal_max_cost,
     )
+    if body.get("request_preapproved"):
+        from vuzol.leadership.events import grant_preapproval
+
+        await grant_preapproval(session, new, str(source.id))
     wakeup_id = uuid.uuid5(source.id, "restart")
     session.add(
         TransactionalOutbox(

@@ -827,7 +827,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:509"
+        "src/vuzol/cli/interpreter.py:511"
       ],
       "producers": [],
       "consumers": [],
@@ -1009,14 +1009,14 @@
       "id": "outbox:project_lead",
       "sources": [],
       "producers": [
-        "src/vuzol/leadership/events.py:380",
-        "src/vuzol/leadership/handoff.py:134",
+        "src/vuzol/leadership/events.py:409",
+        "src/vuzol/leadership/handoff.py:138",
         "src/vuzol/leadership/planning.py:121",
         "src/vuzol/leadership/planning.py:499",
         "src/vuzol/leadership/quota_wait.py:114",
         "src/vuzol/leadership/wakeups.py:52",
         "src/vuzol/leadership/wakeups.py:102",
-        "src/vuzol/leadership/worker.py:1045",
+        "src/vuzol/leadership/worker.py:1077",
         "src/vuzol/workflows/lead_events.py:104",
         "src/vuzol/workflows/lead_events.py:130",
         "src/vuzol/workflows/lead_events.py:206"
@@ -1132,10 +1132,10 @@
         "src/vuzol/discussion/sequencer.py:781",
         "src/vuzol/discussion/sequencer.py:789",
         "src/vuzol/discussion/sequencer.py:773",
-        "src/vuzol/discussion/service.py:1164",
-        "src/vuzol/discussion/service.py:1297",
+        "src/vuzol/discussion/service.py:1161",
+        "src/vuzol/discussion/service.py:1294",
         "src/vuzol/leadership/service.py:1247",
-        "src/vuzol/leadership/worker.py:1152",
+        "src/vuzol/leadership/worker.py:1184",
         "src/vuzol/telegram/controls.py:558",
         "src/vuzol/telegram/controls.py:670",
         "src/vuzol/telegram/ingress.py:1328",

@@ -18,7 +18,7 @@ from vuzol.leadership.actor import server_agent_principal
 from vuzol.leadership.amendments import apply_pending_amendment
 from vuzol.leadership.batches import execute_batch
 from vuzol.leadership.card import owner_answer_text
-from vuzol.leadership.commands import CommandStatus, LeadCommand
+from vuzol.leadership.commands import MEMORY_COMMANDS, CommandStatus, LeadCommand
 from vuzol.leadership.continuation import continue_if_idle
 from vuzol.leadership.evidence import assess_completion
 from vuzol.leadership.feedback import result_context
@@ -918,6 +918,38 @@ class ProjectLeadWorker:
                 "propose_plan",
             }:
                 return
+        if owner_event and all(
+            command["name"] in {name.value for name in MEMORY_COMMANDS} for command in commands
+        ):
+            await self._close_done_in_place(project_id, goal_id, wakeup_id, claim=claim)
+
+    async def _close_done_in_place(
+        self, project_id: str, goal_id: uuid.UUID, wakeup_id: uuid.UUID, *, claim: TurnClaim
+    ) -> None:
+        """A draft whose request was a note or a dictionary word is done once that is saved.
+
+        Live 2026-11-03: «добавь в словарь Вузол» stayed an open draft for four days, and
+        the next, unrelated request was folded into it.
+        """
+        async with self._factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            if goal is None or goal.lifecycle != "draft" or goal.current_package_id is not None:
+                return
+            version = goal.version
+        await self._service().apply_agent(
+            server_agent_principal(project_id),
+            "worker",
+            LeadCommand(
+                name="cancel_goal",
+                project_id=project_id,
+                goal_id=goal_id,
+                expected_version=version,
+                idempotency_key=f"lead:done-in-place:{wakeup_id}",
+                payload={},
+                reason="done_in_place",
+            ),
+            claim=claim,
+        )
 
     async def _ack(
         self, goal_id: uuid.UUID, wakeup_id: uuid.UUID, token: OutboxLeaseToken, *, claim: TurnClaim

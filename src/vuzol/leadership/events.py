@@ -22,6 +22,7 @@ from vuzol.leadership.persistence import (
     GoalDelegation,
     LeadershipCommandReceipt,
     ManagedGoal,
+    grant_owner_mandate,
     has_owner_mandate,
 )
 from vuzol.leadership.provenance import RequestOrigin
@@ -134,8 +135,14 @@ class ProjectEventService:
         origin: RequestOrigin,
         intake: TelegramIntakeMessage | None = None,
         reply_to_message_id: int | None = None,
+        preapproved: bool = False,
     ) -> EventReceipt:
-        """Record a message, never interpret it or grant execution authority."""
+        """Record a message, never interpret it or grant execution authority.
+
+        The one grant is ``preapproved``: the owner pressed send on this exact request
+        in the assistant topic, so its scope carries the owner's mandate. The server
+        still asks the owner about multi-item, large or risky plans.
+        """
         assert uow.session is not None
         session = uow.session
         settings = self.runtime.settings
@@ -209,6 +216,12 @@ class ProjectEventService:
                 "duplicate",
             )
         provenance = {**origin.model_dump(mode="json"), "authorized_user_id": principal.user_id}
+        live = await session.scalar(
+            select(ManagedGoal.id).where(
+                ManagedGoal.project_id == project_id,
+                ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
+            )
+        )
         goal = await live_or_draft(
             session,
             project_id=project_id,
@@ -225,6 +238,9 @@ class ProjectEventService:
             branch_prefix=settings.project_lead.integration_branch_prefix,
             default_goal_max_cost=settings.project_lead.default_goal_max_cost,
         )
+        if preapproved and live is None:
+            # A request joining a live goal is granted when the lead amends the goal to it.
+            await grant_preapproval(session, goal, idempotency_key)
         # Use one database clock across ingress nodes, after admission serialized them.
         received_at = await session.scalar(select(func.clock_timestamp()))
         assert received_at is not None
@@ -243,6 +259,7 @@ class ProjectEventService:
                 "request_scope": scope or text,
                 "request_criteria": criteria or [],
                 "request_work_limits": limits,
+                **({"request_preapproved": True} if preapproved else {}),
             },
         )
         receipt = LeadershipCommandReceipt(
@@ -296,6 +313,18 @@ class ProjectEventService:
             )
         await session.flush()
         return EventReceipt("accepted", event_id, goal.id, receipt.id)
+
+
+async def grant_preapproval(session: AsyncSession, goal: ManagedGoal, source: str) -> None:
+    """The owner sent this request with the assistant's button: the scope it sets is approved."""
+    delegation = await session.get(GoalDelegation, goal.delegation_id, with_for_update=True)
+    assert delegation is not None
+    grant_owner_mandate(
+        goal, delegation, {"owner_user_id": goal.owner_user_id, "preapproved_by": source}
+    )
+    if goal.lifecycle == "draft":
+        goal.lifecycle = "active"
+    goal.version += 1
 
 
 async def write_owner_event(

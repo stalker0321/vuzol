@@ -378,7 +378,6 @@ class WorkPackageService:
             if user_id != goal.owner_user_id:
                 raise DomainError("control_unauthorized")
             if goal.constraints.get("mandate_required"):
-                from vuzol.leadership.commands import DELEGATED_ACTIONS
                 from vuzol.leadership.persistence import POLICY_REVISION, GoalDelegation
                 from vuzol.leadership.rules import delegation_is_expired
 
@@ -453,20 +452,18 @@ class WorkPackageService:
             from vuzol.leadership.wakeups import enqueue_goal_wakeup
 
             if goal.constraints.get("mandate_required"):
+                from vuzol.leadership.persistence import grant_owner_mandate
+
                 assert delegation is not None
-                delegation.allowed_actions = sorted(
-                    DELEGATED_ACTIONS - {"propose_batch", "request_revision"}
-                )
-                delegation.version += 1
-                goal.constraints = {
-                    **goal.constraints,
-                    "owner_mandate": {
-                        "scope_revision": goal.scope_revision,
+                grant_owner_mandate(
+                    goal,
+                    delegation,
+                    {
                         "revision_id": str(revision.id),
                         "content_hash": revision.content_hash,
                         "owner_user_id": user_id,
                     },
-                }
+                )
 
             # The owner's approval answers whatever the goal was waiting on.
             if goal.lifecycle in {"draft", "waiting"}:

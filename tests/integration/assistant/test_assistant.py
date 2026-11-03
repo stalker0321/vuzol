@@ -275,3 +275,55 @@ async def test_errand_searches_the_web_and_other_topics_are_untouched(postgres_d
         async with factory() as session:
             threads = set(await session.scalars(select(AssistantEntry.message_thread_id)))
         assert threads == {THREAD}
+
+
+async def test_a_second_search_round_is_run_and_the_last_round_must_answer(postgres_dsn):
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "сколько стоит ChatGPT Plus в евро и бизнес на одного"))
+        model = FakeModel(
+            Turn(reply="Ищу.", searches=["ChatGPT Plus price EUR"]),
+            Turn(reply="Секунду, уточню.", searches=["ChatGPT Business price per seat"]),
+            Turn(reply="Plus 23 €, Business 29 € за место.", searches=["ещё"]),
+        )
+        worker, telegram, _ = worker_for(factory, model, search=Search())
+        await drain(worker)
+        assert [call["searches_left"] for call in model.calls] == [2, 1, 0]
+        assert list(model.calls[2]["web"]["searches"]) == [
+            "ChatGPT Plus price EUR",
+            "ChatGPT Business price per seat",
+        ]
+        assert [s["html"] for s in telegram.sent] == ["Plus 23 €, Business 29 € за место."]
+
+
+def voice(number):
+    data = topic(number, "x").to_dict()
+    del data["message"]["text"]
+    data["message"]["voice"] = {
+        "file_id": f"v{number}",
+        "file_unique_id": f"u{number}",
+        "duration": 3,
+        "mime_type": "audio/ogg",
+    }
+    return Update.de_json(data, BOT)
+
+
+async def test_each_voice_is_heard_and_echoed_before_the_answer(postgres_dsn):
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, voice(1), voice(2))
+        model = FakeModel(Turn(reply="Понял."))
+        worker, telegram, _ = worker_for(factory, model)
+
+        async def download(file_id):
+            return file_id.encode()
+
+        async def transcribe(content, mime):
+            return {"v1": "первая часть", "v2": "вторая часть"}[content.decode()]
+
+        worker._download, worker._transcribe = download, transcribe
+        await drain(worker)
+        assert model.calls[0]["latest_owner_message"] == "первая часть\nвторая часть"
+        assert [(s["reply_to"], s["html"]) for s in telegram.sent] == [
+            (1, "🎙 Расслышал: «первая часть»\nЕсли не так — поправь текстом."),
+            (2, "🎙 Расслышал: «вторая часть»\nЕсли не так — поправь текстом."),
+            (2, "Понял."),
+        ]

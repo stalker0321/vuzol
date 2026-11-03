@@ -174,6 +174,11 @@ async def apply_pending_amendment(session: AsyncSession, goal: ManagedGoal) -> b
         if goal.lifecycle == "active":
             goal.lifecycle = "draft"
     goal.scope_revision += 1
+    source = await session.get(TransactionalOutbox, uuid.UUID(amendment["source_event_id"]))
+    if source is not None and source.payload.get("request_preapproved"):
+        from vuzol.leadership.events import grant_preapproval
+
+        await grant_preapproval(session, goal, amendment["source_event_id"])
     goal.version += 1
     goal.fence_epoch += 1
     session.add(

@@ -566,3 +566,130 @@ async def test_model_backoff_success_or_exhaustion_and_owner_continue(
         )
         assert await worker.process_one()
         assert model.calls == 5
+
+
+class PlanThenStart:
+    async def decide(self, snapshot):
+        if snapshot.owner_event:
+            return LeadDecision(
+                commands=(LeadCommandDraft("request_plan", {"goal": snapshot.request}),)
+            )
+        if snapshot.waiting_reason == "plan_approval":
+            return LeadDecision()
+        return LeadDecision(
+            commands=(
+                LeadCommandDraft(
+                    "start_task", {"spec": snapshot.result_context["task_control"]["start_spec"]}
+                ),
+            )
+        )
+
+
+async def test_a_request_sent_from_the_assistant_starts_without_a_second_approval(
+    postgres_dsn, runtime
+):
+    """Owner 2026-11-03: sending from the assistant topic is the approval."""
+    async with _factory(postgres_dsn) as factory:
+        discussion = await _session(factory)
+        access = ProjectAccess(user_id=OWNER, projects={PROJECT: discussion}, allow_submit=True)
+        work = WorkRequest(
+            project_id=PROJECT, request_id=uuid.uuid4(), request="Сделай страницу с описанием"
+        )
+        origin = RequestOrigin(channel="telegram_assistant", display_name="Ассистент")
+        receipt = await ProjectApplication(runtime, factory).submit(
+            access, work, origin=origin, preapproved=True
+        )
+        assert receipt["status"] == "accepted"
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, receipt["goal_id"])
+            assert has_owner_mandate(goal) and goal.lifecycle == "active"
+        worker = _worker(factory, PlanThenStart())
+        for _ in range(4):
+            if not await worker.process_one():
+                break
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, receipt["goal_id"])
+            assert goal.waiting_reason != "plan_approval"
+            assert await session.scalar(select(func.count()).select_from(Task)) == 1
+
+
+async def test_an_mcp_request_still_waits_for_the_owner(postgres_dsn, runtime):
+    async with _factory(postgres_dsn) as factory:
+        discussion = await _session(factory)
+        access = ProjectAccess(user_id=OWNER, projects={PROJECT: discussion}, allow_submit=True)
+        work = WorkRequest(project_id=PROJECT, request_id=uuid.uuid4(), request="Сделай страницу")
+        receipt = await ProjectApplication(runtime, factory).submit(
+            access, work, origin=RequestOrigin(channel="mcp", display_name="ChatGPT")
+        )
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, receipt["goal_id"])
+            assert not has_owner_mandate(goal) and goal.lifecycle == "draft"
+
+
+async def test_a_dictionary_request_closes_its_draft_and_the_next_request_starts_fresh(
+    postgres_dsn, runtime
+):
+    """Live 2026-11-03: «добавь в словарь Вузол» stayed open, and a README task was
+    folded into it four days later."""
+
+    class Vocabulary:
+        async def decide(self, snapshot):
+            return LeadDecision(
+                commands=(LeadCommandDraft("add_vocabulary", {"terms": ["Вузол"]}),)
+            )
+
+    async with _factory(postgres_dsn) as factory:
+        ingress = TelegramIngressService(runtime, factory)
+        await ingress.accept_message(_message(901, "добавь в словарь Вузол"))
+        assert await _worker(factory, Vocabulary()).process_one()
+        async with factory() as session:
+            first = await session.scalar(select(ManagedGoal))
+            assert first.lifecycle == "cancelled"
+        await ingress.accept_message(_message(902, "Добавь в README раздел про запуск"))
+        async with factory() as session:
+            goals = list(
+                await session.scalars(select(ManagedGoal).order_by(ManagedGoal.created_at))
+            )
+            assert len(goals) == 2 and goals[1].lifecycle == "draft"
+            assert current_request(goals[1]) == "Добавь в README раздел про запуск"
+
+
+async def test_an_assistant_request_folded_into_a_live_goal_brings_its_approval(
+    postgres_dsn, runtime
+):
+    async with _factory(postgres_dsn) as factory:
+        await TelegramIngressService(runtime, factory).accept_message(
+            _message(901, "Обсудим устройство проекта")
+        )
+        async with factory() as session:
+            discussion = (await session.scalar(select(ManagedGoal))).discussion_session_id
+        access = ProjectAccess(user_id=OWNER, projects={PROJECT: discussion}, allow_submit=True)
+        work = WorkRequest(project_id=PROJECT, request_id=uuid.uuid4(), request="Сделай справку")
+        receipt = await ProjectApplication(runtime, factory).submit(
+            access,
+            work,
+            origin=RequestOrigin(channel="telegram_assistant", display_name="Ассистент"),
+            preapproved=True,
+        )
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, receipt["goal_id"])
+            # The live goal's own scope was never approved.
+            assert not has_owner_mandate(goal)
+        amended = await command(
+            factory,
+            goal.id,
+            "amend_goal",
+            {
+                "scope": "Сделай справку",
+                "criteria": [{"id": "help", "description": "Есть справка"}],
+                "source_event_id": str(receipt["event_id"]),
+                "inflight_policy": "finish_current",
+            },
+            reason="Владелец прислал задачу",
+        )
+        assert amended.status == "applied", amended.reason
+        assert await _worker(factory, Answer()).process_one()
+        async with factory() as session:
+            updated = await session.get(ManagedGoal, goal.id)
+            assert current_request(updated) == "Сделай справку"
+            assert has_owner_mandate(updated) and updated.lifecycle == "active"

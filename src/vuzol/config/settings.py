@@ -602,6 +602,9 @@ class AssistantSettings(BaseModel):
     opencode_org_ids: dict[str, str] = Field(default_factory=dict)
     # Earlier turns of the topic the model sees, oldest dropped first.
     history_turns: int = Field(default=12, ge=0, le=50)
+    # Owner 2026-11-03: this topic is for real research, let it search.
+    search_rounds: int = Field(default=5, ge=0, le=10)
+    searches_per_round: int = Field(default=5, ge=1, le=10)
     timezone: str = "Europe/Amsterdam"
     timeout_seconds: float = Field(default=180, ge=5, le=900)
 

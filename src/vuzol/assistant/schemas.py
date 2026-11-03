@@ -19,7 +19,7 @@ class Turn(_Model):
     reply: str = Field(min_length=1, max_length=3500)
     dispatches: list[Dispatch] = Field(default_factory=list, max_length=8)
     # Web searches to run before the final answer; empty when not needed.
-    searches: list[str] = Field(default_factory=list, max_length=3)
+    searches: list[str] = Field(default_factory=list, max_length=10)
 
 
 TURN_PROMPT = (
@@ -37,8 +37,10 @@ TURN_PROMPT = (
     "- One message may hold tasks for several projects, or a task plus an errand.\n"
     "- Work that fits no project: say so and suggest a new project (you cannot create one yet).\n"
     "- Errands (find, compare, check dates, prices, quick facts): answer yourself in reply. Fill "
-    "searches with up to three short web queries when the answer depends on facts you may not "
-    "know or that change; you will then get the results and answer again. searches_left says how "
+    "searches with up to {per_round} short web queries when the answer depends on facts you may "
+    "not know or that change; you will then get the results and answer again. The owner expects "
+    "real research here: search as deep as the question needs and cross-check facts. "
+    "searches_left says how "
     "many more rounds you may ask for; at 0, or when the results suffice, leave searches empty "
     "and answer from what you have, saying what you could not find. While searches is filled "
     "the reply is not shown, so never write a reply that promises to look something up later.\n"

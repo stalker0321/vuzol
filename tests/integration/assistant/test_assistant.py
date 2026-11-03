@@ -21,7 +21,7 @@ from vuzol.telegram.durable_ingress import DurableTelegramIngress
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 THREAD = 77
 ASSISTANT = AssistantSettings(
-    enabled=True, profile_id="smart", chat_id=CHAT, message_thread_id=THREAD
+    enabled=True, profile_id="smart", chat_id=CHAT, message_thread_id=THREAD, search_rounds=2
 )
 SETTINGS = Settings(
     environment="test", allowed_user_ids=(OWNER,), allowed_chat_ids=(CHAT,), assistant=ASSISTANT
@@ -287,7 +287,7 @@ async def test_a_second_search_round_is_run_and_the_last_round_must_answer(postg
         )
         worker, telegram, _ = worker_for(factory, model, search=Search())
         await drain(worker)
-        assert [call["searches_left"] for call in model.calls] == [2, 1, 0]
+        assert [call["searches_left"] for call in model.calls] == [2, 1, 0]  # search_rounds=2
         assert list(model.calls[2]["web"]["searches"]) == [
             "ChatGPT Plus price EUR",
             "ChatGPT Business price per seat",

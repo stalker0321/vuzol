@@ -42,7 +42,6 @@ from vuzol.storage.types import DiscussionSessionStatus
 _LOG = get_logger(__name__)
 _ATTEMPTS = 3
 _PAGES = 3
-_SEARCH_ROUNDS = 2
 _PAGE_CHARS = 6_000
 _GOAL_CHARS = 400
 SEND_LABEL = "🚀 Отправить"
@@ -136,7 +135,7 @@ class AssistantWorker:
             token = await claim_outbox_item(
                 session,
                 owner=self._owner,
-                lease_seconds=900,
+                lease_seconds=1800,  # several search rounds, each with a model call
                 allowed_destinations=frozenset({ASSISTANT_DESTINATION}),
             )
         if token is None:
@@ -217,15 +216,16 @@ class AssistantWorker:
 
     async def _think(self, context: dict[str, Any]) -> Turn:
         searches: list[str] = []
-        for round_ in range(_SEARCH_ROUNDS + 1):
+        rounds = self._settings.search_rounds
+        for round_ in range(rounds + 1):
             if self._web is not None:
-                context["searches_left"] = _SEARCH_ROUNDS - round_
+                context["searches_left"] = rounds - round_
             turn = await self._model.ask(
                 Turn, system=self._prompt(), user=json.dumps(context, ensure_ascii=False)
             )
             # Owner 2026-11-03: a second search request went out as "Секунду, уточню…".
             fresh = [query for query in turn.searches if query not in searches]
-            if not fresh or self._web is None or round_ == _SEARCH_ROUNDS:
+            if not fresh or self._web is None or round_ == rounds:
                 return turn
             searches += fresh
             found = await self._look_up(fresh)
@@ -307,7 +307,10 @@ class AssistantWorker:
 
     async def _look_up(self, queries: Sequence[str]) -> dict[str, Any]:
         assert self._web is not None
-        hits = {query: await self._web.search(query) for query in queries[:3]}
+        hits = {
+            query: await self._web.search(query)
+            for query in queries[: self._settings.searches_per_round]
+        }
         seen: list[str] = []
         for found in hits.values():
             seen += [hit.url for hit in found[:2] if hit.url not in seen]
@@ -485,7 +488,11 @@ class AssistantWorker:
 
     def _prompt(self) -> str:
         now = datetime.now(ZoneInfo(self._settings.timezone))
-        return TURN_PROMPT.format(tz=self._settings.timezone, now=now.isoformat(timespec="minutes"))
+        return TURN_PROMPT.format(
+            tz=self._settings.timezone,
+            now=now.isoformat(timespec="minutes"),
+            per_round=self._settings.searches_per_round,
+        )
 
 
 def _goal_view(goal: ManagedGoal | None) -> dict[str, Any] | None:

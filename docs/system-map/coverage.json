@@ -585,7 +585,7 @@
       "sources": [],
       "producers": [],
       "consumers": [
-        "src/vuzol/assistant/service.py:136"
+        "src/vuzol/assistant/service.py:135"
       ],
       "scenario": "assistant"
     },

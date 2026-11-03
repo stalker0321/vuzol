@@ -12,7 +12,7 @@ from vuzol.telegram.formatting import telegram_markdown_html
 
 def test_prompt_distinguishes_refinement_from_separate_work():
     prompt = _prompt(snapshot())
-    assert PROMPT_REVISION == "project-lead-prompt.v19"
+    assert PROMPT_REVISION == "project-lead-prompt.v20"
     assert "If the current request differs from the new message, first amend_goal" not in prompt
     assert "refining the SAME goal" in prompt
     assert "approved/proposed plan, task, result, or waiting question" in prompt
@@ -41,7 +41,17 @@ def test_cancelled_card_explains_the_new_task_handoff():
         )
     )
     assert "Цель закрыта для новой задачи" in card
-    assert "Сохранённые результаты не удалены" in card
+    assert "Принятая работа идёт в main" in card
     assert "closed_for_new_task" not in card
     plain = telegram_markdown_html(render_goal_card({"lifecycle": "cancelled"}))
     assert "Работа отменена" in plain
+
+
+def test_close_keeps_work_and_cancel_discards_it():
+    prompt = _prompt(snapshot())
+    assert "close_goal {} with a reason ends the goal and keeps the work" in prompt
+    assert "cancel_goal " in prompt and "(отмени, выкинь, откати)" in prompt
+    decision = parse_lead_response(
+        {"commands": [{"name": "close_goal", "payload": {}, "reason": "владелец просит"}]}
+    )
+    assert decision.commands[0].name == "close_goal"

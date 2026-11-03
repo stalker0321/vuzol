@@ -123,6 +123,23 @@ async def test_no_change_apply_keeps_existing_safety_guards(tmp_path: Path, bad:
 
 
 @pytest.mark.anyio
+async def test_no_change_result_applies_before_the_goal_branch_exists(tmp_path: Path) -> None:
+    # Live 2026-11-03: a goal's first item changed nothing and was blocked on rev-parse.
+    repository, base = _repository(tmp_path)
+    worktree = tmp_path / "worktree"
+    git = LocalGit()
+    await git.add_worktree(repository, worktree, "result", base)
+    assert not await git.apply_result(
+        repository,
+        worktree,
+        target_branch="vuzol-managed/project/goal",
+        expected_head=base,
+        result_commit=base,
+    )
+    assert await git.read_ref(repository, "vuzol-managed/project/goal") is None
+
+
+@pytest.mark.anyio
 async def test_initialize_rejects_file_at_project_path(tmp_path: Path) -> None:
     obstacle = tmp_path / "notes"
     obstacle.write_text("not a directory\n")

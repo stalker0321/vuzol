@@ -30,7 +30,7 @@ from vuzol.leadership.vocabulary import AddVocabularyPayload, RemoveVocabularyPa
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v19"
+PROMPT_REVISION = "project-lead-prompt.v20"
 LEDGER_PURPOSE = "project_lead"
 
 
@@ -73,7 +73,7 @@ class _ResponseCommand(_Command):
 
 
 class _SkipItemCommand(_Command):
-    name: Literal["skip_item", "park_goal"]
+    name: Literal["skip_item", "park_goal", "close_goal"]
     payload: _Payload = Field(default_factory=_Payload)
     reason: str = Field(min_length=1)
 
@@ -258,6 +258,7 @@ def parse_lead_response(payload: object) -> LeadDecision:
         "propose_completion",
         "pause_goal",
         "cancel_goal",
+        "close_goal",
         "park_goal",
     }
     terminal.update({"amend_goal", "request_revision", "read_status"})
@@ -549,7 +550,8 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "Only server grants authorize effects; never approve publish/deploy/install.",
         "Commands: request_plan, revise_plan, start_task, cancel_task, accept_result, "
         "ask_owner, wait_for, propose_completion, pause_goal, cancel_goal, amend_goal, "
-        "remember, forget, add_vocabulary, remove_vocabulary, skip_item, park_goal, start_job, "
+        "remember, forget, add_vocabulary, remove_vocabulary, skip_item, park_goal, close_goal, "
+        "start_job, "
         "cancel_job.",
         'Return EITHER {"reply": ..., "commands": [...]} OR {"tool_calls": [...]}, never both. '
         'Read tools use {"name": ..., "args": {...}}: read_status {} reads this goal\'s '
@@ -589,6 +591,13 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "repeats the same planning request when the limit resets, and the owner can switch "
         "to the fallback planner with the button on that message. Do not request_plan again "
         "yourself while it waits; answer the owner in reply.",
+        "Before request_plan, make sure the work can be done from what the repository and the "
+        "conversation hold. When it needs a fact or a choice only the owner has (which license, "
+        "names, accounts, texts, design decisions) and the repository does not settle it, "
+        "ask_owner first; read the code or start_job when unsure. Never plan work that may end "
+        "with no change because such a fact is missing. Live 2026-11-03: «добавь раздел про "
+        "лицензию» in a project without a license ran a plan, a worker and a review to change "
+        "nothing, instead of asking which license. "
         "Request a strong planner with request_plan {goal, constraints:[...]}; "
         "revise_plan {reason} replans only future work using prior results and owner corrections. "
         "Planning is the only command in its turn. Wait for plan_ready or plan_failed; "
@@ -617,7 +626,12 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "owner can start another goal; the owner returns to it with a button. Use it only when "
         "the owner asks in this very message to postpone or set the goal aside; it must be the "
         "last command. After an unparked event, check the state and continue: a step stopped "
-        "by parking failed and needs revise_plan or the owner's skip.",
+        "by parking failed and needs revise_plan or the owner's skip. "
+        "close_goal {} with a reason ends the goal and keeps the work: every accepted result "
+        "goes into the project's main branch. Use it when the owner asks in this very message "
+        "to close, finish or stop the goal (закрой, заверши, хватит, готово). cancel_goal "
+        "throws the unmerged work away: use it only when the owner says to cancel, discard or "
+        "undo it (отмени, выкинь, откати). Either must be the last command.",
         "cancel_task {task_id}; ask_owner {question}; "
         "wait_for {condition:{kind:'package',package_id}} waits for the next task decision. "
         "Read result_context for concrete independent review failures. Historical/truncated "

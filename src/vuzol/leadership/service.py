@@ -197,6 +197,7 @@ class LeadershipCommandService:
                     LeadCommandName.RESUME_GOAL,
                     LeadCommandName.SET_WORK_LIMITS,
                     LeadCommandName.REVOKE_DELEGATION,
+                    LeadCommandName.CLOSE_GOAL,
                 }
             ):
                 return await store(
@@ -321,6 +322,7 @@ class LeadershipCommandService:
             LeadCommandName.SET_WORK_LIMITS,
             LeadCommandName.RESUME_GOAL,
             LeadCommandName.CANCEL_GOAL,
+            LeadCommandName.CLOSE_GOAL,
             LeadCommandName.REVOKE_DELEGATION,
             LeadCommandName.ANSWER_PERMISSION,
             LeadCommandName.REQUEST_PERMISSION,
@@ -377,6 +379,29 @@ class LeadershipCommandService:
                 return _Outcome(CommandStatus.DENIED, "owner_request_required", {}, goal)
             parked = await park_goal(uow, goal, actor_id=actor.subject)
             return _Outcome(CommandStatus.APPLIED, None, {**parked, "version": goal.version}, goal)
+        if name is LeadCommandName.CLOSE_GOAL:
+            from vuzol.leadership.acceptance import queue_close
+            from vuzol.leadership.jobs import cancel_goal_jobs
+            from vuzol.leadership.retrospective import enqueue_retrospective
+            from vuzol.storage.models import TransactionalOutbox
+
+            source = await uow.session.get(TransactionalOutbox, claim.wakeup_id) if claim else None
+            if actor.kind is not ActorKind.HUMAN and (
+                source is None or source.payload.get("wakeup_kind") != "owner_message"
+            ):
+                return _Outcome(CommandStatus.DENIED, "owner_request_required", {}, goal)
+            await cancel_goal_jobs(uow.session, goal_id=goal.id)
+            await _settle_children(uow.session, goal, actor, stop=True)
+            outcome = _transition(
+                goal, actor, "cancelled", "closed_by_owner", CommandStatus.APPLIED
+            )
+            await enqueue_retrospective(
+                uow.session, goal, outcome="cancelled", reason=command.reason or "closed_by_owner"
+            )
+            # Live 2026-11-03: «закрой цель» cancelled a goal and its reviewed README work
+            # never reached main. Closing keeps the work; the applier merges it.
+            queue_close(uow.session, goal)
+            return outcome
         if name is LeadCommandName.SKIP_ITEM:
             from vuzol.leadership.skip import skip_goal_item
             from vuzol.storage.models import TransactionalOutbox
@@ -492,6 +517,10 @@ class LeadershipCommandService:
                         uow.session, goal, outcome="cancelled", reason=command.reason or reason
                     )
                     if source is not None:
+                        from vuzol.leadership.acceptance import queue_close
+
+                        # «Новая задача, текущую закрыть» keeps the accepted work too.
+                        queue_close(uow.session, goal)
                         # Release both partial unique indexes before normal draft admission.
                         await uow.session.flush()
                         outcome.result.update(

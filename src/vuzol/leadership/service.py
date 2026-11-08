@@ -22,6 +22,7 @@ from vuzol.leadership.commands import (
     DRAFT_ACTIONS,
     JOB_COMMANDS,
     MEMORY_COMMANDS,
+    QUEUE_COMMANDS,
     READ_COMMANDS,
     VOCABULARY_COMMANDS,
     CommandResult,
@@ -190,7 +191,7 @@ class LeadershipCommandService:
                 goal is not None
                 and not has_owner_mandate(goal)
                 and name.value not in DRAFT_ACTIONS
-                and name not in MEMORY_COMMANDS
+                and name not in MEMORY_COMMANDS | QUEUE_COMMANDS
                 and name
                 not in {
                     LeadCommandName.ANSWER_PERMISSION,
@@ -314,7 +315,9 @@ class LeadershipCommandService:
             return _Outcome(CommandStatus.DENIED, "goal_parked", {}, goal)
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
-        if goal.lifecycle == "paused" and name not in READ_COMMANDS | MEMORY_COMMANDS | {
+        if goal.lifecycle == "paused" and name not in READ_COMMANDS | MEMORY_COMMANDS | (
+            QUEUE_COMMANDS
+        ) | {
             LeadCommandName.REQUEST_PLAN,
             LeadCommandName.REVISE_PLAN,
             LeadCommandName.AMEND_GOAL,
@@ -348,6 +351,24 @@ class LeadershipCommandService:
                 {"note_id": str(note.id), "version": goal.version},
                 goal,
             )
+        if name in QUEUE_COMMANDS:
+            from vuzol.leadership.task_queue import drop_queued_task, queue_task
+            from vuzol.storage.models import TransactionalOutbox
+
+            if name is LeadCommandName.QUEUE_TASK:
+                chosen = command.payload.get("source_event_id")
+                key = uuid.UUID(str(chosen)) if chosen else claim.wakeup_id if claim else None
+                source = await uow.session.get(TransactionalOutbox, key) if key else None
+                item, place = await queue_task(
+                    uow.session, goal, source, str(command.payload.get("summary", ""))
+                )
+                body = {"queue_id": str(item.id), "place": place}
+            else:
+                item = await drop_queued_task(
+                    uow.session, goal, str(command.payload.get("queue_id", ""))
+                )
+                body = {"queue_id": str(item.id), "state": item.state}
+            return _Outcome(CommandStatus.APPLIED, None, body, goal)
         if name in JOB_COMMANDS:
             from vuzol.leadership.jobs import cancel_job, enqueue_job
 
@@ -436,9 +457,9 @@ class LeadershipCommandService:
                 planning = name in {LeadCommandName.REQUEST_PLAN, LeadCommandName.REVISE_PLAN}
                 from vuzol.storage.models import TransactionalOutbox
 
-                source = (
-                    await uow.session.get(TransactionalOutbox, claim.wakeup_id) if claim else None
-                )
+                chosen = command.payload.get("source_event_id")
+                key = uuid.UUID(str(chosen)) if chosen else claim.wakeup_id if claim else None
+                source = await uow.session.get(TransactionalOutbox, key) if key else None
                 permitted = planning and (
                     goal.waiting_reason == "plan_approval"
                     or actor.kind is ActorKind.HUMAN

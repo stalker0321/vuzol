@@ -29,6 +29,8 @@ class LeadCommandName(StrEnum):
     SKIP_ITEM = "skip_item"
     PARK_GOAL = "park_goal"
     CLOSE_GOAL = "close_goal"
+    QUEUE_TASK = "queue_task"
+    DROP_QUEUED_TASK = "drop_queued_task"
     CANCEL_TASK = "cancel_task"
     START_JOB = "start_job"
     CANCEL_JOB = "cancel_job"
@@ -73,6 +75,8 @@ MEMORY_COMMANDS = (
 )
 MAX_MEMORY_COMMANDS = 3
 JOB_COMMANDS = frozenset({LeadCommandName.START_JOB, LeadCommandName.CANCEL_JOB})
+# Owner 2026-11-09: a separate task waits its turn instead of being glued into the goal.
+QUEUE_COMMANDS = frozenset({LeadCommandName.QUEUE_TASK, LeadCommandName.DROP_QUEUED_TASK})
 
 
 OWNER_ONLY_COMMANDS = frozenset(

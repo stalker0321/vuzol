@@ -12,15 +12,16 @@ from vuzol.telegram.formatting import telegram_markdown_html
 
 def test_prompt_distinguishes_refinement_from_separate_work():
     prompt = _prompt(snapshot())
-    assert PROMPT_REVISION == "project-lead-prompt.v20"
+    assert PROMPT_REVISION == "project-lead-prompt.v21"
     assert "If the current request differs from the new message, first amend_goal" not in prompt
     assert "refining the SAME goal" in prompt
-    assert "approved/proposed plan, task, result, or waiting question" in prompt
+    assert "approved/proposed plan, task, result or waiting question" in prompt
     assert "bare draft with no plan and no work" in prompt
     assert "Дополнение к текущей" in prompt
     assert "Новая задача, текущую закрыть" in prompt
     assert "Новая задача после текущей" in prompt
-    assert "resend" in prompt
+    assert "never ask the owner to resend" in prompt
+    assert "queue_task" in prompt
     assert "restart_from_event_id" in prompt
 
 

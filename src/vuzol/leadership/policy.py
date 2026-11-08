@@ -10,6 +10,7 @@ from vuzol.leadership.commands import (
     JOB_COMMANDS,
     MEMORY_COMMANDS,
     OWNER_ONLY_COMMANDS,
+    QUEUE_COMMANDS,
     READ_COMMANDS,
     LeadCommandName,
 )
@@ -83,7 +84,7 @@ def authorize(
     if delegation_policy_revision != POLICY_REVISION:
         return PolicyDecision(False, "denied", "policy_revision_mismatch")
     # Notes and read-only research are intrinsic to a valid lead delegation.
-    if command in MEMORY_COMMANDS | JOB_COMMANDS:
+    if command in MEMORY_COMMANDS | JOB_COMMANDS | QUEUE_COMMANDS:
         return PolicyDecision(True, "applied")
     if command in {
         LeadCommandName.SKIP_ITEM,

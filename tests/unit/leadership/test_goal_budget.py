@@ -265,6 +265,7 @@ async def test_snapshot_budget_matches_lifetime_ledger(ledger, monkeypatch):
     monkeypatch.setattr("vuzol.leadership.worker.result_context", AsyncMock(return_value={}))
     monkeypatch.setattr("vuzol.leadership.planning.source_commit", AsyncMock(return_value=None))
     monkeypatch.setattr("vuzol.leadership.jobs.list_jobs", AsyncMock(return_value=[]))
+    monkeypatch.setattr("vuzol.leadership.task_queue.queue_view", AsyncMock(return_value=[]))
     monkeypatch.setattr("vuzol.leadership.tasks.task_context", AsyncMock(return_value={}))
     worker = ProjectLeadWorker(
         ledger.factory, owner="owner", model=AsyncMock(), enabled=lambda: True

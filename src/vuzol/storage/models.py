@@ -2248,6 +2248,32 @@ class AssistantEntry(IdentityMixin, Base):
     )
 
 
+class ProjectTaskQueueItem(IdentityMixin, Base):
+    """A separate owner task waiting for the project's current goal to end."""
+
+    __tablename__ = "project_task_queue"
+    __table_args__ = (
+        Index("ix_project_task_queue_waiting", "project_id", "state", "created_at"),
+        # One owner message is queued at most once, however often the lead says so.
+        UniqueConstraint("source_event_id", name="uq_project_task_queue_source"),
+    )
+
+    project_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    discussion_session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # The owner's message as the lead got it (text, scope, origin, attachments, preapproval).
+    source_event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    summary: Mapped[str] = mapped_column(String(200), nullable=False)
+    # queued | started | dropped
+    state: Mapped[str] = mapped_column(String(10), nullable=False, default="queued")
+    queued_by_goal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    started_goal_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class GoalDocument(IdentityMixin, Base):
     """A large document the owner attached to a goal: the lead sees an excerpt, workers all."""
 

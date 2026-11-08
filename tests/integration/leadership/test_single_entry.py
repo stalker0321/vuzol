@@ -743,3 +743,93 @@ async def test_asking_for_a_plan_already_on_its_way_is_not_a_model_failure(postg
                 )
             )
             assert receipt.reason == "planner_request_pending"
+
+
+async def test_a_separate_task_waits_in_the_queue_and_starts_when_the_project_is_free(
+    postgres_dsn, runtime
+):
+    """Owner 2026-11-09: a separate task is queued, not glued in, and starts on its own."""
+    from vuzol.storage.models import ProjectTaskQueueItem
+    from vuzol.telegram.topic_line import topic_line
+
+    async with _factory(postgres_dsn) as factory:
+        first_goal = await _enable(factory, await _session(factory))
+        async with factory.begin() as session:
+            for item in await session.scalars(select(TransactionalOutbox)):
+                item.status = DeliveryStatus.DELIVERED
+
+        class Lead:
+            def __init__(self):
+                self.seen = []
+
+            async def decide(self, snapshot):
+                self.seen.append(snapshot)
+                text = (snapshot.owner_event or {}).get("text", "")
+                if snapshot.goal_id == first_goal and "словарь" in text:
+                    return LeadDecision(
+                        reply="Поставил в очередь, первым номером.",
+                        commands=(LeadCommandDraft("queue_task", {"summary": "Словарь терминов"}),),
+                    )
+                return LeadDecision(reply="Беру.")
+
+        lead = Lead()
+        worker = _worker(factory, lead)
+        await TelegramIngressService(runtime, factory).accept_message(
+            _message(902, "Отдельно: добавь в README словарь терминов")
+        )
+        assert await worker.process_one()
+        async with factory() as session:
+            (queued,) = (await session.scalars(select(ProjectTaskQueueItem))).all()
+            goal = await session.get(ManagedGoal, first_goal)
+            assert queued.state == "queued" and queued.summary == "Словарь терминов"
+            assert "словарь" not in goal.scope_text  # not glued into the current goal
+            assert (await topic_line(session, PROJECT, {})).endswith("· +1")
+
+        # The current goal ends: the free project takes the queued task as a new goal.
+        await finish_goal(factory, first_goal)
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, first_goal, with_for_update=True)
+            goal.constraints = {**goal.constraints, "owner_acceptance": {"accepted": True}}
+        assert not await worker.process_one()  # idle: reconciling starts the next goal
+        async with factory() as session:
+            started = await session.get(ProjectTaskQueueItem, queued.id)
+            new_goal = await session.get(ManagedGoal, started.started_goal_id)
+            assert started.state == "started" and new_goal.lifecycle == "draft"
+            assert "словарь" in new_goal.original_request
+        assert await worker.process_one()
+        assert lead.seen[-1].goal_id == new_goal.id
+        assert "словарь" in lead.seen[-1].owner_event["text"]
+        assert lead.seen[0].result_context["task_queue"] == []
+
+
+@pytest.mark.anyio
+async def test_a_routed_answer_queues_the_saved_request_not_the_answer(postgres_dsn, runtime):
+    """After 'Новая задача после текущей' the owner's earlier message is queued, as sent."""
+    from vuzol.storage.models import ProjectTaskQueueItem
+
+    async with _factory(postgres_dsn) as factory:
+        first_goal = await _enable(factory, await _session(factory))
+        await TelegramIngressService(runtime, factory).accept_message(
+            _message(904, "Сделай глоссарий отдельно")
+        )
+        await TelegramIngressService(runtime, factory).accept_message(
+            _message(905, "после текущей")
+        )
+        async with factory() as session:
+            saved = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key == f"lead:message:{CHAT}:904"
+                )
+            )
+        queued = await command(
+            factory,
+            first_goal,
+            "queue_task",
+            {"summary": "Глоссарий", "source_event_id": str(saved.id)},
+            reason="Владелец выбрал: после текущей",
+        )
+        assert queued.status == "applied"
+        async with factory() as session:
+            (item,) = (await session.scalars(select(ProjectTaskQueueItem))).all()
+            assert item.source_event_id == saved.id
+            assert item.body["text"] == "Сделай глоссарий отдельно"

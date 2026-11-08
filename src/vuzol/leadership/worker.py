@@ -610,6 +610,7 @@ class ProjectLeadWorker:
             from vuzol.execution.git import GitError
             from vuzol.leadership.jobs import list_jobs
             from vuzol.leadership.planning import source_commit
+            from vuzol.leadership.task_queue import queue_view
 
             job_head = None
             with suppress(DomainError, GitError, OSError):
@@ -702,6 +703,7 @@ class ProjectLeadWorker:
                     "event": dict(item.payload) if item is not None else None,
                     "pending_amendment": goal.constraints.get("pending_amendment"),
                     "queued_amendment": goal.constraints.get("queued_amendment"),
+                    "task_queue": await queue_view(uow.session, goal.project_id),
                 },
             )
 
@@ -1261,9 +1263,31 @@ class ProjectLeadWorker:
     ) -> None:
         await defer_outbox_item(session, token, delay_seconds=0, reason=reason)
 
+    async def _start_queued(self, session: AsyncSession) -> None:
+        """A free project takes its next queued task; each project under its admission lock."""
+        from vuzol.leadership.fence import lock_project_admission
+        from vuzol.leadership.task_queue import start_next
+        from vuzol.storage.models import ProjectTaskQueueItem
+
+        projects = await session.scalars(
+            select(ProjectTaskQueueItem.project_id)
+            .where(ProjectTaskQueueItem.state == "queued")
+            .distinct()
+        )
+        for project_id in list(projects):
+            async with session.begin_nested():
+                await lock_project_admission(session, project_id)
+                await start_next(
+                    session,
+                    project_id,
+                    branch_prefix=self._branch_prefix,
+                    default_goal_max_cost=self._default_goal_max_cost,
+                )
+
     async def _reconcile(self, session: AsyncSession) -> None:
         from vuzol.telegram.attention import sync_goal_attention
 
+        await self._start_queued(session)
         now = datetime.now(UTC)
         goals = (
             await session.scalars(

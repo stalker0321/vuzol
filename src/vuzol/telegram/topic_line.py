@@ -103,6 +103,23 @@ def profile_labels(profiles: Iterable[ProviderProfileConfig]) -> dict[str, str]:
 
 
 async def topic_line(session: AsyncSession, project_id: str, labels: Mapping[str, str]) -> str:
+    from sqlalchemy import func
+
+    from vuzol.storage.models import ProjectTaskQueueItem
+
+    queued = await session.scalar(
+        select(func.count())
+        .select_from(ProjectTaskQueueItem)
+        .where(
+            ProjectTaskQueueItem.project_id == project_id,
+            ProjectTaskQueueItem.state == "queued",
+        )
+    )
+    line = await _now_line(session, project_id, labels)
+    return f"{line} · +{queued}" if queued else line
+
+
+async def _now_line(session: AsyncSession, project_id: str, labels: Mapping[str, str]) -> str:
     running: list[tuple[str, str]] = []
     rows = await session.execute(
         select(Step.step_type, SupervisedProcess.profile_id)

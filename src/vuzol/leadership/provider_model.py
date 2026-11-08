@@ -30,7 +30,7 @@ from vuzol.leadership.vocabulary import AddVocabularyPayload, RemoveVocabularyPa
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v20"
+PROMPT_REVISION = "project-lead-prompt.v21"
 LEDGER_PURPOSE = "project_lead"
 
 
@@ -203,6 +203,27 @@ class _CancelJobCommand(_Command):
     payload: _JobPayload
 
 
+class _QueueTaskPayload(_Payload):
+    # A short title for the queue list; the owner's message itself is kept as sent.
+    summary: str = Field(min_length=1, max_length=200)
+    # Defaults to the message that woke this turn; after a routing answer, the saved one.
+    source_event_id: str | None = Field(default=None, pattern=r"^[0-9a-f-]{36}$")
+
+
+class _QueueTaskCommand(_Command):
+    name: Literal["queue_task"]
+    payload: _QueueTaskPayload
+
+
+class _DropQueuedPayload(_Payload):
+    queue_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+
+
+class _DropQueuedCommand(_Command):
+    name: Literal["drop_queued_task"]
+    payload: _DropQueuedPayload
+
+
 class _Response(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -225,6 +246,8 @@ class _Response(BaseModel):
         | _RemoveVocabularyCommand
         | _StartJobCommand
         | _CancelJobCommand
+        | _QueueTaskCommand
+        | _DropQueuedCommand
     ] = Field(default_factory=list, max_length=8)
 
 
@@ -551,6 +574,7 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "Commands: request_plan, revise_plan, start_task, cancel_task, accept_result, "
         "ask_owner, wait_for, propose_completion, pause_goal, cancel_goal, amend_goal, "
         "remember, forget, add_vocabulary, remove_vocabulary, skip_item, park_goal, close_goal, "
+        "queue_task, drop_queued_task, "
         "start_job, "
         "cancel_job.",
         'Return EITHER {"reply": ..., "commands": [...]} OR {"tool_calls": [...]}, never both. '
@@ -640,20 +664,25 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "reply and no commands. For a work request, clarify if needed and request_plan; the "
         "owner must approve the plan before execution, including a single small task. "
         "Use amend_goal only for refining the SAME goal: clarification, scope changes of the "
-        "same intent, and owner corrections. For a separate task unrelated to the current "
-        "request, if there is any approved/proposed plan, task, result, or waiting question, "
-        "do not amend_goal. First ask_owner in plain Russian whether this is an addition or "
-        "a new task and whether to close the current goal. Use options "
-        "['Дополнение к текущей', 'Новая задача, текущую закрыть', 'Новая задача после текущей']. "
+        "same intent, and owner corrections. A separate task, unrelated to the current request, "
+        "while the goal has an approved/proposed plan, task, result or waiting question: "
+        "queue_task {summary} with no question. The owner's message is kept as sent and starts "
+        "as its own goal once this one ends; summary is its short Russian title for the queue "
+        "list. Reply that it is queued and at which place. Ask whether it is an addition only "
+        "when you truly cannot tell. task_queue in result_context lists what is queued; "
+        "drop_queued_task {queue_id} removes an item when the owner asks. "
         "A bare draft with no plan and no work may simply be amended using the new message's "
         "source_event_id, scope and observable criteria. "
+        "When the owner wants to switch now, ask_owner with options "
+        "['Дополнение к текущей', 'Новая задача, текущую закрыть', 'Новая задача после текущей']. "
         "After the explicit owner answer 'Новая задача, текущую закрыть', use cancel_goal "
         "{restart_from_event_id: result_context.owner_answer.restart_from_event_id} to close "
         "this goal and start a normal draft from the saved request, including attachments. "
         "The server requires that exact answer to the question bound to that source event; "
         "never use plain cancel_goal as a fallback for a denied handoff. "
-        "For 'Новая задача после текущей', reply that you will finish the current goal first "
-        "and the owner can resend the request later; do not build a queue.",
+        "After 'Новая задача после текущей', queue the saved request with queue_task "
+        "{summary, source_event_id: result_context.owner_answer.restart_from_event_id}; "
+        "never ask the owner to resend it.",
         "Reply to owner_event in reply; describe intended actions, not unexecuted success. "
         "Waiting/paused goals permit conversation and amendments, never task start or resume. "
         "amend_goal uses scope, criteria, supplied source_event_id, reason and inflight_policy: "

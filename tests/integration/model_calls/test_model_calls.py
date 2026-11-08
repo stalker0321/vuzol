@@ -330,3 +330,51 @@ async def test_a_sandbox_left_behind_is_reaped_once_the_lease_is_gone(postgres_d
         async with factory() as session:
             process = await session.scalar(select(SupervisedProcess))
         assert process.reaped_at is not None
+
+
+async def test_a_node_lane_takes_only_its_profiles_and_reaps_only_its_sandboxes(
+    postgres_dsn, tmp_path
+):
+    """Owner 2026-11-08: the work runs on a node, the control plane stays here."""
+    configured, settings, registries = configuration(tmp_path)
+    async with _factory(postgres_dsn) as factory:
+        runtime, proxy = FakeRuntime(factory), FakeProxy()
+        transport = ModelCallSandboxTransport(
+            runtime, factory, settings, registries, proxy, node="gcp"
+        )
+        adapter = PiCliAdapter(transport)
+        bound = RoleBoundCliAdapter(adapter, adapter, adapter, adapter)
+        reachable = False
+
+        def node(profile_ids):
+            return ModelCallWorker(
+                factory,
+                registries.profiles,
+                lambda _id: bound,
+                owner="executor-1:model-call:gcp",
+                profile_ids=profile_ids,
+                ready=lambda: reachable,
+            )
+
+        async with factory.begin() as session:
+            await submit_call(
+                session,
+                purpose="p",
+                profile_id=configured.id,
+                system="s",
+                user="u",
+                output_schema={"type": "object"},
+                timeout_seconds=60,
+                wait_seconds=600,
+            )
+        assert not await node({configured.id}).process_one()  # the tunnel is down
+        reachable = True
+        assert not await node({"codex-a"}).process_one()  # not a profile it can run
+        proxy.cleanup_fails = True
+        assert await node({configured.id}).process_one()
+        async with factory() as session:
+            process = await session.scalar(select(SupervisedProcess))
+            assert process.runtime_metadata["node"] == "gcp"
+        proxy.cleanup_fails = False
+        assert await ModelCallReconciler(factory, runtime, proxy).reconcile() == 0
+        assert await ModelCallReconciler(factory, runtime, proxy, node="gcp").reconcile() == 1

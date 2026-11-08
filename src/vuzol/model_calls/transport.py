@@ -56,12 +56,15 @@ class ModelCallSandboxTransport:
         settings: Settings,
         registries: ConfigurationBundle,
         proxy_manager: ProxyServiceManager | None = None,
+        *,
+        node: str | None = None,
     ) -> None:
         self._runtime = runtime
         self._factory = factory
         self._settings = settings
         self._registries = registries
         self._proxy = proxy_manager
+        self._node = node
 
     async def run(
         self, invocation: CodexInvocation, cancellation: CancellationContext
@@ -321,6 +324,7 @@ class ModelCallSandboxTransport:
                     },
                     "runtime_envelope": envelope.model_dump(mode="json", exclude={"stdin"}),
                     "proxy_required": True,
+                    **({} if self._node is None else {"node": self._node}),
                 },
             )
             session.add(process)

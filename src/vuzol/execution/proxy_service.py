@@ -136,6 +136,13 @@ class ProxyServiceManager:
             )
             if await self._container_exists(name):
                 raise ProxyServiceError(f"proxy container name collision for {name}")
+            # Removal tolerates an absent container and also drops staged policy copies.
+            container_created = True
+            await self._stage_policy(
+                name,
+                policy_path,
+                _ownership_labels(task_id, run_id, step_id, lease_generation, **binding),
+            )
             await self._docker(
                 *self._create_argv(
                     name,
@@ -148,7 +155,6 @@ class ProxyServiceManager:
                     **binding,
                 )
             )
-            container_created = True
             await self._docker(
                 "network",
                 "connect",
@@ -635,7 +641,7 @@ class ProxyServiceManager:
             "--ulimit",
             "nofile=1024:1024",
             "--mount",
-            f"type=bind,src={policy_path},dst={POLICY_CONTAINER_PATH},readonly",
+            self._policy_mount(name, policy_path),
         ]
         for key in sorted(labels):
             argv.extend(("--label", f"{key}={labels[key]}"))
@@ -695,12 +701,20 @@ class ProxyServiceManager:
         mount = mounts[0]
         if (
             not isinstance(mount, dict)
-            or mount.get("Type") != "bind"
-            or Path(str(mount.get("Source"))) != policy_path
+            or not self._policy_mount_matches(mount, name, policy_path)
             or mount.get("Destination") != POLICY_CONTAINER_PATH
             or mount.get("RW") is not False
         ):
             raise ProxyServiceError("proxy policy mount is invalid")
+
+    def _policy_mount(self, name: str, policy_path: Path) -> str:
+        return f"type=bind,src={policy_path},dst={POLICY_CONTAINER_PATH},readonly"
+
+    def _policy_mount_matches(self, mount: dict[str, Any], name: str, policy_path: Path) -> bool:
+        return mount.get("Type") == "bind" and Path(str(mount.get("Source"))) == policy_path
+
+    async def _stage_policy(self, name: str, policy_path: Path, labels: dict[str, str]) -> None:
+        """A remote Docker host cannot see local files; see execution.node."""
 
     async def _wait_ready(self, name: str) -> None:
         command = (

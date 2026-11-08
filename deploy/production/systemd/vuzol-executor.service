@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=vuzol-executor
 Group=vuzol-executor
-StateDirectory=vuzol-proxy-runtime vuzol/dependency-environments
+StateDirectory=vuzol-proxy-runtime vuzol-proxy-runtime-nodes vuzol/dependency-environments
 StateDirectoryMode=0700
 ExecStartPre=/bin/sh -c " set -e;  SOCKET=\"$${VUZOL_EXECUTION__ROOTLESS_DOCKER_SOCKET:-}\";  if [ -z \"$$SOCKET\" ]; then SOCKET=\"/run/user/$$(id -u)/docker.sock\"; fi;  echo \"vuzol-executor: waiting for rootless Docker socket at $$SOCKET\";  for i in $$(seq 1 150); do [ -S \"$$SOCKET\" ] && exit 0; sleep 0.2; done;  echo 'timeout waiting for rootless docker socket' >&2; exit 1  "
 TimeoutStartSec=60

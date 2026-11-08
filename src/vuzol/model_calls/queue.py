@@ -7,6 +7,7 @@ a claimed leadership turn is for the lead's.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -72,7 +73,10 @@ async def submit_call(
     return call.id
 
 
-async def claim_call(session: AsyncSession, *, owner: str) -> ModelCallClaim | None:
+async def claim_call(
+    session: AsyncSession, *, owner: str, profile_ids: Collection[str] | None = None
+) -> ModelCallClaim | None:
+    """profile_ids narrows a lane, e.g. a node that can run only some profiles."""
     now = datetime.now(UTC)
     while True:
         call = await session.scalar(
@@ -81,7 +85,8 @@ async def claim_call(session: AsyncSession, *, owner: str) -> ModelCallClaim | N
                 or_(
                     ModelCall.state == "queued",
                     (ModelCall.state == "leased") & (ModelCall.lease_expires_at < now),
-                )
+                ),
+                *(() if profile_ids is None else (ModelCall.profile_id.in_(profile_ids),)),
             )
             .order_by(ModelCall.created_at)
             .limit(1)

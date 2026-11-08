@@ -403,6 +403,27 @@ class WorkflowSettings(BaseModel):
         return self
 
 
+class ExecutionNode(BaseModel):
+    """Another machine's rootless Docker, reached through a socket forwarded to this host.
+
+    Empty `execution.nodes` keeps every sandbox here. A node runs model calls of
+    read-only-state (pi) profiles; see vuzol.execution.node.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,30}$")
+    docker_socket: Path
+    model_call_parallelism: int = Field(default=1, ge=0, le=64)
+
+    @field_validator("docker_socket")
+    @classmethod
+    def absolute_socket(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("node Docker socket must be absolute")
+        return value
+
+
 class ExecutionSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -421,6 +442,7 @@ class ExecutionSettings(BaseModel):
     model_call_sandbox_profile: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     # Remote MCP servers a model call may use, and its sandbox may reach (name -> https URL).
     model_call_mcp_servers: dict[str, HttpUrl] = Field(default_factory=dict)
+    nodes: tuple[ExecutionNode, ...] = ()
     recovery_batch_size: int = Field(default=50, ge=1, le=1000)
     proxy_image: str | None = Field(
         default=None,
@@ -449,6 +471,9 @@ class ExecutionSettings(BaseModel):
             raise ValueError("sandbox seccomp path and digest must be configured together")
         if self.enabled and not configured:
             raise ValueError("enabled execution requires a pinned sandbox seccomp profile")
+        ids = [node.id for node in self.nodes]
+        if len(set(ids)) != len(ids):
+            raise ValueError("execution node ids must be unique")
         return self
 
 

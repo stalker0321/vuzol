@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,7 +18,7 @@ from vuzol.cli.worker import ProcessorChain
 from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
 from vuzol.config.models import SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
-from vuzol.config.settings import SubscriptionLimitSettings
+from vuzol.config.settings import ExecutionNode, Settings, SubscriptionLimitSettings
 from vuzol.execution.access import RootlessIdentityResolver, WorktreeAccessManager
 from vuzol.execution.artifact_production import (
     ArtifactProductionHandler,
@@ -68,6 +68,10 @@ VALIDATION_IMAGE_PREFLIGHT_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("python", "--version"),
     ("uv", "--version"),
 )
+
+
+# Kept apart from the local proxy root, whose recovery would claim these manifests.
+NODE_PROXY_RUNTIME_ROOT = Path("/var/lib/vuzol-proxy-runtime-nodes")
 
 
 class ExecutorLane(Protocol):
@@ -266,6 +270,9 @@ async def run() -> None:
         )
         call_reconciler = ModelCallReconciler(factory, sandbox_runtime, proxy_manager)
         await call_reconciler.reconcile()
+        node_calls = _node_model_calls(
+            settings, runtime.registries, factory, resolver, journal, proxy_manager
+        )
         adapters: dict[str, ProviderAdapter] = {}
         for profile in runtime.registries.profiles.items():
             if (
@@ -474,11 +481,25 @@ async def run() -> None:
             )
             if settings.execution.model_call_sandbox_profile is not None
             else ()
+        ) + tuple(
+            ModelCallWorker(
+                factory,
+                runtime.registries.profiles,
+                registry.get,
+                owner=f"{owner}:model-call:{node.id}",
+                profile_ids=frozenset(registry_ids),
+                ready=node_ready,
+            )
+            for node, registry, registry_ids, node_ready, _reaper in node_calls
+            for _ in range(node.model_call_parallelism)
         )
 
         async def recover_cli_resources() -> None:
             await turn_reconciler.reconcile_startup()
             await call_reconciler.reconcile()
+            for *_lane, reaper in node_calls:
+                with suppress(Exception):  # an unreachable node must not stop us
+                    await reaper.reconcile()
             if proxy_manager is not None:
                 await ProxyStartupReconciler(
                     factory, proxy_manager, owner=owner
@@ -504,6 +525,72 @@ async def run() -> None:
         )
     finally:
         await engine.dispose()
+
+
+def _node_model_calls(
+    settings: Settings,
+    registries: ConfigurationBundle,
+    factory: async_sessionmaker[AsyncSession],
+    resolver: ScopedSecretResolver,
+    journal: ExecutionJournal | None,
+    proxy_manager: ProxyServiceManager | None,
+) -> tuple[tuple[ExecutionNode, AdapterRegistry, tuple[str, ...], Callable[[], bool], Any], ...]:
+    """Model-call lanes on other machines' Docker; empty `execution.nodes` adds none.
+
+    A node runs pi profiles only: their provider state is read-only, so nothing
+    has to come back from the node (vuzol.execution.node).
+    """
+    from vuzol.execution.node import NodeDockerRuntime, NodeProxyServiceManager
+    from vuzol.model_calls.transport import ModelCallSandboxTransport
+    from vuzol.model_calls.worker import ModelCallReconciler
+
+    sandbox_id = settings.execution.model_call_sandbox_profile
+    proxy_image = settings.execution.proxy_image
+    if sandbox_id is None or proxy_manager is None or proxy_image is None:
+        return ()
+    helper_image = registries.sandboxes.get(sandbox_id).image
+    lanes = []
+    for node in settings.execution.nodes:
+        if node.model_call_parallelism == 0:
+            continue
+        local = settings.execution.rootless_docker_socket
+        node_runtime = NodeDockerRuntime(node.id, node.docker_socket, local, journal=journal)
+        node_proxy = NodeProxyServiceManager(
+            node.docker_socket,
+            local,
+            NODE_PROXY_RUNTIME_ROOT / node.id,
+            proxy_image,
+            helper_image=helper_image,
+        )
+        transport = ModelCallSandboxTransport(
+            node_runtime, factory, settings, registries, node_proxy, node=node.id
+        )
+        adapters: dict[str, ProviderAdapter] = {}
+        for profile in registries.profiles.items():
+            if (
+                profile.enabled
+                and profile.launch_mode is LaunchMode.CLI
+                and profile.provider == "pi"
+                and supported_profile(profile)
+            ):
+                base = cli_adapter(profile, transport)
+                adapters[profile.id] = RoleBoundCliAdapter(base, base, base, base)
+        if not adapters:
+            continue
+        registry = AdapterRegistry(
+            registries.profiles, resolver, adapters=adapters, session_factory=factory
+        )
+        socket = node.docker_socket
+        lanes.append(
+            (
+                node,
+                registry,
+                tuple(sorted(adapters)),
+                socket.is_socket,
+                ModelCallReconciler(factory, node_runtime, node_proxy, node=node.id),
+            )
+        )
+    return tuple(lanes)
 
 
 async def _refresh_topic_lines_tick(

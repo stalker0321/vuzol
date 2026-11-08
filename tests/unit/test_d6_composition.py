@@ -243,6 +243,9 @@ def test_ast_no_call_diagnostic_with_pinned_allowlist() -> None:
         "cli/opencode_usage_export.py",
         "execution/access.py",
         "execution/git.py",
+        # Fixed docker argv against the local and a node's rootless socket (tar
+        # helpers with no network), 120 s timeout then kill+reap.
+        "execution/node.py",
         "execution/proxy_networks.py",
         "execution/proxy_service.py",
         "execution/sandbox.py",

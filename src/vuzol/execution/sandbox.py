@@ -10,7 +10,7 @@ import stat
 import tarfile
 import time
 import uuid
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +87,7 @@ class RootlessDockerRuntime:
         self, envelope: ProcessEnvelope, cancellation: CancellationContext
     ) -> CodexProcessResult:
         name = envelope.container_name
-        argv = docker_run_argv(self._socket, name, envelope)
+        argv = self._run_argv(name, envelope)
         journal = self._journal.open(envelope) if self._journal is not None else None
         started = time.monotonic()
         try:
@@ -229,6 +229,9 @@ class RootlessDockerRuntime:
                 )
             ) from interrupted
         raise AssertionError("sandbox did not produce a result")
+
+    def _run_argv(self, name: str, envelope: ProcessEnvelope) -> tuple[str, ...]:
+        return docker_run_argv(self._socket, name, envelope)
 
     async def _stage_grok_diagnostics(
         self, name: str, envelope: ProcessEnvelope, stdout: str
@@ -553,7 +556,14 @@ async def _bounded_read(
     return b"".join(chunks)
 
 
-def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple[str, ...]:
+def docker_run_argv(
+    socket: Path,
+    name: str,
+    envelope: ProcessEnvelope,
+    *,
+    volumes: Mapping[int, tuple[str, str | None]] | None = None,
+) -> tuple[str, ...]:
+    """Volumes replace bind mounts by index: (volume name, subpath for a single file)."""
     spec = envelope.sandbox
     seccomp_profile = validate_seccomp_profile(spec.seccomp_profile, spec.seccomp_profile_sha256)
     arguments = [
@@ -606,7 +616,16 @@ def docker_run_argv(socket: Path, name: str, envelope: ProcessEnvelope) -> tuple
                 f"uid={spec.uid},gid={spec.gid},mode=0700",
             )
         )
-    for mount in spec.mounts:
+    for index, mount in enumerate(spec.mounts):
+        if volumes is not None:
+            volume, subpath = volumes[index]
+            mount_spec = f"type=volume,src={volume},dst={mount.target}"
+            if subpath is not None:
+                mount_spec += f",volume-subpath={subpath}"
+            if mount.mode is MountMode.READ_ONLY:
+                mount_spec += ",readonly"
+            arguments.extend(("--mount", mount_spec))
+            continue
         try:
             source = mount.source.resolve(strict=True)
         except OSError as error:

@@ -1,0 +1,28 @@
+# Managed by deploy/production. Do not add drop-ins; edit this file and redeploy.
+# One instance per execution node: systemctl enable --now vuzol-node-tunnel@<id>.
+# /etc/vuzol/nodes/<id>.env sets VUZOL_NODE_SSH (user@host), VUZOL_NODE_REMOTE_SOCKET
+# (the node's rootless Docker socket) and VUZOL_NODE_LOCAL_SOCKET (what
+# VUZOL_EXECUTION__NODES names as docker_socket). The node's authorized key allows
+# forwarding only.
+[Unit]
+Description=Vuzol execution node %i: its rootless Docker forwarded here over SSH
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vuzol-executor
+Group=vuzol-executor
+EnvironmentFile=/etc/vuzol/nodes/%i.env
+ExecStart=/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -L ${VUZOL_NODE_LOCAL_SOCKET}:${VUZOL_NODE_REMOTE_SOCKET} ${VUZOL_NODE_SSH}
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

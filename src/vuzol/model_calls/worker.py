@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import Any
 
 from sqlalchemy import select
@@ -42,15 +42,22 @@ class ModelCallWorker:
         adapter: Callable[[str], ProviderAdapter],
         *,
         owner: str,
+        profile_ids: Collection[str] | None = None,
+        ready: Callable[[], bool] = lambda: True,
     ) -> None:
         self._factory = factory
         self._profiles = profiles
         self._adapter = adapter
         self._owner = owner
+        # A node lane takes only the profiles it can run, and nothing while unreachable.
+        self._profile_ids = profile_ids
+        self._ready = ready
 
     async def process_one(self) -> bool:
+        if not self._ready():
+            return False
         async with self._factory.begin() as session:
-            claim = await claim_call(session, owner=self._owner)
+            claim = await claim_call(session, owner=self._owner, profile_ids=self._profile_ids)
         if claim is None:
             return False
         try:
@@ -99,10 +106,14 @@ class ModelCallReconciler:
         factory: async_sessionmaker[AsyncSession],
         runtime: SandboxRuntime,
         proxy: ProxyServiceManager | None,
+        *,
+        node: str | None = None,
     ) -> None:
         self._factory = factory
         self._runtime = runtime
         self._proxy = proxy
+        # Each Docker host reaps only the sandboxes it ran.
+        self._node = node
         self._ticket_cursor: uuid.UUID | None = None
 
     async def reconcile(self) -> int:
@@ -113,6 +124,11 @@ class ModelCallReconciler:
                     .where(
                         SupervisedProcess.model_call_id.is_not(None),
                         SupervisedProcess.reaped_at.is_(None),
+                        (
+                            SupervisedProcess.runtime_metadata["node"].astext.is_(None)
+                            if self._node is None
+                            else SupervisedProcess.runtime_metadata["node"].astext == self._node
+                        ),
                     )
                     .order_by(SupervisedProcess.created_at)
                     .limit(100)

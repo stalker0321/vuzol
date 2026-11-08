@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 from telegram import Bot, CallbackQuery, Update
 
 from tests.integration.leadership.test_managed_goal_flow import CHAT, OWNER, _factory
+from vuzol.assistant.research import Finding, Researcher
 from vuzol.assistant.schemas import Dispatch, Turn
 from vuzol.assistant.service import EDIT_LABEL, SEND_LABEL, AssistantWorker, ProjectRef
 from vuzol.config import Settings
@@ -143,7 +144,7 @@ async def drain(worker):
         await due()
 
 
-def worker_for(factory, model, *, search=None):
+def worker_for(factory, model, *, search=None, researcher=None):
     telegram, leads = Telegram(), Leads()
 
     async def read_link(url):
@@ -159,6 +160,7 @@ def worker_for(factory, model, *, search=None):
         clear_buttons=telegram.clear,
         search=search,
         read_link=read_link,
+        researcher=researcher,
     )
     return worker, telegram, leads
 
@@ -293,6 +295,32 @@ async def test_a_second_search_round_is_run_and_the_last_round_must_answer(postg
             "ChatGPT Business price per seat",
         ]
         assert [s["html"] for s in telegram.sent] == ["Plus 23 €, Business 29 € за место."]
+
+
+async def test_the_researcher_reads_the_web_and_the_assistant_gets_only_findings(postgres_dsn):
+    async def read_link(url):
+        return "x" * 50_000  # a long page reaches the researcher, never the assistant
+
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "сколько стоит перелёт в Барселону на выходных"))
+        cheap = FakeModel(
+            Finding(answer="ищу", searches=["Amsterdam Barcelona 14 Nov"]),
+            Finding(answer="Transavia от €84, 14 ноября.", sources=["https://example.com/flights"]),
+        )
+        model = FakeModel(
+            Turn(reply="Ищу.", research=["Цена AMS→BCN 14–15 ноября 2026"]),
+            Turn(reply="Transavia от €84."),
+        )
+        researcher = Researcher(cheap, Search(), read_link, rounds=2, per_round=5, timezone="UTC")
+        worker, telegram, _ = worker_for(factory, model, search=Search(), researcher=researcher)
+        await drain(worker)
+        assert cheap.calls[0] == {"question": "Цена AMS→BCN 14–15 ноября 2026", "searches_left": 2}
+        assert len(cheap.calls[1]["web"]["pages"][0]) == 15_000
+        assert [call["research_left"] for call in model.calls] == [2, 1]
+        (finding,) = model.calls[1]["research"]
+        assert finding["answer"] == "Transavia от €84, 14 ноября."
+        assert "web" not in model.calls[1]
+        assert [s["html"] for s in telegram.sent] == ["Transavia от €84."]
 
 
 def voice(number):

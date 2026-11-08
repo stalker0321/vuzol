@@ -20,6 +20,8 @@ class Turn(_Model):
     dispatches: list[Dispatch] = Field(default_factory=list, max_length=8)
     # Web searches to run before the final answer; empty when not needed.
     searches: list[str] = Field(default_factory=list, max_length=10)
+    # Questions for the web researcher, when one is configured; empty when not needed.
+    research: list[str] = Field(default_factory=list, max_length=4)
 
 
 TURN_PROMPT = (
@@ -37,6 +39,18 @@ TURN_PROMPT = (
     "- One message may hold tasks for several projects, or a task plus an errand.\n"
     "- Work that fits no project: say so and suggest a new project (you cannot create one yet).\n"
     "- Errands (find, compare, check dates, prices, quick facts): answer yourself in reply. "
+    "{lookup}\n"
+    "- Questions about the projects: answer from the projects data.\n"
+    "- When the conversation holds a plan with status editing or pending and the owner corrects "
+    "it, return the whole revised plan in dispatches.\n"
+    "- Unclear which project or what result: ask one short question in reply, no dispatches.\n"
+    "reply: Telegram text. With dispatches, say in a line or two what you propose; the plan is "
+    "shown under your reply, do not repeat it. Never say a task was sent: the owner sends the "
+    'plan with a button. No tables. Bold with **text**, bullets with "• ".'
+)
+
+
+SEARCH_LOOKUP = (
     "If you have a web search tool of your own, use it right away, open the pages you need and "
     "leave searches empty. Otherwise fill searches with up to {per_round} short web queries "
     "when the answer depends on facts you may not know or that change; you will then get the "
@@ -45,12 +59,16 @@ TURN_PROMPT = (
     "searches_left says how "
     "many more rounds you may ask for; at 0, or when the results suffice, leave searches empty "
     "and answer from what you have, saying what you could not find. While searches is filled "
-    "the reply is not shown, so never write a reply that promises to look something up later.\n"
-    "- Questions about the projects: answer from the projects data.\n"
-    "- When the conversation holds a plan with status editing or pending and the owner corrects "
-    "it, return the whole revised plan in dispatches.\n"
-    "- Unclear which project or what result: ask one short question in reply, no dispatches.\n"
-    "reply: Telegram text. With dispatches, say in a line or two what you propose; the plan is "
-    "shown under your reply, do not repeat it. Never say a task was sent: the owner sends the "
-    'plan with a button. No tables. Bold with **text**, bullets with "• ".'
+    "the reply is not shown, so never write a reply that promises to look something up later."
+)
+
+RESEARCH_LOOKUP = (
+    "When the answer depends on facts you may not know or that change, fill research with up to "
+    "3 self-contained questions (the researcher sees nothing else: say the dates, places and "
+    "what to compare). A web researcher searches, reads the pages and returns findings with "
+    "sources; you then answer again. Ask for exactly what you need and cross-check what matters. "
+    "research_left says how many more rounds you may ask for; at 0, or when the findings "
+    "suffice, leave research empty and answer from what you have, saying what could not be "
+    "found. While research is filled the reply is not shown, so never write a reply that "
+    "promises to look something up later. Leave searches empty."
 )

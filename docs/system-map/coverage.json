@@ -585,7 +585,7 @@
       "sources": [],
       "producers": [],
       "consumers": [
-        "src/vuzol/assistant/service.py:135"
+        "src/vuzol/assistant/service.py:139"
       ],
       "scenario": "assistant"
     },
@@ -827,7 +827,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:522"
+        "src/vuzol/cli/interpreter.py:546"
       ],
       "producers": [],
       "consumers": [],

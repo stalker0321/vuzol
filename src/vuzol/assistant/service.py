@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -16,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.assistant import ASSISTANT_DESTINATION
 from vuzol.assistant.ingress import schedule
-from vuzol.assistant.schemas import TURN_PROMPT, Turn
+from vuzol.assistant.research import Researcher, look_up
+from vuzol.assistant.schemas import RESEARCH_LOOKUP, SEARCH_LOOKUP, TURN_PROMPT, Turn
 from vuzol.config.settings import AssistantSettings
 from vuzol.inbox.fetch import describe_link
 from vuzol.inbox.model import InboxModel, ModelChain
@@ -115,6 +117,7 @@ class AssistantWorker:
         transcribe: Transcriber | None = None,
         search: WebSearch | None = None,
         read_link: LinkReader = describe_link,
+        researcher: Researcher | None = None,
         owner: str = "assistant",
     ) -> None:
         self._factory = factory
@@ -128,6 +131,7 @@ class AssistantWorker:
         self._transcribe = transcribe
         self._web = search
         self._read_link = read_link
+        self._researcher = researcher
         self._owner = f"assistant:{owner}"
 
     async def process_one(self) -> bool:
@@ -215,6 +219,8 @@ class AssistantWorker:
         await self._answer(entry, reply, dispatches, {k: v.name for k, v in refs.items()})
 
     async def _think(self, context: dict[str, Any]) -> Turn:
+        if self._researcher is not None:
+            return await self._think_with_research(context, self._researcher)
         searches: list[str] = []
         rounds = self._settings.search_rounds
         for round_ in range(rounds + 1):
@@ -232,6 +238,22 @@ class AssistantWorker:
             web = context.setdefault("web", {"searches": {}, "pages": []})
             web["searches"].update(found["searches"])
             web["pages"] += found["pages"]
+        raise AssertionError("unreachable")
+
+    async def _think_with_research(self, context: dict[str, Any], researcher: Researcher) -> Turn:
+        asked: list[str] = []
+        rounds = self._settings.research_rounds
+        for round_ in range(rounds + 1):
+            context["research_left"] = rounds - round_
+            turn = await self._model.ask(
+                Turn, system=self._prompt(), user=json.dumps(context, ensure_ascii=False)
+            )
+            fresh = [question for question in turn.research if question not in asked][:3]
+            if not fresh or round_ == rounds:
+                return turn
+            asked += fresh
+            findings = await asyncio.gather(*(researcher.run(question) for question in fresh))
+            context.setdefault("research", []).extend(findings)
         raise AssertionError("unreachable")
 
     async def _hear(self, entry: AssistantEntry, voice: dict[str, Any]) -> AssistantEntry:
@@ -307,18 +329,13 @@ class AssistantWorker:
 
     async def _look_up(self, queries: Sequence[str]) -> dict[str, Any]:
         assert self._web is not None
-        hits = {
-            query: await self._web.search(query)
-            for query in queries[: self._settings.searches_per_round]
-        }
-        seen: list[str] = []
-        for found in hits.values():
-            seen += [hit.url for hit in found[:2] if hit.url not in seen]
-        pages = [await self._read_link(url) for url in seen[:_PAGES]]
-        return {
-            "searches": {q: [hit.as_dict() for hit in found] for q, found in hits.items()},
-            "pages": [page[:_PAGE_CHARS] for page in pages],
-        }
+        return await look_up(
+            self._web,
+            self._read_link,
+            queries[: self._settings.searches_per_round],
+            pages=_PAGES,
+            page_chars=_PAGE_CHARS,
+        )
 
     async def _answer(
         self,
@@ -488,10 +505,13 @@ class AssistantWorker:
 
     def _prompt(self) -> str:
         now = datetime.now(ZoneInfo(self._settings.timezone))
+        lookup = (
+            RESEARCH_LOOKUP
+            if self._researcher is not None
+            else SEARCH_LOOKUP.format(per_round=self._settings.searches_per_round)
+        )
         return TURN_PROMPT.format(
-            tz=self._settings.timezone,
-            now=now.isoformat(timespec="minutes"),
-            per_round=self._settings.searches_per_round,
+            tz=self._settings.timezone, now=now.isoformat(timespec="minutes"), lookup=lookup
         )
 
 

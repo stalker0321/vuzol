@@ -20,6 +20,7 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
+from vuzol.assistant.research import Researcher
 from vuzol.assistant.service import AssistantWorker, ProjectRef
 from vuzol.config import (
     ConfigurationBundle,
@@ -29,6 +30,7 @@ from vuzol.config import (
 )
 from vuzol.config.models import LaunchMode, TopicKind
 from vuzol.experiments.canary import canary_policy_from_settings
+from vuzol.inbox.fetch import describe_link
 from vuzol.inbox.model import ChatModel, InboxModel, ModelChain
 from vuzol.inbox.search import WebSearch
 from vuzol.inbox.service import InboxWorker
@@ -269,6 +271,31 @@ def build_assistant_worker(
         return result.transcript
 
     inbox = runtime.settings.inbox
+    web = (
+        WebSearch(brave_key_file=inbox.brave_key_file, searxng_url=inbox.searxng_url)
+        if inbox.brave_key_file or inbox.searxng_url
+        else None
+    )
+    researcher = None
+    if web is not None and config.research_profile_ids:
+        first, *rest = config.research_profile_ids
+        researcher = Researcher(
+            build_model_chain(
+                runtime,
+                resolver,
+                profile_id=first,
+                fallback_profile_ids=tuple(rest),
+                org_ids=config.opencode_org_ids,
+                timeout_seconds=config.timeout_seconds,
+                factory=factory,
+                purpose="assistant_research",
+            ),
+            web,
+            describe_link,
+            rounds=config.search_rounds,
+            per_round=config.searches_per_round,
+            timezone=config.timezone,
+        )
     return AssistantWorker(
         factory,
         config,
@@ -281,7 +308,7 @@ def build_assistant_worker(
             timeout_seconds=config.timeout_seconds,
             factory=factory,
             purpose="assistant_turn",
-            web_search=True,
+            web_search=config.native_search,
         ),
         projects=projects,
         submit=submit,
@@ -289,11 +316,8 @@ def build_assistant_worker(
         clear_buttons=clear_buttons,
         download=client.download,
         transcribe=transcribe if transcriber is not None else None,
-        search=(
-            WebSearch(brave_key_file=inbox.brave_key_file, searxng_url=inbox.searxng_url)
-            if inbox.brave_key_file or inbox.searxng_url
-            else None
-        ),
+        search=web,
+        researcher=researcher,
         owner=owner,
     )
 

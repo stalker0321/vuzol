@@ -612,6 +612,13 @@ class AssistantSettings(BaseModel):
     # Owner 2026-11-03: this topic is for real research, let it search.
     search_rounds: int = Field(default=5, ge=0, le=10)
     searches_per_round: int = Field(default=5, ge=1, le=10)
+    # Owner 2026-11-08: a cheap model reads the web and the assistant gets its summary.
+    # Empty: the assistant searches itself. Rounds of questions the assistant may ask it;
+    # each question gets search_rounds of searching.
+    research_profile_ids: tuple[str, ...] = ()
+    research_rounds: int = Field(default=2, ge=0, le=5)
+    # The assistant model's own web search (Codex), which reads everything at its price.
+    native_search: bool = False
     timezone: str = "Europe/Amsterdam"
     timeout_seconds: float = Field(default=180, ge=5, le=900)
 

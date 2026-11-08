@@ -585,7 +585,7 @@
       "sources": [],
       "producers": [],
       "consumers": [
-        "src/vuzol/assistant/service.py:139"
+        "src/vuzol/assistant/service.py:159"
       ],
       "scenario": "assistant"
     },
@@ -827,7 +827,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:546"
+        "src/vuzol/cli/interpreter.py:552"
       ],
       "producers": [],
       "consumers": [],
@@ -895,6 +895,15 @@
       "producers": [],
       "consumers": [],
       "scenario": "project"
+    },
+    {
+      "id": "module:vuzol.cli.project_setup",
+      "sources": [
+        "src/vuzol/cli/project_setup.py:41"
+      ],
+      "producers": [],
+      "consumers": [],
+      "scenario": "assistant"
     },
     {
       "id": "module:vuzol.cli.retention",
@@ -1038,6 +1047,17 @@
         "src/vuzol/projects/provisioning.py:296"
       ],
       "scenario": "project"
+    },
+    {
+      "id": "outbox:project_setup",
+      "sources": [],
+      "producers": [
+        "src/vuzol/projects/setup.py:383"
+      ],
+      "consumers": [
+        "src/vuzol/projects/setup.py:179"
+      ],
+      "scenario": "assistant"
     },
     {
       "id": "outbox:subscription_limits",

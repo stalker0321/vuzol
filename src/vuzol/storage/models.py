@@ -2241,6 +2241,8 @@ class AssistantEntry(IdentityMixin, Base):
     dispatches: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     # pending | sent | editing | superseded; null for a turn without dispatches.
     plan_status: Mapped[str | None] = mapped_column(String(12))
+    # A project the plan creates: the proposal, then its topic and setup state.
+    new_project: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

@@ -593,6 +593,33 @@ class InboxSettings(BaseModel):
         return self
 
 
+class ProjectSetupSettings(BaseModel):
+    """Owner 2026-11-08: the assistant creates projects; a root host unit does the setup."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    # A new project copies this project's sandbox, network, delivery and model choices.
+    template_project_id: str = Field(default="diplom", pattern=r"^[a-z][a-z0-9_-]*$")
+    # What caches the registry and must restart to see the new project.
+    systemd_units: tuple[str, ...] = (
+        "vuzol-executor.service",
+        "vuzol-applier.service",
+        "vuzol-static-publisher-worker.service",
+    )
+    compose_services: tuple[str, ...] = (
+        "interpreter",
+        "telegram-ingress",
+        "telegram-delivery",
+        "worker",
+        "memory-writer",
+        "mcp",
+    )
+    compose_command: tuple[str, ...] = ("/usr/local/bin/vuzol-compose",)
+    # Running work gets this long to finish before the restart.
+    idle_wait_seconds: int = Field(default=900, ge=0, le=7200)
+
+
 class AssistantSettings(BaseModel):
     """Owner 2026-11-02: a master topic that takes errands and hands tasks to project leads."""
 
@@ -681,6 +708,7 @@ class Settings(BaseSettings):
     chat: ChatSettings = ChatSettings()
     inbox: InboxSettings = InboxSettings()
     assistant: AssistantSettings = AssistantSettings()
+    project_setup: ProjectSetupSettings = ProjectSetupSettings()
     # J5 canary: at most one Jev decision kind in a small deterministic cohort.
     # Empty means disabled (the default); the kill switch freezes kinds.
     jev_enabled_kinds: tuple[str, ...] = ()

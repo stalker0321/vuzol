@@ -15,6 +15,16 @@ class Dispatch(_Model):
     request: str = Field(min_length=1, max_length=6000)
 
 
+class NewProject(_Model):
+    # Latin slug: the repository directory and the registry id.
+    project_id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,39}$")
+    # The Telegram topic name.
+    name: str = Field(min_length=1, max_length=60)
+    description: str = Field(min_length=1, max_length=1000)
+    # The first task for the new project's lead, when the owner gave one.
+    first_request: str | None = Field(default=None, max_length=6000)
+
+
 class Turn(_Model):
     reply: str = Field(min_length=1, max_length=3500)
     dispatches: list[Dispatch] = Field(default_factory=list, max_length=8)
@@ -22,6 +32,8 @@ class Turn(_Model):
     searches: list[str] = Field(default_factory=list, max_length=10)
     # Questions for the web researcher, when one is configured; empty when not needed.
     research: list[str] = Field(default_factory=list, max_length=4)
+    # A project to create on the owner's button.
+    new_project: NewProject | None = None
 
 
 TURN_PROMPT = (
@@ -37,7 +49,10 @@ TURN_PROMPT = (
     "voice: what to do, the context from this conversation the lead lacks, the expected "
     "result. Do not plan the work in detail: the lead plans. Do not invent requirements.\n"
     "- One message may hold tasks for several projects, or a task plus an errand.\n"
-    "- Work that fits no project: say so and suggest a new project (you cannot create one yet).\n"
+    "- Work that fits no project, or the owner asks for a new project: fill new_project. "
+    "project_id is a short latin slug not in the projects list, name the Russian topic name, "
+    "description what the project is for, first_request the first task for its lead when the "
+    "owner gave one. The owner creates it with the same button as a plan.\n"
     "- Errands (find, compare, check dates, prices, quick facts): answer yourself in reply. "
     "{lookup}\n"
     "- Questions about the projects: answer from the projects data.\n"

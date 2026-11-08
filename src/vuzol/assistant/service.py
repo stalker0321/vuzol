@@ -74,6 +74,10 @@ class Submitter(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class TopicCreator(Protocol):
+    async def __call__(self, *, chat_id: int, name: str) -> int: ...
+
+
 Downloader = Callable[[str], Awaitable[bytes]]
 Transcriber = Callable[[bytes, str], Awaitable[str]]
 LinkReader = Callable[[str], Awaitable[str]]
@@ -89,8 +93,22 @@ def plan_buttons(entry_id: uuid.UUID) -> Buttons:
     return [[[SEND_LABEL, f"as:s:{entry_id.hex}"], [EDIT_LABEL, f"as:e:{entry_id.hex}"]]]
 
 
-def plan_html(reply: str, dispatches: Sequence[dict[str, Any]], names: dict[str, str]) -> str:
+def plan_html(
+    reply: str,
+    dispatches: Sequence[dict[str, Any]],
+    names: dict[str, str],
+    new_project: dict[str, Any] | None = None,
+) -> str:
     lines = [answer_html(reply)]
+    if new_project:
+        lines.append(
+            f"\n🆕 <b>Новый проект: {escape(new_project['name'])}</b> "
+            f"(<code>{escape(new_project['project_id'])}</code>)\n"
+            f"{escape(new_project['description'])}"
+        )
+        if new_project.get("first_request"):
+            first = str(new_project["first_request"])
+            lines.append(f"<b>Первая задача:</b> {escape(first[:600])}")
     if dispatches:
         lines.append("\n📋 <b>План</b>")
         for dispatch in dispatches:
@@ -118,6 +136,7 @@ class AssistantWorker:
         search: WebSearch | None = None,
         read_link: LinkReader = describe_link,
         researcher: Researcher | None = None,
+        create_topic: TopicCreator | None = None,
         owner: str = "assistant",
     ) -> None:
         self._factory = factory
@@ -132,6 +151,7 @@ class AssistantWorker:
         self._web = search
         self._read_link = read_link
         self._researcher = researcher
+        self._create_topic = create_topic
         self._owner = f"assistant:{owner}"
 
     async def process_one(self) -> bool:
@@ -158,6 +178,10 @@ class AssistantWorker:
                 await self._turn(payload, final=attempts >= _ATTEMPTS)
             elif operation == "button":
                 await self._button(payload)
+            elif operation == "project_ready":
+                await self._project_ready(payload)
+            elif operation == "project_failed":
+                await self._project_failed(payload)
             elif operation == "reply":
                 await self._reply(payload)
             else:
@@ -216,7 +240,19 @@ class AssistantWorker:
         reply = turn.reply
         if unknown:
             reply += "\n\nНе нашёл проекты: " + ", ".join(unknown)
-        await self._answer(entry, reply, dispatches, {k: v.name for k, v in refs.items()})
+        new_project = turn.new_project.model_dump() if turn.new_project else None
+        if new_project is not None and (
+            self._create_topic is None or new_project["project_id"] in refs
+        ):
+            reply += (
+                "\n\nПроект с таким id уже есть."
+                if self._create_topic is not None
+                else "\n\nСоздавать проекты отсюда пока нельзя."
+            )
+            new_project = None
+        await self._answer(
+            entry, reply, dispatches, {k: v.name for k, v in refs.items()}, new_project
+        )
 
     async def _think(self, context: dict[str, Any]) -> Turn:
         if self._researcher is not None:
@@ -343,9 +379,11 @@ class AssistantWorker:
         reply: str,
         dispatches: list[dict[str, Any]],
         names: dict[str, str],
+        new_project: dict[str, Any] | None = None,
     ) -> None:
+        planned = bool(dispatches or new_project)
         async with self._factory.begin() as session:
-            if dispatches:
+            if planned:
                 # A new plan replaces any plan still waiting for the owner.
                 for old in await session.scalars(
                     select(AssistantEntry).where(
@@ -369,7 +407,8 @@ class AssistantWorker:
                 role="assistant",
                 body=reply,
                 dispatches=dispatches,
-                plan_status="pending" if dispatches else None,
+                plan_status="pending" if planned else None,
+                new_project=new_project,
             )
             session.add(answer)
             await session.flush()
@@ -380,9 +419,9 @@ class AssistantWorker:
                 payload={
                     "chat_id": entry.chat_id,
                     "thread_id": entry.message_thread_id,
-                    "html": plan_html(reply, dispatches, names),
+                    "html": plan_html(reply, dispatches, names, new_project),
                     "reply_to": entry.telegram_message_id,
-                    "buttons": plan_buttons(answer.id) if dispatches else [],
+                    "buttons": plan_buttons(answer.id) if planned else [],
                     "entry_id": str(answer.id),
                 },
             )
@@ -411,6 +450,7 @@ class AssistantWorker:
                 async with self._factory.begin() as write:
                     await self._say(write, entry, "Этот план уже не актуален.", key="stale")
                 return
+            project = dict(entry.new_project) if entry.new_project else None
             sessions = {
                 row.project_id: row.id
                 for row in await session.scalars(
@@ -429,6 +469,18 @@ class AssistantWorker:
         names = {ref.project_id: ref.name for ref in self._projects()}
         sent: list[str] = []
         failed: list[str] = []
+        creating = False
+        if project is not None and project.get("state") is None:
+            try:
+                await self._create_project(entry, project, user_id)
+                creating = True
+            except Exception as error:  # the plan's other lines still go out
+                _LOG.warning(
+                    "project creation failed",
+                    extra={"event": "assistant.project_failed", "error": type(error).__name__},
+                    exc_info=True,
+                )
+                failed.append(f"проект «{project['name']}» ({type(error).__name__})")
         for index, dispatch in enumerate(entry.dispatches):
             project_id = dispatch["project_id"]
             name = names.get(project_id, project_id)
@@ -453,15 +505,19 @@ class AssistantWorker:
             else:
                 failed.append(f"{name} ({result.get('reason') or result.get('status')})")
         lines = []
+        if creating:
+            assert project is not None
+            lines.append(f"🛠 Создаю проект «{project['name']}»: топик есть, остальное пара минут.")
         if sent:
             lines.append("🚀 Отправил: " + ", ".join(sent))
         if failed:
             lines.append("⚠️ Не отправил: " + ", ".join(failed))
+        done = bool(sent) or creating
         async with self._factory.begin() as session:
             stored = await session.get(AssistantEntry, entry_id, with_for_update=True)
             assert stored is not None
-            stored.plan_status = "sent" if sent else "pending"
-            if stored.telegram_message_id is not None and sent:
+            stored.plan_status = "sent" if done else "pending"
+            if stored.telegram_message_id is not None and done:
                 await schedule(
                     session,
                     operation="reply",
@@ -469,6 +525,89 @@ class AssistantWorker:
                     payload={"clear": stored.telegram_message_id, "chat_id": stored.chat_id},
                 )
             await self._say(session, stored, "\n".join(lines) or "Нечего отправлять.", key="sent")
+
+    async def _create_project(
+        self, entry: AssistantEntry, project: dict[str, Any], user_id: int
+    ) -> None:
+        from vuzol.projects.setup import SetupRequest, queue_setup
+
+        assert self._create_topic is not None
+        name = " ".join(str(project["name"]).split())
+        if project.get("thread_id") is None:
+            project["thread_id"] = await self._create_topic(chat_id=entry.chat_id, name=name)
+        project.update(state="creating", user_id=user_id)
+        async with self._factory.begin() as session:
+            stored = await session.get(AssistantEntry, entry.id, with_for_update=True)
+            assert stored is not None
+            stored.new_project = project
+            await queue_setup(
+                session,
+                SetupRequest(
+                    entry_id=entry.id,
+                    project_id=project["project_id"],
+                    name=name,
+                    description=project["description"],
+                    chat_id=entry.chat_id,
+                    thread_id=project["thread_id"],
+                ),
+            )
+
+    async def _project_ready(self, payload: dict[str, Any]) -> None:
+        entry_id = uuid.UUID(payload["entry_id"])
+        async with self._factory() as session:
+            entry = await session.get(AssistantEntry, entry_id)
+            if entry is None or not entry.new_project:
+                return
+            project = dict(entry.new_project)
+            discussion = await session.scalar(
+                select(ProjectDiscussionSession.id).where(
+                    ProjectDiscussionSession.project_id == project["project_id"],
+                    ProjectDiscussionSession.status == DiscussionSessionStatus.ACTIVE,
+                )
+            )
+        if project.get("state") == "ready":
+            return
+        name, thread_id = project["name"], int(project["thread_id"])
+        await self._send(
+            chat_id=entry.chat_id,
+            thread_id=thread_id,
+            html=f"👋 Топик проекта «{escape(name)}». Пиши сюда задачи: их берёт лид проекта.",
+            reply_to=None,
+            buttons=[],
+        )
+        lines = [f"✅ Создал проект «{name}»: {topic_link(entry.chat_id, thread_id)}"]
+        if project.get("first_request") and discussion is not None:
+            try:
+                result = await self._submit(
+                    user_id=int(project["user_id"]),
+                    project_id=project["project_id"],
+                    session_id=discussion,
+                    request_id=uuid.uuid5(entry_id, "first-request"),
+                    text=project["first_request"],
+                )
+                ok = result.get("status") in ("accepted", "duplicate")
+            except (PermissionError, ValueError):
+                ok = False
+            lines.append(
+                "🚀 Отправил первую задачу лиду." if ok else "⚠️ Первую задачу не отправил."
+            )
+        async with self._factory.begin() as session:
+            stored = await session.get(AssistantEntry, entry_id, with_for_update=True)
+            assert stored is not None
+            stored.new_project = {**project, "state": "ready"}
+            await self._say(session, stored, "\n".join(lines), key="project-ready")
+
+    async def _project_failed(self, payload: dict[str, Any]) -> None:
+        async with self._factory.begin() as session:
+            entry = await session.get(
+                AssistantEntry, uuid.UUID(payload["entry_id"]), with_for_update=True
+            )
+            if entry is None or not entry.new_project:
+                return
+            entry.new_project = {**entry.new_project, "state": "failed"}
+            reason = payload.get("reason", "ошибка")
+            text = f"⚠️ Не получилось создать проект «{entry.new_project['name']}» ({reason})."
+            await self._say(session, entry, text, key="project-failed")
 
     async def _say(self, session: AsyncSession, entry: AssistantEntry, text: str, key: str) -> None:
         await schedule(
@@ -513,6 +652,12 @@ class AssistantWorker:
         return TURN_PROMPT.format(
             tz=self._settings.timezone, now=now.isoformat(timespec="minutes"), lookup=lookup
         )
+
+
+def topic_link(chat_id: int, thread_id: int) -> str:
+    """A t.me link to a forum topic of a supergroup."""
+    internal = str(chat_id).removeprefix("-100")
+    return f"https://t.me/c/{internal}/{thread_id}"
 
 
 def _goal_view(goal: ManagedGoal | None) -> dict[str, Any] | None:

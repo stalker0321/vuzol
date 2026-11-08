@@ -252,6 +252,10 @@ def build_assistant_worker(
         )
         return message.message_id
 
+    async def create_topic(*, chat_id: int, name: str) -> int:
+        topic = await bot.create_forum_topic(chat_id=chat_id, name=name)
+        return topic.message_thread_id
+
     async def clear_buttons(*, chat_id: int, message_id: int) -> None:
         with suppress(TelegramError):  # already cleared or too old to edit
             await bot.edit_message_reply_markup(
@@ -318,6 +322,8 @@ def build_assistant_worker(
         transcribe=transcribe if transcriber is not None else None,
         search=web,
         researcher=researcher,
+        # The root host unit does the rest; without it the button would hang.
+        create_topic=create_topic if runtime.settings.project_setup.enabled else None,
         owner=owner,
     )
 

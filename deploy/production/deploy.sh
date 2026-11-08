@@ -7,7 +7,7 @@ set -eu
 REPO=${VUZOL_SOURCE_REPO:-/srv/vuzol/repo}
 UV=${UV:-/usr/local/bin/uv}
 RELEASES=/opt/vuzol/releases
-UNITS="vuzol-executor.service vuzol-applier.service vuzol-static-publisher-worker.service"
+UNITS="vuzol-executor.service vuzol-applier.service vuzol-static-publisher-worker.service vuzol-project-setup.service"
 TIMERS="vuzol-opencode-usage.timer vuzol-backup.timer vuzol-retention.timer"
 KEEP=3
 
@@ -58,6 +58,7 @@ install -m 0644 "$REL"/deploy/production/systemd/*.service "$REL"/deploy/product
   /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --quiet --now $TIMERS
+systemctl enable --quiet $UNITS
 /usr/local/bin/vuzol-compose up -d --remove-orphans --wait postgres
 /usr/local/bin/vuzol-compose up -d --remove-orphans
 systemctl restart $UNITS

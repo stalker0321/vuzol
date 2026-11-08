@@ -1,0 +1,33 @@
+# Managed by deploy/production. Do not add drop-ins; edit this file and redeploy.
+[Unit]
+Description=Vuzol project setup for projects the owner approved in the assistant topic
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root: it writes the registry, hands the repository to the executor and restarts services.
+User=root
+EnvironmentFile=/etc/vuzol/vuzol.env
+EnvironmentFile=-/etc/vuzol/project-setup.env
+EnvironmentFile=/etc/vuzol/secrets.env
+# Retries run git on a repository already handed to vuzol-executor.
+Environment=GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=*
+# docker compose may write client state; home is read-only here.
+Environment=DOCKER_CONFIG=/tmp/docker HOME=/tmp
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictRealtime=true
+ReadWritePaths=/srv/vuzol/repositories /var/lib/vuzol/registry
+WorkingDirectory=/opt/vuzol/current
+ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.project_setup
+
+[Install]
+WantedBy=multi-user.target

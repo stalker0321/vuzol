@@ -5,7 +5,7 @@ Everything that runs in production is described here and nowhere else:
 - `compose.yaml` — containers: postgres, telegram-ingress, telegram-delivery, interpreter,
   memory-writer, worker, mcp.
 - `systemd/` — host services: executor (rootless Docker sandboxes), applier, static publisher,
-  OpenCode usage timer.
+  project setup, OpenCode usage timer.
 - `deploy.sh` — installs one commit and switches production to it.
 - `vuzol-compose` — `docker compose` with the production files and env (installed to
   `/usr/local/bin`).
@@ -39,6 +39,14 @@ commit. Migrations are not downgraded, so they must stay compatible with the pre
   `sudo vuzol-compose run --rm --no-deps -T worker python -c "from vuzol.config import
   get_runtime_configuration as g; g(validate_profile_credentials=False)"`, then recreate the
   containers and restart the host services.
+- Projects created from the assistant topic: `vuzol-project-setup` (root) appends the
+  project and its topic to the account-profiles overlay, copied from
+  `VUZOL_PROJECT_SETUP__TEMPLATE_PROJECT_ID`. It keeps the file's owner and mode. It creates
+  the repository as the repository root's owner, maps the topic and copies the template's
+  model choices, then restarts the services that cache the registry once work is idle.
+  `VUZOL_PROJECT_SETUP__ENABLED=true` goes in `/etc/vuzol/vuzol.env` (the unit) and as
+  `VUZOL_PROJECT_SETUP_ENABLED=true` in `/srv/vuzol/.env` (the assistant's button). Without
+  both, the unit idles and the assistant does not offer to create projects.
 - A Codex account for Vuzol gets its own state directory
   `/var/lib/vuzol-provider-state/<id>` (owner `110000`, mode `0710`, ACL
   `u:vuzol-executor:--x`, `auth.json` `110000:vuzol-executor 0640`) and a unique

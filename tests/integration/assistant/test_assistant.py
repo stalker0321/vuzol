@@ -9,13 +9,15 @@ from sqlalchemy import select, update
 from telegram import Bot, CallbackQuery, Update
 
 from tests.integration.leadership.test_managed_goal_flow import CHAT, OWNER, _factory
+from vuzol.assistant.ingress import schedule
 from vuzol.assistant.research import Finding, Researcher
-from vuzol.assistant.schemas import Dispatch, Turn
+from vuzol.assistant.schemas import Dispatch, NewProject, Turn
 from vuzol.assistant.service import EDIT_LABEL, SEND_LABEL, AssistantWorker, ProjectRef
 from vuzol.config import Settings
 from vuzol.config.settings import AssistantSettings
 from vuzol.inbox.search import Hit
 from vuzol.storage.models import AssistantEntry, ProjectDiscussionSession, TransactionalOutbox
+from vuzol.storage.repositories.discussion import DiscussionRepository
 from vuzol.storage.types import DiscussionSessionStatus
 from vuzol.telegram.durable_ingress import DurableTelegramIngress
 
@@ -144,7 +146,7 @@ async def drain(worker):
         await due()
 
 
-def worker_for(factory, model, *, search=None, researcher=None):
+def worker_for(factory, model, *, search=None, researcher=None, create_topic=None):
     telegram, leads = Telegram(), Leads()
 
     async def read_link(url):
@@ -161,6 +163,7 @@ def worker_for(factory, model, *, search=None, researcher=None):
         search=search,
         read_link=read_link,
         researcher=researcher,
+        create_topic=create_topic,
     )
     return worker, telegram, leads
 
@@ -220,6 +223,64 @@ async def test_plan_is_sent_to_project_leads_only_on_the_button(postgres_dsn, mo
         assert "🚀 Отправил: Диплом, Сайт" in telegram.sent[1]["html"]
         assert "уже не актуален" in telegram.sent[2]["html"]
         assert telegram.cleared == [9001]
+
+
+async def test_a_new_project_is_created_on_the_button_and_gets_its_first_task(
+    postgres_dsn, monkeypatch
+):
+    monkeypatch.setattr(CallbackQuery, "answer", AsyncMock())
+    topics = []
+
+    async def create_topic(*, chat_id, name):
+        topics.append((chat_id, name))
+        return 2001
+
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "заведи проект под марафон и составь план тренировок"))
+        model = FakeModel(
+            Turn(
+                reply="Заведу проект.",
+                new_project=NewProject(
+                    project_id="marathon",
+                    name="Марафон",
+                    description="Подготовка к весеннему марафону.",
+                    first_request="Составь план тренировок на 12 недель.",
+                ),
+            )
+        )
+        worker, telegram, leads = worker_for(factory, model, create_topic=create_topic)
+        await drain(worker)
+        plan = telegram.sent[0]
+        assert "🆕 <b>Новый проект: Марафон</b>" in plan["html"] and plan["buttons"]
+
+        async with factory() as session:
+            entry = await session.scalar(
+                select(AssistantEntry).where(AssistantEntry.role == "assistant")
+            )
+        await admit(factory, press(2, "s", entry.id))
+        await drain(worker)
+        assert topics == [(CHAT, "Марафон")]
+        assert "🛠 Создаю проект «Марафон»" in telegram.sent[1]["html"]
+        async with factory.begin() as session:
+            setup = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.destination == "project_setup"
+                )
+            )
+            assert setup.payload["thread_id"] == 2001 and setup.payload["project_id"] == "marathon"
+            # What the host unit leaves behind once the project exists.
+            await DiscussionRepository(session).create_session(
+                project_id="marathon", chat_id=CHAT, message_thread_id=2001
+            )
+            await schedule(session, operation="project_ready", key="ready", payload=setup.payload)
+        await drain(worker)
+        welcome = telegram.sent[2]
+        assert welcome["thread"] == 2001 and "Марафон" in welcome["html"]
+        assert [(p, t) for p, _, t in leads.calls] == [
+            ("marathon", "Составь план тренировок на 12 недель.")
+        ]
+        assert "✅ Создал проект «Марафон»" in telegram.sent[3]["html"]
+        assert "https://t.me/c/" in telegram.sent[3]["html"]
 
 
 async def test_edit_button_then_correction_replaces_the_plan(postgres_dsn, monkeypatch):

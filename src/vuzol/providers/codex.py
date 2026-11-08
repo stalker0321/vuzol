@@ -48,6 +48,7 @@ def canonical_codex_argv(
     model: str | None = None,
     reasoning_effort: str | None = None,
     read_only: bool = False,
+    web_search: bool = False,
 ) -> tuple[str, ...]:
     """Return the only Codex command accepted by the production sandbox transport.
 
@@ -77,6 +78,9 @@ def canonical_codex_argv(
         args.extend(["--model", resolved_model])
     if isinstance(reasoning_effort, str) and reasoning_effort.strip():
         args.extend(["--config", f'model_reasoning_effort="{reasoning_effort.strip()}"'])
+    if web_search:
+        # Runs on OpenAI's side: no egress beyond the Codex runtime itself.
+        args.extend(["--config", 'web_search="live"'])
     args.extend(
         [
             "--config",
@@ -145,6 +149,7 @@ class CodexCliAdapter:
                 model=profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
                 read_only=Capability.CODE_EDIT not in request.required_capabilities,
+                web_search=request.web_search,
             ),
             stdin=json.dumps(envelope, ensure_ascii=False),
             runtime_identity=profile.runtime_identity,

@@ -311,6 +311,55 @@ def test_only_readers_skip_the_git_repository_check() -> None:
 
 
 @pytest.mark.anyio
+async def test_live_web_search_reaches_the_command_and_only_when_asked(tmp_path: Path) -> None:
+    from vuzol.execution.codex import _require_provider_command
+    from vuzol.providers.codex import canonical_codex_argv
+
+    seen: list[tuple[str, ...]] = []
+
+    class Transport:
+        async def run(
+            self, invocation: CodexInvocation, cancellation: CancellationContext
+        ) -> CodexProcessResult:
+            seen.append(invocation.argv)
+            events = (
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+                {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+            )
+            return CodexProcessResult(0, "\n".join(map(json.dumps, events)), "", 1)
+
+    configured = profile(
+        "codex-a",
+        provider="codex",
+        api_base_url=None,
+        launch_mode=LaunchMode.CLI,
+        credential_reference=None,
+        credential_required=False,
+        runtime_identity="codex-a",
+        state_directory=tmp_path / "codex-a",
+    )
+    for web_search in (True, False):
+        await CodexCliAdapter(Transport()).execute(
+            provider_request().model_copy(
+                update={
+                    "sandbox_reference": "model-call:x",
+                    "web_search": web_search,
+                    "output_json_schema": None,
+                }
+            ),
+            configured,
+            CancellationContext(),
+        )
+    searching, plain = seen
+    assert 'web_search="live"' in searching and 'web_search="live"' not in plain
+    model = configured.model
+    _require_provider_command(searching, "codex", model, web_search=True)
+    with pytest.raises(ValueError):  # the sandbox refuses a search the call did not ask for
+        _require_provider_command(searching, "codex", model)
+    assert canonical_codex_argv(web_search=True) != canonical_codex_argv()
+
+
+@pytest.mark.anyio
 async def test_codex_usage_limit_is_quota_exhausted_not_unavailable(tmp_path: Path) -> None:
     """Live 2026-10-30: a subscription limit read as "provider unavailable"."""
     limit = (

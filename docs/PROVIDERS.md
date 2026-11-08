@@ -286,6 +286,14 @@ refuses any stdin but the frozen call. A failed call is settled, not retried, so
 fall back to its next profile. The executor leases a row again only when the owner died. Leftover
 sandboxes are reaped once no launcher holds them and the lease is gone. Without a sandbox profile
 the lanes do not start, and a CLI profile there waits until the call's deadline.
+A call may ask for the provider's own live web search. For Codex that is `web_search="live"`:
+the search runs on OpenAI's side, so it needs no egress of its own, and the sandbox accepts the
+flag only when the frozen call asked for it. The assistant asks for it, so it researches inside
+one call instead of running our search rounds.
+
+Lead turns run on `VUZOL_PROJECT_LEAD__LEAD_PARALLELISM` executor lanes (default 1). Each lane has
+its own owner name, because a goal lease names the lane that holds it. A goal still has one lead
+turn at a time: a lane that finds the lease held defers the wakeup.
 
 ### Selecting today's models (configuration, not application code)
 

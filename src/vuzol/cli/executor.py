@@ -39,6 +39,7 @@ from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_prof
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
 from vuzol.leadership.composition import build_goal_retrospective_worker, build_project_lead_worker
+from vuzol.leadership.worker import ProjectLeadWorker
 from vuzol.observability import configure_logging, get_logger
 from vuzol.projects.capability_provisioning import (
     CapabilityProvisioningHandler,
@@ -86,6 +87,7 @@ class ExecutorChain:
         control_worktrees: ExecutorLane | None = None,
         provider_parallelism: int = 1,
         model_calls: tuple[ExecutorLane, ...] = (),
+        leads: tuple[ExecutorLane, ...] = (),
     ) -> None:
         self._worktrees = worktrees
         self._providers = providers
@@ -97,6 +99,7 @@ class ExecutorChain:
         self._control_worktrees = control_worktrees
         self._provider_parallelism = provider_parallelism
         self._model_calls = model_calls
+        self._leads = leads
 
     def lanes(self) -> tuple[ExecutorLane, ...]:
         """Long provider turns must not occupy the lead/control event loop."""
@@ -104,6 +107,7 @@ class ExecutorChain:
             worker
             for worker in (
                 self._lead,
+                *self._leads,
                 self._reviews,
                 self._control_worktrees,
                 self._control,
@@ -418,21 +422,25 @@ async def run() -> None:
             queue_classes=frozenset({QueueClass.LIGHT}),
             profile_limits={p.id: p.concurrency_limit for p in runtime.registries.profiles.items()},
         )
+
+        def project_lead(lane_owner: str) -> ProjectLeadWorker:
+            return build_project_lead_worker(
+                factory,
+                settings=settings,
+                profiles=runtime.registries.profiles,
+                owner=lane_owner,
+                default_branches={
+                    p.id: p.default_branch for p in runtime.registries.projects.items()
+                },
+                repository_paths={
+                    p.id: p.repository_path for p in runtime.registries.projects.items()
+                },
+                adapter_registry=adapter_registry,
+            )
+
         lead_worker = (
             ProcessorChain(
-                build_project_lead_worker(
-                    factory,
-                    settings=settings,
-                    profiles=runtime.registries.profiles,
-                    owner=f"{owner}:project-lead",
-                    default_branches={
-                        p.id: p.default_branch for p in runtime.registries.projects.items()
-                    },
-                    repository_paths={
-                        p.id: p.repository_path for p in runtime.registries.projects.items()
-                    },
-                    adapter_registry=adapter_registry,
-                ),
+                project_lead(f"{owner}:project-lead"),
                 build_goal_retrospective_worker(
                     factory,
                     settings=settings,
@@ -443,6 +451,15 @@ async def run() -> None:
             )
             if settings.project_lead.enabled
             else None
+        )
+        # Every lane needs its own owner: a goal lease names the lane that holds it.
+        extra_leads = (
+            tuple(
+                project_lead(f"{owner}:project-lead:{lane}")
+                for lane in range(1, settings.project_lead.lead_parallelism)
+            )
+            if settings.project_lead.enabled
+            else ()
         )
 
         model_call_lanes = (
@@ -478,6 +495,7 @@ async def run() -> None:
                 control_worktrees=control_worktree_worker,
                 provider_parallelism=settings.execution.provider_parallelism,
                 model_calls=model_call_lanes,
+                leads=extra_leads,
             ),
             settings.workflow.poll_interval_seconds,
             session_factory=factory,

@@ -101,6 +101,8 @@ class ProviderRequest(FrozenProviderModel):
     reserved_cost_units: Decimal = Field(ge=0)
     reserved_quota_units: Decimal = Field(ge=0)
     sandbox_reference: str | None = Field(default=None, max_length=500)
+    # The provider's own live web search (Codex), for calls that research the open web.
+    web_search: bool = False
 
     @model_validator(mode="after")
     def validate_reasoning_budget(self) -> "ProviderRequest":

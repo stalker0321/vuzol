@@ -627,9 +627,9 @@ async def test_executor_chain_short_circuits_between_workers() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("cli_review", [False, True])
+@pytest.mark.parametrize(("cli_review", "lead_lanes"), [(False, 0), (True, 0), (False, 3)])
 async def test_executor_composes_enabled_runtime(
-    monkeypatch: pytest.MonkeyPatch, cli_review
+    monkeypatch: pytest.MonkeyPatch, cli_review, lead_lanes
 ) -> None:
     from vuzol.cli import executor as executor_cli
     from vuzol.config.models import LaunchMode
@@ -650,7 +650,8 @@ async def test_executor_composes_enabled_runtime(
     settings.service_name = "vuzol"
     settings.log_level = "INFO"
     settings.execution.enabled = True
-    settings.project_lead.enabled = False
+    settings.project_lead.enabled = lead_lanes > 0
+    settings.project_lead.lead_parallelism = lead_lanes
     settings.execution.reviewer_profile_id = "grok-a" if cli_review else None
     settings.limits.provider_call_input_tokens = 100_000
     settings.execution.require_preflight = True
@@ -724,6 +725,14 @@ async def test_executor_composes_enabled_runtime(
     )
     run_loop = AsyncMock()
     monkeypatch.setattr(executor_cli, "_run_loop", run_loop)
+    lead_owners: list[str] = []
+
+    def lead(*_args: object, owner: str, **_kwargs: object) -> MagicMock:
+        lead_owners.append(owner)
+        return MagicMock()
+
+    monkeypatch.setattr(executor_cli, "build_project_lead_worker", lead)
+    monkeypatch.setattr(executor_cli, "build_goal_retrospective_worker", MagicMock())
 
     await executor_cli.run()
     sandbox.preflight.assert_awaited_once()
@@ -732,12 +741,15 @@ async def test_executor_composes_enabled_runtime(
     sync_profiles.assert_awaited()
     turn_reconciler.reconcile_startup.assert_awaited_once()
     assert turn_reconciler_factory.call_args.args[:2] == (factory, sandbox)
-    assert turn_reconciler_factory.call_args.kwargs["enabled"]() is False
+    assert turn_reconciler_factory.call_args.kwargs["enabled"]() is (lead_lanes > 0)
     run_loop.assert_awaited_once()
     assert run_loop.await_args is not None
     assert run_loop.await_args.kwargs["subscription_limit_settings"] is settings.subscription_limits
     chain = run_loop.await_args.args[0]
     assert chain._reviews is not None
+    # Each lead lane owns its goal leases under its own name.
+    assert len(lead_owners) == lead_lanes and len(set(lead_owners)) == lead_lanes
+    assert len(chain._leads) == max(0, lead_lanes - 1)
     review_args = executor_cli.WorkflowWorker.call_args.kwargs
     assert set(review_args["handlers"]) == {"review"}
     assert review_args["profile_limits"] == {"codex-a": 2}

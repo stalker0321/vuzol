@@ -1058,12 +1058,15 @@ def _require_provider_command(
     reasoning_effort: str | None = None,
     require_read_only: bool = False,
     require_prompt_only: bool = False,
+    web_search: bool = False,
 ) -> None:
     effort = reasoning_effort if isinstance(reasoning_effort, str) else None
     modes = (True,) if require_read_only else (False, True)
     if provider == "codex":
         expected = {
-            canonical_codex_argv(model=model, reasoning_effort=effort, read_only=read_only)
+            canonical_codex_argv(
+                model=model, reasoning_effort=effort, read_only=read_only, web_search=web_search
+            )
             for read_only in modes
         }
     elif provider == "grok":

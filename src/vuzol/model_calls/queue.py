@@ -48,12 +48,18 @@ async def submit_call(
     output_schema: dict[str, Any],
     timeout_seconds: int,
     wait_seconds: int,
+    web_search: bool = False,
 ) -> uuid.UUID:
     call = ModelCall(
         id=uuid.uuid4(),
         purpose=purpose,
         profile_id=profile_id,
-        request={"system": system, "user": user, "output_schema": output_schema},
+        request={
+            "system": system,
+            "user": user,
+            "output_schema": output_schema,
+            "web_search": web_search,
+        },
         timeout_seconds=timeout_seconds,
         state="queued",
         lease_generation=0,

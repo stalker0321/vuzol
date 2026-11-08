@@ -127,6 +127,7 @@ def build_model_chain(
     timeout_seconds: float,
     factory: async_sessionmaker[AsyncSession] | None = None,
     purpose: str = "inbox",
+    web_search: bool = False,
 ) -> ModelChain:
     def build(profile_id: str) -> ChatModel:
         profile = runtime.registries.profiles.get(profile_id)
@@ -138,6 +139,7 @@ def build_model_chain(
                 model=profile.model,
                 purpose=purpose,
                 timeout_seconds=timeout_seconds,
+                web_search=web_search and profile.provider == "codex",
             )
         return build_inbox_model(
             runtime.registries,
@@ -279,6 +281,7 @@ def build_assistant_worker(
             timeout_seconds=config.timeout_seconds,
             factory=factory,
             purpose="assistant_turn",
+            web_search=True,
         ),
         projects=projects,
         submit=submit,

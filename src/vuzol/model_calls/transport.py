@@ -183,6 +183,7 @@ class ModelCallSandboxTransport:
                 reasoning_effort=profile.model_reasoning_effort,
                 require_read_only=True,
                 require_prompt_only=profile.provider == "pi",
+                web_search=bool(call.request.get("web_search")),
             )
             # The adapter must forward the frozen call, not a different prompt.
             request = provider_request(call, claim)

@@ -28,6 +28,7 @@ class RelayedModel:
         purpose: str,
         timeout_seconds: float,
         poll_seconds: float = 1.0,
+        web_search: bool = False,
     ) -> None:
         self._factory = factory
         self._profile_id = profile_id
@@ -35,6 +36,8 @@ class RelayedModel:
         self._purpose = purpose
         self._timeout = int(timeout_seconds)
         self._poll = poll_seconds
+        # The model searches the web itself, in the same call.
+        self.web_search = web_search
 
     async def ask(
         self,
@@ -59,6 +62,7 @@ class RelayedModel:
                 output_schema=strict_response_schema(output),
                 timeout_seconds=self._timeout,
                 wait_seconds=wait,
+                web_search=self.web_search,
             )
         give_up = time.monotonic() + wait + 60
         while time.monotonic() < give_up:

@@ -49,6 +49,7 @@ async def submit_call(
     timeout_seconds: int,
     wait_seconds: int,
     web_search: bool = False,
+    mcp_servers: dict[str, str] | None = None,
 ) -> uuid.UUID:
     call = ModelCall(
         id=uuid.uuid4(),
@@ -59,6 +60,7 @@ async def submit_call(
             "user": user,
             "output_schema": output_schema,
             "web_search": web_search,
+            "mcp_servers": dict(mcp_servers or {}),
         },
         timeout_seconds=timeout_seconds,
         state="queued",

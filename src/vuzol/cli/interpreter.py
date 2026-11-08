@@ -130,6 +130,7 @@ def build_model_chain(
     factory: async_sessionmaker[AsyncSession] | None = None,
     purpose: str = "inbox",
     web_search: bool = False,
+    mcp_servers: dict[str, str] | None = None,
 ) -> ModelChain:
     def build(profile_id: str) -> ChatModel:
         profile = runtime.registries.profiles.get(profile_id)
@@ -142,6 +143,7 @@ def build_model_chain(
                 purpose=purpose,
                 timeout_seconds=timeout_seconds,
                 web_search=web_search and profile.provider == "codex",
+                mcp_servers=mcp_servers if profile.provider == "codex" else None,
             )
         return build_inbox_model(
             runtime.registries,
@@ -313,6 +315,7 @@ def build_assistant_worker(
             factory=factory,
             purpose="assistant_turn",
             web_search=config.native_search,
+            mcp_servers=config.mcp_servers,
         ),
         projects=projects,
         submit=submit,

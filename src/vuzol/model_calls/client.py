@@ -29,6 +29,7 @@ class RelayedModel:
         timeout_seconds: float,
         poll_seconds: float = 1.0,
         web_search: bool = False,
+        mcp_servers: dict[str, str] | None = None,
     ) -> None:
         self._factory = factory
         self._profile_id = profile_id
@@ -38,6 +39,8 @@ class RelayedModel:
         self._poll = poll_seconds
         # The model searches the web itself, in the same call.
         self.web_search = web_search
+        # Remote tools (MCP) the model may call itself, e.g. a flight search.
+        self.mcp_servers = dict(mcp_servers or {})
 
     async def ask(
         self,
@@ -63,6 +66,7 @@ class RelayedModel:
                 timeout_seconds=self._timeout,
                 wait_seconds=wait,
                 web_search=self.web_search,
+                mcp_servers=self.mcp_servers,
             )
         give_up = time.monotonic() + wait + 60
         while time.monotonic() < give_up:

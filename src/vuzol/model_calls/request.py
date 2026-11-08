@@ -58,4 +58,5 @@ def provider_request(call: ModelCall, claim: ModelCallClaim) -> ProviderRequest:
         reserved_quota_units=Decimal(0),
         sandbox_reference=claim.sandbox_reference,
         web_search=bool(call.request.get("web_search")),
+        mcp_servers=dict(call.request.get("mcp_servers") or {}),
     )

@@ -419,6 +419,8 @@ class ExecutionSettings(BaseModel):
     # Model calls other services hand to this executor (vuzol.model_calls).
     model_call_parallelism: int = Field(default=2, ge=1, le=256)
     model_call_sandbox_profile: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    # Remote MCP servers a model call may use, and its sandbox may reach (name -> https URL).
+    model_call_mcp_servers: dict[str, HttpUrl] = Field(default_factory=dict)
     recovery_batch_size: int = Field(default=50, ge=1, le=1000)
     proxy_image: str | None = Field(
         default=None,
@@ -646,6 +648,9 @@ class AssistantSettings(BaseModel):
     research_rounds: int = Field(default=2, ge=0, le=5)
     # The assistant model's own web search (Codex), which reads everything at its price.
     native_search: bool = False
+    # Remote MCP tools for the assistant (name -> URL), e.g. kiwi flight search. The executor
+    # runs only those its own model_call_mcp_servers lists.
+    mcp_servers: dict[str, str] = Field(default_factory=dict)
     timezone: str = "Europe/Amsterdam"
     timeout_seconds: float = Field(default=180, ge=5, le=900)
 

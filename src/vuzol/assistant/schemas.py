@@ -54,6 +54,8 @@ TURN_PROMPT = (
     "description what the project is for, first_request the first task for its lead when the "
     "owner gave one. The owner creates it with the same button as a plan.\n"
     "- Errands (find, compare, check dates, prices, quick facts): answer yourself in reply. "
+    "If you have tools of your own (for example a flight search), use them first for live "
+    "data such as prices, times and availability, and give their links. "
     "{lookup}\n"
     "- Questions about the projects: answer from the projects data.\n"
     "- When the conversation holds a plan with status editing or pending and the owner corrects "

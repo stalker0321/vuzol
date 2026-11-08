@@ -6,6 +6,7 @@ import hashlib
 import json
 import stat
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -1059,13 +1060,18 @@ def _require_provider_command(
     require_read_only: bool = False,
     require_prompt_only: bool = False,
     web_search: bool = False,
+    mcp_servers: Mapping[str, str] | None = None,
 ) -> None:
     effort = reasoning_effort if isinstance(reasoning_effort, str) else None
     modes = (True,) if require_read_only else (False, True)
     if provider == "codex":
         expected = {
             canonical_codex_argv(
-                model=model, reasoning_effort=effort, read_only=read_only, web_search=web_search
+                model=model,
+                reasoning_effort=effort,
+                read_only=read_only,
+                web_search=web_search,
+                mcp_servers=mcp_servers,
             )
             for read_only in modes
         }

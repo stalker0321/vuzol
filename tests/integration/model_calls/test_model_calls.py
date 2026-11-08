@@ -206,6 +206,39 @@ async def test_a_failed_call_reaches_the_caller_so_it_can_fall_back(postgres_dsn
         assert call.state == "failed" and call.error
 
 
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_only_mcp_servers_the_executor_allows_are_run(postgres_dsn, tmp_path, allowed):
+    configured, settings, registries = configuration(tmp_path)
+    if allowed:
+        settings = settings.model_copy(
+            update={
+                "execution": settings.execution.model_copy(
+                    update={"model_call_mcp_servers": {"kiwi": "https://mcp.kiwi.com"}}
+                )
+            }
+        )
+    async with _factory(postgres_dsn) as factory:
+        runtime = FakeRuntime(factory)
+        worker = worker_for(factory, settings, registries, runtime, FakeProxy())
+        async with factory.begin() as session:
+            await submit_call(
+                session,
+                purpose="p",
+                profile_id=configured.id,
+                system="s",
+                user="u",
+                output_schema={"type": "object"},
+                timeout_seconds=60,
+                wait_seconds=600,
+                mcp_servers={"kiwi": "https://mcp.kiwi.com"},
+            )
+        assert await worker.process_one()
+        async with factory() as session:
+            call = await session.scalar(select(ModelCall))
+        assert (call.state == "succeeded") is allowed
+        assert len(runtime.envelopes) == (1 if allowed else 0)
+
+
 async def test_the_sandbox_runs_only_for_the_current_lease(postgres_dsn, tmp_path):
     configured, settings, registries = configuration(tmp_path)
     async with _factory(postgres_dsn) as factory:

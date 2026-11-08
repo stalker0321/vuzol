@@ -103,6 +103,8 @@ class ProviderRequest(FrozenProviderModel):
     sandbox_reference: str | None = Field(default=None, max_length=500)
     # The provider's own live web search (Codex), for calls that research the open web.
     web_search: bool = False
+    # Remote MCP servers (name -> streamable-HTTP URL) the provider's own agent may call.
+    mcp_servers: dict[str, str] = Field(default_factory=dict, max_length=10)
 
     @model_validator(mode="after")
     def validate_reasoning_budget(self) -> "ProviderRequest":

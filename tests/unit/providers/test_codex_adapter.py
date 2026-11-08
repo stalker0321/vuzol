@@ -359,6 +359,21 @@ async def test_live_web_search_reaches_the_command_and_only_when_asked(tmp_path:
     assert canonical_codex_argv(web_search=True) != canonical_codex_argv()
 
 
+def test_mcp_servers_reach_the_command_and_the_sandbox_checks_them() -> None:
+    from vuzol.execution.codex import _require_provider_command
+    from vuzol.providers.codex import canonical_codex_argv
+
+    kiwi = {"kiwi": "https://mcp.kiwi.com"}
+    argv = canonical_codex_argv(model="gpt-6.1-sol", read_only=True, mcp_servers=kiwi)
+    assert 'mcp_servers.kiwi.url="https://mcp.kiwi.com"' in argv
+    _require_provider_command(argv, "codex", "gpt-6.1-sol", mcp_servers=kiwi)
+    with pytest.raises(ValueError):  # a tool the frozen call did not ask for
+        _require_provider_command(argv, "codex", "gpt-6.1-sol")
+    for bad in ({"Bad name": "https://x.example"}, {"x": 'https://x.example" evil'}):
+        with pytest.raises(ValueError):
+            canonical_codex_argv(mcp_servers=bad)
+
+
 @pytest.mark.anyio
 async def test_codex_usage_limit_is_quota_exhausted_not_unavailable(tmp_path: Path) -> None:
     """Live 2026-10-30: a subscription limit read as "provider unavailable"."""

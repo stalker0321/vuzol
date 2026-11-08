@@ -14,10 +14,11 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import HttpUrl
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
-from vuzol.config.models import LaunchMode, SandboxNetworkMode
+from vuzol.config.models import EgressDestination, LaunchMode, NetworkPolicy, SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
 from vuzol.execution.codex import _provider_state_runtime, _require_provider_command
@@ -176,6 +177,13 @@ class ModelCallSandboxTransport:
                 or str(profile.state_directory) != invocation.state_directory
             ):
                 raise ValueError("model call profile does not match its call")
+            request = provider_request(call, claim)
+            allowed = self._settings.execution.model_call_mcp_servers
+            if any(
+                name not in allowed or str(HttpUrl(url)) != str(HttpUrl(str(allowed[name])))
+                for name, url in request.mcp_servers.items()
+            ):
+                raise ValueError("model call asks for an MCP server the executor does not allow")
             _require_provider_command(
                 invocation.argv,
                 profile.provider,
@@ -184,9 +192,9 @@ class ModelCallSandboxTransport:
                 require_read_only=True,
                 require_prompt_only=profile.provider == "pi",
                 web_search=bool(call.request.get("web_search")),
+                mcp_servers=request.mcp_servers,
             )
             # The adapter must forward the frozen call, not a different prompt.
-            request = provider_request(call, claim)
             expected = {
                 "schema_version": request.schema_version,
                 "original_input": request.original_input,
@@ -208,6 +216,18 @@ class ModelCallSandboxTransport:
                 raise ValueError("model calls have no sandbox profile")
             sandbox = self._registries.sandboxes.get(sandbox_id)
             targets = compile_proxy_allowlist(profile.runtime_network)
+            if request.mcp_servers and profile.provider == "codex":
+                targets += compile_proxy_allowlist(
+                    NetworkPolicy(
+                        enabled=True,
+                        destinations=tuple(
+                            EgressDestination(
+                                url=HttpUrl(str(allowed[name])), purpose=f"MCP server {name}"
+                            )
+                            for name in sorted(request.mcp_servers)
+                        ),
+                    )
+                )
             if (
                 not sandbox.enabled
                 or sandbox.network_mode is not SandboxNetworkMode.HTTPS_PROXY

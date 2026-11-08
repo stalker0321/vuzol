@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections.abc import Mapping
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 
@@ -43,12 +44,16 @@ CODEX_READ_ONLY_PERMISSION_CONFIG = (
 )
 
 
+_MCP_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
+
+
 def canonical_codex_argv(
     *,
     model: str | None = None,
     reasoning_effort: str | None = None,
     read_only: bool = False,
     web_search: bool = False,
+    mcp_servers: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return the only Codex command accepted by the production sandbox transport.
 
@@ -81,6 +86,10 @@ def canonical_codex_argv(
     if web_search:
         # Runs on OpenAI's side: no egress beyond the Codex runtime itself.
         args.extend(["--config", 'web_search="live"'])
+    for name, url in sorted((mcp_servers or {}).items()):
+        if not _MCP_NAME.fullmatch(name) or '"' in url or "\\" in url:
+            raise ValueError("invalid MCP server")
+        args.extend(["--config", f'mcp_servers.{name}.url="{url}"'])
     args.extend(
         [
             "--config",
@@ -150,6 +159,7 @@ class CodexCliAdapter:
                 reasoning_effort=profile.model_reasoning_effort,
                 read_only=Capability.CODE_EDIT not in request.required_capabilities,
                 web_search=request.web_search,
+                mcp_servers=request.mcp_servers,
             ),
             stdin=json.dumps(envelope, ensure_ascii=False),
             runtime_identity=profile.runtime_identity,

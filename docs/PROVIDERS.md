@@ -291,6 +291,12 @@ the search runs on OpenAI's side, so it needs no egress of its own, and the sand
 flag only when the frozen call asked for it. The assistant asks for it, so it researches inside
 one call instead of running our search rounds.
 
+A call may also name remote MCP servers (streamable HTTP) that Codex calls itself, for
+example `{"kiwi": "https://mcp.kiwi.com"}` for flight search. The executor runs only the
+servers in its own `VUZOL_EXECUTION__MODEL_CALL_MCP_SERVERS`, with the same URL. Their hosts
+are added to the sandbox's proxy allowlist for that call only. The assistant's list is
+`assistant.mcp_servers`.
+
 Lead turns run on `VUZOL_PROJECT_LEAD__LEAD_PARALLELISM` executor lanes (default 1). Each lane has
 its own owner name, because a goal lease names the lane that holds it. A goal still has one lead
 turn at a time: a lane that finds the lease held defers the wakeup.

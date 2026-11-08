@@ -33,6 +33,7 @@ from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
     dead_letter_outbox_item,
+    mark_outbox_ambiguous,
     retry_outbox_item,
 )
 from vuzol.storage.models import (
@@ -41,6 +42,8 @@ from vuzol.storage.models import (
     TransactionalOutbox,
 )
 from vuzol.storage.types import DiscussionSessionStatus
+from vuzol.telegram.formatting import telegram_answer_rich_html
+from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
 
 _LOG = get_logger(__name__)
 _ATTEMPTS = 3
@@ -61,6 +64,12 @@ class Sender(Protocol):
 
 class ButtonClearer(Protocol):
     async def __call__(self, *, chat_id: int, message_id: int) -> None: ...
+
+
+class RichSender(Protocol):
+    async def __call__(
+        self, *, chat_id: int, thread_id: int, html: str, reply_to: int | None
+    ) -> int: ...
 
 
 class Submitter(Protocol):
@@ -132,6 +141,7 @@ class AssistantWorker:
         submit: Submitter,
         send: Sender,
         clear_buttons: ButtonClearer,
+        send_rich: RichSender | None = None,
         download: Downloader | None = None,
         transcribe: Transcriber | None = None,
         search: WebSearch | None = None,
@@ -146,6 +156,7 @@ class AssistantWorker:
         self._projects = projects
         self._submit = submit
         self._send = send
+        self._send_rich = send_rich
         self._clear_buttons = clear_buttons
         self._download = download
         self._transcribe = transcribe
@@ -174,6 +185,7 @@ class AssistantWorker:
                 item.attempt_count,
             )
         error: str | None = None
+        ambiguous = False
         try:
             if operation == "turn":
                 await self._turn(payload, final=attempts >= _ATTEMPTS)
@@ -187,6 +199,8 @@ class AssistantWorker:
                 await self._reply(payload)
             else:
                 raise ValueError(f"unknown assistant operation {operation}")
+        except LostTelegramResponse:
+            ambiguous = True
         except (TimedOut, NetworkError) as failure:
             if operation != "reply" or isinstance(failure, BadRequest):
                 error = f"assistant_{type(failure).__name__}"[:100]
@@ -206,7 +220,9 @@ class AssistantWorker:
             )
         try:
             async with self._factory.begin() as session:
-                if error is None:
+                if ambiguous:
+                    await mark_outbox_ambiguous(session, token)
+                elif error is None:
                     await complete_outbox_item(session, token)
                 elif attempts >= _ATTEMPTS:
                     await dead_letter_outbox_item(session, token, error_category=error)
@@ -431,6 +447,7 @@ class AssistantWorker:
                     "chat_id": entry.chat_id,
                     "thread_id": entry.message_thread_id,
                     "html": plan_html(reply, dispatches, names, new_project),
+                    "rich_html": telegram_answer_rich_html(reply) if not planned else None,
                     "reply_to": entry.telegram_message_id,
                     "buttons": plan_buttons(answer.id) if planned else [],
                     "entry_id": str(answer.id),
@@ -640,18 +657,39 @@ class AssistantWorker:
                 chat_id=int(payload["chat_id"]), message_id=int(payload["clear"])
             )
             return
-        message_id = await self._send(
+        rich_html = payload.get("rich_html")
+        if self._send_rich is not None and rich_html and not payload.get("buttons"):
+            try:
+                message_id = await self._send_rich(
+                    chat_id=int(payload["chat_id"]),
+                    thread_id=int(payload["thread_id"]),
+                    html=rich_html,
+                    reply_to=payload.get("reply_to"),
+                )
+            except RichMessageRejected:
+                message_id = await self._send_reply(payload)
+            except BadRequest:
+                raise
+            except (TimedOut, NetworkError) as failure:
+                raise LostTelegramResponse("assistant rich send outcome unknown") from failure
+            if type(message_id) is not int or message_id <= 0:
+                raise LostTelegramResponse("assistant rich send returned no confirmed message ID")
+        else:
+            message_id = await self._send_reply(payload)
+        if payload.get("entry_id"):
+            async with self._factory.begin() as session:
+                stored = await session.get(AssistantEntry, uuid.UUID(payload["entry_id"]))
+                if stored is not None:
+                    stored.telegram_message_id = message_id
+
+    async def _send_reply(self, payload: dict[str, Any]) -> int:
+        return await self._send(
             chat_id=int(payload["chat_id"]),
             thread_id=int(payload["thread_id"]),
             html=str(payload["html"]),
             reply_to=payload.get("reply_to"),
             buttons=payload.get("buttons") or [],
         )
-        if payload.get("entry_id"):
-            async with self._factory.begin() as session:
-                stored = await session.get(AssistantEntry, uuid.UUID(payload["entry_id"]))
-                if stored is not None:
-                    stored.telegram_message_id = message_id
 
     def _prompt(self) -> str:
         now = datetime.now(ZoneInfo(self._settings.timezone))

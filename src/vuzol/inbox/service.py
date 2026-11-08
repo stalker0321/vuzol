@@ -15,13 +15,14 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram.error import BadRequest, NetworkError, TimedOut
 
 from vuzol.config.settings import InboxSettings
 from vuzol.inbox import INBOX_DESTINATION
 from vuzol.inbox.fetch import describe_link
 from vuzol.inbox.ingress import schedule
 from vuzol.inbox.model import Image, InboxModel, InboxModelError, ModelChain
-from vuzol.inbox.render import answer_html, card_buttons, card_html, digest_html
+from vuzol.inbox.render import answer_html, card_buttons, card_html, digest_html, digest_markdown
 from vuzol.inbox.schemas import (
     ASK_PROMPT,
     CARD_PROMPT,
@@ -43,9 +44,12 @@ from vuzol.storage.leasing import (
     claim_outbox_item,
     complete_outbox_item,
     dead_letter_outbox_item,
+    mark_outbox_ambiguous,
     retry_outbox_item,
 )
 from vuzol.storage.models import InboxItem, InboxLink, InboxMessage, TransactionalOutbox
+from vuzol.telegram.formatting import telegram_answer_rich_html
+from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
 
 _LOG = get_logger(__name__)
 _MAX_IMAGES = 4
@@ -75,6 +79,10 @@ class Sender(Protocol):
     ) -> int: ...
 
 
+class RichSender(Protocol):
+    async def __call__(self, *, chat_id: int, html: str, reply_to: int | None) -> int: ...
+
+
 Downloader = Callable[[str], Awaitable[bytes]]
 Transcriber = Callable[[bytes, str], Awaitable[str]]
 LinkReader = Callable[[str], Awaitable[str]]
@@ -89,6 +97,7 @@ class InboxWorker:
         model: InboxModel | ModelChain,
         send: Sender,
         download: Downloader,
+        send_rich: RichSender | None = None,
         transcribe: Transcriber | None = None,
         read_link: LinkReader = describe_link,
         search: WebSearch | None = None,
@@ -100,6 +109,7 @@ class InboxWorker:
         self._settings = settings
         self._model = model
         self._send = send
+        self._send_rich = send_rich
         self._download = download
         self._transcribe = transcribe
         self._read_link = read_link
@@ -132,6 +142,7 @@ class InboxWorker:
                 item.attempt_count,
             )
         error: str | None = None
+        ambiguous = False
         try:
             if operation == "settle":
                 await self._settle(int(payload["chat_id"]))
@@ -145,6 +156,13 @@ class InboxWorker:
                 await self._reply(payload)
             else:
                 raise ValueError(f"unknown inbox operation {operation}")
+        except LostTelegramResponse:
+            ambiguous = True
+        except (TimedOut, NetworkError) as failure:
+            if operation == "reply" and not isinstance(failure, BadRequest):
+                ambiguous = True
+            else:
+                error = f"inbox_{type(failure).__name__}"[:100]
         except Exception as failure:  # every failure is retried, then parked
             error = f"inbox_{type(failure).__name__}"[:100]
             _LOG.warning(
@@ -154,7 +172,9 @@ class InboxWorker:
             )
         try:
             async with self._factory.begin() as session:
-                if error is None:
+                if ambiguous:
+                    await mark_outbox_ambiguous(session, token)
+                elif error is None:
                     await complete_outbox_item(session, token)
                 elif attempts >= _ATTEMPTS:
                     await dead_letter_outbox_item(session, token, error_category=error)
@@ -301,7 +321,9 @@ class InboxWorker:
             await self._delete(target, chat_id, reply_to=anchor, key=str(batch_id))
         else:
             text = route.reply or "Не понял, к какой записи это. Ответь реплаем на её карточку."
-            await self._queue(chat_id, answer_html(text), reply_to=anchor, key=f"chat:{batch_id}")
+            await self._queue(
+                chat_id, answer_html(text), reply_to=anchor, key=f"chat:{batch_id}", markdown=text
+            )
 
     async def _answer_op(self, payload: dict[str, Any]) -> None:
         async with self._factory() as session:
@@ -365,6 +387,7 @@ class InboxWorker:
                 reply_to=reply_to,
                 key=f"answer:{key}",
                 item_ids=[items[0].id] if items else [],
+                markdown=answer.text,
             )
 
     async def _search(
@@ -418,7 +441,13 @@ class InboxWorker:
                 default=str,
             ),
         )
-        await self._queue(chat_id, answer_html(answer.text), reply_to=reply_to, key=f"search:{key}")
+        await self._queue(
+            chat_id,
+            answer_html(answer.text),
+            reply_to=reply_to,
+            key=f"search:{key}",
+            markdown=answer.text,
+        )
 
     async def _look_up(self, question: str, records: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Let the model pick searches, run them and open the best pages."""
@@ -579,6 +608,7 @@ class InboxWorker:
                 reply_to=None,
                 key=f"digest:{chat_id}:{week.year}-{week.week}",
                 item_ids=[],
+                markdown=digest_markdown(saved, soon, self._settings.timezone),
             )
 
     async def _keep_raw(
@@ -733,9 +763,13 @@ class InboxWorker:
                     },
                 )
 
-    async def _queue(self, chat_id: int, html: str, *, reply_to: int, key: str) -> None:
+    async def _queue(
+        self, chat_id: int, html: str, *, reply_to: int, key: str, markdown: str | None = None
+    ) -> None:
         async with self._factory.begin() as session:
-            await self._enqueue(session, chat_id, html, reply_to=reply_to, key=key, item_ids=[])
+            await self._enqueue(
+                session, chat_id, html, reply_to=reply_to, key=key, item_ids=[], markdown=markdown
+            )
 
     async def _enqueue(
         self,
@@ -747,6 +781,7 @@ class InboxWorker:
         key: str,
         item_ids: Sequence[uuid.UUID],
         buttons: Buttons | None = None,
+        markdown: str | None = None,
     ) -> None:
         await schedule(
             session,
@@ -755,6 +790,9 @@ class InboxWorker:
             payload={
                 "chat_id": chat_id,
                 "html": html,
+                "rich_html": telegram_answer_rich_html(markdown)
+                if markdown and not buttons
+                else None,
                 "reply_to": reply_to,
                 "item_ids": [str(item_id) for item_id in item_ids],
                 "buttons": buttons or [],
@@ -762,13 +800,20 @@ class InboxWorker:
         )
 
     async def _reply(self, payload: dict[str, Any]) -> None:
-        html = payload.get("html") or answer_html(str(payload.get("text") or ""))
-        message_id = await self._send(
-            chat_id=int(payload["chat_id"]),
-            html=html,
-            reply_to=payload.get("reply_to"),
-            buttons=payload.get("buttons") or [],
-        )
+        rich_html = payload.get("rich_html")
+        if self._send_rich is not None and rich_html and not payload.get("buttons"):
+            try:
+                message_id = await self._send_rich(
+                    chat_id=int(payload["chat_id"]),
+                    html=rich_html,
+                    reply_to=payload.get("reply_to"),
+                )
+            except RichMessageRejected:
+                message_id = await self._send_reply(payload)
+            if type(message_id) is not int or message_id <= 0:
+                raise LostTelegramResponse("inbox rich send returned no confirmed message ID")
+        else:
+            message_id = await self._send_reply(payload)
         async with self._factory.begin() as session:
             for raw in payload.get("item_ids") or []:
                 session.add(
@@ -779,6 +824,14 @@ class InboxWorker:
                     )
                 )
                 break  # One record per bot message; replies resolve to it.
+
+    async def _send_reply(self, payload: dict[str, Any]) -> int:
+        return await self._send(
+            chat_id=int(payload["chat_id"]),
+            html=payload.get("html") or answer_html(str(payload.get("text") or "")),
+            reply_to=payload.get("reply_to"),
+            buttons=payload.get("buttons") or [],
+        )
 
     async def _replied_item(
         self, chat_id: int, messages: Sequence[InboxMessage]

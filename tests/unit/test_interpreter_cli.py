@@ -84,6 +84,42 @@ def runtime(tmp_path: Path) -> RuntimeConfiguration:
     return RuntimeConfiguration(settings=settings, registries=bundle)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["assistant", "inbox"])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_workers_wire_rich_adapter_only_when_enabled(tmp_path, monkeypatch, kind, enabled):
+    from vuzol.config.settings import AssistantSettings, InboxSettings
+
+    configured = runtime(tmp_path)
+    configured = RuntimeConfiguration(
+        settings=configured.settings.model_copy(
+            update={
+                "assistant": AssistantSettings(profile_id="interpreter"),
+                "inbox": InboxSettings(profile_id="interpreter"),
+                "chat": configured.settings.chat.model_copy(update={"rich_messages": enabled}),
+            }
+        ),
+        registries=configured.registries,
+    )
+    monkeypatch.setattr(interpreter_cli, "build_model_chain", lambda *args, **kwargs: object())
+    bot = AsyncMock()
+    bot.do_api_request.return_value = {"message_id": 17}
+    builder = getattr(interpreter_cli, f"build_{kind}_worker")
+    worker = builder(configured, object(), object(), bot, None, "test")
+    if not enabled:
+        assert worker._send_rich is None
+        return
+    kwargs = {"chat_id": -100, "html": "<h1>Ответ</h1>", "reply_to": 5}
+    if kind == "assistant":
+        kwargs["thread_id"] = 10
+    assert await worker._send_rich(**kwargs) == 17
+    assert bot.do_api_request.await_args.args == ("sendRichMessage",)
+    payload = bot.do_api_request.await_args.kwargs["api_kwargs"]
+    assert payload["rich_message"] == {"html": "<h1>Ответ</h1>"}
+    assert payload["message_thread_id"] == (10 if kind == "assistant" else None)
+    assert payload["reply_parameters"]["message_id"] == 5
+
+
 def test_interpreter_runtime_composes_and_stops_cleanly(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -20,6 +20,8 @@ from vuzol.storage.models import AssistantEntry, ProjectDiscussionSession, Trans
 from vuzol.storage.repositories.discussion import DiscussionRepository
 from vuzol.storage.types import DiscussionSessionStatus
 from vuzol.telegram.durable_ingress import DurableTelegramIngress
+from vuzol.telegram.formatting import telegram_rich_html
+from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 THREAD = 77
@@ -146,7 +148,7 @@ async def drain(worker):
         await due()
 
 
-def worker_for(factory, model, *, search=None, researcher=None, create_topic=None):
+def worker_for(factory, model, *, search=None, researcher=None, create_topic=None, send_rich=None):
     telegram, leads = Telegram(), Leads()
 
     async def read_link(url):
@@ -159,6 +161,7 @@ def worker_for(factory, model, *, search=None, researcher=None, create_topic=Non
         projects=lambda: PROJECTS,
         submit=leads.submit,
         send=telegram.send,
+        send_rich=send_rich,
         clear_buttons=telegram.clear,
         search=search,
         read_link=read_link,
@@ -166,6 +169,70 @@ def worker_for(factory, model, *, search=None, researcher=None, create_topic=Non
         create_topic=create_topic,
     )
     return worker, telegram, leads
+
+
+@pytest.mark.parametrize("planned", [False, True])
+async def test_formatted_reply_uses_rich_only_without_plan_buttons(postgres_dsn, planned):
+    text = "# Итог\n\n" + "Подробный ответ. " * 30
+    send_rich = AsyncMock(return_value=9017)
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "Расскажи подробнее"))
+        turn = Turn(
+            reply=text,
+            dispatches=[Dispatch(project_id="diplom", request="Сделай.")] if planned else [],
+        )
+        worker, telegram, _ = worker_for(factory, FakeModel(turn), send_rich=send_rich)
+        await drain(worker)
+        if planned:
+            send_rich.assert_not_awaited()
+            assert len(telegram.sent) == 1 and telegram.sent[0]["buttons"]
+        else:
+            send_rich.assert_awaited_once_with(
+                chat_id=CHAT, thread_id=THREAD, html=telegram_rich_html(text), reply_to=1
+            )
+            assert not telegram.sent
+            async with factory() as session:
+                answer = await session.scalar(
+                    select(AssistantEntry).where(AssistantEntry.role == "assistant")
+                )
+                assert answer.telegram_message_id == 9017
+
+
+@pytest.mark.parametrize("outcome", ["rejected", "timeout", "missing_id", "bad_request"])
+async def test_rich_reply_falls_back_only_after_definite_rejection(postgres_dsn, outcome):
+    from telegram.error import BadRequest, TimedOut
+
+    from vuzol.storage.types import DeliveryStatus
+
+    text = "# Итог\n\nПодробности."
+    failures = {
+        "rejected": RichMessageRejected("unsupported"),
+        "timeout": TimedOut(),
+        "missing_id": LostTelegramResponse("no confirmation"),
+        "bad_request": BadRequest("invalid request"),
+    }
+    send_rich = AsyncMock(side_effect=failures[outcome])
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "Расскажи"))
+        worker, telegram, _ = worker_for(factory, FakeModel(Turn(reply=text)), send_rich=send_rich)
+        await drain(worker)
+        assert send_rich.await_count == (3 if outcome == "bad_request" else 1)
+        assert len(telegram.sent) == int(outcome == "rejected")
+        async with factory() as session:
+            reply = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("assistant:reply:%")
+                )
+            )
+            assert (
+                reply.status
+                is {
+                    "rejected": DeliveryStatus.DELIVERED,
+                    "timeout": DeliveryStatus.AMBIGUOUS,
+                    "missing_id": DeliveryStatus.AMBIGUOUS,
+                    "bad_request": DeliveryStatus.DEAD_LETTER,
+                }[outcome]
+            )
 
 
 async def sessions(factory):

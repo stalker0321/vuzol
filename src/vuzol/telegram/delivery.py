@@ -55,7 +55,11 @@ from vuzol.storage.types import (
     DeliveryStatus,
     TaskStatus,
 )
-from vuzol.telegram.formatting import telegram_markdown_parts, telegram_rich_html
+from vuzol.telegram.formatting import (
+    telegram_answer_rich_html,
+    telegram_markdown_parts,
+    telegram_rich_html,
+)
 from vuzol.telegram.layout import (
     HELP_CARD_ROLE,
     HISTORY_TOPIC_KIND,
@@ -1215,8 +1219,9 @@ async def _prepare_discussion_reply(
     html_body, fallback_body = parts[part_index]
     # Rich posts cannot carry an inline keyboard. Deliver briefs as ordinary
     # messages, placing the authorization button on the last chunk only.
+    lead_reply = item.idempotency_key.startswith("lead:reply:")
     rich_body = (
-        telegram_rich_html(reply_text)
+        (telegram_answer_rich_html(reply_text) if lead_reply else telegram_rich_html(reply_text))
         if rich_messages and part_index == 0 and handoff is None
         else None
     )
@@ -1227,7 +1232,7 @@ async def _prepare_discussion_reply(
     )
     worker_task_id = item.payload.get("worker_task_id")
     task_id = uuid.UUID(str(worker_task_id)) if handoff is not None and worker_task_id else None
-    if rich_body is not None and len(parts) == 1 and "<table>" not in rich_body:
+    if not lead_reply and rich_body is not None and len(parts) == 1 and "<table>" not in rich_body:
         # Ordinary Markdown formatting already works in short messages.
         # Posts are useful for long replies or rich-only structure, not every turn.
         rich_body = None

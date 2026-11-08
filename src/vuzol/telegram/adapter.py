@@ -224,6 +224,7 @@ class PythonTelegramClient:
         thread_id: int | None,
         html: str,
         disable_notification: bool = False,
+        reply_to: int | None = None,
     ) -> int:
         try:
             result = await self._bot.do_api_request(
@@ -233,6 +234,16 @@ class PythonTelegramClient:
                     "message_thread_id": thread_id,
                     "rich_message": {"html": html},
                     "disable_notification": disable_notification,
+                    **(
+                        {
+                            "reply_parameters": {
+                                "message_id": reply_to,
+                                "allow_sending_without_reply": True,
+                            }
+                        }
+                        if reply_to is not None
+                        else {}
+                    ),
                 },
             )
         except (BadRequest, EndPointNotFound):

@@ -79,6 +79,21 @@ def telegram_rich_html(markdown: str) -> str | None:
     return rendered if rendered and len(rendered) <= 32_768 else None
 
 
+def telegram_answer_rich_html(markdown: str) -> str | None:
+    """Prefer rich answers for length or structure that ordinary HTML flattens."""
+    rendered = telegram_rich_html(markdown)
+    if rendered is not None and (
+        len(markdown) > 300
+        or any(
+            f"<{tag}>" in rendered
+            for tag in ("table", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6")
+        )
+        or '<ol start="' in rendered
+    ):
+        return rendered
+    return None
+
+
 def telegram_markdown_parts(markdown: str, *, limit: int = 4096) -> tuple[tuple[str, str], ...]:
     """Losslessly split rendered text, keeping tags/entities valid in every part.
 

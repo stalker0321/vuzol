@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 from html import escape
+from string import punctuation
 from zoneinfo import ZoneInfo
 
 from vuzol.storage.models import InboxItem
@@ -114,4 +115,26 @@ def digest_html(saved: Sequence[InboxItem], soon: Sequence[InboxItem], tz: str) 
         for item in soon[:15]:
             assert item.event_start is not None
             lines.append(f"{when(item.event_start, tz)} — {escape(item.title)}")
+    return "\n".join(lines)
+
+
+def digest_markdown(saved: Sequence[InboxItem], soon: Sequence[InboxItem], tz: str) -> str:
+    def literal(text: str) -> str:
+        return "".join(
+            "\\" + char if char in punctuation else char for char in " ".join(text.splitlines())
+        )
+
+    lines = ["# 🗂 Неделя в инбоксе"]
+    if saved:
+        lines.append(f"\nСохранено: {len(saved)}\n")
+        for item in saved[:15]:
+            icon = KIND_LABELS.get(item.kind, KIND_LABELS["other"])[0]
+            lines.append(f"- {icon} {literal(item.title)}")
+        if len(saved) > 15:
+            lines.append(f"\n…и ещё {len(saved) - 15}")
+    if soon:
+        lines.append("\n## 📅 В ближайший месяц\n")
+        for item in soon[:15]:
+            assert item.event_start is not None
+            lines.append(f"- {literal(when(item.event_start, tz))} — {literal(item.title)}")
     return "\n".join(lines)

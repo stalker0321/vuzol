@@ -14,6 +14,41 @@ from vuzol.telegram.formatting import telegram_rich_html
 from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
 
 
+@pytest.mark.parametrize(
+    ("text", "rich"),
+    [
+        ("Коротко и **ясно**.", False),
+        ("я" * 300, False),
+        ("я" * 301, True),
+        ("# Итог\n\nДетали.", True),  # noqa: RUF001
+        ("- Один\n- Два", True),
+        ("1. Первый\n2. Второй", True),
+        ("| A | B |\n|---|---|\n| 1 | 2 |", True),
+        ("`<h1>` и `<ul>` — текст.", False),
+        ("```\n# не заголовок\n- не список\n```", False),
+        ("я" * 40_000, False),
+        ("- Пункт\n" * 501, False),
+    ],
+)
+def test_answer_rich_selection_uses_length_or_actual_structure(text, rich) -> None:
+    from vuzol.telegram.formatting import telegram_answer_rich_html
+
+    assert telegram_answer_rich_html(text) == (telegram_rich_html(text) if rich else None)
+
+
+@pytest.mark.anyio
+async def test_rich_send_preserves_reply_anchor() -> None:
+    bot = AsyncMock()
+    bot.do_api_request.return_value = {"message_id": 17}
+    await PythonTelegramClient(bot).send_rich_message(
+        chat_id=-100, thread_id=10, html="<h1>Ответ</h1>", reply_to=5
+    )
+    assert bot.do_api_request.await_args.kwargs["api_kwargs"]["reply_parameters"] == {
+        "message_id": 5,
+        "allow_sending_without_reply": True,
+    }
+
+
 def test_rich_formatting_preserves_actual_blocks_and_tables() -> None:
     rendered = telegram_rich_html(
         "# Выбор\n\n**Текст** и ~~старый~~\n\n- Один\n- Два\n\n"

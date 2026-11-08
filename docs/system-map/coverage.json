@@ -585,7 +585,7 @@
       "sources": [],
       "producers": [],
       "consumers": [
-        "src/vuzol/assistant/service.py:160"
+        "src/vuzol/assistant/service.py:171"
       ],
       "scenario": "assistant"
     },
@@ -603,7 +603,7 @@
       "sources": [],
       "producers": [],
       "consumers": [
-        "src/vuzol/inbox/service.py:110"
+        "src/vuzol/inbox/service.py:120"
       ],
       "scenario": "inbox"
     },
@@ -620,7 +620,7 @@
       "id": "dynamic-outbox:src/vuzol/telegram/delivery.py:item.destination",
       "sources": [],
       "producers": [
-        "src/vuzol/telegram/delivery.py:1997"
+        "src/vuzol/telegram/delivery.py:2002"
       ],
       "consumers": [],
       "scenario": "delivery"
@@ -827,7 +827,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:555"
+        "src/vuzol/cli/interpreter.py:567"
       ],
       "producers": [],
       "consumers": [],
@@ -1091,9 +1091,9 @@
         "src/vuzol/projects/provisioning.py:452",
         "src/vuzol/telegram/attention.py:103",
         "src/vuzol/telegram/controls.py:278",
-        "src/vuzol/telegram/delivery.py:217",
-        "src/vuzol/telegram/delivery.py:992",
-        "src/vuzol/telegram/delivery.py:1857",
+        "src/vuzol/telegram/delivery.py:221",
+        "src/vuzol/telegram/delivery.py:996",
+        "src/vuzol/telegram/delivery.py:1862",
         "src/vuzol/telegram/ingress.py:356",
         "src/vuzol/telegram/ingress.py:471",
         "src/vuzol/telegram/ingress.py:577",
@@ -1119,7 +1119,7 @@
         "src/vuzol/workflows/dispatch.py:340"
       ],
       "consumers": [
-        "src/vuzol/telegram/delivery.py:1624"
+        "src/vuzol/telegram/delivery.py:1629"
       ],
       "scenario": "delivery"
     },
@@ -1172,7 +1172,7 @@
         "src/vuzol/workflows/corrective.py:59"
       ],
       "consumers": [
-        "src/vuzol/telegram/delivery.py:1624"
+        "src/vuzol/telegram/delivery.py:1629"
       ],
       "scenario": "delivery"
     },
@@ -1251,7 +1251,7 @@
     {
       "id": "telegram-handler:filters.ALL",
       "sources": [
-        "src/vuzol/telegram/adapter.py:908"
+        "src/vuzol/telegram/adapter.py:919"
       ],
       "producers": [],
       "consumers": [],

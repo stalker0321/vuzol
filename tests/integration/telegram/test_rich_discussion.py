@@ -16,6 +16,40 @@ pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
 
 @pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize(
+    ("text", "expect_rich"),
+    [
+        pytest.param("Длинный ответ. " * 30, True, id="long"),
+        pytest.param("# Итог\n\nДетали.", True, id="heading"),  # noqa: RUF001
+        pytest.param("- Первый\n- Второй", True, id="list"),
+        pytest.param("| A | B |\n|---|---|\n| 1 | 2 |", True, id="table"),
+        pytest.param("Короткий ответ.", False, id="short"),
+    ],
+)
+async def test_lead_replies_use_rich_for_length_or_structure(
+    postgres_dsn, thinking, text, expect_rich
+):
+    engine, factory = storage(postgres_dsn)
+    client = FakeTelegramClient()
+    try:
+        item_id = await seed_reply(factory, text, thinking=thinking)
+        async with factory.begin() as session:
+            item = await session.get(TransactionalOutbox, item_id)
+            # leadership/worker.py persists conversational lead answers under this key.
+            item.idempotency_key = f"lead:reply:{item_id}"
+        assert await service(factory, client, rich_messages=True).deliver_one()
+        rich = client.rich_edited if thinking else client.rich_sent
+        ordinary = client.edited if thinking else client.sent
+        assert len(rich) == int(expect_rich)
+        assert len(ordinary) == int(not expect_rich)
+        if expect_rich:
+            assert rich[0][2] == telegram_rich_html(text)
+        assert not await service(factory, client, rich_messages=True).deliver_one()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("thinking", [False, True])
 async def test_short_markdown_stays_ordinary_even_with_rich_capability(postgres_dsn, thinking):
     engine, factory = storage(postgres_dsn)
     text = "# Итог\n\n**Жирный** и *курсив*.\n\n- Пункт\n\n> Цитата\n\n`код`"

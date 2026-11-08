@@ -254,6 +254,11 @@ def build_assistant_worker(
         )
         return message.message_id
 
+    async def send_rich(*, chat_id: int, thread_id: int, html: str, reply_to: int | None) -> int:
+        return await client.send_rich_message(
+            chat_id=chat_id, thread_id=thread_id, html=html, reply_to=reply_to
+        )
+
     async def create_topic(*, chat_id: int, name: str) -> int:
         topic = await bot.create_forum_topic(chat_id=chat_id, name=name)
         return topic.message_thread_id
@@ -320,6 +325,7 @@ def build_assistant_worker(
         projects=projects,
         submit=submit,
         send=send,
+        send_rich=send_rich if runtime.settings.chat.rich_messages else None,
         clear_buttons=clear_buttons,
         download=client.download,
         transcribe=transcribe if transcriber is not None else None,
@@ -369,6 +375,11 @@ def build_inbox_worker(
         )
         return message.message_id
 
+    async def send_rich(*, chat_id: int, html: str, reply_to: int | None) -> int:
+        return await client.send_rich_message(
+            chat_id=chat_id, thread_id=None, html=html, reply_to=reply_to
+        )
+
     async def transcribe(content: bytes, media_type: str) -> str:
         assert transcriber is not None
         result = await transcriber.transcribe(
@@ -387,6 +398,7 @@ def build_inbox_worker(
         model=models,
         search=WebSearch(brave_key_file=config.brave_key_file, searxng_url=config.searxng_url),
         send=send,
+        send_rich=send_rich if runtime.settings.chat.rich_messages else None,
         download=client.download,
         transcribe=transcribe if transcriber is not None else None,
         owner=owner,

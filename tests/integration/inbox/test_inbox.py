@@ -16,6 +16,8 @@ from vuzol.inbox.service import InboxWorker
 from vuzol.storage.models import InboxItem, InboxLink, InboxMessage, TransactionalOutbox
 from vuzol.storage.types import DeliveryStatus
 from vuzol.telegram.durable_ingress import DurableTelegramIngress
+from vuzol.telegram.formatting import telegram_rich_html
+from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 INBOX = InboxSettings(enabled=True, profile_id="fast", settle_seconds=1)
@@ -111,7 +113,9 @@ async def drain(worker):
             )
 
 
-def worker_for(factory, model, telegram=None, links=None, search=None, download=None):
+def worker_for(
+    factory, model, telegram=None, links=None, search=None, download=None, send_rich=None
+):
     telegram = telegram or Telegram()
 
     async def read_link(url):
@@ -123,12 +127,129 @@ def worker_for(factory, model, telegram=None, links=None, search=None, download=
             INBOX,
             model=model,
             send=telegram.send,
+            send_rich=send_rich,
             download=AsyncMock(return_value=download or b"\xff\xd8jpeg"),
             read_link=read_link,
             search=search,
         ),
         telegram,
     )
+
+
+@pytest.mark.parametrize("route", ["ask", "search", "chat"])
+async def test_formatted_inbox_answers_use_rich_messages(postgres_dsn, route):
+    text = "# Итог\n\n- Первый пункт\n- Второй пункт"
+    send_rich = AsyncMock(return_value=9017)
+    answers = [Route(action=route, reply=text)]
+    if route != "chat":
+        answers.append(Answer(text=text))
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, private(1, text="Расскажи подробнее"))
+        worker, telegram = worker_for(factory, FakeModel(*answers), send_rich=send_rich)
+        await drain(worker)
+        send_rich.assert_awaited_once_with(chat_id=OWNER, html=telegram_rich_html(text), reply_to=1)
+        assert not telegram.sent
+
+
+@pytest.mark.parametrize("outcome", ["rejected", "timeout", "network", "missing_id", "bad_request"])
+async def test_inbox_rich_unknown_outcome_is_never_sent_again(postgres_dsn, outcome):
+    from telegram.error import BadRequest, NetworkError, TimedOut
+
+    text = "# Итог\n\nПодробности."
+    failures = {
+        "rejected": RichMessageRejected("unsupported"),
+        "timeout": TimedOut(),
+        "network": NetworkError("unknown"),
+        "missing_id": LostTelegramResponse("no confirmation"),
+        "bad_request": BadRequest("invalid request"),
+    }
+    send_rich = AsyncMock(side_effect=failures[outcome])
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, private(1, text="Расскажи"))
+        worker, telegram = worker_for(
+            factory, FakeModel(Route(action="ask"), Answer(text=text)), send_rich=send_rich
+        )
+        await drain(worker)
+        assert send_rich.await_count == (3 if outcome == "bad_request" else 1)
+        assert len(telegram.sent) == int(outcome == "rejected")
+        async with factory() as session:
+            reply = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("inbox:reply:answer:%")
+                )
+            )
+            assert reply.status is (
+                DeliveryStatus.DELIVERED
+                if outcome == "rejected"
+                else DeliveryStatus.DEAD_LETTER
+                if outcome == "bad_request"
+                else DeliveryStatus.AMBIGUOUS
+            )
+            assert not list(await session.scalars(select(InboxLink)))
+
+
+async def test_rich_answer_keeps_record_reply_link_and_cards_keep_buttons(postgres_dsn):
+    send_rich = AsyncMock(return_value=9017)
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, private(1, text="Запомни книгу"))
+        worker, telegram = worker_for(
+            factory,
+            FakeModel(
+                Route(action="save"),
+                Cards(cards=[Card(kind="book", title="Книга", summary="Описание")]),
+            ),
+            send_rich=send_rich,
+        )
+        await drain(worker)
+        send_rich.assert_not_awaited()
+        assert telegram.sent[0]["buttons"]
+        async with factory() as session:
+            item = await session.scalar(select(InboxItem))
+        worker._model = FakeModel(Answer(text="# Итог\n\n**Подробный** разбор."))
+        await worker._answer([item], "Разбери", OWNER, reply_to=2, key="rich-record")
+        await drain(worker)
+        async with factory() as session:
+            link = await session.scalar(select(InboxLink).where(InboxLink.message_id == 9017))
+            assert link.item_id == item.id
+
+
+async def test_weekly_digest_uses_safe_rich_headings_and_lists(postgres_dsn):
+    from vuzol.inbox.render import digest_html
+
+    sunday = datetime(2026, 11, 1, 11, 0, tzinfo=UTC)
+    send_rich = AsyncMock(return_value=9017)
+    title = "Книга *буквально* [ссылка](https://example.com) <tag>"
+    async with _factory(postgres_dsn) as factory:
+        async with factory.begin() as session:
+            session.add(
+                InboxItem(
+                    owner_user_id=OWNER,
+                    chat_id=OWNER,
+                    ordinal=0,
+                    kind="book",
+                    title=title,
+                    summary="",
+                    evidence="",
+                    answers=[],
+                    created_at=sunday - timedelta(days=1),
+                )
+            )
+        worker, telegram = worker_for(factory, FakeModel(), send_rich=send_rich)
+        await worker._sweep(sunday)
+        await drain(worker)
+        assert not telegram.sent
+        send_rich.assert_awaited_once()
+        html = send_rich.await_args.kwargs["html"]
+        assert "<h1>" in html and "<ul>" in html
+        assert "*буквально*" in html and "&lt;tag&gt;" in html
+        assert "<a href=" not in html
+        assert send_rich.await_args.kwargs["reply_to"] is None
+        async with factory() as session:
+            item = await session.scalar(select(InboxItem))
+            reply = await session.scalar(
+                select(TransactionalOutbox).where(TransactionalOutbox.operation_type == "reply")
+            )
+            assert reply.payload["html"] == digest_html([item], [], INBOX.timezone)
 
 
 async def test_comment_then_forward_is_one_record_with_an_answer(postgres_dsn):

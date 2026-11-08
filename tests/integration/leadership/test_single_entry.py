@@ -452,8 +452,14 @@ async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runt
 
 @pytest.mark.parametrize("reason", ["lead_response_invalid", "goal_review_invalid"])
 @pytest.mark.parametrize("second", ["answers", "malformed_again"])
-async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, second, reason):
-    """A received malformed answer still gets one fresh turn before parking."""
+async def test_a_malformed_lead_answer_is_redone_before_parking(
+    postgres_dsn, runtime, second, reason
+):
+    """Owner 2026-11-08: a bad answer from the cheap lead is redone three times, then parks."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
     from vuzol.leadership.model import LeadModelUnavailable
     from vuzol.storage.models import Event
 
@@ -474,17 +480,25 @@ async def test_one_malformed_lead_answer_is_retried_once(postgres_dsn, runtime, 
                     raise LeadModelUnavailable(reason)
                 return LeadDecision(reply="Запускаю.", profile_id="fixture")
 
+        async def due():  # skip the backoff between tries
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TransactionalOutbox)
+                    .where(TransactionalOutbox.destination == "project_lead")
+                    .values(available_at=datetime.now(UTC) - timedelta(seconds=1))
+                )
+
         model = Flaky()
         worker = _worker(factory, model)
         assert await worker.process_one()
         async with factory() as session:
             goal = await session.get(ManagedGoal, goal_id)
             assert goal.waiting_reason is None
-        assert await worker.process_one()
-        assert len(model.seen) == 2
-        # The retry carries the same owner message.
-        assert model.seen[1].owner_event["text"] == "Запускай"
-        assert not await worker.process_one()
+        while await worker.process_one():
+            await due()
+        assert len(model.seen) == (2 if second == "answers" else 4)
+        # Every retry carries the same owner message.
+        assert all(seen.owner_event["text"] == "Запускай" for seen in model.seen)
         async with factory() as session:
             goal = await session.get(ManagedGoal, goal_id)
             parked = await session.scalar(

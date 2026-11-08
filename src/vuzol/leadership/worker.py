@@ -68,7 +68,8 @@ from vuzol.storage.unit_of_work import UnitOfWork
 
 # A refusal meaning "too early": the package answers it, not the owner.
 _NOT_YET_REASONS = frozenset({"result_not_ready", "project_task_running"})
-_RETRIED_ONCE = frozenset({"lead_response_invalid", "goal_review_invalid"})
+# A bad answer is redone, up to the retry budget; later tries may go to a fallback model.
+_RETRIED_INVALID = frozenset({"lead_response_invalid", "goal_review_invalid"})
 _INFRASTRUCTURE_FAILURES = frozenset({"provider_unavailable", "rate_limited", "timeout"})
 # A parked goal is set aside: its wakeups end like a finished goal's until it returns.
 _TERMINAL_GOAL = frozenset({"cancelled", "completed", "parked"})
@@ -1063,9 +1064,9 @@ class ProjectLeadWorker:
                 and retry_count < len(delays)
             )
             invalid_retry = (
-                reason in _RETRIED_ONCE
+                reason in _RETRIED_INVALID
                 and item is not None
-                and "retry_of" not in item.payload
+                and retry_count < len(delays)
                 and (failure_category is None or definitive)
             )
             if (
@@ -1076,7 +1077,14 @@ class ProjectLeadWorker:
             ):
                 # A fresh wakeup gives the same event a fresh invocation identity.
                 # Keep it durable and unclaimable until its backoff has elapsed.
-                delay = delays[retry_count] if infrastructure_retry else 0
+                # An unreadable answer is redone at once, then with the same backoff.
+                delay = (
+                    delays[retry_count]
+                    if infrastructure_retry
+                    else 0
+                    if retry_count == 0
+                    else delays[retry_count - 1]
+                )
                 uow.session.add(
                     TransactionalOutbox(
                         destination="project_lead",

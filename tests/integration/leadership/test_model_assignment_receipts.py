@@ -110,6 +110,14 @@ async def test_restart_preserves_failure_reason_and_diagnostics_without_resendin
             )
 
     settings = _settings(monkeypatch, "lead-local")
+    # One retry: the retry budget is the backoff list (three by default).
+    settings = settings.model_copy(
+        update={
+            "project_lead": settings.project_lead.model_copy(
+                update={"model_retry_delays_seconds": (0,)}
+            )
+        }
+    )
     async with _factory(postgres_dsn) as factory:
         await _enable(factory, await _session(factory))
         first = _worker(factory, settings, Invalid({}), owner="before")
@@ -421,3 +429,57 @@ async def test_crash_between_commands_keeps_pins_and_replays_remaining_commands(
             assert await session.scalar(select(func.count()).select_from(WorkPackage)) == 1
             turn = await session.scalar(select(LeadershipTurn))
             assert turn.status == "applied"
+
+
+async def test_a_turn_that_keeps_failing_goes_to_the_fallback_lead(postgres_dsn, monkeypatch):
+    """Owner 2026-11-08: cheap Muse stays the lead; its third try goes to the fallback model."""
+    from sqlalchemy import update
+
+    from vuzol.storage.models import TransactionalOutbox
+
+    seen = []
+
+    class MuseBreaks(_Transport):
+        async def execute(self, request, profile, cancellation):
+            seen.append(profile.id)
+            if profile.id == "lead-local":
+                raise ProviderFailure(
+                    ProviderErrorCategory.INVALID_STRUCTURED_OUTPUT,
+                    True,
+                    True,
+                    execution_completed=True,
+                    usage=NormalizedUsage(input_tokens=1, output_tokens=1, duration_ms=1),
+                )
+            return await super().execute(request, profile, cancellation)
+
+    fallback = _profile().model_copy(update={"id": "lead-fallback", "model": "fallback-test"})
+    settings = _settings(monkeypatch, "lead-local")
+    settings = settings.model_copy(
+        update={
+            "project_lead": settings.project_lead.model_copy(
+                update={"lead_fallback_profile_ids": ["lead-fallback"]}
+            )
+        }
+    )
+    async with _factory(postgres_dsn) as factory:
+        await _enable(factory, await _session(factory))
+        worker = _worker(
+            factory,
+            settings,
+            MuseBreaks({"commands": []}),
+            owner="lead",
+            profiles=ProfileRegistry((_profile(), fallback)),
+        )
+        for _ in range(4):
+            if not await worker.process_one():
+                break
+            async with factory.begin() as session:  # skip the backoff between tries
+                await session.execute(
+                    update(TransactionalOutbox)
+                    .where(TransactionalOutbox.destination == "project_lead")
+                    .values(available_at=datetime.now(UTC) - timedelta(seconds=1))
+                )
+        assert seen == ["lead-local", "lead-local", "lead-fallback"]
+        async with factory() as session:
+            goal = await session.scalar(select(ManagedGoal))
+            assert goal.waiting_reason != "lead_response_invalid"

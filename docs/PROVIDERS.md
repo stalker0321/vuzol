@@ -297,6 +297,12 @@ servers in its own `VUZOL_EXECUTION__MODEL_CALL_MCP_SERVERS`, with the same URL.
 are added to the sandbox's proxy allowlist for that call only. The assistant's list is
 `assistant.mcp_servers`.
 
+A lead or goal-review answer that cannot be parsed is redone, once per entry of
+`VUZOL_PROJECT_LEAD__MODEL_RETRY_DELAYS_SECONDS` (default three: at once, then 30 s, then 120 s).
+Only then is the owner asked to continue. From `LEAD_FALLBACK_AFTER` failed tries on (default 2),
+the turn goes to the first usable `VUZOL_PROJECT_LEAD__LEAD_FALLBACK_PROFILE_IDS` profile.
+The cheap lead stays the default; a bad answer costs a redo, not the owner's attention.
+
 Lead turns run on `VUZOL_PROJECT_LEAD__LEAD_PARALLELISM` executor lanes (default 1). Each lane has
 its own owner name, because a goal lease names the lane that holds it. A goal still has one lead
 turn at a time: a lane that finds the lease held defers the wakeup.

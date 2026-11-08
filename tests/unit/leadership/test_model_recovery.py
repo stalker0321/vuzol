@@ -82,17 +82,23 @@ async def test_exhaustion_names_part_reason_retries_and_action(
         ("goal_review_invalid", "Проверка цели"),
     ],
 )
-async def test_unparseable_answer_has_plain_reason_and_one_retry(turns, monkeypatch, reason, part):
+async def test_unparseable_answer_is_redone_three_times_before_the_owner_hears(
+    turns, monkeypatch, reason, part
+):
     turns.recovery.side_effect = service.request_owner_recovery
     enqueue = AsyncMock()
     monkeypatch.setattr(service, "_enqueue_owner_question", enqueue)
     turns.model.decide.side_effect = LeadModelUnavailable(reason)
-    await turns.run(turns.first)
-    (retry,) = turns.pending()
-    await turns.run(retry)
+    item = turns.first
+    for tries in range(3):
+        await turns.run(item)
+        (item,) = turns.pending()
+        assert item.payload["model_retry_count"] == tries + 1
+    enqueue.assert_not_awaited()  # owner 2026-11-08: a cheap model's bad answer is redone
+    await turns.run(item)
     question = enqueue.call_args.args[2]
     assert part in question and "ответ не удалось разобрать" in question
-    assert "Повторил 1 раз" in question and "Напиши «продолжай»" in question
+    assert "Повторил 3 раза" in question and "Напиши «продолжай»" in question
 
 
 @pytest.mark.anyio

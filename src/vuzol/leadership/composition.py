@@ -286,15 +286,20 @@ class _TurnModels:
         )
 
     def _fallback_planner(self, profile_id: str) -> tuple[ProviderProfileConfig, ProviderAdapter]:
+        return self._fallback(profile_id, "planner_strong")
+
+    def _fallback(
+        self, profile_id: str, slot: str
+    ) -> tuple[ProviderProfileConfig, ProviderAdapter]:
         try:
             profile = self._profiles.get(profile_id)
             if (
                 not profile.enabled
-                or SLOT_ROLES["planner_strong"] not in profile.roles
+                or SLOT_ROLES[slot] not in profile.roles
                 or not supported_profile(profile)
             ):
-                raise ValueError("fallback planner is disabled or unsupported")
-            adapter = self._injected["planner_strong"]
+                raise ValueError("fallback profile is disabled or unsupported")
+            adapter = self._injected[slot]
             if adapter is None and self._registry is not None:
                 adapter = self._registry.get(profile.id)
             if adapter is None:
@@ -402,6 +407,16 @@ class _TurnModels:
         if "lead" not in pins:
             raise LeadModelUnavailable("lead_profile_unselected")
         profile, adapter = self._resolve(pins["lead"], "lead")
+        tries = int((snapshot.result_context.get("event") or {}).get("model_retry_count", 0))
+        if tries >= self._settings.project_lead.lead_fallback_after:
+            for fallback_id in self._settings.project_lead.lead_fallback_profile_ids:
+                if fallback_id == profile.id:
+                    continue
+                try:
+                    profile, adapter = self._fallback(fallback_id, "lead")
+                    break
+                except LeadModelUnavailable:
+                    continue
         return await ProviderLeadModel(
             self._factory,
             profile,

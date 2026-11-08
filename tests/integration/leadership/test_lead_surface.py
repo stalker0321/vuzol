@@ -149,9 +149,18 @@ async def test_invalid_provider_response_parks_without_a_plan(
     transport = _Transport({"commands": [{"name": "accept_criterion", "payload": {}}]})
     async with _factory(postgres_dsn) as factory:
         await _enable(factory, await _session(factory))
+        settings = _settings(monkeypatch, "lead-local")
+        # One retry: the retry budget is the backoff list (three by default).
+        settings = settings.model_copy(
+            update={
+                "project_lead": settings.project_lead.model_copy(
+                    update={"model_retry_delays_seconds": (0,)}
+                )
+            }
+        )
         worker = build_project_lead_worker(
             factory,
-            settings=_settings(monkeypatch, "lead-local"),
+            settings=settings,
             profiles=ProfileRegistry((_profile(),)),
             owner="lead-invalid",
             default_branches={PROJECT: "main"},

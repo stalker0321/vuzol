@@ -552,6 +552,10 @@ class ProjectLeadSettings(BaseModel):
     research_models: list[ResearchModelChoice] = Field(default_factory=list)
     # Tried in order when the assigned planner hits its quota or is unavailable.
     planner_fallback_profile_ids: list[str] = Field(default_factory=list)
+    # Owner 2026-11-08: Muse stays the lead because it is cheap; a bad answer is redone.
+    # From this many failed tries of one turn on, the turn goes to the first usable fallback.
+    lead_fallback_profile_ids: list[str] = Field(default_factory=list)
+    lead_fallback_after: int = Field(default=2, ge=1, le=3)
     # Wall-clock bound for each lead/review invocation, independent of model/provider.
     inference_timeout_seconds: int = Field(default=60, ge=1, le=600)
     # Each entry schedules one safe resend; never more than three retries.

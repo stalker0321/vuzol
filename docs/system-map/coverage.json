@@ -1026,13 +1026,13 @@
         "src/vuzol/leadership/quota_wait.py:114",
         "src/vuzol/leadership/wakeups.py:52",
         "src/vuzol/leadership/wakeups.py:102",
-        "src/vuzol/leadership/worker.py:1081",
+        "src/vuzol/leadership/worker.py:1089",
         "src/vuzol/workflows/lead_events.py:104",
         "src/vuzol/workflows/lead_events.py:130",
         "src/vuzol/workflows/lead_events.py:206"
       ],
       "consumers": [
-        "src/vuzol/leadership/worker.py:153"
+        "src/vuzol/leadership/worker.py:154"
       ],
       "scenario": "goal"
     },
@@ -1082,7 +1082,7 @@
         "src/vuzol/interpretation/service.py:1635",
         "src/vuzol/interpretation/service.py:1425",
         "src/vuzol/interpretation/service.py:1569",
-        "src/vuzol/leadership/worker.py:776",
+        "src/vuzol/leadership/worker.py:777",
         "src/vuzol/projects/naming.py:86",
         "src/vuzol/projects/naming.py:180",
         "src/vuzol/projects/naming.py:207",
@@ -1156,7 +1156,7 @@
         "src/vuzol/discussion/service.py:1161",
         "src/vuzol/discussion/service.py:1294",
         "src/vuzol/leadership/service.py:1276",
-        "src/vuzol/leadership/worker.py:1188",
+        "src/vuzol/leadership/worker.py:1196",
         "src/vuzol/telegram/controls.py:558",
         "src/vuzol/telegram/controls.py:670",
         "src/vuzol/telegram/ingress.py:1328",

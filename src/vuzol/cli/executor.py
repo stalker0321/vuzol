@@ -18,7 +18,12 @@ from vuzol.cli.worker import ProcessorChain
 from vuzol.config import LaunchMode, ScopedSecretResolver, get_runtime_configuration
 from vuzol.config.models import SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
-from vuzol.config.settings import ExecutionNode, Settings, SubscriptionLimitSettings
+from vuzol.config.settings import (
+    ExecutionNode,
+    ProjectLeadSettings,
+    Settings,
+    SubscriptionLimitSettings,
+)
 from vuzol.execution.access import RootlessIdentityResolver, WorktreeAccessManager
 from vuzol.execution.artifact_production import (
     ArtifactProductionHandler,
@@ -38,7 +43,12 @@ from vuzol.execution.result_validation import ResultValidationHandler
 from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
 from vuzol.execution.static_build import StaticBuildHandler
 from vuzol.execution.worktrees import WorktreeService
-from vuzol.leadership.composition import build_goal_retrospective_worker, build_project_lead_worker
+from vuzol.leadership.composition import (
+    build_dream_worker,
+    build_goal_retrospective_worker,
+    build_project_lead_worker,
+)
+from vuzol.leadership.dreaming import enqueue_dreams
 from vuzol.leadership.worker import ProjectLeadWorker
 from vuzol.observability import configure_logging, get_logger
 from vuzol.projects.capability_provisioning import (
@@ -455,6 +465,13 @@ async def run() -> None:
                     owner=f"{owner}:retrospective",
                     adapter_registry=adapter_registry,
                 ),
+                build_dream_worker(
+                    factory,
+                    settings=settings,
+                    profiles=runtime.registries.profiles,
+                    owner=f"{owner}:dream",
+                    adapter_registry=adapter_registry,
+                ),
             )
             if settings.project_lead.enabled
             else None
@@ -522,6 +539,8 @@ async def run() -> None:
             session_factory=factory,
             registries=runtime.registries,
             subscription_limit_settings=settings.subscription_limits,
+            dream_settings=settings.project_lead,
+            timezone=settings.assistant.timezone,
         )
     finally:
         await engine.dispose()
@@ -697,6 +716,8 @@ async def _run_loop(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     registries: object | None = None,
     subscription_limit_settings: SubscriptionLimitSettings | None = None,
+    dream_settings: ProjectLeadSettings | None = None,
+    timezone: str = "Europe/Amsterdam",
 ) -> None:
     if (
         session_factory is not None
@@ -714,6 +735,7 @@ async def _run_loop(
     last_limit_refresh = -limit_refresh_seconds  # refresh once on startup
     line_refresh_seconds = 10.0
     last_line_refresh = -line_refresh_seconds
+    last_dream_tick = -60.0
 
     async def run_lane(lane: ExecutorLane) -> None:
         while not stop.is_set():
@@ -730,6 +752,21 @@ async def _run_loop(
                     task.result()  # A failed lane must fail visibly, not silently disappear.
             await processor.recover_if_due()
             now = time.monotonic()
+            if (
+                session_factory is not None
+                and dream_settings is not None
+                and now - last_dream_tick >= 60
+            ):
+                last_dream_tick = now
+                try:
+                    async with session_factory.begin() as session:
+                        await enqueue_dreams(session, settings=dream_settings, timezone=timezone)
+                except Exception:  # nightly memory upkeep must never stop the executor
+                    get_logger(__name__).warning(
+                        "dream scheduling failed",
+                        extra={"event": "executor.dream_schedule_failed"},
+                        exc_info=True,
+                    )
             due_periodic = now - last_limit_refresh >= limit_refresh_seconds
             if session_factory is not None and registries is not None:
                 assert subscription_limit_settings is not None

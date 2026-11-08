@@ -568,6 +568,8 @@ class ProjectLeadSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = False
+    dreaming_enabled: bool = False
+    dreaming_hour: int = Field(default=4, ge=0, le=23)
     default_goal_max_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # Empty means the feature can be on while no model is selected. The worker
     # then parks the goal with an explicit blocker instead of inventing a plan.

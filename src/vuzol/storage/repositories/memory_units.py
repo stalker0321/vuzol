@@ -100,6 +100,17 @@ class MemoryUnitRepository:
         return await self._session.get(MemoryUnit, unit_id)
 
     async def lock_note(self, note_id: uuid.UUID) -> MemoryUnit | None:
+        identity = (
+            await self._session.execute(
+                select(MemoryUnit.scope, MemoryUnit.project_id).where(
+                    MemoryUnit.id == note_id, MemoryUnit.unit_type == "notebook_note"
+                )
+            )
+        ).one_or_none()
+        if identity is None:
+            return None
+        # Controls and forget serialize with consolidation before taking a row lock.
+        await self.lock_notebook(identity.scope, identity.project_id)
         return cast(
             MemoryUnit | None,
             await self._session.scalar(

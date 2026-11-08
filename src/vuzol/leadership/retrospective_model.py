@@ -94,7 +94,35 @@ async def generate_retrospective(
         + json.dumps(context, ensure_ascii=False)
         + "\n</retrospective_data>"
     )
-    schema = strict_response_schema(RetrospectiveResponse)
+    return await generate_memory_response(
+        factory,
+        profile,
+        adapter,
+        prompt,
+        response_type=RetrospectiveResponse,
+        purpose=LEDGER_PURPOSE,
+        revision="lead-retrospective.v1",
+        invocation_id=invocation_id,
+        limits=limits,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+async def generate_memory_response[Response: BaseModel](
+    factory: async_sessionmaker[AsyncSession],
+    profile: ProviderProfileConfig,
+    adapter: ProviderAdapter,
+    prompt: str,
+    *,
+    response_type: type[Response],
+    purpose: str,
+    revision: str,
+    invocation_id: uuid.UUID,
+    limits: HardLimits,
+    timeout_seconds: int,
+) -> Response:
+    """Shared accounted structured-output path for the lead's memory jobs."""
+    schema = strict_response_schema(response_type)
     input_tokens = (len(prompt.encode()) + len(json.dumps(schema).encode()) + 2) // 3 + 500
     output_tokens = min(
         profile.output_limit or limits.provider_call_output_tokens,
@@ -116,18 +144,18 @@ async def generate_retrospective(
             provider_attempt=1,
             role=ProviderRole.LEAD,
             original_input=prompt,
-            output_schema_name="lead_retrospective",
-            output_schema_version="lead-retrospective.v1",
+            output_schema_name=purpose,
+            output_schema_version=revision,
             output_json_schema=schema,
             system_policy_revision=POLICY_REVISION,
-            prompt_revision="lead-retrospective.v1",
+            prompt_revision=revision,
             timeout_seconds=timeout_seconds,
             max_input_tokens=input_tokens,
             max_output_tokens=output_tokens,
             reserved_cost_units=Decimal(0),
             reserved_quota_units=Decimal(0),
         ),
-        purpose=LEDGER_PURPOSE,
+        purpose=purpose,
         limits=limits,
     )
     if result.status is not ProviderResultStatus.SUCCEEDED:
@@ -136,6 +164,6 @@ async def generate_retrospective(
         payload = result.structured_output
         if payload is None and result.text:
             payload = json.loads(result.text)
-        return RetrospectiveResponse.model_validate(payload)
+        return response_type.model_validate(payload)
     except (ValidationError, ValueError) as error:
         raise LeadModelUnavailable("retrospective_response_invalid") from error

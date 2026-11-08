@@ -14,6 +14,8 @@ from vuzol.config.models import Capability, LaunchMode, ProviderProfileConfig
 from vuzol.config.registries import ProfileRegistry
 from vuzol.config.revision import assignment_matches, assignment_revision
 from vuzol.config.settings import ResearchModelChoice, Settings
+from vuzol.leadership.dreaming import DreamConsumer
+from vuzol.leadership.dreaming_model import DreamResponse, generate_dream
 from vuzol.leadership.fencing import TurnClaim
 from vuzol.leadership.invocation_context import current_turn, invocation_current
 from vuzol.leadership.job_runner import ResearchJobRunner
@@ -114,6 +116,29 @@ def build_goal_retrospective_worker(
         timeout_seconds=settings.project_lead.inference_timeout_seconds,
         # A model outage lasts minutes to hours (2026-10-27: ~40 minutes); back off for
         # about two hours in total before giving the retrospective up.
+        max_attempts=8,
+        retry_min_seconds=60,
+        retry_max_seconds=3600,
+    )
+
+
+def build_dream_worker(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    settings: Settings,
+    profiles: ProfileRegistry,
+    owner: str,
+    adapter: ProviderAdapter | None = None,
+    adapter_registry: AdapterRegistry | None = None,
+) -> DreamConsumer:
+    return DreamConsumer(
+        session_factory,
+        owner=owner,
+        model=_TurnModels(
+            session_factory, settings, profiles, adapter, adapter_registry, None, None, None
+        ),
+        enabled=lambda: settings.project_lead.enabled and settings.project_lead.dreaming_enabled,
+        timeout_seconds=settings.project_lead.inference_timeout_seconds,
         max_attempts=8,
         retry_min_seconds=60,
         retry_max_seconds=3600,
@@ -276,6 +301,23 @@ class _TurnModels:
             raise LeadModelUnavailable("lead_profile_unselected")
         profile, adapter = self._resolve(pins["lead"], "lead")
         return await generate_retrospective(
+            self._factory,
+            profile,
+            adapter,
+            context,
+            invocation_id=invocation_id,
+            limits=self._settings.limits,
+            timeout_seconds=self._settings.project_lead.inference_timeout_seconds,
+        )
+
+    async def dream(
+        self, project_id: str, context: dict[str, Any], *, invocation_id: uuid.UUID
+    ) -> DreamResponse:
+        pins = await self._pins()
+        if "lead" not in pins:
+            raise LeadModelUnavailable("lead_profile_unselected")
+        profile, adapter = self._resolve(pins["lead"], "lead")
+        return await generate_dream(
             self._factory,
             profile,
             adapter,

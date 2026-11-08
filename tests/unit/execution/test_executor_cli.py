@@ -733,6 +733,8 @@ async def test_executor_composes_enabled_runtime(
 
     monkeypatch.setattr(executor_cli, "build_project_lead_worker", lead)
     monkeypatch.setattr(executor_cli, "build_goal_retrospective_worker", MagicMock())
+    dream_builder = MagicMock()
+    monkeypatch.setattr(executor_cli, "build_dream_worker", dream_builder)
 
     await executor_cli.run()
     sandbox.preflight.assert_awaited_once()
@@ -745,6 +747,12 @@ async def test_executor_composes_enabled_runtime(
     run_loop.assert_awaited_once()
     assert run_loop.await_args is not None
     assert run_loop.await_args.kwargs["subscription_limit_settings"] is settings.subscription_limits
+    if lead_lanes:
+        dream_builder.assert_called_once()
+    else:
+        dream_builder.assert_not_called()
+    assert run_loop.await_args.kwargs["dream_settings"] is settings.project_lead
+    assert run_loop.await_args.kwargs["timezone"] == settings.assistant.timezone
     chain = run_loop.await_args.args[0]
     assert chain._reviews is not None
     # Each lead lane owns its goal leases under its own name.

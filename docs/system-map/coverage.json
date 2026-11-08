@@ -692,7 +692,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_refresh_subscription_limits_tick",
       "sources": [
-        "src/vuzol/cli/executor.py:614"
+        "src/vuzol/cli/executor.py:633"
       ],
       "producers": [],
       "consumers": [],
@@ -701,7 +701,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_run_loop",
       "sources": [
-        "src/vuzol/cli/executor.py:693"
+        "src/vuzol/cli/executor.py:712"
       ],
       "producers": [],
       "consumers": [],
@@ -809,7 +809,7 @@
     {
       "id": "module:vuzol.cli.executor",
       "sources": [
-        "src/vuzol/cli/executor.py:141"
+        "src/vuzol/cli/executor.py:151"
       ],
       "producers": [],
       "consumers": [],
@@ -1016,6 +1016,15 @@
       "scenario": "memory"
     },
     {
+      "id": "outbox:project_dream",
+      "sources": [],
+      "producers": [],
+      "consumers": [
+        "src/vuzol/leadership/dreaming.py:267"
+      ],
+      "scenario": "lead-dreaming"
+    },
+    {
       "id": "outbox:project_lead",
       "sources": [],
       "producers": [
@@ -1067,7 +1076,7 @@
         "src/vuzol/telegram/ingress.py:1120"
       ],
       "consumers": [
-        "src/vuzol/cli/executor.py:638"
+        "src/vuzol/cli/executor.py:657"
       ],
       "scenario": "accounts"
     },

@@ -188,9 +188,10 @@ async def invoke(
                     purpose=purpose,
                     horizon_id=context.claim.goal_id if context is not None else None,
                 ),
-                # Keep the owner conversation and terminal reflection available
+                # Keep the owner conversation and memory consolidation available
                 # after exhaustion, but count their receipts against the goal.
-                enforce_lifetime_budget=purpose not in {"project_lead", "lead_retrospective"},
+                enforce_lifetime_budget=purpose
+                not in {"project_lead", "lead_retrospective", "lead_dreaming"},
             )
             reservation_id = reservation.id
             if context is not None:

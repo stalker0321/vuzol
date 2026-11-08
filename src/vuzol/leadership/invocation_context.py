@@ -32,6 +32,7 @@ class TurnInvocationContext:
     scope_revision: int
     conversational: bool = False
     retrospective: bool = False
+    dream: bool = False
     job: bool = False
     enabled: Callable[[], bool] = lambda: True
 
@@ -47,8 +48,8 @@ async def invocation_current(
         return False
     if context.job:
         return await _job_current(session, context, lock=lock)
-    if context.retrospective:
-        return await _retrospective_current(session, context, lock=lock)
+    if context.retrospective or context.dream:
+        return await _memory_job_current(session, context, lock=lock)
     goal = await session.get(ManagedGoal, context.claim.goal_id, with_for_update=lock)
     turn = await session.get(LeadershipTurn, context.turn_id, with_for_update=lock)
     if (
@@ -83,10 +84,10 @@ async def invocation_current(
     )
 
 
-async def _retrospective_current(
+async def _memory_job_current(
     session: AsyncSession, context: TurnInvocationContext, *, lock: bool = True
 ) -> bool:
-    """A terminal goal's read-only inference is authorized solely by its outbox lease."""
+    """Read-only memory inference is authorized by its outbox lease and provenance goal."""
     from vuzol.storage.models import TransactionalOutbox
     from vuzol.storage.types import DeliveryStatus
 
@@ -96,8 +97,8 @@ async def _retrospective_current(
     goal = await session.get(ManagedGoal, claim.goal_id)
     return (
         item is not None
-        and item.destination == "goal_retrospective"
-        and item.operation_type == "retrospect_goal"
+        and item.destination == ("project_dream" if context.dream else "goal_retrospective")
+        and item.operation_type == ("dream_project" if context.dream else "retrospect_goal")
         and item.linked_entity_id == claim.goal_id
         and item.status == DeliveryStatus.LEASED
         and item.lease_owner == claim.owner
@@ -107,7 +108,11 @@ async def _retrospective_current(
         and not item.payload.get("applied")
         and goal is not None
         and goal.project_id == context.project_id
-        and (goal.lifecycle == "cancelled" or bool(goal.constraints.get("owner_acceptance")))
+        and (
+            context.dream
+            or goal.lifecycle == "cancelled"
+            or bool(goal.constraints.get("owner_acceptance"))
+        )
         and turn is not None
         and turn.status == "claimed"
         and turn.goal_id == goal.id

@@ -350,11 +350,17 @@ async def _tell_assistant(
     )
 
 
-async def _run_command(argv: Sequence[str]) -> None:
+async def _run_command(argv: Sequence[str], *, timeout_seconds: float = 300) -> None:
+    """Run one fixed restart command from settings, bounded in time."""
     process = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
     )
-    _stdout, stderr = await process.communicate()
+    try:
+        _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise OSError(f"{argv[0]} timed out") from None
     if process.returncode != 0:
         raise OSError(f"{argv[0]} failed: {stderr.decode(errors='replace')[:200]}")
 

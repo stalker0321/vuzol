@@ -27,9 +27,9 @@ from vuzol.config import (
     ScopedSecretResolver,
     get_runtime_configuration,
 )
-from vuzol.config.models import TopicKind
+from vuzol.config.models import LaunchMode, TopicKind
 from vuzol.experiments.canary import canary_policy_from_settings
-from vuzol.inbox.model import InboxModel, ModelChain
+from vuzol.inbox.model import ChatModel, InboxModel, ModelChain
 from vuzol.inbox.search import WebSearch
 from vuzol.inbox.service import InboxWorker
 from vuzol.interpretation.adapters import (
@@ -42,6 +42,7 @@ from vuzol.interpretation.jev import JevDecisionsInterpreter
 from vuzol.interpretation.service import InterpretationPipeline, transcription_keywords
 from vuzol.leadership.access import ProjectAccess, ProjectApplication, WorkRequest
 from vuzol.leadership.provenance import RequestOrigin
+from vuzol.model_calls.client import RelayedModel
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
@@ -124,27 +125,32 @@ def build_model_chain(
     fallback_profile_ids: tuple[str, ...],
     org_ids: dict[str, str],
     timeout_seconds: float,
+    factory: async_sessionmaker[AsyncSession] | None = None,
+    purpose: str = "inbox",
 ) -> ModelChain:
-    models = [
-        build_inbox_model(
+    def build(profile_id: str) -> ChatModel:
+        profile = runtime.registries.profiles.get(profile_id)
+        if profile.launch_mode is LaunchMode.CLI and factory is not None:
+            # Subscription CLIs (Codex, Pi) run only in the executor's sandbox.
+            return RelayedModel(
+                factory,
+                profile_id=profile.id,
+                model=profile.model,
+                purpose=purpose,
+                timeout_seconds=timeout_seconds,
+            )
+        return build_inbox_model(
             runtime.registries,
             resolver,
             profile_id=profile_id,
             timeout_seconds=timeout_seconds,
             org_id=org_ids.get(profile_id),
         )
-    ]
+
+    models = [build(profile_id)]
     for fallback in fallback_profile_ids:
         try:
-            models.append(
-                build_inbox_model(
-                    runtime.registries,
-                    resolver,
-                    profile_id=fallback,
-                    timeout_seconds=timeout_seconds,
-                    org_id=org_ids.get(fallback),
-                )
-            )
+            models.append(build(fallback))
         except (LookupError, ValueError) as error:  # incl. a missing key file
             # A spare account without its key yet must not stop the worker.
             get_logger(__name__).warning(
@@ -271,6 +277,8 @@ def build_assistant_worker(
             fallback_profile_ids=config.fallback_profile_ids,
             org_ids=config.opencode_org_ids,
             timeout_seconds=config.timeout_seconds,
+            factory=factory,
+            purpose="assistant_turn",
         ),
         projects=projects,
         submit=submit,

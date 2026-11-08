@@ -273,6 +273,20 @@ goal-verification CLI calls use an empty read-only workspace and bounded capture
 with real turn/invocation ownership rather than fabricated Task/Run/Step rows. Lease, goal
 version, scope, delegation, and feature fences are rechecked before launch and during calls.
 
+### Model calls for other services (`vuzol.model_calls`)
+
+A container service (the assistant topic, the inbox) cannot run a CLI subscription account:
+the account state lives only with the host executor. When such a service's profile is a CLI one,
+it queues a row in `model_calls` with its prompt, input and output schema, then waits. Executor
+lanes (`VUZOL_EXECUTION__MODEL_CALL_PARALLELISM`, default 2) lease the row and run the canonical
+prompt-only command in an empty sandbox (`VUZOL_EXECUTION__MODEL_CALL_SANDBOX_PROFILE`, which must
+proxy egress), with egress limited to the profile's own `runtime_network`. The lease is the
+authority. It is rechecked before launch and watched while the process runs, and the sandbox
+refuses any stdin but the frozen call. A failed call is settled, not retried, so the caller can
+fall back to its next profile. The executor leases a row again only when the owner died. Leftover
+sandboxes are reaped once no launcher holds them and the lease is gone. Without a sandbox profile
+the lanes do not start, and a CLI profile there waits until the call's deadline.
+
 ### Selecting today's models (configuration, not application code)
 
 The 2026-10-21 requested lead selection is **Muse Spark 1.3 Contributor / high**

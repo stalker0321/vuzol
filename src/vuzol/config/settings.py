@@ -414,7 +414,11 @@ class ExecutionSettings(BaseModel):
     cleanup_interval_seconds: int = Field(default=300, ge=10, le=86_400)
     journal_root: Path = Path("/srv/vuzol/runtime-journal")
     journal_key_file: Path | None = None
-    provider_parallelism: int = Field(default=2, ge=1, le=16)
+    # How many provider turns run at once: bounded by the machine, not the accounts.
+    provider_parallelism: int = Field(default=2, ge=1, le=256)
+    # Model calls other services hand to this executor (vuzol.model_calls).
+    model_call_parallelism: int = Field(default=2, ge=1, le=256)
+    model_call_sandbox_profile: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     recovery_batch_size: int = Field(default=50, ge=1, le=1000)
     proxy_image: str | None = Field(
         default=None,
@@ -596,7 +600,8 @@ class AssistantSettings(BaseModel):
     # The forum topic the assistant owns; every message there goes to it.
     chat_id: int | None = None
     message_thread_id: int | None = Field(default=None, ge=1)
-    # Any OpenAI-compatible registry profile; the model is the profile's, never fixed here.
+    # An OpenAI-compatible profile, or a CLI one (Codex, Pi) the executor runs for it.
+    # The model is the profile's, never fixed here.
     profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     fallback_profile_ids: tuple[str, ...] = ()
     opencode_org_ids: dict[str, str] = Field(default_factory=dict)

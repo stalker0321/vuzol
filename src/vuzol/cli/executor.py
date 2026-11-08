@@ -85,6 +85,7 @@ class ExecutorChain:
         control: ExecutorLane | None = None,
         control_worktrees: ExecutorLane | None = None,
         provider_parallelism: int = 1,
+        model_calls: tuple[ExecutorLane, ...] = (),
     ) -> None:
         self._worktrees = worktrees
         self._providers = providers
@@ -95,6 +96,7 @@ class ExecutorChain:
         self._control = control
         self._control_worktrees = control_worktrees
         self._provider_parallelism = provider_parallelism
+        self._model_calls = model_calls
 
     def lanes(self) -> tuple[ExecutorLane, ...]:
         """Long provider turns must not occupy the lead/control event loop."""
@@ -107,6 +109,7 @@ class ExecutorChain:
                 self._control,
                 self._worktrees,
                 *([self._providers] * self._provider_parallelism),
+                *self._model_calls,
             )
             if worker is not None
         )
@@ -251,6 +254,14 @@ async def run() -> None:
         turn_transport = TurnSandboxTransport(
             sandbox_runtime, factory, settings, runtime.registries, proxy_manager
         )
+        from vuzol.model_calls.transport import ModelCallSandboxTransport
+        from vuzol.model_calls.worker import ModelCallReconciler, ModelCallWorker
+
+        call_transport = ModelCallSandboxTransport(
+            sandbox_runtime, factory, settings, runtime.registries, proxy_manager
+        )
+        call_reconciler = ModelCallReconciler(factory, sandbox_runtime, proxy_manager)
+        await call_reconciler.reconcile()
         adapters: dict[str, ProviderAdapter] = {}
         for profile in runtime.registries.profiles.items():
             if (
@@ -264,6 +275,7 @@ async def run() -> None:
                 base,
                 ReadOnlyCliAdapter(base, runtime, factory),
                 cli_adapter(profile, turn_transport),
+                cli_adapter(profile, call_transport),
             )
         if not adapters:
             raise RuntimeError("execution worker has no enabled CLI profile")
@@ -433,8 +445,23 @@ async def run() -> None:
             else None
         )
 
+        model_call_lanes = (
+            tuple(
+                ModelCallWorker(
+                    factory,
+                    runtime.registries.profiles,
+                    adapter_registry.get,
+                    owner=f"{owner}:model-call",
+                )
+                for _ in range(settings.execution.model_call_parallelism)
+            )
+            if settings.execution.model_call_sandbox_profile is not None
+            else ()
+        )
+
         async def recover_cli_resources() -> None:
             await turn_reconciler.reconcile_startup()
+            await call_reconciler.reconcile()
             if proxy_manager is not None:
                 await ProxyStartupReconciler(
                     factory, proxy_manager, owner=owner
@@ -450,6 +477,7 @@ async def run() -> None:
                 control=control_worker,
                 control_worktrees=control_worktree_worker,
                 provider_parallelism=settings.execution.provider_parallelism,
+                model_calls=model_call_lanes,
             ),
             settings.workflow.poll_interval_seconds,
             session_factory=factory,

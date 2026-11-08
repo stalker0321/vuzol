@@ -8,7 +8,7 @@ import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 from urllib.parse import urlsplit
 
 import httpx
@@ -135,10 +135,18 @@ class InboxModel:
         return text
 
 
+class ChatModel(Protocol):
+    model: str
+
+    async def ask(
+        self, output: type[M], *, system: str, user: str, images: tuple[Image, ...] = ()
+    ) -> M: ...
+
+
 class ModelChain:
     """The same model on several accounts: on a provider failure, try the next one."""
 
-    def __init__(self, models: Sequence[InboxModel]) -> None:
+    def __init__(self, models: Sequence[ChatModel]) -> None:
         if not models:
             raise ValueError("inbox needs at least one model")
         self._models = tuple(models)

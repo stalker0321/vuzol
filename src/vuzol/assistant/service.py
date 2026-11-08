@@ -135,7 +135,7 @@ class AssistantWorker:
             token = await claim_outbox_item(
                 session,
                 owner=self._owner,
-                lease_seconds=1800,  # several search rounds, each with a model call
+                lease_seconds=3600,  # several search rounds, each a model call that may queue
                 allowed_destinations=frozenset({ASSISTANT_DESTINATION}),
             )
         if token is None:

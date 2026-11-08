@@ -158,7 +158,7 @@ class PiCliAdapter:
             request.sandbox_reference
             and request.sandbox_reference.startswith("lead-turn:")
             and request.role in {ProviderRole.LEAD, ProviderRole.REVIEWER}
-        )
+        ) or bool(request.sandbox_reference and request.sandbox_reference.startswith("model-call:"))
         envelope = {
             "schema_version": request.schema_version,
             "role": request.role.value,

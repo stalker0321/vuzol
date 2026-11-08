@@ -718,6 +718,10 @@ async def test_executor_composes_enabled_runtime(
     ):
         monkeypatch.setattr(executor_cli, name, MagicMock())
     monkeypatch.setattr("vuzol.execution.turn_transport.TurnSandboxTransport", MagicMock())
+    monkeypatch.setattr(
+        "vuzol.model_calls.worker.ModelCallReconciler",
+        MagicMock(return_value=MagicMock(reconcile=AsyncMock(return_value=0))),
+    )
     run_loop = AsyncMock()
     monkeypatch.setattr(executor_cli, "_run_loop", run_loop)
 
@@ -741,7 +745,8 @@ async def test_executor_composes_enabled_runtime(
     assert reviewer._profile_id == ("grok-a" if cli_review else None)
     assert reviewer._input_token_limit == 100_000
     assert reviewer._factory is factory
-    assert executor_cli.cli_adapter.call_count == 2
+    # workflow, leadership turn and model call transports
+    assert executor_cli.cli_adapter.call_count == 3
     executor_cli.ReadOnlyCliAdapter.assert_called_once()
     provider_calls = executor_cli.RoutedWorkflowWorker.call_args_list
     assert len(provider_calls) == 2

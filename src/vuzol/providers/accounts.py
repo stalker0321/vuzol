@@ -228,7 +228,7 @@ class AccountBoundAdapter:
         control = (
             request.role is ProviderRole.LEAD
             or request.output_schema_version == "discussion-text-reply.v2"
-            or (request.sandbox_reference or "").startswith("lead-turn:")
+            or (request.sandbox_reference or "").startswith(("lead-turn:", "model-call:"))
         )
         slots = (
             (*range(limit - reserved, limit), *range(limit - reserved))

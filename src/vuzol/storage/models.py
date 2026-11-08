@@ -1837,15 +1837,44 @@ class Worktree(IdentityMixin, TimestampMixin, Base):
     cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ModelCall(IdentityMixin, TimestampMixin, Base):
+    """One model call a service asks the executor to make on a CLI subscription account."""
+
+    __tablename__ = "model_calls"
+    __table_args__ = (Index("ix_model_calls_claim", "state", "lease_expires_at", "created_at"),)
+
+    purpose: Mapped[str] = mapped_column(String(60), nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    # {"system", "user", "output_schema"}: frozen, so the sandbox can check what it runs.
+    request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    # queued | leased | succeeded | failed
+    state: Mapped[str] = mapped_column(String(12), nullable=False, default="queued")
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The caller stops waiting after this; a call nobody claimed by then is not run.
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(String(200))
+    usage: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=JSON_OBJECT
+    )
+
+
 class SupervisedProcess(IdentityMixin, TimestampMixin, Base):
     __tablename__ = "supervised_processes"
     __table_args__ = (
         CheckConstraint(
             "(leadership_turn_id IS NULL AND invocation_id IS NULL "
             "AND task_id IS NOT NULL AND run_id IS NOT NULL "
-            "AND step_id IS NOT NULL AND worktree_id IS NOT NULL) OR "
+            "AND step_id IS NOT NULL AND worktree_id IS NOT NULL AND model_call_id IS NULL) OR "
             "(leadership_turn_id IS NOT NULL AND invocation_id IS NOT NULL "
-            "AND task_id IS NULL AND run_id IS NULL AND step_id IS NULL AND worktree_id IS NULL)",
+            "AND task_id IS NULL AND run_id IS NULL AND step_id IS NULL AND worktree_id IS NULL "
+            "AND model_call_id IS NULL) OR "
+            "(model_call_id IS NOT NULL AND invocation_id IS NOT NULL "
+            "AND leadership_turn_id IS NULL AND task_id IS NULL AND run_id IS NULL "
+            "AND step_id IS NULL AND worktree_id IS NULL)",
             name="supervised_process_binding_xor",
         ),
         Index(
@@ -1870,6 +1899,9 @@ class SupervisedProcess(IdentityMixin, TimestampMixin, Base):
     )
     leadership_turn_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("leadership_turns.id", ondelete="RESTRICT"), index=True
+    )
+    model_call_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("model_calls.id", ondelete="RESTRICT"), index=True
     )
     invocation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False)

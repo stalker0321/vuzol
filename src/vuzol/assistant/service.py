@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from telegram.error import BadRequest, NetworkError, TimedOut
 
 from vuzol.assistant import ASSISTANT_DESTINATION
 from vuzol.assistant.ingress import schedule
@@ -186,6 +187,16 @@ class AssistantWorker:
                 await self._reply(payload)
             else:
                 raise ValueError(f"unknown assistant operation {operation}")
+        except (TimedOut, NetworkError) as failure:
+            if operation != "reply" or isinstance(failure, BadRequest):
+                error = f"assistant_{type(failure).__name__}"[:100]
+            else:
+                # Live 2026-11-08: a send that timed out had arrived; the retry doubled it.
+                # Like telegram delivery, an unknown send outcome is not sent again.
+                _LOG.warning(
+                    "assistant send outcome unknown",
+                    extra={"event": "assistant.send_ambiguous", "error": type(failure).__name__},
+                )
         except Exception as failure:  # every failure is retried, then parked
             error = f"assistant_{type(failure).__name__}"[:100]
             _LOG.warning(

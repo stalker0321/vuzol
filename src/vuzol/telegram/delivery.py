@@ -137,6 +137,8 @@ class PreparedDelivery:
     plan_revision_id: uuid.UUID | None = None
     control_status_generation: int | None = None
     pin_after_send: bool = False
+    # The revision is a content hash, not an ordered counter: store it as delivered.
+    content_revision: bool = False
     project_id: str | None = None
     discussion_parts: tuple[tuple[str, str], ...] = ()
     discussion_part_index: int = 0
@@ -818,6 +820,8 @@ async def _prepare_work_package_projection(
         return await _prepare_project_topic_status(session, item)
     if item.operation_type == "render_topic_idle":
         return await _prepare_project_topic_status(session, item, idle=True)
+    if item.operation_type == "render_topic_line":
+        return await _prepare_topic_line(session, item)
     if item.linked_entity_type != "work_package":
         raise PermanentDeliveryError("invalid_work_package_projection_entity")
     package_id = item.linked_entity_id
@@ -1001,6 +1005,48 @@ async def _retire_plan_cards(session: AsyncSession, package_id: uuid.UUID) -> No
             )
         )
         await session.delete(stale_link)
+
+
+async def _prepare_topic_line(session: AsyncSession, item: TransactionalOutbox) -> PreparedDelivery:
+    """The pinned line, rendered by the executor's refresher; a newer one supersedes it."""
+    try:
+        chat_id = int(item.payload["chat_id"])
+        thread_id = int(item.payload["thread_id"])
+        revision = int(item.payload["revision"])
+        html = str(item.payload["html"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise PermanentDeliveryError("invalid_topic_line_payload") from error
+    newer = await session.scalar(
+        select(TransactionalOutbox.id).where(
+            TransactionalOutbox.destination == WORK_PACKAGE_PROJECTION_DESTINATION,
+            TransactionalOutbox.operation_type == "render_topic_line",
+            TransactionalOutbox.payload["chat_id"].astext == str(chat_id),
+            TransactionalOutbox.payload["thread_id"].astext == str(thread_id),
+            TransactionalOutbox.created_at > item.created_at,
+        )
+    )
+    link = await session.scalar(
+        select(TelegramMessageLink).where(
+            TelegramMessageLink.chat_id == chat_id,
+            TelegramMessageLink.message_thread_id == thread_id,
+            TelegramMessageLink.message_role == WORK_PACKAGE_STATUS_ROLE,
+        )
+    )
+    if newer is not None or (link is not None and link.projection_revision == revision):
+        return PreparedDelivery(DeliveryAction.NOOP, chat_id=chat_id, thread_id=thread_id)
+    return PreparedDelivery(
+        DeliveryAction.SEND_STATUS if link is None else DeliveryAction.EDIT_STATUS,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        html=html,
+        revision=revision,
+        link_id=None if link is None else link.id,
+        message_id=None if link is None else link.message_id,
+        message_role=WORK_PACKAGE_STATUS_ROLE,
+        pin_after_send=link is None,
+        content_revision=True,
+        project_id=str(item.payload.get("project_id") or "") or None,
+    )
 
 
 async def _prepare_project_topic_status(
@@ -1859,6 +1905,7 @@ class TelegramDeliveryService:
                 # Other cards retain their monotonic stale-edit protection.
                 if (
                     prepared.message_role == PROJECT_STATUS_DASHBOARD_ROLE
+                    or prepared.content_revision
                     or prepared.revision > link.projection_revision
                 ):
                     link.projection_revision = prepared.revision

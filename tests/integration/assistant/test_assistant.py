@@ -283,6 +283,23 @@ async def test_a_new_project_is_created_on_the_button_and_gets_its_first_task(
         assert "https://t.me/c/" in telegram.sent[3]["html"]
 
 
+async def test_a_reply_that_timed_out_is_not_sent_twice(postgres_dsn):
+    from telegram.error import TimedOut
+
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "привет"))
+        worker, _, _ = worker_for(factory, FakeModel(Turn(reply="Привет!")))
+        sends = []
+
+        async def timed_out(**kwargs):
+            sends.append(kwargs)
+            raise TimedOut()  # Telegram may still have delivered it
+
+        worker._send = timed_out
+        await drain(worker)
+        assert len(sends) == 1
+
+
 async def test_edit_button_then_correction_replaces_the_plan(postgres_dsn, monkeypatch):
     monkeypatch.setattr(CallbackQuery, "answer", AsyncMock())
     async with _factory(postgres_dsn) as factory:

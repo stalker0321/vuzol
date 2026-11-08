@@ -506,6 +506,24 @@ async def run() -> None:
         await engine.dispose()
 
 
+async def _refresh_topic_lines_tick(
+    session_factory: async_sessionmaker[AsyncSession], registries: object
+) -> None:
+    """Keep each project topic's pinned line saying what runs there now."""
+    from vuzol.telegram.topic_line import profile_labels, refresh_topic_lines
+
+    try:
+        labels = profile_labels(registries.profiles.items())  # type: ignore[attr-defined]
+        async with session_factory.begin() as session:
+            await refresh_topic_lines(session, labels)
+    except Exception:  # a status line must never stop the executor
+        get_logger(__name__).warning(
+            "topic line refresh failed",
+            extra={"event": "executor.topic_line_failed"},
+            exc_info=True,
+        )
+
+
 async def _refresh_subscription_limits_tick(
     session_factory: async_sessionmaker[AsyncSession],
     registries: object,
@@ -607,6 +625,8 @@ async def _run_loop(
     get_logger(__name__).info("executor ready", extra={"event": "executor.ready"})
     limit_refresh_seconds = 120.0
     last_limit_refresh = -limit_refresh_seconds  # refresh once on startup
+    line_refresh_seconds = 10.0
+    last_line_refresh = -line_refresh_seconds
 
     async def run_lane(lane: ExecutorLane) -> None:
         while not stop.is_set():
@@ -634,6 +654,9 @@ async def _run_loop(
                 )
                 if due_periodic:
                     last_limit_refresh = now
+                if now - last_line_refresh >= line_refresh_seconds:
+                    last_line_refresh = now
+                    await _refresh_topic_lines_tick(session_factory, registries)
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval)
     finally:

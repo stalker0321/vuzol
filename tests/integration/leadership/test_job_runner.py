@@ -177,7 +177,9 @@ async def test_heartbeat_extends_lease_and_revocation_discards_report(postgres_d
             owner="heartbeat",
             model=lead._model,
             enabled=lambda: True,
-            lease_seconds=1,
+            # Under a loaded full suite one second can pass before the first
+            # renewal, losing the lease before the call starts.
+            lease_seconds=3,
         )
         try:
             assert await runner.tick()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
@@ -30,7 +31,6 @@ from vuzol.discussion.domain import (
     semantic_plan_hash,
     semantic_revision_hash,
 )
-from vuzol.leadership.persistence import ManagedGoal
 from vuzol.project_environment import apply_approved_environment_delta
 from vuzol.storage.models import (
     Approval,
@@ -58,6 +58,11 @@ from vuzol.storage.types import (
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
+
+if TYPE_CHECKING:
+    # Runtime imports stay local: leadership.persistence -> storage -> providers
+    # -> discussion would otherwise import a half-initialised module.
+    from vuzol.leadership.persistence import ManagedGoal
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,6 +556,8 @@ class WorkPackageService:
         return package.version
 
     async def _lock_managed_goal(self, package_id: uuid.UUID) -> ManagedGoal | None:
+        from vuzol.leadership.persistence import ManagedGoal
+
         assert self._uow.session is not None
         goal_id = await self._uow.session.scalar(
             select(WorkPackage.managed_goal_id).where(WorkPackage.id == package_id)
@@ -608,6 +615,8 @@ class WorkPackageService:
             payload={"revision_id": str(revision.id), "discarded_by_user_id": user_id},
         )
         if package.managed_goal_id is not None:
+            from vuzol.leadership.persistence import ManagedGoal
+
             assert self._uow.session is not None
             goal = await self._uow.session.get(
                 ManagedGoal, package.managed_goal_id, with_for_update=True
@@ -638,6 +647,8 @@ class WorkPackageService:
 
         assert self._uow.session is not None
         if package.managed_goal_id is not None:
+            from vuzol.leadership.persistence import ManagedGoal
+
             goal = await self._uow.session.get(ManagedGoal, package.managed_goal_id)
             if goal is not None:
                 # Replacing/accepting/discarding this plan settles its previous decisions.

@@ -36,3 +36,24 @@ def test_entrypoint_imports_in_a_fresh_process(entrypoint: str) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+# Backlog 2026-10-24: importing a leadership module first hit the cycle
+# leadership.persistence -> storage -> providers -> discussion.service.
+@pytest.mark.parametrize("module", ["vuzol.leadership.persistence", "vuzol.discussion.service"])
+def test_module_imports_first_in_a_fresh_process(module: str) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib, sys; importlib.import_module(sys.argv[1])",
+            module,
+        ],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

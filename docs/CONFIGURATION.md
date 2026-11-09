@@ -44,6 +44,29 @@ same cross-registry validation and revision calculation. The provisioner writes 
 atomic replace only after the new repository and Telegram thread exist. Duplicate IDs, path escapes,
 or an invalid inherited project policy prevent activation.
 
+## Features and where they run
+
+Each subsystem is a settings group (`VUZOL_<GROUP>__<FIELD>`), defined in
+`src/vuzol/config/settings.py`. Containers take theirs from `deploy/production/compose.yaml`
+and `/srv/vuzol/.env`; host units from `/etc/vuzol/*.env` (see the deployment guide). Every
+process must agree on `project_lead.enabled`.
+
+| Group | Runs in | Main fields |
+| --- | --- | --- |
+| `project_lead` | executor lanes | `enabled`, `profile_id`, `reviewer_profile_id`, `lead_fallback_profile_ids`, `planner_fallback_profile_ids`, `research_models`, `lead_parallelism`, `model_retry_delays_seconds`, `default_goal_max_cost`, `dreaming_enabled`, `dreaming_hour` |
+| `assistant` | interpreter | `enabled`, `chat_id`, `message_thread_id`, `profile_id`, `fallback_profile_ids`, `research_profile_ids`, `mcp_servers`, `native_search`, `timezone`, `timeout_seconds` |
+| `inbox` | interpreter | `enabled`, `profile_id`, `fallback_profile_ids`, `brave_key_file`, `searxng_url`, `settle_seconds` |
+| `monitor` | interpreter | `enabled`, `chat_id`, `message_thread_id`, `profile_ids`, `interests`, `digest_hours`, `sources` ([Monitor](MONITOR.md)) |
+| `project_setup` | `vuzol-project-setup` (root) | `enabled`, `template_project_id` |
+| `execution` | executor | `provider_parallelism`, `model_call_parallelism`, `model_call_sandbox_profile`, `model_call_mcp_servers`, `worker_mcp_servers`, `nodes`, `proxy_image`, `rootless_docker_socket` |
+| `chat` | interpreter | `/think` discussion mode: `enabled`, `profile_id`, `rich_messages`, `memory_enabled` |
+
+`execution.nodes` is a list of `{id, docker_socket, model_call_parallelism,
+provider_parallelism, max_copy_back_bytes}`; each node's socket is forwarded by
+`vuzol-node-tunnel@<id>` from `/etc/vuzol/nodes/<id>.env` ([Second node](SECOND_NODE.md)).
+MCP server maps are `{"name": "https://..."}`: an agent can use a server only when both its
+own role lists it and the executor's allowlist has the same URL.
+
 ## Registry interfaces
 
 - `ProjectRegistry.get(project_id)` returns normalized immutable project configuration;
@@ -75,9 +98,9 @@ re-evaluates it.
 
 ## Hard limits
 
-Typed settings define positive defaults for concurrency, retention, input and artifact sizes,
-provider attempts and fallback depth, provider-call/step/task token budgets, step/task/daily cost and
-quota units, and task duration. Provider routing reserves these limits atomically before each call.
+Typed settings define positive defaults for concurrency, retention, artifact sizes, provider
+attempts, provider-call/step/task token budgets, and step/task/daily cost and quota units. A goal
+has its own cost cap (`project_lead.default_goal_max_cost`, changed per goal with `/lead limits`). Provider routing reserves these limits atomically before each call.
 Known usage reconciles the reservation; unknown usage retains a conservative charge. Budget modes
 affect preference but cannot bypass hard limits or security policy.
 
@@ -91,9 +114,7 @@ fallback, and Codex isolation rules.
 or blocked worktree retention cannot be shorter than completed-worktree retention.
 
 `vuzol-retention` is dry-run by default. Filesystem and database mutation requires the explicit
-`--apply` flag. The checked-in `vuzol-retention.service` and `.timer` files are deployment templates,
-not installed or enabled production units; enabling scheduled apply requires a separate operator
-decision after an isolated dry-run/apply drill.
+`--apply` flag; production runs it nightly from `vuzol-retention.timer`.
 
 ## Backup capture foundation
 

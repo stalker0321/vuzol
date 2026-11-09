@@ -259,7 +259,7 @@ async def test_process_records_optional_account_metadata_without_overwriting_run
 
 @pytest.mark.anyio
 async def test_account_metadata_cannot_overwrite_transport_metadata(envelope_call, monkeypatch):
-    from vuzol.execution import codex
+    import vuzol.execution.codex as codex
 
     metadata = {"account_id": "account", "cleanup_initiator": "other"}
     monkeypatch.setattr(

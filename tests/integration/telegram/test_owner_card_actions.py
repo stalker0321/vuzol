@@ -7,9 +7,11 @@ import pytest
 from sqlalchemy import select
 from telegram import Update
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
-from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+from vuzol.discussion.domain import PlanDraft, PlanItemDraft
+from vuzol.discussion.service import WorkPackageService
 from vuzol.storage.models import (
     Event,
     MaterializationLink,
@@ -34,7 +36,6 @@ from vuzol.telegram.adapter import control_update
 from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import ControlUpdate, IngressStatus
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.controls import WorkflowControlConsumer
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]

@@ -8,7 +8,7 @@ declared pairs. Three pairs exist:
 - Scout→Planner (explicit): step-less scout completion → ``plan`` step,
   slot ``scout_packet`` (see ``vuzol/scout.py``).
 - Task→Task (explicit): accepted upstream output → ``plan`` step,
-  slot ``upstream_result`` (see ``bind_task_output``).
+  slot ``upstream_result``.
 
 Consumer-boundary validation has two layers: the slot must carry a
 pair-declared schema (tampered schema strings block), and pair schemas with
@@ -19,14 +19,9 @@ resolver hash/scope/freshness checks always apply first.
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
-from datetime import datetime
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.context.resolver import BindingError
-from vuzol.storage.models import InputBinding
 
 RESEARCH_SLOT = "predecessor_result"
 SCOUT_SLOT = "scout_packet"
@@ -150,49 +145,3 @@ def validate_resolved_bindings(resolved: object) -> None:
             schema_version=schema_version,
             content=getattr(binding, "content", b""),
         )
-
-
-async def bind_task_output(
-    session: AsyncSession,
-    *,
-    artifact_id: uuid.UUID,
-    content_hash: str,
-    consumer_step_id: uuid.UUID,
-    producer_step_id: uuid.UUID | None,
-    schema_name: str = "task-result",
-    schema_version: str = "task-result.v1",
-    slot: str = TASK_SLOT,
-    scope_project_id: str | None,
-    access_scope: str = "private",
-    required: bool = True,
-    freshness_max_age_seconds: int | None = None,
-    source_retrieved_at: datetime | None = None,
-) -> InputBinding:
-    """Bind an accepted upstream output to a consumer step (Task→Task, D3 W5).
-
-    The consumer side is checked by the caller via the slot; the schema must
-    belong to the slot's declared pair set — programming errors raise
-    ``ValueError``, never silent misbinding.
-    """
-
-    check_pair_schema(slot=slot, schema_name=schema_name, schema_version=schema_version)
-    if slot != TASK_SLOT:
-        raise ValueError(f"task output binds only to {TASK_SLOT!r}")
-    binding = InputBinding(
-        consumer_step_id=consumer_step_id,
-        producer_step_id=producer_step_id,
-        artifact_id=artifact_id,
-        slot=slot,
-        schema_name=schema_name,
-        schema_version=schema_version,
-        content_hash=content_hash,
-        scope_project_id=scope_project_id,
-        access_scope=access_scope,
-        required=required,
-        status="resolved",
-        freshness_max_age_seconds=freshness_max_age_seconds,
-        source_retrieved_at=source_retrieved_at,
-    )
-    session.add(binding)
-    await session.flush()
-    return binding

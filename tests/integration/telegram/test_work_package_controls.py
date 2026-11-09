@@ -8,11 +8,12 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
 from vuzol.config import RuntimeConfiguration
-from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
-from vuzol.discussion.service import RevisionResult
+from vuzol.discussion.domain import PlanDraft, PlanItemDraft
+from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.interpretation.discussion import DISCUSSION_CLASSIFY_DESTINATION
 from vuzol.storage.models import (
     EditSession,
@@ -30,7 +31,7 @@ from vuzol.storage.types import (
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram import TelegramControlService, TelegramIngressService
+from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import (
     IngressResult,
@@ -38,7 +39,7 @@ from vuzol.telegram.domain import (
     MessageUpdate,
     WorkPackageControlUpdate,
 )
-from vuzol.telegram.projections import FakeTelegramClient
+from vuzol.telegram.ingress import TelegramIngressService
 from vuzol.telegram.work_package_projections import (
     WORK_PACKAGE_ACTION_ROLE,
     WORK_PACKAGE_DETAIL_ROLE,

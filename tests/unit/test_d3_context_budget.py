@@ -189,41 +189,6 @@ def test_d3_assembly_roundtrip_hash_chain() -> None:
     assert validate_source_report_bytes(content) == ()
 
 
-def test_d3_scout_request_validation() -> None:
-    """W3: scout requests fail closed on unknown kinds and bad bounds."""
-
-    from vuzol.scout import ScoutProbe, ScoutRequest, validate_request
-
-    good = ScoutRequest(
-        question="q?",
-        scope="vuzol",
-        probes=(ScoutProbe(name="p1", kind="fetch", uri="fixture://a"),),
-        deadline="2026-10-01T00:00:00Z",
-        max_calls=3,
-        stop_condition="all_required",
-    )
-    assert validate_request(good) == ()
-    bad_kind = ScoutRequest(
-        question="q?",
-        scope="vuzol",
-        probes=(ScoutProbe(name="p1", kind="repo-exec", uri="x"),),
-        deadline="2026-10-01T00:00:00Z",
-        max_calls=3,
-        stop_condition="all_required",
-    )
-    assert validate_request(bad_kind) == ("scout_probe_unsupported",)
-    assert "scout_max_calls_invalid" in validate_request(
-        ScoutRequest(
-            question="q?",
-            scope="vuzol",
-            probes=(ScoutProbe(name="p1", kind="fetch", uri="x"),),
-            deadline="2026-10-01T00:00:00Z",
-            max_calls=0,
-            stop_condition="all_required",
-        )
-    )
-
-
 def test_d3_scout_packet_bytes_validate() -> None:
     """W3/Q6: packets are typed immutable bytes with observed revision/time."""
 
@@ -272,44 +237,6 @@ def test_d3_pair_schema_mismatch_blocks() -> None:
         assert error.category == "pair_schema_mismatch"
     else:
         raise AssertionError("expected pair refusal")
-
-
-def test_d3_repo_probe_read_file_contained() -> None:
-    """REDO-1: repo read_file probe executes read-only under containment."""
-
-    import asyncio
-    from pathlib import Path
-    from tempfile import TemporaryDirectory
-
-    from vuzol.scout import LocalRepoProbeExecutor, ScoutError
-
-    with TemporaryDirectory() as root:
-        target = Path(root) / "notes.md"
-        target.write_text("hello scout")
-        outcome = asyncio.run(
-            LocalRepoProbeExecutor().run(
-                op="read_file", path="notes.md", root=root, max_bytes=65536
-            )
-        )
-        assert "hello scout" in outcome.observation
-        try:
-            asyncio.run(
-                LocalRepoProbeExecutor().run(
-                    op="read_file", path="../escape.md", root=root, max_bytes=65536
-                )
-            )
-        except ScoutError as error:
-            assert error.code == "scout_repo_path_escape"
-        else:
-            raise AssertionError("expected escape refusal")
-        try:
-            asyncio.run(
-                LocalRepoProbeExecutor().run(op="exec", path="notes.md", root=root, max_bytes=65536)
-            )
-        except ScoutError as error:
-            assert error.code == "scout_repo_op_unsupported"
-        else:
-            raise AssertionError("expected op refusal")
 
 
 def test_d3_consumer_blocks_incomplete_scout_packet() -> None:

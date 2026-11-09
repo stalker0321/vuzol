@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy import select
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.leadership.test_lead_review_regressions import control
 from tests.integration.leadership.test_lead_surface import _message
 from tests.integration.leadership.test_managed_goal_flow import (
@@ -31,7 +32,7 @@ from vuzol.telegram.adapter import _callback_answer
 from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.domain import ControlUpdate, IngressStatus, WorkPackageControlUpdate
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient, enqueue_chat_notice
+from vuzol.telegram.projections import enqueue_chat_notice
 from vuzol.telegram.work_package_projections import build_work_package_plan_card
 from vuzol.telegram.work_packages import encode_work_package_callback, parse_work_package_callback
 

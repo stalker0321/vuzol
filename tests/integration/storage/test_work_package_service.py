@@ -5,14 +5,17 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import func, select
 
-from vuzol.discussion import DomainError, PlanDraft, PlanItemDraft, WorkPackageService
 from vuzol.discussion.domain import (
     CapabilityProvisioning,
     CapabilityRequirementDraft,
     ComponentKind,
+    DomainError,
     EnvironmentComponentDraft,
     EnvironmentDeltaDraft,
+    PlanDraft,
+    PlanItemDraft,
 )
+from vuzol.discussion.service import WorkPackageService
 from vuzol.storage.models import (
     Event,
     MaterializationLink,
@@ -85,13 +88,8 @@ async def test_create_approve_revise_invalidates_approval_without_tasks(postgres
 
     async with UnitOfWork(factory) as uow:
         service = WorkPackageService(uow)
-        approved_id = await service.validate_startable(
-            package_id=package_id,
-            revision_number=1,
-            h8=first_hash[:8],
-            expected_status_generation=2,
-        )
-        first_revision = await uow.work_packages.get_revision(approved_id)
+        package = await uow.work_packages.get_package(package_id)
+        first_revision = await uow.work_packages.get_revision(package.approved_revision_id)
         first_item_id = uuid.UUID(str(first_revision.immutable_body["items"][0]["item_id"]))
         revised = await service.revise_draft(
             package_id=package_id,
@@ -318,39 +316,6 @@ async def test_concurrent_approve_accepts_only_button_epoch_once(postgres_dsn: s
     await engine.dispose()
 
 
-async def test_item_edit_creates_new_revision_and_consumes_session(postgres_dsn: str) -> None:
-    engine, factory = storage(postgres_dsn)
-    _, package_id, content_hash = await create_package(factory)
-
-    async with UnitOfWork(factory) as uow:
-        service = WorkPackageService(uow)
-        edit = await service.open_edit_session(
-            package_id=package_id,
-            revision_number=1,
-            h8=content_hash[:8],
-            ordinal=1,
-            user_id=42,
-        )
-        head = await uow.work_packages.get_revision(edit.plan_revision_id)
-        item_id = uuid.UUID(str(head.immutable_body["items"][0]["item_id"]))
-
-    async with UnitOfWork(factory) as uow:
-        revised = await WorkPackageService(uow).apply_item_edit(
-            edit_session_id=edit.id,
-            expected_session_generation=1,
-            replacement=plan("Edited package", item_id=item_id),
-            user_id=42,
-        )
-
-    async with factory() as session:
-        persisted_edit = await session.get(type(edit), edit.id)
-        tasks = await session.scalar(select(func.count()).select_from(Task))
-    assert revised.revision_number == 2 and revised.status_generation == 2
-    assert persisted_edit is not None and persisted_edit.status is EditSessionStatus.ACCEPTED
-    assert tasks == 0
-    await engine.dispose()
-
-
 async def test_discard_is_terminal_and_expires_edit_session_explicitly(postgres_dsn: str) -> None:
     engine, factory = storage(postgres_dsn)
     _, package_id, content_hash = await create_package(factory)
@@ -364,16 +329,6 @@ async def test_discard_is_terminal_and_expires_edit_session_explicitly(postgres_
             user_id=42,
             expires_in=timedelta(seconds=-1),
         )
-
-    with pytest.raises(DomainError) as expired:
-        async with UnitOfWork(factory) as uow:
-            await WorkPackageService(uow).apply_item_edit(
-                edit_session_id=edit.id,
-                expected_session_generation=1,
-                replacement=plan("will not persist"),
-                user_id=42,
-            )
-    assert expired.value.code == "edit_session_expired"
 
     async with UnitOfWork(factory) as uow:
         service = WorkPackageService(uow)

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import func, select
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.storage.helpers import seed_task_run_step, storage
 from tests.unit.execution.test_candidate_archive import committed
 from vuzol.execution.artifact_production import ArtifactProductionHandler
@@ -29,7 +30,7 @@ from vuzol.telegram.delivery import (
     TelegramDeliveryService,
     prepare_delivery,
 )
-from vuzol.telegram.projections import FakeTelegramClient, LostTelegramResponse
+from vuzol.telegram.projections import LostTelegramResponse
 from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 

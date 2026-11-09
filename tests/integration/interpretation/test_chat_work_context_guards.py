@@ -115,7 +115,7 @@ def test_work_snapshot_ignores_new_history_and_rejects_source_or_scope_drift(pos
                 elif case == "summary":
                     from vuzol.storage.types import ConversationSummaryGenerator
 
-                    await memory.update_summary(
+                    await uow.discussions.add_summary(
                         session_id=discussion_id,
                         body="Original summary.",
                         covered_through_turn_ordinal=2,

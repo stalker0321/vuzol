@@ -4,13 +4,10 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
-from vuzol.discussion import (
-    DiscussionMemoryService,
-    DomainError,
-    ExplicitDecisionSource,
-    MemoryLimits,
-)
-from vuzol.storage.models import AcceptedDecision, ConversationSummary, Event, Task
+from vuzol.discussion.domain import DomainError
+from vuzol.discussion.memory import ExplicitDecisionSource, MemoryLimits
+from vuzol.discussion.memory_service import DiscussionMemoryService
+from vuzol.storage.models import AcceptedDecision, Event, Task
 from vuzol.storage.types import (
     AcceptedDecisionStatus,
     ConversationSummaryGenerator,
@@ -63,7 +60,7 @@ async def test_context_uses_latest_summary_decisions_and_bounded_raw_tail(
                 max_decisions=1,
             ),
         )
-        await service.update_summary(
+        await uow.discussions.add_summary(
             session_id=session_id,
             body="The first two turns established scope.",
             covered_through_turn_ordinal=3,
@@ -105,41 +102,12 @@ async def test_context_uses_latest_summary_decisions_and_bounded_raw_tail(
     assert task_count == 0
     assert {
         "conversation_turn.appended",
-        "conversation_summary.updated",
         "decision.accepted",
     }.issubset(event_types)
     await engine.dispose()
 
 
-async def test_summary_revision_cas_allows_one_concurrent_writer(postgres_dsn: str) -> None:
-    engine, factory = storage(postgres_dsn)
-    session_id = await create_session(factory, 93)
-    await append_turn(factory, session_id, "turn to summarize")
-
-    async def update(body: str) -> str:
-        try:
-            async with UnitOfWork(factory) as uow:
-                await DiscussionMemoryService(uow).update_summary(
-                    session_id=session_id,
-                    body=body,
-                    covered_through_turn_ordinal=2,
-                    generator=ConversationSummaryGenerator.MODEL,
-                    expected_summary_revision=0,
-                )
-        except DomainError as error:
-            return error.code
-        return "updated"
-
-    outcomes = await asyncio.gather(update("first summary"), update("second summary"))
-    assert sorted(outcomes) == ["stale_summary_revision", "updated"]
-
-    async with factory() as session:
-        summary_count = await session.scalar(select(func.count()).select_from(ConversationSummary))
-    assert summary_count == 1
-    await engine.dispose()
-
-
-async def test_decision_conflict_supersede_retract_and_source_fence(postgres_dsn: str) -> None:
+async def test_decision_conflict_and_source_fence(postgres_dsn: str) -> None:
     engine, factory = storage(postgres_dsn)
     session_id = await create_session(factory, 94)
     other_session_id = await create_session(factory, 95)
@@ -189,37 +157,6 @@ async def test_decision_conflict_supersede_retract_and_source_fence(postgres_dsn
             )
     assert source_mismatch.value.code == "decision_source_mismatch"
 
-    async with UnitOfWork(factory) as uow:
-        service = DiscussionMemoryService(uow)
-        replacement_id = await service.supersede_decision(
-            session_id=session_id,
-            key="database",
-            statement="Use PostgreSQL with migrations.",
-            source_turn_id=source_turn,
-            accepted_by_user_id=42,
-            acceptance_source=ExplicitDecisionSource.EXPLICIT_COMMAND,
-        )
-        await service.retract_decision(
-            session_id=session_id,
-            decision_id=replacement_id,
-            retracted_by_user_id=42,
-            acceptance_source=ExplicitDecisionSource.EXPLICIT_COMMAND,
-        )
-
-    async with factory() as session:
-        decisions = (
-            await session.scalars(
-                select(AcceptedDecision)
-                .where(AcceptedDecision.session_id == session_id)
-                .order_by(AcceptedDecision.created_at, AcceptedDecision.id)
-            )
-        ).all()
-        task_count = await session.scalar(select(func.count()).select_from(Task))
-    assert {item.status for item in decisions} == {
-        AcceptedDecisionStatus.SUPERSEDED,
-        AcceptedDecisionStatus.RETRACTED,
-    }
-    assert task_count == 0
     await engine.dispose()
 
 
@@ -270,7 +207,7 @@ async def test_concurrent_decision_conflict_and_physical_turn_bound(postgres_dsn
     await engine.dispose()
 
 
-async def test_invalid_turn_summary_and_decision_mutations_fail_closed(
+async def test_invalid_turn_and_decision_limit_fail_closed(
     postgres_dsn: str,
 ) -> None:
     engine, factory = storage(postgres_dsn)
@@ -298,43 +235,6 @@ async def test_invalid_turn_summary_and_decision_mutations_fail_closed(
                 should_create_task=True,
             )
     assert invalid_mode.value.code == "invalid_turn"
-
-    await append_turn(factory, session_id, "only turn")
-    for body, coverage, code in (
-        ("x" * 2_001, 2, "summary_too_large"),
-        ("valid body", 3, "invalid_summary_coverage"),
-    ):
-        with pytest.raises(DomainError) as summary_error:
-            async with UnitOfWork(factory) as uow:
-                await DiscussionMemoryService(uow).update_summary(
-                    session_id=session_id,
-                    body=body,
-                    covered_through_turn_ordinal=coverage,
-                    generator=ConversationSummaryGenerator.MODEL,
-                    expected_summary_revision=0,
-                )
-        assert summary_error.value.code == code
-
-    with pytest.raises(DomainError) as missing:
-        async with UnitOfWork(factory) as uow:
-            await DiscussionMemoryService(uow).supersede_decision(
-                session_id=session_id,
-                key="missing",
-                statement="New statement.",
-                accepted_by_user_id=42,
-                acceptance_source=ExplicitDecisionSource.EXPLICIT_COMMAND,
-            )
-    assert missing.value.code == "decision_not_found"
-
-    with pytest.raises(DomainError) as missing_retract:
-        async with UnitOfWork(factory) as uow:
-            await DiscussionMemoryService(uow).retract_decision(
-                session_id=session_id,
-                decision_id=uuid.uuid4(),
-                retracted_by_user_id=42,
-                acceptance_source=ExplicitDecisionSource.EXPLICIT_COMMAND,
-            )
-    assert missing_retract.value.code == "decision_not_found"
 
     async with UnitOfWork(factory) as uow:
         limited = DiscussionMemoryService(uow, limits=MemoryLimits(max_decisions=1))

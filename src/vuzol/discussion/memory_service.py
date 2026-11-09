@@ -27,13 +27,10 @@ from vuzol.discussion.memory import (
 from vuzol.discussion.memory_units import RecallQuery
 from vuzol.discussion.memory_writer import (
     DECISION_OPERATION,
-    RETRACT_OPERATION,
     enqueue_memory_extraction,
 )
 from vuzol.storage.models import AcceptedDecision, TransactionalOutbox
 from vuzol.storage.types import (
-    AcceptedDecisionStatus,
-    ConversationSummaryGenerator,
     ConversationTurnRole,
     ConversationTurnSource,
     InteractionMode,
@@ -94,49 +91,6 @@ class DiscussionMemoryService:
             },
         )
         return turn_id, ordinal
-
-    async def update_summary(
-        self,
-        *,
-        session_id: uuid.UUID,
-        body: str,
-        covered_through_turn_ordinal: int,
-        generator: ConversationSummaryGenerator,
-        expected_summary_revision: int,
-    ) -> tuple[uuid.UUID, int]:
-        normalized = ensure_memory_safe(body)
-        if len(normalized) > self._limits.max_summary_chars:
-            raise DomainError("summary_too_large")
-        latest = await self._uow.discussions.latest_summary(session_id=session_id)
-        maximum = await self._uow.discussions.max_turn_ordinal(session_id=session_id)
-        if not 1 <= covered_through_turn_ordinal <= maximum + 1:
-            raise DomainError("invalid_summary_coverage")
-        if latest is not None and (
-            covered_through_turn_ordinal < latest.covered_through_turn_ordinal
-        ):
-            raise DomainError("invalid_summary_coverage")
-        try:
-            summary_id, revision = await self._uow.discussions.add_summary(
-                session_id=session_id,
-                body=normalized,
-                covered_through_turn_ordinal=covered_through_turn_ordinal,
-                generator=generator,
-                expected_summary_revision=expected_summary_revision,
-            )
-        except ValueError as error:
-            raise DomainError("stale_summary_revision") from error
-        await self._uow.events.append(
-            entity_type="discussion_session",
-            entity_id=session_id,
-            event_type=DiscussionEvent.SUMMARY_UPDATED.value,
-            actor_type=generator.value,
-            payload={
-                "summary_id": str(summary_id),
-                "revision": revision,
-                "covered_through_turn_ordinal": covered_through_turn_ordinal,
-            },
-        )
-        return summary_id, revision
 
     async def load_context(
         self,
@@ -343,111 +297,6 @@ class DiscussionMemoryService:
             payload={"decision_id": str(decision_id), "source_event_id": str(trigger_event_id)},
         )
         return decision_id
-
-    async def supersede_decision(
-        self,
-        *,
-        session_id: uuid.UUID,
-        key: str,
-        statement: str,
-        accepted_by_user_id: int,
-        acceptance_source: ExplicitDecisionSource,
-        source_turn_id: uuid.UUID | None = None,
-    ) -> uuid.UUID:
-        normalized_key, normalized_statement = validate_decision(key, statement)
-        session = await self._uow.discussions.get_session(session_id, for_update=True)
-        existing = await self._uow.discussions.active_decision(
-            session_id=session_id, key=normalized_key, for_update=True
-        )
-        if existing is None:
-            raise DomainError("decision_not_found")
-        if existing.statement == normalized_statement:
-            return existing.id
-        await self._uow.discussions.set_decision_status(existing, AcceptedDecisionStatus.SUPERSEDED)
-        try:
-            replacement_id = await self._uow.discussions.accept_decision(
-                session_id=session_id,
-                key=normalized_key,
-                statement=normalized_statement,
-                source_turn_id=source_turn_id,
-                accepted_by_user_id=accepted_by_user_id,
-            )
-        except ValueError as error:
-            raise DomainError("decision_source_mismatch") from error
-        await self._decision_event(
-            session_id=session_id,
-            decision_id=existing.id,
-            event=DiscussionEvent.DECISION_SUPERSEDED,
-            user_id=accepted_by_user_id,
-            payload={
-                "key": normalized_key,
-                "replacement_id": str(replacement_id),
-                "acceptance_source": acceptance_source.value,
-            },
-        )
-        trigger_event_id = await self._decision_event(
-            session_id=session_id,
-            decision_id=replacement_id,
-            event=DiscussionEvent.DECISION_ACCEPTED,
-            user_id=accepted_by_user_id,
-            payload={
-                "key": normalized_key,
-                "supersedes_id": str(existing.id),
-                "acceptance_source": acceptance_source.value,
-            },
-        )
-        await enqueue_memory_extraction(
-            self._uow,
-            trigger_event_id=trigger_event_id,
-            project_id=session.project_id,
-            session_id=session_id,
-            operation=DECISION_OPERATION,
-            entity_type="accepted_decision",
-            entity_id=replacement_id,
-            payload={
-                "decision_id": str(replacement_id),
-                "source_event_id": str(trigger_event_id),
-            },
-        )
-        return replacement_id
-
-    async def retract_decision(
-        self,
-        *,
-        session_id: uuid.UUID,
-        decision_id: uuid.UUID,
-        retracted_by_user_id: int,
-        acceptance_source: ExplicitDecisionSource,
-    ) -> None:
-        discussion = await self._uow.discussions.get_session(session_id, for_update=True)
-        try:
-            decision = await self._uow.discussions.get_decision(decision_id, for_update=True)
-        except LookupError as error:
-            raise DomainError("decision_not_found") from error
-        if decision.session_id != session_id:
-            raise DomainError("decision_not_found")
-        if decision.status is AcceptedDecisionStatus.RETRACTED:
-            return
-        if decision.status is not AcceptedDecisionStatus.ACTIVE:
-            raise DomainError("decision_not_active")
-        await self._uow.discussions.set_decision_status(decision, AcceptedDecisionStatus.RETRACTED)
-        trigger_event_id = await self._decision_event(
-            session_id=session_id,
-            decision_id=decision.id,
-            event=DiscussionEvent.DECISION_RETRACTED,
-            user_id=retracted_by_user_id,
-            payload={"key": decision.key, "acceptance_source": acceptance_source.value},
-        )
-        await enqueue_memory_extraction(
-            self._uow,
-            trigger_event_id=trigger_event_id,
-            project_id=discussion.project_id,
-            session_id=session_id,
-            operation=RETRACT_OPERATION,
-            entity_type="accepted_decision",
-            entity_id=decision.id,
-            payload={"decision_id": str(decision.id)},
-        )
 
     @staticmethod
     def _decision_view(decision: AcceptedDecision) -> DecisionView:

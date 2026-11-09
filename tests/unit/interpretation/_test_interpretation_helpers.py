@@ -7,13 +7,9 @@ import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from tests.fakes.interpretation import FakeInterpreter, FakeTranscriber
 from vuzol.config import Capability, TopicKind
-from vuzol.interpretation.adapters import (
-    FakeInterpreter,
-    FakeTranscriber,
-    OpenAICompatibleInterpreter,
-    OpenAICompatibleTranscriber,
-)
+from vuzol.interpretation.adapters import OpenAICompatibleInterpreter, OpenAICompatibleTranscriber
 from vuzol.interpretation.domain import (
     InterpretationInput,
     InterpretationResult,

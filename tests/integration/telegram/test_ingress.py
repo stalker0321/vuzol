@@ -6,6 +6,7 @@ import pytest
 from pydantic import HttpUrl
 from sqlalchemy import func, select
 
+from tests.fakes.telegram import FakeTelegramClient
 from vuzol.config import (
     RegistryDocument,
     RuntimeConfiguration,
@@ -29,7 +30,6 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.types import TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram import TelegramIngressService
 from vuzol.telegram.delivery import (
     PermanentDeliveryError,
     TelegramDeliveryService,
@@ -41,7 +41,7 @@ from vuzol.telegram.domain import (
     MessageUpdate,
     TelegramAttachment,
 )
-from vuzol.telegram.projections import FakeTelegramClient
+from vuzol.telegram.ingress import TelegramIngressService
 from vuzol.telegram.work_package_projections import WORK_PACKAGE_STATUS_ROLE
 
 from ..storage.helpers import storage

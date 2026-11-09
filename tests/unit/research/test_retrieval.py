@@ -13,7 +13,6 @@ from vuzol.research.retrieval import (
     RetrievalBounds,
     RetrievalError,
     TransportResponse,
-    select_retrieval_descriptor,
 )
 
 
@@ -84,11 +83,6 @@ def test_injection_stays_inert_data() -> None:
     fetched = adapter.fetch("https://example.com/x", now="2026-09-27T10:00:00Z")
     assert fetched.content == payload
     assert "<script>" in fetched.as_text()
-
-
-def test_retrieval_descriptor_selected_from_registry() -> None:
-    descriptor = select_retrieval_descriptor()
-    assert descriptor.key == "web-research"
 
 
 class _ProbeHandler(BaseHTTPRequestHandler):

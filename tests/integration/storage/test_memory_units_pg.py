@@ -17,16 +17,14 @@ from vuzol.discussion.memory_service import DiscussionMemoryService
 from vuzol.discussion.memory_units import EXTRACTOR_VERSION, RecallQuery, extraction_scope
 from vuzol.discussion.memory_writer import (
     DECISION_OPERATION,
+    RETRACT_OPERATION,
     MemoryWriterService,
-    record_hypothesis,
-    redact_artifact_for_memory,
-    tombstone_unit,
+    enqueue_memory_extraction,
 )
 from vuzol.execution.git import LocalGit
 from vuzol.ops.retention import RetentionSweeper
 from vuzol.storage.models import (
     Artifact,
-    Event,
     MemoryUnit,
     Task,
     TransactionalOutbox,
@@ -34,6 +32,7 @@ from vuzol.storage.models import (
     Worktree,
 )
 from vuzol.storage.types import (
+    AcceptedDecisionStatus,
     ArtifactStorageState,
     ConversationTurnRole,
     ConversationTurnSource,
@@ -210,8 +209,9 @@ async def test_delayed_writer_does_not_displace_current(postgres_dsn: str) -> No
             acceptance_source=ExplicitDecisionSource.USER_CONFIRM,
         )
     async with UnitOfWork(factory) as uow:
-        service = DiscussionMemoryService(uow)
-        await service.supersede_decision(
+        existing = await uow.discussions.active_decision(session_id=session_id, key="stack")
+        await uow.discussions.set_decision_status(existing, AcceptedDecisionStatus.SUPERSEDED)
+        await DiscussionMemoryService(uow).accept_decision(
             session_id=session_id,
             key="stack",
             statement="Use Postgres with read replicas",
@@ -276,12 +276,24 @@ async def test_retraction_excludes_recall_but_keeps_row(postgres_dsn: str) -> No
     assert await _writer(factory).process_one() is True
 
     async with UnitOfWork(factory) as uow:
-        service = DiscussionMemoryService(uow)
-        await service.retract_decision(
+        decision = await uow.discussions.get_decision(decision_id)
+        await uow.discussions.set_decision_status(decision, AcceptedDecisionStatus.RETRACTED)
+        trigger = await uow.events.append(
+            entity_type="discussion_session",
+            entity_id=session_id,
+            event_type="decision.retracted",
+            actor_type="user",
+            payload={},
+        )
+        await enqueue_memory_extraction(
+            uow,
+            trigger_event_id=trigger,
+            project_id="demo",
             session_id=session_id,
-            decision_id=decision_id,
-            retracted_by_user_id=7,
-            acceptance_source=ExplicitDecisionSource.USER_CONFIRM,
+            operation=RETRACT_OPERATION,
+            entity_type="accepted_decision",
+            entity_id=decision_id,
+            payload={"decision_id": str(decision_id)},
         )
     assert await _writer(factory).process_one() is True
 
@@ -297,55 +309,6 @@ async def test_retraction_excludes_recall_but_keeps_row(postgres_dsn: str) -> No
         # Addressable by id with provenance intact.
         same = await uow.memory_units.get(rows[0].id)
         assert same is not None and same.text != ""
-    await engine.dispose()
-
-
-async def test_tombstone_and_artifact_redaction_keep_provenance(postgres_dsn: str) -> None:
-    engine, factory = storage(postgres_dsn)
-    session_id = await _session_id(factory)
-    await _accept(factory, session_id)
-    assert await _writer(factory).process_one() is True
-    (unit,) = await _units(factory)
-
-    async with UnitOfWork(factory) as uow:
-        event_id = await tombstone_unit(uow, unit_id=unit.id, actor="user", reason="secret")
-        row = await uow.memory_units.get(unit.id)
-        assert row is not None
-        assert row.status is MemoryUnitStatus.TOMBSTONED
-        assert row.text == "[tombstoned]"
-        assert row.tombstone_event_id == event_id
-        assert (
-            await uow.memory_units.recall(RecallQuery(scope=MemoryScope.PROJECT, project_id="demo"))
-            == ()
-        )
-
-    task_record, run_id, _step = await seed_task_run_step(factory)
-    async with UnitOfWork(factory) as uow:
-        assert uow.session is not None
-        artifact = Artifact(
-            task_id=task_record.id,
-            run_id=run_id,
-            step_id=None,
-            artifact_type="notes",
-            content_uri="artifact:notes/abc",
-            size_bytes=3,
-            content_hash="c" * 64,
-            media_type="text/plain",
-            sensitivity="private",
-            visibility="private",
-            retention_until=datetime.now(UTC) - timedelta(days=1),
-            storage_state=ArtifactStorageState.AVAILABLE,
-        )
-        uow.session.add(artifact)
-        await uow.session.flush()
-        before = artifact.content_hash
-        event_id = await redact_artifact_for_memory(
-            uow, artifact_id=artifact.id, actor="user", reason="secret"
-        )
-        assert artifact.redaction_revision is not None
-        assert artifact.content_hash == before
-        event = await uow.session.get(Event, event_id)
-        assert event is not None and event.event_type == "artifact.redacted"
     await engine.dispose()
 
 
@@ -453,8 +416,15 @@ async def test_hypotheses_and_filters_in_recall(postgres_dsn: str) -> None:
     engine, factory = storage(postgres_dsn)
     session_id = await _session_id(factory)
     async with UnitOfWork(factory) as uow:
-        await record_hypothesis(
-            uow, project_id="demo", session_id=session_id, body="Maybe use SQLite"
+        await uow.memory_units.create_unit(
+            text="Maybe use SQLite",
+            unit_type="observation",
+            status=MemoryUnitStatus.HYPOTHESIS,
+            extractor_version="test",
+            extraction_identity="test:hypothesis",
+            effective_at=datetime.now(UTC),
+            project_id="demo",
+            session_id=session_id,
         )
         await uow.memory_units.create_unit(
             text="Postgres is fast",

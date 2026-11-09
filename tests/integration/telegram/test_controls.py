@@ -24,7 +24,7 @@ from vuzol.storage.models import (
 )
 from vuzol.storage.types import IntakeStatus, ProjectNamingStatus, RiskLevel, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
-from vuzol.telegram import TelegramControlService
+from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.domain import ControlUpdate, IngressStatus
 
 from ..storage.helpers import storage

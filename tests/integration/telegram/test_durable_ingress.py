@@ -117,7 +117,7 @@ async def test_crash_after_business_commit_before_ack_replays_without_duplicate_
     tmp_path,
     monkeypatch,
 ):
-    from vuzol.telegram import durable_ingress
+    import vuzol.telegram.durable_ingress as durable_ingress
 
     bot = Bot("123:FAKE_TOKEN_NOT_A_CREDENTIAL")
     repository = tmp_path / "repositories/repo"
@@ -241,7 +241,8 @@ async def test_processing_timeout_quarantines_without_blocking_admission(postgre
 
 @pytest.mark.parametrize("invalid", ["domain", "oversized"])
 async def test_invalid_update_has_durable_failure_receipt(postgres_dsn, monkeypatch, invalid):
-    from vuzol.telegram import adapter, durable_ingress
+    import vuzol.telegram.adapter as adapter
+    import vuzol.telegram.durable_ingress as durable_ingress
 
     bot = Bot("123:FAKE_TOKEN_NOT_A_CREDENTIAL")
     handler = AsyncMock()

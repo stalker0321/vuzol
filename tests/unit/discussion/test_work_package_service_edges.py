@@ -9,7 +9,6 @@ from vuzol.discussion.domain import DomainError
 from vuzol.discussion.service import WorkPackageService
 from vuzol.storage.models import WorkPackage
 from vuzol.storage.types import (
-    PlanRevisionState,
     WorkPackagePauseReason,
     WorkPackageStatus,
 )
@@ -36,29 +35,6 @@ def _args(package_id: uuid.UUID) -> dict[str, object]:
 
 
 @pytest.mark.anyio
-async def test_start_validation_rejects_status_and_approval_binding() -> None:
-    service, uow = _service()
-    package_id = uuid.uuid4()
-    revision_id = uuid.uuid4()
-    package = SimpleNamespace(
-        version=1,
-        status=WorkPackageStatus.DRAFT,
-        approved_revision_id=None,
-    )
-    uow.work_packages.get_package.return_value = package
-
-    with pytest.raises(DomainError, match="invalid_transition"):
-        await service.validate_startable(**_args(package_id))  # type: ignore[arg-type]
-
-    package.status = WorkPackageStatus.APPROVED
-    service._fenced_revision = AsyncMock(  # type: ignore[method-assign]
-        return_value=SimpleNamespace(id=revision_id, state=PlanRevisionState.DRAFT)
-    )
-    with pytest.raises(DomainError, match="approval_binding_mismatch"):
-        await service.validate_startable(**_args(package_id))  # type: ignore[arg-type]
-
-
-@pytest.mark.anyio
 async def test_control_fence_returns_current_revision_and_rejects_stale() -> None:
     service, uow = _service()
     package_id = uuid.uuid4()
@@ -76,39 +52,6 @@ async def test_control_fence_returns_current_revision_and_rejects_stale() -> Non
     package.head_revision_id = uuid.uuid4()
     with pytest.raises(DomainError, match="stale_revision"):
         await service.validate_control_fence(**_args(package_id))  # type: ignore[arg-type]
-
-
-@pytest.mark.anyio
-async def test_pause_for_item_outcome_rejects_status_revision_and_cursor() -> None:
-    service, uow = _service()
-    package_id = uuid.uuid4()
-    revision_id = uuid.uuid4()
-    package = SimpleNamespace(
-        version=1,
-        status=WorkPackageStatus.DRAFT,
-        running_revision_id=revision_id,
-        head_revision_id=revision_id,
-        cursor_ordinal=1,
-    )
-    uow.work_packages.get_package.return_value = package
-    service._fenced_revision = AsyncMock(  # type: ignore[method-assign]
-        return_value=SimpleNamespace(id=revision_id)
-    )
-    service._resolve_item = AsyncMock(return_value=(revision_id, uuid.uuid4()))  # type: ignore[method-assign]
-    arguments = {**_args(package_id), "ordinal": 1, "blocked": True}
-
-    with pytest.raises(DomainError, match="invalid_transition"):
-        await service.pause_for_item_outcome(**arguments)  # type: ignore[arg-type]
-
-    package.status = WorkPackageStatus.RUNNING
-    package.head_revision_id = uuid.uuid4()
-    with pytest.raises(DomainError, match="stale_revision"):
-        await service.pause_for_item_outcome(**arguments)  # type: ignore[arg-type]
-
-    package.head_revision_id = revision_id
-    service._resolve_item = AsyncMock(return_value=(uuid.uuid4(), uuid.uuid4()))  # type: ignore[method-assign]
-    with pytest.raises(DomainError, match="stale_cursor"):
-        await service.pause_for_item_outcome(**arguments)  # type: ignore[arg-type]
 
 
 @pytest.mark.anyio

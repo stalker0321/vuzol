@@ -4,13 +4,14 @@ import pytest
 from sqlalchemy import select
 from telegram.error import NetworkError, RetryAfter
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.test_delivery import service
 from tests.integration.telegram.test_discussion_chunks import seed_reply
 from vuzol.storage.models import TransactionalOutbox
 from vuzol.storage.types import DeliveryStatus
 from vuzol.telegram.formatting import telegram_markdown_parts, telegram_rich_html
-from vuzol.telegram.projections import FakeTelegramClient, RichMessageRejected
+from vuzol.telegram.projections import RichMessageRejected
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 

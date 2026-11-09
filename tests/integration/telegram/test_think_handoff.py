@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import select
 from telegram import Update
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.interpretation.test_conversation_modes import modes_runtime, turn
 from tests.integration.storage.helpers import storage
 from vuzol.discussion.agent import DeliverDiscussionReplyHandler, schedule_discussion_agent
@@ -37,7 +38,6 @@ from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import IngressStatus
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]

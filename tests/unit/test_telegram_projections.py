@@ -1,8 +1,6 @@
 # ruff: noqa: RUF001
 
-import asyncio
 import uuid
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -10,7 +8,6 @@ import pytest
 
 from vuzol.storage.types import ApprovalStatus, StepStatus, TaskStatus, WorktreeDeliveryState
 from vuzol.telegram.projections import (
-    EditRateLimiter,
     _approval_buttons,
     _approval_display_summary,
     _approval_fact_lines,
@@ -39,18 +36,6 @@ def test_html_is_escaped_and_messages_are_bounded() -> None:
     assert split_message("") == ("",)
     with pytest.raises(ValueError):
         split_message("x", limit=0)
-
-
-def test_edit_rate_limiter_serializes_one_projection() -> None:
-    async def scenario() -> None:
-        limiter = EditRateLimiter(2)
-        task_id = uuid.uuid4()
-        now = datetime.now(UTC)
-        assert await limiter.reserve(task_id, now) == now
-        assert (await limiter.reserve(task_id, now) - now).total_seconds() == 2
-        assert await limiter.reserve(uuid.uuid4(), now) == now
-
-    asyncio.run(scenario())
 
 
 def test_all_status_and_delivery_values_have_russian_labels() -> None:

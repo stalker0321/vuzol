@@ -14,13 +14,6 @@ from tests.unit.providers.test_opencode_usage import NOW, collector, payload
 from vuzol.cli.accounts import inventory
 from vuzol.config.loader import load_document
 from vuzol.config.models import AccountConfig
-from vuzol.config.registries import (
-    ConfigurationBundle,
-    ProfileRegistry,
-    ProjectRegistry,
-    SandboxRegistry,
-    TopicRegistry,
-)
 from vuzol.config.revision import content_revision
 from vuzol.providers.account_auth import AccountAuthError
 from vuzol.providers.opencode_oauth import IMPORT_MIGRATION, read_go_oauth
@@ -348,21 +341,6 @@ def test_config_usage_binding_does_not_change_execution_pins_or_account_slots(
     assert profile.account.auth_method == "static_api_key"
     assert profile.state_directory == binding.state_directory
     assert profile.concurrency_limit == 2 and profile.control_reserved_slots == 1
-    projects = ProjectRegistry((), repository_root=tmp_path)
-    bundle = ConfigurationBundle(
-        profiles=ProfileRegistry((profile,)),
-        projects=projects,
-        topics=TopicRegistry((), projects=projects),
-        sandboxes=SandboxRegistry(()),
-        revision="test",
-    )
-    snapshot = bundle.model_copy(update={"profiles": ProfileRegistry((previous,))}).snapshot(
-        profile_id=profile.id
-    )
-    assert bundle.evaluate(snapshot).allowed
-    changed_runtime = profile.model_copy(update={"state_directory": tmp_path / "other"})
-    changed_bundle = bundle.model_copy(update={"profiles": ProfileRegistry((changed_runtime,))})
-    assert not changed_bundle.evaluate(snapshot).allowed
     rows = inventory(profiles, check_auth=False)
     assert len(rows) == 1 and rows[0]["quota_health"] == "not-probed"
 

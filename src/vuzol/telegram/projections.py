@@ -1,14 +1,13 @@
 """Reconstructable and revision-safe Telegram projections."""
 # ruff: noqa: RUF001
 
-import asyncio
 import hashlib
 import html
 import re
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC
 from typing import Protocol
 
 from sqlalchemy import case, func, select
@@ -33,7 +32,6 @@ from vuzol.storage.models import (
     Step,
     Task,
     TelegramIntakeMessage,
-    TelegramMessageLink,
     TopicMapping,
     TransactionalOutbox,
     UsageRecord,
@@ -2126,187 +2124,6 @@ class LostTelegramResponse(RuntimeError):
 
 class RichMessageRejected(RuntimeError):
     """Known Telegram rejection before creation: ordinary fallback is safe."""
-
-
-@dataclass(slots=True)
-class FakeTelegramClient:
-    fail: Exception | None = None
-    next_message_id: int = 1
-    documents: list[tuple[int, int | None, bytes, str, str]] = field(
-        default_factory=list, init=False, repr=False
-    )
-    sent: list[tuple[int, int | None, str]] = field(default_factory=list, init=False)
-    edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
-    deleted: list[tuple[int, int]] = field(default_factory=list, init=False)
-    pinned: list[tuple[int, int]] = field(default_factory=list, init=False)
-    sent_silent: list[bool] = field(default_factory=list, init=False)
-    rich_sent_silent: list[bool] = field(default_factory=list, init=False)
-    rich_sent: list[tuple[int, int | None, str]] = field(default_factory=list, init=False)
-    rich_edited: list[tuple[int, int, str]] = field(default_factory=list, init=False)
-    sent_keyboards: list[tuple[tuple[tuple[str, str], ...], ...]] = field(
-        default_factory=list, init=False
-    )
-    edited_keyboards: list[tuple[tuple[tuple[str, str], ...], ...]] = field(
-        default_factory=list, init=False
-    )
-
-    async def send_document(
-        self, *, chat_id: int, thread_id: int | None, content: bytes, filename: str, caption: str
-    ) -> int:
-        if self.fail:
-            raise self.fail
-        self.documents.append((chat_id, thread_id, content, filename, caption))
-        message_id = self.next_message_id
-        self.next_message_id += 1
-        return message_id
-
-    async def send_rich_message(
-        self,
-        *,
-        chat_id: int,
-        thread_id: int | None,
-        html: str,
-        disable_notification: bool = False,
-    ) -> int:
-        if self.fail:
-            raise self.fail
-        self.rich_sent.append((chat_id, thread_id, html))
-        self.rich_sent_silent.append(disable_notification)
-        message_id = self.next_message_id
-        self.next_message_id += 1
-        return message_id
-
-    async def edit_rich_message(self, *, chat_id: int, message_id: int, html: str) -> None:
-        if self.fail:
-            raise self.fail
-        self.rich_edited.append((chat_id, message_id, html))
-
-    async def send_message(
-        self,
-        *,
-        chat_id: int,
-        thread_id: int | None,
-        html: str,
-        buttons: tuple[str, ...] = (),
-        task_id: uuid.UUID | None = None,
-        approval_id: uuid.UUID | None = None,
-        callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
-        disable_notification: bool = False,
-    ) -> int:
-        del buttons, task_id, approval_id
-        if self.fail:
-            raise self.fail
-        self.sent.append((chat_id, thread_id, html))
-        self.sent_silent.append(disable_notification)
-        self.sent_keyboards.append(callback_buttons)
-        message_id = self.next_message_id
-        self.next_message_id += 1
-        return message_id
-
-    async def edit_message(
-        self,
-        *,
-        chat_id: int,
-        message_id: int,
-        html: str,
-        buttons: tuple[str, ...] = (),
-        task_id: uuid.UUID | None = None,
-        approval_id: uuid.UUID | None = None,
-        callback_buttons: tuple[tuple[tuple[str, str], ...], ...] = (),
-    ) -> None:
-        del buttons, task_id, approval_id
-        if self.fail:
-            raise self.fail
-        self.edited.append((chat_id, message_id, html))
-        self.edited_keyboards.append(callback_buttons)
-
-    async def edit_reply_markup(
-        self,
-        *,
-        chat_id: int,
-        message_id: int,
-        callback_buttons: tuple[tuple[tuple[str, str], ...], ...],
-    ) -> None:
-        if self.fail:
-            raise self.fail
-        self.edited_keyboards.append(callback_buttons)
-
-    async def delete_message(self, *, chat_id: int, message_id: int) -> None:
-        if self.fail:
-            raise self.fail
-        self.deleted.append((chat_id, message_id))
-
-    async def pin_message(self, *, chat_id: int, message_id: int) -> bool:
-        self.pinned.append((chat_id, message_id))
-        return True
-
-
-async def apply_status_projection(
-    session: AsyncSession,
-    client: TelegramClient,
-    *,
-    card: StatusCard,
-    chat_id: int,
-    thread_id: int | None,
-) -> bool:
-    """Apply only a newer desired revision; persist link after a confirmed send."""
-
-    link = await session.scalar(
-        select(TelegramMessageLink)
-        .where(
-            TelegramMessageLink.task_id == card.task_id,
-            TelegramMessageLink.message_role == "task_status",
-        )
-        .with_for_update()
-    )
-    if link is not None and card.revision <= link.projection_revision:
-        return False
-    if link is None:
-        message_id = await client.send_message(
-            chat_id=chat_id,
-            thread_id=thread_id,
-            html=card.html,
-            buttons=card.buttons,
-            task_id=card.task_id,
-            approval_id=card.approval_id,
-        )
-        session.add(
-            TelegramMessageLink(
-                chat_id=chat_id,
-                message_thread_id=thread_id,
-                message_id=message_id,
-                task_id=card.task_id,
-                message_role="task_status",
-                projection_revision=card.revision,
-            )
-        )
-    else:
-        await client.edit_message(
-            chat_id=chat_id,
-            message_id=link.message_id,
-            html=card.html,
-            buttons=card.buttons,
-            task_id=card.task_id,
-            approval_id=card.approval_id,
-        )
-        link.projection_revision = card.revision
-    await session.flush()
-    return True
-
-
-class EditRateLimiter:
-    """Per-projection gate; callers naturally coalesce to the latest desired card."""
-
-    def __init__(self, minimum_interval_seconds: float) -> None:
-        self._interval = timedelta(seconds=minimum_interval_seconds)
-        self._next: dict[uuid.UUID, datetime] = {}
-        self._lock = asyncio.Lock()
-
-    async def reserve(self, task_id: uuid.UUID, now: datetime) -> datetime:
-        async with self._lock:
-            available = max(now, self._next.get(task_id, now))
-            self._next[task_id] = available + self._interval
-            return available
 
 
 def status_buttons(status: str) -> Sequence[str]:

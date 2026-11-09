@@ -7,15 +7,16 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import storage
-from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
 from vuzol.discussion.domain import (
     CapabilityProvisioning,
     CapabilityRequirementDraft,
     ComponentKind,
     EnvironmentComponentDraft,
     EnvironmentDeltaDraft,
+    PlanDraft,
+    PlanItemDraft,
 )
-from vuzol.discussion.service import RevisionResult
+from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.storage.models import PlanRevision, Task, WorkPackageOpenDetail
 from vuzol.storage.types import PlanRevisionCreatedBy
 from vuzol.storage.unit_of_work import UnitOfWork

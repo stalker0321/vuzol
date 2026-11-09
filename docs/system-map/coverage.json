@@ -692,7 +692,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_refresh_subscription_limits_tick",
       "sources": [
-        "src/vuzol/cli/executor.py:772"
+        "src/vuzol/cli/executor.py:762"
       ],
       "producers": [],
       "consumers": [],
@@ -701,7 +701,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_run_loop",
       "sources": [
-        "src/vuzol/cli/executor.py:851"
+        "src/vuzol/cli/executor.py:841"
       ],
       "producers": [],
       "consumers": [],
@@ -710,7 +710,7 @@
     {
       "id": "job:src/vuzol/cli/worker.py:_recovery_loop",
       "sources": [
-        "src/vuzol/cli/worker.py:335"
+        "src/vuzol/cli/worker.py:324"
       ],
       "producers": [],
       "consumers": [],
@@ -809,7 +809,7 @@
     {
       "id": "module:vuzol.cli.executor",
       "sources": [
-        "src/vuzol/cli/executor.py:158"
+        "src/vuzol/cli/executor.py:148"
       ],
       "producers": [],
       "consumers": [],
@@ -953,7 +953,7 @@
     {
       "id": "module:vuzol.cli.worker",
       "sources": [
-        "src/vuzol/cli/worker.py:76"
+        "src/vuzol/cli/worker.py:65"
       ],
       "producers": [],
       "consumers": [],
@@ -1008,10 +1008,10 @@
       "id": "outbox:memory_extract",
       "sources": [],
       "producers": [
-        "src/vuzol/discussion/memory_writer.py:80"
+        "src/vuzol/discussion/memory_writer.py:77"
       ],
       "consumers": [
-        "src/vuzol/discussion/memory_writer.py:233"
+        "src/vuzol/discussion/memory_writer.py:113"
       ],
       "scenario": "memory"
     },
@@ -1077,7 +1077,7 @@
         "src/vuzol/telegram/ingress.py:1120"
       ],
       "consumers": [
-        "src/vuzol/cli/executor.py:796"
+        "src/vuzol/cli/executor.py:786"
       ],
       "scenario": "accounts"
     },
@@ -1119,11 +1119,11 @@
         "src/vuzol/telegram/model_command.py:189",
         "src/vuzol/telegram/model_command.py:246",
         "src/vuzol/telegram/model_matrix.py:112",
-        "src/vuzol/telegram/projections.py:716",
-        "src/vuzol/telegram/projections.py:1393",
-        "src/vuzol/telegram/projections.py:1438",
-        "src/vuzol/telegram/projections.py:1488",
-        "src/vuzol/telegram/projections.py:1544",
+        "src/vuzol/telegram/projections.py:714",
+        "src/vuzol/telegram/projections.py:1391",
+        "src/vuzol/telegram/projections.py:1436",
+        "src/vuzol/telegram/projections.py:1486",
+        "src/vuzol/telegram/projections.py:1542",
         "src/vuzol/telegram/tracing.py:69",
         "src/vuzol/workflows/dispatch.py:318",
         "src/vuzol/workflows/dispatch.py:340"
@@ -1164,8 +1164,8 @@
         "src/vuzol/discussion/sequencer.py:781",
         "src/vuzol/discussion/sequencer.py:789",
         "src/vuzol/discussion/sequencer.py:773",
-        "src/vuzol/discussion/service.py:1172",
-        "src/vuzol/discussion/service.py:1305",
+        "src/vuzol/discussion/service.py:1061",
+        "src/vuzol/discussion/service.py:1194",
         "src/vuzol/leadership/service.py:1297",
         "src/vuzol/leadership/worker.py:1207",
         "src/vuzol/telegram/controls.py:558",
@@ -1174,8 +1174,8 @@
         "src/vuzol/telegram/ingress.py:1336",
         "src/vuzol/telegram/model_command.py:369",
         "src/vuzol/telegram/model_command.py:397",
-        "src/vuzol/telegram/projections.py:1558",
-        "src/vuzol/telegram/projections.py:1569",
+        "src/vuzol/telegram/projections.py:1556",
+        "src/vuzol/telegram/projections.py:1567",
         "src/vuzol/telegram/topic_line.py:242",
         "src/vuzol/telegram/work_package_projections.py:110",
         "src/vuzol/telegram/work_package_projections.py:158",

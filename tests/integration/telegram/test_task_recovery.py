@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 from telegram import Update
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.interpretation.test_chat_boundary import chat_runtime, message
 from tests.integration.storage.helpers import seed_task_run_step, storage
 from tests.unit.interpretation.test_jev_live import response
@@ -38,11 +39,7 @@ from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.delivery import TelegramDeliveryService, prepare_delivery
 from vuzol.telegram.domain import IngressStatus
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import (
-    FakeTelegramClient,
-    build_status_card,
-    enqueue_task_control_snapshot,
-)
+from vuzol.telegram.projections import build_status_card, enqueue_task_control_snapshot
 from vuzol.workflows.application import Principal, apply_task_command
 from vuzol.workflows.controls import WorkflowControlConsumer
 from vuzol.workflows.recovery_policy import RecoveryPolicy

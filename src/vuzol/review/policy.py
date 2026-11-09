@@ -17,8 +17,7 @@ Levels:
 
 Coverage (D0 ADR): L2 and L3 require an independent model call; L0 and L1
 are mechanical only. MEDIUM maps to L2, so a medium handler invokes the
-required reviewer. ``should_skip_rereview`` is documented as unused by the
-dispatch path (kept as a pure helper with unit coverage).
+required reviewer. Each dispatch performs a fresh review.
 
 Jev is not a dependency of review and must stay unconnected.
 """
@@ -152,35 +151,6 @@ def resolve_review_plan(
         "l1_enabled": l1_enabled,
         "file_classes": {path: classify_file(path).value for path in changed_files},
     }
-
-
-def should_skip_rereview(
-    *,
-    previous_policy_revision: str,
-    previous_base_commit: str,
-    previous_result_commit: str,
-    previous_diff_hash: str | None,
-    base_commit: str,
-    result_commit: str,
-    diff_hash: str | None,
-    policy_revision: str = REVIEW_POLICY_REVISION,
-) -> bool:
-    """No re-review for an unchanged candidate under the same policy.
-
-    Any change of base/result/diff hash or of the policy revision requires a
-    fresh review. A changed hash invalidates the previous verdict.
-
-    D0 note: the dispatch path does not call this helper; every review step
-    performs a fresh review. It is kept as a pure, unit-tested predicate for
-    future admission use.
-    """
-
-    return (
-        previous_policy_revision == policy_revision
-        and previous_base_commit == base_commit
-        and previous_result_commit == result_commit
-        and (previous_diff_hash or "") == (diff_hash or "")
-    )
 
 
 def requires_independent(level: ReviewLevel) -> bool:

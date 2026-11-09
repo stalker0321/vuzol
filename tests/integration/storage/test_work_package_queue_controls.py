@@ -5,20 +5,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import storage
-from vuzol.discussion import (
-    DomainError,
-    PackageControlAction,
-    PlanDraft,
-    PlanItemDraft,
-    WorkPackageService,
-)
 from vuzol.discussion.application import (
     AuthoritativeControlCommand,
     PackageControlIngress,
     PackageControlResultCode,
     PackageControlSource,
 )
-from vuzol.discussion.service import RevisionResult
+from vuzol.discussion.domain import DomainError, PackageControlAction, PlanDraft, PlanItemDraft
+from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.storage.models import (
     Event,
     PlanRevision,
@@ -30,6 +24,7 @@ from vuzol.storage.models import (
 from vuzol.storage.types import (
     PlanRevisionCreatedBy,
     PlanRevisionState,
+    WorkPackagePauseReason,
     WorkPackageStatus,
 )
 from vuzol.storage.unit_of_work import UnitOfWork
@@ -146,28 +141,13 @@ async def test_failure_pause_retry_skip_preserve_revision_evidence(
 ) -> None:
     engine, factory = storage(postgres_dsn)
     created, _ = await _running_package(factory)
+    # Seed a stored failure outcome; the controls below consume it.
     async with UnitOfWork(factory) as uow:
-        paused_generation = await WorkPackageService(uow).pause_for_item_outcome(
-            package_id=created.package_id,
-            revision_number=1,
-            h8=created.content_hash[:8],
-            expected_status_generation=3,
-            ordinal=1,
-            blocked=False,
-        )
-    assert paused_generation == 4
-    with pytest.raises(DomainError) as duplicate_failure:
-        async with UnitOfWork(factory) as uow:
-            await WorkPackageService(uow).pause_for_item_outcome(
-                package_id=created.package_id,
-                revision_number=1,
-                h8=created.content_hash[:8],
-                expected_status_generation=3,
-                ordinal=1,
-                blocked=False,
-            )
-    assert duplicate_failure.value.code == "stale_generation"
-
+        package = await uow.work_packages.get_package(created.package_id)
+        package.status = WorkPackageStatus.PAUSED
+        package.pause_reason = WorkPackagePauseReason.ITEM_FAILED
+        package.cursor_ordinal = 1
+        package.version = 4
     async with factory() as session:
         status_card = await build_work_package_status_card(session, created.package_id)
         action_card = await build_work_package_action_card(session, created.package_id)
@@ -223,10 +203,7 @@ async def test_failure_pause_retry_skip_preserve_revision_evidence(
     assert package.cursor_ordinal == 2
     assert [revision.state for revision in revisions] == [PlanRevisionState.APPROVED]
     assert len(revision_items) == 2
-    assert {
-        "work_package.paused",
-        "work_package.item_skipped",
-    }.issubset(events)
+    assert "work_package.item_skipped" in events
     assert task_count == 1
     await engine.dispose()
 

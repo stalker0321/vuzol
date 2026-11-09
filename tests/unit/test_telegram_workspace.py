@@ -7,6 +7,7 @@ import pytest
 from pytest import MonkeyPatch
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import vuzol.telegram.workspace as workspace
 from vuzol.config import (
     Capability,
     ProjectConfig,
@@ -18,7 +19,6 @@ from vuzol.config import (
     build_bundle,
 )
 from vuzol.storage.models import TopicMapping
-from vuzol.telegram import workspace
 from vuzol.telegram.workspace import (
     TelegramWorkspaceService,
     TopicPinUnsupported,

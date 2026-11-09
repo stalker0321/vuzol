@@ -26,7 +26,6 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
 
 from vuzol.ops.backup.crypto import CHUNK_PLAINTEXT_MAX
 
@@ -652,110 +651,6 @@ def run_pg_restore_stdin(
         watchdog_alive=wd_alive,
         drain_alive=dr_alive,
     )
-
-
-def run_pg_restore_from_path(
-    argv: list[str],
-    plaintext_path: Path,
-    *,
-    assert_plaintext_path: Callable[[Path], None],
-    env: dict[str, str] | None = None,
-    cancel_flag: Callable[[], bool] | None = None,
-    write_size: int = DEFAULT_WRITE_SIZE,
-    write_poll_seconds: float = DEFAULT_WRITE_POLL_SECONDS,
-    overall_timeout_seconds: float | None = None,
-    close_plaintext: bool = True,
-) -> RestoreProcessResult:
-    """File-mode: assert + open before spawn; guarantee file closure."""
-
-    if not isinstance(plaintext_path, Path):
-        return _result(
-            ok=False,
-            code=CODE_PREFLIGHT,
-            exit_code=None,
-            bytes_written=0,
-            process_started=False,
-        )
-    if not callable(assert_plaintext_path):
-        return _result(
-            ok=False,
-            code=CODE_PREFLIGHT,
-            exit_code=None,
-            bytes_written=0,
-            process_started=False,
-        )
-
-    # Validate run inputs before callback/open side effects where possible.
-    if _validate_run_inputs(
-        argv,
-        env=env,
-        cancel_flag=cancel_flag,
-        write_size=write_size,
-        write_poll_seconds=write_poll_seconds,
-        overall_timeout_seconds=overall_timeout_seconds,
-        close_plaintext=close_plaintext,
-    ):
-        return _result(
-            ok=False,
-            code=CODE_PREFLIGHT,
-            exit_code=None,
-            bytes_written=0,
-            process_started=False,
-        )
-
-    try:
-        assert_plaintext_path(plaintext_path)
-    except Exception:
-        return _result(
-            ok=False,
-            code=CODE_PREFLIGHT,
-            exit_code=None,
-            bytes_written=0,
-            process_started=False,
-        )
-
-    try:
-        handle = plaintext_path.open("rb")
-    except (OSError, ValueError, TypeError, AttributeError):
-        return _result(
-            ok=False,
-            code=CODE_PREFLIGHT,
-            exit_code=None,
-            bytes_written=0,
-            process_started=False,
-        )
-
-    def _iter_file() -> Iterator[bytes]:
-        try:
-            chunk_size = (
-                write_size
-                if isinstance(write_size, int) and not isinstance(write_size, bool)
-                else DEFAULT_WRITE_SIZE
-            )
-            while True:
-                block = handle.read(chunk_size)
-                if not block:
-                    break
-                yield block
-        finally:
-            with contextlib.suppress(Exception):
-                handle.close()
-
-    try:
-        return run_pg_restore_stdin(
-            argv,
-            _iter_file(),
-            env=env,
-            cancel_flag=cancel_flag,
-            write_size=write_size,
-            write_poll_seconds=write_poll_seconds,
-            overall_timeout_seconds=overall_timeout_seconds,
-            close_plaintext=close_plaintext,
-        )
-    finally:
-        # Guarantee closure even if generator never started / close_plaintext=False.
-        with contextlib.suppress(Exception):
-            handle.close()
 
 
 def _write_chunk_nonblocking(

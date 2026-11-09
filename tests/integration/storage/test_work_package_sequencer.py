@@ -8,9 +8,9 @@ from sqlalchemy import func, select
 
 from tests.integration.storage.helpers import storage
 from vuzol.config import Settings
-from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+from vuzol.discussion.domain import PlanDraft, PlanItemDraft
 from vuzol.discussion.sequencer import WorkPackageSequenceConsumer, WorkPackageSequencer
-from vuzol.discussion.service import RevisionResult
+from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.interpretation.domain import TaskDraft
 from vuzol.storage.models import (
     Approval,

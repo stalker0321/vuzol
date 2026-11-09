@@ -12,9 +12,10 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.dialects import postgresql
 
+import vuzol.execution.reconciliation as reconciliation
+import vuzol.execution.turn_transport as turn_transport
 from vuzol.config.models import ProviderRole, SandboxProfileConfig
 from vuzol.config.revision import content_revision
-from vuzol.execution import reconciliation, turn_transport
 from vuzol.execution.domain import ProcessEnvelope, TurnProcessBinding
 from vuzol.execution.reconciliation import ReconciliationClassification, TurnStartupReconciler
 from vuzol.execution.sandbox import docker_run_argv

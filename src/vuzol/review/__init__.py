@@ -30,7 +30,6 @@ from vuzol.review.policy import (
     level_for,
     requires_independent,
     resolve_review_plan,
-    should_skip_rereview,
 )
 
 __all__ = [
@@ -57,7 +56,6 @@ __all__ = [
     "resolve_review_plan",
     "review_cost_export",
     "select_reviewer_profile",
-    "should_skip_rereview",
     "validate_manifest",
     "verify_chunk_receipts",
 ]

@@ -605,28 +605,6 @@ def test_pi_execution_boundary_accepts_only_canonical_runtime() -> None:
 
 
 @pytest.mark.anyio
-async def test_executor_chain_short_circuits_between_workers() -> None:
-    from vuzol.cli.executor import ExecutorChain
-
-    worktrees = MagicMock()
-    worktrees.process_one = AsyncMock(return_value=True)
-    providers = MagicMock()
-    providers.process_one = AsyncMock(return_value=True)
-    assert await ExecutorChain(worktrees, providers).process_one() is True
-    providers.process_one.assert_not_awaited()
-
-    worktrees.process_one.return_value = False
-    assert await ExecutorChain(worktrees, providers).process_one() is True
-    providers.process_one.assert_awaited_once()
-    reviews = MagicMock(process_one=AsyncMock(return_value=True))
-    worktrees.process_one.reset_mock()
-    providers.process_one.reset_mock()
-    assert await ExecutorChain(worktrees, providers, reviews).process_one()
-    worktrees.process_one.assert_not_awaited()
-    providers.process_one.assert_not_awaited()
-
-
-@pytest.mark.anyio
 @pytest.mark.parametrize(("cli_review", "lead_lanes"), [(False, 0), (True, 0), (False, 3)])
 async def test_executor_composes_enabled_runtime(
     monkeypatch: pytest.MonkeyPatch, cli_review, lead_lanes

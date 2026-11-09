@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import select
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.interpretation.test_chat_boundary import message
 from tests.integration.interpretation.test_chat_intent_context import finish_reply
 from tests.integration.interpretation.test_chat_recovery_memory import runtime_with_memory
@@ -16,7 +17,6 @@ from vuzol.interpretation.jev import JevDecisionsInterpreter
 from vuzol.interpretation.service import InterpretationPipeline
 from vuzol.storage.models import Event, Run, Step, Task, TransactionalOutbox
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.dispatch import WorkflowDispatcher
 
 pytestmark = pytest.mark.postgresql

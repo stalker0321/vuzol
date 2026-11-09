@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from vuzol.ops.backup import restore_cli_hooks as hooks
+import vuzol.ops.backup.restore_cli_hooks as hooks
 from vuzol.ops.backup.restore_cli_hooks import (
     LockProbeFailed,
     LockProbeUnreachable,

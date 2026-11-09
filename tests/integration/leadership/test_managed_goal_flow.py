@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.storage.helpers import storage
 
 from vuzol.cli.applier import applier_handlers
@@ -72,7 +73,6 @@ from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import IngressStatus, MessageUpdate
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.dispatch import WorkflowDispatcher
 from vuzol.workflows.domain import OutcomeKind, StepOutcome
 from vuzol.workflows.ports import CancellationContext, StepExecutionRequest

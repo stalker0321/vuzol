@@ -30,7 +30,6 @@ from vuzol.config.registries import (
     SandboxRegistry,
     TopicRegistry,
 )
-from vuzol.config.revision import RunConfigurationSnapshot, SnapshotCompatibility
 from vuzol.config.runtime import RuntimeConfiguration, get_runtime_configuration
 from vuzol.config.secrets import ScopedSecretResolver, SecretResolutionError
 from vuzol.config.settings import (
@@ -83,7 +82,6 @@ __all__ = [
     "RegistryDocument",
     "RegistryError",
     "RetentionDefaults",
-    "RunConfigurationSnapshot",
     "RuntimeConfiguration",
     "SandboxNetworkMode",
     "SandboxProfileConfig",
@@ -91,7 +89,6 @@ __all__ = [
     "ScopedSecretResolver",
     "SecretResolutionError",
     "Settings",
-    "SnapshotCompatibility",
     "StaticDeploymentConfig",
     "SubscriptionLimitSettings",
     "TelegramSettings",

@@ -24,11 +24,9 @@ from tests.integration.providers._test_routing_helpers import (
     seed_provider_step,
     storage,
 )
-from vuzol.context.bindings import bind_task_output
 from vuzol.context.resolver import BindingError, pack_context, resolve_context
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.providers.budgets import (
-    _lifetime_totals,
     accounting_for_profile,
     reserve_invocation_budget,
     settle_invocation_budget,
@@ -205,7 +203,8 @@ async def test_d3_lifetime_gate_and_epoch_canon(
 ) -> None:
     """Lead limits include historical package receipts across retry epochs."""
 
-    from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+    from vuzol.discussion.domain import PlanDraft, PlanItemDraft
+    from vuzol.discussion.service import WorkPackageService
     from vuzol.storage.types import PlanRevisionCreatedBy
 
     engine, factory = storage(postgres_dsn)
@@ -287,11 +286,6 @@ async def test_d3_lifetime_gate_and_epoch_canon(
                         api, purpose="coding", attempt_kind="retry", horizon_id=goal_id
                     ),
                 )
-        # lifetime totals see the spend across the epoch bump (canon, no filter)
-        async with factory.begin() as session:
-            totals = await _lifetime_totals(session, horizon)
-            assert totals[2] >= estimate.cost_units
-
         # The same task can have historical package and newer goal receipts.
         # They share one task unit, while every receipt still counts as spend.
         async with factory.begin() as session:
@@ -423,8 +417,6 @@ async def test_d3_counters_and_allowance_exhaustion(postgres_dsn: str, tmp_path:
 async def test_d3_step_less_reserve_settle_idempotent(postgres_dsn: str, tmp_path: Path) -> None:
     """pp.3/W4: step-less reserve+settle without fake Step; duplicate safe."""
 
-    from vuzol.providers.budgets import _lifetime_totals as _lt
-
     engine, factory = storage(postgres_dsn)
     settings, _registries = bundle(tmp_path, profile("api"))
     try:
@@ -465,71 +457,6 @@ async def test_d3_step_less_reserve_settle_idempotent(postgres_dsn: str, tmp_pat
             # tokens without price stay unknown: conservative floor, not zero
             assert record.cost_known is False
             assert record.cost_units is not None and record.cost_units > Decimal("0")
-            totals = await _lt(session, horizon)
-            assert totals[0] >= 4
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.anyio
-async def test_d3_scout_partial_retry_capacity(postgres_dsn: str, tmp_path: Path) -> None:
-    """pp.7/W3: partial persists on probe failure; retry runs missing only."""
-
-    from vuzol.scout import ScoutProbe, ScoutRequest, retry_scout, run_scout
-
-    engine, factory = storage(postgres_dsn)
-    settings, _registries = bundle(tmp_path, profile("api"))
-    try:
-        fixtures = FixtureRetrieval(fixtures={"fixture://a": b"alpha beta"})
-        request = ScoutRequest(
-            question="q?",
-            scope="vuzol",
-            probes=(
-                ScoutProbe(name="p1", kind="fetch", uri="fixture://a"),
-                ScoutProbe(name="p2", kind="fetch", uri="fixture://missing"),
-            ),
-            deadline="2026-10-01T00:00:00Z",
-            max_calls=5,
-            stop_condition="all_required",
-        )
-        async with factory.begin() as session:
-            partial = await run_scout(
-                session,
-                request=request,
-                fetch=_fixture_fetch(fixtures),
-                profile=profile("api"),
-                limits=settings.limits,
-                artifacts=None,
-                consumer_step_id=None,
-                project_id="vuzol",
-                now="2026-09-30T00:00:00Z",
-            )
-            assert partial.status == "partial"
-            assert [fact.probe for fact in partial.facts] == ["p1"]
-            assert partial.unresolved == ["p2"]
-            events = (
-                await session.scalars(
-                    select(Event).where(Event.event_type == "scout.packet_partial")
-                )
-            ).all()
-            assert len(events) >= 1
-        fixtures.fixtures["fixture://missing"] = b"gamma delta"
-        async with factory.begin() as session:
-            complete = await retry_scout(
-                session,
-                packet=partial,
-                request=request,
-                fetch=_fixture_fetch(fixtures),
-                profile=profile("api"),
-                limits=settings.limits,
-                artifacts=None,
-                consumer_step_id=None,
-                project_id="vuzol",
-                now="2026-09-30T01:00:00Z",
-            )
-            assert complete.status == "complete"
-            assert [fact.probe for fact in complete.facts] == ["p1", "p2"]
-            assert complete.unresolved == []
     finally:
         await engine.dispose()
 
@@ -585,15 +512,21 @@ async def test_d3_scope_freshness_manifest_task_pair(postgres_dsn: str, tmp_path
                 visibility="private",
             )
             # missing scope owner fails closed even though hashes match
-            await bind_task_output(
-                uow.session,
+            binding = InputBinding(
                 artifact_id=artifact.id,
                 content_hash=artifact.content_hash,
                 consumer_step_id=missing_consumer.id,
                 producer_step_id=first_step,
                 scope_project_id=None,
                 access_scope="private",
+                slot="upstream_result",
+                schema_name="task-result",
+                schema_version="task-result.v1",
+                status="resolved",
+                required=True,
             )
+            uow.session.add(binding)
+            await uow.session.flush()
             try:
                 await resolve_context(
                     uow.session,
@@ -607,8 +540,7 @@ async def test_d3_scope_freshness_manifest_task_pair(postgres_dsn: str, tmp_path
                 raise AssertionError("expected missing_scope")
             # same bytes, old retrieved_at anchor: stale, not rejuvenated
             old = datetime.now(UTC) - timedelta(days=2)
-            await bind_task_output(
-                uow.session,
+            binding = InputBinding(
                 artifact_id=artifact.id,
                 content_hash=artifact.content_hash,
                 consumer_step_id=stale_consumer.id,
@@ -618,7 +550,13 @@ async def test_d3_scope_freshness_manifest_task_pair(postgres_dsn: str, tmp_path
                 required=False,
                 freshness_max_age_seconds=3600,
                 source_retrieved_at=old,
+                slot="upstream_result",
+                schema_name="task-result",
+                schema_version="task-result.v1",
+                status="resolved",
             )
+            uow.session.add(binding)
+            await uow.session.flush()
             stale = await resolve_context(
                 uow.session,
                 store,
@@ -628,15 +566,21 @@ async def test_d3_scope_freshness_manifest_task_pair(postgres_dsn: str, tmp_path
             assert not stale.is_empty
             assert stale.bindings[0].freshness == "stale"
             # success path: scoped binding resolves to items for the pair
-            scoped = await bind_task_output(
-                uow.session,
+            scoped = InputBinding(
                 artifact_id=artifact.id,
                 content_hash=artifact.content_hash,
                 consumer_step_id=ok_consumer.id,
                 producer_step_id=first_step,
                 scope_project_id="vuzol",
                 access_scope="private",
+                slot="upstream_result",
+                schema_name="task-result",
+                schema_version="task-result.v1",
+                status="resolved",
+                required=True,
             )
+            uow.session.add(scoped)
+            await uow.session.flush()
             assert scoped.schema_name == "task-result"
             resolved_ok = await resolve_context(
                 uow.session,
@@ -821,88 +765,6 @@ async def test_d3_intake_owner_in_usage_horizon(postgres_dsn: str, tmp_path: Pat
 
 
 @pytest.mark.anyio
-async def test_d3_item_retry_new_task_keeps_lifetime(postgres_dsn: str) -> None:
-    """REDO-2: an item-retry Task joins the same lifetime; epoch hides nothing."""
-
-    from vuzol.providers.budgets import _lifetime_totals as _lt
-
-    engine, factory = storage(postgres_dsn)
-    try:
-        horizon = uuid.uuid4()
-        task_a, _run_a, _step_a = await seed_provider_step(factory)
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            first = await uow.session.scalar(
-                select(UsageRecord).where(UsageRecord.task_id == task_a)
-            )
-            assert first is None
-            uow.session.add(
-                UsageRecord(
-                    provider="openai-compatible",
-                    profile_id="api",
-                    model="model",
-                    task_id=task_a,
-                    run_id=None,
-                    step_id=None,
-                    input_tokens=100,
-                    output_tokens=10,
-                    duration_ms=1,
-                    provider_request_id=None,
-                    reservation_id=None,
-                    outcome="succeeded",
-                    purpose="coding",
-                    attempt_kind="initial",
-                    horizon_id=horizon,
-                    pricing_revision="p",
-                    currency="USD",
-                    cost_known=True,
-                )
-            )
-        # item-retry materializes a NEW task (epoch 0); same horizon scope
-        task_b, _run_b, _step_b = await seed_provider_step(factory)
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            task = await uow.session.get(Task, task_b)
-            assert task is not None
-            assert task.budget_epoch == 0
-            uow.session.add(
-                UsageRecord(
-                    provider="openai-compatible",
-                    profile_id="api",
-                    model="model",
-                    task_id=task_b,
-                    run_id=None,
-                    step_id=None,
-                    input_tokens=50,
-                    output_tokens=5,
-                    duration_ms=1,
-                    provider_request_id=None,
-                    reservation_id=None,
-                    outcome="succeeded",
-                    purpose="coding",
-                    attempt_kind="retry",
-                    horizon_id=horizon,
-                    pricing_revision="p",
-                    currency="USD",
-                    cost_known=True,
-                )
-            )
-        # epoch bump on the new task changes nothing about lifetime
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            task = await uow.session.get(Task, task_b, with_for_update=True)
-            assert task is not None
-            task.budget_epoch += 1
-        async with factory.begin() as session:
-            totals = await _lt(session, horizon)
-            assert totals[0] == 150
-            assert totals[1] == 15
-            assert totals[4] == 2
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.anyio
 async def test_d3_work_attempt_counter_fires(postgres_dsn: str, tmp_path: Path) -> None:
     """REDO-4: max_work_attempts counts attempt rows plus step attempts."""
 
@@ -952,7 +814,8 @@ async def test_d3_replan_counter_fires_on_package_revisions(
 ) -> None:
     """REDO-4: max_replans counts plan revisions of the task's package."""
 
-    from vuzol.discussion import PlanDraft, PlanItemDraft, WorkPackageService
+    from vuzol.discussion.domain import PlanDraft, PlanItemDraft
+    from vuzol.discussion.service import WorkPackageService
     from vuzol.storage.types import PlanRevisionCreatedBy
 
     engine, factory = storage(postgres_dsn)

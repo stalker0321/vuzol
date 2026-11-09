@@ -9,6 +9,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.interpretation.test_chat_boundary import chat_runtime
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.test_delivery import service
@@ -49,7 +50,6 @@ from vuzol.storage.types import (
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.formatting import telegram_markdown_html, telegram_markdown_parts
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.worker import CompleteHandler, RoutedWorkflowWorker, WorkflowWorker
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]

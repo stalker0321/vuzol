@@ -780,46 +780,6 @@ class WorkPackageService:
             payload={"package_id": str(edit.package_id)},
         )
 
-    async def apply_item_edit(
-        self,
-        *,
-        edit_session_id: uuid.UUID,
-        expected_session_generation: int,
-        replacement: PlanDraft,
-        user_id: int,
-    ) -> RevisionResult:
-        edit = await self._uow.work_packages.get_edit_session(edit_session_id, for_update=True)
-        if edit.opened_by_user_id != user_id:
-            raise DomainError("edit_session_owner_mismatch")
-        if edit.status is not EditSessionStatus.OPEN:
-            raise DomainError("edit_session_closed")
-        if edit.expires_at <= datetime.now(UTC):
-            raise DomainError("edit_session_expired")
-        if edit.session_generation != expected_session_generation:
-            raise DomainError("edit_session_generation_stale")
-        package = await self._uow.work_packages.get_package(edit.package_id, for_update=True)
-        if (
-            package.version != edit.session_generation
-            or package.head_revision_id != edit.plan_revision_id
-        ):
-            raise DomainError("stale_revision")
-        edit.status = EditSessionStatus.ACCEPTED
-        result = await self.revise_draft(
-            package_id=package.id,
-            expected_status_generation=package.version,
-            plan=replacement,
-            created_by=PlanRevisionCreatedBy.USER,
-            actor_type="user",
-        )
-        await self._event(
-            edit.id,
-            WorkPackageEvent.EDIT_SESSION_ACCEPTED,
-            "user",
-            entity_type="edit_session",
-            payload={"package_id": str(package.id), "new_revision_id": str(result.revision_id)},
-        )
-        return result
-
     async def set_open_detail(
         self, *, package_id: uuid.UUID, revision_number: int, h8: str, ordinal: int
     ) -> None:
@@ -840,28 +800,6 @@ class WorkPackageService:
         await self._uow.work_packages.clear_open_detail(package_id=package_id)
         await self._detail_event(package_id, None, None, None, None, True)
 
-    async def validate_startable(
-        self,
-        *,
-        package_id: uuid.UUID,
-        revision_number: int,
-        h8: str,
-        expected_status_generation: int,
-    ) -> uuid.UUID:
-        """Validate approval binding without starting or creating a canonical Task."""
-        package = await self._uow.work_packages.get_package(package_id, for_update=True)
-        require_generation(package.version, expected_status_generation)
-        if package.status is not WorkPackageStatus.APPROVED:
-            raise DomainError("invalid_transition")
-        control_transition_target(package.status, PackageControlAction.START)
-        revision = await self._fenced_revision(package_id, revision_number, h8)
-        if (
-            revision.state is not PlanRevisionState.APPROVED
-            or package.approved_revision_id != revision.id
-        ):
-            raise DomainError("approval_binding_mismatch")
-        return revision.id
-
     async def validate_control_fence(
         self,
         *,
@@ -879,55 +817,6 @@ class WorkPackageService:
         if package.head_revision_id != revision.id:
             raise DomainError("stale_revision")
         return revision.id, package.version
-
-    async def pause_for_item_outcome(
-        self,
-        *,
-        package_id: uuid.UUID,
-        revision_number: int,
-        h8: str,
-        expected_status_generation: int,
-        ordinal: int,
-        blocked: bool,
-        failure_task_id: uuid.UUID | None = None,
-    ) -> int:
-        """Record a sequencer-owned failed/blocked outcome without advancing the queue."""
-
-        package = await self._uow.work_packages.get_package(package_id, for_update=True)
-        require_generation(package.version, expected_status_generation)
-        if package.status is not WorkPackageStatus.RUNNING:
-            raise DomainError("invalid_transition")
-        revision = await self._fenced_revision(package_id, revision_number, h8)
-        if package.running_revision_id != revision.id or package.head_revision_id != revision.id:
-            raise DomainError("stale_revision")
-        resolved_revision_id, _ = await self._resolve_item(package_id, revision_number, h8, ordinal)
-        if resolved_revision_id != revision.id or (
-            package.cursor_ordinal is not None and package.cursor_ordinal != ordinal
-        ):
-            raise DomainError("stale_cursor")
-        package.status = WorkPackageStatus.PAUSED
-        package.pause_reason = (
-            WorkPackagePauseReason.ITEM_BLOCKED if blocked else WorkPackagePauseReason.ITEM_FAILED
-        )
-        package.cursor_ordinal = ordinal
-        package.last_failure_task_id = failure_task_id
-        package.version += 1
-        await self._event(
-            package.id,
-            WorkPackageEvent.PACKAGE_PAUSED,
-            "system",
-            previous_state=WorkPackageStatus.RUNNING.value,
-            new_state=WorkPackageStatus.PAUSED.value,
-            payload={
-                "revision_id": str(revision.id),
-                "ordinal": ordinal,
-                "reason": package.pause_reason.value,
-                "failure_task_id": None if failure_task_id is None else str(failure_task_id),
-                "status_generation": package.version,
-            },
-        )
-        await self._enqueue_plan_projection(package.id, package.version, "pause")
-        return package.version
 
     async def retry_item(
         self,

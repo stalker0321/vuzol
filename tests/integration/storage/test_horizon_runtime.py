@@ -5,19 +5,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import storage
-from vuzol.discussion import (
-    PackageControlAction,
-    PlanDraft,
-    PlanItemDraft,
-    WorkPackageService,
-)
 from vuzol.discussion.application import (
     AuthoritativeControlCommand,
     PackageControlIngress,
     PackageControlResultCode,
     PackageControlSource,
 )
-from vuzol.discussion.service import RevisionResult
+from vuzol.discussion.domain import PackageControlAction, PlanDraft, PlanItemDraft
+from vuzol.discussion.service import RevisionResult, WorkPackageService
 from vuzol.storage.models import PlanRevision, Task, WorkPackage
 from vuzol.storage.types import (
     PlanRevisionCreatedBy,

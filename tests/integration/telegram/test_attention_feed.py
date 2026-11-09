@@ -6,6 +6,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.leadership.test_managed_goal_flow import (
     OWNER,
     PROJECT,
@@ -38,7 +39,7 @@ from vuzol.storage.types import DeliveryStatus, TaskStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.attention import sync_attention, sync_goal_attention
 from vuzol.telegram.delivery import DeliveryAction, TelegramDeliveryService, prepare_delivery
-from vuzol.telegram.projections import FakeTelegramClient, enqueue_chat_notice
+from vuzol.telegram.projections import enqueue_chat_notice
 from vuzol.workflows.application import Principal
 from vuzol.workflows.lead_events import publish_task_event
 

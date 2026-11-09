@@ -5,10 +5,10 @@ import anyio
 import pytest
 from sqlalchemy import func, select, update
 
+from tests.fakes.interpretation import FakeInterpreter, FakeTranscriber
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.helpers import telegram_runtime
 from vuzol.config import Capability
-from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
 from vuzol.interpretation.domain import (
     InterpretationResult,
     ProjectNameOption,

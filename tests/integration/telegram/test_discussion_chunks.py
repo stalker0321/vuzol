@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 from telegram.error import NetworkError, RetryAfter
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.test_delivery import service
 from tests.unit.test_telegram_reply_chunks import visible
@@ -21,7 +22,6 @@ from vuzol.storage.types import (
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.delivery import PermanentDeliveryError, prepare_delivery
 from vuzol.telegram.formatting import telegram_markdown_html, telegram_markdown_parts
-from vuzol.telegram.projections import FakeTelegramClient
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 

@@ -144,16 +144,6 @@ class ExecutorChain:
             await self._recovery()
             self._next_recovery = time.monotonic() + 30
 
-    async def process_one(self) -> bool:
-        if self._recovery is not None and time.monotonic() >= self._next_recovery:
-            await self._recovery()
-            self._next_recovery = time.monotonic() + 30
-        if self._lead is not None and await self._lead.process_one():
-            return True
-        if self._reviews is not None and await self._reviews.process_one():
-            return True
-        return await self._worktrees.process_one() or await self._providers.process_one()
-
 
 def main() -> None:
     asyncio.run(run())

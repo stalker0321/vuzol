@@ -10,8 +10,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterator
-from pathlib import Path
+from collections.abc import Iterator
 from typing import ClassVar, cast
 
 import pytest
@@ -29,7 +28,6 @@ from vuzol.ops.backup.postgres_restore import (
     _get_last_helper_liveness,
     _get_last_watchdog_stats,
     build_pg_restore_argv,
-    run_pg_restore_from_path,
     run_pg_restore_stdin,
 )
 
@@ -435,75 +433,6 @@ def test_t10_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.code == CODE_PROCESS_FAILED
     assert result.exit_code == 3
     assert _get_last_helper_liveness() == (False, False)
-
-
-def test_t11_file_assert_failure_no_spawn_redaction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    called = {"popen": False}
-
-    def factory(*_a: object, **_k: object) -> FakePopen:
-        called["popen"] = True
-        return FakePopen(["x"])
-
-    monkeypatch.setattr(subprocess, "Popen", factory)
-    secret_path = Path("/tmp/secret-drill-path-should-not-leak")  # noqa: S108
-
-    def refuse(_path: Path) -> None:
-        raise ValueError(f"conflict with {secret_path}")
-
-    result = run_pg_restore_from_path(
-        ["pg_restore"],
-        secret_path,
-        assert_plaintext_path=refuse,
-    )
-    assert result.code == CODE_PREFLIGHT
-    assert result.process_started is False
-    assert called["popen"] is False
-    text = str(result) + str(result.to_operational_payload())
-    assert "secret-drill-path" not in text
-    assert str(secret_path) not in text
-
-
-def test_t12_file_mode_ok_and_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _patch_popen(monkeypatch, exit_code=0)
-    path = tmp_path / "plain.dump"
-    path.write_bytes(b"hello-file")
-    seen: list[Path] = []
-
-    def ok_assert(p: Path) -> None:
-        seen.append(p)
-
-    result = run_pg_restore_from_path(
-        ["pg_restore"],
-        path,
-        assert_plaintext_path=ok_assert,
-    )
-    assert result.ok is True
-    assert result.code == CODE_RESTORED
-    assert result.bytes_written == 10
-    assert seen == [path]
-    # File remains readable (closed cleanly, not unlinked by primitive).
-    assert path.read_bytes() == b"hello-file"
-
-
-def test_file_open_failure_before_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    missing = tmp_path / "no-such-file.dump"
-    called = {"popen": False}
-
-    def factory(*_a: object, **_k: object) -> FakePopen:
-        called["popen"] = True
-        return FakePopen(["x"])
-
-    monkeypatch.setattr(subprocess, "Popen", factory)
-    result = run_pg_restore_from_path(
-        ["pg_restore"],
-        missing,
-        assert_plaintext_path=lambda _p: None,
-    )
-    assert result.code == CODE_PREFLIGHT
-    assert result.process_started is False
-    assert called["popen"] is False
 
 
 def test_t14_redaction_no_env_leak(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1236,43 +1165,6 @@ def test_preflight_close_false_leaves_iterator_open(
     result = run_pg_restore_stdin([], iterator, close_plaintext=False)
     assert result.code == CODE_PREFLIGHT
     assert iterator.closed is False
-
-
-def test_from_path_rejects_invalid_contract_before_side_effects(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    called = {"assert": 0, "spawn": 0}
-
-    def asserted(_path: Path) -> None:
-        called["assert"] += 1
-
-    def factory(*_args: object, **_kwargs: object) -> object:
-        called["spawn"] += 1
-        raise AssertionError("must not spawn")
-
-    monkeypatch.setattr(subprocess, "Popen", factory)
-    path = tmp_path / "plain.dump"
-    path.write_bytes(b"x")
-
-    bad_path = run_pg_restore_from_path(
-        ["pg_restore"],
-        cast(Path, "not-a-path"),
-        assert_plaintext_path=asserted,
-    )
-    bad_callback = run_pg_restore_from_path(
-        ["pg_restore"],
-        path,
-        assert_plaintext_path=cast(Callable[[Path], None], None),
-    )
-    bad_runtime = run_pg_restore_from_path(
-        [],
-        path,
-        assert_plaintext_path=asserted,
-    )
-
-    assert {bad_path.code, bad_callback.code, bad_runtime.code} == {CODE_PREFLIGHT}
-    assert called == {"assert": 0, "spawn": 0}
 
 
 def test_write_helper_stops_before_write_for_cancel_and_timeout(

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, select, update
 
+from tests.fakes.telegram import FakeTelegramClient
 from vuzol.config import (
     Capability,
     ProjectConfig,
@@ -42,7 +43,6 @@ from vuzol.storage.types import (
     TaskStatus,
 )
 from vuzol.telegram.delivery import TelegramDeliveryService
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.telegram.work_package_projections import enqueue_project_topic_status
 from vuzol.telegram.workspace import TopicCreationOutcomeUnknown
 from vuzol.workflows.dispatch import WorkflowDispatcher

@@ -48,7 +48,6 @@ from vuzol.review.policy import (
     classify_file,
     level_for,
     resolve_review_plan,
-    should_skip_rereview,
 )
 from vuzol.storage.records import LeaseToken, StepRecord
 from vuzol.storage.types import RiskLevel, StepStatus
@@ -202,45 +201,6 @@ def test_review_has_no_jev_dependency() -> None:
             ):
                 offenders.append(f"{path.name}: {line.strip()}")
     assert offenders == []
-
-
-def test_no_rereview_for_unchanged_candidate_under_same_policy() -> None:
-    assert (
-        should_skip_rereview(
-            previous_policy_revision=REVIEW_POLICY_REVISION,
-            previous_base_commit="a" * 40,
-            previous_result_commit="b" * 40,
-            previous_diff_hash="c" * 64,
-            base_commit="a" * 40,
-            result_commit="b" * 40,
-            diff_hash="c" * 64,
-        )
-        is True
-    )
-    assert (
-        should_skip_rereview(
-            previous_policy_revision=REVIEW_POLICY_REVISION,
-            previous_base_commit="a" * 40,
-            previous_result_commit="b" * 40,
-            previous_diff_hash="c" * 64,
-            base_commit="a" * 40,
-            result_commit="b" * 40,
-            diff_hash="d" * 64,
-        )
-        is False
-    )
-    assert (
-        should_skip_rereview(
-            previous_policy_revision="review-policy.v0",
-            previous_base_commit="a" * 40,
-            previous_result_commit="b" * 40,
-            previous_diff_hash="c" * 64,
-            base_commit="a" * 40,
-            result_commit="b" * 40,
-            diff_hash="c" * 64,
-        )
-        is False
-    )
 
 
 # --- Partitions ---

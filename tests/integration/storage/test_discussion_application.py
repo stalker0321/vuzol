@@ -4,19 +4,14 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
-from vuzol.discussion import (
-    DomainError,
-    PackageControlAction,
-    PlanDraft,
-    PlanItemDraft,
-    WorkPackageService,
-)
 from vuzol.discussion.application import (
     AuthoritativeControlCommand,
     PackageControlIngress,
     PackageControlResultCode,
     PackageControlSource,
 )
+from vuzol.discussion.domain import DomainError, PackageControlAction, PlanDraft, PlanItemDraft
+from vuzol.discussion.service import WorkPackageService
 from vuzol.storage.models import (
     Interpretation,
     MaterializationLink,

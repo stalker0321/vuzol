@@ -1,4 +1,4 @@
-"""Stable non-secret configuration revisions and run snapshots."""
+"""Stable non-secret configuration and assignment revisions."""
 
 import hashlib
 import json
@@ -7,13 +7,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pydantic import AnyUrl, BaseModel, ConfigDict
+from pydantic import AnyUrl, BaseModel
 
 from vuzol.config.models import (
-    ProjectConfig,
     ProviderProfileConfig,
     RegistryDocument,
-    SandboxProfileConfig,
 )
 
 
@@ -86,27 +84,6 @@ def _canonicalize(value: object) -> object:
 
 def _sort_key(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-
-
-class RunConfigurationSnapshot(BaseModel):
-    """Immutable policy inputs retained by a future run record."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    bundle_revision: str
-    project: ProjectConfig | None
-    profile: ProviderProfileConfig | None
-    sandbox: SandboxProfileConfig | None
-    project_revision: str | None
-    profile_revision: str | None
-    sandbox_revision: str | None
-
-
-class SnapshotCompatibility(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    allowed: bool
-    reasons: tuple[str, ...] = ()
 
 
 # What a stored model choice means: which model, how it reasons, through which account

@@ -14,7 +14,7 @@ from vuzol.ops.disk_pressure import (
 )
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.models import Run, Step, TransactionalOutbox
-from vuzol.storage.records import LeaseToken, OutboxLeaseToken, StepRecord
+from vuzol.storage.records import LeaseToken, OutboxLeaseToken
 from vuzol.storage.repositories.core import step_record
 from vuzol.storage.types import DeliveryStatus, QueueClass, RunStatus, StepStatus
 
@@ -162,50 +162,6 @@ async def heartbeat_step(
     result = cast(CursorResult[Any], await session.execute(statement))
     if result.rowcount != 1:
         raise LeaseLost(f"step lease lost: {token.step.id}")
-
-
-async def complete_step(
-    session: AsyncSession,
-    token: LeaseToken,
-    *,
-    result_payload: dict[str, object],
-) -> None:
-    statement = (
-        update(Step)
-        .where(
-            Step.id == token.step.id,
-            Step.lease_owner == token.owner,
-            Step.lease_generation == token.generation,
-            Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
-            Step.run_id.in_(
-                select(Run.id).where(
-                    Run.status.not_in((RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.COMPLETED))
-                )
-            ),
-        )
-        .values(
-            status=StepStatus.COMPLETED,
-            result=result_payload,
-            lease_owner=None,
-            lease_expires_at=None,
-        )
-    )
-    result = cast(CursorResult[Any], await session.execute(statement))
-    if result.rowcount != 1:
-        raise LeaseLost(f"step lease lost: {token.step.id}")
-
-
-async def find_expired_leases(session: AsyncSession) -> tuple[StepRecord, ...]:
-    statement = (
-        select(Step)
-        .where(
-            Step.status.in_((StepStatus.LEASED, StepStatus.RUNNING)),
-            Step.lease_expires_at < func.now(),
-        )
-        .order_by(Step.lease_expires_at, Step.id)
-    )
-    steps = (await session.scalars(statement)).all()
-    return tuple(step_record(step) for step in steps)
 
 
 async def claim_outbox_item(

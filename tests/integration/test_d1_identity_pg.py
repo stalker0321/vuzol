@@ -13,7 +13,6 @@ from sqlalchemy.exc import IntegrityError
 
 from tests.integration.storage.helpers import seed_task_run_step, storage
 from vuzol.storage.attempts import (
-    close_work_attempt,
     latest_attempt,
     record_review_outcome,
     record_work_attempt,
@@ -222,8 +221,8 @@ async def test_d1_repeat_redo_rejects_and_keeps_candidate(postgres_dsn: str) -> 
 
 
 @pytest.mark.anyio
-async def test_d1_attempt_uniqueness_lineage_close(postgres_dsn: str) -> None:
-    """pp.7: attempt_no unique within step, parent lineage, close is append-only."""
+async def test_d1_attempt_uniqueness_lineage(postgres_dsn: str) -> None:
+    """pp.7: attempt_no unique within step, with parent lineage."""
 
     _engine, factory = storage(postgres_dsn)
     try:
@@ -272,14 +271,6 @@ async def test_d1_attempt_uniqueness_lineage_close(postgres_dsn: str) -> None:
             # the failed flush poisons the unit of work; roll back the clash
             # so the context exit can commit cleanly
             await uow.session.rollback()
-        async with UnitOfWork(factory) as uow:
-            assert uow.session is not None
-            # close is final: a second close raises instead of mutating
-            reopened = await latest_attempt(uow.session, step.id)
-            assert reopened is not None
-            await close_work_attempt(uow.session, reopened, outcome="failed")
-            with pytest.raises(ValueError, match="already closed"):
-                await close_work_attempt(uow.session, reopened, outcome="failed")
     finally:
         await _engine.dispose()
 

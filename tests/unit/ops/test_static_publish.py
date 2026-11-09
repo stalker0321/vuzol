@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from vuzol.ops import static_publish
+import vuzol.ops.static_publish as static_publish
 from vuzol.ops.static_publish import StaticPublishError, StaticSite, load_sites, publish, rollback
 
 

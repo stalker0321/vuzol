@@ -4,10 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from vuzol.discussion import DomainError, MemoryLimits
 from vuzol.discussion.context_budget import ChatContextError
+from vuzol.discussion.domain import DomainError
 from vuzol.discussion.memory import (
     DecisionView,
+    MemoryLimits,
     MemorySummary,
     MemoryTurn,
     build_chat_memory_pack,

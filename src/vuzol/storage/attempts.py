@@ -3,8 +3,7 @@
 All writers are additive and append-only:
 
 - ``record_work_attempt`` creates a NEW row per repair/retry/takeover/REDO;
-  closed attempts are never mutated (``close_work_attempt`` raises on a
-  closed row). ``attempt_no`` is monotonic within ``step_id`` and is work
+  closed attempts are never mutated. ``attempt_no`` is monotonic within ``step_id`` and is work
   lineage — never conflated with ``lease_generation`` or ``provider_attempt``
   (ADR-A01.4).
 - ``snapshot_task_spec`` versions the spec separately from the mutating
@@ -21,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -144,37 +142,6 @@ async def record_work_attempt(
         prior_review_summary=prior_review_summary,
     )
     session.add(attempt)
-    await session.flush()
-    return attempt
-
-
-async def close_work_attempt(
-    session: AsyncSession,
-    attempt: WorkAttempt,
-    *,
-    outcome: str,
-    output_hash: str | None = None,
-    failure_category: str | None = None,
-    failure_fingerprint: str | None = None,
-    usage_ref: str | None = None,
-) -> WorkAttempt:
-    """Close an open attempt. Closed attempts are append-only (raises if closed)."""
-
-    if attempt.closed_at is not None:
-        raise ValueError("work attempt is already closed")
-    attempt.outcome = outcome
-    if output_hash is not None:
-        attempt.output_hash = output_hash
-    if failure_category is not None:
-        attempt.failure_category = failure_category
-    if failure_fingerprint is not None:
-        attempt.failure_fingerprint = failure_fingerprint
-    if usage_ref is not None:
-        attempt.usage_ref = usage_ref
-    # Python-side timestamp (not func.now()): the close guard re-reads
-    # closed_at in the same session, and a server-side expression would
-    # leave the attribute expired.
-    attempt.closed_at = datetime.now(UTC)
     await session.flush()
     return attempt
 

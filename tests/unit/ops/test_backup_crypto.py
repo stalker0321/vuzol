@@ -423,7 +423,7 @@ def test_decrypt_chunk_max_mismatch(tmp_path: Path) -> None:
 
 def test_fsync_handle_without_fileno(tmp_path: Path) -> None:
     """_fsync_handle is a no-op when fileno is missing (defensive)."""
-    from vuzol.ops.backup import crypto as crypto_mod
+    import vuzol.ops.backup.crypto as crypto_mod
 
     class _NoFileno:
         pass
@@ -462,7 +462,7 @@ def test_decrypt_uses_only_bounded_reads(tmp_path: Path) -> None:
     """Streaming decrypt must never call handle.read() without a positive size."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    from vuzol.ops.backup import crypto as crypto_mod
+    import vuzol.ops.backup.crypto as crypto_mod
 
     out = tmp_path / "blob.enc"
     payload = b"bounded-read-proof"
@@ -628,7 +628,7 @@ def test_decrypt_no_chunks_after_header(tmp_path: Path) -> None:
 
 def test_decrypt_invalid_utf8_component_name(tmp_path: Path) -> None:
     """Invalid UTF-8 in component name → BackupCryptoError, no raw-byte leak."""
-    from vuzol.ops.backup import crypto as crypto_mod
+    import vuzol.ops.backup.crypto as crypto_mod
 
     out = tmp_path / "blob.enc"
     bad_comp = b"\xff\xfe"
@@ -663,7 +663,7 @@ def test_decrypt_invalid_utf8_component_name(tmp_path: Path) -> None:
 
 def test_decrypt_invalid_utf8_format_name(tmp_path: Path) -> None:
     """Invalid UTF-8 in format name maps to the same stable encoding error."""
-    from vuzol.ops.backup import crypto as crypto_mod
+    import vuzol.ops.backup.crypto as crypto_mod
 
     out = tmp_path / "blob.enc"
     comp = b"postgres"
@@ -699,7 +699,7 @@ def test_decrypt_max_chunks_boundary_synthetic(tmp_path: Path) -> None:
     Monkeypatches small CHUNK_PLAINTEXT_MAX and MAX_CHUNKS so the test never
     allocates or iterates millions of real-size chunks.
     """
-    from vuzol.ops.backup import crypto as crypto_mod
+    import vuzol.ops.backup.crypto as crypto_mod
 
     out = tmp_path / "blob.enc"
     small_max = 32

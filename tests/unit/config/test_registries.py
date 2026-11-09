@@ -4,14 +4,11 @@ import pytest
 
 from vuzol.config import (
     Capability,
-    ConfigurationBundle,
     ProfileRegistry,
     ProjectConfig,
     ProjectRegistry,
     ProviderProfileConfig,
     RegistryError,
-    SandboxProfileConfig,
-    SandboxRegistry,
     TopicConfig,
     TopicKind,
     TopicRegistry,
@@ -125,29 +122,6 @@ def test_cli_profiles_require_distinct_identity_and_state_paths(tmp_path: Path) 
         )
 
 
-def test_profile_capability_matching_ignores_disabled_profiles() -> None:
-    registry = ProfileRegistry(
-        [
-            profile("reader"),
-            profile(
-                "coder",
-                capabilities=frozenset({Capability.REPOSITORY_READ, Capability.CODE_EDIT}),
-            ),
-            profile("disabled", enabled=False, credential_required=False),
-        ]
-    )
-
-    assert [candidate.id for candidate in registry.find_candidates(frozenset())] == [
-        "reader",
-        "coder",
-    ]
-    assert [
-        candidate.id for candidate in registry.find_candidates(frozenset({Capability.CODE_EDIT}))
-    ] == ["coder"]
-    with pytest.raises(RegistryError, match="unknown profile ID"):
-        registry.get("missing")
-
-
 def test_topic_registry_validates_project_and_duplicate_mapping(tmp_path: Path) -> None:
     projects = ProjectRegistry(
         [project(Path("project-a"), enabled=False)], repository_root=tmp_path
@@ -168,56 +142,3 @@ def test_topic_registry_validates_project_and_duplicate_mapping(tmp_path: Path) 
         TopicRegistry([topic.model_copy(update={"project_id": "missing"})], projects=projects)
     with pytest.raises(RegistryError, match="unknown topic mapping"):
         registry.resolve(-100, 9)
-
-
-def test_snapshot_preserves_non_security_configuration_and_detects_revocation(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "project-a").mkdir()
-    original_project = project(Path("project-a"))
-    original_profile = profile()
-
-    def bundle(
-        configured_project: ProjectConfig, configured_profile: ProviderProfileConfig
-    ) -> ConfigurationBundle:
-        projects = ProjectRegistry([configured_project], repository_root=tmp_path)
-        profiles = ProfileRegistry([configured_profile])
-        topics = TopicRegistry([], projects=projects)
-        sandboxes = SandboxRegistry(
-            [
-                SandboxProfileConfig(
-                    id="project-default",
-                    image=f"example/sandbox@sha256:{'0' * 64}",
-                )
-            ]
-        )
-        return ConfigurationBundle(
-            projects=projects,
-            profiles=profiles,
-            topics=topics,
-            sandboxes=sandboxes,
-            revision="revision",
-        )
-
-    original = bundle(original_project, original_profile)
-    snapshot = original.snapshot(project_id="project-a", profile_id="profile-a")
-
-    renamed = bundle(
-        original_project.model_copy(update={"display_name": "Renamed"}), original_profile
-    )
-    assert renamed.evaluate(snapshot).allowed
-    assert snapshot.project is not None and snapshot.project.display_name == "Project A"
-
-    revoked = bundle(
-        original_project.model_copy(
-            update={"allowed_capabilities": frozenset(), "sandbox_profile": "restricted"}
-        ),
-        original_profile.model_copy(
-            update={"enabled": False, "sandbox_required": False, "roles": frozenset()}
-        ),
-    ).evaluate(snapshot)
-    assert not revoked.allowed
-    assert any("capabilities revoked" in reason for reason in revoked.reasons)
-    assert any("sandbox policy changed" in reason for reason in revoked.reasons)
-    assert any("profile disabled" in reason for reason in revoked.reasons)
-    assert any("profile roles revoked" in reason for reason in revoked.reasons)

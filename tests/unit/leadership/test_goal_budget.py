@@ -127,7 +127,7 @@ async def test_goal_owns_reservation_and_settlement_including_read_rounds(ledger
     usage = next(r for r in ledger.rows if isinstance(r, UsageRecord))
     assert reservation.horizon_id == usage.horizon_id == ledger.goal.id
     assert reservation.purpose == usage.purpose == purpose
-    assert (await budgets._lifetime_totals(ledger.session, ledger.goal.id))[2] == Decimal("0.2")
+    assert (await budgets.goal_cost_totals(ledger.session, ledger.goal.id))[0] == Decimal("0.2")
     assert next(r for r in ledger.rows if isinstance(r, LeadershipInference)).round == 1
 
 
@@ -148,7 +148,7 @@ async def test_lead_and_retrospective_are_counted_even_after_goal_cap_is_exhaust
     ledger.goal.constraints = {"work_limits": {"max_cost": 0.0, "max_attempts": 1}}
     await call(ledger, purpose)
     ledger.send.assert_awaited_once()
-    assert (await budgets._lifetime_totals(ledger.session, ledger.goal.id))[2] == Decimal("0.2")
+    assert (await budgets.goal_cost_totals(ledger.session, ledger.goal.id))[0] == Decimal("0.2")
 
 
 @pytest.mark.anyio

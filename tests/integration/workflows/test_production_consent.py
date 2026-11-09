@@ -267,7 +267,7 @@ async def test_lease_expiring_during_approval_lookup_blocks_activation(
     tmp_path,
     monkeypatch,
 ):
-    from vuzol.workflows import publication
+    import vuzol.workflows.publication as publication
 
     async with _factory(postgres_dsn) as factory:
         request, handler = await fixture(factory, tmp_path)

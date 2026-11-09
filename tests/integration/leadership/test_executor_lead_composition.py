@@ -165,10 +165,11 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
         assert "plan" not in processor._providers._handlers
         assert processor._reviews is not None
         assert processor._lead is not None
-        assert await processor.process_one()
+        assert processor._lead in processor.lanes()
+        assert await processor._lead.process_one()
         if retrospective:
             # The terminal goal's old lead wakeup is acknowledged first.
-            assert await processor.process_one()
+            assert await processor._lead.process_one()
 
     monkeypatch.setattr(executor, "_run_loop", one_turn)
     async with _factory(postgres_dsn) as factory:

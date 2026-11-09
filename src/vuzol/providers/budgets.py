@@ -531,50 +531,6 @@ async def _lifetime_task_count(session: AsyncSession, scopes: set[uuid.UUID]) ->
     return len(tasks) + int(attempts)
 
 
-async def _lifetime_totals(
-    session: AsyncSession, horizon_id: uuid.UUID
-) -> tuple[int, int, Decimal, Decimal, int]:
-    """Settled + outstanding spend for a lifetime owner, no epoch filter.
-
-    Canonical lifetime math (lead Q2, like ``_lifetime_spend``): retry, goal
-    revision and epoch changes never erase it. ``budget_epoch`` keeps
-    resetting only task/step caps (documented in ACCOUNTING_LEDGER).
-    """
-
-    usage = (
-        await session.execute(
-            select(
-                func.coalesce(func.sum(UsageRecord.input_tokens), 0),
-                func.coalesce(func.sum(UsageRecord.output_tokens), 0),
-                func.coalesce(func.sum(UsageRecord.cost_units), 0),
-                func.coalesce(func.sum(UsageRecord.quota_units), 0),
-                func.count(),
-            ).where(UsageRecord.horizon_id == horizon_id)
-        )
-    ).one()
-    reserved = (
-        await session.execute(
-            select(
-                func.coalesce(func.sum(ProviderBudgetReservation.reserved_input_tokens), 0),
-                func.coalesce(func.sum(ProviderBudgetReservation.reserved_output_tokens), 0),
-                func.coalesce(func.sum(ProviderBudgetReservation.reserved_cost_units), 0),
-                func.coalesce(func.sum(ProviderBudgetReservation.reserved_quota_units), 0),
-                func.count(),
-            ).where(
-                ProviderBudgetReservation.horizon_id == horizon_id,
-                ProviderBudgetReservation.status == BudgetReservationStatus.RESERVED,
-            )
-        )
-    ).one()
-    return (
-        int(usage[0]) + int(reserved[0]),
-        int(usage[1]) + int(reserved[1]),
-        Decimal(usage[2]) + Decimal(reserved[2]),
-        Decimal(usage[3]) + Decimal(reserved[3]),
-        int(usage[4]) + int(reserved[4]),
-    )
-
-
 async def _task_lifetime_calls(session: AsyncSession, task_id: uuid.UUID) -> int:
     """Provider invocations for a task across all epochs (D3 counters)."""
 

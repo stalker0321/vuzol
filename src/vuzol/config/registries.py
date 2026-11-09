@@ -6,17 +6,11 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from vuzol.config.models import (
-    Capability,
     ProjectConfig,
     ProviderProfileConfig,
     SandboxProfileConfig,
     TopicConfig,
     TopicKind,
-)
-from vuzol.config.revision import (
-    RunConfigurationSnapshot,
-    SnapshotCompatibility,
-    content_revision,
 )
 
 
@@ -171,15 +165,6 @@ class ProfileRegistry:
         except KeyError as error:
             raise RegistryError(f"unknown profile ID: {profile_id}") from error
 
-    def find_candidates(
-        self, required_capabilities: frozenset[Capability]
-    ) -> tuple[ProviderProfileConfig, ...]:
-        return tuple(
-            profile
-            for profile in self._profiles.values()
-            if profile.enabled and required_capabilities.issubset(profile.capabilities)
-        )
-
     def items(self) -> tuple[ProviderProfileConfig, ...]:
         return tuple(self._profiles.values())
 
@@ -245,93 +230,3 @@ class ConfigurationBundle(BaseModel):
     topics: TopicRegistry
     sandboxes: SandboxRegistry
     revision: str
-
-    def snapshot(
-        self, *, project_id: str | None = None, profile_id: str | None = None
-    ) -> RunConfigurationSnapshot:
-        project = self.projects.get(project_id) if project_id is not None else None
-        profile = self.profiles.get(profile_id) if profile_id is not None else None
-        sandbox = self.sandboxes.get(project.sandbox_profile) if project is not None else None
-        return RunConfigurationSnapshot(
-            bundle_revision=self.revision,
-            project=project,
-            profile=profile,
-            sandbox=sandbox,
-            project_revision=content_revision(project) if project is not None else None,
-            profile_revision=content_revision(profile) if profile is not None else None,
-            sandbox_revision=content_revision(sandbox) if sandbox is not None else None,
-        )
-
-    def evaluate(self, snapshot: RunConfigurationSnapshot) -> SnapshotCompatibility:
-        reasons: list[str] = []
-        if snapshot.project is not None:
-            try:
-                current_project = self.projects.get(snapshot.project.id)
-                if not current_project.enabled:
-                    reasons.append(f"project disabled: {current_project.id}")
-                if current_project.repository_path != snapshot.project.repository_path:
-                    reasons.append(f"project repository changed: {current_project.id}")
-                if current_project.sandbox_profile != snapshot.project.sandbox_profile:
-                    reasons.append(f"project sandbox policy changed: {current_project.id}")
-                if (
-                    current_project.validation_sandbox_profile
-                    != snapshot.project.validation_sandbox_profile
-                ):
-                    reasons.append(f"project validation sandbox changed: {current_project.id}")
-                if current_project.network != snapshot.project.network:
-                    reasons.append(f"project network policy changed: {current_project.id}")
-                if current_project.git_delivery != snapshot.project.git_delivery:
-                    reasons.append(f"project delivery policy changed: {current_project.id}")
-                if current_project.static_deployment != snapshot.project.static_deployment:
-                    reasons.append(f"project static deployment changed: {current_project.id}")
-                removed = (
-                    snapshot.project.allowed_capabilities - current_project.allowed_capabilities
-                )
-                if removed:
-                    reasons.append(f"project capabilities revoked: {sorted(removed)}")
-            except RegistryError:
-                reasons.append(f"project removed: {snapshot.project.id}")
-        if snapshot.profile is not None:
-            try:
-                current_profile = self.profiles.get(snapshot.profile.id)
-                if not current_profile.enabled:
-                    reasons.append(f"profile disabled: {current_profile.id}")
-                removed = snapshot.profile.capabilities - current_profile.capabilities
-                if removed:
-                    reasons.append(f"profile capabilities revoked: {sorted(removed)}")
-                removed_roles = snapshot.profile.roles - current_profile.roles
-                if removed_roles:
-                    reasons.append(f"profile roles revoked: {sorted(removed_roles)}")
-                if current_profile.credential_reference != snapshot.profile.credential_reference:
-                    reasons.append(f"profile credential reference changed: {current_profile.id}")
-                if current_profile.sandbox_required != snapshot.profile.sandbox_required:
-                    reasons.append(f"profile sandbox policy changed: {current_profile.id}")
-                if current_profile.runtime_identity != snapshot.profile.runtime_identity:
-                    reasons.append(f"profile runtime identity changed: {current_profile.id}")
-                if current_profile.state_directory != snapshot.profile.state_directory:
-                    reasons.append(f"profile state directory changed: {current_profile.id}")
-                if current_profile.account_binding != snapshot.profile.account_binding:
-                    reasons.append(f"profile account binding changed: {current_profile.id}")
-                accounting_fields = (
-                    "input_cost_units_per_million",
-                    "output_cost_units_per_million",
-                    "quota_units_per_call",
-                    "minimum_unknown_usage_cost",
-                )
-                if any(
-                    getattr(current_profile, field) != getattr(snapshot.profile, field)
-                    for field in accounting_fields
-                ):
-                    reasons.append(f"profile accounting policy changed: {current_profile.id}")
-            except RegistryError:
-                reasons.append(f"profile removed: {snapshot.profile.id}")
-        if snapshot.sandbox is not None:
-            try:
-                current_sandbox = self.sandboxes.get(snapshot.sandbox.id)
-                if not current_sandbox.enabled:
-                    reasons.append(f"sandbox disabled: {current_sandbox.id}")
-                if current_sandbox != snapshot.sandbox:
-                    reasons.append(f"sandbox policy changed: {current_sandbox.id}")
-            except RegistryError:
-                reasons.append(f"sandbox removed: {snapshot.sandbox.id}")
-        return SnapshotCompatibility(allowed=not reasons, reasons=tuple(reasons))

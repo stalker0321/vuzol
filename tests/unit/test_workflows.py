@@ -4,6 +4,7 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
+import vuzol.workflows.transitions as workflow_transitions
 from vuzol.config import Capability, WorkflowSettings
 from vuzol.interpretation.domain import (
     SuggestedComplexity,
@@ -23,8 +24,7 @@ from vuzol.storage.types import (
     StepStatus,
     TaskStatus,
 )
-from vuzol.workflows import compile_workflow
-from vuzol.workflows import transitions as workflow_transitions
+from vuzol.workflows.compiler import compile_workflow
 from vuzol.workflows.domain import StepOutcome
 from vuzol.workflows.ports import CancellationContext
 from vuzol.workflows.service import derive_task_status

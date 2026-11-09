@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vuzol.execution import git as git_module
+import vuzol.execution.git as git_module
 from vuzol.execution.git import GitError, LocalGit, require_writable_directory
 
 from ._execution_helpers import _git

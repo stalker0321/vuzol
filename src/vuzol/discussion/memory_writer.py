@@ -10,7 +10,6 @@ Templates are deterministic; no model, config, Git, or environment access.
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -18,7 +17,6 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.discussion.domain import DomainError
-from vuzol.discussion.memory import ensure_memory_safe
 from vuzol.discussion.memory_units import (
     EXTRACTOR_VERSION,
     MEMORY_DESTINATION,
@@ -36,7 +34,6 @@ from vuzol.storage.leasing import (
 )
 from vuzol.storage.models import (
     AcceptedDecision,
-    Artifact,
     TransactionalOutbox,
 )
 from vuzol.storage.records import OutboxLeaseToken
@@ -92,123 +89,6 @@ async def enqueue_memory_extraction(
             "project_id": project_id,
             "session_id": None if session_id is None else str(session_id),
             **(payload or {}),
-        },
-    )
-
-
-async def record_hypothesis(
-    uow: UnitOfWork,
-    *,
-    project_id: str | None,
-    session_id: uuid.UUID | None,
-    body: str,
-    source_turn_id: uuid.UUID | None = None,
-) -> uuid.UUID:
-    """Explicitly record a hypothesis. It can never become verified in code."""
-
-    text = ensure_memory_safe(body)[:4_000]
-    scope = extraction_scope(project_id=project_id, session_id=session_id)
-    content_hash = hashlib.sha256(f"hypothesis:{scope}:{text}".encode()).hexdigest()
-    trigger = uuid.uuid5(uuid.NAMESPACE_URL, f"hypothesis:{content_hash}")
-    unit = await uow.memory_units.create_unit(
-        text=text,
-        unit_type="observation",
-        status=MemoryUnitStatus.HYPOTHESIS,
-        extractor_version=EXTRACTOR_VERSION,
-        extraction_identity=extraction_identity(
-            trigger_event_id=trigger,
-            scope=scope,
-            unit_type="observation",
-            unit_key=f"hypothesis:{content_hash[:16]}",
-        ),
-        effective_at=datetime.now(UTC),
-        project_id=project_id,
-        session_id=session_id,
-        source_turn_id=source_turn_id,
-    )
-    return unit.id
-
-
-async def retract_unit(
-    uow: UnitOfWork,
-    *,
-    unit_id: uuid.UUID,
-    actor: str,
-) -> uuid.UUID:
-    """Retract a unit: excluded from recall, row and provenance survive."""
-
-    unit = await uow.memory_units.get(unit_id)
-    if unit is None:
-        raise MemoryWriterError("memory unit not found")
-    event_id = await uow.events.append(
-        entity_type="memory_unit",
-        entity_id=unit.id,
-        event_type="memory_unit.retracted",
-        actor_type=actor,
-        payload={"extraction_identity": unit.extraction_identity},
-    )
-    await uow.memory_units.set_status(unit, MemoryUnitStatus.RETRACTED)
-    return event_id
-
-
-async def tombstone_unit(
-    uow: UnitOfWork,
-    *,
-    unit_id: uuid.UUID,
-    actor: str,
-    reason: str,
-) -> uuid.UUID:
-    """Tombstone sensitive unit text; the row, refs and events survive."""
-
-    unit = await uow.memory_units.get(unit_id)
-    if unit is None:
-        raise MemoryWriterError("memory unit not found")
-    event_id = await uow.events.append(
-        entity_type="memory_unit",
-        entity_id=unit.id,
-        event_type="memory_unit.tombstoned",
-        actor_type=actor,
-        payload={"extraction_identity": unit.extraction_identity, "reason": reason},
-    )
-    await uow.memory_units.set_status(
-        unit,
-        MemoryUnitStatus.TOMBSTONED,
-        text="[tombstoned]",
-        tombstone_event_id=event_id,
-    )
-    return event_id
-
-
-async def redact_artifact_for_memory(
-    uow: UnitOfWork,
-    *,
-    artifact_id: uuid.UUID,
-    actor: str,
-    reason: str,
-) -> uuid.UUID:
-    """Post-hoc redaction marker for a sensitive artifact (D5).
-
-    Only the redaction revision pointer moves; content bytes and hashes are
-    untouched, so operational history is never forged. Units referencing the
-    artifact stay pinned and readable with provenance.
-    """
-
-    assert uow.session is not None
-    artifact = await uow.session.get(Artifact, artifact_id)
-    if artifact is None:
-        raise MemoryWriterError("artifact not found")
-    revision = f"redaction-{uuid.uuid4().hex[:16]}"
-    artifact.redaction_revision = revision
-    await uow.session.flush()
-    return await uow.events.append(
-        entity_type="artifact",
-        entity_id=artifact.id,
-        event_type="artifact.redacted",
-        actor_type=actor,
-        payload={
-            "redaction_revision": revision,
-            "reason": reason,
-            "content_hash": artifact.content_hash,
         },
     )
 

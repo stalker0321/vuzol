@@ -70,29 +70,3 @@ def bind_report(
     if errors:
         raise SynthesisError(errors[0])
     return report
-
-
-def build_synthesis_context(report: ResearchReport) -> str:
-    """Render the explicit context block; only valid reports reach here."""
-
-    errors = validate_report(report)
-    if errors:
-        raise SynthesisError(errors[0])
-    lines = [f"Research question: {report.question}", ""]
-    markers = {
-        "supported": "[verified]",
-        "unsupported": "[unsupported]",
-        "conflicting": "[conflicting]",
-    }
-    for claim in report.claims:
-        marker = markers[claim.support]
-        lines.append(f"- {marker} {claim.claim_id}: {claim.statement}")
-        for source_id, position in claim.citations:
-            source = next(s for s in report.sources if s.source_id == source_id)
-            stale = " (stale)" if source.freshness_class == "stale" else ""
-            lines.append(f"    -> {source_id} @ {position}{stale} [{source.content_hash[:8]}]")
-        if claim.support == "unsupported":
-            lines.append("    -> no retrieved source; do not present as verified")
-    lines.append("")
-    lines.append(f"report: {report.research_id} ({len(report.sources)} sources)")
-    return "\n".join(lines)

@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy import func, select
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.leadership.test_managed_goal_flow import (
     CHAT,
     OWNER,
@@ -31,7 +32,6 @@ from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.adapter import _callback_answer
 from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.domain import ControlUpdate, IngressStatus
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.application import Principal
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]

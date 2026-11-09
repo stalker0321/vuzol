@@ -4,7 +4,6 @@ import asyncio
 import os
 import signal
 import socket
-import threading
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, suppress
 from typing import Protocol
@@ -61,16 +60,6 @@ class ProcessorChain:
             close = getattr(processor, "aclose", None)
             if close is not None:
                 await close()
-
-
-def run_worker(*, poll_interval_seconds: float, stop_event: threading.Event) -> None:
-    """Wait for future workflow work without owning in-memory business state."""
-
-    logger = get_logger(__name__)
-    logger.info("worker ready", extra={"event": "worker.ready"})
-    while not stop_event.wait(poll_interval_seconds):
-        logger.debug("worker idle", extra={"event": "worker.idle"})
-    logger.info("worker stopped", extra={"event": "worker.stopped"})
 
 
 def main() -> None:

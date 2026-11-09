@@ -14,8 +14,6 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import NoReturn, Protocol
 
-from vuzol.projects.descriptors import CapabilityDescriptor, descriptor_for_capability
-
 
 @dataclass(frozen=True, slots=True)
 class RetrievalBounds:
@@ -186,15 +184,6 @@ class FixtureRetrieval:
             retrieved_at=now,
             redirect_count=0,
         )
-
-
-def select_retrieval_descriptor() -> CapabilityDescriptor:
-    """Select the vetted retrieval capability from the WP03 registry."""
-
-    descriptor: CapabilityDescriptor | None = descriptor_for_capability("web_research")
-    if descriptor is None:
-        raise RetrievalError("retrieval_capability_unregistered")
-    return descriptor
 
 
 def utc_now_iso() -> str:

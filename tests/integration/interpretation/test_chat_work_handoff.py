@@ -11,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.interpretation.test_chat_boundary import message
 from tests.integration.interpretation.test_chat_documents import (
     Downloader,
@@ -48,7 +49,6 @@ from vuzol.storage.types import RunStatus, StepStatus
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.delivery import prepare_delivery
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.dispatch import WorkflowDispatcher
 
 pytestmark = pytest.mark.postgresql

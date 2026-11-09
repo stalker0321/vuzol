@@ -8,6 +8,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.interpretation.test_chat_boundary import message
 from tests.integration.interpretation.test_chat_documents import (
     Downloader,
@@ -37,7 +38,6 @@ from vuzol.storage.types import (
 )
 from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 
 pytestmark = pytest.mark.postgresql
 
@@ -220,7 +220,7 @@ def test_compiled_prompt_compacts_only_covered_overlap_and_can_publish_summary(
                     content=old,
                     classifier_mode=InteractionMode.DISCUSSION,
                 )
-                await memory.update_summary(
+                await uow.discussions.add_summary(
                     session_id=session_id,
                     body="Initial proposal summarized.",
                     covered_through_turn_ordinal=2,

@@ -4,6 +4,7 @@
 import pytest
 from sqlalchemy import func, select
 from telegram.error import BadRequest, TimedOut
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.leadership.test_lead_surface import _message
 from tests.integration.leadership.test_managed_goal_flow import _factory, _runtime
 from tests.integration.telegram.test_delivery import service as delivery_service
@@ -15,7 +16,7 @@ from vuzol.storage.types import DeliveryStatus
 from vuzol.telegram.domain import IngressStatus
 from vuzol.telegram.formatting import telegram_markdown_html
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient, enqueue_chat_notice
+from vuzol.telegram.projections import enqueue_chat_notice
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 

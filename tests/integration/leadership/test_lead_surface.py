@@ -10,6 +10,7 @@ from pathlib import Path
 import anyio
 import pytest
 from sqlalchemy import func, select
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.leadership.test_managed_goal_flow import (
     CHAT,
     OWNER,
@@ -42,7 +43,6 @@ from vuzol.storage.models import Task, UsageRecord
 from vuzol.telegram.delivery import TelegramDeliveryService
 from vuzol.telegram.domain import IngressStatus, MessageUpdate
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 from vuzol.workflows.application import Principal
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
@@ -627,10 +627,10 @@ async def test_two_owner_events_are_serial_even_across_workers(postgres_dsn, tmp
 
 
 async def test_voice_is_transcribed_before_later_owner_text(postgres_dsn, tmp_path):
+    from tests.fakes.interpretation import FakeInterpreter, FakeTranscriber
     from tests.integration.interpretation.test_pipeline import FakeDownloader
     from tests.integration.leadership.test_managed_goal_flow import _worker
 
-    from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
     from vuzol.interpretation.domain import TranscriptionResult
     from vuzol.interpretation.service import InterpretationPipeline
     from vuzol.leadership.model import LeadDecision
@@ -884,9 +884,9 @@ async def test_project_messages_from_two_chats_reply_to_their_source_topic(postg
 
 async def test_voice_without_live_goal_starts_a_lead_draft(postgres_dsn, tmp_path):
     """Live 2026-10-30: a goal-less voice note went to the legacy task pipeline."""
+    from tests.fakes.interpretation import FakeInterpreter, FakeTranscriber
     from tests.integration.interpretation.test_pipeline import FakeDownloader
 
-    from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
     from vuzol.interpretation.domain import TranscriptionResult
     from vuzol.interpretation.service import InterpretationPipeline
     from vuzol.leadership.persistence import ManagedGoal
@@ -954,9 +954,9 @@ async def test_refused_goal_less_voice_is_a_clear_failure_not_a_storage_retry(
 ):
     """Live 2026-10-30: the interpreter lacked allowed ids and PermissionError, an
     OSError, read as "artifact storage unavailable"."""
+    from tests.fakes.interpretation import FakeInterpreter, FakeTranscriber
     from tests.integration.interpretation.test_pipeline import FakeDownloader
 
-    from vuzol.interpretation.adapters import FakeInterpreter, FakeTranscriber
     from vuzol.interpretation.domain import TranscriptionResult
     from vuzol.interpretation.service import InterpretationPipeline
     from vuzol.storage.models import TransactionalOutbox
@@ -1013,9 +1013,9 @@ async def test_refused_goal_less_voice_is_a_clear_failure_not_a_storage_retry(
 @pytest.mark.parametrize("live_goal", [False, True])
 async def test_long_document_reaches_the_lead_as_an_excerpt(postgres_dsn, tmp_path, live_goal):
     """Owner 2026-10-31: a 37k-character chapter broke the lead's input; now it is kept aside."""
+    from tests.fakes.interpretation import FakeInterpreter
     from tests.integration.leadership.test_managed_goal_flow import _worker
 
-    from vuzol.interpretation.adapters import FakeInterpreter
     from vuzol.interpretation.service import InterpretationPipeline
     from vuzol.leadership.model import LeadDecision
     from vuzol.storage.models import GoalDocument

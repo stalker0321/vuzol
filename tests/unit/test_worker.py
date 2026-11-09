@@ -1,25 +1,11 @@
 import asyncio
-import logging
-import threading
 
-from pytest import LogCaptureFixture
-
-from vuzol.cli.worker import run_runtime, run_worker
+from vuzol.cli.worker import run_runtime
 from vuzol.workflows.worker import INTERNAL_HANDLERS
 
 
 def test_internal_worker_owns_the_bounded_context_boundary() -> None:
     assert "prepare_context" in INTERNAL_HANDLERS
-
-
-def test_worker_stops_when_requested(caplog: LogCaptureFixture) -> None:
-    stop_event = threading.Event()
-    stop_event.set()
-
-    with caplog.at_level(logging.INFO):
-        run_worker(poll_interval_seconds=0.01, stop_event=stop_event)
-
-    assert [record.message for record in caplog.records] == ["worker ready", "worker stopped"]
 
 
 def test_runtime_keeps_controls_responsive_and_drains_execution() -> None:

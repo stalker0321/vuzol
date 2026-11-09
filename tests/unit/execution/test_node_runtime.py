@@ -184,7 +184,7 @@ def local_tar_docker(monkeypatch, tmp_path):
     import re
     import shlex
 
-    from vuzol.execution import node
+    import vuzol.execution.node as node
 
     real_spawn = asyncio.create_subprocess_exec
     volume = tmp_path / "volume"
@@ -253,7 +253,7 @@ async def test_copy_back_failure_leaves_original_tree_untouched(
     monkeypatch,
     failure,
 ):
-    from vuzol.execution import node
+    import vuzol.execution.node as node
 
     volume, _calls = local_tar_docker
     source = tmp_path / "worktree"
@@ -341,10 +341,10 @@ def test_node_provider_composition_uses_pi_transport_and_extra_lanes(
 ):
     from unittest.mock import MagicMock
 
+    import vuzol.execution.codex as codex
     from tests.unit.projects.test_model_matrix import configured
     from vuzol.cli import executor
     from vuzol.config import Settings
-    from vuzol.execution import codex
 
     settings = Settings(
         execution={
@@ -426,7 +426,7 @@ async def test_node_reaper_uses_existing_lease_authority(tmp_path, monkeypatch, 
     from datetime import UTC, datetime, timedelta
     from unittest.mock import MagicMock
 
-    from vuzol.execution import reconciliation
+    import vuzol.execution.reconciliation as reconciliation
     from vuzol.storage.models import SupervisedProcess
     from vuzol.storage.types import ProcessStatus, RunStatus, StepStatus
 
@@ -480,7 +480,7 @@ async def test_cancelled_helper_kills_and_joins_docker_client(tmp_path, monkeypa
     import asyncio
     from unittest.mock import MagicMock
 
-    from vuzol.execution import node
+    import vuzol.execution.node as node
 
     started = asyncio.Event()
     process = MagicMock()
@@ -619,7 +619,7 @@ async def test_cancelled_staging_joins_both_helpers(tmp_path, monkeypatch):
     import asyncio
     from unittest.mock import MagicMock
 
-    from vuzol.execution import node
+    import vuzol.execution.node as node
 
     source = tmp_path / "source"
     source.mkdir()
@@ -654,7 +654,7 @@ async def test_task_cancellation_during_copy_back_keeps_original(
 ):
     import asyncio
 
-    from vuzol.execution import node
+    import vuzol.execution.node as node
 
     volume, _calls = local_tar_docker
     source = tmp_path / "worktree"

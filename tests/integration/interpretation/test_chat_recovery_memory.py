@@ -3,6 +3,7 @@
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -10,6 +11,7 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 from telegram.error import Forbidden, NetworkError
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.interpretation.test_chat_boundary import chat_runtime, message
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.test_delivery import service
@@ -23,7 +25,7 @@ from vuzol.discussion.agent import (
 from vuzol.discussion.chat_recovery import enqueue_chat_failure, failure_role
 from vuzol.discussion.memory import ExplicitDecisionSource
 from vuzol.discussion.memory_service import DiscussionMemoryService
-from vuzol.discussion.memory_writer import MemoryWriterService, record_hypothesis
+from vuzol.discussion.memory_writer import MemoryWriterService
 from vuzol.interpretation.jev import JevDecisionsInterpreter
 from vuzol.interpretation.service import InterpretationPipeline
 from vuzol.storage.models import (
@@ -44,6 +46,7 @@ from vuzol.storage.types import (
     ConversationTurnSource,
     DeliveryStatus,
     InteractionMode,
+    MemoryUnitStatus,
     RunStatus,
     StepStatus,
     TaskStatus,
@@ -52,7 +55,6 @@ from vuzol.storage.unit_of_work import UnitOfWork
 from vuzol.telegram.controls import TelegramControlService
 from vuzol.telegram.domain import ControlUpdate, IngressStatus
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 RAW = "Если поиск уже работает, ничего не меняй. Только обсудим; пока не запускай."
@@ -392,8 +394,15 @@ async def test_existing_writer_to_scoped_recall_to_sol_context(postgres_dsn, tmp
                 accepted_by_user_id=42,
                 acceptance_source=ExplicitDecisionSource.USER_CONFIRM,
             )
-            await record_hypothesis(
-                uow, project_id="vuzol", session_id=session_id, body="Unverified guess"
+            await uow.memory_units.create_unit(
+                text="Unverified guess",
+                unit_type="observation",
+                status=MemoryUnitStatus.HYPOTHESIS,
+                extractor_version="test",
+                extraction_identity="test:hypothesis",
+                effective_at=datetime.now(UTC),
+                project_id="vuzol",
+                session_id=session_id,
             )
             other = await uow.discussions.create_session(
                 project_id="other", chat_id=-100, message_thread_id=11
@@ -555,7 +564,7 @@ async def test_delayed_summary_cannot_overwrite_newer_memory(postgres_dsn, tmp_p
                     memory_summary="Устаревший summary",
                 ),
             )
-            await DiscussionMemoryService(uow).update_summary(
+            await uow.discussions.add_summary(
                 session_id=session_id,
                 body="Более свежая память",
                 covered_through_turn_ordinal=2,

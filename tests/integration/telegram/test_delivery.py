@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import func, select, update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.storage.helpers import storage
 from vuzol.storage.models import (
     Approval,
@@ -44,7 +45,6 @@ from vuzol.telegram.layout import HISTORY_TOPIC_KIND, STATUS_DASHBOARD_TOPIC_KIN
 from vuzol.telegram.projections import (
     PROJECT_STATUS_DASHBOARD_ROLE,
     TASK_HISTORY_ROLE,
-    FakeTelegramClient,
     enqueue_task_status_projection,
 )
 from vuzol.telegram.tracing import (

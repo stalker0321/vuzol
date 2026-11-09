@@ -11,12 +11,12 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+import vuzol.workflows.runtime_preview as runtime_preview
 from tests.unit.workflows import test_runtime_preview as runtime_fixture
 from tests.unit.workflows.test_static_publish import _handler as static_handler
 from vuzol.app import preview_gateway
 from vuzol.execution.sandbox import RootlessDockerRuntime, SandboxInterrupted
 from vuzol.ops.static_publish import StaticSite, publish, rollback
-from vuzol.workflows import runtime_preview
 from vuzol.workflows.domain import OutcomeKind
 from vuzol.workflows.ports import CancellationContext
 

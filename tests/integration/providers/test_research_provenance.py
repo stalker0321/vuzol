@@ -17,9 +17,9 @@ from vuzol.context.resolver import (
     resolve_context,
 )
 from vuzol.execution.artifacts import ArtifactStore
-from vuzol.research.report import Claim, Source, validate_report
+from vuzol.research.report import Claim, validate_report
 from vuzol.research.retrieval import FixtureRetrieval
-from vuzol.research.synthesize import bind_report, build_synthesis_context, sources_from_retrieved
+from vuzol.research.synthesize import bind_report, sources_from_retrieved
 from vuzol.storage.models import InputBinding, Task
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
@@ -157,31 +157,3 @@ async def test_stale_research_binding_is_visible_not_verified(
     assert entry.freshness == "stale"
     assert entry.content == payload
     await engine.dispose()
-
-
-def test_synthesis_block_marks_stale_citation() -> None:
-    source = Source(
-        source_id="s1",
-        uri="fixture://adapter.md",
-        retriever="local-docs-fixture",
-        retrieved_at="2026-09-01T10:00:00Z",
-        content="old bytes",
-        scope="vuzol",
-        freshness_class="stale",
-    )
-    report = bind_report(
-        research_id=str(uuid.uuid4()),
-        question="Which adapter backs CI retrieval?",
-        sources=(source,),
-        claims=(
-            Claim(
-                claim_id="c1",
-                statement="CI retrieval is fixture-based.",
-                support="supported",
-                citations=(("s1", "para 1"),),
-            ),
-        ),
-        created_at="2026-09-27T10:10:00Z",
-    )
-    block = build_synthesis_context(report)
-    assert "(stale)" in block and "[verified] c1" in block

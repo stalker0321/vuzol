@@ -8,19 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import storage
 from vuzol.config import Settings
-from vuzol.discussion import (
-    DomainError,
-    PackageControlAction,
-    PlanDraft,
-    PlanItemDraft,
-    WorkPackageService,
-)
 from vuzol.discussion.application import (
     AuthoritativeControlCommand,
     PackageControlIngress,
     PackageControlSource,
 )
+from vuzol.discussion.domain import DomainError, PackageControlAction, PlanDraft, PlanItemDraft
 from vuzol.discussion.sequencer import WorkPackageSequenceConsumer
+from vuzol.discussion.service import WorkPackageService
 from vuzol.storage.models import MaterializationLink, Task, WorkPackage
 from vuzol.storage.types import (
     ConversationTurnRole,
@@ -124,19 +119,13 @@ async def test_default_off_composed_discussion_to_sequential_completion(
         revision = await uow.work_packages.get_revision(created.revision_id)
         item_ids = tuple(uuid.UUID(item["item_id"]) for item in revision.immutable_body["items"])
         assert len(item_ids) == 2
-        edit = await WorkPackageService(uow).open_edit_session(
-            package_id=created.package_id,
-            revision_number=1,
-            h8=created.content_hash[:8],
-            ordinal=1,
-            user_id=42,
-        )
     async with UnitOfWork(factory) as uow:
-        revised = await WorkPackageService(uow).apply_item_edit(
-            edit_session_id=edit.id,
-            expected_session_generation=1,
-            replacement=_plan(item_ids=(item_ids[0], item_ids[1])),
-            user_id=42,
+        revised = await WorkPackageService(uow).revise_draft(
+            package_id=created.package_id,
+            expected_status_generation=1,
+            plan=_plan(item_ids=(item_ids[0], item_ids[1])),
+            created_by=PlanRevisionCreatedBy.USER,
+            actor_type="user",
         )
 
     disabled = PackageControlIngress(factory, enabled=False, authorized_user_ids=frozenset({42}))

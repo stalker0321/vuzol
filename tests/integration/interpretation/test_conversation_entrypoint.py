@@ -10,6 +10,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
 
+from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.interpretation.test_conversation_modes import classify, modes_runtime, turn
 from tests.integration.storage.helpers import storage
 from tests.integration.telegram.test_delivery import service
@@ -22,7 +23,6 @@ from vuzol.providers.ports import CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Task, UsageRecord
 from vuzol.storage.types import ProcessStatus
 from vuzol.telegram.ingress import TelegramIngressService
-from vuzol.telegram.projections import FakeTelegramClient
 
 pytestmark = pytest.mark.postgresql
 
@@ -162,7 +162,8 @@ def test_lead_conversation_through_executor_entrypoint(
 
         async def one_turn(processor, *args, **kwargs):
             assert processor._lead is not None
-            assert await processor.process_one()
+            assert processor._lead in processor.lanes()
+            assert await processor._lead.process_one()
 
         monkeypatch.setattr(executor, "_run_loop", one_turn)
         engine, factory = storage(postgres_dsn)

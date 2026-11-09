@@ -6,13 +6,13 @@ import asyncio
 
 import pytest
 
+import vuzol.interpretation.decisions as semantic_decisions
 from vuzol.discussion.domain import (
     DomainError,
     PlanDraft,
     PlanItemDraft,
     validate_plan_dependencies,
 )
-from vuzol.interpretation import decisions as semantic_decisions
 from vuzol.interpretation.domain import TaskDraft
 from vuzol.interpretation.explicit import is_explicit_task_command
 from vuzol.interpretation.policy import enforce_interpretation_policy
@@ -48,7 +48,7 @@ def test_recovery_contract_is_bounded_and_fail_closed() -> None:
     assert RECOVERY_MAX_FALLBACKS == 1
 
     async def scenario() -> None:
-        from vuzol.interpretation.adapters import FakeInterpreter
+        from tests.fakes.interpretation import FakeInterpreter
         from vuzol.interpretation.ports import InvalidInterpreterOutput
         from vuzol.interpretation.service import interpret_with_recovery
 

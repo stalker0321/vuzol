@@ -218,7 +218,6 @@ class RetentionDefaults(BaseModel):
     failed_worktree_days: int = Field(default=14, ge=1)
     artifact_days: int = Field(default=14, ge=1)
     voice_days: int = Field(default=3, ge=1)
-    log_days: int = Field(default=14, ge=1)
     sweep_batch_size: int = Field(default=50, ge=1, le=1_000)
     sweep_lock_timeout_seconds: float = Field(default=5.0, ge=0.1, le=120.0)
 
@@ -250,12 +249,8 @@ class HardLimits(BaseModel):
     # Primary plus bounded fallbacks. Four leaves room for a provider-originated
     # cancellation followed by a quota-triggered account failover.
     provider_attempts: int = Field(default=6, ge=1, le=20)
-    fallback_depth: int = Field(default=2, ge=0, le=10)
     daily_cost_units: float = Field(default=100, gt=0)
     daily_quota_units: float = Field(default=100, gt=0)
-    # Watchdog value in seconds. Admission does not enforce it, and it is
-    # neither a money ceiling nor a provider-call timeout.
-    task_duration_seconds: int = Field(default=7_200, ge=1)
     # Cumulative task/step token totals and estimated cost_units.
     # ``hard`` is the migration default: historical numbers have no recorded
     # origin, so this build does not grant extra spend. ``soft`` records the
@@ -269,7 +264,6 @@ class HardLimits(BaseModel):
     # stay in force either way.
     explicit_money_cap_units: float | None = None
     artifact_bytes: int = Field(default=100_000_000, ge=1)
-    input_bytes: int = Field(default=25_000_000, ge=1)
     # D3 admission counters (lead W4): enforced alongside caps, never instead
     # of them. 0 means unlimited (documented opt-out, not "no calls").
     max_work_attempts: int = Field(default=50, ge=0)
@@ -307,7 +301,6 @@ class TelegramSettings(BaseModel):
     max_text_chars: int = Field(default=16_000, ge=1, le=100_000)
     max_attachments: int = Field(default=10, ge=0, le=20)
     max_attachment_bytes: int = Field(default=25_000_000, ge=1)
-    edit_min_interval_seconds: float = Field(default=2.0, ge=0.1, le=60)
     delivery_poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=60)
     delivery_lease_seconds: int = Field(default=30, ge=5, le=600)
     delivery_max_attempts: int = Field(default=5, ge=1, le=20)
@@ -434,7 +427,6 @@ class ExecutionSettings(BaseModel):
     default_executor_profile_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     rootless_docker_socket: Path = Path("/run/user/1000/docker.sock")
     require_preflight: bool = True
-    cleanup_interval_seconds: int = Field(default=300, ge=10, le=86_400)
     journal_root: Path = Path("/srv/vuzol/runtime-journal")
     journal_key_file: Path | None = None
     # How many provider turns run at once: bounded by the machine, not the accounts.

@@ -60,9 +60,11 @@ rich message; явный отказ переключает его на обыч�
 неоднозначной доставки нет.
 
 Миграция создаёт `monitor_events`, `monitor_source_fetches`, `monitor_digests`.
-В production compose добавлен только pass-through флага
-`VUZOL_MONITOR__ENABLED` с default `false`; остальная конфигурация монитора
-должна быть передана interpreter через настройки окружения отдельно.
+Production compose передаёт interpreter из `/srv/vuzol/.env` флаг
+`VUZOL_MONITOR__ENABLED` (default `false`) и `VUZOL_MONITOR_CHAT_ID`,
+`VUZOL_MONITOR_THREAD_ID`, `VUZOL_MONITOR_PROFILE_IDS` (default
+`["inbox-flash-c","inbox-flash-a"]`), `VUZOL_MONITOR_INTERESTS`,
+`VUZOL_MONITOR_SOURCES` (JSON-массивы, default `[]`).
 
 Отложены до следующих этапов: Gmail, Calendar, X/Apify (нужны credentials),
 глубокий анализ, редакционная память и извлечение действий. Монитор сам не

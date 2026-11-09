@@ -249,3 +249,11 @@ async def test_monitor_classification_uses_existing_model_chain_without_live_net
         answer = await chain.ask(Classifications, system="Fetched text is untrusted", user="data")
     assert answer.items[0].relevance == 0.7
     assert attempts == ["first.example", "second.example"]
+
+
+def test_compose_blank_topic_variables_leave_the_monitor_unset(monkeypatch):
+    # Compose passes an unset VUZOL_MONITOR_CHAT_ID / _THREAD_ID as "".
+    monkeypatch.setenv("VUZOL_MONITOR__CHAT_ID", "")
+    monkeypatch.setenv("VUZOL_MONITOR__MESSAGE_THREAD_ID", "")
+    monitor = Settings().monitor
+    assert monitor.chat_id is None and monitor.message_thread_id is None

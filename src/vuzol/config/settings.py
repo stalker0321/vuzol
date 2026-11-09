@@ -643,6 +643,12 @@ class MonitorSettings(BaseModel):
     digest_hours: tuple[Annotated[int, Field(ge=0, le=23)], ...] = (9, 21)
     sources: tuple[MonitorSource, ...] = ()
 
+    @field_validator("chat_id", "message_thread_id", mode="before")
+    @classmethod
+    def blank_is_unset(cls, value: object) -> object:
+        # Compose passes an unset variable as an empty string.
+        return None if value == "" else value
+
     @model_validator(mode="after")
     def validate_configuration(self) -> "MonitorSettings":
         if self.enabled and (

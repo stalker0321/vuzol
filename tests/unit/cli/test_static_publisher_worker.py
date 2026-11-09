@@ -22,6 +22,8 @@ async def test_static_publisher_worker_processes_then_stops(
         preview_site_root=Path("/tmp/previews"),  # noqa: S108
         preview_gateway_host="127.0.0.1",
         preview_gateway_port=8091,
+        static_site_base_url="https://example.com/",
+        preview_site_base_url="https://test.example.com/",
     )
     runtime = SimpleNamespace(settings=settings)
     engine = MagicMock()
@@ -84,7 +86,12 @@ async def test_static_publisher_worker_disposes_engine_on_preflight_failure(
 ) -> None:
     import vuzol.cli.static_publisher_worker as cli
 
-    settings = SimpleNamespace(service_name="vuzol", log_level="INFO")
+    settings = SimpleNamespace(
+        service_name="vuzol",
+        log_level="INFO",
+        static_site_base_url="https://example.com/",
+        preview_site_base_url="https://test.example.com/",
+    )
     runtime = SimpleNamespace(settings=settings)
     engine = MagicMock()
     engine.dispose = AsyncMock()
@@ -97,3 +104,19 @@ async def test_static_publisher_worker_disposes_engine_on_preflight_failure(
     with pytest.raises(RuntimeError, match="old"):
         await cli.run()
     engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_static_publisher_worker_refuses_to_start_without_public_urls(monkeypatch) -> None:
+    from vuzol.cli import static_publisher_worker as cli
+
+    settings = SimpleNamespace(static_site_base_url=None, preview_site_base_url=None)
+    monkeypatch.setattr(
+        cli, "get_runtime_configuration", lambda **_kwargs: SimpleNamespace(settings=settings)
+    )
+    create_engine = MagicMock()
+    monkeypatch.setattr(cli, "create_engine", create_engine)
+
+    with pytest.raises(SystemExit, match="VUZOL_STATIC_SITE_BASE_URL"):
+        await cli.run()
+    create_engine.assert_not_called()

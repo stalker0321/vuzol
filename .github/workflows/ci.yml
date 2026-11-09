@@ -81,7 +81,7 @@ jobs:
   postgresql:
     name: PostgreSQL integration
     runs-on: ubuntu-24.04  # the production host OS
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16

@@ -403,6 +403,7 @@ async def test_typed_git_recovers_checked_out_branch_after_ref_only_apply(tmp_pa
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("mapped_acl_ids")
 async def test_worktree_access_rolls_back_partial_grant_and_detects_git_change(
     tmp_path: Path,
 ) -> None:

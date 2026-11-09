@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import subprocess
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import SecretStr
@@ -17,7 +17,6 @@ from tests.integration.telegram.test_delivery import service
 from vuzol.cli import executor
 from vuzol.config import RegistryDocument, RuntimeConfiguration, build_bundle
 from vuzol.config.models import ProviderRole
-from vuzol.execution.access import WorktreeAccessManager
 from vuzol.leadership.persistence import LeadershipInference, LeadershipTurn, ManagedGoal
 from vuzol.providers.ports import CodexProcessResult
 from vuzol.storage.models import Step, SupervisedProcess, Task, UsageRecord
@@ -154,7 +153,11 @@ def test_lead_conversation_through_executor_entrypoint(
             async def cleanup(self, envelope):
                 assert envelope in launched
 
-        monkeypatch.setattr(WorktreeAccessManager, "preflight", AsyncMock())
+        access = MagicMock(preflight=AsyncMock())
+        monkeypatch.setattr(executor, "WorktreeAccessManager", lambda *_args: access)
+        monkeypatch.setattr(
+            "vuzol.providers.cli_readonly.WorktreeAccessManager", lambda *_args: access
+        )
         monkeypatch.setattr(executor, "get_runtime_configuration", lambda **kwargs: runtime)
         monkeypatch.setattr(executor, "resolve_database_dsn", lambda _: SecretStr(postgres_dsn))
         monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda *_a, **_k: DockerBoundary())

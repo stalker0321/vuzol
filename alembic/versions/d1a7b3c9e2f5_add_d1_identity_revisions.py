@@ -42,7 +42,10 @@ def upgrade() -> None:
         "work_attempts",
         sa.Column("id", UUID(as_uuid=True), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.Column("task_id", UUID(as_uuid=True), nullable=False),
         sa.Column("run_id", UUID(as_uuid=True), nullable=False),
@@ -75,9 +78,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["task_id"], ["tasks.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["step_id"], ["steps.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(
-            ["plan_revision_id"], ["plan_revisions.id"], ondelete="RESTRICT"
-        ),
+        sa.ForeignKeyConstraint(["plan_revision_id"], ["plan_revisions.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["parent_attempt_id"], ["work_attempts.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("step_id", "attempt_no", name="uq_work_attempt_step_number"),
@@ -91,16 +92,17 @@ def upgrade() -> None:
         "task_spec_revisions",
         sa.Column("id", UUID(as_uuid=True), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.Column("task_id", UUID(as_uuid=True), nullable=False),
         sa.Column("spec_revision", sa.String(length=64), nullable=False),
         sa.Column("spec", JSONB, nullable=False),
         sa.Column("source_turn_id", UUID(as_uuid=True), nullable=True),
         sa.ForeignKeyConstraint(["task_id"], ["tasks.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(
-            ["source_turn_id"], ["conversation_turns.id"], ondelete="RESTRICT"
-        ),
+        sa.ForeignKeyConstraint(["source_turn_id"], ["conversation_turns.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("task_id", "spec_revision", name="uq_task_spec_task_revision"),
     )
@@ -109,7 +111,10 @@ def upgrade() -> None:
         "review_outcome_history",
         sa.Column("id", UUID(as_uuid=True), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.Column("task_id", UUID(as_uuid=True), nullable=False),
         sa.Column("run_id", UUID(as_uuid=True), nullable=False),

@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -26,7 +27,7 @@ from vuzol.providers.openai import OpenAICompatibleAdapter
 from vuzol.providers.pi import PiCliAdapter
 from vuzol.workflows.ports import CancellationContext
 
-SCHEMA = {"type": "object", "required": ["answer"]}
+SCHEMA: dict[str, object] = {"type": "object", "required": ["answer"]}
 
 
 @pytest.mark.anyio
@@ -48,7 +49,7 @@ async def test_codex_rejection_preserves_tokens(tmp_path: Path, missing_answer: 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("choices", [[], [{"message": {"content": "not JSON"}}]])
-async def test_api_rejection_preserves_receipt(choices: list) -> None:
+async def test_api_rejection_preserves_receipt(choices: list[dict[str, Any]]) -> None:
     async with httpx.AsyncClient(
         base_url="https://provider.example/v1",
         transport=httpx.MockTransport(

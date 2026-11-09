@@ -9,6 +9,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from pydantic import HttpUrl
 from sqlalchemy import func, select
 from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.leadership.test_managed_goal_flow import (
@@ -59,7 +60,7 @@ def _profile() -> ProviderProfileConfig:
         provider="openai-compatible",
         model="lead-test",
         launch_mode=LaunchMode.API,
-        api_base_url="https://example.com/v1",
+        api_base_url=HttpUrl("https://example.com/v1"),
         credential_reference="env:VUZOL_UNUSED_LEAD_TOKEN",
         capabilities=frozenset({Capability.REPOSITORY_READ}),
         concurrency_limit=1,
@@ -347,7 +348,9 @@ async def test_paused_answer_keeps_the_question_revision(
     async with _factory(postgres_dsn) as factory:
         goal_id = await _enable(factory, await _session(factory))
         async with factory() as session:
-            version = (await session.get(ManagedGoal, goal_id)).version
+            loaded_goal = await session.get(ManagedGoal, goal_id)
+            assert loaded_goal is not None
+            version = loaded_goal.version
         asked = await _lead_service(factory).apply_agent(
             server_agent_principal(PROJECT),
             "worker",
@@ -374,7 +377,9 @@ async def test_paused_answer_keeps_the_question_revision(
         )
         assert paused.status == "applied"
         async with factory() as session:
-            current = (await session.get(ManagedGoal, goal_id)).version
+            loaded_goal = await session.get(ManagedGoal, goal_id)
+            assert loaded_goal is not None
+            current = loaded_goal.version
         answered = await _lead_service(factory).apply_human(
             Principal(OWNER, "telegram"),
             LeadCommand(
@@ -544,7 +549,9 @@ async def test_owner_reply_and_paid_inference_survive_restart(
         async with factory() as session:
             # The owner's message answers the idle question; a pause stays a pause.
             expected = "active" if lifecycle == "waiting" else lifecycle
-            assert (await session.get(ManagedGoal, goal_id)).lifecycle == expected
+            loaded_goal = await session.get(ManagedGoal, goal_id)
+            assert loaded_goal is not None
+            assert loaded_goal.lifecycle == expected
             assert (
                 await session.scalar(
                     select(func.count())
@@ -1021,7 +1028,7 @@ async def test_long_document_reaches_the_lead_as_an_excerpt(postgres_dsn, tmp_pa
     from vuzol.storage.models import GoalDocument
     from vuzol.telegram.domain import AttachmentKind, TelegramAttachment
 
-    chapter = ("Глава 2. Анализ системы стратегического управления. " * 800).encode()
+    chapter: bytes = ("Глава 2. Анализ системы стратегического управления. " * 800).encode()
 
     class Downloader:
         async def download(self, file_id: str) -> bytes:

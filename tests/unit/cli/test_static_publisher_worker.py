@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import uvicorn
 
+from vuzol.workflows.runtime_preview import RuntimePreviewHandler
+
 
 @pytest.mark.anyio
 async def test_static_publisher_worker_processes_then_stops(
@@ -43,7 +45,7 @@ async def test_static_publisher_worker_processes_then_stops(
     monkeypatch.setattr(cli, "require_migration_head", AsyncMock())
     monkeypatch.setattr(cli, "create_session_factory", lambda _engine: factory)
     restore = AsyncMock()
-    monkeypatch.setattr(cli.RuntimePreviewHandler, "restore_latest", restore)
+    monkeypatch.setattr(RuntimePreviewHandler, "restore_latest", restore)
     monkeypatch.setattr(cli, "cleanup_orphaned_runtimes", MagicMock())
     handler = object()
     monkeypatch.setattr(cli, "StaticPublishHandler", lambda *_args, **_kwargs: handler)

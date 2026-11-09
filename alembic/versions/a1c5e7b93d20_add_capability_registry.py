@@ -48,9 +48,7 @@ def upgrade() -> None:
         ),
         sa.Column("id", sa.UUID(), nullable=False),
         sa.PrimaryKeyConstraint("id", name="pk_capability_installations"),
-        sa.UniqueConstraint(
-            "capability_key", "node_id", name="uq_capability_installation_node"
-        ),
+        sa.UniqueConstraint("capability_key", "node_id", name="uq_capability_installation_node"),
     )
     op.create_index(
         "ix_capability_installations_capability_key",

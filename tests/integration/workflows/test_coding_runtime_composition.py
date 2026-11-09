@@ -161,6 +161,7 @@ def test_real_handlers_wait_for_approval_then_finish(
             await git.fast_forward(repository, branch=branch, commit=base)
             async with factory.begin() as session:
                 package = await session.get(WorkPackage, package_id)
+                assert package is not None
                 package.integration_branch = branch
                 package.integration_target_branch = "main"
                 package.integration_base_commit = base
@@ -366,7 +367,9 @@ def test_real_handlers_wait_for_approval_then_finish(
                 if not any(progressed):
                     break
             async with factory() as session:
-                run = await session.get(Run, run_id)
+                loaded_run = await session.get(Run, run_id)
+                assert loaded_run is not None
+                run = loaded_run
                 task = await session.get(Task, task_id)
                 assert run is not None and run.status is RunStatus.RUNNING
                 assert task is not None and task.status is TaskStatus.WAITING_APPROVAL
@@ -395,6 +398,7 @@ def test_real_handlers_wait_for_approval_then_finish(
                     assert envelope["no_change_reason"] == "README уже содержит Before."
                     assert approval.human_summary.startswith("Изменений не потребовалось")
                     validation = next(s for s in steps if s.step_type == "validate")
+                    assert validation.result is not None
                     assert validation.result["no_change"] is True
                     assert validation.result["diff_hash"] == hashlib.sha256(b"").hexdigest()
                 if kind == "report":
@@ -403,6 +407,7 @@ def test_real_handlers_wait_for_approval_then_finish(
 
                     report_step = next(s for s in steps if s.step_type == "execute_agent")
                     original_result = report_step.result
+                    assert original_result is not None
                     report_step.result = {
                         "structured_output": {
                             **original_result["structured_output"],
@@ -436,7 +441,9 @@ def test_real_handlers_wait_for_approval_then_finish(
                 if not any([await w.process_one() for w in workers]):
                     break
             async with factory() as session:
-                run = await session.get(Run, run_id)
+                loaded_run = await session.get(Run, run_id)
+                assert loaded_run is not None
+                run = loaded_run
                 task = await session.get(Task, task_id)
                 approval = await session.get(Approval, approval_id)
                 assert run is not None and run.status is RunStatus.COMPLETED
@@ -463,6 +470,7 @@ def test_real_handlers_wait_for_approval_then_finish(
                     assert advanced.task_id is not None and advanced.task_id != task_id
                 async with factory() as session:
                     package = await session.get(WorkPackage, package_id)
+                    assert package is not None
                     assert package.status is WorkPackageStatus.RUNNING
                     assert package.cursor_ordinal == 2
                     assert package.pause_reason is None

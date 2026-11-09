@@ -562,6 +562,7 @@ async def test_independent_reviewer_fails_closed_on_provider_error(has_receipt: 
             cancellation=CancellationContext(),
             lease=_lease(),
         )
+    assert isinstance(reviewer._accounting.reconcile, AsyncMock)
     reconciled = reviewer._accounting.reconcile.call_args.kwargs
     assert reconciled["conservative"] is (not has_receipt)
     if has_receipt:

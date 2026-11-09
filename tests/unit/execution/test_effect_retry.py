@@ -2,6 +2,7 @@
 
 import uuid
 from dataclasses import replace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -60,7 +61,11 @@ async def test_only_identical_denied_apply_can_rearm_before_retry(drift: str | N
         assert effect.status == "failed"
         session.add.assert_not_called()
     elif drift:
-        values = {"payload_hash": "b" * 64, "approval_id": uuid.uuid4(), "context": {}}
+        values: dict[str, Any] = {
+            "payload_hash": "b" * 64,
+            "approval_id": uuid.uuid4(),
+            "context": {},
+        }
         with pytest.raises(ValueError, match="does not match"):
             await record_intent(session, replace(intent, **{drift: values[drift]}))
         assert effect.status == "failed"

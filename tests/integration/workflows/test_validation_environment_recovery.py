@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -138,7 +139,7 @@ def test_operator_recovery_is_fenced_and_does_not_spend_another_model_attempt(
                 )
             )
         service = TaskControlService(factory)
-        args = {
+        args: dict[str, Any] = {
             "task_id": task_record.id,
             "command": "revalidate",
             "principal": Principal(

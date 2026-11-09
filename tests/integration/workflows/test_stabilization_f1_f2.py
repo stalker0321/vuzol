@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -33,7 +34,9 @@ class _SlowHandler:
         return StepOutcome.succeeded()
 
 
-async def _expire_running_review(factory, *, idempotency: IdempotencyClass, attempts: int) -> tuple:
+async def _expire_running_review(
+    factory, *, idempotency: IdempotencyClass, attempts: int
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
     task, run_id, step = await seed_task_run_step(
         factory,
         step_status=StepStatus.RUNNING,

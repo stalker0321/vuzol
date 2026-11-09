@@ -44,6 +44,7 @@ def test_chat_retry_callback_preserves_exact_error_message_and_topic_binding() -
     markup = _control_markup(
         (), task_id=None, approval_id=None, callback_buttons=((("Ещё раз", data),),)
     )
+    assert markup is not None
     assert markup.inline_keyboard[0][0].callback_data == data
 
 

@@ -4,12 +4,15 @@ from dataclasses import replace
 from datetime import timedelta
 from html import escape
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 
+from tests.unit.config.test_account_descriptors import document
 from tests.unit.providers._test_subscription_limits_helpers import _cli_profile
-from tests.unit.providers.test_opencode_usage import NOW, account, collector, document, payload
+from tests.unit.providers.test_opencode_usage import NOW, account, collector, payload
+from vuzol.config import LaunchMode
 from vuzol.config.loader import load_document
 from vuzol.config.models import AccountConfig
 from vuzol.config.revision import content_revision
@@ -45,7 +48,9 @@ def test_codex_reports_current_plan_without_model_or_profile_guess(
     assert snapshot.plan_label == label
     assert snapshot.plan and snapshot.plan.tier_id == tier
     assert snapshot.plan.observed_at == NOW and snapshot.plan.source == "codex_usage"
-    card = "\n".join(format_subscription_limits_html([snapshot], html_escape=escape))
+    card = "\n".join(
+        format_subscription_limits_html([snapshot], html_escape=lambda value: escape(str(value)))
+    )
     assert "OpenAI / Codex · " + label in card
 
 
@@ -63,7 +68,9 @@ def test_unreadable_auth_is_not_evidence_of_paid_subscription(
     snapshot = collect_profile_limits(_cli_profile("paid-pro", provider, tmp_path), now=NOW)
     assert not snapshot.ok and snapshot.plan is None
     assert snapshot.plan_label == "тариф неизвестен"
-    card = "\n".join(format_subscription_limits_html([snapshot], html_escape=escape))
+    card = "\n".join(
+        format_subscription_limits_html([snapshot], html_escape=lambda value: escape(str(value)))
+    )
     assert "тариф неизвестен" in card and "Plus" not in card and "Super" not in card
 
 
@@ -79,7 +86,7 @@ def test_unreadable_auth_is_not_evidence_of_paid_subscription(
     ],
 )
 def test_go_tariff_requires_valid_meter_not_a_provider_name(
-    tmp_path: Path, monkeypatch, status: int, body: dict, expected: str | None
+    tmp_path: Path, monkeypatch, status: int, body: dict[str, Any], expected: str | None
 ) -> None:
     account(tmp_path)
     profile = load_document(document(tmp_path)).profiles[0]
@@ -90,6 +97,7 @@ def test_go_tariff_requires_valid_meter_not_a_provider_name(
     snapshot = collect_profile_limits(profile, now=NOW)
     assert (snapshot.plan.status if snapshot.plan else None) == expected
     if expected == "reported":
+        assert snapshot.plan is not None
         assert snapshot.plan.label == "Go"
     elif expected is None:
         assert snapshot.plan_label == "тариф неизвестен"
@@ -119,10 +127,12 @@ def test_plan_upgrade_changes_card_identity_not_account_profile_or_execution(
     stale = subscription_inventory([profile], [pro], now=NOW + timedelta(minutes=16))[0]
     assert stale.plan and stale.plan.stale
     assert "Pro (данные устарели)" in "\n".join(
-        format_subscription_limits_html([stale], html_escape=escape)
+        format_subscription_limits_html([stale], html_escape=lambda value: escape(str(value)))
     )
     legacy = replace(pro, plan=None)
-    card = "\n".join(format_subscription_limits_html([legacy], html_escape=escape))
+    card = "\n".join(
+        format_subscription_limits_html([legacy], html_escape=lambda value: escape(str(value)))
+    )
     assert "Pro" not in card and "тариф неизвестен" in card
 
 
@@ -146,7 +156,7 @@ def test_explicit_no_collector_does_not_fall_back_to_legacy_http(
         id="codex-test",
         service="chatgpt",
         provider="codex",
-        launch_mode="cli",
+        launch_mode=LaunchMode.CLI,
         auth_method="cli_oauth",
         auth_owner="serialized_cli",
         state_directory=tmp_path,

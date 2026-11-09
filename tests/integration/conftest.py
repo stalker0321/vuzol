@@ -30,11 +30,13 @@ def clean_postgres(request: pytest.FixtureRequest) -> Iterator[None]:
     with psycopg.connect(sync_dsn, autocommit=True) as connection:
         # A previously failed test may leak its engine with an idle-in-transaction
         # connection; those relations blocks would deadlock every later TRUNCATE.
+        # Restrict termination to our role so cleanup needs no superuser privileges.
         connection.execute(
             """
             SELECT pg_terminate_backend(pid)
             FROM pg_stat_activity
             WHERE datname = current_database() AND pid <> pg_backend_pid()
+              AND usename = current_user
             """
         )
         tables = connection.execute(

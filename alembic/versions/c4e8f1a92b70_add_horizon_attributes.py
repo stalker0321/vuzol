@@ -27,17 +27,13 @@ def upgrade() -> None:
     op.add_column("work_packages", sa.Column("goal_revision", sa.Integer(), nullable=True))
     op.add_column("work_packages", sa.Column("exit_criteria", JSONB(), nullable=True))
     op.add_column("work_packages", sa.Column("lifetime_budget", JSONB(), nullable=True))
-    op.add_column(
-        "work_packages", sa.Column("deadline", sa.DateTime(timezone=True), nullable=True)
-    )
+    op.add_column("work_packages", sa.Column("deadline", sa.DateTime(timezone=True), nullable=True))
     op.add_column(
         "work_packages", sa.Column("permission_envelope_hash", sa.String(length=64), nullable=True)
     )
     op.add_column("work_packages", sa.Column("owner", sa.String(length=100), nullable=True))
     op.add_column("work_packages", sa.Column("horizon_phase", sa.String(length=30), nullable=True))
-    op.add_column(
-        "work_packages", sa.Column("acceptance_artifact_id", sa.UUID(), nullable=True)
-    )
+    op.add_column("work_packages", sa.Column("acceptance_artifact_id", sa.UUID(), nullable=True))
     op.add_column(
         "work_packages", sa.Column("accepted_at", sa.DateTime(timezone=True), nullable=True)
     )

@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import vuzol.execution.git as git_module
 from vuzol.execution.git import GitError, LocalGit, require_writable_directory
 
 from ._execution_helpers import _git
@@ -45,8 +44,8 @@ def test_readonly_mount_rejected_even_when_dac_permissions_allow_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(git_module.os, "statvfs", lambda _: SimpleNamespace(f_flag=os.ST_RDONLY))
-    monkeypatch.setattr(git_module.os, "access", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(os, "statvfs", lambda _: SimpleNamespace(f_flag=os.ST_RDONLY))
+    monkeypatch.setattr(os, "access", lambda *_args, **_kwargs: True)
     with pytest.raises(GitError, match="read-only filesystem"):
         require_writable_directory(tmp_path)
 
@@ -55,7 +54,7 @@ def test_writable_mount_does_not_bypass_uid_or_acl_denial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(git_module.os, "access", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(os, "access", lambda *_args, **_kwargs: False)
     with pytest.raises(GitError, match="lacks write access"):
         require_writable_directory(tmp_path)
 
@@ -72,7 +71,7 @@ def test_uninspectable_directory_fails_closed(
     def denied(_path: object) -> object:
         raise PermissionError("denied")
 
-    monkeypatch.setattr(git_module.os, "statvfs", denied)
+    monkeypatch.setattr(os, "statvfs", denied)
     with pytest.raises(GitError, match="cannot inspect"):
         require_writable_directory(tmp_path)
 
@@ -102,9 +101,9 @@ async def test_linked_repository_checks_real_common_and_worktree_metadata(
     def mounts(path: object) -> object:
         if Path(str(path)) == blocked:
             return SimpleNamespace(f_flag=os.ST_RDONLY)
-        return original(path)
+        return original(str(path))
 
-    monkeypatch.setattr(git_module.os, "statvfs", mounts)
+    monkeypatch.setattr(os, "statvfs", mounts)
     with pytest.raises(GitError, match="read-only filesystem"):
         await LocalGit().require_apply_access(linked)
     assert _metadata_snapshot(repository) == before

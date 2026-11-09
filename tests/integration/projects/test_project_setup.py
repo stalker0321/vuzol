@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from pydantic import HttpUrl
 from sqlalchemy import select
 
 from tests.integration.leadership.test_managed_goal_flow import _factory
@@ -21,7 +22,7 @@ from vuzol.config import (
     load_document,
     merge_documents,
 )
-from vuzol.config.models import NetworkPolicy, SandboxNetworkMode
+from vuzol.config.models import EgressDestination, NetworkPolicy, SandboxNetworkMode
 from vuzol.config.settings import ProjectSetupSettings
 from vuzol.projects.setup import (
     ProjectSetupService,
@@ -63,8 +64,8 @@ def template() -> ProjectConfig:
         network=NetworkPolicy(
             enabled=True,
             destinations=(
-                {"url": "https://chatgpt.com", "purpose": "Codex"},
-                {"url": "https://opencode.ai", "purpose": 'Pi "go"'},
+                EgressDestination(url=HttpUrl("https://chatgpt.com"), purpose="Codex"),
+                EgressDestination(url=HttpUrl("https://opencode.ai"), purpose='Pi "go"'),
             ),
         ),
     )

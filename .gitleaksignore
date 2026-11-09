@@ -1,0 +1,7 @@
+# Historical false positives: retry_outbox_item's token/delay/error arguments.
+5244f426111006b011743921f45a401e0c850b10:src/vuzol/projects/setup.py:generic-api-key:204
+a8b65009a01b509371b8adc1439f61a40dbe84d5:src/vuzol/assistant/service.py:generic-api-key:175
+7dd959d6db115c7499eb16e8f66cd878986e47b1:src/vuzol/inbox/service.py:generic-api-key:129
+# Synthetic strings used to test secret rejection; never real credentials.
+e14cd2202d32e301a73404b0da27c18178808cfa:tests/integration/interpretation/test_chat_recovery_memory.py:generic-api-key:345
+6f53fb1a10438ac3226376eed0e7fc7d2aeb2fba:tests/unit/discussion/test_memory_units.py:generic-api-key:118

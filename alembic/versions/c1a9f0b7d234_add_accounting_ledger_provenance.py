@@ -24,9 +24,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("usage_records", sa.Column("purpose", sa.String(length=30), nullable=True))
-    op.add_column(
-        "usage_records", sa.Column("attempt_kind", sa.String(length=20), nullable=True)
-    )
+    op.add_column("usage_records", sa.Column("attempt_kind", sa.String(length=20), nullable=True))
     op.add_column("usage_records", sa.Column("horizon_id", sa.UUID(), nullable=True))
     op.add_column(
         "usage_records", sa.Column("pricing_revision", sa.String(length=100), nullable=True)
@@ -50,9 +48,7 @@ def upgrade() -> None:
         "provider_budget_reservations",
         sa.Column("attempt_kind", sa.String(length=20), nullable=True),
     )
-    op.add_column(
-        "provider_budget_reservations", sa.Column("horizon_id", sa.UUID(), nullable=True)
-    )
+    op.add_column("provider_budget_reservations", sa.Column("horizon_id", sa.UUID(), nullable=True))
     op.add_column(
         "provider_budget_reservations",
         sa.Column("pricing_revision", sa.String(length=100), nullable=True),

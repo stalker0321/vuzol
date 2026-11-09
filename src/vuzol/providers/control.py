@@ -11,5 +11,3 @@ def ceiling_is_admission_only(profile: ProviderProfileConfig) -> bool:
     """True when the process can outspend the reservation after it starts."""
 
     return profile.launch_mode in {LaunchMode.CLI, LaunchMode.TOOL}
-
-

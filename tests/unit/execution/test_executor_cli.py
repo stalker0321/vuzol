@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from vuzol.projects.toolchains import TOOLCHAIN_RECEIPT, ToolchainSpec
+from vuzol.storage.types import QueueClass
 
 from ._execution_helpers import (
     Any,
@@ -691,6 +692,7 @@ async def test_executor_composes_enabled_runtime(
     monkeypatch.setattr(executor_cli, "TurnStartupReconciler", turn_reconciler_factory)
     sync_profiles = AsyncMock()
     monkeypatch.setattr(executor_cli, "synchronize_profiles", sync_profiles)
+    patched: dict[str, MagicMock] = {}
     for name in (
         "ScopedSecretResolver",
         "ArtifactStore",
@@ -706,7 +708,8 @@ async def test_executor_composes_enabled_runtime(
         "WorkflowWorker",
         "RoutedWorkflowWorker",
     ):
-        monkeypatch.setattr(executor_cli, name, MagicMock())
+        patched[name] = MagicMock()
+        monkeypatch.setattr(executor_cli, name, patched[name])
     monkeypatch.setattr("vuzol.execution.turn_transport.TurnSandboxTransport", MagicMock())
     monkeypatch.setattr(
         "vuzol.model_calls.worker.ModelCallReconciler",
@@ -768,7 +771,7 @@ async def test_executor_composes_enabled_runtime(
     # Each lead lane owns its goal leases under its own name.
     assert len(lead_owners) == lead_lanes and len(set(lead_owners)) == lead_lanes
     assert len(chain._leads) == max(0, lead_lanes - 1)
-    review_args = executor_cli.WorkflowWorker.call_args.kwargs
+    review_args = patched["WorkflowWorker"].call_args.kwargs
     assert set(review_args["handlers"]) == {"review"}
     assert review_args["profile_limits"] == {"codex-a": 2}
     reviewer = review_args["handlers"]["review"]._independent
@@ -776,14 +779,14 @@ async def test_executor_composes_enabled_runtime(
     assert reviewer._input_token_limit == 100_000
     assert reviewer._factory is factory
     # workflow, leadership turn and model call transports
-    assert executor_cli.cli_adapter.call_count == 3
-    executor_cli.ReadOnlyCliAdapter.assert_called_once()
-    provider_calls = executor_cli.RoutedWorkflowWorker.call_args_list
+    assert patched["cli_adapter"].call_count == 3
+    patched["ReadOnlyCliAdapter"].assert_called_once()
+    provider_calls = patched["RoutedWorkflowWorker"].call_args_list
     assert len(provider_calls) == 2
     assert all("plan" not in call.kwargs["handlers"] for call in provider_calls)
     assert {call.kwargs["queue_classes"] for call in provider_calls} == {
-        frozenset({executor_cli.QueueClass.LIGHT}),
-        frozenset({executor_cli.QueueClass.HEAVY}),
+        frozenset({QueueClass.LIGHT}),
+        frozenset({QueueClass.HEAVY}),
     }
     assert chain._node_providers == (remote_worker, remote_worker)
     assert len(chain._model_calls) >= 2

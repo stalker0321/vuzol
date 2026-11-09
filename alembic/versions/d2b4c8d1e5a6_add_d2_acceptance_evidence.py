@@ -27,7 +27,10 @@ def upgrade() -> None:
         "acceptance_evidence",
         sa.Column("id", UUID(as_uuid=True), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.Column("package_id", UUID(as_uuid=True), nullable=False),
         sa.Column("plan_revision_id", UUID(as_uuid=True), nullable=True),
@@ -37,23 +40,22 @@ def upgrade() -> None:
         sa.Column("artifact_id", UUID(as_uuid=True), nullable=True),
         sa.Column("evidence", JSONB, nullable=False),
         sa.ForeignKeyConstraint(["package_id"], ["work_packages.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(
-            ["plan_revision_id"], ["plan_revisions.id"], ondelete="RESTRICT"
-        ),
+        sa.ForeignKeyConstraint(["plan_revision_id"], ["plan_revisions.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["artifact_id"], ["artifacts.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
             "package_id", "evidence_hash", name="uq_acceptance_evidence_package_hash"
         ),
     )
-    op.create_index(
-        "ix_acceptance_evidence_package_id", "acceptance_evidence", ["package_id"]
-    )
+    op.create_index("ix_acceptance_evidence_package_id", "acceptance_evidence", ["package_id"])
     op.create_table(
         "acceptance_waivers",
         sa.Column("id", UUID(as_uuid=True), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.Column("package_id", UUID(as_uuid=True), nullable=False),
         sa.Column("integration_head", sa.String(length=64), nullable=False),
@@ -65,9 +67,7 @@ def upgrade() -> None:
             "package_id", "integration_head", name="uq_acceptance_waiver_package_head"
         ),
     )
-    op.create_index(
-        "ix_acceptance_waivers_package_id", "acceptance_waivers", ["package_id"]
-    )
+    op.create_index("ix_acceptance_waivers_package_id", "acceptance_waivers", ["package_id"])
 
 
 def downgrade() -> None:

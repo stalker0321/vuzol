@@ -159,6 +159,7 @@ async def test_executor_runs_selected_pi_lead_without_creating_a_fake_task(
     monkeypatch.setattr(executor, "resolve_database_dsn", lambda settings: SecretStr(postgres_dsn))
     monkeypatch.setattr(executor, "RootlessDockerRuntime", lambda socket, **kw: DockerBoundary())
     monkeypatch.setattr(executor, "WorktreeAccessManager", AccessBoundary)
+    monkeypatch.setattr("vuzol.providers.cli_readonly.WorktreeAccessManager", AccessBoundary)
     monkeypatch.setattr(executor, "_refresh_subscription_limits_tick", AsyncMock())
 
     async def one_turn(processor, *args, **kwargs):

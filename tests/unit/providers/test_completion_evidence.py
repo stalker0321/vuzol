@@ -79,12 +79,16 @@ async def test_cli_requires_returned_process_result_not_transport_exception(
                 duration_ms=3,
             )
 
-    adapter_type = {
+    adapter_types: dict[
+        str,
+        type[CodexCliAdapter] | type[GrokCliAdapter] | type[KimiCliAdapter] | type[PiCliAdapter],
+    ] = {
         "codex": CodexCliAdapter,
         "grok": GrokCliAdapter,
         "kimi": KimiCliAdapter,
         "pi": PiCliAdapter,
-    }[provider]
+    }
+    adapter_type = adapter_types[provider]
     with pytest.raises(ProviderFailure) as failure:
         await adapter_type(Transport()).execute(
             codex_request(),

@@ -20,9 +20,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("runs", sa.Column("execution_contract_version", sa.String(length=64), nullable=True))
     op.add_column(
-        "work_packages", sa.Column("execution_contract_version", sa.String(length=64), nullable=True)
+        "runs", sa.Column("execution_contract_version", sa.String(length=64), nullable=True)
+    )
+    op.add_column(
+        "work_packages",
+        sa.Column("execution_contract_version", sa.String(length=64), nullable=True),
     )
 
 

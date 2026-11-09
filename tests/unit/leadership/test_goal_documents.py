@@ -1,9 +1,11 @@
 """Owner 2026-10-31: a long document must not break the lead; workers get it in full."""
 
+from typing import Any
+
 from vuzol.leadership.goal_documents import EXCERPT_CHARS, INLINE_CHARS, lead_turn
 
 
-def prepared(text: str) -> dict:
+def prepared(text: str) -> dict[str, Any]:
     return {
         "caption": "Поправь главу",
         "turn": "Поправь главу\n\nAttached document text ...\n" + text,

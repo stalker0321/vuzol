@@ -5,6 +5,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -21,7 +22,7 @@ from vuzol.providers.opencode_usage import GO_OAUTH_USAGE_URL, parse_oauth_go_us
 from vuzol.providers.subscription_limits import collect_profile_limits, subscription_inventory
 
 
-def oauth_payload(now: datetime = NOW) -> dict:
+def oauth_payload(now: datetime = NOW) -> dict[str, Any]:
     return {
         "usage": {
             name: {
@@ -85,6 +86,7 @@ def oauth_account(tmp_path: Path, *, now: datetime = NOW, identity: str = "c") -
 
 
 def mutate(binding: AccountConfig, **changes) -> None:
+    assert binding.quota_oauth is not None
     with sqlite3.connect(binding.quota_oauth.store_path) as db:
         row = db.execute("SELECT value FROM credential WHERE id='selected'").fetchone()
         raw = json.loads(row[0])
@@ -103,6 +105,8 @@ def oauth_document(tmp_path: Path, binding: AccountConfig) -> Path:
 
 def test_new_endpoint_exact_record_org_readonly_and_no_secret_output(tmp_path: Path) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     before = binding.quota_oauth.store_path.read_bytes()
     calls = []
 
@@ -140,6 +144,8 @@ def test_new_endpoint_exact_record_org_readonly_and_no_secret_output(tmp_path: P
 )
 def test_bad_identity_expiry_and_format_never_send(tmp_path: Path, changes, expected) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     mutate(binding, **changes)
     service = collector(lambda r: pytest.fail("invalid auth must not send HTTP"))
     result = service.collect(binding)
@@ -160,6 +166,8 @@ def test_bad_identity_expiry_and_format_never_send(tmp_path: Path, changes, expe
 )
 def test_foreign_issuer_never_reaches_transport(tmp_path: Path, issuer: str) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     mutate(binding, metadata={"server": issuer, "accountID": "account-c", "orgID": "org-c"})
     result = collector(lambda r: pytest.fail("foreign issuer")).collect(binding)
     assert result.detail == "auth_issuer_mismatch"
@@ -185,6 +193,8 @@ def test_no_fallback_to_active_key_env_or_stale_auth(
     tmp_path: Path, monkeypatch, damage, expected
 ) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     (binding.state_directory / "auth.json").write_text(
         json.dumps(
             {
@@ -202,6 +212,8 @@ def test_no_fallback_to_active_key_env_or_stale_auth(
 
 def test_rotation_recovers_cached_401_and_logout_fences_cached_success(tmp_path: Path) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     calls = []
 
     def transport(request):
@@ -221,6 +233,8 @@ def test_rotation_recovers_cached_401_and_logout_fences_cached_success(tmp_path:
 
 def test_rotation_and_expiry_while_request_in_flight_fence_result(tmp_path: Path) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
 
     def transport(request):
         mutate(binding, access="rotated-in-flight")
@@ -234,6 +248,8 @@ def test_rotation_and_expiry_while_request_in_flight_fence_result(tmp_path: Path
 
 def test_wal_rotation_is_read_without_checkpoint_or_restart(tmp_path: Path) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     writer = sqlite3.connect(binding.quota_oauth.store_path)
     try:
         writer.execute("PRAGMA journal_mode=WAL")
@@ -246,6 +262,8 @@ def test_wal_rotation_is_read_without_checkpoint_or_restart(tmp_path: Path) -> N
 
 def test_busy_store_recovers_next_tick_without_manual_reset(tmp_path: Path) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     service = collector(lambda r: httpx.Response(200, json=oauth_payload()))
     writer = sqlite3.connect(binding.quota_oauth.store_path)
     try:
@@ -259,6 +277,8 @@ def test_busy_store_recovers_next_tick_without_manual_reset(tmp_path: Path) -> N
 
 def test_deep_malformed_json_is_failure_not_collector_crash(tmp_path: Path) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     service = collector(
         lambda r: httpx.Response(
             200,
@@ -311,6 +331,8 @@ def test_new_schema_failures_are_not_legacy_fallback(field, value) -> None:
 
 def test_missing_new_window_does_not_use_legacy_payload(tmp_path: Path) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     data = oauth_payload()
     del data["usage"]["weekly"]
     data.update(payload())
@@ -324,6 +346,8 @@ def test_config_usage_binding_does_not_change_execution_pins_or_account_slots(
     tmp_path: Path,
 ) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     profiles = load_document(oauth_document(tmp_path, binding)).profiles
     profile = profiles[0]
     previous = profile.model_copy(
@@ -338,6 +362,7 @@ def test_config_usage_binding_does_not_change_execution_pins_or_account_slots(
     )
     assert profile.account_binding == previous.account_binding
     assert content_revision(profile) == content_revision(previous)
+    assert profile.account is not None
     assert profile.account.auth_method == "static_api_key"
     assert profile.state_directory == binding.state_directory
     assert profile.concurrency_limit == 2 and profile.control_reserved_slots == 1
@@ -347,12 +372,15 @@ def test_config_usage_binding_does_not_change_execution_pins_or_account_slots(
 
 def test_new_source_and_scope_roundtrip_inventory(tmp_path: Path, monkeypatch) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     profiles = load_document(oauth_document(tmp_path, binding)).profiles
     monkeypatch.setattr(
         "vuzol.providers.opencode_usage.go_usage_collector",
         collector(lambda r: httpx.Response(200, json=oauth_payload())),
     )
     snap = collect_profile_limits(profiles[0], now=NOW)
+    assert snap.plan is not None
     assert snap.source == "opencode_go_oauth_v1" and snap.plan.tier_id == "go"
     assert subscription_inventory(profiles, [snap], now=NOW)[0].ok
     from dataclasses import replace
@@ -366,6 +394,8 @@ def test_v1_selected_account_and_migration_logout_do_not_resurrect_stale_auth(
     tmp_path: Path,
 ) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     oauth = binding.quota_oauth.model_copy(
         update={"store_format": "account_v1", "credential_id": None}
     )
@@ -407,6 +437,8 @@ def test_v1_selected_account_and_migration_logout_do_not_resurrect_stale_auth(
 )
 def test_bad_usage_bindings_rejected_by_config(tmp_path: Path, change) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     raw = binding.model_dump(mode="json")
     raw["quota_oauth"].update(change)
     with pytest.raises(ValueError):
@@ -417,6 +449,8 @@ def test_world_readable_store_and_fifo_are_refused_without_http(tmp_path: Path) 
     import os
 
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     path = binding.quota_oauth.store_path
     path.chmod(0o644)
     with pytest.raises(AccountAuthError, match="auth_permissions"):
@@ -472,6 +506,8 @@ def test_oauth_errors_have_no_fake_windows_or_endpoint_fallback(
     tmp_path: Path, status, expected
 ) -> None:
     binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    assert binding.state_directory is not None
     calls = []
 
     def transport(request):
@@ -492,3 +528,24 @@ def test_oauth_errors_have_no_fake_windows_or_endpoint_fallback(
     assert "private upstream" not in repr(result)
     if status == 429:
         assert result.retry_after_seconds == 150
+
+
+def test_oauth_store_is_read_only_when_sqlite_uri_default_is_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binding = oauth_account(tmp_path)
+    assert binding.quota_oauth is not None
+    connect = sqlite3.connect
+
+    def without_uri_default(database: str, **kwargs: Any) -> sqlite3.Connection:
+        # Emulate builds without SQLITE_USE_URI, retaining real SQLite I/O.
+        if database.startswith("file:") and not kwargs.get("uri", False):
+            raise sqlite3.OperationalError("URI filenames are disabled by default")
+        connection: sqlite3.Connection = connect(database, **kwargs)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("CREATE TABLE unexpected_write (id INTEGER)")
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", without_uri_default)
+    credential = read_go_oauth(binding.quota_oauth, now=NOW)
+    assert credential.org_id == "org-c"

@@ -66,7 +66,9 @@ def test_normalize_blank_lines_at_eof_is_bounded_to_changed_text(tmp_path: Path)
     ["Already implemented in base.", "x" * 2500, None],
     ids=["explanation", "bounded", "missing"],
 )
-async def test_validate_empty_change_passes_with_gates(tmp_path: Path, reason: str | None) -> None:
+async def test_validate_empty_change_passes_with_gates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reason: str | None
+) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
     git = MagicMock()
@@ -88,9 +90,12 @@ async def test_validate_empty_change_passes_with_gates(tmp_path: Path, reason: s
         tmp_path, validation_commands=(CommandDefinition(name="tests", argv=("make", "test")),)
     )
     handler = _handler(git=git, worktree_root=tmp_path, session=session, gate_runner=gates)
-    handler._grant_access = AsyncMock(return_value=None)
-    handler._load = AsyncMock(return_value=(worktree, project, worktree_path))
-    handler._persist = AsyncMock()
+    monkeypatch.setattr(handler, "_grant_access", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        handler, "_load", AsyncMock(return_value=(worktree, project, worktree_path))
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(handler, "_persist", persist)
 
     outcome = await handler.execute(_request(worktree), CancellationContext())
 
@@ -104,12 +109,14 @@ async def test_validate_empty_change_passes_with_gates(tmp_path: Path, reason: s
     gates.run.assert_awaited_once()
     git.require_clean_worktree.assert_awaited()
     git.create_commit.assert_not_awaited()
-    handler._persist.assert_awaited_once()
+    persist.assert_awaited_once()
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("bad", ["head", "dirty", "gate_dirty", "gate_failed"])
-async def test_validate_empty_change_keeps_guards(tmp_path: Path, bad: str) -> None:
+async def test_validate_empty_change_keeps_guards(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad: str
+) -> None:
     worktree_path = tmp_path / "wt"
     worktree_path.mkdir()
     git = MagicMock()
@@ -141,9 +148,12 @@ async def test_validate_empty_change_keeps_guards(tmp_path: Path, bad: str) -> N
         tmp_path, validation_commands=(CommandDefinition(name="tests", argv=("make", "test")),)
     )
     handler = _handler(git=git, worktree_root=tmp_path, gate_runner=gates)
-    handler._grant_access = AsyncMock(return_value=None)
-    handler._load = AsyncMock(return_value=(worktree, project, worktree_path))
-    handler._persist = AsyncMock()
+    monkeypatch.setattr(handler, "_grant_access", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        handler, "_load", AsyncMock(return_value=(worktree, project, worktree_path))
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(handler, "_persist", persist)
 
     outcome = await handler.execute(_request(worktree), CancellationContext())
 
@@ -157,7 +167,7 @@ async def test_validate_empty_change_keeps_guards(tmp_path: Path, bad: str) -> N
             "gate_failed": "validation_gate_failed",
         }[bad]
     )
-    handler._persist.assert_not_awaited()
+    persist.assert_not_awaited()
 
 
 @pytest.mark.anyio

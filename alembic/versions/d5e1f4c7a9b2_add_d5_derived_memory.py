@@ -96,23 +96,15 @@ def upgrade() -> None:
             "('hypothesis', 'observation', 'verified', 'superseded', 'retracted', 'tombstoned')",
             name="memory_unit_status_bounded",
         ),
-        sa.CheckConstraint(
-            "char_length(text) BETWEEN 1 AND 4000", name="memory_unit_text_bounded"
-        ),
+        sa.CheckConstraint("char_length(text) BETWEEN 1 AND 4000", name="memory_unit_text_bounded"),
         sa.CheckConstraint(
             "char_length(extraction_identity) BETWEEN 1 AND 255",
             name="memory_unit_extraction_identity_bounded",
         ),
-        sa.UniqueConstraint(
-            "extraction_identity", name="uq_memory_unit_extraction_identity"
-        ),
+        sa.UniqueConstraint("extraction_identity", name="uq_memory_unit_extraction_identity"),
     )
-    op.create_index(
-        "ix_memory_units_project_id", "memory_units", ["project_id"], unique=False
-    )
-    op.create_index(
-        "ix_memory_units_session_id", "memory_units", ["session_id"], unique=False
-    )
+    op.create_index("ix_memory_units_project_id", "memory_units", ["project_id"], unique=False)
+    op.create_index("ix_memory_units_session_id", "memory_units", ["session_id"], unique=False)
     op.create_index(
         "ix_memory_units_project_type_status",
         "memory_units",
@@ -137,10 +129,7 @@ def upgrade() -> None:
         ["source_artifact_id"],
         unique=False,
     )
-    op.execute(
-        "CREATE INDEX ix_memory_units_text_search "
-        "ON memory_units USING gin (text_search)"
-    )
+    op.execute("CREATE INDEX ix_memory_units_text_search ON memory_units USING gin (text_search)")
 
 
 def downgrade() -> None:

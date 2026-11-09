@@ -66,12 +66,8 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name="pk_input_bindings"),
         sa.UniqueConstraint("consumer_step_id", "slot", name="uq_input_binding_consumer_slot"),
     )
-    op.create_index(
-        "ix_input_bindings_consumer_step_id", "input_bindings", ["consumer_step_id"]
-    )
-    op.create_index(
-        "ix_input_bindings_producer_step_id", "input_bindings", ["producer_step_id"]
-    )
+    op.create_index("ix_input_bindings_consumer_step_id", "input_bindings", ["consumer_step_id"])
+    op.create_index("ix_input_bindings_producer_step_id", "input_bindings", ["producer_step_id"])
 
 
 def downgrade() -> None:

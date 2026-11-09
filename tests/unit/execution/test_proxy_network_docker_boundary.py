@@ -114,7 +114,7 @@ def test_docker_operation_failure_is_not_classified_as_absent(monkeypatch):
     async def fail(*a: str) -> str:
         raise ProxyNetworkError("rootless Docker network operation failed")
 
-    m._docker = fail  # type: ignore[method-assign]
+    m._docker = fail
     with pytest.raises(ProxyNetworkError):
         asyncio.run(m._network_exists("some-net"))
 
@@ -128,7 +128,7 @@ def test_empty_exact_network_list_result_means_absent(monkeypatch):
             return ""
         return ""
 
-    m._docker = ls_empty  # type: ignore[method-assign]
+    m._docker = ls_empty
     assert asyncio.run(m._network_exists("absent-net")) is False
 
 
@@ -146,7 +146,7 @@ def test_no_prune_command(monkeypatch):
             return ""
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     lease = ProxyNetworkLease(
         internal_name=int_n,
         egress_name=eg_n,

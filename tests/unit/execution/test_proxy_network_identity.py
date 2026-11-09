@@ -70,7 +70,7 @@ def test_tampered_lease_rejected_before_docker_mutation(monkeypatch):
         calls.append(a)
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     bad_lease = ProxyNetworkLease(
         internal_name="vuzol-0123456789ab-internal",
         egress_name="vuzol-0123456789ab-egress",
@@ -94,7 +94,7 @@ def test_exact_deterministic_labels(monkeypatch):
         calls.append(a)
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     t = uuid4()
     r = uuid4()
     s = uuid4()
@@ -144,7 +144,7 @@ def test_internal_create_contains_internal_flag(monkeypatch):
             )
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     # will error on collision check ls or validate name, but flag captured
     with pytest.raises(Exception):  # noqa: B017
         asyncio.run(m.create(uuid4(), uuid4(), uuid4(), 1))
@@ -191,7 +191,7 @@ def test_egress_create_omits_internal_flag(monkeypatch):
             )
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     lease = asyncio.run(m.create(t, r, s, 1))
     create_calls = [c for c in calls if c and c[0] == "network" and "create" in c]
     # at least one create without --internal (the egress)

@@ -1,6 +1,7 @@
 """Semantic choices must stay coherent through the draft and safety policy."""
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ from vuzol.interpretation.policy import enforce_interpretation_policy
 from vuzol.interpretation.work_contract import work_contract_error
 
 
-def choices(task_type: str, operation: str, effect: str = "execute_request") -> dict:
+def choices(task_type: str, operation: str, effect: str = "execute_request") -> dict[str, Any]:
     body = response(effect, "continue", "conversation_context")
     body["answers"]["task_type"]["choice"] = task_type
     body["answers"]["operation"]["choice"] = operation

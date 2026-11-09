@@ -100,7 +100,9 @@ async def test_finish_live_package_releases_topic_and_records_cancelled_task(
         )
 
     async with factory() as session:
-        package = await session.get(WorkPackage, created.package_id)
+        loaded_package = await session.get(WorkPackage, created.package_id)
+        assert loaded_package is not None
+        package = loaded_package
         revision = await session.get(PlanRevision, created.revision_id)
         discussion = await session.get(ProjectDiscussionSession, session_id)
         event = await session.scalar(
@@ -170,7 +172,9 @@ async def test_failure_pause_retry_skip_preserve_revision_evidence(
         await ingress.apply(_command(PackageControlAction.REQUEST_REPLAN, created, 5, "replan-1"))
 
     async with factory() as session:
-        package = await session.get(WorkPackage, created.package_id)
+        loaded_package = await session.get(WorkPackage, created.package_id)
+        assert loaded_package is not None
+        package = loaded_package
         revisions = tuple(
             (
                 await session.scalars(
@@ -225,7 +229,9 @@ async def test_stop_is_terminal_and_queue_controls_require_failure_pause(
         )
     assert terminal.value.code == "terminal_package"
     async with factory() as session:
-        package = await session.get(WorkPackage, created.package_id)
+        loaded_package = await session.get(WorkPackage, created.package_id)
+        assert loaded_package is not None
+        package = loaded_package
     assert package is not None and package.status is WorkPackageStatus.STOPPED
     assert package.pause_reason is None
     restarted = await ingress.apply(
@@ -233,7 +239,9 @@ async def test_stop_is_terminal_and_queue_controls_require_failure_pause(
     )
     assert restarted.code is PackageControlResultCode.APPLIED
     async with factory() as session:
-        package = await session.get(WorkPackage, created.package_id)
+        loaded_package = await session.get(WorkPackage, created.package_id)
+        assert loaded_package is not None
+        package = loaded_package
         revisions = tuple(
             (
                 await session.scalars(

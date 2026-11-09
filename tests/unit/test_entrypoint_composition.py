@@ -299,7 +299,8 @@ def test_worker_main_composes_runtime_and_handles_stop(
     monkeypatch.setattr(worker_cli, "require_workflow_upgrade", AsyncMock())
     monkeypatch.setattr(worker_cli, "WorkflowDispatcher", Dispatcher)
     monkeypatch.setattr(worker_cli, "WorkflowControlConsumer", Controls)
-    monkeypatch.setattr(worker_cli, "ResultReviewHandler", MagicMock())
+    review_handler = MagicMock()
+    monkeypatch.setattr(worker_cli, "ResultReviewHandler", review_handler)
     monkeypatch.setattr(worker_cli, "WorkflowWorker", WorkflowWorker)
 
     async def recover(_session: object, *, batch_size: int) -> int:
@@ -315,11 +316,12 @@ def test_worker_main_composes_runtime_and_handles_stop(
     assert calls["service"] == "vuzol-worker"
     assert calls["recovery_batch_size"] == 100
     assert calls["disposed"] is True
+    assert isinstance(calls["workflow_handlers"], dict)
     assert ("review" in calls["workflow_handlers"]) is not cli_review
     # The applier is the only acceptance consumer; a second one raced it.
     assert "acceptance" not in calls["workflow_handlers"]
     if review_mode == "api":
-        reviewer = worker_cli.ResultReviewHandler.call_args.kwargs["independent_reviewer"]
+        reviewer = review_handler.call_args.kwargs["independent_reviewer"]
         assert reviewer._input_token_limit == settings.limits.provider_call_input_tokens
     migration_head.assert_awaited()
     assert any(record.__dict__.get("signal") == signal.SIGTERM for record in caplog.records)

@@ -117,6 +117,7 @@ async def test_reasoning_choice_reaches_the_pinned_transport(effort, snapshot) -
         else {}
     )
     await PiCliAdapter(transport).execute(request(**changes), chosen, CancellationContext())
+    assert transport.invocation is not None
     argv = transport.invocation.argv
     assert argv[argv.index("--thinking") + 1] == effort
     _require_provider_command(
@@ -255,6 +256,7 @@ async def test_turn_inference_disables_tools_but_worktree_review_keeps_inspectio
             profile(),
             CancellationContext(),
         )
+        assert transport.invocation is not None
         argv = transport.invocation.argv
         assert ("--no-tools" in argv) is prompt_only
         assert ("--tools" in argv) is not prompt_only

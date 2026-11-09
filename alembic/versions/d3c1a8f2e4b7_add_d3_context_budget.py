@@ -25,8 +25,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("plan_revision_items", sa.Column("work_kind", sa.String(length=30), nullable=True))
-    op.add_column("plan_revision_items", sa.Column("capability", sa.String(length=100), nullable=True))
+    op.add_column(
+        "plan_revision_items", sa.Column("work_kind", sa.String(length=30), nullable=True)
+    )
+    op.add_column(
+        "plan_revision_items", sa.Column("capability", sa.String(length=100), nullable=True)
+    )
     op.add_column(
         "plan_revision_items", sa.Column("effect_intent", sa.String(length=30), nullable=True)
     )
@@ -34,9 +38,15 @@ def upgrade() -> None:
         "plan_revision_items",
         sa.Column("item_contract_version", sa.String(length=64), nullable=True),
     )
-    op.alter_column("provider_budget_reservations", "task_id", existing_type=UUID(as_uuid=True), nullable=True)
-    op.alter_column("provider_budget_reservations", "run_id", existing_type=UUID(as_uuid=True), nullable=True)
-    op.alter_column("provider_budget_reservations", "step_id", existing_type=UUID(as_uuid=True), nullable=True)
+    op.alter_column(
+        "provider_budget_reservations", "task_id", existing_type=UUID(as_uuid=True), nullable=True
+    )
+    op.alter_column(
+        "provider_budget_reservations", "run_id", existing_type=UUID(as_uuid=True), nullable=True
+    )
+    op.alter_column(
+        "provider_budget_reservations", "step_id", existing_type=UUID(as_uuid=True), nullable=True
+    )
     op.add_column(
         "provider_budget_reservations",
         sa.Column("invocation_id", UUID(as_uuid=True), nullable=True),
@@ -78,9 +88,7 @@ def upgrade() -> None:
             server_default="0",
         ),
     )
-    op.add_column(
-        "usage_records", sa.Column("invocation_id", UUID(as_uuid=True), nullable=True)
-    )
+    op.add_column("usage_records", sa.Column("invocation_id", UUID(as_uuid=True), nullable=True))
     op.create_index("ix_usage_records_invocation_id", "usage_records", ["invocation_id"])
     op.add_column(
         "input_bindings",
@@ -101,9 +109,15 @@ def downgrade() -> None:
         table_name="provider_budget_reservations",
     )
     op.drop_column("provider_budget_reservations", "invocation_id")
-    op.alter_column("provider_budget_reservations", "step_id", existing_type=UUID(as_uuid=True), nullable=False)
-    op.alter_column("provider_budget_reservations", "run_id", existing_type=UUID(as_uuid=True), nullable=False)
-    op.alter_column("provider_budget_reservations", "task_id", existing_type=UUID(as_uuid=True), nullable=False)
+    op.alter_column(
+        "provider_budget_reservations", "step_id", existing_type=UUID(as_uuid=True), nullable=False
+    )
+    op.alter_column(
+        "provider_budget_reservations", "run_id", existing_type=UUID(as_uuid=True), nullable=False
+    )
+    op.alter_column(
+        "provider_budget_reservations", "task_id", existing_type=UUID(as_uuid=True), nullable=False
+    )
     op.drop_column("plan_revision_items", "item_contract_version")
     op.drop_column("plan_revision_items", "effect_intent")
     op.drop_column("plan_revision_items", "capability")

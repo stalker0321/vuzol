@@ -9,7 +9,9 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     # Container deployments publish this listener on a loopback-only host port.
     parser.add_argument(
-        "--host", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1"  # noqa: S104
+        "--host",
+        choices=("127.0.0.1", "0.0.0.0"),  # noqa: S104
+        default="127.0.0.1",
     )
     args = parser.parse_args()
     # Optional dependency is loaded only by this entrypoint.

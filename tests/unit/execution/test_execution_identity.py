@@ -7,11 +7,12 @@ from uuid import uuid4
 import pytest
 
 from vuzol.execution.identity import step_execution_identity
+from vuzol.storage.models import Step
 
 
 @pytest.mark.anyio
 async def test_running_attempt_has_frozen_account_model_and_effort() -> None:
-    step = SimpleNamespace(id=uuid4(), executor_profile_id="pi-c-muse", result={}, payload={})
+    step = Step(id=uuid4(), executor_profile_id="pi-c-muse", result={}, payload={})
     process = SimpleNamespace(
         runtime_metadata={
             "account_id": "opencode-c",
@@ -31,7 +32,7 @@ async def test_running_attempt_has_frozen_account_model_and_effort() -> None:
 
 @pytest.mark.anyio
 async def test_recorded_result_wins_over_requested_model() -> None:
-    step = SimpleNamespace(
+    step = Step(
         id=uuid4(), executor_profile_id="codex-a", result={"model": "actual-model"}, payload={}
     )
     session = MagicMock(
@@ -44,7 +45,7 @@ async def test_recorded_result_wins_over_requested_model() -> None:
 
 @pytest.mark.anyio
 async def test_historical_usage_fallback_and_unknown_are_explicit() -> None:
-    step = SimpleNamespace(id=uuid4(), executor_profile_id="codex-a", result={}, payload={})
+    step = Step(id=uuid4(), executor_profile_id="codex-a", result={}, payload={})
     session = MagicMock(scalar=AsyncMock(side_effect=[None, "old-model", None, None]))
     assert (await step_execution_identity(session, step)).model == "old-model"
     assert (await step_execution_identity(session, step)).model is None

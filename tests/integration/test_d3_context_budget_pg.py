@@ -6,6 +6,7 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -199,7 +200,7 @@ async def test_d3_source_backed_research_end_to_end(postgres_dsn: str, tmp_path:
 @pytest.mark.anyio
 @pytest.mark.parametrize("work_limits", [{"max_cost": 0.015}, {"max_attempts": 1}])
 async def test_d3_lifetime_gate_and_epoch_canon(
-    postgres_dsn: str, tmp_path: Path, work_limits: dict
+    postgres_dsn: str, tmp_path: Path, work_limits: dict[str, Any]
 ) -> None:
     """Lead limits include historical package receipts across retry epochs."""
 
@@ -240,11 +241,13 @@ async def test_d3_lifetime_gate_and_epoch_canon(
             package_id = created.package_id
         async with factory.begin() as session:
             goal = await session.get(ManagedGoal, goal_id)
+            assert goal is not None
             goal.constraints = {
                 **goal.constraints,
                 "work_limits": work_limits,
             }
             package = await session.get(WorkPackage, package_id)
+            assert package is not None
             package.managed_goal_id = goal_id
         assert package_id is not None
         api = profile("api")
@@ -290,6 +293,7 @@ async def test_d3_lifetime_gate_and_epoch_canon(
         # They share one task unit, while every receipt still counts as spend.
         async with factory.begin() as session:
             goal = await session.get(ManagedGoal, goal_id)
+            assert goal is not None
             goal.constraints = {**goal.constraints, "work_limits": {"max_attempts": 2}}
             await reserve_budget(
                 session,

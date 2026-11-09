@@ -3,6 +3,7 @@
 UV ?= uv
 LOCAL_DATABASE_DSN ?= postgresql+psycopg://vuzol:vuzol-local-only@127.0.0.1:5432/vuzol# pragma: allowlist secret
 LOCAL_TEST_DATABASE_DSN ?= postgresql://vuzol:vuzol-local-only@127.0.0.1:5432/vuzol_test# pragma: allowlist secret
+VUZOL_TEST_DATABASE_DSN ?= $(LOCAL_TEST_DATABASE_DSN)
 
 run-app:
 	$(UV) run vuzol-app
@@ -31,9 +32,9 @@ test-rootless-proxy:
 	@test -n "$(VUZOL_PROXY_RUNTIME_ROOT)" || (echo "VUZOL_PROXY_RUNTIME_ROOT is required" >&2; exit 2)
 	$(UV) run pytest tests/integration/execution/test_proxy_service.py --no-cov
 
-test-postgres: db-up db-migrate
-	VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_DATABASE_DSN VUZOL_DATABASE_DSN="$(subst postgresql://,postgresql+psycopg://,$(LOCAL_TEST_DATABASE_DSN))" $(UV) run alembic upgrade head
-	VUZOL_TEST_DATABASE_DSN="$(LOCAL_TEST_DATABASE_DSN)" $(UV) run pytest -m postgresql --no-cov
+test-postgres:
+	VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_DATABASE_DSN VUZOL_DATABASE_DSN="$(subst postgresql://,postgresql+psycopg://,$(VUZOL_TEST_DATABASE_DSN))" $(UV) run alembic upgrade head
+	VUZOL_TEST_DATABASE_DSN="$(VUZOL_TEST_DATABASE_DSN)" $(UV) run pytest -m postgresql --no-cov
 
 lint:
 	$(UV) run ruff check .

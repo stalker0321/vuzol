@@ -88,6 +88,16 @@ python_version = "3.12"
 strict = true
 files = ["src", "tests"]
 
+[[tool.mypy.overrides]]
+# Check annotated tests and helpers; allow pytest fixtures and dynamic fakes
+# without imposing production's annotation requirements on every test body.
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+check_untyped_defs = false
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
@@ -100,6 +110,7 @@ ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S603", "S607"]
 "alembic/**" = ["ANN"]
+"alembic/versions/**" = ["E501"]
 # Owner-facing Russian text throughout.
 "src/vuzol/inbox/**" = ["RUF001"]
 "tests/integration/inbox/**" = ["RUF001"]

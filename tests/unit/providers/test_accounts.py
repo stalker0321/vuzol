@@ -486,7 +486,7 @@ def test_unresolved_slot_survives_lost_lock_and_other_slot_can_execute(tmp_path:
             "account_slot": 1,
             "account_lease_token": str(execution.token),
         }
-        compiled = database.queries[0].compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        compiled = database.queries[0].compile(dialect=postgresql.dialect())
         sql = str(compiled)
         assert "profile_id IN" in sql and "runtime_metadata" in sql
         assert "status !=" in sql and "reaped_at IS NULL" in sql

@@ -521,6 +521,7 @@ async def test_second_wakeup_waits_then_sees_the_live_package(postgres_dsn: str)
                     LeadershipCommandReceipt.command_name == "start_task"
                 )
             )
+            assert receipt is not None
             assert receipt.status == "applied"
 
 
@@ -884,6 +885,7 @@ async def run_managed_goal_flow(
             assert not client.sent
             async with factory() as session:
                 goal = await session.scalar(select(ManagedGoal))
+                assert goal is not None
                 assert goal.lifecycle == "draft"
                 assert await session.scalar(select(func.count()).select_from(Task)) == 0
                 goal_id = goal.id
@@ -902,6 +904,7 @@ async def run_managed_goal_flow(
 
             async with factory() as session:
                 planned = await session.get(ManagedGoal, goal_id)
+                assert planned is not None
                 assert planned.current_package_id is not None, planned.waiting_reason
             assert (await approve_plan(factory, goal_id)).code == "applied"
             assert await first.process_one()  # stale plan_ready is consumed
@@ -918,6 +921,7 @@ async def run_managed_goal_flow(
                     package = await session.scalar(select(WorkPackage))
                     task = await session.scalar(select(Task))
                     assert controlled
+                    assert goal is not None and package is not None and task is not None
                     assert goal.lifecycle in {"paused", "cancelled"}
                     assert package.status is WorkPackageStatus.STOPPED
                     assert task.status is TaskStatus.CANCELLED

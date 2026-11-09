@@ -34,7 +34,7 @@ def test_existing_internal_collision_prevents_all_creation(monkeypatch):
             return "present\n"
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     with pytest.raises(ProxyNetworkError, match="collision"):
         asyncio.run(m.create(uuid4(), uuid4(), uuid4(), 1))
     # no create attempted
@@ -60,7 +60,7 @@ def test_existing_egress_collision_prevents_internal_creation(monkeypatch):
             return ""
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     with pytest.raises(ProxyNetworkError, match="collision"):
         asyncio.run(m.create(uuid4(), uuid4(), uuid4(), 1))
 
@@ -120,7 +120,7 @@ def test_successful_production_create_validates_both_inspect_responses(monkeypat
             return json.dumps(good_eg)
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     lease = asyncio.run(m.create(t, r, s, 1))
     assert isinstance(lease, ProxyNetworkLease)
     assert lease.internal_name == fixed_int
@@ -141,7 +141,7 @@ def test_malformed_json_rejected(monkeypatch):
             return "not json {"
         return ""
 
-    m._docker = bad  # type: ignore[method-assign]
+    m._docker = bad
     with pytest.raises(ProxyNetworkError, match="malformed"):
         asyncio.run(m.create(t, r, s, 1))
 
@@ -179,7 +179,7 @@ def test_missing_boolean_rejected(monkeypatch):
             )
         return ""
 
-    m._docker = miss_bool  # type: ignore[method-assign]
+    m._docker = miss_bool
     with pytest.raises(ProxyNetworkError):
         asyncio.run(m.create(t, r, s, 1))
 
@@ -216,7 +216,7 @@ def test_wrong_driver_rejected(monkeypatch):
             return json.dumps(d)
         return ""
 
-    m._docker = wrong  # type: ignore[method-assign]
+    m._docker = wrong
     with pytest.raises(ProxyNetworkError, match="driver"):
         asyncio.run(m.create(t, r, s, 1))
 
@@ -253,7 +253,7 @@ def test_wrong_internal_rejected(monkeypatch):
             return json.dumps(d)
         return ""
 
-    m._docker = bad_int  # type: ignore[method-assign]
+    m._docker = bad_int
     with pytest.raises(ProxyNetworkError, match="Internal"):
         asyncio.run(m.create(t, r, s, 1))
 
@@ -291,7 +291,7 @@ def test_attachable_missing_or_true_rejected(monkeypatch):
                 return json.dumps(d)
             return ""
 
-        m._docker = bad_a  # type: ignore[method-assign]
+        m._docker = bad_a
         with pytest.raises(ProxyNetworkError, match="Attachable"):
             asyncio.run(m.create(t, r, s, 1))
 
@@ -328,7 +328,7 @@ def test_ipv6_enabled_rejected(monkeypatch):
             return json.dumps(d)
         return ""
 
-    m._docker = bad6  # type: ignore[method-assign]
+    m._docker = bad6
     with pytest.raises(ProxyNetworkError, match="IPv6"):
         asyncio.run(m.create(t, r, s, 1))
 
@@ -364,7 +364,7 @@ def test_missing_label_rejected(monkeypatch):
             return json.dumps(d)
         return ""
 
-    m._docker = miss_l  # type: ignore[method-assign]
+    m._docker = miss_l
     with pytest.raises(ProxyNetworkError, match="label"):
         asyncio.run(m.create(t, r, s, 1))
 
@@ -403,7 +403,7 @@ def test_unexpected_vuzol_label_rejected(monkeypatch):
             return json.dumps(d)
         return ""
 
-    m._docker = extra  # type: ignore[method-assign]
+    m._docker = extra
     with pytest.raises(ProxyNetworkError, match="unexpected vuzol"):
         asyncio.run(m.create(t, r, s, 1))
 
@@ -440,6 +440,6 @@ def test_attached_endpoint_rejected(monkeypatch):
             return json.dumps(d)
         return ""
 
-    m._docker = attached  # type: ignore[method-assign]
+    m._docker = attached
     with pytest.raises(ProxyNetworkError, match="containers"):
         asyncio.run(m.create(t, r, s, 1))

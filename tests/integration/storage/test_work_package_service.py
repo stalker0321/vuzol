@@ -89,6 +89,7 @@ async def test_create_approve_revise_invalidates_approval_without_tasks(postgres
     async with UnitOfWork(factory) as uow:
         service = WorkPackageService(uow)
         package = await uow.work_packages.get_package(package_id)
+        assert package.approved_revision_id is not None
         first_revision = await uow.work_packages.get_revision(package.approved_revision_id)
         first_item_id = uuid.UUID(str(first_revision.immutable_body["items"][0]["item_id"]))
         revised = await service.revise_draft(
@@ -102,7 +103,9 @@ async def test_create_approve_revise_invalidates_approval_without_tasks(postgres
     assert revised.status_generation == 3
 
     async with factory() as session:
-        package = await session.get(WorkPackage, package_id)
+        loaded_package = await session.get(WorkPackage, package_id)
+        assert loaded_package is not None
+        package = loaded_package
         revisions = (
             await session.scalars(
                 select(PlanRevision)
@@ -305,7 +308,9 @@ async def test_concurrent_approve_accepts_only_button_epoch_once(postgres_dsn: s
     assert sorted(outcomes) == ["approved", "stale_generation"]
 
     async with factory() as session:
-        package = await session.get(WorkPackage, package_id)
+        loaded_package = await session.get(WorkPackage, package_id)
+        assert loaded_package is not None
+        package = loaded_package
         approval_events = await session.scalar(
             select(func.count())
             .select_from(Event)
@@ -354,7 +359,9 @@ async def test_discard_is_terminal_and_expires_edit_session_explicitly(postgres_
     assert terminal.value.code == "terminal_package"
 
     async with factory() as session:
-        package = await session.get(WorkPackage, package_id)
+        loaded_package = await session.get(WorkPackage, package_id)
+        assert loaded_package is not None
+        package = loaded_package
         persisted_edit = await session.get(type(edit), edit.id)
         task_count = await session.scalar(select(func.count()).select_from(Task))
     assert package is not None and package.status is WorkPackageStatus.DISCARDED

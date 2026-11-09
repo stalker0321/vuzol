@@ -68,7 +68,7 @@ def read_go_oauth(
             # One exact row, not a desktop credential scan. SQL limits prevent
             # oversized JSON from reaching Python; progress/busy limits bound IO.
             deadline = time.monotonic() + 1
-            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", timeout=0.2)) as db:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as db:
                 db.execute("PRAGMA query_only=ON")
                 db.execute("PRAGMA trusted_schema=OFF")
                 db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)

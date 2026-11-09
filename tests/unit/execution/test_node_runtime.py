@@ -154,11 +154,11 @@ def test_node_proxy_mounts_its_policy_from_a_volume(tmp_path: Path) -> None:
 def test_no_nodes_by_default_and_ids_are_unique() -> None:
     assert ExecutionSettings().nodes == ()
     node = {"id": "gcp", "docker_socket": "/run/user/994/vuzol-node-gcp.sock"}
-    assert ExecutionSettings(nodes=[node]).nodes[0].model_call_parallelism == 1
+    assert ExecutionSettings.model_validate({"nodes": [node]}).nodes[0].model_call_parallelism == 1
     with pytest.raises(ValueError, match="unique"):
-        ExecutionSettings(nodes=[node, node])
+        ExecutionSettings.model_validate({"nodes": [node, node]})
     with pytest.raises(ValueError, match="absolute"):
-        ExecutionSettings(nodes=[{"id": "gcp", "docker_socket": "node.sock"}])
+        ExecutionSettings.model_validate({"nodes": [{"id": "gcp", "docker_socket": "node.sock"}]})
 
 
 @pytest.mark.anyio

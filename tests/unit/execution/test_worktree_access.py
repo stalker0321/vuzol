@@ -28,6 +28,7 @@ from ._execution_helpers import (
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("mapped_acl_ids")
 async def test_worktree_acl_is_bounded_inherited_and_revoked(tmp_path: Path) -> None:
     root = tmp_path / "worktrees"
     worktree = root / "task"
@@ -77,6 +78,7 @@ async def test_worktree_acl_is_bounded_inherited_and_revoked(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("mapped_acl_ids")
 async def test_worktree_acl_rejects_symlinks_and_unavailable_support(
     tmp_path: Path,
 ) -> None:
@@ -97,6 +99,7 @@ async def test_worktree_acl_rejects_symlinks_and_unavailable_support(
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("mapped_acl_ids")
 async def test_worktree_acl_reclaims_entries_before_rejecting_new_symlink(
     tmp_path: Path,
 ) -> None:
@@ -117,6 +120,7 @@ async def test_worktree_acl_reclaims_entries_before_rejecting_new_symlink(
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("mapped_acl_ids")
 async def test_worktree_acl_rejects_changed_mapping_then_revokes_with_original_mapping(
     tmp_path: Path,
 ) -> None:
@@ -158,6 +162,7 @@ def test_acl_xattr_errors_are_safe(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("mapped_acl_ids")
 async def test_worktree_access_additional_fail_closed_boundaries(tmp_path: Path) -> None:
     root = tmp_path / "worktrees"
     root.mkdir()
@@ -203,6 +208,7 @@ async def test_worktree_access_additional_fail_closed_boundaries(tmp_path: Path)
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("mapped_acl_ids")
 async def test_worktree_preflight_rejects_unverified_acl_result(tmp_path: Path) -> None:
     root = tmp_path / "worktrees"
     root.mkdir()

@@ -39,5 +39,3 @@ def require_eligible_report(path: Path) -> EvaluationReport:
     if not report.automatic_execution_eligible:
         raise ValueError("evaluation report does not permit automatic execution")
     return report
-
-

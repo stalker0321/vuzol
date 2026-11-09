@@ -56,6 +56,7 @@ def test_executor_update_roundtrip_restart_dashboard_and_no_model_slots(
         calls = []
         settings = SubscriptionLimitSettings()
         if auth == "snapshot":
+            assert binding.quota_scope_id is not None
             path = tmp_path / "usage.json"
             await asyncio.to_thread(tmp_path.chmod, 0o700)
             publish_usage_snapshot(
@@ -130,10 +131,11 @@ def test_executor_update_roundtrip_restart_dashboard_and_no_model_slots(
             assert claimed
             async with factory() as session:
                 outbox = await session.get(TransactionalOutbox, request_id)
+                assert outbox is not None
                 assert outbox.status == DeliveryStatus.DELIVERED
                 assert list(await session.scalars(select(ProviderAccountLease))) == []
                 before = await load_subscription_limits(session)
-            assert len(calls) == (0 if auth == "snapshot" else 1)
+            assert len(calls) == (0 if auth == "snapshot" else 1), before
         finally:
             await engine.dispose()
         # Fresh database composition, not an OS restart or a second provider request.

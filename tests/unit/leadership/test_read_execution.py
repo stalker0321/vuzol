@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from test_tool_loop import snapshot
+from tests.unit.leadership.test_tool_loop import snapshot
 
 from vuzol.leadership.fencing import TurnClaim
 from vuzol.leadership.invocation_context import TurnInvocationContext, current_turn

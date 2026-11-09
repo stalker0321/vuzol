@@ -220,5 +220,3 @@ def host_executables() -> dict[str, str]:
         for descriptor in _DESCRIPTORS_BY_KEY.values()
         if descriptor.host_executable is not None
     }
-
-

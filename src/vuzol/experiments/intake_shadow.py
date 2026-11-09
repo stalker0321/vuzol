@@ -217,5 +217,3 @@ def parse_intake_output(
         input_fingerprint=fingerprint,
         prompt_hash=prompt_digest,
     )
-
-

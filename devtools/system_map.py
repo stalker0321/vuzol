@@ -12,12 +12,13 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 MAP = ROOT / "docs/system-map"
 
 
-def inventory(root: Path = ROOT) -> list[dict]:
+def inventory(root: Path = ROOT) -> list[dict[str, Any]]:
     trees = {
         str(p.relative_to(root)): ast.parse(p.read_text())
         for p in sorted((root / "src/vuzol").rglob("*.py"))
@@ -45,13 +46,16 @@ def inventory(root: Path = ROOT) -> list[dict]:
                 for alias in node.names:
                     constants[path, alias.asname or alias.name] = (source, alias.name)
 
-    def values(path: str, node: ast.AST, seen: frozenset = frozenset()) -> list[str]:
+    def values(
+        path: str, node: ast.AST, seen: frozenset[tuple[str, str]] = frozenset()
+    ) -> list[str]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return [node.value]
         if isinstance(node, ast.JoinedStr):
             return [
                 "".join(
-                    v.value if isinstance(v, ast.Constant) else "{dynamic}" for v in node.values
+                    cast(str, v.value) if isinstance(v, ast.Constant) else "{dynamic}"
+                    for v in node.values
                 )
             ]
         if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
@@ -71,7 +75,7 @@ def inventory(root: Path = ROOT) -> list[dict]:
             return values(target[0], ast.Name(id=target[1]), seen | {key})
         return values(path, target, seen | {key})
 
-    entries: dict[str, dict] = {}
+    entries: dict[str, dict[str, Any]] = {}
 
     def add(identifier: str, path: str, line: int, role: str = "sources") -> None:
         entry = entries.setdefault(
@@ -110,7 +114,7 @@ def inventory(root: Path = ROOT) -> list[dict]:
                         and dec.args
                         and isinstance(dec.args[0], ast.Constant)
                     ):
-                        add(f"http:{dec.func.attr}:{dec.args[0].value}", path, node.lineno)
+                        add(f"http:{dec.func.attr}:{dec.args[0].value!s}", path, node.lineno)
             if (
                 isinstance(node, ast.Constant)
                 and isinstance(node.value, str)
@@ -135,7 +139,7 @@ def inventory(root: Path = ROOT) -> list[dict]:
                     ):
                         for kw in member.value.keywords:
                             if kw.arg == "pattern" and isinstance(kw.value, ast.Constant):
-                                pattern = kw.value.value
+                                pattern = cast(str, kw.value.value)
                                 if re.fullmatch(r"\^\([a-z_|]+\)\$", pattern):
                                     for action in pattern[2:-2].split("|"):
                                         add("callback:ControlUpdate:" + action, path, member.lineno)
@@ -166,7 +170,7 @@ def inventory(root: Path = ROOT) -> list[dict]:
     return [entries[key] for key in sorted(entries)]
 
 
-def validate(data: dict, root: Path = ROOT) -> dict:
+def validate(data: dict[str, Any], root: Path = ROOT) -> dict[str, Any]:
     errors = []
     scenarios = data["scenarios"]
     ids = [s["id"] for s in scenarios]
@@ -260,7 +264,7 @@ def validate(data: dict, root: Path = ROOT) -> dict:
     }
 
 
-def build(data: dict, report: dict, template: str) -> str:
+def build(data: dict[str, Any], report: dict[str, Any], template: str) -> str:
     payload = (
         json.dumps({**data, "coverage_report": report}, ensure_ascii=False)
         .replace("<", "\\u003c")
@@ -303,7 +307,7 @@ def main() -> None:
     )
 
 
-def unique_object(pairs: list[tuple[str, object]]) -> dict:
+def unique_object(pairs: list[tuple[str, object]]) -> dict[str, Any]:
     result = {}
     for key, value in pairs:
         if key in result:

@@ -634,6 +634,7 @@ async def test_capability_handler_cancels_before_loading(tmp_path: Path) -> None
 @pytest.mark.anyio
 @pytest.mark.parametrize("apply_allowed", [True, False])
 async def test_applier_access_checked_even_when_no_tool_installation_is_needed(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     apply_allowed: bool,
 ) -> None:
@@ -655,14 +656,18 @@ async def test_applier_access_checked_even_when_no_tool_installation_is_needed(
         registries=registries,
         apply_access_check=check,
     )
-    handler._load = AsyncMock(
-        return_value=(
-            task,
-            step,
-            SimpleNamespace(contract={}),
-            None,
-            frozenset(),
-        )
+    monkeypatch.setattr(
+        handler,
+        "_load",
+        AsyncMock(
+            return_value=(
+                task,
+                step,
+                SimpleNamespace(contract={}),
+                None,
+                frozenset(),
+            )
+        ),
     )
     outcome = await handler.execute(request, CancellationContext())
     if apply_allowed:

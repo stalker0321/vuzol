@@ -23,7 +23,7 @@ from ._test_providers_helpers import profile, provider_request
 
 
 @pytest.fixture(params=("codex", "grok", "kimi", "pi"))
-def review_call(request, tmp_path):
+def review_call(request, tmp_path, monkeypatch):
     configured = profile(
         "review-account",
         provider=request.param,
@@ -77,6 +77,7 @@ def review_call(request, tmp_path):
     )
     runtime.registries.sandboxes.get.return_value = SimpleNamespace(uid=1000, gid=1000)
     adapter = MagicMock(execute=AsyncMock())
+    monkeypatch.setattr("vuzol.providers.cli_readonly.WorktreeAccessManager", MagicMock())
     wrapper = ReadOnlyCliAdapter(adapter, runtime, factory)
     access = MagicMock(revoke=AsyncMock())
     wrapper._access = MagicMock(grant=AsyncMock(return_value=access))

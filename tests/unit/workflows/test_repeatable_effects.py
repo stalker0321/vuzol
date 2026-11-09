@@ -17,7 +17,7 @@ def _step(**overrides: object) -> Step:
         "timeout_seconds": 30,
     }
     values.update(overrides)
-    return Step(**values)  # type: ignore[arg-type]
+    return Step(**values)
 
 
 def test_read_only_without_mutating_capabilities_can_repeat() -> None:

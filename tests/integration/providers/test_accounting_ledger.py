@@ -355,6 +355,7 @@ def test_lifetime_cost_survives_budget_epoch(postgres_dsn: str, tmp_path: Path) 
                 accounting=accounting,
             )
         async with factory() as session:
+            assert reservation.task_id is not None
             rows = await usage_totals_by_purpose(session, task_id=reservation.task_id)
             total_cost = sum(cost for _purpose, cost, _count in rows)
             total_count = sum(count for _purpose, _cost, count in rows)

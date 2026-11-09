@@ -19,6 +19,7 @@ from vuzol.ops.retention import (
     RetentionSweepMode,
     effective_worktree_retention_until,
 )
+from vuzol.storage.models import Artifact
 from vuzol.storage.types import TaskStatus
 
 
@@ -457,13 +458,11 @@ def test_artifact_path_accepts_absolute_paths_inside_the_artifact_root(tmp_path:
     (tmp_path / "repos").mkdir()
     sweeper._bind_roots(mode=RetentionSweepMode.DRY_RUN)
     attachment = artifacts / "telegram-intake" / "item.bin"
-    path = sweeper._artifact_path(SimpleNamespace(content_uri=str(attachment)))  # type: ignore[arg-type]
+    path = sweeper._artifact_path(Artifact(content_uri=str(attachment)))
     assert path == attachment.resolve()
     assert (
-        sweeper._artifact_path(SimpleNamespace(content_uri="artifact:ab/abcd"))
-        == (  # type: ignore[arg-type]
-            artifacts / "ab" / "abcd"
-        ).resolve()
+        sweeper._artifact_path(Artifact(content_uri="artifact:ab/abcd"))
+        == (artifacts / "ab" / "abcd").resolve()
     )
     with pytest.raises(PathViolation):
         sweeper._artifact_path(SimpleNamespace(content_uri=str(tmp_path / "elsewhere.bin")))  # type: ignore[arg-type]

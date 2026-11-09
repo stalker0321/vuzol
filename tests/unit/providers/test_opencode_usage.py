@@ -5,6 +5,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -24,7 +25,7 @@ from vuzol.telegram.projections import telegram_html
 NOW = datetime(2026, 10, 23, 1, tzinfo=UTC)
 
 
-def payload() -> dict[str, object]:
+def payload() -> dict[str, Any]:
     return {
         "useBalance": False,
         "rollingUsage": {"status": "ok", "usagePercent": 12.5, "resetInSec": 100},
@@ -101,7 +102,7 @@ def test_missing_window_is_an_explicit_schema_failure() -> None:
     ],
 )
 def test_http_failures_are_distinct_and_never_follow_redirect(
-    tmp_path: Path, status: int, body: dict, expected: str
+    tmp_path: Path, status: int, body: dict[str, Any], expected: str
 ) -> None:
     calls = []
 
@@ -154,6 +155,7 @@ def test_timeout_has_no_fake_measurement(tmp_path: Path) -> None:
 
 def test_coalescing_retry_after_and_measurement_time(tmp_path: Path) -> None:
     binding = account(tmp_path)
+    assert binding.state_directory is not None
     calls = []
     mono = [0.0]
     now = [NOW]
@@ -213,8 +215,9 @@ def test_real_config_collection_render_and_content_identity(tmp_path: Path, monk
         {"opencode-go": {"type": "api_key", "key": "!echo unsafe"}},
     ],
 )
-def test_auth_never_falls_back_or_executes(tmp_path: Path, auth: dict) -> None:
+def test_auth_never_falls_back_or_executes(tmp_path: Path, auth: dict[str, Any]) -> None:
     binding = account(tmp_path)
+    assert binding.state_directory is not None
     (binding.state_directory / "auth.json").write_text(json.dumps(auth))
 
     def transport(request):
@@ -230,6 +233,7 @@ def test_distinct_accounts_are_not_coalesced_and_retry_after_is_respected(tmp_pa
     b = account(b_dir).model_copy(update={"id": "b", "quota_scope_id": "b-meter"})
     c = account(c_dir).model_copy(update={"id": "c", "quota_scope_id": "c-meter"})
     for binding in (b, c):
+        assert binding.state_directory is not None
         (binding.state_directory / "auth.json").write_text(
             json.dumps({"opencode-go": {"type": "api_key", "key": "fixture-" + binding.id}})
         )
@@ -255,6 +259,7 @@ def test_distinct_accounts_are_not_coalesced_and_retry_after_is_respected(tmp_pa
 
 def test_cached_entitlement_evidence_does_not_become_a_fresh_measurement(tmp_path: Path) -> None:
     binding = account(tmp_path)
+    assert binding.state_directory is not None
     now = [NOW]
     service = OpenCodeUsageCollector(
         clock=lambda: now[0],
@@ -274,6 +279,7 @@ def test_cached_entitlement_evidence_does_not_become_a_fresh_measurement(tmp_pat
 
 def test_auth_fifo_does_not_block_and_never_reaches_http(tmp_path: Path) -> None:
     binding = AccountConfig.model_validate(descriptor(tmp_path))
+    assert binding.state_directory is not None
     binding.state_directory.mkdir()
     os.mkfifo(binding.state_directory / "auth.json", mode=0o600)
     result = collector(lambda r: pytest.fail("invalid auth must not reach HTTP")).collect(binding)

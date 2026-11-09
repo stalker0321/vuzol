@@ -86,6 +86,14 @@ make test-postgres     # PostgreSQL-marked integration
 make check             # lint, format, types, tests, security
 ```
 
+`make test-postgres` migrates and tests only `VUZOL_TEST_DATABASE_DSN` (defaulting
+to `LOCAL_TEST_DATABASE_DSN`). Start the local database with `make db-up` first,
+or supply the DSN of an already running disposable PostgreSQL database.
+
+The real POSIX ACL checks require UID/GID mappings for root and IDs 60001-60003.
+They skip in restricted user namespaces; the other unit tests use mocked host
+boundaries. Hosted CI runs the ACL checks with normal host mappings.
+
 Live Telegram and provider calls do not belong in the hermetic CI suite.
 
 ## Managed projects (provisioned by Vuzol)

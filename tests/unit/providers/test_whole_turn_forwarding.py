@@ -79,6 +79,7 @@ async def test_cli_keeps_full_raw_turn_not_truncated_goal(
             "task_draft": {"goal": RAW[:4000], "task_summary": "Проверить поиск"},
         }
     )
+    adapter: PiCliAdapter | KimiCliAdapter | GrokCliAdapter | CodexCliAdapter
     if provider == "pi":
         adapter, profile = PiCliAdapter(transport), pi_profile()
     elif provider == "kimi":

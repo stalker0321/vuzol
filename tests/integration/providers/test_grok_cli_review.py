@@ -39,7 +39,7 @@ from vuzol.workflows.ports import CancellationContext
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
 
-async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path):
+async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path, monkeypatch):
     engine, factory = storage(postgres_dsn)
     try:
         configured = profile(
@@ -139,6 +139,7 @@ async def test_cli_review_partitions_and_accounting(postgres_dsn, tmp_path):
                     1,
                 )
 
+        monkeypatch.setattr("vuzol.providers.cli_readonly.WorktreeAccessManager", MagicMock())
         wrapper = ReadOnlyCliAdapter(
             GrokCliAdapter(Transport()),
             RuntimeConfiguration.model_construct(settings=settings, registries=registries),

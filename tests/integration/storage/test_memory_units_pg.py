@@ -210,6 +210,7 @@ async def test_delayed_writer_does_not_displace_current(postgres_dsn: str) -> No
         )
     async with UnitOfWork(factory) as uow:
         existing = await uow.discussions.active_decision(session_id=session_id, key="stack")
+        assert existing is not None
         await uow.discussions.set_decision_status(existing, AcceptedDecisionStatus.SUPERSEDED)
         await DiscussionMemoryService(uow).accept_decision(
             session_id=session_id,

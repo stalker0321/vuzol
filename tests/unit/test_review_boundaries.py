@@ -560,6 +560,7 @@ async def test_all_partition_requests_obey_configured_cap_and_keep_full_context(
         with pytest.raises(IndependentReviewError, match="context budget"):
             await review
         adapters.get.return_value.execute.assert_not_awaited()
+        assert isinstance(reviewer._accounting.reserve, AsyncMock)
         reviewer._accounting.reserve.assert_not_awaited()
         return
     verdict = await review

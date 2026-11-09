@@ -26,7 +26,7 @@ async def test_a_model_call_goes_only_to_the_model_call_transport() -> None:
         result = await RoleBoundCliAdapter(workflow, readonly, turn, call).execute(
             MagicMock(), MagicMock(), CancellationContext()
         )
-        assert result == "c"
+        assert result is call.execute.return_value
         with pytest.raises(ValueError, match="model calls"):
             await RoleBoundCliAdapter(workflow, readonly, turn).execute(
                 MagicMock(), MagicMock(), CancellationContext()

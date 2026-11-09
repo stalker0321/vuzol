@@ -206,6 +206,7 @@ def test_owner_can_pause_blocked_work_without_clearing_its_blocker(postgres_dsn:
                     select(Step).where(Step.run_id == run.id, Step.status == StepStatus.QUEUED)
                 )
                 task = await session.get(Task, task_id)
+                assert task is not None and step is not None
                 run.status = RunStatus.BLOCKED
                 task.status = TaskStatus.BLOCKED
                 step.status = StepStatus.BLOCKED
@@ -214,14 +215,23 @@ def test_owner_can_pause_blocked_work_without_clearing_its_blocker(postgres_dsn:
             async with factory.begin() as session:
                 await pause_task(session, task_id, actor_id="1")
             async with factory() as session:
-                assert (await session.get(Task, task_id)).status is TaskStatus.PAUSED
-                assert (await session.get(Run, run_id)).status is RunStatus.PAUSED
+                loaded_task = await session.get(Task, task_id)
+                assert loaded_task is not None
+                assert loaded_task.status is TaskStatus.PAUSED
+                loaded_run = await session.get(Run, run_id)
+                assert loaded_run is not None
+                assert loaded_run.status is RunStatus.PAUSED
             async with factory.begin() as session:
                 await resume_task(session, task_id, actor_id="1")
             async with factory() as session:
-                assert (await session.get(Task, task_id)).status is TaskStatus.BLOCKED
-                assert (await session.get(Run, run_id)).status is RunStatus.BLOCKED
+                loaded_task = await session.get(Task, task_id)
+                assert loaded_task is not None
+                assert loaded_task.status is TaskStatus.BLOCKED
+                loaded_run = await session.get(Run, run_id)
+                assert loaded_run is not None
+                assert loaded_run.status is RunStatus.BLOCKED
                 step = await session.get(Step, step_id)
+                assert step is not None
                 assert step.status is StepStatus.BLOCKED
                 assert step.failure_category == "project_pin_unresolved"
         finally:

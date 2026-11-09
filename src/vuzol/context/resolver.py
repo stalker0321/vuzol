@@ -98,11 +98,7 @@ async def _resolve_one(
     binding: InputBinding,
     project_id: str | None,
 ) -> ResolvedBinding:
-    if (
-        binding.status != "resolved"
-        or binding.artifact_id is None
-        or binding.content_hash is None
-    ):
+    if binding.status != "resolved" or binding.artifact_id is None or binding.content_hash is None:
         raise BindingError("binding_unresolved", f"binding {binding.id} is not resolved")
     artifact = await session.get(Artifact, binding.artifact_id)
     if artifact is None:
@@ -114,9 +110,7 @@ async def _resolve_one(
     # freshness still apply); "private"/"project" require scope match.
     access = binding.access_scope or "private"
     if access not in {"private", "project", "public"}:
-        raise BindingError(
-            "invalid_access_scope", f"binding {binding.id} has unknown access"
-        )
+        raise BindingError("invalid_access_scope", f"binding {binding.id} has unknown access")
     if access != "public":
         # Missing scope is fail-closed (a silent pass when either side was
         # None hid missing owners). Required bindings raise here; optional
@@ -124,13 +118,9 @@ async def _resolve_one(
         if binding.scope_project_id is None or project_id is None:
             raise BindingError("missing_scope", f"binding {binding.id} has no scope owner")
         if binding.scope_project_id != project_id:
-            raise BindingError(
-                "foreign_scope", f"binding {binding.id} belongs to another scope"
-            )
+            raise BindingError("foreign_scope", f"binding {binding.id} belongs to another scope")
         artifact_task = (
-            await session.get(Task, artifact.task_id)
-            if artifact.task_id is not None
-            else None
+            await session.get(Task, artifact.task_id) if artifact.task_id is not None else None
         )
         if artifact_task is not None and artifact_task.project_id != project_id:
             raise BindingError("foreign_scope", "artifact project does not match consumer")

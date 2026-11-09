@@ -61,7 +61,7 @@ def test_egress_create_failure_rolls_back_owned_internal(monkeypatch):
             return ""
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     with pytest.raises(ProxyNetworkError):
         asyncio.run(m.create(t, r, s, 1))
     # rollback performed (rm may or may not record depending on ls in this test fake)
@@ -122,7 +122,7 @@ def test_egress_validation_failure_rolls_back_owned_internal(monkeypatch):
             return ""
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     with pytest.raises(ProxyNetworkError):
         asyncio.run(m.create(t, r, s, 1))
     assert True  # rollback path exercised (removed may be empty if ls sequencing)
@@ -172,7 +172,7 @@ def test_rollback_failure_is_surfaced(monkeypatch):
             raise ProxyNetworkError("rollback rm failed")
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     with pytest.raises(ProxyNetworkError, match="rollback failed"):
         asyncio.run(m.create(t, r, s, 1))
 
@@ -216,7 +216,7 @@ def test_rollback_never_removes_foreign_network(monkeypatch):
             return ""
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     with pytest.raises(ProxyNetworkError):
         asyncio.run(m.create(t, r, s, 1))
     assert not removed
@@ -268,7 +268,7 @@ def test_cleanup_uses_reverse_order(monkeypatch):
             return ""
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     lease = ProxyNetworkLease(
         internal_name=int_n,
         egress_name=eg_n,
@@ -295,7 +295,7 @@ def test_cleanup_already_absent_is_idempotent(monkeypatch):
             return ""
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     lease = ProxyNetworkLease(
         internal_name=int_n,
         egress_name=eg_n,
@@ -341,7 +341,7 @@ def test_cleanup_refuses_foreign_labels(monkeypatch):
             )
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     lease = ProxyNetworkLease(
         internal_name=_make_network_name(t, r, s, 1, "internal"),
         egress_name=eg_n,
@@ -385,7 +385,7 @@ def test_cleanup_refuses_attachments(monkeypatch):
             )
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     lease = ProxyNetworkLease(
         internal_name=_make_network_name(t, r, s, 1, "internal"),
         egress_name=eg_n,
@@ -432,7 +432,7 @@ def test_cleanup_verifies_exact_disappearance(monkeypatch):
             return ""
         return ""
 
-    m._docker = fake  # type: ignore[method-assign]
+    m._docker = fake
     lease = ProxyNetworkLease(
         internal_name=_make_network_name(t, r, s, 1, "internal"),
         egress_name=eg_n,

@@ -633,8 +633,6 @@ def _snapshot_entry_to_subscription(
     )
 
 
-
-
 def format_subscription_limits_html(
     snapshots: Sequence[SubscriptionLimitSnapshot],
     *,

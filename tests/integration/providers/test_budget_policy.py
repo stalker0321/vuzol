@@ -14,6 +14,7 @@ from tests.integration.providers._test_routing_helpers import (
     seed_provider_step,
 )
 from tests.integration.storage.helpers import seed_task_run_step, storage
+from vuzol.config import Settings
 from vuzol.config.settings import HardLimits
 from vuzol.providers.budgets import (
     EXPLICIT_MONEY_CAP_SUMMARY,
@@ -281,15 +282,15 @@ def test_claim_stops_on_explicit_money_cap_without_losing_the_task(
     asyncio.run(scenario())
 
 
-def _soft_limits(settings: object, *, enforcement: str) -> object:
-    limits = settings.limits.model_copy(  # type: ignore[attr-defined]
+def _soft_limits(settings: Settings, *, enforcement: str) -> Settings:
+    limits = settings.limits.model_copy(
         update={
             "usage_total_enforcement": enforcement,
             "estimated_cost_enforcement": enforcement,
             "task_cost_units": 0.001,
         }
     )
-    return settings.model_copy(update={"limits": limits})  # type: ignore[attr-defined]
+    return settings.model_copy(update={"limits": limits})
 
 
 @pytest.mark.postgresql
@@ -306,7 +307,7 @@ def test_soft_estimated_cost_lets_claim_continue(postgres_dsn: str, tmp_path) ->
             )
             token = await claim_routed_step(
                 session,
-                settings=settings,  # type: ignore[arg-type]
+                settings=settings,
                 registries=registries,
                 owner="executor",
                 lease_seconds=60,
@@ -345,7 +346,7 @@ def test_hard_estimated_cost_still_stops_claim(postgres_dsn: str, tmp_path) -> N
             )
             token = await claim_routed_step(
                 session,
-                settings=settings,  # type: ignore[arg-type]
+                settings=settings,
                 registries=registries,
                 owner="executor",
                 lease_seconds=60,

@@ -3,6 +3,7 @@ import os
 import uuid
 import zipfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,6 +13,7 @@ from sqlalchemy import func, select
 from tests.fakes.telegram import FakeTelegramClient
 from tests.integration.storage.helpers import seed_task_run_step, storage
 from tests.unit.execution.test_candidate_archive import committed
+from vuzol.execution.access import grant_artifact_read
 from vuzol.execution.artifact_production import ArtifactProductionHandler
 from vuzol.execution.artifacts import ArtifactStore
 from vuzol.execution.git import LocalGit
@@ -37,10 +39,22 @@ from vuzol.workflows.ports import CancellationContext, StepExecutionRequest
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 
 
+@pytest.fixture
+def artifact_read_grant(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    grant_read = AsyncMock(wraps=grant_artifact_read)
+    # Keep real ACL coverage on hosts where the trusted tool owner is mapped.
+    acl_tool = Path("/usr/bin/setfacl")
+    if not acl_tool.is_file() or acl_tool.stat().st_uid != 0:
+        grant_read = AsyncMock()
+    monkeypatch.setattr("vuzol.execution.artifact_production.grant_artifact_read", grant_read)
+    return grant_read
+
+
 @pytest.mark.parametrize("mode", ["success", "lost-send", "secret", "wrong-review", "stale-lease"])
 async def test_checked_archive_to_confirmed_telegram_link(
-    postgres_dsn, tmp_path, monkeypatch, mode
+    postgres_dsn, tmp_path, monkeypatch, mode, artifact_read_grant
 ):
+    grant_read = artifact_read_grant
     engine, factory = storage(postgres_dsn)
     try:
         root = tmp_path / "candidate"
@@ -130,6 +144,7 @@ async def test_checked_archive_to_confirmed_telegram_link(
         outcome = await producer.execute(request, CancellationContext())
         if mode in {"secret", "wrong-review", "stale-lease"}:
             assert outcome.kind is OutcomeKind.BLOCKED
+            grant_read.assert_not_awaited()
             async with factory() as session:
                 assert await session.scalar(select(func.count()).select_from(Artifact)) == 0
                 assert (
@@ -137,6 +152,9 @@ async def test_checked_archive_to_confirmed_telegram_link(
                 )
             return
         assert outcome.kind is OutcomeKind.SUCCEEDED
+        grant_read.assert_awaited_once()
+        assert grant_read.call_args.kwargs == {"delivery_uid": os.getuid()}
+        assert grant_read.call_args.args[0].is_file()
         assert (
             await producer.execute(request, CancellationContext())
         ).kind is OutcomeKind.SUCCEEDED

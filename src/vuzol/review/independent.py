@@ -1020,7 +1020,7 @@ def _build_request(
     if not task_goal and isinstance(task.original_text, str):
         task_goal = task.original_text.strip()[:1_000]
 
-    payload = {
+    payload: dict[str, Any] = {
         "instruction": (
             "You are an independent code reviewer. The change already passed trusted "
             "validation gates. Decide whether the retained result is safe to present for "

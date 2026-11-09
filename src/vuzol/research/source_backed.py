@@ -232,9 +232,7 @@ def assemble_source_report(
         )
     except SynthesisError as error:
         raise SourceBackedError("research_report_invalid", str(error)) from error
-    blobs = tuple(
-        RawSourceBlob(uri=uri, content=raw_by_uri[uri].content) for uri in ordered_uris
-    )
+    blobs = tuple(RawSourceBlob(uri=uri, content=raw_by_uri[uri].content) for uri in ordered_uris)
     anchor = min(item.retrieved_at for item in retrieved)
     return (
         report_to_json(

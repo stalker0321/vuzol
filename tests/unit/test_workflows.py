@@ -273,7 +273,7 @@ def test_retrying_task_can_restore_early_workflow_status(target: TaskStatus) -> 
 def test_report_contract_rejects_missing_or_unbounded_evidence(field: str, value: object) -> None:
     from vuzol.research.report import TaskReport
 
-    report = {
+    report: dict[str, object] = {
         "summary": "Repository inspected",
         "findings": ["Read README"],
         "sources": ["README.md:1"],

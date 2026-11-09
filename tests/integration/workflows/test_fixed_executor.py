@@ -105,7 +105,9 @@ async def test_frozen_budget_bounds_successful_and_unsuccessful_repairs(
     if passes and failed_stage == "validate":
         await finish(StepOutcome.succeeded(), "review")
     async with factory() as session:
-        run = await session.get(Run, run_id)
+        loaded_run = await session.get(Run, run_id)
+        assert loaded_run is not None
+        run = loaded_run
         assert run is not None
         assert run.status is (RunStatus.COMPLETED if passes else RunStatus.BLOCKED)
         steps = list(await session.scalars(select(Step).where(Step.run_id == run_id)))
@@ -151,7 +153,9 @@ async def test_fixed_run_lease_recovery_and_cancellation_fence(postgres_dsn: str
         with pytest.raises(LeaseLost):
             await commit_step_outcome(session, recovered, StepOutcome.succeeded())
     async with factory() as session:
-        run = await session.get(Run, run_id)
+        loaded_run = await session.get(Run, run_id)
+        assert loaded_run is not None
+        run = loaded_run
         assert run is not None and run.status is RunStatus.CANCELLED
     await engine.dispose()
 

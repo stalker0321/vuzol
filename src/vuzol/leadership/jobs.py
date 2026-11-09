@@ -76,12 +76,13 @@ async def _lock_goal(
     session: AsyncSession, goal_id: uuid.UUID, *, skip_locked: bool = False
 ) -> ManagedGoal | None:
     # Every mutation locks the goal before its jobs, including completion/cancellation.
-    return await session.scalar(
+    goal: ManagedGoal | None = await session.scalar(
         select(ManagedGoal)
         .where(ManagedGoal.id == goal_id)
         .with_for_update(skip_locked=skip_locked)
         .execution_options(populate_existing=True)
     )
+    return goal
 
 
 async def enqueue_job(

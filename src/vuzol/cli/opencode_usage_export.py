@@ -117,7 +117,9 @@ def refresh_with_cli(
             != config.owner_launcher_sha256
         ):
             raise AccountAuthError("auth_refresh_owner_changed")
-    with closing(sqlite3.connect(oauth.store_path.as_uri() + "?mode=ro", timeout=0.2)) as db:
+    with closing(
+        sqlite3.connect(oauth.store_path.as_uri() + "?mode=ro", uri=True, timeout=0.2)
+    ) as db:
         rows = db.execute("SELECT id FROM account LIMIT 2").fetchall()
         if rows != [(oauth.account_id,)]:
             raise AccountAuthError("auth_refresh_scope_invalid")

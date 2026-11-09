@@ -326,5 +326,3 @@ def compile_proxy_allowlist(
 
     # Stable order
     return tuple(sorted(seen.values(), key=lambda t: (t.hostname, t.port)))
-
-

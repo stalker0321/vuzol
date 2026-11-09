@@ -111,4 +111,5 @@ def test_old_or_undated_log_cannot_be_relabelled_as_a_fresh_measurement(
     assert not snap.ok
     assert snap.weekly.remaining_percent is None
     if timestamp:
+        assert snap.observed_at is not None
         assert snap.observed_at < NOW - timedelta(days=1)

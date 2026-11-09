@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import func, select
@@ -23,7 +25,7 @@ from tests.integration.leadership.test_managed_goal_flow import (
 from vuzol.execution.result_apply import ResultApplyHandler
 from vuzol.leadership.commands import LeadCommand
 from vuzol.leadership.evidence import new_effect_blocker
-from vuzol.leadership.model import LeadDecision
+from vuzol.leadership.model import LeadDecision, LeadSnapshot
 from vuzol.leadership.persistence import LeadershipCommandReceipt, ManagedGoal
 from vuzol.leadership.worker import ProjectLeadWorker
 from vuzol.storage.models import (
@@ -77,7 +79,7 @@ async def control(factory: object, goal_id: uuid.UUID, name: str) -> object:
 
 
 class StartModel:
-    async def decide(self, snapshot: object) -> LeadDecision:
+    async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
         if snapshot is not None and snapshot.current_package_status == "draft":
             from vuzol.leadership.model import LeadCommandDraft
 
@@ -100,6 +102,7 @@ async def test_pause_propagates_to_running_package(postgres_dsn: str) -> None:
         assert (await control(factory, goal_id, "pause_goal")).status == "applied"  # type: ignore[attr-defined]
         async with factory() as session:
             package = await session.scalar(select(WorkPackage))
+            assert package is not None
             assert package.status.value == "paused", (
                 f"goal paused but package is {package.status.value}"
             )
@@ -141,10 +144,14 @@ async def test_ack_retry_does_not_repeat_mutations(postgres_dsn: str) -> None:
         with pytest.raises(RuntimeError, match="crash-before-ack"):
             await worker.process_one()
         async with factory() as session:
-            before = (await session.get(ManagedGoal, goal_id)).version
+            loaded_goal = await session.get(ManagedGoal, goal_id)
+            assert loaded_goal is not None
+            before = loaded_goal.version
         await worker.process_one()
         async with factory() as session:
-            after = (await session.get(ManagedGoal, goal_id)).version
+            loaded_goal = await session.get(ManagedGoal, goal_id)
+            assert loaded_goal is not None
+            after = loaded_goal.version
             count = await session.scalar(
                 select(func.count())
                 .select_from(LeadershipCommandReceipt)
@@ -160,7 +167,7 @@ async def test_resume_wakes_parked_goal(postgres_dsn: str) -> None:
         goal_id = await _enable(factory, await _session(factory))
 
         class Idle:
-            async def decide(self, snapshot: object) -> LeadDecision:
+            async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
                 del snapshot
                 return LeadDecision()
 
@@ -174,7 +181,7 @@ async def test_resume_wakes_parked_goal(postgres_dsn: str) -> None:
 
 
 async def test_goal_description_requires_actual_evidence(
-    postgres_dsn: str, tmp_path: object, monkeypatch: pytest.MonkeyPatch
+    postgres_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from tests.integration.leadership.test_managed_goal_flow import (
         run_managed_goal_flow,
@@ -185,12 +192,13 @@ async def test_goal_description_requires_actual_evidence(
     await run_managed_goal_flow(
         postgres_dsn,
         tmp_path,
-        monkeypatch,  # type: ignore[arg-type]
+        monkeypatch,
         request="Implement working OAuth login",
         expected_completed=False,
     )
     async with _factory(postgres_dsn) as factory, factory() as session:
         goal = await session.scalar(select(ManagedGoal))
+        assert goal is not None
         assert goal.lifecycle != "completed", "OAuth goal completed by writing marker files"
 
 
@@ -206,7 +214,7 @@ async def _assert_outcome_wakes(postgres_dsn: str, reason: WorkPackagePauseReaso
     class Noted:
         calls = 0
 
-        async def decide(self, snapshot: object) -> LeadDecision:
+        async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
             self.calls += 1
             del snapshot
             return LeadDecision()
@@ -236,12 +244,12 @@ async def test_late_response_after_lease_takeover(postgres_dsn: str) -> None:
         await _enable(factory, await _session(factory))
 
         class Idle:
-            async def decide(self, snapshot: object) -> LeadDecision:
+            async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
                 del snapshot
                 return LeadDecision()
 
         class Late:
-            async def decide(self, snapshot: object) -> LeadDecision:
+            async def decide(self, snapshot: LeadSnapshot) -> LeadDecision:
                 del snapshot
                 past = datetime.now(UTC) - timedelta(seconds=5)
                 async with factory.begin() as session:
@@ -355,7 +363,7 @@ async def test_revoke_before_effect_intent_records_nothing(postgres_dsn: str) ->
                 generation=1,
             ),
         )
-        handler = ResultApplyHandler(factory, SimpleNamespace(), SimpleNamespace())
+        handler = ResultApplyHandler(factory, MagicMock(), MagicMock())
         with pytest.raises(ValueError, match=r"delegation_revoked|managed_goal_inactive"):
             await handler._record_intent(
                 request,

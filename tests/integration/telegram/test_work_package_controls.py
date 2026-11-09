@@ -211,6 +211,7 @@ async def test_rendered_button_uses_durable_epoch_and_stale_card_fails_closed(
     assert stale_open.status is IngressStatus.HANDLED and stale_open.reason == "render_detail"
     async with factory() as session:
         package = await session.get(WorkPackage, result.package_id)
+        assert package is not None
         task_count = await session.scalar(select(func.count()).select_from(Task))
     assert package is not None and package.status is WorkPackageStatus.RUNNING
     assert package.version == 3 and task_count == 1
@@ -454,6 +455,7 @@ async def test_replan_button_emits_lead_event_without_arming_legacy_planner(
 
     async with factory.begin() as session:
         package = await session.get(WorkPackage, result.package_id)
+        assert package is not None
         package.managed_goal_id = goal_id
     client = FakeTelegramClient(next_message_id=901)
     delivery = TelegramDeliveryService(
@@ -522,6 +524,7 @@ async def test_replan_button_emits_lead_event_without_arming_legacy_planner(
 
     async with factory() as session:
         package = await session.get(WorkPackage, result.package_id)
+        assert package is not None
         revisions = tuple(
             (
                 await session.scalars(

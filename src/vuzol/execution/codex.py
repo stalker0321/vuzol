@@ -89,8 +89,11 @@ class ExecutionEnvelopeFactory:
         factory: async_sessionmaker[AsyncSession],
         settings: Settings,
         registries: ConfigurationBundle,
+        *,
+        node: str | None = None,
     ) -> None:
         self._factory = factory
+        self._node = node
         self._settings = settings
         self._registries = registries
         self._worktree_root = trusted_root(settings.worktree_root, create=True)
@@ -327,6 +330,14 @@ class ExecutionEnvelopeFactory:
                 termination_stage=TerminationStage.NONE,
                 runtime_metadata={
                     **(account_execution.runtime_metadata if account_execution is not None else {}),
+                    **(
+                        {
+                            "node": self._node,
+                            "runtime_envelope": envelope.model_dump(mode="json", exclude={"stdin"}),
+                        }
+                        if self._node is not None
+                        else {}
+                    ),
                     "executor_model": profile.model,
                     "executor_reasoning_effort": profile.model_reasoning_effort,
                     "configured_deadline_seconds": spec.timeout_seconds,

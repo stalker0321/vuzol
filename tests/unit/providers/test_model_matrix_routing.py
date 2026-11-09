@@ -160,3 +160,44 @@ async def test_busy_pinned_profile_waits_without_using_alternate(route_call, mon
     assert await claim(c) is None
     c.reserve.assert_not_awaited()
     c.blocked.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("allowed", [frozenset(), frozenset({"pi-only"})])
+async def test_node_profile_filter_leaves_other_routes_for_local_lanes(route_call, allowed):
+    c = route_call
+    assert (
+        await routing.claim_routed_step(
+            c.session,
+            settings=c.settings,
+            registries=c.registries,
+            owner="node",
+            lease_seconds=30,
+            candidate_limit=1,
+            profile_ids=allowed,
+            step_types=frozenset({"execute_code"}),
+        )
+        is None
+    )
+    assert c.step.status is StepStatus.QUEUED
+    c.reserve.assert_not_awaited()
+    c.persist.assert_not_awaited()
+    c.blocked.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_node_profile_filter_can_claim_matching_route(route_call):
+    c = route_call
+    assert (
+        await routing.claim_routed_step(
+            c.session,
+            settings=c.settings,
+            registries=c.registries,
+            owner="node",
+            lease_seconds=30,
+            candidate_limit=1,
+            profile_ids=frozenset({c.profile.id}),
+            step_types=frozenset({"execute_code"}),
+        )
+        is not None
+    )

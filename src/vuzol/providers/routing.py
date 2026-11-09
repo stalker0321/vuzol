@@ -94,9 +94,10 @@ async def claim_routed_step(
     candidate_limit: int,
     class_limits: dict[QueueClass, int] | None = None,
     step_types: frozenset[str] = frozenset(PROVIDER_STEP_ROLES),
+    profile_ids: frozenset[str] | None = None,
     free_space_probe: FreeSpaceProbe | None = None,
 ) -> LeaseToken | None:
-    if candidate_limit < 1 or not step_types:
+    if candidate_limit < 1 or not step_types or profile_ids == frozenset():
         return None
     await session.execute(select(func.pg_advisory_xact_lock(STEP_CLAIM_LOCK_KEY)))
     rows = await session.execute(
@@ -176,6 +177,8 @@ async def claim_routed_step(
         )
         attempt = decision_count + 1
         if provider_call_count >= settings.limits.provider_attempts:
+            if profile_ids is not None:
+                continue
             await _block_route(
                 session,
                 step=step,
@@ -210,6 +213,8 @@ async def claim_routed_step(
                 or run.selected_route.get("chat_work_spec_revision"),
             )
         except ValueError:
+            if profile_ids is not None:
+                continue
             await _block_route(
                 session,
                 step=step,
@@ -229,6 +234,8 @@ async def claim_routed_step(
             if facts is not None:
                 estimated_input += (len(facts.content) + 3) // 4
         if work_context and estimated_input > settings.limits.provider_call_input_tokens:
+            if profile_ids is not None:
+                continue
             await _block_route(
                 session,
                 step=step,
@@ -249,6 +256,8 @@ async def claim_routed_step(
             limits=settings.limits,
         )
         if requested_output == 0:
+            if profile_ids is not None:
+                continue
             await _block_route(
                 session, step=step, run=run, task=task, category="budget_exhausted", quota=True
             )
@@ -274,6 +283,8 @@ async def claim_routed_step(
             try:
                 allowed_fallbacks = registries.profiles.get(failed_profile_id).fallback_profile_ids
             except RegistryError:
+                if profile_ids is not None:
+                    continue
                 await _block_route(
                     session,
                     step=step,
@@ -304,6 +315,8 @@ async def claim_routed_step(
                 or not isinstance(value, str)
                 or not value
             ):
+                if profile_ids is not None:
+                    continue
                 await _block_route(
                     session,
                     step=step,
@@ -319,6 +332,8 @@ async def claim_routed_step(
             try:
                 role = conversation_provider_role(run.selected_route)
             except ValueError:
+                if profile_ids is not None:
+                    continue
                 await _block_route(
                     session,
                     step=step,
@@ -332,6 +347,8 @@ async def claim_routed_step(
             if responder is None or not assignment_matches(
                 responder, run.selected_route.get("profile_revision")
             ):
+                if profile_ids is not None:
+                    continue
                 await _block_route(
                     session,
                     step=step,
@@ -368,6 +385,8 @@ async def claim_routed_step(
                 else None
             )
         except (ValueError, KeyError, ExecutorPreferenceError):
+            if profile_ids is not None:
+                continue
             await _block_route(
                 session,
                 step=step,
@@ -391,6 +410,8 @@ async def claim_routed_step(
                 project_pin = resolve_route_pin(preference, registries)
                 if project_pin is None:
                     # Stored pin must not silently degrade to unrestricted auto routing.
+                    if profile_ids is not None:
+                        continue
                     await _persist_decision(
                         session,
                         run=run,
@@ -469,6 +490,8 @@ async def claim_routed_step(
             try:
                 primary = registries.profiles.get(default_executor_id)
             except RegistryError:
+                if profile_ids is not None:
+                    continue
                 await _block_route(
                     session,
                     step=step,
@@ -526,6 +549,9 @@ async def claim_routed_step(
             ),
         )
         decision = select_profile(policy_request, profiles, states)
+        # Routing stays authoritative; node capacity must not change the chosen provider.
+        if profile_ids is not None and decision.selected_profile_id not in profile_ids:
+            continue
         ordered = tuple(
             profile_id
             for profile_id in (decision.selected_profile_id, *decision.alternatives)
@@ -540,6 +566,8 @@ async def claim_routed_step(
         consent_required = False
         goal_budget_hit = False
         for profile_id in ordered:
+            if profile_ids is not None and profile_id not in profile_ids:
+                continue
             profile = registries.profiles.get(profile_id)
             estimate = estimate_reservation(
                 profile,
@@ -610,6 +638,8 @@ async def claim_routed_step(
             pin_decision_inputs["default_executor_profile_id"] = default_executor_id
         if selected is None or reservation is None:
             exhausted = bool(ordered) or _quota_exhausted(decision)
+            if profile_ids is not None:
+                continue
             await _persist_decision(
                 session,
                 run=run,

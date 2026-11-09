@@ -150,3 +150,93 @@ def test_default_worker_is_fenced_and_does_not_replace_other_choices(
         await engine.dispose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("provider", ["pi", "codex"])
+def test_node_profile_filter_preserves_local_coding_routes(
+    postgres_dsn: str,
+    tmp_path: Path,
+    provider: str,
+) -> None:
+    async def scenario() -> None:
+        from vuzol.storage.models import ProviderBudgetReservation
+
+        engine, factory = storage(postgres_dsn)
+        state = tmp_path / "state"
+        state.mkdir()
+        configured = profile(
+            "worker",
+            provider=provider,
+            api_base_url=None,
+            credential_reference=None,
+            launch_mode="cli",
+            runtime_identity="worker",
+            state_directory=state,
+            sandbox_required=True,
+            supported_task_types=frozenset({"coding"}),
+            capabilities=frozenset({"code_edit"}),
+        )
+        settings, registries = bundle(tmp_path, configured)
+        task_id, _run_id, step_id = await seed_provider_step(
+            factory,
+            step_type="execute_code",
+            capabilities=["code_edit"],
+        )
+        async with factory.begin() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            task.task_type = "coding"
+            await synchronize_profiles(
+                session,
+                registries.profiles.items(),
+                configuration_revision="a" * 64,
+            )
+        # Step-type filtering must also leave an otherwise runnable profile alone.
+        async with factory.begin() as session:
+            assert (
+                await claim_routed_step(
+                    session,
+                    settings=settings,
+                    registries=registries,
+                    owner="node",
+                    lease_seconds=60,
+                    candidate_limit=20,
+                    step_types=frozenset({"execute_agent"}),
+                    profile_ids=frozenset({"worker"}),
+                )
+                is None
+            )
+        async with factory.begin() as session:
+            token = await claim_routed_step(
+                session,
+                settings=settings,
+                registries=registries,
+                owner="node",
+                lease_seconds=60,
+                candidate_limit=20,
+                step_types=frozenset({"execute_code"}),
+                profile_ids=frozenset({"worker"}) if provider == "pi" else frozenset({"pi-only"}),
+            )
+        if provider == "pi":
+            assert token is not None and token.step.id == step_id
+        else:
+            assert token is None
+            async with factory() as session:
+                step = await session.get(Step, step_id)
+                assert step is not None and step.status is StepStatus.QUEUED
+                assert step.attempt_count == 0 and step.executor_profile_id is None
+                assert not (await session.scalars(select(RoutingDecision))).all()
+                assert not (await session.scalars(select(ProviderBudgetReservation))).all()
+            async with factory.begin() as session:
+                token = await claim_routed_step(
+                    session,
+                    settings=settings,
+                    registries=registries,
+                    owner="local",
+                    lease_seconds=60,
+                    candidate_limit=20,
+                )
+            assert token is not None and token.step.id == step_id
+        await engine.dispose()
+
+    asyncio.run(scenario())

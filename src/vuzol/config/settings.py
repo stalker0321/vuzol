@@ -406,8 +406,8 @@ class WorkflowSettings(BaseModel):
 class ExecutionNode(BaseModel):
     """Another machine's rootless Docker, reached through a socket forwarded to this host.
 
-    Empty `execution.nodes` keeps every sandbox here. A node runs model calls of
-    read-only-state (pi) profiles; see vuzol.execution.node.
+    Empty `execution.nodes` keeps every sandbox here. Nodes run pi model calls
+    and optional coding lanes; OAuth refresh owners stay local.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -415,6 +415,8 @@ class ExecutionNode(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,30}$")
     docker_socket: Path
     model_call_parallelism: int = Field(default=1, ge=0, le=64)
+    provider_parallelism: int = Field(default=0, ge=0, le=64)
+    max_copy_back_bytes: int = Field(default=2 * 1024**3, ge=1)
 
     @field_validator("docker_socket")
     @classmethod

@@ -38,7 +38,11 @@ from vuzol.execution.git import LocalGit
 from vuzol.execution.handlers import PrepareWorktreeHandler
 from vuzol.execution.journal import ExecutionJournal
 from vuzol.execution.proxy_service import ProxyServiceManager
-from vuzol.execution.reconciliation import ProxyStartupReconciler, TurnStartupReconciler
+from vuzol.execution.reconciliation import (
+    NodeStepReconciler,
+    ProxyStartupReconciler,
+    TurnStartupReconciler,
+)
 from vuzol.execution.result_validation import ResultValidationHandler
 from vuzol.execution.sandbox import RootlessDockerRuntime, validate_seccomp_profile
 from vuzol.execution.static_build import StaticBuildHandler
@@ -101,6 +105,7 @@ class ExecutorChain:
         control_worktrees: ExecutorLane | None = None,
         provider_parallelism: int = 1,
         model_calls: tuple[ExecutorLane, ...] = (),
+        node_providers: tuple[ExecutorLane, ...] = (),
         leads: tuple[ExecutorLane, ...] = (),
     ) -> None:
         self._worktrees = worktrees
@@ -113,6 +118,7 @@ class ExecutorChain:
         self._control_worktrees = control_worktrees
         self._provider_parallelism = provider_parallelism
         self._model_calls = model_calls
+        self._node_providers = node_providers
         self._leads = leads
 
     def lanes(self) -> tuple[ExecutorLane, ...]:
@@ -128,6 +134,7 @@ class ExecutorChain:
                 self._worktrees,
                 *([self._providers] * self._provider_parallelism),
                 *self._model_calls,
+                *self._node_providers,
             )
             if worker is not None
         )
@@ -322,6 +329,20 @@ async def run() -> None:
                 name: str(url) for name, url in settings.execution.worker_mcp_servers.items()
             },
         )
+        node_providers = _node_providers(
+            settings,
+            runtime.registries,
+            factory,
+            resolver,
+            journal,
+            artifacts=artifact_store,
+            worktrees=worktree_service,
+            worktree_access=worktree_access,
+            owner=owner,
+        )
+        for _node, _worker, reaper in node_providers:
+            with suppress(Exception):  # an unreachable node must not stop us
+                await reaper.reconcile()
         worktree_handler = PrepareWorktreeHandler(
             factory,
             runtime.registries,
@@ -520,6 +541,9 @@ async def run() -> None:
             for *_lane, reaper in node_calls:
                 with suppress(Exception):  # an unreachable node must not stop us
                     await reaper.reconcile()
+            for _node, _worker, reaper in node_providers:
+                with suppress(Exception):
+                    await reaper.reconcile()
             if proxy_manager is not None:
                 await ProxyStartupReconciler(
                     factory, proxy_manager, owner=owner
@@ -536,6 +560,11 @@ async def run() -> None:
                 control_worktrees=control_worktree_worker,
                 provider_parallelism=settings.execution.provider_parallelism,
                 model_calls=model_call_lanes,
+                node_providers=tuple(
+                    worker
+                    for node, worker, _reaper in node_providers
+                    for _ in range(node.provider_parallelism)
+                ),
                 leads=extra_leads,
             ),
             settings.workflow.poll_interval_seconds,
@@ -547,6 +576,107 @@ async def run() -> None:
         )
     finally:
         await engine.dispose()
+
+
+def _node_providers(
+    settings: Settings,
+    registries: ConfigurationBundle,
+    factory: async_sessionmaker[AsyncSession],
+    resolver: ScopedSecretResolver,
+    journal: ExecutionJournal | None,
+    *,
+    artifacts: ArtifactStore,
+    worktrees: WorktreeService,
+    worktree_access: WorktreeAccessManager,
+    owner: str,
+) -> tuple[tuple[ExecutionNode, RoutedWorkflowWorker, NodeStepReconciler], ...]:
+    """Extra coding capacity for pi; OAuth state with refresh owners stays local."""
+    from vuzol.execution.node import NodeDockerRuntime, NodeProxyServiceManager
+
+    profiles = tuple(
+        p
+        for p in registries.profiles.items()
+        if p.enabled
+        and p.launch_mode is LaunchMode.CLI
+        and p.provider == "pi"
+        and supported_profile(p)
+    )
+    if not profiles:
+        return ()
+    # The helper image must already be on the node; model calls use the same one.
+    sandbox_id = settings.execution.model_call_sandbox_profile
+    helper_image = registries.sandboxes.get(sandbox_id).image if sandbox_id else None
+    groups = []
+    for node in settings.execution.nodes:
+        if node.provider_parallelism == 0:
+            continue
+        local = settings.execution.rootless_docker_socket
+        node_runtime = NodeDockerRuntime(
+            node.id,
+            node.docker_socket,
+            local,
+            journal=journal,
+            max_copy_back_bytes=node.max_copy_back_bytes,
+            writable_worktree_only=True,
+        )
+        proxy_image = settings.execution.proxy_image
+        node_proxy = (
+            NodeProxyServiceManager(
+                node.docker_socket,
+                local,
+                NODE_PROXY_RUNTIME_ROOT / node.id,
+                proxy_image,
+                helper_image=helper_image,
+            )
+            if proxy_image is not None and helper_image is not None
+            else None
+        )
+        envelopes = ExecutionEnvelopeFactory(factory, settings, registries, node=node.id)
+        transport = SandboxCodexTransport(node_runtime, envelopes, artifacts, node_proxy)
+        adapters = {profile.id: cli_adapter(profile, transport) for profile in profiles}
+        registry = AdapterRegistry(
+            registries.profiles,
+            resolver,
+            adapters=adapters,
+            session_factory=factory,
+        )
+        handler = ProviderStepHandler(
+            factory,
+            registries,
+            registry,
+            worktrees=worktrees,
+            artifacts=artifacts,
+            worktree_access=worktree_access,
+            redaction_patterns=settings.redaction_patterns,
+            dependency_provisioning_enabled=settings.dependency_provisioning.enabled,
+            worker_mcp_servers={
+                name: str(url) for name, url in settings.execution.worker_mcp_servers.items()
+            },
+        )
+        worker = RoutedWorkflowWorker(
+            settings,
+            factory,
+            registries=registries,
+            owner=f"{owner}:provider:{node.id}",
+            handlers={"execute_code": executor_provider_handlers(handler)["execute_code"]},
+            queue_classes=frozenset({QueueClass.HEAVY}),
+            profile_ids=frozenset(adapters),
+            ready=node.docker_socket.is_socket,
+        )
+        groups.append(
+            (
+                node,
+                worker,
+                NodeStepReconciler(
+                    factory,
+                    node_runtime,
+                    node_proxy,
+                    node=node.id,
+                    owner=owner,
+                ),
+            )
+        )
+    return tuple(groups)
 
 
 def _node_model_calls(
@@ -576,7 +706,13 @@ def _node_model_calls(
         if node.model_call_parallelism == 0:
             continue
         local = settings.execution.rootless_docker_socket
-        node_runtime = NodeDockerRuntime(node.id, node.docker_socket, local, journal=journal)
+        node_runtime = NodeDockerRuntime(
+            node.id,
+            node.docker_socket,
+            local,
+            journal=journal,
+            max_copy_back_bytes=node.max_copy_back_bytes,
+        )
         node_proxy = NodeProxyServiceManager(
             node.docker_socket,
             local,

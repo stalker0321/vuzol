@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -242,6 +242,8 @@ class RoutedWorkflowWorker(WorkflowWorker):
         handlers: Mapping[str, StepHandler],
         queue_classes: frozenset[QueueClass] | None = None,
         free_space_probe: FreeSpaceProbe | None = None,
+        profile_ids: frozenset[str] | None = None,
+        ready: Callable[[], bool] = lambda: True,
     ) -> None:
         effective_queues = queue_classes or frozenset({QueueClass.LIGHT})
         super().__init__(
@@ -253,6 +255,13 @@ class RoutedWorkflowWorker(WorkflowWorker):
             free_space_probe=free_space_probe,
         )
         self._registries = registries
+        self._profile_ids = profile_ids
+        self._ready = ready
+
+    async def process_one(self) -> bool:
+        if not self._ready():
+            return False
+        return await super().process_one()
 
     async def _claim(
         self, session: AsyncSession, class_limits: Mapping[QueueClass, int]
@@ -266,5 +275,6 @@ class RoutedWorkflowWorker(WorkflowWorker):
             candidate_limit=self._settings.workflow.claim_candidate_limit,
             class_limits=dict(class_limits),
             step_types=frozenset(self._handlers),
+            profile_ids=self._profile_ids,
             free_space_probe=self._free_space_probe,
         )

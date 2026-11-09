@@ -692,7 +692,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_refresh_subscription_limits_tick",
       "sources": [
-        "src/vuzol/cli/executor.py:636"
+        "src/vuzol/cli/executor.py:772"
       ],
       "producers": [],
       "consumers": [],
@@ -701,7 +701,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_run_loop",
       "sources": [
-        "src/vuzol/cli/executor.py:715"
+        "src/vuzol/cli/executor.py:851"
       ],
       "producers": [],
       "consumers": [],
@@ -809,7 +809,7 @@
     {
       "id": "module:vuzol.cli.executor",
       "sources": [
-        "src/vuzol/cli/executor.py:151"
+        "src/vuzol/cli/executor.py:158"
       ],
       "producers": [],
       "consumers": [],
@@ -1036,13 +1036,14 @@
         "src/vuzol/leadership/task_queue.py:185",
         "src/vuzol/leadership/wakeups.py:52",
         "src/vuzol/leadership/wakeups.py:102",
-        "src/vuzol/leadership/worker.py:1091",
+        "src/vuzol/leadership/worker.py:1446",
+        "src/vuzol/leadership/worker.py:1100",
         "src/vuzol/workflows/lead_events.py:104",
         "src/vuzol/workflows/lead_events.py:130",
         "src/vuzol/workflows/lead_events.py:206"
       ],
       "consumers": [
-        "src/vuzol/leadership/worker.py:154"
+        "src/vuzol/leadership/worker.py:156"
       ],
       "scenario": "goal"
     },
@@ -1076,7 +1077,7 @@
         "src/vuzol/telegram/ingress.py:1120"
       ],
       "consumers": [
-        "src/vuzol/cli/executor.py:660"
+        "src/vuzol/cli/executor.py:796"
       ],
       "scenario": "accounts"
     },
@@ -1092,7 +1093,7 @@
         "src/vuzol/interpretation/service.py:1635",
         "src/vuzol/interpretation/service.py:1425",
         "src/vuzol/interpretation/service.py:1569",
-        "src/vuzol/leadership/worker.py:779",
+        "src/vuzol/leadership/worker.py:786",
         "src/vuzol/projects/naming.py:86",
         "src/vuzol/projects/naming.py:180",
         "src/vuzol/projects/naming.py:207",
@@ -1163,10 +1164,10 @@
         "src/vuzol/discussion/sequencer.py:781",
         "src/vuzol/discussion/sequencer.py:789",
         "src/vuzol/discussion/sequencer.py:773",
-        "src/vuzol/discussion/service.py:1161",
-        "src/vuzol/discussion/service.py:1294",
+        "src/vuzol/discussion/service.py:1172",
+        "src/vuzol/discussion/service.py:1305",
         "src/vuzol/leadership/service.py:1297",
-        "src/vuzol/leadership/worker.py:1198",
+        "src/vuzol/leadership/worker.py:1207",
         "src/vuzol/telegram/controls.py:558",
         "src/vuzol/telegram/controls.py:670",
         "src/vuzol/telegram/ingress.py:1328",

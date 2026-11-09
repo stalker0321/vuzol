@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 
 from sqlalchemy import String, and_, cast, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -21,6 +22,7 @@ from vuzol.execution.proxy_service import (
     ProxyServiceError,
     ProxyServiceManager,
 )
+from vuzol.execution.sandbox import RootlessDockerRuntime
 from vuzol.execution.turn_transport import cleanup_turn_runtime, turn_runtime_lock
 from vuzol.leadership.fencing import TurnClaim
 from vuzol.leadership.invocation_context import TurnInvocationContext, invocation_current
@@ -376,6 +378,118 @@ async def release_reaped_account_tickets(
             cleanup_confirmed=True,
         )
     return records[-1][0] if len(records) == 100 else None
+
+
+class NodeStepReconciler:
+    """Use the local step lease authority to reap only this node's coding runs."""
+
+    def __init__(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        runtime: RootlessDockerRuntime,
+        proxy: ProxyServiceManager | None,
+        *,
+        node: str,
+        owner: str,
+    ) -> None:
+        self._factory = factory
+        self._runtime = runtime
+        self._proxy = proxy
+        self._node = node
+        self._owner = owner
+        self._ticket_cursor: uuid.UUID | None = None
+
+    async def reconcile(self) -> int:
+        async with self._factory() as session:
+            ids = tuple(
+                (
+                    await session.scalars(
+                        select(SupervisedProcess.id)
+                        .where(
+                            SupervisedProcess.step_id.is_not(None),
+                            SupervisedProcess.reaped_at.is_(None),
+                            SupervisedProcess.runtime_metadata["node"].astext == self._node,
+                        )
+                        .order_by(SupervisedProcess.created_at)
+                        .limit(100)
+                    )
+                ).all()
+            )
+        reaped = 0
+        for process_id in ids:
+            reaped += int(await self._reap(process_id))
+        if self._proxy is not None:
+            # Also covers a crash after proxy creation but before the process row.
+            await ProxyStartupReconciler(
+                self._factory,
+                self._proxy,
+                owner=self._owner,
+            ).reconcile_startup()
+        self._ticket_cursor = await release_reaped_account_tickets(
+            self._factory, self._ticket_cursor
+        )
+        return reaped
+
+    async def _reap(self, process_id: uuid.UUID) -> bool:
+        async with self._factory.begin() as session:
+            process = await session.get(SupervisedProcess, process_id, with_for_update=True)
+            if (
+                process is None
+                or process.reaped_at is not None
+                or process.runtime_metadata.get("node") != self._node
+            ):
+                return False
+            try:
+                envelope = ProcessEnvelope.model_validate(
+                    {**process.runtime_metadata["runtime_envelope"], "stdin": ""}
+                )
+            except (KeyError, ValueError, TypeError):
+                return False
+            if (
+                envelope.task_id,
+                envelope.run_id,
+                envelope.step_id,
+                envelope.worktree_id,
+                envelope.lease_generation,
+            ) != (
+                process.task_id,
+                process.run_id,
+                process.step_id,
+                process.worktree_id,
+                process.lease_generation,
+            ):
+                return False
+            manifest = ProxyRecoveryManifest(
+                Path("/"),
+                envelope.task_id,
+                envelope.run_id,
+                envelope.step_id,
+                envelope.lease_generation,
+                "",
+            )
+            state = await ProxyStartupReconciler._read_state_for_update(session, manifest)
+            classification = classify_recovery_manifest(manifest, state, now=datetime.now(UTC))
+            if classification not in {
+                ReconciliationClassification.REMOVED_TERMINAL_LEFTOVER,
+                ReconciliationClassification.REMOVED_EXPIRED_LEASE,
+                ReconciliationClassification.REMOVED_OLD_GENERATION,
+            }:
+                return False
+            try:
+                await self._runtime.cleanup(envelope)
+                if self._proxy is not None:
+                    for found in self._proxy.recovery_manifests():
+                        if found.turn_binding is None and found.identity == manifest.identity:
+                            await self._proxy.cleanup_recovery_manifest(found)
+                elif not envelope.sandbox.network_disabled:
+                    return False
+            except Exception:
+                process.status = ProcessStatus.UNKNOWN
+                process.outcome = process.outcome or ProcessOutcome.UNKNOWN
+                process.runtime_metadata = {**process.runtime_metadata, "cleanup_confirmed": False}
+                return False
+            mark_reaped(process)
+            return True
 
 
 class TurnStartupReconciler:

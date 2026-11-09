@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
+from vuzol.config.models import LaunchMode, NetworkPolicy, ProviderProfileConfig, ProviderRole
 from vuzol.config.registries import ConfigurationBundle, ProfileRegistry, RegistryError
 from vuzol.config.revision import assignment_matches, assignment_revision, content_revision
 from vuzol.projects.executor_preference import (
@@ -61,11 +61,14 @@ def slot_for_role(role: ProviderRole, *, strong: bool) -> str | None:
 
 
 def eligible_profiles(
-    registries: ConfigurationBundle, slot: str
+    registries: ConfigurationBundle, slot: str, *, project_id: str | None = None
 ) -> tuple[ProviderProfileConfig, ...]:
+    """With a project, CLI profiles whose egress its network policy forbids are left out:
+    choosing one used to fail only at launch (backlog 2026-10-24)."""
     if slot not in SLOT_ROLES:
         raise ExecutorPreferenceError("unknown model role")
     role = SLOT_ROLES[slot]
+    allowed = None if project_id is None else _egress(registries.projects.get(project_id).network)
     return tuple(
         sorted(
             (
@@ -76,10 +79,21 @@ def eligible_profiles(
                 and role in profile.roles
                 and (role is not ProviderRole.EXECUTOR or profile.launch_mode is LaunchMode.CLI)
                 and (slot != "think" or conversation_compatible(profile, role))
+                and (
+                    allowed is None
+                    or profile.launch_mode is not LaunchMode.CLI
+                    or _egress(profile.runtime_network) <= allowed
+                )
             ),
             key=lambda profile: (profile.routing_priority, profile.id),
         )
     )
+
+
+def _egress(policy: NetworkPolicy) -> frozenset[tuple[str, int]]:
+    from vuzol.execution.egress import compile_proxy_allowlist
+
+    return frozenset((t.hostname, t.port) for t in compile_proxy_allowlist(policy))
 
 
 def assignment_snapshot(value: object) -> dict[str, Any]:
@@ -155,7 +169,11 @@ async def set_assignment(
     registries: ConfigurationBundle,
 ) -> None:
     chosen = next(
-        (profile for profile in eligible_profiles(registries, slot) if profile.id == profile_id),
+        (
+            profile
+            for profile in eligible_profiles(registries, slot, project_id=project_id)
+            if profile.id == profile_id
+        ),
         None,
     )
     if profile_id is not None and chosen is None:

@@ -234,3 +234,28 @@ def test_legacy_status_view_reports_matrix_executor_instead_of_auto():
     assert view.profile_id == profile.id and view.model == profile.model
     label = format_preference_label(view)
     assert profile.id in label and profile.model in label and "automatic" not in label
+
+
+def test_a_project_offers_only_cli_profiles_its_network_policy_allows():
+    """Backlog 2026-10-24: /model accepted a profile whose egress the project forbids,
+    and the call then failed at launch ("turn CLI egress exceeds project policy")."""
+    from vuzol.config.models import NetworkPolicy
+
+    def policy(*urls):
+        return NetworkPolicy(
+            enabled=True, destinations=tuple({"url": url, "purpose": "test"} for url in urls)
+        )
+
+    wide = configured(profile_id="wide").model_copy(
+        update={"runtime_network": policy("https://chatgpt.com", "https://other.example")}
+    )
+    narrow = configured(profile_id="narrow").model_copy(
+        update={"runtime_network": policy("https://chatgpt.com")}
+    )
+    api = configured("openai-compatible", profile_id="api")
+    registries = bundle(wide, narrow, api)
+    registries.projects.get.return_value = MagicMock(network=policy("https://chatgpt.com"))
+
+    assert set(eligible_profiles(registries, "lead", project_id="p")) == {api, narrow}
+    assert set(eligible_profiles(registries, "lead")) == {wide, narrow, api}
+    registries.projects.get.assert_called_with("p")

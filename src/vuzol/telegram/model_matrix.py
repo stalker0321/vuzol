@@ -95,7 +95,7 @@ async def enqueue_matrix(
     if slot is not None:
         text.extend(["", f"Выберите: {SLOT_LABELS[slot]}"])
         buttons.append((("По умолчанию", f"v3:pm:p:{row.revision}:{slot}:auto"),))
-        for profile in eligible_profiles(runtime.registries, slot):
+        for profile in eligible_profiles(runtime.registries, slot, project_id=project_id):
             buttons.append(
                 (
                     (
@@ -153,7 +153,7 @@ async def apply_matrix(
         if update.preference_profile_token is not None:
             matches = [
                 profile
-                for profile in eligible_profiles(runtime.registries, slot)
+                for profile in eligible_profiles(runtime.registries, slot, project_id=project_id)
                 if profile_token(profile) == update.preference_profile_token
             ]
             if len(matches) != 1:

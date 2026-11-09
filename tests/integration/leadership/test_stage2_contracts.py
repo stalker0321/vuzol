@@ -408,7 +408,8 @@ async def test_slow_inference_renews_both_leases(postgres_dsn):
 
         class Slow:
             async def decide(self, snapshot):
-                await asyncio.sleep(1.2)
+                # Outlive the first lease; renewals at lease/3 must keep it ours.
+                await asyncio.sleep(3.6)
                 assert not await _worker(factory, StartModel(), owner="other").process_one()
                 return await StartModel().decide(snapshot)
 
@@ -417,7 +418,8 @@ async def test_slow_inference_renews_both_leases(postgres_dsn):
             owner="slow",
             model=Slow(),
             enabled=lambda: True,
-            lease_seconds=1,
+            # One second left no margin for a late renewal on a loaded host.
+            lease_seconds=3,
             repository_paths={PROJECT: __import__("pathlib").Path(__file__).resolve().parents[3]},
         )
         assert await worker.process_one()

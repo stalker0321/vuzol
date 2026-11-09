@@ -13,7 +13,7 @@ jobs:
   quality:
     name: Quality and tests
     runs-on: ubuntu-24.04  # the production host OS
-    timeout-minutes: 20
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:16

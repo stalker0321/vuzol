@@ -3,7 +3,8 @@
 # Host-side services (executor, applier, publisher) are systemd units in ./systemd.
 name: repo
 
-x-dsn: &dsn ${VUZOL_DATABASE_DSN:-postgresql+psycopg://vuzol:vuzol-local-only@postgres:5432/vuzol}
+# Both come from /srv/vuzol/.env; there is deliberately no default password.
+x-dsn: &dsn ${VUZOL_DATABASE_DSN:?}
 
 x-logging: &logging
   driver: json-file
@@ -13,7 +14,7 @@ x-logging: &logging
 
 x-roles: &roles
   VUZOL_DATABASE_DSN_REFERENCE: env:VUZOL_DATABASE_DSN
-  VUZOL_ENVIRONMENT: development
+  VUZOL_ENVIRONMENT: production
   VUZOL_SERVICE_NAME: vuzol
   VUZOL_REGISTRY_FILE: /app/config/registries.toml
   VUZOL_REGISTRY_OVERLAY_FILE: /app/config/account-profiles.toml
@@ -95,7 +96,7 @@ services:
     environment:
       POSTGRES_DB: vuzol
       POSTGRES_USER: vuzol
-      POSTGRES_PASSWORD: ${VUZOL_POSTGRES_PASSWORD:-vuzol-local-only}
+      POSTGRES_PASSWORD: ${VUZOL_POSTGRES_PASSWORD:?}
     ports:
       - 127.0.0.1:5433:5432
     volumes:

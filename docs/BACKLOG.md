@@ -7,9 +7,6 @@ since were removed; they remain in Git history.
 
 ## Operations and security
 
-- Postgres still uses the default password, and the compose services run with
-  `VUZOL_ENVIRONMENT=development`. Changing it needs a coordinated deploy.
-- The full suite's coverage is below the 90% gate in `pyproject.toml`.
 - `codex-b` and `codex-c` point at home directories the executor cannot read. To use them in
   Vuzol, each needs its own login under `/var/lib/vuzol-provider-state/<id>`. Never copy a
   personal Codex home: two refresh owners break the login.

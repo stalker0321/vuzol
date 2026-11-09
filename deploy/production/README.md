@@ -32,6 +32,11 @@ commit. Migrations are not downgraded, so they must stay compatible with the pre
   `static-publisher`) and `/etc/vuzol/secrets.env` (`0600`, secrets only). Put a setting in
   `vuzol.env` unless one service needs a different value. Containers take theirs from
   `compose.yaml` and `/srv/vuzol/.env`. None of these files are committed: the repository is public.
+- The database password is `VUZOL_POSTGRES_PASSWORD` and `VUZOL_DATABASE_DSN` in
+  `/srv/vuzol/.env`; host units read the DSN from `secrets.env`, backups from
+  `/etc/vuzol/backup/restore_dsn`. Compose refuses to start without them. To rotate, run
+  `ALTER ROLE vuzol PASSWORD ...` in the container, update those three files and redeploy.
+  Test databases (`vuzol_test*`) belong to a separate non-superuser role `vuzol_test`.
 - Account profiles live in `/var/lib/vuzol/registry/account-profiles.toml`
   (`vodkolyan:vuzol-executor 0640`). Edit it in place and keep that group: host services
   cannot read it otherwise and crash-loop. Containers bind-mount it by inode, so after an
@@ -87,6 +92,3 @@ expired artifacts, and moves files with no artifact row into `/srv/vuzol/artifac
 (never emptied automatically). Run `vuzol-retention --json` without `--apply` to see what it would
 do.
 
-## Not cleaned up yet
-
-- Postgres uses the default password and services run with `VUZOL_ENVIRONMENT=development`.

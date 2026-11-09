@@ -255,7 +255,6 @@ def test_ast_no_call_diagnostic_with_pinned_allowlist() -> None:
         "interpretation/documents.py",
         "ops/backup/postgres_dump.py",
         "ops/backup/postgres_restore.py",
-        "ops/production_deploy.py",
         "projects/provisioning.py",
         # Fixed restart commands from settings (systemctl, vuzol-compose), 300 s
         # timeout then kill+reap; the root project-setup unit only.

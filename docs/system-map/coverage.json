@@ -1,7 +1,9 @@
 {
   "errors": [],
   "uncovered": [],
-  "stale_bindings": [],
+  "stale_bindings": [
+    "cli:vuzol-production-deploy"
+  ],
   "missing_consumers": [],
   "inventory": [
     {
@@ -491,15 +493,6 @@
       "scenario": "delivery"
     },
     {
-      "id": "cli:vuzol-production-deploy",
-      "sources": [
-        "src/vuzol/cli/production_deploy.py:1"
-      ],
-      "producers": [],
-      "consumers": [],
-      "scenario": "operations"
-    },
-    {
       "id": "cli:vuzol-project-provisioner",
       "sources": [
         "src/vuzol/cli/project_provisioner.py:1"
@@ -877,15 +870,6 @@
       "producers": [],
       "consumers": [],
       "scenario": "delivery"
-    },
-    {
-      "id": "module:vuzol.cli.production_deploy",
-      "sources": [
-        "src/vuzol/cli/production_deploy.py:20"
-      ],
-      "producers": [],
-      "consumers": [],
-      "scenario": "operations"
     },
     {
       "id": "module:vuzol.cli.project_provisioner",

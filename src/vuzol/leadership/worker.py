@@ -73,6 +73,8 @@ _RETRIED_INVALID = frozenset({"lead_response_invalid", "goal_review_invalid"})
 _INFRASTRUCTURE_FAILURES = frozenset({"provider_unavailable", "rate_limited", "timeout"})
 # A parked goal is set aside: its wakeups end like a finished goal's until it returns.
 _TERMINAL_GOAL = frozenset({"cancelled", "completed", "parked"})
+# Each redelivery follows a goal change; a goal that keeps moving answers the newest.
+_MAX_FENCE_REDELIVERIES = 3
 _MODEL_BLOCKERS = frozenset(
     {
         "lead_model_unconfigured",
@@ -214,6 +216,10 @@ class ProjectLeadWorker:
                     if await self._defer_terminal_owner_input(session, goal, turn, token):
                         return
                     elif turn.status == "lost" and turn.lease_epoch == claim.lease_epoch:
+                        if goal is not None and goal.lease_owner == claim.owner:
+                            goal.lease_owner = None
+                            goal.lease_until = None
+                        await _redeliver_owner_message(session, goal, wakeup_id)
                         await self._complete(session, token)
                     else:
                         await self._defer_in_session(session, token, "lead_lease_lost")
@@ -486,6 +492,7 @@ class ProjectLeadWorker:
                         await publish_outcome(
                             uow.session, goal, item.id, reason="planner_scope_changed"
                         )
+                    await _redeliver_owner_message(uow.session, goal, item.id)
                     await self._complete(uow.session, token)
                     return None
                 if _lease_current(goal, turn, self._owner, now):
@@ -1046,6 +1053,7 @@ class ProjectLeadWorker:
                     and goal.fence_epoch != turn.fence_epoch
                 ):
                     turn.status = "lost"
+                    await _redeliver_owner_message(uow.session, goal, wakeup_id)
                     await self._complete(uow.session, token)
                 return
             if goal.fence_epoch != turn.fence_epoch:
@@ -1055,6 +1063,7 @@ class ProjectLeadWorker:
                 turn.status = "lost"
                 goal.lease_owner = None
                 goal.lease_until = None
+                await _redeliver_owner_message(uow.session, goal, wakeup_id)
                 await self._complete(uow.session, token)
                 return
             item = await uow.session.get(TransactionalOutbox, wakeup_id)
@@ -1411,6 +1420,45 @@ class ProjectLeadWorker:
             if goal is not None and goal.lease_owner == self._owner:
                 goal.lease_owner = None
                 goal.lease_until = None
+
+
+async def _redeliver_owner_message(
+    session: AsyncSession, goal: ManagedGoal | None, wakeup_id: uuid.UUID
+) -> None:
+    """An owner message whose turn the goal fenced out was never answered.
+
+    The newer event drives, but the message must not vanish (backlog 2026-10-24):
+    it comes back as a fresh wakeup with the same intake order, so it is read
+    before anything the owner sent after it. Terminal goals have their own handoff.
+    """
+    item = await session.get(TransactionalOutbox, wakeup_id)
+    if (
+        goal is None
+        or goal.lifecycle in _TERMINAL_GOAL
+        or item is None
+        or item.payload.get("wakeup_kind") != "owner_message"
+    ):
+        return
+    count = int(item.payload.get("fence_redelivery_count", 0))
+    if count >= _MAX_FENCE_REDELIVERIES:
+        return
+    session.add(
+        TransactionalOutbox(
+            destination="project_lead",
+            operation_type="lead_wakeup",
+            linked_entity_type="managed_goal",
+            linked_entity_id=goal.id,
+            idempotency_key=f"lead:redeliver:{wakeup_id}",
+            payload={
+                **item.payload,
+                "redelivered_from": str(wakeup_id),
+                "fence_redelivery_count": count + 1,
+                "goal_version": goal.version,
+                "scope_revision": goal.scope_revision,
+            },
+            status=DeliveryStatus.PENDING,
+        )
+    )
 
 
 async def _turn(session: AsyncSession, goal_id: uuid.UUID, wakeup_id: uuid.UUID) -> LeadershipTurn:

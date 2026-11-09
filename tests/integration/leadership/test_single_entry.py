@@ -397,10 +397,12 @@ async def test_late_task_result_never_opens_new_goal(postgres_dsn, runtime):
             assert await session.scalar(select(func.count()).select_from(ManagedGoal)) == 1
 
 
+@pytest.mark.parametrize("call", ["fails", "answers"])
 @pytest.mark.parametrize("wakeup", ["owner_message", "plan_ready"])
-async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runtime, wakeup):
+async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runtime, wakeup, call):
     """Live pilot 2026-10-24: the owner approved the plan while the lead was thinking about
-    "plan ready"; the guard cancelled the stale call and the goal was parked as a model error."""
+    "plan ready"; the guard cancelled the stale call and the goal was parked as a model error.
+    An owner message in that turn is not consumed: it comes back as a fresh wakeup."""
     from vuzol.leadership.model import LeadModelUnavailable
     from vuzol.leadership.wakeups import enqueue_goal_wakeup
     from vuzol.storage.models import Event
@@ -430,6 +432,8 @@ async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runt
                     goal = await session.get(ManagedGoal, goal_id, with_for_update=True)
                     goal.version += 1
                     goal.fence_epoch += 1
+                if call == "answers":
+                    return LeadDecision(reply="Хорошо.", profile_id="fixture")
                 raise LeadModelUnavailable("lead_model_unavailable")
 
         assert await _worker(factory, Approved()).process_one()
@@ -446,8 +450,14 @@ async def test_goal_moving_on_mid_call_is_not_a_model_failure(postgres_dsn, runt
                     TransactionalOutbox.status != DeliveryStatus.DELIVERED,
                 )
             )
-        # The newer event (here the plan approval) drives the next turn; this one is done.
-        assert event is None
+        if wakeup == "plan_ready":
+            # The newer event (here the plan approval) drives the next turn; this one is done.
+            assert event is None
+        else:
+            assert event is not None and event.status == DeliveryStatus.PENDING
+            assert event.payload["text"] == "Как дела?"
+            assert event.payload["goal_version"] == goal.version
+            assert event.payload["fence_redelivery_count"] == 1
 
 
 @pytest.mark.parametrize("reason", ["lead_response_invalid", "goal_review_invalid"])

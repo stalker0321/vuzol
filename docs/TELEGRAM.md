@@ -163,39 +163,33 @@ Permanently pinned system topics, top → bottom:
 | 1         | `История`           | `changelog`       | Append-only cross-project history         |
 | 2         | `Статус проектов`   | `task_dashboard`  | Global project dashboard                  |
 | 3         | `Апрувы`            | `approvals`       | Exact-result decisions across projects    |
-| 4         | `Новый проект`      | `inbox`           | Project intake and environment creation   |
+| 4         | `Новый проект`      | `inbox`           | Legacy project intake; new projects come from the assistant |
 
 Additional workspace roles that are **not** part of the fixed pin stack:
 
+- `Ассистент` (`personal`): errands, dispatching tasks to projects, creating projects;
+- `Мониторинг`: the optional monitor digest ([Monitor](MONITOR.md));
 - `Система` (`system`) for operational alerts and bounded orchestration traces;
-- one `<project>` (`project`) topic per provisioned project.
+- one `<project>` (`project`) topic per provisioned project, with its lead.
+
+The private chat with the bot is the inbox: forwarded material becomes the knowledge base.
 
 ### Orchestration traces
 
-For production dogfood, every completed semantic-interpretation call and every terminal planner
-attempt emits a durable one-shot message into `Система`. These are diagnostic projections from
-PostgreSQL/outbox state, not best-effort process logs, so a Telegram or service restart does not
-silently lose them.
+Every completed semantic-interpretation call emits a durable one-shot message into `Система`.
+These are diagnostic projections from PostgreSQL/outbox state, not best-effort process logs, so a
+Telegram or service restart does not silently lose them. Project-lead text bypasses semantic
+interpretation, so lead work produces no such trace; the lead's own cards cover it.
 
 Delivery is configurable with `VUZOL_TELEGRAM__ORCHESTRATION_TRACE_ENABLED` and deterministic
-task-level sampling through `VUZOL_TELEGRAM__ORCHESTRATION_TRACE_SAMPLE_PERCENT` (`0`–`100`). The
-same task always lands in the same sample bucket across processes and restarts, so its routine
-interpreter and planner story is kept or suppressed together. The default remains `100` for
-backward-compatible visibility. With
-`VUZOL_TELEGRAM__ORCHESTRATION_TRACE_ALWAYS_INCLUDE_ANOMALIES=true` (the default), repair/policy
-changes plus failed, empty, or token-truncated planner outcomes bypass routine sampling. Disabling
-traces suppresses anomalies too. Sampling changes only Telegram projection: the source records and
-outbox item remain durable.
+task-level sampling through `VUZOL_TELEGRAM__ORCHESTRATION_TRACE_SAMPLE_PERCENT` (`0`–`100`,
+default `100`). With `VUZOL_TELEGRAM__ORCHESTRATION_TRACE_ALWAYS_INCLUDE_ANOMALIES=true` (the
+default), repairs and policy changes bypass sampling. Sampling changes only the Telegram
+projection; the source records and outbox item remain durable.
 
 The interpreter trace shows the task number and project, profile/model, prompt and schema versions,
-input/output tokens, duration, repair use, the model-produced `TaskDraft`, and—when different—the
-effective draft after deterministic policy enforcement. The planner trace shows attempt/status,
-profile/model, measured tokens and reserved output limit, `finish_reason`, plain and structured
-output, explicit warnings for token-limited or empty results, and whether a validated plan was
-handed off. Empty or token-truncated planner output is not marked completed; it fails with a
-retryable category when attempts remain. A completed, non-empty plan is attached as bounded,
-redacted `ProviderRequest.context` items for `execute_code` / `execute_agent`. Workflows
-materialized without a plan step still execute with empty planner context.
+input/output tokens, duration, repair use, the model-produced `TaskDraft` and, when different, the
+effective draft after deterministic policy enforcement.
 All provider/user text is HTML-escaped and bounded below the Telegram message limit; credentials,
 provider request IDs, raw prompts, and execution artifacts are not included. These traces are
 observational only: they do not change routing, validation, approval, or task status.

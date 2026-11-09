@@ -25,28 +25,39 @@ The committed credentials are local-development defaults only. Production suppli
 
 ## Schema
 
-The initial foundation and subsequent migrations currently expose 42 application tables:
+Alembic owns the schema; `alembic/versions` is the authority and `vuzol.storage.models`
+plus the subsystem `persistence` modules hold the mappings. As of November 2026 there are
+69 application tables, by owner:
 
-- canonical workflow: `tasks`, `runs`, `steps`, `events`;
-- delivery: `external_inbox`, `transactional_outbox`, `topic_mappings`, `telegram_message_links`;
-- decisions/evidence: `approvals`, `artifacts`, `usage_records`,
-  `provider_budget_reservations`, `interpretations`, `clarification_decisions`,
-  `validation_results`, `routing_decisions`, `profile_health_observations`,
-  `configuration_revisions`, `provider_profiles`;
-- execution resources: `worktrees`, `supervised_processes`.
-- project lifecycle: `project_provisioning`;
-- intake/control: `telegram_intake_messages`, `telegram_control_actions`,
+- workflow core: `tasks`, `runs`, `steps`, `events`, `task_spec_revisions`, `work_attempts`,
+  `effects`, `input_bindings`;
+- delivery and intake: `external_inbox`, `transactional_outbox`, `topic_mappings`,
+  `telegram_message_links`, `telegram_intake_messages`, `telegram_control_actions`,
   `topic_task_counters`;
-- project collaboration: `project_discussion_sessions`, `conversation_turns`,
-  `conversation_summaries`, `accepted_decisions`;
-- planning/packaging: `work_packages`, `plan_revisions`, `plan_revision_items`,
-  `work_item_drafts`, `materialization_links`, `edit_sessions`,
-  `work_package_open_details`;
-- platform/configuration: `secret_ingress_requests`, `subscription_limit_snapshots`,
-  `project_dependency_sources`, `project_environment_revisions`,
-  `project_naming_requests`, `project_executor_preferences`.
+- project leads: `managed_goals`, `goal_delegations`, `goal_documents`,
+  `managed_goal_evidence`, `leadership_turns`, `leadership_inferences`,
+  `leadership_command_receipts`, `lead_jobs`, `project_task_queue`, `transcription_terms`;
+- plans and packages: `work_packages`, `plan_revisions`, `plan_revision_items`,
+  `work_item_drafts`, `materialization_links`, `edit_sessions`, `work_package_open_details`;
+- memory and conversation: `memory_units` (notebooks, decision log, recall),
+  `project_discussion_sessions`, `conversation_turns`, `conversation_summaries`,
+  `accepted_decisions`;
+- assistant, inbox, monitor: `assistant_entries`, `inbox_items`, `inbox_links`,
+  `inbox_messages`, `monitor_events`, `monitor_source_fetches`, `monitor_digests`;
+- providers and accounting: `provider_profiles`, `profile_health_observations`,
+  `provider_account_leases`, `provider_budget_reservations`, `usage_records`,
+  `routing_decisions`, `subscription_limit_snapshots`, `model_calls`;
+- evidence and review: `approvals`, `artifacts`, `interpretations`,
+  `clarification_decisions`, `validation_results`, `review_outcome_history`;
+- execution and projects: `worktrees`, `supervised_processes`, `nodes`,
+  `project_provisioning`, `project_environment_revisions`, `project_dependency_sources`,
+  `project_naming_requests`, `project_executor_preferences`, `capability_installations`,
+  `capability_run_pins`, `secret_ingress_requests`.
 
-Stable searchable concepts are columns; provider-neutral envelopes use JSONB. All timestamps are timezone-aware. Telegram IDs use signed `BIGINT`. All foreign keys (63 single-column plus 11 composite constraints) use `RESTRICT`; deleting a Telegram projection cannot cascade into canonical state.
+Stable searchable concepts are columns; provider-neutral envelopes use JSONB. All timestamps are
+timezone-aware. Telegram IDs use signed `BIGINT`. Foreign keys use `RESTRICT` (a few use no
+action, and two cascade within one owner's rows); deleting a Telegram projection cannot cascade
+into canonical state.
 
 ## Transactions
 

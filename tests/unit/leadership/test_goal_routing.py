@@ -12,7 +12,7 @@ from vuzol.telegram.formatting import telegram_markdown_html
 
 def test_prompt_distinguishes_refinement_from_separate_work():
     prompt = _prompt(snapshot())
-    assert PROMPT_REVISION == "project-lead-prompt.v21"
+    assert PROMPT_REVISION == "project-lead-prompt.v22"
     assert "If the current request differs from the new message, first amend_goal" not in prompt
     assert "refining the SAME goal" in prompt
     assert "approved/proposed plan, task, result or waiting question" in prompt
@@ -21,6 +21,8 @@ def test_prompt_distinguishes_refinement_from_separate_work():
     assert "Новая задача, текущую закрыть" in prompt
     assert "Новая задача после текущей" in prompt
     assert "never ask the owner to resend" in prompt
+    # Backlog 2026-10-24: "держи на паузе" ended up in the amended scope and outlived the moment.
+    assert "never copy a control" in prompt
     assert "queue_task" in prompt
     assert "restart_from_event_id" in prompt
 

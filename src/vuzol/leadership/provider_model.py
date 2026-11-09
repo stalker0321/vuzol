@@ -30,7 +30,7 @@ from vuzol.leadership.vocabulary import AddVocabularyPayload, RemoveVocabularyPa
 from vuzol.providers.domain import ProviderRequest, ProviderResultStatus
 from vuzol.providers.ports import ProviderAdapter
 
-PROMPT_REVISION = "project-lead-prompt.v21"
+PROMPT_REVISION = "project-lead-prompt.v22"
 LEDGER_PURPOSE = "project_lead"
 
 
@@ -685,7 +685,10 @@ def _prompt(snapshot: LeadSnapshot) -> str:
         "never ask the owner to resend it.",
         "Reply to owner_event in reply; describe intended actions, not unexecuted success. "
         "Waiting/paused goals permit conversation and amendments, never task start or resume. "
-        "amend_goal uses scope, criteria, supplied source_event_id, reason and inflight_policy: "
+        "amend_goal uses scope, criteria, supplied source_event_id, reason and inflight_policy. "
+        "scope and criteria describe the work only: never copy a control such as 'держи на "
+        "паузе', 'пока не запускай' or 'подожди' into them (it would outlive the moment); "
+        "act on it with pause_goal or wait_for instead. inflight_policy: "
         "finish_current stops future dispatch; cancel_current cancels without rollback; "
         "queue waits for the package. Amendment does not resume a paused goal. "
         "A wait, question, amendment, pause, goal cancellation or completion must be last.",

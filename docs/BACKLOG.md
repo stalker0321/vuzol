@@ -22,9 +22,6 @@ since were removed; they remain in Git history.
 
 - A pause the lead decides on its own is recorded with the owner's pause reason
   (`owner_pause`).
-- `/model` lets a slot point at a profile whose `runtime_network` the project's network policy
-  does not allow; the call then fails at launch ("turn CLI egress exceeds project policy").
-  Validate this at assignment time.
 - Leads have no MCP tools: Pi has no MCP client. Assistant and Codex workers do.
 
 ## Product ideas (owner, not scheduled)

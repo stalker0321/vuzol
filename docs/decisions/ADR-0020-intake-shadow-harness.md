@@ -3,6 +3,8 @@
 Status: accepted (J3, base fd81e39). Implements `IMPLEMENTATION_PLAN.md` §J3.
 Builds on ADR-0018 (DecisionBinding/chain) and ADR-0019 (context assembler).
 
+Note (2026-11): only the intake parser and effect types remain of this harness.
+
 ## 1. Versioned prompt loader
 
 `interpretation/prompt_loader.py` registers prompt templates by

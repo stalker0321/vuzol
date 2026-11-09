@@ -5,6 +5,8 @@ Implements DELTA §D4. Successor of ADR-0003: the model-based interpreter
 stays mandatory for ambiguous natural language; a deterministic fast path
 handles only explicit task commands beside it, never instead of it.
 
+Partly superseded (2026-11): per-task planning tiers and the `plan` step were removed; the project lead requests plans through the `planner_strong` slot.
+
 ## 1. Decision interface (W1)
 
 Closed classes `EffectIntent` / `RelationHint` / `ContextHint`

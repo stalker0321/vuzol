@@ -4,6 +4,8 @@ Status: accepted (J5, base e2b40f4). Implements `IMPLEMENTATION_PLAN.md` §J5 an
 `EVAL_PLAN.md`. Builds on ADR-0018 (chain/ledger), ADR-0020 (intake shadow) and
 ADR-0021 (planning tier).
 
+Note (2026-11): the replay corpus machinery is gone; the canary policy remains (`experiments/canary.py`).
+
 ## 1. Decision-opportunity corpus
 
 `experiments/decision_corpus.py` defines a corpus whose unit of observation is a

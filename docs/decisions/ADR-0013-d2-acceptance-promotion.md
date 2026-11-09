@@ -2,6 +2,8 @@
 
 Status: accepted (D2 writer, base 760323b D1-PASS). Implements DELTA §D2.
 
+Partly superseded (2026-11): the acceptance/promotion step left the compiled workflow; goals are accepted by the owner through the project lead.
+
 ## 1. Placement (Q1) and authority (Q2)
 
 - The final acceptance gate stands BEFORE promotion of the last item into

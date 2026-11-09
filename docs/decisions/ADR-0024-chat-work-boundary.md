@@ -3,6 +3,8 @@
 Status: accepted by owner for implementation (T090); production rollout pending.
 Base: T089 / ADR-0023. No migration, new queue, planner, executor or intent array.
 
+Rolled out (2026-11): `/think` and `/lead` modes are live; project-lead text bypasses Jev.
+
 ## Decision
 
 The opt-in `chat.enabled` boundary admits free project-topic text as existing

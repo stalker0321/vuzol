@@ -4,6 +4,8 @@ Status: accepted (J1, base 2ef7d22). Implements `IMPLEMENTATION_PLAN.md` §J1.
 Extends ADR-0014 (D3 context budget) and ADR-0015 (D4 semantic planning)
 without replacing their ledgers or tables.
 
+Partly superseded (2026-11): the typed packet/binding model hierarchy was removed as unconsumed; the `Coverage` vocabulary and stored bindings remain.
+
 ## 1. Packet vs binding
 
 A semantic decision is made against a snapshot, not against live rows. J1

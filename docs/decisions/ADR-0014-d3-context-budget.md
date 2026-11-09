@@ -2,6 +2,8 @@
 
 Status: accepted (D3 writer, base 1d42f85 D2-PASS). Implements DELTA §D3.
 
+Partly superseded (2026-11): Scout execution was removed as unreachable; the packet format and its validator remain for stored bindings.
+
 ## 1. Lifetime owner (Q1)
 
 The lifetime owner appears on ingress as scope project plus intake identity

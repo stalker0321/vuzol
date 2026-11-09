@@ -12,7 +12,7 @@ permissions:
 jobs:
   quality:
     name: Quality and tests
-    runs-on: ubuntu-24.04  # the production host OS; see docs/BACKLOG.md
+    runs-on: ubuntu-24.04  # the production host OS
     timeout-minutes: 20
     services:
       postgres:
@@ -78,7 +78,7 @@ jobs:
 
   postgresql:
     name: PostgreSQL integration
-    runs-on: ubuntu-24.04  # the production host OS; see docs/BACKLOG.md
+    runs-on: ubuntu-24.04  # the production host OS
     timeout-minutes: 15
     services:
       postgres:
@@ -117,7 +117,7 @@ jobs:
 
   container:
     name: Container verification
-    runs-on: ubuntu-24.04  # the production host OS; see docs/BACKLOG.md
+    runs-on: ubuntu-24.04  # the production host OS
     timeout-minutes: 15
     steps:
       - name: Check out repository

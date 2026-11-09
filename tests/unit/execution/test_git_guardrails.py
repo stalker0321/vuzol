@@ -330,8 +330,8 @@ async def test_add_worktree_trusts_only_exact_source_in_upload_pack(tmp_path: Pa
     git = _DifferentOwnerGit()
 
     # Scoped outer-command trust does not transfer to Git's local upload-pack.
-    with pytest.raises(GitError, match="dubious ownership"):
-        await git._run(tmp_path, "ls-remote", str(repository), "HEAD")
+    # Git 2.43 (the production host) checks ownership there; 2.49+ no longer does.
+    upload_pack_checks_owner = await _upload_pack_checks_owner(git, tmp_path, repository)
     await git.require_clean_source(repository)
     worktree = tmp_path / "isolated-copy"
     await git.add_worktree(repository, worktree, "result", base)
@@ -345,9 +345,19 @@ async def test_add_worktree_trusts_only_exact_source_in_upload_pack(tmp_path: Pa
     assert str(repository) not in config
     assert not (worktree / "INJECTED").exists()
     assert not (tmp_path / "INJECTED").exists()
-    with pytest.raises(GitError, match="dubious ownership"):
-        await git._run(worktree, "ls-remote", str(unrelated), "HEAD")
+    if upload_pack_checks_owner:
+        with pytest.raises(GitError, match="dubious ownership"):
+            await git._run(worktree, "ls-remote", str(unrelated), "HEAD")
     await git.require_clean_source(repository)
+
+
+async def _upload_pack_checks_owner(git: LocalGit, cwd: Path, repository: Path) -> bool:
+    try:
+        await git._run(cwd, "ls-remote", str(repository), "HEAD")
+    except GitError as error:
+        assert "dubious ownership" in str(error)
+        return True
+    return False
 
 
 @pytest.mark.anyio

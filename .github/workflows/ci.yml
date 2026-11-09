@@ -35,6 +35,8 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+          # gitleaks scans the whole history; its reviewed exceptions name commits.
+          fetch-depth: 0
 
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0

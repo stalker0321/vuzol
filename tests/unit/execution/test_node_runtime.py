@@ -365,18 +365,19 @@ def test_node_provider_composition_uses_pi_transport_and_extra_lanes(
         configured("pi"),
         configured("codex", profile_id="oauth"),
     )
-    registries.sandboxes.items.return_value = ()
     if networked:
         settings = settings.model_copy(
             update={
                 "execution": settings.execution.model_copy(
-                    update={"proxy_image": "sha256:" + "c" * 64}
+                    update={
+                        "proxy_image": "sha256:" + "c" * 64,
+                        "model_call_sandbox_profile": "project-default",
+                    }
                 )
             }
         )
-        registries.sandboxes.items.return_value = (
-            MagicMock(enabled=True, image="sandbox@sha256:" + "d" * 64),
-        )
+        # The proxy helper is the model-call sandbox image, which the node holds.
+        registries.sandboxes.get.return_value = MagicMock(image="sandbox@sha256:" + "d" * 64)
     registry = MagicMock()
     monkeypatch.setattr(executor, "AdapterRegistry", MagicMock(return_value=registry))
     adapter = MagicMock()
@@ -407,6 +408,8 @@ def test_node_provider_composition_uses_pi_transport_and_extra_lanes(
     assert isinstance(transport, codex.SandboxCodexTransport)
     if networked:
         assert isinstance(transport._proxy, NodeProxyServiceManager)
+        assert transport._proxy._helper_image == "sandbox@sha256:" + "d" * 64
+        registries.sandboxes.get.assert_called_with("project-default")
     else:
         assert transport._proxy is None
     assert isinstance(transport._runtime, NodeDockerRuntime)

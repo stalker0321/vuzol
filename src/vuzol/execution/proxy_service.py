@@ -353,6 +353,13 @@ class ProxyServiceManager:
             state_path=state_path,
         )
 
+    async def step_network_leases(self) -> tuple[tuple[ProxyNetworkLease, str], ...]:
+        return await self._networks.step_leases()
+
+    async def cleanup_networks(self, lease: ProxyNetworkLease) -> None:
+        """Ownership and zero attachments are rechecked before each rm."""
+        await self._networks.cleanup(lease)
+
     @staticmethod
     def _recovery_networks(manifest: ProxyRecoveryManifest) -> ProxyNetworkLease:
         return ProxyNetworkLease(

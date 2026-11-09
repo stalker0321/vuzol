@@ -7,7 +7,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
@@ -130,6 +130,16 @@ def classify_recovery_manifest(
     return ReconciliationClassification.PRESERVED_AMBIGUOUS
 
 
+UNMANIFESTED_NETWORK_GRACE = timedelta(hours=1)
+_REMOVABLE = frozenset(
+    {
+        ReconciliationClassification.REMOVED_TERMINAL_LEFTOVER,
+        ReconciliationClassification.REMOVED_EXPIRED_LEASE,
+        ReconciliationClassification.REMOVED_OLD_GENERATION,
+    }
+)
+
+
 class ProxyStartupReconciler:
     """Serialize startup cleanup and authorize every mutation from row-locked PostgreSQL state."""
 
@@ -164,6 +174,9 @@ class ProxyStartupReconciler:
                         continue
                     async with self._factory() as state_session:
                         decisions.append(await self._reconcile_one(state_session, manifest))
+                decisions.extend(
+                    await self._sweep_unmanifested_networks({m.identity for m in manifests})
+                )
                 self._ticket_cursor = await release_reaped_account_tickets(
                     self._factory, self._ticket_cursor
                 )
@@ -178,6 +191,47 @@ class ProxyStartupReconciler:
                 except Exception:
                     await connection.invalidate()
                     raise
+
+    async def _sweep_unmanifested_networks(
+        self, manifested: set[tuple[uuid.UUID | None, uuid.UUID | None, uuid.UUID | None, int]]
+    ) -> list[ReconciliationDecision]:
+        """Networks whose manifest is gone (prod 2026-11-09: three from August).
+
+        Removable like a manifest's leftovers, or when the step row no longer
+        exists at all; a young network may still be getting its manifest.
+        """
+        try:
+            leases = await self._manager.step_network_leases()
+        except (ProxyNetworkError, ProxyServiceError):
+            return []
+        now = datetime.now(UTC)
+        decisions = []
+        for lease, created in leases:
+            identity = (lease.task_id, lease.run_id, lease.step_id, lease.lease_generation)
+            try:
+                young = now - datetime.fromisoformat(created) < UNMANIFESTED_NETWORK_GRACE
+            except ValueError:
+                young = True
+            if identity in manifested or young:
+                continue
+            manifest = ProxyRecoveryManifest(Path("/"), *identity, "")
+            async with self._factory() as session, session.begin():
+                state = await self._read_state_for_update(session, manifest)
+                classification = (
+                    ReconciliationClassification.REMOVED_TERMINAL_LEFTOVER
+                    if state is None
+                    else classify_recovery_manifest(manifest, state, now=now)
+                )
+                if classification not in _REMOVABLE:
+                    continue
+                try:
+                    await self._manager.cleanup_networks(lease)
+                except ProxyNetworkError:
+                    # Retried every pass, so only removals are recorded as events.
+                    continue
+                await self._record(session, manifest, classification)
+                decisions.append(self._decision(manifest, classification))
+        return decisions
 
     async def _acquire_lock(self, session: AsyncSession) -> bool:
         deadline = time.monotonic() + self._lock_timeout_seconds

@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.integration.storage.helpers import seed_task_run_step, storage
+from vuzol.execution.proxy_networks import ProxyNetworkLease
 from vuzol.execution.proxy_service import (
     ProxyRecoveryManifest,
     ProxyServiceError,
@@ -33,6 +34,14 @@ class RecordingProxyManager(ProxyServiceManager):
         self.cleanup_release = asyncio.Event()
         self.cleanup_release.set()
         self.validation_error: ProxyServiceError | None = None
+        self.networks: list[tuple[ProxyNetworkLease, str]] = []
+        self.removed_networks: list[ProxyNetworkLease] = []
+
+    async def step_network_leases(self) -> tuple[tuple[ProxyNetworkLease, str], ...]:
+        return tuple(self.networks)
+
+    async def cleanup_networks(self, lease: ProxyNetworkLease) -> None:
+        self.removed_networks.append(lease)
 
     def recovery_manifests(self) -> tuple[ProxyRecoveryManifest, ...]:
         return tuple(self.manifests)
@@ -300,4 +309,53 @@ async def test_durable_state_is_reread_after_waiting_for_lock(postgres_dsn: str)
         assert manager.cleaned == []
     finally:
         await holder.close()
+        await engine.dispose()
+
+
+def _network_lease(task_id, run_id, step_id, generation) -> ProxyNetworkLease:
+    return ProxyNetworkLease("internal", "egress", task_id, run_id, step_id, generation)
+
+
+async def test_networks_without_a_manifest_are_reaped_only_when_proven_stale(
+    postgres_dsn: str,
+) -> None:
+    """Prod 2026-11-09: three proxy networks from August had no manifest and no step row."""
+    engine, factory = storage(postgres_dsn)
+    try:
+        old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
+        young = datetime.now(UTC).isoformat()
+        live_task, live_run, live_step = await seed_task_run_step(factory)
+        await _set_lease(
+            factory,
+            live_step.id,
+            status=StepStatus.RUNNING,
+            generation=1,
+            expires_at=datetime.now(UTC) + timedelta(minutes=2),
+        )
+        done_task, done_run, done_step = await seed_task_run_step(factory)
+        await _set_lease(
+            factory, done_step.id, status=StepStatus.COMPLETED, generation=1, expires_at=None
+        )
+        missing = _network_lease(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), 1)
+        done = _network_lease(done_task.id, done_run, done_step.id, 1)
+        live = _network_lease(live_task.id, live_run, live_step.id, 1)
+        fresh = _network_lease(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), 1)
+        manifested = _network_lease(done_task.id, done_run, done_step.id, 2)
+        manager = RecordingProxyManager([_manifest(done_task.id, done_run, done_step.id, 2)])
+        manager.networks = [
+            (missing, old),
+            (done, old),
+            (live, old),
+            (fresh, young),
+            (manifested, old),
+        ]
+
+        report = await ProxyStartupReconciler(
+            factory, manager, owner="executor"
+        ).reconcile_startup()
+
+        assert manager.removed_networks == [missing, done]
+        swept = {d.step_id for d in report.decisions if d.lease_generation == 1}
+        assert swept == {str(missing.step_id), str(done_step.id)}
+    finally:
         await engine.dispose()

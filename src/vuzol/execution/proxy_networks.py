@@ -207,6 +207,51 @@ class ProxyNetworkManager:
             **lease.binding_kwargs,
         )
 
+    async def step_leases(self) -> tuple[tuple[ProxyNetworkLease, str], ...]:
+        """Step-scoped proxy networks present now, with their creation time.
+
+        Startup cleanup is driven by runtime manifests; a network whose manifest
+        is gone (e.g. a database reset) would otherwise stay forever. Only exact
+        step-scheme labels qualify; turn-bound networks have their own reaper.
+        """
+        out = await self._docker(
+            "network",
+            "ls",
+            "--filter",
+            "label=vuzol.managed=true",
+            "--filter",
+            "label=vuzol.resource=proxy-network",
+            "--format",
+            "{{.Name}}",
+        )
+        keys = ("vuzol.task_id", "vuzol.run_id", "vuzol.step_id", "vuzol.lease_generation")
+        # Both networks of a lease carry the same identity; keep the older creation time.
+        created: dict[tuple[UUID, UUID, UUID, int], str] = {}
+        for name in sorted({line.strip() for line in out.splitlines() if line.strip()}):
+            data = await self._inspect_network(name)
+            labels = data.get("Labels") or {}
+            if not isinstance(labels, dict) or not all(key in labels for key in keys):
+                continue
+            try:
+                task, run, step = (UUID(str(labels[key])) for key in keys[:3])
+                identity = (task, run, step, int(labels["vuzol.lease_generation"]))
+            except ValueError:
+                continue
+            stamp = str(data.get("Created") or "")
+            created[identity] = min(created.get(identity, stamp), stamp)
+        leases = []
+        for identity, stamp in created.items():
+            try:
+                names = (
+                    _make_network_name(*identity, "internal"),
+                    _make_network_name(*identity, "egress"),
+                )
+            except ProxyNetworkError:
+                continue
+            lease = ProxyNetworkLease(names[0], names[1], *identity)
+            leases.append((lease, stamp))
+        return tuple(leases)
+
     async def validate_owned(self, lease: ProxyNetworkLease) -> None:
         """Validate exact network identity and labels without mutating resources."""
         expected = (

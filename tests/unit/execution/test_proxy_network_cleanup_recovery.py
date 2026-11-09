@@ -557,3 +557,37 @@ def test_recovery_validation_rejects_wrong_network_boundary(
     monkeypatch.setattr(m, "_inspect_network", inspect)
     with pytest.raises(ProxyNetworkError, match=error):
         asyncio.run(m.validate_owned(lease))
+
+
+def test_step_leases_pair_both_networks_and_skip_turn_and_malformed_labels(monkeypatch):
+    m = ProxyNetworkManager(Path("/run/user/1000/docker.sock"))
+    t, r, s = uuid4(), uuid4(), uuid4()
+    step = {
+        "vuzol.managed": "true",
+        "vuzol.resource": "proxy-network",
+        "vuzol.task_id": str(t),
+        "vuzol.run_id": str(r),
+        "vuzol.step_id": str(s),
+        "vuzol.lease_generation": "2",
+    }
+    networks = {
+        "a-internal": ({**step, "vuzol.network_role": "internal"}, "2026-08-05T19:33:13Z"),
+        "a-egress": ({**step, "vuzol.network_role": "egress"}, "2026-08-05T19:33:12Z"),
+        "turn": ({"vuzol.managed": "true", "vuzol.turn_id": str(uuid4())}, "2026-08-05T00:00:00Z"),
+        "bad": ({**step, "vuzol.step_id": "not-a-uuid"}, "2026-08-05T00:00:00Z"),
+    }
+
+    async def fake(*a: str) -> str:
+        if a[:2] == ("network", "ls"):
+            return "\n".join(networks) + "\n"
+        labels, created = networks[a[2]]
+        return json.dumps({"Name": a[2], "Labels": labels, "Created": created})
+
+    monkeypatch.setattr(m, "_docker", fake)
+    leases = asyncio.run(m.step_leases())
+    assert len(leases) == 1
+    lease, created = leases[0]
+    assert (lease.task_id, lease.run_id, lease.step_id, lease.lease_generation) == (t, r, s, 2)
+    assert lease.internal_name == _make_network_name(t, r, s, 2, "internal")
+    assert lease.egress_name == _make_network_name(t, r, s, 2, "egress")
+    assert created == "2026-08-05T19:33:12Z"

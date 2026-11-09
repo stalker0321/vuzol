@@ -15,6 +15,11 @@ since were removed; they remain in Git history.
 - Coding steps of Codex profiles cannot run on a remote node: their OAuth home must stay with
   one refresh owner. Pi coding can (`execution.nodes[].provider_parallelism`).
 
+- CI is pinned to Ubuntu 24.04 (git 2.43), the production OS. On Ubuntu 26.04 (git 2.56)
+  `test_add_worktree_trusts_only_exact_source_in_upload_pack` sees no "dubious ownership" from
+  a local `ls-remote`. Find out whether newer Git weakened the upload-pack ownership guard
+  before upgrading the host.
+
 ## Leads
 
 - A pause the lead decides on its own is recorded with the owner's pause reason

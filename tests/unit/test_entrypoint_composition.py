@@ -2,6 +2,7 @@ import asyncio
 import logging
 import signal
 from collections.abc import Callable
+from pathlib import Path
 from types import FrameType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -202,9 +203,10 @@ async def test_project_provisioner_fails_closed_before_loop_when_migration_head_
 
 @pytest.mark.parametrize("review_mode", ["none", "cli", "api"])
 def test_worker_main_composes_runtime_and_handles_stop(
-    monkeypatch: MonkeyPatch, caplog: LogCaptureFixture, review_mode: str
+    monkeypatch: MonkeyPatch, caplog: LogCaptureFixture, review_mode: str, tmp_path: Path
 ) -> None:
-    settings = Settings(environment="test")
+    # The worker creates its artifact root; never touch a host's /srv/vuzol.
+    settings = Settings(environment="test", artifact_root=tmp_path / "artifacts")
     cli_review = review_mode == "cli"
     runtime = runtime_configuration(settings)
     if cli_review:

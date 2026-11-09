@@ -71,7 +71,6 @@ accounts specify `/inference/go/openai/v1`; a public metadata URL cannot establi
 the correct credential-bound inference path. B/C were repaired atomically with
 private backups and preserved uid/gid/0600. No tokens were printed or rotated.
 
-Both operator installers share `/home/owner/vuzol-local/bin/pi_go_binding.py`;
-synthetic regressions live in `/home/owner/vuzol-release-t124/test_pi_go_binding.py`.
-An offline pinned-Pi mock verified correct Bearer/org headers. The actual resumed
+The operator installers share one binding helper kept outside the repository. An offline
+pinned-Pi mock verified correct Bearer/org headers. The actual resumed
 coding task verified model responses and tools without a separate paid probe.

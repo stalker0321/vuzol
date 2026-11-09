@@ -190,7 +190,7 @@ worktree. It does not use a shell and receives a reduced environment (`PATH`, is
 loopback `HOST`, assigned `PORT`, and `NODE_ENV=test`). A healthcheck must pass before the target is
 published.
 
-`test.example.com/<project>/` is served by a gateway on `127.0.0.1:8091`. The gateway serves existing
+The preview domain's `/<project>/` is served by a gateway on `127.0.0.1:8091`. The gateway serves existing
 static releases or reverse-proxies a live runtime and supports streaming responses. Caddy remains the
 public TLS boundary. The in-memory registry and child processes belong to the publisher service and
 are cleaned up on shutdown.

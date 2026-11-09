@@ -492,3 +492,350 @@ async def test_prepare_worktree_handler_cancel_and_missing(tmp_path: Path) -> No
         "permanent_failure",
         "PERMANENT_FAILURE",
     )
+
+
+def _persisted_worktree(path, **overrides):
+    from vuzol.storage.models import Worktree
+    from vuzol.storage.types import WorktreeDeliveryState
+
+    return Worktree(
+        **(
+            dict(
+                id=uuid.uuid4(),
+                task_id=uuid.uuid4(),
+                run_id=uuid.uuid4(),
+                project_id="project",
+                path=str(path),
+                branch="worker",
+                base_commit="a" * 40,
+                repository_identity_hash="identity",
+                owner="executor",
+                delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
+                lifecycle_generation=1,
+            )
+            | overrides
+        )
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("refusal", ["missing", "cleaned_at", "cleaned", "active", "process"])
+async def test_cleanup_preserves_unowned_or_in_use_worktrees(tmp_path, refusal):
+    from vuzol.execution.worktrees import WorktreeService
+    from vuzol.storage.types import WorktreeDeliveryState
+
+    path = tmp_path / "worktrees" / "recorded"
+    path.mkdir(parents=True)
+    sentinel = path / "result.txt"
+    sentinel.write_text("keep me")
+    row = _persisted_worktree(path)
+    if refusal == "cleaned_at":
+        from datetime import UTC, datetime
+
+        row.cleaned_at = datetime.now(UTC)
+    if refusal in {"cleaned", "active"}:
+        row.delivery_state = (
+            WorktreeDeliveryState.CLEANED if refusal == "cleaned" else WorktreeDeliveryState.ACTIVE
+        )
+    session = AsyncMock()
+    session.scalar.side_effect = [
+        None if refusal == "missing" else row,
+        uuid.uuid4() if refusal == "process" else None,
+    ]
+    git = AsyncMock()
+    service = WorktreeService(path.parent, git, retention_days=3)
+    await service.cleanup(session, worktree_id=row.id, repository=tmp_path)
+    assert sentinel.read_text() == "keep me"
+    git.remove_worktree.assert_not_awaited()
+    session.flush.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_cleanup_records_path_escape_without_deleting_external_files(tmp_path):
+    from vuzol.execution.worktrees import WorktreeService
+    from vuzol.storage.types import WorktreeDeliveryState
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "result"
+    sentinel.write_text("private")
+    row = _persisted_worktree(outside)
+    session, git = AsyncMock(), AsyncMock()
+    session.scalar.side_effect = [row, None]
+    await WorktreeService(tmp_path / "worktrees", git, retention_days=3).cleanup(
+        session, worktree_id=row.id
+    )
+    assert row.cleanup_reason == "path_violation"
+    assert row.delivery_state == WorktreeDeliveryState.WORKTREE_RETAINED
+    assert sentinel.read_text() == "private"
+    git.remove_worktree.assert_not_awaited()
+    session.flush.assert_awaited_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("metadata", ["gone", "present", "error", "no_repository"])
+@pytest.mark.parametrize("path_exists", [False, True])
+async def test_cleanup_requires_both_filesystem_and_git_removal(tmp_path, metadata, path_exists):
+    from vuzol.execution.worktrees import WorktreeService
+    from vuzol.storage.types import WorktreeDeliveryState
+
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    path = root / "recorded"
+    if path_exists:
+        path.mkdir()
+        (path / ".git").mkdir()
+        (path / "result").write_text("result")
+    row = _persisted_worktree(path)
+    session, git = AsyncMock(), AsyncMock()
+    session.scalar.side_effect = [row, None]
+    git.remove_worktree.side_effect = RuntimeError("git remove failed")
+    if metadata == "error":
+        git._run.side_effect = RuntimeError("socket unavailable")
+    else:
+        git._run.return_value = str(path).encode() if metadata == "present" else b""
+    service = WorktreeService(root, git, retention_days=3)
+    await service.cleanup(
+        session,
+        worktree_id=row.id,
+        repository=None if metadata == "no_repository" else tmp_path,
+        reason="completed",
+    )
+    assert not path.exists()
+    if metadata in {"present", "error"}:
+        assert row.delivery_state == WorktreeDeliveryState.WORKTREE_RETAINED
+        assert row.cleaned_at is None
+        assert row.cleanup_reason == "removal_incomplete"
+    else:
+        assert row.delivery_state == WorktreeDeliveryState.CLEANED
+        assert row.cleaned_at is not None
+        assert row.cleanup_reason == "completed"
+    session.flush.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_cleanup_does_not_mark_cleaned_when_filesystem_removal_fails(tmp_path, monkeypatch):
+    from vuzol.execution.worktrees import WorktreeService
+    from vuzol.storage.types import WorktreeDeliveryState
+
+    path = tmp_path / "worktrees" / "recorded"
+    path.mkdir(parents=True)
+    row = _persisted_worktree(path)
+    session = AsyncMock()
+    session.scalar.side_effect = [row, None]
+    monkeypatch.setattr("vuzol.execution.worktrees.shutil.rmtree", lambda *a, **kw: None)
+    await WorktreeService(path.parent, AsyncMock(), retention_days=3).cleanup(
+        session, worktree_id=row.id
+    )
+    assert row.cleanup_reason == "removal_incomplete"
+    assert row.delivery_state == WorktreeDeliveryState.WORKTREE_RETAINED
+    assert row.cleaned_at is None
+    assert path.exists()
+
+
+@pytest.mark.parametrize(
+    "remote,expected",
+    [
+        (None, None),
+        ("/srv/repository", "/srv/repository"),
+        ("git@host.test:org/repo.git", "host.test:org/repo.git"),
+        (
+            "https://user:password@host.test:8443/org/repo?token=secret#fragment",
+            "https://host.test:8443/org/repo",
+        ),
+        ("file:///srv/repo", "file://redacted/srv/repo"),
+    ],
+)
+def test_persisted_remote_redacts_credentials_query_and_fragment(remote, expected):
+    from vuzol.execution.worktrees import _safe_remote
+
+    assert _safe_remote(remote) == expected
+
+
+@pytest.mark.anyio
+async def test_retain_refuses_missing_record_without_inspecting_disk(tmp_path):
+    from vuzol.execution.worktrees import WorktreeError, WorktreeService
+
+    session, git = AsyncMock(), AsyncMock()
+    session.scalar.return_value = None
+    with pytest.raises(WorktreeError, match="unknown worktree"):
+        await WorktreeService(tmp_path, git, retention_days=3).retain(
+            session, worktree_id=uuid.uuid4()
+        )
+    git.inspect.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["inspect", "identity", "flush"])
+async def test_prepare_rolls_back_created_directory_on_failure(tmp_path, failure):
+    from types import SimpleNamespace
+
+    from vuzol.execution.paths import worktree_path
+    from vuzol.execution.worktrees import WorktreeError, WorktreeService
+
+    root, repo = tmp_path / "worktrees", tmp_path / "repository"
+    repo.mkdir()
+    task_id, run_id = uuid.uuid4(), uuid.uuid4()
+    path = worktree_path(root, "project", run_id)
+    session, git = AsyncMock(), AsyncMock()
+    session.add = MagicMock()
+    session.scalar.side_effect = [None, None]
+    git.repository_identity.return_value = ("identity", None)
+    git.resolve_commit.return_value = "a" * 40
+
+    async def add(*args):
+        path.mkdir()
+        (path / "partial").write_text("partial")
+
+    git.add_worktree.side_effect = add
+    git.inspect.return_value = SimpleNamespace(
+        head="a" * 40, branch="wrong" if failure == "identity" else worktree_branch(task_id, run_id)
+    )
+    if failure == "inspect":
+        git.inspect.side_effect = RuntimeError("inspection failed")
+    if failure == "flush":
+        session.flush.side_effect = RuntimeError("database failed")
+    error = WorktreeError if failure == "identity" else RuntimeError
+    with pytest.raises(
+        error,
+        match={
+            "inspect": "inspection failed",
+            "identity": "identity is invalid",
+            "flush": "database failed",
+        }[failure],
+    ):
+        await WorktreeService(root, git, retention_days=3).prepare(
+            session,
+            task_id=task_id,
+            run_id=run_id,
+            project=SimpleNamespace(id="project", repository_path=repo, default_branch="main"),
+            owner="executor",
+        )
+    git.remove_worktree.assert_awaited_once_with(repo, path)
+    assert not path.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("missing", ["package", "goal"])
+async def test_prepare_refuses_broken_materialization_links(tmp_path, missing):
+    from types import SimpleNamespace
+
+    from vuzol.execution.worktrees import WorktreeError, WorktreeService
+
+    session, git = AsyncMock(), AsyncMock()
+    materialization = SimpleNamespace(work_package_id=uuid.uuid4())
+    package = SimpleNamespace(managed_goal_id=uuid.uuid4(), integration_branch=None)
+    session.scalar.side_effect = [None, materialization, None if missing == "package" else package]
+    session.get.return_value = None
+    git.repository_identity.return_value = ("identity", None)
+    git.resolve_commit.return_value = "a" * 40
+    with pytest.raises(
+        WorktreeError, match="no work package" if missing == "package" else "no goal"
+    ):
+        await WorktreeService(tmp_path / "worktrees", git, retention_days=3).prepare(
+            session,
+            task_id=uuid.uuid4(),
+            run_id=uuid.uuid4(),
+            project=SimpleNamespace(id="project", repository_path=tmp_path, default_branch="main"),
+            owner="executor",
+        )
+    git.add_worktree.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("missing_branch", [False, True])
+async def test_managed_worktree_pins_goal_branch_and_falls_back_to_default_commit(
+    tmp_path, missing_branch
+):
+    from types import SimpleNamespace
+
+    from vuzol.execution.worktrees import WorktreeService
+
+    root = tmp_path / "worktrees"
+    task_id, run_id = uuid.uuid4(), uuid.uuid4()
+    package = SimpleNamespace(managed_goal_id=uuid.uuid4(), integration_branch=None)
+    materialization = SimpleNamespace(work_package_id=uuid.uuid4())
+    session, git = AsyncMock(), AsyncMock()
+    session.add = MagicMock()
+    session.scalar.side_effect = [None, materialization, package]
+    session.get.return_value = SimpleNamespace(integration_branch="vuzol/goal/goal-17")
+    git.repository_identity.return_value = (
+        "d" * 64,
+        "https://user:password@host.test/repo?token=secret",
+    )
+    git.resolve_commit.side_effect = (
+        ["a" * 40, GitError("missing branch") if missing_branch else "b" * 40]
+        + (["a" * 40] if missing_branch else [])
+        + ["a" * 40 if missing_branch else "b" * 40]
+    )
+    path = root / "project" / str(run_id)
+
+    async def add(*args):
+        path.mkdir()
+
+    git.add_worktree.side_effect = add
+    base = "a" * 40 if missing_branch else "b" * 40
+    git.inspect.return_value = SimpleNamespace(head=base, branch=worktree_branch(task_id, run_id))
+
+    async def flush():
+        session.add.call_args.args[0].id = uuid.uuid4()
+
+    session.flush.side_effect = flush
+    reference = await WorktreeService(root, git, retention_days=3).prepare(
+        session,
+        task_id=task_id,
+        run_id=run_id,
+        project=SimpleNamespace(id="project", repository_path=tmp_path, default_branch="main"),
+        owner="executor",
+    )
+    assert reference.path == path and reference.base_commit == base
+    assert package.integration_branch == "vuzol/goal/goal-17"
+    assert package.integration_target_branch == package.integration_branch
+    assert package.integration_base_commit == package.integration_head_commit == base
+    row = session.add.call_args.args[0]
+    assert row.source_remote == "https://host.test/repo"
+    assert row.default_branch == package.integration_branch
+    assert row.expected_target_head == base
+    git.add_worktree.assert_awaited_once_with(
+        tmp_path, path, worktree_branch(task_id, run_id), base
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("problem", ["mismatched_record", "unrecorded_path"])
+async def test_prepare_refuses_mismatched_or_unrecorded_worktree_identity(tmp_path, problem):
+    from types import SimpleNamespace
+
+    from vuzol.execution.worktrees import WorktreeError, WorktreeService
+
+    root = tmp_path / "worktrees"
+    task_id, run_id = uuid.uuid4(), uuid.uuid4()
+    path = root / "project" / str(run_id)
+    path.mkdir(parents=True)
+    sentinel = path / "result"
+    sentinel.write_text("keep existing work")
+    existing = (
+        _persisted_worktree(path, run_id=run_id, task_id=uuid.uuid4())
+        if problem == "mismatched_record"
+        else None
+    )
+    session, git = AsyncMock(), AsyncMock()
+    session.scalar.side_effect = [existing, None]
+    git.repository_identity.return_value = ("identity", None)
+    git.resolve_commit.return_value = "a" * 40
+    service = WorktreeService(root, git, retention_days=3)
+    # Existing/unrecorded paths must never be overwritten by prepare.
+    with pytest.raises(
+        WorktreeError,
+        match="identity does not match" if existing else "already exists without a record",
+    ):
+        await service.prepare(
+            session,
+            task_id=task_id,
+            run_id=run_id,
+            project=SimpleNamespace(id="project", repository_path=tmp_path, default_branch="main"),
+            owner="executor",
+        )
+    assert sentinel.read_text() == "keep existing work"
+    git.add_worktree.assert_not_awaited()
+    git.remove_worktree.assert_not_awaited()

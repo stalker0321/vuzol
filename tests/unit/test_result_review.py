@@ -716,3 +716,330 @@ async def test_no_change_handler_requires_independent_review(tmp_path, verdict_k
         )
         assert claim["no_change"] is True
         assert claim["no_change_reason"] == "x" * 2000
+
+
+def _review_fixture(tmp_path):
+    lease = _lease()
+    task_id, run_id = uuid.uuid4(), uuid.uuid4()
+    inspection = GitInspection(
+        head="b" * 40, branch="task-branch", changed_files=("docs/guide.md",), diff=b"+hello\n"
+    )
+    validate = SimpleNamespace(
+        step_type="validate",
+        status=StepStatus.COMPLETED,
+        result={
+            "structured_output": {
+                "base_commit": "a" * 40,
+                "result_commit": inspection.head,
+                "gates": [{"exit_code": 0}],
+            }
+        },
+    )
+    step = SimpleNamespace(
+        status=StepStatus.RUNNING,
+        lease_owner=lease.owner,
+        lease_generation=lease.generation,
+        run_id=run_id,
+        payload={},
+        dependency_metadata={"predecessor_ordinals": [5]},
+    )
+    run = SimpleNamespace(task_id=task_id)
+    task = SimpleNamespace(risk=RiskLevel.LOW, task_draft={}, original_text="Update docs")
+    worktree = SimpleNamespace(
+        path=str(tmp_path),
+        delivery_state=WorktreeDeliveryState.WORKTREE_RETAINED,
+        base_commit="a" * 40,
+        result_commit=inspection.head,
+        diff_hash=inspection.diff_hash,
+        branch=inspection.branch,
+    )
+    session = MagicMock(
+        get=AsyncMock(side_effect=[step, run, task]),
+        scalar=AsyncMock(side_effect=[validate, worktree]),
+    )
+    git = MagicMock(
+        require_clean_worktree=AsyncMock(),
+        require_no_remotes=AsyncMock(),
+        inspect=AsyncMock(return_value=inspection),
+    )
+    handler = ResultReviewHandler(
+        MagicMock(return_value=AsyncContext(session)), git, worktree_root=tmp_path
+    )
+    return SimpleNamespace(
+        handler=handler,
+        request=_request(task_id, run_id, lease),
+        step=step,
+        run=run,
+        task=task,
+        worktree=worktree,
+        validate=validate,
+        session=session,
+        git=git,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "problem,message",
+    [
+        ("active", "worktree is not retained"),
+        ("commit", "measured result commit"),
+        ("structured", "no structured validation output"),
+        ("gates", "no gate evidence"),
+        ("failed_gate", "did not pass all gates"),
+        ("malformed_gate", "did not pass all gates"),
+        ("result", "validate result commit does not match"),
+        ("base", "validate base commit does not match"),
+        ("head", "HEAD does not match"),
+        ("branch", "branch does not match"),
+    ],
+)
+async def test_review_refuses_unbound_or_failed_validation_evidence(tmp_path, problem, message):
+    setup = _review_fixture(tmp_path)
+    structured = setup.validate.result["structured_output"]
+    if problem == "active":
+        setup.worktree.delivery_state = WorktreeDeliveryState.ACTIVE
+    elif problem == "commit":
+        setup.worktree.result_commit = None
+    elif problem == "structured":
+        setup.validate.result = {"structured_output": None}
+    elif problem == "gates":
+        structured["gates"] = []
+    elif problem == "failed_gate":
+        structured["gates"] = [{"exit_code": 1}]
+    elif problem == "malformed_gate":
+        structured["gates"] = ["passed"]
+    elif problem in {"result", "base"}:
+        structured[f"{problem}_commit"] = "c" * 40
+    else:
+        setup.git.inspect.return_value = setup.git.inspect.return_value.model_copy(
+            update={"head" if problem == "head" else "branch": "wrong"}
+        )
+    outcome = await setup.handler.execute(setup.request, CancellationContext())
+    assert outcome.kind is OutcomeKind.BLOCKED
+    assert outcome.category == "review_failed"
+    assert message in outcome.summary
+    assert outcome.unknown_effects is False
+    if problem not in {"head", "branch"}:
+        setup.git.inspect.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "binding,predecessor,message",
+    [
+        ("bad-uuid", None, "binding is invalid"),
+        (str(uuid.UUID(int=1)), None, "binding is missing"),
+        (str(uuid.UUID(int=1)), SimpleNamespace(step_type="execute_code"), "binding is missing"),
+        (
+            str(uuid.UUID(int=1)),
+            SimpleNamespace(step_type="validate", status=StepStatus.RUNNING),
+            "not completed",
+        ),
+        (None, None, "exactly one validate predecessor"),
+    ],
+)
+async def test_review_repair_refuses_invalid_or_unfinished_predecessor(
+    tmp_path, binding, predecessor, message
+):
+    setup = _review_fixture(tmp_path)
+    setup.step.payload = {"repair_validation_step_id": binding} if binding else {}
+    if binding is None:
+        setup.step.dependency_metadata = {"predecessor_ordinals": [1, 2]}
+    setup.session.scalar.side_effect = None
+    setup.session.scalar.return_value = predecessor
+    outcome = await setup.handler.execute(setup.request, CancellationContext())
+    assert outcome.kind is OutcomeKind.BLOCKED
+    assert outcome.category == "review_failed"
+    assert message in outcome.summary
+    setup.git.inspect.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_review_repair_uses_completed_bound_validation(tmp_path):
+    setup = _review_fixture(tmp_path)
+    setup.step.payload = {"repair_validation_step_id": str(uuid.uuid4())}
+    outcome = await setup.handler.execute(setup.request, CancellationContext())
+    assert outcome.kind is OutcomeKind.SUCCEEDED
+    assert outcome.result["verdict"] == "pass"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "message,category,kind",
+    [
+        (
+            "admission-only launch requires consent",
+            "admission_only_consent_required",
+            OutcomeKind.BLOCKED,
+        ),
+        ("cost is unknown", "money_cap_uncertified", OutcomeKind.BLOCKED),
+        ("explicit money cap exceeded", "money_cap_reached", OutcomeKind.BLOCKED),
+        ("invalid structured output", "reviewer_output_invalid", OutcomeKind.TRANSIENT_FAILURE),
+    ],
+)
+async def test_independent_review_refusals_preserve_budget_and_retry_categories(
+    tmp_path, message, category, kind
+):
+    from vuzol.review.independent import IndependentReviewError
+
+    setup = _review_fixture(tmp_path)
+    setup.task.risk = RiskLevel.HIGH
+    reviewer = MagicMock(review=AsyncMock(side_effect=IndependentReviewError(message)))
+    setup.handler._independent = reviewer
+    outcome = await setup.handler.execute(setup.request, CancellationContext())
+    assert outcome.kind is kind
+    assert outcome.category == category
+    assert outcome.unknown_effects is False
+    assert outcome.result == {}
+    reviewer.review.assert_awaited_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mutation", ["head", "diff"])
+async def test_independent_verdict_is_rejected_if_result_changes_during_review(tmp_path, mutation):
+    from vuzol.review.domain import ReviewVerdict
+
+    setup = _review_fixture(tmp_path)
+    setup.task.risk = RiskLevel.HIGH
+    inspection = setup.git.inspect.return_value
+    reviewer = MagicMock(
+        review=AsyncMock(
+            return_value=ReviewVerdict(
+                verdict=ReviewVerdictKind.PASSED,
+                review_kind="independent",
+                risk="high",
+                base_commit="a" * 40,
+                result_commit=inspection.head,
+                diff_hash=inspection.diff_hash,
+                changed_files=inspection.changed_files,
+                findings=(),
+                summary="Approved",
+            )
+        )
+    )
+    setup.handler._independent = reviewer
+    setup.git.inspect.side_effect = [
+        inspection,
+        inspection.model_copy(
+            update={"head": "c" * 40} if mutation == "head" else {"diff": b"+mutated"}
+        ),
+    ]
+    outcome = await setup.handler.execute(setup.request, CancellationContext())
+    assert outcome.kind is OutcomeKind.BLOCKED
+    assert outcome.category == "review_failed"
+    assert "mutated during independent review" in outcome.summary
+    assert setup.git.inspect.await_count == 2
+
+
+def test_review_policy_failure_requires_independent_review_instead_of_passing(monkeypatch):
+    from vuzol.review import handler
+    from vuzol.review.independent import IndependentReviewError
+
+    monkeypatch.setattr(
+        handler, "resolve_review_plan", MagicMock(side_effect=ValueError("unknown policy"))
+    )
+    with pytest.raises(IndependentReviewError, match="review policy failed closed: unknown policy"):
+        handler._requires_independent_for(RiskLevel.LOW, ("README.md",))
+
+
+def test_non_string_scope_fields_and_unknown_risk_do_not_weaken_review():
+    from vuzol.review.handler import _task_scope_text
+
+    task = SimpleNamespace(
+        risk=RiskLevel.HIGH,
+        original_text=17,
+        task_draft={
+            "goal": None,
+            "task_summary": "Update guide",
+            "normalized_title": {},
+            "requested_outcomes": ["Keep commands", 17],
+            "constraints": ("No scripts", None),
+            "suggested_risk": "not-a-risk",
+        },
+        source_turn_id=uuid.UUID(int=1),
+        spec_revision="revision-17",
+    )
+    assert effective_risk(task) is RiskLevel.HIGH
+    text = _task_scope_text(task)
+    assert (
+        text == "Update guide\nKeep commands\nNo scripts\n"
+        "[derived from turn 00000000-0000-0000-0000-000000000001]\n"
+        "[spec revision revision-17]"
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "predecessor,message",
+    [
+        (None, "predecessor must be a validate step"),
+        (SimpleNamespace(step_type="execute_code"), "predecessor must be a validate step"),
+        (
+            SimpleNamespace(step_type="validate", status=StepStatus.FAILED),
+            "validate predecessor is not completed",
+        ),
+    ],
+)
+async def test_review_refuses_missing_or_failed_validate_predecessor(
+    tmp_path, predecessor, message
+):
+    setup = _review_fixture(tmp_path)
+    setup.session.scalar.side_effect = None
+    setup.session.scalar.return_value = predecessor
+    outcome = await setup.handler.execute(setup.request, CancellationContext())
+    assert outcome.kind is OutcomeKind.BLOCKED and outcome.category == "review_failed"
+    assert message in outcome.summary
+    setup.git.inspect.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "verdict_kind,classification,category",
+    [
+        ("changes_required", "quality", "review_changes_required"),
+        ("blocked", "independent_review_required", "independent_review_required"),
+    ],
+)
+async def test_independent_refusal_returns_precise_blocking_category(
+    tmp_path, verdict_kind, classification, category
+):
+    from vuzol.review.domain import FindingSeverity, ReviewFinding, ReviewVerdict
+
+    setup = _review_fixture(tmp_path)
+    setup.task.risk = RiskLevel.HIGH
+    inspection = setup.git.inspect.return_value
+    setup.handler._independent = MagicMock(
+        review=AsyncMock(
+            return_value=ReviewVerdict(
+                verdict=ReviewVerdictKind(verdict_kind),
+                review_kind="independent",
+                risk="high",
+                base_commit=setup.worktree.base_commit,
+                result_commit=inspection.head,
+                diff_hash=inspection.diff_hash,
+                findings=(
+                    ReviewFinding(
+                        severity=FindingSeverity.ERROR,
+                        classification=classification,
+                        summary="Needs review",
+                    ),
+                ),
+                summary="Refused",
+            )
+        )
+    )
+    outcome = await setup.handler.execute(setup.request, CancellationContext())
+    assert outcome.kind is OutcomeKind.BLOCKED and outcome.category == category
+    assert outcome.result["verdict"] == verdict_kind
+    assert outcome.summary == "Refused"
+
+
+def test_mechanical_findings_keep_warning_severity_and_evidence_location():
+    from vuzol.review.domain import FindingSeverity
+
+    (finding,) = mechanical_findings(b"+pytest.skip('not ready')\n")
+    assert finding.severity is FindingSeverity.WARNING
+    assert finding.classification == "arbitrary_skip"
+    assert finding.line == 1 and finding.path is None
+    assert "not ready" in finding.summary

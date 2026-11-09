@@ -121,17 +121,31 @@ async def test_workers_wire_rich_adapter_only_when_enabled(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("monitor_enabled", [False, True])
+@pytest.mark.parametrize(
+    "assistant_enabled,inbox_enabled", [(False, False), (True, False), (False, True), (True, True)]
+)
 def test_interpreter_runtime_composes_and_stops_cleanly(
-    monkeypatch: MonkeyPatch, tmp_path: Path, monitor_enabled: bool
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    monitor_enabled: bool,
+    assistant_enabled: bool,
+    inbox_enabled: bool,
 ) -> None:
     from unittest.mock import Mock
 
-    from vuzol.config.settings import MonitorSettings
+    from vuzol.config.settings import AssistantSettings, InboxSettings, MonitorSettings
 
     configured = runtime(tmp_path)
     configured = RuntimeConfiguration(
         settings=configured.settings.model_copy(
             update={
+                "assistant": AssistantSettings(
+                    enabled=assistant_enabled,
+                    profile_id="interpreter",
+                    chat_id=-100,
+                    message_thread_id=8,
+                ),
+                "inbox": InboxSettings(enabled=inbox_enabled, profile_id="interpreter"),
                 "monitor": MonitorSettings(
                     enabled=monitor_enabled,
                     chat_id=-100,
@@ -144,6 +158,10 @@ def test_interpreter_runtime_composes_and_stops_cleanly(
     )
     monitor_builder = Mock(return_value=Mock(process_one=AsyncMock(return_value=False)))
     monkeypatch.setattr(interpreter_cli, "build_monitor_worker", monitor_builder)
+    assistant_builder = Mock(return_value=Mock(process_one=AsyncMock(return_value=False)))
+    inbox_builder = Mock(return_value=Mock(process_one=AsyncMock(return_value=False)))
+    monkeypatch.setattr(interpreter_cli, "build_assistant_worker", assistant_builder)
+    monkeypatch.setattr(interpreter_cli, "build_inbox_worker", inbox_builder)
     engine = FakeEngine()
     handlers: dict[int, Any] = {}
 
@@ -187,6 +205,8 @@ def test_interpreter_runtime_composes_and_stops_cleanly(
     migration_head.assert_awaited_once_with(engine)
     assert engine.disposed
     assert monitor_builder.call_count == int(monitor_enabled)
+    assert assistant_builder.call_count == int(assistant_enabled)
+    assert inbox_builder.call_count == int(inbox_enabled)
 
 
 def test_interpreter_fails_closed_disposes_once_without_pipeline(
@@ -457,3 +477,434 @@ async def test_monitor_builder_uses_model_chain_and_monitor_topic(tmp_path, monk
     assert bot.send_message.await_args.kwargs["message_thread_id"] == 7
     assert await worker._send_rich(chat_id=-100, thread_id=7, html="<p>Текст</p>") == 17
     assert bot.do_api_request.await_args.kwargs["api_kwargs"]["message_thread_id"] == 7
+
+
+@pytest.mark.parametrize("builder", ["build_inbox_model", "build_profile_transcriber"])
+@pytest.mark.parametrize("problem", ["provider", "url", "credential"])
+def test_model_builders_refuse_unusable_profiles(tmp_path, builder, problem):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    profile = SimpleNamespace(
+        id="broken",
+        provider="openai-compatible",
+        api_base_url="https://example.test/v1",
+        credential_reference="env:KEY",
+    )
+    setattr(
+        profile,
+        {"provider": "provider", "url": "api_base_url", "credential": "credential_reference"}[
+            problem
+        ],
+        "codex" if problem == "provider" else None,
+    )
+    registries = Mock()
+    registries.profiles.get.return_value = profile
+    resolver = Mock()
+    with pytest.raises(
+        ValueError, match="no credential" if problem == "credential" else "unsupported"
+    ):
+        getattr(interpreter_cli, builder)(
+            registries, resolver, profile_id="broken", timeout_seconds=1
+        )
+    resolver.get.assert_not_called()
+
+
+@pytest.mark.parametrize("output_limit,org_id", [(None, None), (1234, "org-17")])
+def test_inbox_model_keeps_account_header_and_output_budget(tmp_path, output_limit, org_id):
+    from unittest.mock import Mock
+
+    configured = runtime(tmp_path)
+    profile = configured.registries.profiles.get("interpreter").model_copy(
+        update={"output_limit": output_limit}
+    )
+    registries = Mock()
+    registries.profiles.get.return_value = profile
+    resolver = Mock()
+    resolver.get.return_value = SecretStr("test-key")
+    model = interpreter_cli.build_inbox_model(
+        registries, resolver, profile_id=profile.id, timeout_seconds=9, org_id=org_id
+    )
+    assert model._output_tokens == (output_limit or 8000)
+    assert model._headers == ({"x-opencode-org-id": org_id} if org_id else {})
+    resolver.get.assert_called_once_with("env:MODEL_KEY", "profile:interpreter")
+
+
+@pytest.mark.parametrize("provider", ["codex", "pi"])
+@pytest.mark.parametrize("factory_present", [False, True])
+def test_model_chain_relays_cli_only_with_executor_factory(
+    tmp_path, monkeypatch, provider, factory_present
+):
+    from unittest.mock import Mock
+
+    configured = runtime(tmp_path)
+    profile = configured.registries.profiles.get("interpreter").model_copy(
+        update={"provider": provider, "launch_mode": LaunchMode.CLI}
+    )
+    registries = Mock()
+    registries.profiles.get.return_value = profile
+    configured = RuntimeConfiguration.model_construct(
+        settings=configured.settings, registries=registries
+    )
+    factory = object() if factory_present else None
+    api = Mock(return_value=Mock(model="api"))
+    relay = Mock(return_value=Mock(model="relay"))
+    monkeypatch.setattr(interpreter_cli, "build_inbox_model", api)
+    monkeypatch.setattr(interpreter_cli, "RelayedModel", relay)
+    chain = interpreter_cli.build_model_chain(
+        configured,
+        object(),
+        profile_id="interpreter",
+        fallback_profile_ids=(),
+        org_ids={"interpreter": "org"},
+        timeout_seconds=7,
+        factory=factory,
+        purpose="assistant_turn",
+        web_search=True,
+        mcp_servers={"docs": "https://docs.test"},
+    )
+    assert chain.model == ("relay" if factory_present else "api")
+    if factory_present:
+        api.assert_not_called()
+        assert relay.call_args.args == (factory,)
+        assert relay.call_args.kwargs["web_search"] is (provider == "codex")
+        assert relay.call_args.kwargs["mcp_servers"] == (
+            {"docs": "https://docs.test"} if provider == "codex" else None
+        )
+        assert relay.call_args.kwargs["purpose"] == "assistant_turn"
+    else:
+        relay.assert_not_called()
+        assert api.call_args.kwargs["org_id"] == "org"
+
+
+def test_model_chain_skips_unavailable_spares_but_refuses_missing_primary(
+    tmp_path, monkeypatch, caplog
+):
+    from unittest.mock import Mock
+
+    configured = runtime(tmp_path)
+    registries = Mock()
+    registries.profiles.get.return_value = configured.registries.profiles.get("interpreter")
+    configured = configured.model_copy(update={"registries": registries})
+    models = [
+        Mock(model="primary"),
+        ValueError("key missing"),
+        LookupError("unknown"),
+        Mock(model="spare"),
+    ]
+    build = Mock(side_effect=models)
+    monkeypatch.setattr(interpreter_cli, "build_inbox_model", build)
+    chain = interpreter_cli.build_model_chain(
+        configured,
+        object(),
+        profile_id="interpreter",
+        fallback_profile_ids=("nokey", "unknown", "spare"),
+        org_ids={},
+        timeout_seconds=3,
+    )
+    assert [model.model for model in chain._models] == ["primary", "spare"]
+    assert [
+        r.profile_id for r in caplog.records if r.message == "fallback profile unavailable"
+    ] == ["nokey", "unknown"]
+    build.side_effect = ValueError("primary credential missing")
+    with pytest.raises(ValueError, match="primary credential missing"):
+        interpreter_cli.build_model_chain(
+            configured,
+            object(),
+            profile_id="interpreter",
+            fallback_profile_ids=("spare",),
+            org_ids={},
+            timeout_seconds=3,
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["assistant", "inbox"])
+@pytest.mark.parametrize("reply_to", [None, 8])
+async def test_worker_callbacks_preserve_reply_markup_and_transcription(
+    tmp_path, monkeypatch, kind, reply_to
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from telegram.error import TelegramError
+
+    from vuzol.config.settings import AssistantSettings, InboxSettings
+
+    configured = runtime(tmp_path)
+    configured = RuntimeConfiguration.model_construct(
+        settings=configured.settings.model_copy(
+            update={
+                "assistant": AssistantSettings(profile_id="interpreter"),
+                "inbox": InboxSettings(profile_id="interpreter"),
+                "project_setup": configured.settings.project_setup.model_copy(
+                    update={"enabled": True}
+                ),
+            }
+        ),
+        registries=configured.registries,
+    )
+    monkeypatch.setattr(interpreter_cli, "build_model_chain", Mock())
+    monkeypatch.setattr(interpreter_cli, "transcription_keywords", lambda _path: ("Vuzol",))
+    bot = AsyncMock()
+    bot.send_message.return_value.message_id = 23
+    bot.create_forum_topic.return_value.message_thread_id = 19
+    transcriber = AsyncMock()
+    transcriber.transcribe.return_value = SimpleNamespace(transcript="spoken request")
+    worker = getattr(interpreter_cli, f"build_{kind}_worker")(
+        configured, object(), object(), bot, transcriber, "owner"
+    )
+    kwargs = dict(
+        chat_id=-100,
+        html="<b>answer</b>",
+        reply_to=reply_to,
+        buttons=[[["Run", "run:1"]]] if reply_to else [],
+    )
+    if kind == "assistant":
+        kwargs["thread_id"] = 7
+    assert await worker._send(**kwargs) == 23
+    sent = bot.send_message.await_args.kwargs
+    assert sent["text"] == "<b>answer</b>"
+    assert sent["parse_mode"] == "HTML"
+    assert sent["link_preview_options"].is_disabled
+    if reply_to:
+        assert sent["reply_parameters"].message_id == reply_to
+        assert sent["reply_parameters"].allow_sending_without_reply
+        assert sent["reply_markup"].inline_keyboard[0][0].callback_data == "run:1"
+    else:
+        assert sent["reply_parameters"] is None
+        assert sent["reply_markup"] is None
+    assert await worker._transcribe(b"voice", "audio/ogg") == "spoken request"
+    request = transcriber.transcribe.await_args.args[0]
+    assert (request.content, request.media_type, request.keywords) == (
+        b"voice",
+        "audio/ogg",
+        ("Vuzol",),
+    )
+    if kind == "assistant":
+        assert await worker._create_topic(chat_id=-100, name="New project") == 19
+        bot.create_forum_topic.assert_awaited_once_with(chat_id=-100, name="New project")
+        bot.edit_message_reply_markup.side_effect = TelegramError("already cleared")
+        await worker._clear_buttons(chat_id=-100, message_id=23)
+        bot.edit_message_reply_markup.assert_awaited_once_with(
+            chat_id=-100, message_id=23, reply_markup=None
+        )
+
+
+@pytest.mark.anyio
+async def test_poll_logs_bad_item_then_continues_processing(monkeypatch, caplog):
+    stop = asyncio.Event()
+    calls = 0
+
+    async def process():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("bad item")
+        if calls == 3:
+            stop.set()
+        return calls == 2
+
+    await asyncio.wait_for(interpreter_cli._poll(process, stop, 0.001), timeout=1)
+    assert calls == 3
+    assert any(getattr(r, "event", None) == "inbox.loop_error" for r in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_assistant_lists_only_accepting_projects_and_submits_scoped_request(
+    tmp_path, monkeypatch
+):
+    import uuid
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vuzol.config.models import TopicKind
+    from vuzol.config.settings import AssistantSettings, InboxSettings
+
+    configured = runtime(tmp_path)
+    configured = RuntimeConfiguration.model_construct(
+        settings=configured.settings.model_copy(
+            update={
+                "assistant": AssistantSettings(
+                    profile_id="interpreter", research_profile_ids=("research", "spare")
+                ),
+                "inbox": InboxSettings(searxng_url="https://search.test"),
+            }
+        ),
+        registries=Mock(),
+    )
+
+    def topic(**overrides):
+        return SimpleNamespace(
+            **(
+                dict(
+                    kind=TopicKind.PROJECT,
+                    project_id="active",
+                    enabled=True,
+                    accepts_new_tasks=True,
+                    display_name=None,
+                )
+                | overrides
+            )
+        )
+
+    configured.registries.topics.items.return_value = [
+        topic(kind=TopicKind.INBOX),
+        topic(project_id=None),
+        topic(enabled=False),
+        topic(accepts_new_tasks=False),
+        topic(project_id="disabled"),
+        topic(display_name="Topic name"),
+        topic(display_name="Duplicate"),
+        topic(project_id="other"),
+    ]
+    configured.registries.projects.get.side_effect = lambda key: SimpleNamespace(
+        id=key, enabled=key != "disabled", display_name="Project name"
+    )
+    application = Mock(submit=AsyncMock(return_value={"accepted": True}))
+    monkeypatch.setattr(interpreter_cli, "ProjectApplication", Mock(return_value=application))
+    chain = Mock()
+    monkeypatch.setattr(interpreter_cli, "build_model_chain", chain)
+    worker = interpreter_cli.build_assistant_worker(
+        configured, object(), object(), AsyncMock(), None, "owner"
+    )
+    assert [(p.project_id, p.name) for p in worker._projects()] == [
+        ("active", "Topic name"),
+        ("other", "Project name"),
+    ]
+    assert worker._create_topic is None
+    assert worker._transcribe is None
+    assert worker._researcher is not None
+    assert chain.call_args_list[0].kwargs["purpose"] == "assistant_research"
+    assert chain.call_args_list[0].kwargs["fallback_profile_ids"] == ("spare",)
+    session_id, request_id = uuid.uuid4(), uuid.uuid4()
+    assert await worker._submit(
+        user_id=17,
+        project_id="active",
+        session_id=session_id,
+        request_id=request_id,
+        text="Build it",
+    ) == {"accepted": True}
+    access, request = application.submit.await_args.args
+    assert access.user_id == 17 and access.projects == {"active": session_id}
+    assert access.allow_submit
+    assert request.project_id == "active" and request.request_id == request_id
+    assert request.request == "Build it"
+    assert application.submit.await_args.kwargs["preapproved"] is True
+    assert application.submit.await_args.kwargs["origin"].channel == "telegram_assistant"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "case,reason",
+    [
+        ("no_profile", "interpretation.profile_id is required"),
+        ("no_credential", "Jev profile requires a credential reference"),
+        ("fallback", "Jev intake must not fall back"),
+        ("no_canary", "Jev intake is not enabled"),
+    ],
+)
+async def test_runtime_refuses_incomplete_intake_before_opening_database(
+    tmp_path, monkeypatch, case, reason
+):
+    from unittest.mock import Mock
+
+    configured = runtime(tmp_path)
+    config = configured.settings.interpretation.model_copy(
+        update={
+            "profile_id": None if case == "no_profile" else "interpreter",
+            "fallback_profile_ids": ("spare",) if case == "fallback" else (),
+        }
+    )
+    registries = Mock()
+    registries.profiles.items.return_value = ()
+    registries.profiles.get.return_value = configured.registries.profiles.get(
+        "interpreter"
+    ).model_copy(
+        update={
+            "provider": "jev",
+            "credential_reference": None if case == "no_credential" else "env:KEY",
+        }
+    )
+    configured = RuntimeConfiguration.model_construct(
+        settings=configured.settings.model_copy(update={"interpretation": config}),
+        registries=registries,
+    )
+    monkeypatch.setattr(interpreter_cli, "get_runtime_configuration", lambda **kw: configured)
+    monkeypatch.setattr(interpreter_cli, "configure_logging", Mock())
+    monkeypatch.setattr(interpreter_cli, "canary_policy_from_settings", lambda _settings: None)
+    engine = Mock()
+    monkeypatch.setattr(interpreter_cli, "create_engine", engine)
+    with pytest.raises(ValueError, match=reason):
+        await interpreter_cli.run()
+    engine.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_jev_runtime_keeps_canary_admission_and_structurer_binding(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    configured = runtime(tmp_path)
+    primary = configured.registries.profiles.get("interpreter").model_copy(
+        update={"provider": "jev"}
+    )
+    registries = Mock()
+    registries.profiles.get.return_value = primary
+    registries.profiles.items.return_value = (primary,)
+    config = configured.settings.interpretation.model_copy(
+        update={
+            "structure_profile_id": "structurer",
+            "transcription_profile_id": "voice",
+            "automatic_execution_enabled": True,
+            "evaluation_report_file": tmp_path / "evaluation.json",
+        }
+    )
+    configured = configured.model_copy(
+        update={
+            "registries": registries,
+            "settings": configured.settings.model_copy(update={"interpretation": config}),
+        }
+    )
+    handlers = {}
+    pipeline = Mock()
+
+    async def process_one():
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return False
+
+    pipeline.process_one = process_one
+    canary = Mock()
+    canary.admit.return_value.allowed = False
+    jev, structurer, transcriber, gate = Mock(), Mock(), Mock(), Mock()
+    engine = FakeEngine()
+    monkeypatch.setenv("MODEL_KEY", "test-key")
+    monkeypatch.setattr(interpreter_cli, "get_runtime_configuration", lambda **kw: configured)
+    monkeypatch.setattr(interpreter_cli, "configure_logging", Mock())
+    monkeypatch.setattr(interpreter_cli, "require_eligible_report", gate)
+    monkeypatch.setattr(interpreter_cli, "canary_policy_from_settings", lambda _settings: canary)
+    monkeypatch.setattr(interpreter_cli, "JevDecisionsInterpreter", jev)
+    monkeypatch.setattr(interpreter_cli, "build_profile_interpreter", structurer)
+    monkeypatch.setattr(interpreter_cli, "build_profile_transcriber", transcriber)
+    monkeypatch.setattr(interpreter_cli, "create_engine", lambda *args: engine)
+    monkeypatch.setattr(interpreter_cli, "resolve_database_dsn", Mock())
+    monkeypatch.setattr(
+        interpreter_cli, "resolve_bot_token", lambda _settings: SecretStr("telegram-token")
+    )
+    monkeypatch.setattr(interpreter_cli, "require_migration_head", AsyncMock())
+    monkeypatch.setattr(interpreter_cli, "create_session_factory", Mock())
+    monkeypatch.setattr(interpreter_cli, "Bot", FakeBot)
+    builder = Mock(return_value=pipeline)
+    monkeypatch.setattr(interpreter_cli, "InterpretationPipeline", builder)
+    monkeypatch.setattr(
+        signal, "signal", lambda signum, handler: handlers.update({signum: handler})
+    )
+    await interpreter_cli.run()
+    gate.assert_called_once_with(config.evaluation_report_file)
+    assert jev.call_args.kwargs["structurer"] is structurer.return_value
+    assert structurer.call_args.kwargs["profile_id"] == "structurer"
+    assert not jev.call_args.kwargs["admitted"]("opportunity-17")
+    canary.admit.assert_called_once_with(decision_kind="intake", opportunity_id="opportunity-17")
+    assert builder.call_args.kwargs["interpreter"] is jev.return_value
+    assert builder.call_args.kwargs["transcriber"] is transcriber.return_value
+    assert builder.call_args.kwargs["fallback_interpreters"] == ()
+    assert engine.disposed

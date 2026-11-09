@@ -630,3 +630,204 @@ def test_every_accepted_press_says_what_it_did() -> None:
         action_kind="pause",
     )
     assert _done_answer(task) == "⏸ Ставлю на паузу."
+
+
+def _callback_update(data):
+    return SimpleNamespace(
+        update_id=17,
+        effective_user=SimpleNamespace(id=42),
+        callback_query=SimpleNamespace(
+            id="callback-17",
+            data=data,
+            message=SimpleNamespace(
+                chat=SimpleNamespace(id=-100), message_id=23, message_thread_id=7
+            ),
+            answer=AsyncMock(),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "v1:mf:" + "z" * 32,
+        "v1:mu:short:undo",
+        "v1:mu:" + "z" * 32 + ":undo",
+        "v2:th:invalid",
+        "v2:task:unknown:invalid:1",
+        "v2:task:start:invalid:1",
+        f"v2:task:start:{uuid.UUID(int=1)}:0",
+        f"v2:task:start:{uuid.UUID(int=1)}:x",
+        f"v2:retry:{uuid.UUID(int=1)}:0:1",
+        f"v2:retry:{uuid.UUID(int=1)}:1:-1",
+        "v2:retry:invalid:1:0",
+        "v1:lg:x:resume",
+        "v1:lq:x:0",
+        "v1:secret_cancel:invalid",
+        "v1:pn:invalid:1:0",
+        "v1:pm:a:x",
+        "v1:pm:unknown:1",
+        "v2:pm:c:x:model",
+        "v2:pm:unknown:1:model",
+        "v3:pm:b:x",
+        "v3:pm:b",
+        "v3:pm:unknown:1",
+        "v3:pm:b:1:extra",
+        "v3:pm:p:1:worker:" + "a" * 65,
+        "v1:start:invalid",
+        "v1:unknown:invalid",
+        "v2:unknown",
+    ],
+)
+def test_malformed_callbacks_never_become_control_commands(data):
+    assert control_update(_callback_update(data), "main") is None
+
+
+@pytest.mark.parametrize(
+    "data,action,fields",
+    [
+        (f"v1:mf:{uuid.UUID(int=1).hex}", "memory_forget", {"note_id": uuid.UUID(int=1)}),
+        (f"v1:mu:{uuid.UUID(int=1).hex}:undo", "memory_undo", {"note_id": uuid.UUID(int=1)}),
+        (f"v2:th:{uuid.UUID(int=1)}", "think_handoff", {"assistant_turn_id": uuid.UUID(int=1)}),
+        (
+            f"v2:retry:{uuid.UUID(int=1)}:4:0",
+            "retry",
+            {"task_id": uuid.UUID(int=1), "expected_task_version": 4, "retry_step_ordinal": 0},
+        ),
+        (
+            "v2:pm:m:3:pi-a:sol",
+            "project_model_select_worker",
+            {
+                "preference_profile_id": "pi-a",
+                "preference_worker": "sol",
+                "preference_revision": 3,
+            },
+        ),
+        (
+            "v2:pm:e:3:pi-a:sol:high",
+            "project_model_select_effort",
+            {
+                "preference_profile_id": "pi-a",
+                "preference_worker": "sol",
+                "preference_effort": "high",
+            },
+        ),
+    ],
+)
+def test_control_conversion_preserves_target_and_version(data, action, fields):
+    converted = control_update(_callback_update(data), "main")
+    assert converted is not None
+    assert converted.action_kind == action
+    assert (converted.chat_id, converted.user_id, converted.message_thread_id) == (-100, 42, 7)
+    for name, value in fields.items():
+        assert getattr(converted, name) == value
+
+
+@pytest.mark.anyio
+async def test_update_queue_retries_commit_without_advancing_or_logging_secret(monkeypatch, caplog):
+    from vuzol.telegram import adapter
+
+    update = Update(update_id=17)
+    admit = AsyncMock(
+        side_effect=[
+            RuntimeError("private token should stay secret"),
+            RuntimeError("private token"),
+            None,
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
+    queue = adapter.CommittingUpdateQueue(admit)
+    await queue.put(update)
+    assert admit.await_count == 3
+    assert all(call.args == (update,) for call in admit.await_args_list)
+    assert [call.args[0] for call in sleep.await_args_list] == [0.1, 0.2]
+    assert queue.empty()
+    assert "private token" not in caplog.text
+    assert caplog.text.count("RuntimeError") == 2
+    sentinel = object()
+    await queue.put(sentinel)
+    assert await queue.get() is sentinel
+    assert admit.await_count == 3
+
+
+@pytest.mark.anyio
+async def test_dispatch_reports_handled_action_even_if_acknowledgement_fails(caplog):
+    from vuzol.telegram.adapter import dispatch_update
+
+    update = _callback_update(f"v1:start:{uuid.UUID(int=1)}")
+    update.callback_query.answer.side_effect = BadRequest("query too old")
+    on_control = AsyncMock(return_value=IngressResult(status=IngressStatus.HANDLED))
+    on_message = AsyncMock()
+    await dispatch_update(update, bot_id="main", on_message=on_message, on_control=on_control)
+    on_control.assert_awaited_once()
+    assert on_control.await_args.args[0].task_id == uuid.UUID(int=1)
+    update.callback_query.answer.assert_awaited_once_with(text="▶️ Запускаю.", show_alert=False)
+    on_message.assert_not_awaited()
+    assert "callback acknowledgement unavailable" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_dispatch_ignores_invalid_control_without_invoking_business_handlers():
+    from vuzol.telegram.adapter import dispatch_update
+
+    update = _callback_update("v1:start:not-a-uuid")
+    on_control, on_message = AsyncMock(), AsyncMock()
+    await dispatch_update(update, bot_id="main", on_message=on_message, on_control=on_control)
+    on_control.assert_not_awaited()
+    on_message.assert_not_awaited()
+    update.callback_query.answer.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_long_polling_hooks_forward_bot_and_close_resources():
+    from unittest.mock import Mock
+
+    startup, shutdown, on_message, on_control = AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock()
+    application = build_long_polling_application(
+        "123:test",
+        bot_id="main",
+        admit_update=AsyncMock(),
+        on_message=on_message,
+        on_control=on_control,
+        on_startup=startup,
+        on_shutdown=shutdown,
+    )
+    await application.post_init(application)
+    startup.assert_awaited_once_with(application.bot)
+    await application.post_stop(application)
+    shutdown.assert_awaited_once_with()
+    update = _callback_update(f"v1:start:{uuid.UUID(int=1)}")
+    await application.handlers[0][0].callback(update, Mock())
+    on_control.assert_awaited_once()
+    message = Update.de_json(
+        {
+            "update_id": 20,
+            "message": {
+                "message_id": 31,
+                "date": 1,
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 42, "is_bot": False, "first_name": "Owner"},
+                "message_thread_id": 7,
+                "text": "request",
+            },
+        },
+        None,
+    )
+    await application.handlers[0][1].callback(message, Mock())
+    assert on_message.await_args.args[0].text == "request"
+
+
+@pytest.mark.anyio
+async def test_delete_expired_message_also_tolerates_uneditable_markup():
+    bot = AsyncMock()
+    bot.delete_message.side_effect = BadRequest("too old")
+    bot.edit_message_reply_markup.side_effect = BadRequest("also too old")
+    await PythonTelegramClient(bot).delete_message(chat_id=-100, message_id=17)
+    bot.edit_message_reply_markup.assert_awaited_once_with(
+        chat_id=-100, message_id=17, reply_markup=None
+    )
+
+
+def test_markup_refuses_unbound_approval_actions():
+    assert _control_markup(("approve",), task_id=uuid.uuid4(), approval_id=None) is None

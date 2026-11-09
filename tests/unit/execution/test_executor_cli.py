@@ -606,8 +606,9 @@ def test_pi_execution_boundary_accepts_only_canonical_runtime() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(("cli_review", "lead_lanes"), [(False, 0), (True, 0), (False, 3)])
+@pytest.mark.parametrize("networked", [False, True])
 async def test_executor_composes_enabled_runtime(
-    monkeypatch: pytest.MonkeyPatch, cli_review, lead_lanes
+    monkeypatch: pytest.MonkeyPatch, caplog, cli_review, lead_lanes, networked
 ) -> None:
     from vuzol.cli import executor as executor_cli
     from vuzol.config.models import LaunchMode
@@ -643,6 +644,16 @@ async def test_executor_composes_enabled_runtime(
     registries.profiles.items.return_value = (profile,)
     registries.profiles.get.return_value.concurrency_limit = 2
     registries.revision = "a" * 64
+    registries.sandboxes.items.return_value = (
+        (
+            SimpleNamespace(
+                enabled=True, network_mode=SandboxNetworkMode.HTTPS_PROXY, uid=10001, gid=10001
+            ),
+        )
+        if networked
+        else ()
+    )
+    settings.execution.proxy_image = "proxy@sha256:" + "a" * 64 if networked else None
     runtime = MagicMock(settings=settings, registries=registries)
 
     session = MagicMock()
@@ -701,6 +712,27 @@ async def test_executor_composes_enabled_runtime(
         "vuzol.model_calls.worker.ModelCallReconciler",
         MagicMock(return_value=MagicMock(reconcile=AsyncMock(return_value=0))),
     )
+    proxy_manager = MagicMock()
+    proxy_report = SimpleNamespace(lock_acquired=False, removed_count=2)
+    proxy_reconciler = MagicMock(reconcile_startup=AsyncMock(return_value=proxy_report))
+    monkeypatch.setattr(executor_cli, "ProxyServiceManager", MagicMock(return_value=proxy_manager))
+    monkeypatch.setattr(
+        executor_cli, "ProxyStartupReconciler", MagicMock(return_value=proxy_reconciler)
+    )
+    node = SimpleNamespace(id="remote", model_call_parallelism=2, provider_parallelism=2)
+    remote_calls = MagicMock(reconcile=AsyncMock(side_effect=RuntimeError("node unavailable")))
+    remote_providers = MagicMock(reconcile=AsyncMock(side_effect=RuntimeError("node unavailable")))
+    remote_worker = MagicMock()
+    monkeypatch.setattr(
+        executor_cli,
+        "_node_model_calls",
+        lambda *args: ((node, MagicMock(), ("pi-a",), lambda: False, remote_calls),),
+    )
+    monkeypatch.setattr(
+        executor_cli,
+        "_node_providers",
+        lambda *args, **kwargs: ((node, remote_worker, remote_providers),),
+    )
     run_loop = AsyncMock()
     monkeypatch.setattr(executor_cli, "_run_loop", run_loop)
     lead_owners: list[str] = []
@@ -753,6 +785,20 @@ async def test_executor_composes_enabled_runtime(
         frozenset({executor_cli.QueueClass.LIGHT}),
         frozenset({executor_cli.QueueClass.HEAVY}),
     }
+    assert chain._node_providers == (remote_worker, remote_worker)
+    assert len(chain._model_calls) >= 2
+    await chain._recovery()
+    assert remote_calls.reconcile.await_count == 1
+    assert remote_providers.reconcile.await_count == 2
+    assert turn_reconciler.reconcile_startup.await_count == 2
+    if networked:
+        assert proxy_reconciler.reconcile_startup.await_count == 2
+        assert {getattr(r, "event", None) for r in caplog.records} >= {
+            "executor.proxy_reconciliation_lock_timeout",
+            "executor.proxy_recovered",
+        }
+    else:
+        proxy_reconciler.reconcile_startup.assert_not_awaited()
     engine.dispose.assert_awaited_once()
 
 
@@ -910,3 +956,420 @@ def test_unknown_effects_step_outcome() -> None:
     assert outcome.kind == OutcomeKind.BLOCKED
     assert outcome.category is not None
     assert "unknown" in outcome.category
+
+
+@pytest.mark.parametrize("missing", ["sandbox", "proxy", "image"])
+def test_node_model_calls_require_controlled_egress(monkeypatch, missing):
+    from vuzol.cli import executor as cli
+
+    settings, registries = MagicMock(), MagicMock()
+    settings.execution.model_call_sandbox_profile = None if missing == "sandbox" else "helper"
+    settings.execution.proxy_image = None if missing == "image" else "image@sha256:abc"
+    assert (
+        cli._node_model_calls(
+            settings,
+            registries,
+            MagicMock(),
+            MagicMock(),
+            None,
+            None if missing == "proxy" else MagicMock(),
+        )
+        == ()
+    )
+    registries.sandboxes.get.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["model_calls", "providers"])
+@pytest.mark.parametrize("proxy_enabled", [False, True])
+def test_remote_lanes_admit_only_enabled_supported_pi_cli_profiles(
+    tmp_path, monkeypatch, kind, proxy_enabled
+):
+    import socket
+
+    from vuzol.cli import executor as cli
+    from vuzol.config import LaunchMode
+    from vuzol.execution import node as node_module
+    from vuzol.model_calls import transport as call_transport
+    from vuzol.model_calls import worker as call_worker
+
+    settings, registries = MagicMock(), MagicMock()
+    path = tmp_path / "docker.sock"
+    node = SimpleNamespace(
+        id="remote",
+        docker_socket=path,
+        model_call_parallelism=2,
+        provider_parallelism=3,
+        max_copy_back_bytes=1234,
+    )
+    disabled = SimpleNamespace(id="disabled", model_call_parallelism=0, provider_parallelism=0)
+    settings.execution.nodes = (disabled, node)
+    settings.execution.model_call_sandbox_profile = "helper" if proxy_enabled else None
+    settings.execution.proxy_image = "proxy-image" if proxy_enabled else None
+    settings.execution.rootless_docker_socket = tmp_path / "local.sock"
+    settings.execution.worker_mcp_servers = {"docs": "https://docs.test"}
+    registries.sandboxes.get.return_value.image = "helper-image"
+
+    def profile(id, **kw):
+        return SimpleNamespace(
+            **(dict(id=id, enabled=True, provider="pi", launch_mode=LaunchMode.CLI) | kw)
+        )
+
+    registries.profiles.items.return_value = (
+        profile("pi-b"),
+        profile("pi-a"),
+        profile("off", enabled=False),
+        profile("codex", provider="codex"),
+        profile("api", launch_mode=LaunchMode.API),
+        profile("unsupported"),
+    )
+    monkeypatch.setattr(cli, "supported_profile", lambda p: p.id != "unsupported")
+    runtime, proxy = MagicMock(), MagicMock()
+    monkeypatch.setattr(node_module, "NodeDockerRuntime", runtime)
+    monkeypatch.setattr(node_module, "NodeProxyServiceManager", proxy)
+    adapter = MagicMock(side_effect=lambda p, _transport: SimpleNamespace(profile_id=p.id))
+    monkeypatch.setattr(cli, "cli_adapter", adapter)
+    registry = MagicMock()
+    monkeypatch.setattr(cli, "AdapterRegistry", registry)
+    role = MagicMock()
+    monkeypatch.setattr(cli, "RoleBoundCliAdapter", role)
+    factory, resolver, journal = MagicMock(), MagicMock(), MagicMock()
+    if kind == "model_calls":
+        # Model calls always need proxy configuration; provider lanes may be offline.
+        settings.execution.model_call_sandbox_profile = "helper"
+        settings.execution.proxy_image = "proxy-image"
+        transport, reaper = MagicMock(), MagicMock()
+        monkeypatch.setattr(call_transport, "ModelCallSandboxTransport", transport)
+        monkeypatch.setattr(call_worker, "ModelCallReconciler", reaper)
+        lanes = cli._node_model_calls(settings, registries, factory, resolver, journal, MagicMock())
+        assert len(lanes) == 1
+        actual_node, actual_registry, profile_ids, ready, actual_reaper = lanes[0]
+        assert actual_registry is registry.return_value and actual_reaper is reaper.return_value
+        assert profile_ids == ("pi-a", "pi-b")
+        assert role.call_count == 2
+        assert transport.call_args.kwargs["node"] == "remote"
+    else:
+        worker, handler, reaper = MagicMock(), MagicMock(), MagicMock()
+        envelopes, transport = MagicMock(), MagicMock()
+        monkeypatch.setattr(cli, "RoutedWorkflowWorker", worker)
+        monkeypatch.setattr(cli, "ProviderStepHandler", handler)
+        monkeypatch.setattr(cli, "NodeStepReconciler", reaper)
+        monkeypatch.setattr(cli, "ExecutionEnvelopeFactory", envelopes)
+        monkeypatch.setattr(cli, "SandboxCodexTransport", transport)
+        monkeypatch.setattr(
+            cli,
+            "executor_provider_handlers",
+            lambda _handler: {"execute_code": "execute", "plan": "plan"},
+        )
+        lanes = cli._node_providers(
+            settings,
+            registries,
+            factory,
+            resolver,
+            journal,
+            artifacts=MagicMock(),
+            worktrees=MagicMock(),
+            worktree_access=MagicMock(),
+            owner="executor",
+        )
+        assert len(lanes) == 1
+        actual_node, actual_worker, actual_reaper = lanes[0]
+        assert actual_worker is worker.return_value and actual_reaper is reaper.return_value
+        assert runtime.call_args.kwargs["writable_worktree_only"] is True
+        assert worker.call_args.kwargs["handlers"] == {"execute_code": "execute"}
+        assert worker.call_args.kwargs["profile_ids"] == frozenset({"pi-a", "pi-b"})
+        assert worker.call_args.kwargs["queue_classes"] == frozenset({cli.QueueClass.HEAVY})
+        assert worker.call_args.kwargs["owner"] == "executor:provider:remote"
+        assert handler.call_args.kwargs["worker_mcp_servers"] == {"docs": "https://docs.test"}
+        assert envelopes.call_args.kwargs["node"] == "remote"
+        assert transport.call_args.args[-1] is (proxy.return_value if proxy_enabled else None)
+        ready = worker.call_args.kwargs["ready"]
+    assert actual_node is node
+    assert [call.args[0].id for call in adapter.call_args_list] == ["pi-b", "pi-a"]
+    assert set(registry.call_args.kwargs["adapters"]) == {"pi-a", "pi-b"}
+    assert runtime.call_args.args[:3] == ("remote", path, settings.execution.rootless_docker_socket)
+    assert runtime.call_args.kwargs["max_copy_back_bytes"] == 1234
+    assert not ready()
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.bind(str(path))
+        assert ready()
+    assert proxy.call_count == int(proxy_enabled or kind == "model_calls")
+
+
+@pytest.mark.parametrize("kind", ["model_calls", "providers"])
+def test_remote_lanes_are_absent_without_eligible_profiles(kind, monkeypatch):
+    from vuzol.cli import executor as cli
+    from vuzol.execution import node
+
+    settings, registries = MagicMock(), MagicMock()
+    settings.execution.nodes = (
+        SimpleNamespace(
+            id="remote",
+            docker_socket=Path("/missing"),
+            model_call_parallelism=1,
+            provider_parallelism=1,
+            max_copy_back_bytes=1,
+        ),
+    )
+    registries.profiles.items.return_value = ()
+    runtime = MagicMock()
+    monkeypatch.setattr(node, "NodeDockerRuntime", runtime)
+    monkeypatch.setattr(node, "NodeProxyServiceManager", MagicMock())
+    monkeypatch.setattr("vuzol.model_calls.transport.ModelCallSandboxTransport", MagicMock())
+    if kind == "model_calls":
+        assert (
+            cli._node_model_calls(settings, registries, MagicMock(), MagicMock(), None, MagicMock())
+            == ()
+        )
+    else:
+        assert (
+            cli._node_providers(
+                settings,
+                registries,
+                MagicMock(),
+                MagicMock(),
+                None,
+                artifacts=MagicMock(),
+                worktrees=MagicMock(),
+                worktree_access=MagicMock(),
+                owner="executor",
+            )
+            == ()
+        )
+        runtime.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_executor_recovery_runs_only_when_due_and_retries_after_error(monkeypatch):
+    from vuzol.cli import executor as cli
+
+    now = 100.0
+    monkeypatch.setattr(cli.time, "monotonic", lambda: now)
+    recovery = AsyncMock(side_effect=[RuntimeError("reconcile failed"), None])
+    chain = cli.ExecutorChain(MagicMock(), MagicMock(), recovery=recovery)
+    await chain.recover_if_due()
+    recovery.assert_not_awaited()
+    now = 130.0
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        await chain.recover_if_due()
+    await chain.recover_if_due()
+    assert recovery.await_count == 2
+    await chain.recover_if_due()
+    assert recovery.await_count == 2
+    now = 160.0
+    recovery.side_effect = None
+    await chain.recover_if_due()
+    assert recovery.await_count == 3
+
+
+def test_executor_lanes_preserve_priority_and_configured_parallelism():
+    from vuzol.cli import executor as cli
+
+    workers = [MagicMock() for _ in range(10)]
+    worktrees, providers, reviews, lead, control, control_wt, model, node, extra, extra2 = workers
+    chain = cli.ExecutorChain(
+        worktrees,
+        providers,
+        reviews,
+        lead,
+        control=control,
+        control_worktrees=control_wt,
+        provider_parallelism=3,
+        model_calls=(model,),
+        node_providers=(node,),
+        leads=(extra, extra2),
+    )
+    assert chain.lanes() == (
+        lead,
+        extra,
+        extra2,
+        reviews,
+        control_wt,
+        control,
+        worktrees,
+        providers,
+        providers,
+        providers,
+        model,
+        node,
+    )
+    assert cli.ExecutorChain(worktrees, providers).lanes() == (worktrees, providers)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["profiles", "database", "refresh"])
+async def test_topic_line_tick_logs_failures_without_stopping_executor(
+    monkeypatch, caplog, failure
+):
+    from vuzol.cli import executor as cli
+    from vuzol.telegram import topic_line
+
+    registries, factory = MagicMock(), MagicMock()
+    session = AsyncMock()
+    factory.begin.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    labels = MagicMock(return_value={"pi": "Pi"})
+    refresh = AsyncMock()
+    monkeypatch.setattr(topic_line, "profile_labels", labels)
+    monkeypatch.setattr(topic_line, "refresh_topic_lines", refresh)
+    if failure == "profiles":
+        labels.side_effect = RuntimeError("broken profiles")
+    elif failure == "database":
+        factory.begin.side_effect = RuntimeError("database unavailable")
+    else:
+        refresh.side_effect = RuntimeError("Telegram down")
+    await cli._refresh_topic_lines_tick(factory, registries)
+    assert any(getattr(r, "event", None) == "executor.topic_line_failed" for r in caplog.records)
+    if failure == "refresh":
+        refresh.assert_awaited_once_with(session, {"pi": "Pi"})
+    else:
+        refresh.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("exit_code", [0, 127])
+async def test_validation_preflight_checks_unique_enabled_images_offline(tmp_path, exit_code):
+    from vuzol.cli import executor as cli
+
+    registries = MagicMock()
+    registries.projects.items.return_value = (
+        SimpleNamespace(enabled=True, validation_sandbox_profile="validation"),
+        SimpleNamespace(enabled=True, validation_sandbox_profile="validation"),
+        SimpleNamespace(enabled=False, validation_sandbox_profile="disabled"),
+        SimpleNamespace(enabled=True, validation_sandbox_profile=None),
+    )
+    sandbox = SandboxProfileConfig(
+        id="validation",
+        image="validation@sha256:" + "a" * 64,
+        uid=10001,
+        gid=10001,
+        cpu_count=1,
+        memory_bytes=128 * 1024 * 1024,
+        pids_limit=64,
+        tmpfs_bytes=16 * 1024 * 1024,
+        timeout_seconds=120,
+        output_bytes=4096,
+    )
+    registries.sandboxes.get.return_value = sandbox
+    runtime = AsyncMock()
+    runtime.run.return_value = SimpleNamespace(exit_code=exit_code)
+    kwargs = dict(seccomp_profile=tmp_path / "seccomp.json", seccomp_digest="a" * 64)
+    if exit_code:
+        with pytest.raises(RuntimeError, match="validation.*failed toolchain preflight.*make"):
+            await cli._preflight_validation_images(runtime, registries, **kwargs)
+        assert runtime.run.await_count == 1
+    else:
+        await cli._preflight_validation_images(runtime, registries, **kwargs)
+        assert [c.args[0].argv for c in runtime.run.await_args_list] == list(
+            cli.VALIDATION_IMAGE_PREFLIGHT_COMMANDS
+        )
+    registries.sandboxes.get.assert_called_once_with("validation")
+    for call in runtime.run.await_args_list:
+        envelope = call.args[0]
+        assert envelope.sandbox.network_disabled
+        assert envelope.sandbox.mounts == ()
+        assert envelope.sandbox.timeout_seconds == 60
+        assert envelope.sandbox.environment["UV_OFFLINE"] == "1"
+        assert envelope.sandbox.environment["UV_NO_SYNC"] == "1"
+        assert envelope.stdin == ""
+        assert not call.args[1].requested
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_dream_scheduling_failure_does_not_prevent_clean_shutdown(
+    monkeypatch, caplog, failure
+):
+    from vuzol.cli import executor as cli
+    from vuzol.config.settings import ProjectLeadSettings
+
+    caplog.set_level("INFO")
+    callbacks = {}
+    loop = SimpleNamespace(
+        add_signal_handler=lambda signum, callback: callbacks.update({signum: callback})
+    )
+    monkeypatch.setattr(cli.asyncio, "get_running_loop", lambda: loop)
+    processor = MagicMock()
+    processor.lanes.return_value = ()
+    processor.recover_if_due = AsyncMock()
+    factory = MagicMock()
+    factory.begin.return_value.__aenter__ = AsyncMock(return_value="session")
+    factory.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    async def schedule(session, **kwargs):
+        callbacks[signal.SIGTERM]()
+        if failure:
+            raise RuntimeError("dream database unavailable")
+
+    enqueue = AsyncMock(side_effect=schedule)
+    monkeypatch.setattr(cli, "enqueue_dreams", enqueue)
+    settings = ProjectLeadSettings()
+    await cli._run_loop(
+        processor, 0.001, session_factory=factory, dream_settings=settings, timezone="Europe/Paris"
+    )
+    enqueue.assert_awaited_once_with("session", settings=settings, timezone="Europe/Paris")
+    processor.recover_if_due.assert_awaited_once()
+    assert (
+        any(getattr(r, "event", None) == "executor.dream_schedule_failed" for r in caplog.records)
+        is failure
+    )
+    assert any(getattr(r, "event", None) == "executor.stopped" for r in caplog.records)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "case", ["not_due", "periodic", "missing_item", "null_chat", "forced", "error"]
+)
+async def test_subscription_tick_refreshes_only_when_due_and_acknowledges_claimed_request(
+    monkeypatch, caplog, case
+):
+    from vuzol.cli import executor as cli
+    from vuzol.config import SubscriptionLimitSettings
+    from vuzol.providers import subscription_limits
+    from vuzol.storage import leasing
+    from vuzol.telegram import projections
+
+    factory, registries = MagicMock(), MagicMock()
+    session = AsyncMock()
+    session.scalars.return_value = SimpleNamespace(all=lambda: [-100, -200])
+    factory.begin.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    token = (
+        SimpleNamespace(item_id=uuid.uuid4())
+        if case in {"missing_item", "null_chat", "forced"}
+        else None
+    )
+    session.get.return_value = (
+        None
+        if case == "missing_item"
+        else SimpleNamespace(payload={"chat_id": None if case == "null_chat" else -300})
+    )
+    claim = AsyncMock(return_value=token)
+    if case == "error":
+        claim.side_effect = RuntimeError("database unavailable")
+    complete, refresh, dashboard = AsyncMock(), AsyncMock(), AsyncMock()
+    monkeypatch.setattr(leasing, "claim_outbox_item", claim)
+    monkeypatch.setattr(leasing, "complete_outbox_item", complete)
+    monkeypatch.setattr(subscription_limits, "refresh_and_store_subscription_limits", refresh)
+    monkeypatch.setattr(projections, "enqueue_project_status_dashboard", dashboard)
+    result = await cli._refresh_subscription_limits_tick(
+        factory, registries, due_periodic=case == "periodic", settings=SubscriptionLimitSettings()
+    )
+    assert result is (token is not None)
+    if case in {"not_due", "error"}:
+        refresh.assert_not_awaited()
+        dashboard.assert_not_awaited()
+        complete.assert_not_awaited()
+    else:
+        refresh.assert_awaited_once()
+        assert [call.args[1] for call in dashboard.await_args_list] == (
+            [-300] if case == "forced" else [-100, -200]
+        )
+        if token:
+            complete.assert_awaited_once_with(session, token)
+        else:
+            complete.assert_not_awaited()
+    if case == "error":
+        assert any(
+            getattr(r, "event", None) == "executor.subscription_limits_failed"
+            for r in caplog.records
+        )

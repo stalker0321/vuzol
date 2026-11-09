@@ -692,7 +692,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_refresh_subscription_limits_tick",
       "sources": [
-        "src/vuzol/cli/executor.py:633"
+        "src/vuzol/cli/executor.py:636"
       ],
       "producers": [],
       "consumers": [],
@@ -701,7 +701,7 @@
     {
       "id": "job:src/vuzol/cli/executor.py:_run_loop",
       "sources": [
-        "src/vuzol/cli/executor.py:712"
+        "src/vuzol/cli/executor.py:715"
       ],
       "producers": [],
       "consumers": [],
@@ -827,7 +827,7 @@
     {
       "id": "module:vuzol.cli.interpreter",
       "sources": [
-        "src/vuzol/cli/interpreter.py:567"
+        "src/vuzol/cli/interpreter.py:618"
       ],
       "producers": [],
       "consumers": [],
@@ -1076,7 +1076,7 @@
         "src/vuzol/telegram/ingress.py:1120"
       ],
       "consumers": [
-        "src/vuzol/cli/executor.py:657"
+        "src/vuzol/cli/executor.py:660"
       ],
       "scenario": "accounts"
     },

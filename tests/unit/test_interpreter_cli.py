@@ -120,10 +120,30 @@ async def test_workers_wire_rich_adapter_only_when_enabled(tmp_path, monkeypatch
     assert payload["reply_parameters"]["message_id"] == 5
 
 
+@pytest.mark.parametrize("monitor_enabled", [False, True])
 def test_interpreter_runtime_composes_and_stops_cleanly(
-    monkeypatch: MonkeyPatch, tmp_path: Path
+    monkeypatch: MonkeyPatch, tmp_path: Path, monitor_enabled: bool
 ) -> None:
+    from unittest.mock import Mock
+
+    from vuzol.config.settings import MonitorSettings
+
     configured = runtime(tmp_path)
+    configured = RuntimeConfiguration(
+        settings=configured.settings.model_copy(
+            update={
+                "monitor": MonitorSettings(
+                    enabled=monitor_enabled,
+                    chat_id=-100,
+                    message_thread_id=7,
+                    profile_ids=("interpreter",),
+                ),
+            }
+        ),
+        registries=configured.registries,
+    )
+    monitor_builder = Mock(return_value=Mock(process_one=AsyncMock(return_value=False)))
+    monkeypatch.setattr(interpreter_cli, "build_monitor_worker", monitor_builder)
     engine = FakeEngine()
     handlers: dict[int, Any] = {}
 
@@ -166,6 +186,7 @@ def test_interpreter_runtime_composes_and_stops_cleanly(
     assert set(handlers) == {signal.SIGTERM, signal.SIGINT}
     migration_head.assert_awaited_once_with(engine)
     assert engine.disposed
+    assert monitor_builder.call_count == int(monitor_enabled)
 
 
 def test_interpreter_fails_closed_disposes_once_without_pipeline(
@@ -395,3 +416,44 @@ def test_builder_rejects_non_api_profiles_and_missing_credentials(
             profile_id="codex-executor",
             timeout_seconds=1.0,
         )
+
+
+@pytest.mark.anyio
+async def test_monitor_builder_uses_model_chain_and_monitor_topic(tmp_path, monkeypatch):
+    from vuzol.config.settings import MonitorSettings
+
+    configured = runtime(tmp_path)
+    configured = RuntimeConfiguration(
+        settings=configured.settings.model_copy(
+            update={
+                "monitor": MonitorSettings(
+                    enabled=True,
+                    chat_id=-100,
+                    message_thread_id=7,
+                    profile_ids=("interpreter", "spare"),
+                ),
+            }
+        ),
+        registries=configured.registries,
+    )
+    calls = []
+    model = object()
+
+    def chain(*args, **kwargs):
+        calls.append(kwargs)
+        return model
+
+    monkeypatch.setattr(interpreter_cli, "build_model_chain", chain)
+    bot = AsyncMock()
+    bot.send_message.return_value.message_id = 12
+    bot.do_api_request.return_value = {"message_id": 17}
+    worker = interpreter_cli.build_monitor_worker(configured, object(), object(), bot)
+    assert worker._model is model
+    assert worker._timezone == configured.settings.assistant.timezone
+    assert calls[0]["profile_id"] == "interpreter"
+    assert calls[0]["fallback_profile_ids"] == ("spare",)
+    assert calls[0]["purpose"] == "monitor_classification"
+    assert await worker._send(chat_id=-100, thread_id=7, html="Текст") == 12
+    assert bot.send_message.await_args.kwargs["message_thread_id"] == 7
+    assert await worker._send_rich(chat_id=-100, thread_id=7, html="<p>Текст</p>") == 17
+    assert bot.do_api_request.await_args.kwargs["api_kwargs"]["message_thread_id"] == 7

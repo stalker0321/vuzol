@@ -45,6 +45,7 @@ from vuzol.interpretation.service import InterpretationPipeline, transcription_k
 from vuzol.leadership.access import ProjectAccess, ProjectApplication, WorkRequest
 from vuzol.leadership.provenance import RequestOrigin
 from vuzol.model_calls.client import RelayedModel
+from vuzol.monitor.service import MonitorWorker
 from vuzol.observability import configure_logging, get_logger
 from vuzol.storage import create_engine, create_session_factory, resolve_database_dsn
 from vuzol.storage.migration_preflight import require_migration_head
@@ -405,6 +406,51 @@ def build_inbox_worker(
     )
 
 
+def build_monitor_worker(
+    runtime: RuntimeConfiguration,
+    resolver: ScopedSecretResolver,
+    factory: async_sessionmaker[AsyncSession],
+    bot: Bot,
+) -> MonitorWorker:
+    config = runtime.settings.monitor
+    first, *rest = config.profile_ids
+    assistant = runtime.settings.assistant
+    client = PythonTelegramClient(bot)
+
+    async def send(*, chat_id: int, thread_id: int, html: str) -> int:
+        message = await bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=html,
+            parse_mode=ParseMode.HTML,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        return message.message_id
+
+    async def send_rich(*, chat_id: int, thread_id: int, html: str) -> int:
+        return await client.send_rich_message(
+            chat_id=chat_id, thread_id=thread_id, html=html, reply_to=None
+        )
+
+    return MonitorWorker(
+        factory,
+        config,
+        model=build_model_chain(
+            runtime,
+            resolver,
+            profile_id=first,
+            fallback_profile_ids=tuple(rest),
+            org_ids=assistant.opencode_org_ids,
+            timeout_seconds=assistant.timeout_seconds,
+            factory=factory,
+            purpose="monitor_classification",
+        ),
+        timezone=assistant.timezone,
+        send=send,
+        send_rich=send_rich,
+    )
+
+
 async def _poll(
     process_one: Callable[[], Awaitable[bool]], stop_event: asyncio.Event, interval: float
 ) -> None:
@@ -552,6 +598,11 @@ async def run() -> None:
                         _poll(assistant.process_one, stop_event, config.poll_interval_seconds)
                     )
                 )
+            if settings.monitor.enabled:
+                monitor = build_monitor_worker(
+                    runtime, resolver, create_session_factory(engine), bot
+                )
+                loops.append(asyncio.create_task(_poll(monitor.process_one, stop_event, 60)))
             while not stop_event.is_set():
                 processed = await pipeline.process_one()
                 if not processed:

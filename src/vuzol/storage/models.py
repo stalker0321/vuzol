@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     Computed,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -2290,3 +2291,50 @@ class GoalDocument(IdentityMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class MonitorEvent(IdentityMixin, Base):
+    """Public evidence, including cheap-rule rejections for inspection."""
+
+    __tablename__ = "monitor_events"
+    __table_args__ = (
+        UniqueConstraint("source_id", "external_id", name="uq_monitor_event_source_external"),
+        CheckConstraint("char_length(excerpt) <= 4000", name="excerpt_length"),
+        CheckConstraint("state IN ('new', 'dropped', 'classified', 'digested')", name="state"),
+        CheckConstraint("relevance >= 0 AND relevance <= 1", name="relevance"),
+        Index("ix_monitor_events_state", "state", "fetched_at"),
+        Index("ix_monitor_events_url", "url"),
+    )
+
+    source_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(String(12), nullable=False, default="new")
+    relevance: Mapped[float | None] = mapped_column(Float)
+    summary: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    digested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MonitorSourceFetch(Base):
+    """Successful fetch cursor, persisted across interpreter restarts."""
+
+    __tablename__ = "monitor_source_fetches"
+
+    source_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MonitorDigest(Base):
+    """Reserve before sending; an uncertain Telegram effect is never replayed."""
+
+    __tablename__ = "monitor_digests"
+
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    state: Mapped[str] = mapped_column(String(12), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)

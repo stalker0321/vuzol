@@ -37,8 +37,8 @@ def test_migration_chain_has_single_head() -> None:
     config.set_main_option("script_location", "alembic")
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    # Role assignment, supervised turn calls and account admission share one chain.
-    assert heads == ["b2e4a6c8d0f1"]  # pragma: allowlist secret - migration identifier
+    # Public monitoring follows the existing migration chain.
+    assert heads == ["c3f5a7b9d102"]  # pragma: allowlist secret - migration identifier
     seen: set[str] = set()
     revision: str | None = heads[0]
     while revision is not None:

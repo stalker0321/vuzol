@@ -600,6 +600,60 @@ class ProjectLeadSettings(BaseModel):
     integration_branch_prefix: str = Field(default="vuzol-managed/", min_length=1, max_length=80)
 
 
+class MonitorSource(BaseModel):
+    """One unauthenticated public source."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,99}$")
+    kind: Literal["rss", "github_releases", "hn", "reddit"]
+    target: str = Field(min_length=1)
+    interval_minutes: int = Field(default=60, ge=1)
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "MonitorSource":
+        import re
+        from urllib.parse import urlsplit
+
+        if self.kind == "rss":
+            url = urlsplit(self.target)
+            if url.scheme not in {"http", "https"} or not url.hostname or url.username:
+                raise ValueError("monitor RSS target must be a public HTTP URL")
+        if self.kind == "github_releases" and not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.target
+        ):
+            raise ValueError("monitor GitHub target must be owner/repo")
+        if self.kind == "reddit" and not re.fullmatch(r"[A-Za-z0-9_]+", self.target):
+            raise ValueError("monitor Reddit target must be a subreddit name")
+        return self
+
+
+class MonitorSettings(BaseModel):
+    """Default-off public monitoring; scheduling uses the assistant's timezone."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    chat_id: int | None = None
+    message_thread_id: int | None = Field(default=None, ge=1)
+    profile_ids: tuple[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]*$")], ...] = ()
+    interests: tuple[str, ...] = ()
+    digest_hours: tuple[Annotated[int, Field(ge=0, le=23)], ...] = (9, 21)
+    sources: tuple[MonitorSource, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_configuration(self) -> "MonitorSettings":
+        if self.enabled and (
+            not self.chat_id or self.message_thread_id is None or not self.profile_ids
+        ):
+            raise ValueError("monitor.enabled requires chat_id, message_thread_id and profile_ids")
+        if len({source.id for source in self.sources}) != len(self.sources):
+            raise ValueError("monitor source IDs must be unique")
+        return self
+
+
 class InboxSettings(BaseModel):
     """Owner 2026-10-31: forward anything to the bot in private; it builds a knowledge base."""
 
@@ -745,6 +799,7 @@ class Settings(BaseSettings):
     project_discussion_enabled: bool = False
     project_lead: ProjectLeadSettings = ProjectLeadSettings()
     chat: ChatSettings = ChatSettings()
+    monitor: MonitorSettings = MonitorSettings()
     inbox: InboxSettings = InboxSettings()
     assistant: AssistantSettings = AssistantSettings()
     project_setup: ProjectSetupSettings = ProjectSetupSettings()

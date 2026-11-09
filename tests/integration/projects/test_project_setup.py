@@ -39,7 +39,7 @@ from vuzol.storage.models import (
 )
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
-CHAT = -1009876543210
+CHAT = -1001234567777
 
 
 @pytest.fixture

@@ -52,6 +52,17 @@ commit. Migrations are not downgraded, so they must stay compatible with the pre
   `u:vuzol-executor:--x`, `auth.json` `110000:vuzol-executor 0640`) and a unique
   `runtime_identity`; a home directory such as `~/.codex-c` is not readable by the executor.
 
+## OpenCode usage export
+
+`vuzol-opencode-usage.timer` runs about once a minute as the owner's Unix account, which owns
+the OpenCode OAuth store. It writes a token-free snapshot to
+`/var/lib/vuzol/usage-export/opencode-c/usage.json` (directory `2750`, file `0640`, group
+`vuzol-executor`); the executor reads only that file and rejects it when stale (over 15 minutes),
+malformed or bound to another account. The installed OpenCode CLI stays the only refresh owner:
+`/usr/local/bin/opencode` is the dispatcher from `deploy/opencode-dispatch.py`, which serializes
+interactive use and the exporter with one `flock`. Upgrading OpenCode requires rechecking the
+dispatcher and the pinned store schema; until then the exporter stops with an explicit error.
+
 ## Backups and retention
 
 `vuzol-backup.timer` runs `vuzol-backup-run.sh` every night at about 03:30. It takes an encrypted

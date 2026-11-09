@@ -642,7 +642,7 @@ def test_project_status_dashboard_sends_once_then_edits(postgres_dsn: str) -> No
         )
 
         # Isolated forum chat so leftover tasks from other tests are not listed.
-        chat_id = -1003950752999
+        chat_id = -1001234567778
         dashboard_thread = 5
         engine, factory = storage(postgres_dsn)
         async with factory.begin() as session:

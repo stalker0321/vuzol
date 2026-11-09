@@ -1,13 +1,13 @@
-# Vuzol MCP: opt-in boundary and rollout
+# Vuzol MCP server: an opt-in boundary
 
-Current production: `vuzol:t136-execution-reliability-r5`, schema `e8b5a61fa505`.
-ChatGPT has submitted a real request through this endpoint. OAuth metadata and
-unauthenticated rejection are verified; submission still requires the owner's
-scoped grant. MCP dependencies are bundled in the release image. The old t135
-module-overlay workaround below is historical, not the current deployment.
+The `mcp` container exposes Vuzol to an external MCP client such as ChatGPT. It
+runs from the same release image as the other services. OAuth metadata and
+unauthenticated rejection are part of the contract; submitting work still
+requires the owner's scoped grant.
 
-See [execution reliability report](EXECUTION_RELIABILITY_2026_10_22.md) for
-provenance, durable request notices, idempotency and live execution checks.
+This is the server side. Remote MCP servers that Vuzol's own agents may call are
+configured per role: `assistant.mcp_servers`, `execution.model_call_mcp_servers`
+and `execution.worker_mcp_servers` (see [Configuration](CONFIGURATION.md)).
 
 ## Contract
 
@@ -50,7 +50,7 @@ Example configuration (replace all placeholder identities):
 
 ```json
 {
-  "resource_url": "https://vuzol.example.com/mcp",
+  "resource_url": "https://mcp.example.com/mcp",
   "issuer_url": "https://YOUR-TENANT.example/",
   "jwks_url": "https://YOUR-TENANT.example/.well-known/jwks.json",
   "port": 8093,
@@ -96,10 +96,10 @@ scope consent, refresh, JWKS rotation, and a real ChatGPT connection. Local
 tests verify signed JWT checks with a substituted JWKS lookup, not a live IdP.
 Add ingress rate limiting appropriate to the chosen public edge before rollout.
 
-After those checks, replace the closed Caddy site with:
+The public edge then proxies the endpoint, for example:
 
 ```caddyfile
-vuzol.example.com {
+mcp.example.com {
     request_body {
         max_size 256KB
     }
@@ -112,76 +112,6 @@ vuzol.example.com {
 Proxy the metadata path too, not just `/mcp`. Never expose the upstream port.
 Do not log Authorization headers, tokens, or OAuth codes. Validate the complete
 Caddy config and reload (not restart); keep a copy for rollback.
-
-## Historical t135 rollout state, 2026-10-22
-
-DNS `vuzol.example.com` points to 203.0.113.10. Caddy serves TLS and proxies
-to the separate `vuzol-mcp` container, published only at 127.0.0.1:8093.
-Public resource metadata returns 200; unauthenticated `/mcp` returns 401 with
-the resource metadata challenge. Existing site blocks are unchanged. Backup:
-`/etc/caddy/Caddyfile.backup-20261022-before-mcp-proxy` restores the closed
-503 placeholder. The earlier `Caddyfile.backup-20261022-before-mcp` predates
-the entire MCP site block. Production Vuzol services have not been restarted.
-
-Runtime: `/home/owner/vuzol-mcp-runtime/{compose.yaml,mcp.json,overlay/,deps/}`.
-It uses the existing `vuzol:t135-inference-diagnostics` image (core code 710b98e)
-plus only the new MCP/application modules and optional dependency directory.
-The core image matches production DB migration d7a4f50e9404. The development
-branch additionally contains migration e8b5a61fa505; do NOT deploy that whole
-branch against production without the separate migration/modes rollout.
-Dependency files are hard-linked copies outside `/tmp`; container restart
-does not depend on the temporary test venv. Registry and repository mounts are
-read-only; no Docker socket, Telegram token or inference credentials are supplied.
-The MCP-only Compose project is `vuzol-mcp`, attached to `repo_default` for DB
-connectivity. Updates require resupplying the existing DB DSN; the running
-container stores it as an environment value like the other services. Never
-print `docker inspect` environment values or rendered Compose output.
-
-### Overlay must mount `service.py`
-
-The overlay adapts the branch MCP/application modules onto the t135 core.
-`leadership/access.py` submits with `apply_human(..., uow=...)`, and only the
-branch version of `leadership/service.py` accepts that keyword. Mount both:
-
-```yaml
-- ./overlay/access.py:/app/src/vuzol/leadership/access.py:ro
-- ./overlay/service.py:/app/src/vuzol/leadership/service.py:ro
-```
-
-If `service.py` is omitted the container still starts, but submission fails with
-`LeadershipCommandService.apply_human() got an unexpected keyword argument 'uow'`.
-The branch `service.py` differs from t135 only by the optional `uow` parameter on
-`apply`/`apply_human` and reuse of the caller's UnitOfWork; it does not introduce
-the branch's migration. After changing any overlay file, recreate (not just
-restart) the container so the bind mount and imported module are refreshed.
-
-Verified 2026-10-22 after recreating `vuzol-mcp`: `apply_human` accepts `uow`,
-resource metadata returns 200 at both the local and public
-`/.well-known/oauth-protected-resource/mcp`, unauthenticated `/mcp` returns 401
-with the metadata challenge, and startup logs contain no errors. Auth0 callback
-configuration remains the separate open item below.
-
-The user-specified Auth0 subject is explicitly mapped to the existing Vuzol
-owner and four active project discussions in the operator-controlled runtime
-JSON. Submission requires both the local grant and token `vuzol:submit`.
-The application credential file `.env.auth0` is a git-ignored staging file;
-the MCP verifier does not consume its client secret. Those client credentials
-belong in the ChatGPT OAuth client form, not in the resource server.
-
-Verified on deployment: schema-head preflight, application status reads for all
-four granted projects, two integration tests, Ruff and scoped strict mypy.
-These status reads did not create goals or invoke providers.
-
-Auth0 discovery advertises PKCE S256 and issuer response binding. A silent
-authorization preflight with the configured client currently fails with
-`Callback URL mismatch`. The next user action is to allow the exact ChatGPT
-redirect URI in the Auth0 application. The stable issuer-bound callback is
-`https://chatgpt.com/connector_platform_oauth_redirect`; if ChatGPT shows a
-connection-specific redirect, use the exact value it displays instead.
-Actual OAuth token issuance, refresh, and ChatGPT tool calls remain unverified.
-
-Rollback: `docker stop vuzol-mcp`, restore the proxy backup above and validate /
-reload Caddy. This does not require rolling back any Vuzol worker or DB schema.
 
 ## Tests
 

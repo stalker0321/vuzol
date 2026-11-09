@@ -394,7 +394,7 @@ async def test_build_and_enqueue_history_report() -> None:
         id=task_id,
         status=TaskStatus.COMPLETED,
         task_type="general",
-        source_chat_id=-1009876543210,
+        source_chat_id=-1001234567777,
         project_id="bill-buddy",
         public_task_number=730004,
         topic_task_number=1,
@@ -408,7 +408,7 @@ async def test_build_and_enqueue_history_report() -> None:
     )
     mapping = SimpleNamespace(
         id=mapping_id,
-        chat_id=-1009876543210,
+        chat_id=-1001234567777,
         message_thread_id=13,
         topic_kind="changelog",
         enabled=True,

@@ -39,8 +39,7 @@ deferred. Completed work belongs in `CHANGELOG.md`.
 
 ## Product consolidation — 2026-10-21
 
-Direction: `ASTRA_PRODUCT_CONSOLIDATION_HANDOFF.md` (owner-provided, separate
-from implementation). Safety repairs from the pilot precede new interfaces.
+Safety repairs from the pilot precede new interfaces.
 This inventory is not authorization to delete stored projects, results or grants.
 
 | Mechanism | Supported scenario | Replacement | Dependencies / retained data | Decision |

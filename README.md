@@ -4,115 +4,90 @@
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 
-Vuzol is a self-hosted AI task orchestrator controlled from Telegram. Send a request in a project
-topic, choose an AI provider, and Vuzol turns the conversation into a durable workflow that can
-plan, edit code, run tests, request approval, and safely apply the result.
+Vuzol is a self-hosted team of AI agents you run from Telegram. Each project gets a forum
+topic with its own **project lead**, an AI agent that talks with you, plans the work, hands
+tasks to coding agents in isolated sandboxes, has the results reviewed and asks for your
+approval before anything lands in the repository. A **personal assistant** topic handles
+errands and dispatches work to the right project. The private chat with the bot is an
+**inbox**: anything you forward becomes a searchable knowledge base.
 
-It is built for personal infrastructure where convenience matters, but handing an AI agent direct
-access to the host is not acceptable.
+It is built for personal infrastructure where convenience matters, but handing an AI agent
+direct access to the host is not acceptable.
 
-> **Project status:** active development and real-world dogfooding. The core task, discussion,
-> coding, validation, review, and approval flows are implemented. Deployment still assumes an
-> experienced operator and is not yet a one-command install.
+> **Project status:** in daily use by its author on one deployment. Installing it elsewhere
+> still assumes an experienced operator.
 
-## Why Vuzol?
+## What it does
 
-Most chat bots stop at generating an answer. Vuzol manages the work around that answer:
-
-- **Telegram-native workspace** — each forum topic maps to a project, with status cards, history,
-  model selection, approvals, and voice-message intake.
-- **Multi-provider routing** — provider accounts and models are selected independently, with
-  capability, health, budget, project preference, and fallback policies.
-- **Durable workflows** — PostgreSQL-backed tasks, steps, leases, events, inboxes, and outboxes
-  survive restarts without treating Telegram as the source of truth.
-- **Isolated coding agents** — every coding attempt runs in its own Git worktree and rootless
-  container with explicit filesystem, network, and resource boundaries.
-- **Trusted validation** — tests run separately from the model in a pinned validation image; the
-  executor cannot declare its own result valid.
-- **Human approval before apply** — reviewed result commits are applied by a narrow, separate
-  service using compare-and-swap protection.
-- **Operational recovery** — idempotency keys, fenced leases, bounded retries, retention, backup,
-  and restore paths are first-class parts of the design.
+- **Project leads.** Write or dictate in a project topic. The lead answers questions,
+  clarifies a request, proposes a plan as a card and, after you approve it, runs the tasks
+  one by one. It keeps a notebook of project facts and decisions, writes a retrospective when
+  a goal ends, and tidies its notes in a nightly pass. A request that is not about the current
+  goal goes into the topic's task queue.
+- **Personal assistant.** A separate topic for errands (search, flights, small research) and
+  for sending tasks to project topics or creating a new project with its repository.
+- **Inbox.** Forward links, files, voice notes or text to the bot in private. It summarizes
+  and files them, and project leads can recall them.
+- **Monitor (optional).** Watches public sources (RSS, GitHub releases, Hacker News, Reddit),
+  ranks items against your interests and posts a digest to a topic.
+- **Isolated coding agents.** Every coding attempt runs in its own Git worktree inside a
+  rootless container with explicit filesystem, network and resource limits. Network access
+  goes through an allowlisting proxy. Work can also run on other machines' Docker.
+- **Trusted validation and review.** Project gates run in a separate validation sandbox, and an
+  independent model reviews each result; the agent cannot declare its own work done.
+- **Durable by design.** PostgreSQL is the source of truth. Leases, fencing, idempotency keys
+  and transactional outboxes make restarts and retries safe. Telegram messages are projections.
 
 ## How it works
 
 ```text
-Telegram text / voice
+Telegram (project topic, assistant topic, private inbox)
         │
         ▼
- durable intake ──► semantic interpretation ──► task or work package
-        │                                            │
-        │                                            ▼
-        │                                  provider routing + budget
-        │                                            │
-        ▼                                            ▼
- status projection                         isolated worktree execution
-                                                     │
-                                                     ▼
-                                          trusted tests and review
-                                                     │
-                                                     ▼
-                                           Telegram approval card
-                                                     │
-                                                     ▼
-                                           CAS-protected local apply
+ durable intake ──► project lead (model) ──► plan card ──► owner approval
+                          │                                    │
+                          │ notebook, decision log, recall     ▼
+                          │                          task: isolated worktree
+                          │                          + coding agent sandbox
+                          │                                    │
+                          ▼                                    ▼
+                  replies, status cards ◄──── trusted gates + independent review
+                                                               │
+                                                               ▼
+                                              CAS-protected apply to the project branch
 ```
 
-Telegram messages are reconstructable projections. PostgreSQL remains the source of truth, so a
-delivery retry or process restart cannot silently lose workflow state.
+## Models and providers
 
-### Project conversation modes (opt-in)
+Leads, coding agents, reviewers and the assistant are configured independently per role.
 
-With `project_lead.enabled=true`, ordinary text in a project topic and `/lead <request>`
-both enter `ProjectEventService.submit_event`. Telegram and MCP record a message atomically;
-`ProjectLeadWorker` decides whether to answer, clarify, or request a strong plan. Jev does not
-classify this text path. Without a live goal, admission creates a draft conversation. Questions
-receive replies in the topic without a Task. A work request produces a plan card; the owner's
-approval grants execution for the current scope, and the lead then starts each task.
-
-With `chat.enabled=true`, bare `/think` and `/lead` select the persistent mode in that topic.
-The default is lead when the project lead is enabled. Switching mode creates no goal and does
-not pause or resume existing work. `/think` sends the topic's messages to its own discussion
-model (the `think` slot of `/model`), never to the lead: it answers, including a work request,
-and never starts or plans work. Once a concrete task is agreed, Sol may offer a brief with
-**➡️ Передать лиду**. Pressing it sends the brief to the lead like an MCP request and returns
-the topic to the lead; the lead can then ask for a plan, whose launch still needs owner approval.
-The button is available only with the project lead enabled. `/lead` followed by
-«делай как обсудили» also works: the lead sees recent conversation turns.
-
-Live goals accept subsequent messages without automatically changing scope or resuming work.
-Scope amendments require a new owner-approved plan. Unprocessed owner messages arriving around
-goal completion move to a new or existing live conversation; late task results never reopen a
-completed goal. Admission and retries create no duplicate events or conversational Tasks.
-
-This path works with `project_discussion_enabled=false`. No schema migration is needed for
-single text entry. Existing owner-enabled goals retain their grants. With the lead feature
-disabled, the legacy intake remains available; pause, cancel and status controls still work.
-Voice, attachment preparation and INBOX project creation retain their existing paths and are
-separate follow-up work. See [Telegram](docs/TELEGRAM.md) and [MCP](docs/MCP.md) for contracts.
-
-## Supported integrations
-
-| Area | Current support |
+| Kind | Supported |
 | --- | --- |
-| Interface | Telegram forum groups, text and voice intake |
-| Coding providers | Codex CLI, Grok CLI, Kimi Code through an OpenAI-compatible gateway |
-| Interpretation | OpenAI-compatible model profiles |
-| Repositories | Local Git repositories with managed branches and isolated worktrees |
-| Execution | Rootless Docker, pinned sandbox and validation images |
-| Persistence | PostgreSQL 16 with Alembic migrations |
-| Operations | systemd units, health checks, retention, encrypted backup and restore |
+| CLI agents in sandboxes | Codex CLI, Pi (OpenCode Go models), Grok CLI, Kimi Code |
+| API models | OpenAI-compatible endpoints (inbox, assistant, interpretation) |
+| Tools | remote MCP servers allowlisted per role; an MCP server exposing Vuzol itself |
+| Voice | OpenAI transcription with a project vocabulary |
 
-Provider credentials are kept outside the repository and scoped to the runtime identity that needs
-them. See [Provider routing and budgets](docs/PROVIDERS.md) for the profile model.
+Provider credentials stay outside the repository, each readable only by the runtime identity
+that needs it. See [Providers](docs/PROVIDERS.md).
 
-## Quick start for development
+## Safety model
 
-### Prerequisites
+Responsibilities are split instead of running one all-powerful agent process:
 
-- Python 3.12
-- [uv](https://docs.astral.sh/uv/)
-- Docker with Compose
+1. **Ingress and delivery** talk to Telegram and never touch repositories.
+2. The **worker** and the **executor's lead lanes** own workflow state and decisions; model
+   calls run in sandboxes with no host access.
+3. The **executor** gives a coding agent only its task worktree, inside a rootless sandbox.
+4. The **validator** measures the resulting Git state and runs trusted gates independently.
+5. The **applier** advances configured local branches only for an exact approved result.
+
+Agents never push, deploy or get general host access. The stable contracts are in
+[Architecture invariants](docs/ARCHITECTURE_INVARIANTS.md).
+
+## Development
+
+Prerequisites: Python 3.12, [uv](https://docs.astral.sh/uv/), Docker with Compose.
 
 ```bash
 git clone https://github.com/stalker0321/vuzol.git
@@ -124,89 +99,38 @@ make db-migrate
 make check
 ```
 
-Run the health application and worker in separate terminals:
-
 ```bash
-make run-app
-make run-worker
-```
-
-The health endpoints are available at `http://127.0.0.1:8000/health/live` and
-`http://127.0.0.1:8000/health/ready`.
-
-The base container stack can also be started with Compose. Telegram and interpretation services
-are opt-in profiles because they require credentials:
-
-```bash
-docker compose --profile telegram --profile interpretation up
-```
-
-Before enabling them, configure the Telegram allowlist, bot token, project registry, database DSN,
-and provider profiles. The complete setup reference is in
-[Configuration](docs/CONFIGURATION.md).
-
-## Safety model
-
-Vuzol deliberately separates responsibilities instead of running one all-powerful agent process:
-
-1. The **ingress and delivery services** communicate with Telegram but do not edit repositories.
-2. The **worker** owns workflow state and dispatch but has no provider sandbox or repository-write
-   capability.
-3. The **executor** gives a provider access only to a task worktree inside a rootless sandbox.
-4. The **validator** measures the resulting Git state and runs trusted gates independently.
-5. The **applier** can advance configured local branches only after an exact result is approved.
-
-The coding path does not push branches, open pull requests, deploy applications, or grant general
-host access. High-risk results require additional review and mechanical blockers fail closed.
-The stable security contracts are documented in
-[Architecture invariants](docs/ARCHITECTURE_INVARIANTS.md).
-
-## Development commands
-
-```bash
-make lint           # Ruff linting
-make format-check   # formatting verification
-make type-check     # strict mypy checks
-make test           # unit and default integration tests
+make lint           # Ruff
+make format-check   # formatting
+make type-check     # mypy
+make test           # unit and integration tests
 make test-postgres  # PostgreSQL migration and concurrency tests
 make security       # secret and dependency checks
-make check          # complete local quality gate
+make check          # the complete local gate
 ```
 
-CI runs the quality suite, PostgreSQL integration tests, Compose validation, and container builds.
+Production runs from `deploy/production`: containers in `compose.yaml`, host services as
+systemd units, and one `deploy.sh` that installs a commit. See
+[Production deployment](deploy/production/README.md) and [Configuration](docs/CONFIGURATION.md).
 
 ## Repository map
 
 ```text
-src/vuzol/          application, workflow, provider, execution, and Telegram modules
+src/vuzol/          leadership, assistant, inbox, monitor, workflows, execution, providers, Telegram
 alembic/            database migrations
 config/             non-secret registry examples
-deploy/             systemd, sandbox, proxy, and validation assets
-docs/               operator guides, architecture decisions, and design invariants
-tests/              unit and integration test suites
+deploy/             production compose, systemd units, sandbox, proxy and validation images
+docs/               guides, architecture decisions and invariants
+tests/              unit and integration suites
 ```
 
 ## Documentation
 
-- [Documentation map: current guides and historical plans](docs/README.md)
-- [Configuration](docs/CONFIGURATION.md)
-- [Telegram workspace](docs/TELEGRAM.md)
-- [Voice and semantic interpretation](docs/INTERPRETATION.md)
-- [Provider routing and budgets](docs/PROVIDERS.md)
-- [PostgreSQL storage](docs/STORAGE.md)
-- [Architecture invariants](docs/ARCHITECTURE_INVARIANTS.md)
-- [Testing policy](docs/TESTING.md)
-- [Architecture decisions](docs/decisions/)
-- [Changelog](docs/CHANGELOG.md)
-- [Contributing](CONTRIBUTING.md)
-
-## Contributing
-
-Vuzol is currently shaped around a single self-hosted deployment, but focused bug reports and pull
-requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and run `make check` before
-submitting a change.
+Start with the [documentation map](docs/README.md). Also: [Telegram](docs/TELEGRAM.md),
+[lead memory](docs/LEAD_MEMORY.md), [monitor](docs/MONITOR.md), [storage](docs/STORAGE.md),
+[testing](docs/TESTING.md), [architecture decisions](docs/decisions/),
+[contributing](CONTRIBUTING.md).
 
 ## License
 
-Vuzol is open-source software licensed under the
 [Apache License 2.0](LICENSE).

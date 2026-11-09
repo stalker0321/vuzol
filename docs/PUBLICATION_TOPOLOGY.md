@@ -1,9 +1,9 @@
 # Publication with separate edge and worker hosts
 
-The public DNS for example.com and test.example.com points to the edge
-vuzol-main (203.0.113.20 / private 10.0.0.2). The current Vuzol publisher,
-worktrees, static releases and loopback preview gateway are on ubuntu-4gb
-(203.0.113.10 / private 10.0.0.3). They do not share a localhost or filesystem.
+The public DNS for the site and preview domains points to the edge host. The
+Vuzol publisher, worktrees, static releases and loopback preview gateway are on
+the worker host; the two reach each other over a private network. They do not
+share a localhost or filesystem.
 
 An edge proxy to 127.0.0.1:8091 therefore returns 502 even while the worker's
 gateway and local TLS site return 200. A production file_server on the edge

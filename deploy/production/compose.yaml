@@ -42,7 +42,8 @@ x-roles: &roles
   VUZOL_MONITOR__SOURCES: ${VUZOL_MONITOR_SOURCES:-[]}
   VUZOL_INBOX__PROFILE_ID: inbox-flash-c
   VUZOL_INBOX__FALLBACK_PROFILE_IDS: '["inbox-flash-a"]'
-  VUZOL_INBOX__OPENCODE_ORG_IDS: '{"inbox-flash-c": "org_EXAMPLE"}'
+  # Account ids are private: /srv/vuzol/.env holds the JSON map.
+  VUZOL_INBOX__OPENCODE_ORG_IDS: ${VUZOL_OPENCODE_ORG_IDS:-{}}
   # Web search for answers: Brave when its key file exists, else our SearXNG.
   VUZOL_INBOX__BRAVE_KEY_FILE: /run/vuzol-secrets/inbox/brave.key
   VUZOL_INBOX__SEARXNG_URL: http://searxng:8080
@@ -61,7 +62,7 @@ x-roles: &roles
   VUZOL_ASSISTANT__NATIVE_SEARCH: ${VUZOL_ASSISTANT_NATIVE_SEARCH:-false}
   VUZOL_ASSISTANT__MCP_SERVERS: '{"kiwi": "https://mcp.kiwi.com"}'
   VUZOL_PROJECT_SETUP__ENABLED: ${VUZOL_PROJECT_SETUP_ENABLED:-false}
-  VUZOL_ASSISTANT__OPENCODE_ORG_IDS: '{"inbox-flash-c": "org_EXAMPLE"}'
+  VUZOL_ASSISTANT__OPENCODE_ORG_IDS: ${VUZOL_OPENCODE_ORG_IDS:-{}}
 
 x-app: &app
   image: ${VUZOL_IMAGE:?set by vuzol-compose}
@@ -219,7 +220,7 @@ services:
       - /srv/vuzol/worktrees:/srv/vuzol/worktrees
       - /etc/vuzol/sandbox-seccomp.json:/etc/vuzol/sandbox-seccomp.json:ro
 
-  # Public MCP endpoint, reverse-proxied by Caddy at https://vuzol.example.com/mcp.
+  # Public MCP endpoint, reverse-proxied by Caddy at https://<public host>/mcp.
   mcp:
     <<: *app
     container_name: vuzol-mcp

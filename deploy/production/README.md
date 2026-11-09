@@ -70,6 +70,18 @@ interactive use and the exporter with one `flock`; the exporter checks its SHA-2
 (`owner_launcher_sha256`), so update that after reinstalling it. Upgrading OpenCode requires rechecking the
 dispatcher and the pinned store schema; until then the exporter stops with an explicit error.
 
+## Health summary
+
+`vuzol-health-report.timer` sends one message to the system topic every morning at 09:00:
+disk use, host units and their restarts, the last backup, the OpenCode usage export and its
+quota windows, runs waiting for the owner, stuck steps, waiting goals, and the last day's
+failed research jobs, model calls and undelivered messages. A healthy day is one silent line.
+`/etc/vuzol/health-report.env` (root `0600`) holds `VUZOL_TELEGRAM_BOT_TOKEN`,
+`VUZOL_HEALTH_CHAT_ID` and `VUZOL_HEALTH_THREAD_ID`. To see it without sending:
+`sudo systemd-run --pipe --wait -p User=vuzol-executor -p EnvironmentFile=/etc/vuzol/vuzol.env
+-p EnvironmentFile=/etc/vuzol/secrets.env -p WorkingDirectory=/opt/vuzol/current
+/opt/vuzol/current/.venv/bin/python -m vuzol.cli.health_report --dry-run`.
+
 ## Backups and retention
 
 `vuzol-backup.timer` runs `vuzol-backup-run.sh` every night at about 03:30. It takes an encrypted

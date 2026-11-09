@@ -1,0 +1,10 @@
+[Unit]
+Description=Send the Vuzol health summary every morning
+
+[Timer]
+OnCalendar=*-*-* 09:00
+Persistent=true
+Unit=vuzol-health-report.service
+
+[Install]
+WantedBy=timers.target

@@ -8,7 +8,7 @@ REPO=${VUZOL_SOURCE_REPO:-/srv/vuzol/repo}
 UV=${UV:-/usr/local/bin/uv}
 RELEASES=/opt/vuzol/releases
 UNITS="vuzol-executor.service vuzol-applier.service vuzol-static-publisher-worker.service vuzol-project-setup.service"
-TIMERS="vuzol-opencode-usage.timer vuzol-backup.timer vuzol-retention.timer"
+TIMERS="vuzol-opencode-usage.timer vuzol-backup.timer vuzol-retention.timer vuzol-health-report.timer"
 KEEP=3
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
@@ -21,7 +21,7 @@ IMAGE=vuzol:$TAG
 exec 9>/run/vuzol-deploy.lock
 flock -n 9 || { echo "another deploy is running" >&2; exit 1; }
 
-for unit in $UNITS vuzol-opencode-usage.service vuzol-backup.service vuzol-retention.service; do
+for unit in $UNITS vuzol-opencode-usage.service vuzol-backup.service vuzol-retention.service vuzol-health-report.service; do
   if [ -d "/etc/systemd/system/$unit.d" ]; then
     echo "drop-ins found in /etc/systemd/system/$unit.d; fold them into deploy/production/systemd" >&2
     exit 1

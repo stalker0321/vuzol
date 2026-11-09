@@ -44,6 +44,7 @@ vuzol-backup = "vuzol.cli.backup:main"
 vuzol-static-publisher = "vuzol.ops.static_publish:main"
 vuzol-static-publisher-worker = "vuzol.cli.static_publisher_worker:main"
 vuzol-task = "vuzol.cli.task:main"
+vuzol-health-report = "vuzol.cli.health_report:main"
 
 [dependency-groups]
 dev = [

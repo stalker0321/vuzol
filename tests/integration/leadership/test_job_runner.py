@@ -44,10 +44,11 @@ def anyio_backend():
     return "asyncio"
 
 
-def worker(factory, adapter, profile=None):
+def worker(factory, adapter, profile=None, *, job_concurrency=1):
+    lead = ProjectLeadSettings(enabled=True, job_concurrency=job_concurrency)
     return build_project_lead_worker(
         factory,
-        settings=Settings(environment="test", project_lead=ProjectLeadSettings(enabled=True)),
+        settings=Settings(environment="test", project_lead=lead),
         profiles=ProfileRegistry((profile or planner_profile(),)),
         owner="research",
         planner_adapter=adapter,
@@ -142,7 +143,9 @@ async def test_runner_capacity_is_shared_and_does_not_block_lead(postgres_dsn):
                     "content_revision": content_revision(profile),
                 }
             }
-        lead = worker(factory, adapter, profile)
+        # Research runs one at a time by default; the shared capacity holds at any size.
+        assert ProjectLeadSettings().job_concurrency == 1
+        lead = worker(factory, adapter, profile, job_concurrency=2)
         runner = lead.job_runner
         try:
             assert await runner.tick()

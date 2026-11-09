@@ -587,7 +587,9 @@ class ProjectLeadSettings(BaseModel):
         Annotated[float, Field(ge=0, le=3600, allow_inf_nan=False)], ...
     ] = Field(default=(30, 120, 600), max_length=3)
     repeat_limit: int = Field(default=2, ge=1, le=20)
-    job_concurrency: int = Field(default=2, ge=1, le=100)
+    # Research jobs at once across all projects. One: parallel research raced for the
+    # same account and failed (live 2026-11-03); later ones simply queue.
+    job_concurrency: int = Field(default=1, ge=1, le=100)
     # Lead turns at once across all projects; each goal still has one lead at a time.
     lead_parallelism: int = Field(default=1, ge=1, le=256)
     lease_seconds: int = Field(default=120, ge=30, le=3600)

@@ -92,7 +92,7 @@ Prerequisites: Python 3.12, [uv](https://docs.astral.sh/uv/), Docker with Compos
 ```bash
 git clone https://github.com/stalker0321/vuzol.git
 cd vuzol
-uv sync --frozen
+uv sync --frozen --extra mcp
 cp .env.example .env
 make db-up
 make db-migrate

@@ -9,7 +9,7 @@ can go directly to a pull request.
 ```bash
 git clone https://github.com/stalker0321/vuzol.git
 cd vuzol
-uv sync --frozen
+uv sync --frozen --extra mcp
 cp .env.example .env
 make db-up
 make db-migrate

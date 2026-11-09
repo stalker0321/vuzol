@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -786,11 +786,7 @@ class LeadershipCommandService:
                     },
                     goal,
                 )
-            question = (
-                "Не подтверждены критерии: "  # noqa: RUF001
-                + ", ".join(assessment.missing)
-                + ". Уточните следующий шаг."
-            )
+            question = evidence_question(goal.criteria, assessment.missing)
             goal.wakeup_condition = {
                 "kind": "owner",
                 "missing": list(assessment.missing),
@@ -1924,3 +1920,26 @@ def _uuid(value: uuid.UUID | None) -> str | None:
 def _version_of(result: Mapping[str, Any]) -> int | None:
     version = result.get("version")
     return version if isinstance(version, int) else None
+
+
+def evidence_question(criteria: object, missing: Sequence[str]) -> str:
+    """Name unconfirmed criteria by what the owner asked for, never by their identifiers.
+
+    Live 2026-11-03: the owner was asked about "requested-outcome", an internal id.
+    """
+    from vuzol.leadership.text import short_owner_text
+
+    described = (
+        {
+            str(item.get("id")): str(item.get("description") or "")
+            for item in criteria
+            if isinstance(item, dict)
+        }
+        if isinstance(criteria, list)
+        else {}
+    )
+    named = [short_owner_text(described.get(key) or key, width=160) for key in missing]
+    if len(named) == 1:
+        return f"Не нашёл подтверждения, что выполнено: «{named[0]}». Что делаем дальше?"  # noqa: RUF001
+    lines = "\n".join(f"• {text}" for text in named)
+    return f"Не нашёл подтверждения, что выполнено:\n{lines}\nЧто делаем дальше?"  # noqa: RUF001

@@ -47,12 +47,14 @@ def _url(source: MonitorSource) -> str:
     if source.kind == "rss":
         return source.target
     if source.kind == "github_releases":
-        return f"https://api.github.com/repos/{source.target}/releases"
+        # The Atom feed, not the API: Codex's release notes alone exceed 2 MB per API page.
+        return f"https://github.com/{source.target}/releases.atom"
     if source.kind == "hn":
         return "https://hn.algolia.com/api/v1/search_by_date?" + urlencode(
             {"tags": "story", "query": source.target}
         )
-    return f"https://www.reddit.com/r/{source.target}/new.json?limit=50"
+    # Reddit answers JSON from server addresses with 403 but still serves RSS.
+    return f"https://www.reddit.com/r/{source.target}/new/.rss"
 
 
 def _item(
@@ -112,41 +114,16 @@ def _xml(body: bytes, base_url: str) -> list[CollectedItem]:
     return items
 
 
-def _json(body: bytes, kind: str) -> list[CollectedItem]:
-    data = json.loads(body)
-    if kind == "github_releases":
-        return [
-            _item(
-                row["id"],
-                row["html_url"],
-                row.get("name") or row.get("tag_name"),
-                row.get("body"),
-                row.get("published_at"),
-            )
-            for row in data
-            if not row.get("draft")
-        ]
-    if kind == "hn":
-        return [
-            _item(
-                row["objectID"],
-                row.get("url") or f"https://news.ycombinator.com/item?id={row['objectID']}",
-                row.get("title"),
-                row.get("story_text"),
-                row.get("created_at"),
-            )
-            for row in data["hits"]
-        ]
+def _json(body: bytes) -> list[CollectedItem]:
     return [
         _item(
-            row["id"],
-            urljoin("https://www.reddit.com", row["permalink"]),
+            row["objectID"],
+            row.get("url") or f"https://news.ycombinator.com/item?id={row['objectID']}",
             row.get("title"),
-            row.get("selftext"),
-            row.get("created_utc"),
+            row.get("story_text"),
+            row.get("created_at"),
         )
-        for child in data["data"]["children"]
-        for row in [child["data"]]
+        for row in json.loads(body)["hits"]
     ]
 
 
@@ -181,7 +158,5 @@ async def collect(
                 body.extend(chunk)
                 if len(body) > _MAX_BYTES:
                     raise ValueError("source response exceeds 2 MB")
-            return (
-                _xml(bytes(body), url) if source.kind == "rss" else _json(bytes(body), source.kind)
-            )
+            return _json(bytes(body)) if source.kind == "hn" else _xml(bytes(body), url)
     raise ValueError("too many source redirects")

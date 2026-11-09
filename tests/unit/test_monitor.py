@@ -72,8 +72,12 @@ def test_source_defaults():
         (
             "github_releases",
             "owner/repo",
-            b'[{"id":1,"name":"News","html_url":"https://example.com/1","body":"body","published_at":"2026-11-09T08:00:00Z"}]',
-            "/repos/owner/repo/releases",
+            (
+                b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>r1</id><title>News</title>'
+                b'<link rel="alternate" href="https://github.com/owner/repo/releases/tag/v1"/>'
+                b"<content>body</content><updated>2026-11-09T08:00:00Z</updated></entry></feed>"
+            ),
+            "/owner/repo/releases.atom",
         ),
         (
             "hn",
@@ -84,8 +88,12 @@ def test_source_defaults():
         (
             "reddit",
             "python",
-            b'{"data":{"children":[{"data":{"id":"p1","title":"News","permalink":"/r/python/comments/p1/news/","selftext":"body","created_utc":1794211200}}]}}',
-            "/r/python/new.json",
+            (
+                b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>t3_p1</id><title>News</title>'
+                b'<link href="https://www.reddit.com/r/python/comments/p1/news/"/>'
+                b"<content>body</content><published>2026-11-09T08:00:00Z</published></entry></feed>"
+            ),
+            "/r/python/new/.rss",
         ),
     ],
 )

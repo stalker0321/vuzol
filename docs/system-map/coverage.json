@@ -1,9 +1,7 @@
 {
   "errors": [],
   "uncovered": [],
-  "stale_bindings": [
-    "cli:vuzol-production-deploy"
-  ],
+  "stale_bindings": [],
   "missing_consumers": [],
   "inventory": [
     {

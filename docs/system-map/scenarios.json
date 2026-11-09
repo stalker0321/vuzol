@@ -137,7 +137,6 @@
     "cli:vuzol-mcp": "mcp",
     "cli:vuzol-memory-writer": "memory",
     "cli:vuzol-outbox-replay": "delivery",
-    "cli:vuzol-production-deploy": "operations",
     "cli:vuzol-project-provisioner": "project",
     "cli:vuzol-retention": "operations",
     "cli:vuzol-static-publisher": "execution",

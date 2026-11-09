@@ -70,7 +70,7 @@ def test_new_account_is_visible_before_first_refresh_and_stale_quota_is_unknown(
     assert all(not item.ok and item.five_hour.remaining_percent is None for item in inventory)
     text = "\n".join(format_subscription_limits_html(inventory, html_escape=telegram_html))
     assert "50%" not in text and "100%" not in text
-    assert "ещё не получены" in text and "старше 15 минут" in text
+    assert "данные ещё не получены" in text and "данные устарели" in text
 
 
 @pytest.mark.anyio
@@ -81,7 +81,7 @@ async def test_unsupported_provider_is_visible_as_unknown_not_full() -> None:
     assert not snapshots[0].ok
     assert snapshots[0].detail == "collector_not_supported"
     text = "\n".join(format_subscription_limits_html(snapshots, html_escape=telegram_html))
-    assert "сборщик не подключён" in text
+    assert "нет сборщика лимитов" in text
 
 
 def test_visibility_is_not_an_execution_policy_revision() -> None:

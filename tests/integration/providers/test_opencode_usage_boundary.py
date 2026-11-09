@@ -161,7 +161,7 @@ def test_executor_update_roundtrip_restart_dashboard_and_no_model_slots(
                     session, chat_id=-100, subscription_profiles=profiles
                 )
                 assert (
-                    "1mo" in card.html and ("87.5%" if auth == "static" else "86.3%") in card.html
+                    "1mo" in card.html and ("12.5%" if auth == "static" else "13.7%") in card.html
                 )
                 assert "OpenCode · Go" in card.html and "UTC" not in card.html
                 assert "offline-fixture-only" not in card.html

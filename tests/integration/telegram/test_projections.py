@@ -895,9 +895,9 @@ def test_dashboard_resolves_executors_pins_and_subscription_limits(postgres_dsn:
         assert "Sol · medium (по умолчанию для проекта)" in dashboard.html
         assert "Grok Build" in dashboard.html
         assert "Qwen3 Max" in dashboard.html
-        assert "Лимиты подписки" in dashboard.html
+        assert "Лимиты подписок · использовано" in dashboard.html
         assert "OpenAI / Codex · Pro" in dashboard.html
-        assert "Обновлено:" in dashboard.html
+        assert "Обновлено:" not in dashboard.html
         await engine.dispose()
 
     asyncio.run(scenario())

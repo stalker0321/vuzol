@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import json
 import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -118,6 +119,53 @@ _SAFE_UNAVAILABLE_DETAILS: Final = {
 }
 
 
+_SHORT_UNAVAILABLE_FALLBACK: Final = "нет данных лимитов"
+_SHORT_UNAVAILABLE_DETAILS: Final = {
+    "state_directory missing": "профиль не настроен",
+    "auth.json unreadable": "нет доступа к логину",
+    "usage endpoint failed": "провайдер не ответил",
+    "billing unavailable": "лимиты недоступны",
+    "billing shape unknown": "формат ответа изменился",
+    CODE_SNAPSHOT_UNREADABLE: "снимок не читается",
+    CODE_SNAPSHOT_INVALID: "снимок повреждён",
+    CODE_SNAPSHOT_STALE: "данные устарели",
+    CODE_SNAPSHOT_UNBOUND: "нет профиля в снимке",
+    CODE_BINDING_MISMATCH: "привязка не совпадает",
+    CODE_LIMITS_SOURCE_UNKNOWN: "неверный источник лимитов",
+    "limits_not_collected": "данные ещё не получены",
+    "collector_not_supported": "нет сборщика лимитов",
+    "limits_stale": "данные устарели",
+    "billing timestamp unknown": "нет времени замера",
+    "auth_unreadable": "нет доступа к логину",
+    "auth_permissions": "небезопасные права логина",
+    "auth_invalid": "логин повреждён",
+    "auth_method_unsupported": "способ входа не поддерживается",
+    "auth_expired": "авторизация истекла",
+    "auth_identity_mismatch": "аккаунт не совпадает с привязкой",
+    "auth_issuer_mismatch": "неверный сервер авторизации",
+    "auth_store_unsupported": "хранилище входа не поддерживается",
+    "auth_store_migrated": "хранилище входа изменилось",
+    "auth_store_busy": "хранилище входа занято",
+    "auth_store_changed": "логин изменился при чтении",
+    "auth_refresh_busy": "обновление входа ожидает CLI",
+    "auth_refresh_failed": "не удалось обновить вход",
+    "auth_refresh_scope_invalid": "неоднозначный аккаунт входа",
+    "auth_cli_version_changed": "версия OpenCode изменилась",
+    "auth_refresh_owner_changed": "владелец входа изменился",
+    "reauth_required": "нужен повторный вход",
+    "go_entitlement_missing": "подписка Go не подтверждена",
+    "usage_permission_denied": "нет доступа к лимитам",
+    "usage_rate_limited": "слишком частые запросы лимитов",
+    "usage_timeout": "время запроса истекло",
+    "usage_unavailable": "сервис лимитов недоступен",
+    "usage_schema_invalid": "формат лимитов изменился",
+    "usage_oversized": "ответ лимитов слишком большой",
+    "usage_clock_skew": "неверное время ответа",
+    "usage_stale": "данные устарели",
+    "usage_redirect_denied": "перенаправление отклонено",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class LimitWindow:
     remaining_percent: int | None
@@ -144,13 +192,13 @@ class SubscriptionLimitSnapshot:
     use_balance: bool | None = None
     plan: SubscriptionPlan | None = None
 
-    def fingerprint(self) -> str:
-        # Include every window and measurement time, but not a cache-read attempt.
-        raw = asdict(self)
-        raw.pop("attempted_at", None)
-        raw["windows"] = [window.model_dump(mode="json") for window in self.windows]
-        raw["plan"] = self.plan.model_dump(mode="json") if self.plan else None
-        return json.dumps(raw, sort_keys=True, default=str)
+    def fingerprint(self, *, now: datetime | None = None) -> str:
+        """Visible content identity; observation/attempt timestamps are not content."""
+        return "\n".join(
+            format_subscription_limits_html(
+                (self,), html_escape=lambda value: html.escape(str(value)), now=now
+            )
+        )
 
 
 def subscription_profiles(
@@ -196,11 +244,13 @@ def subscription_inventory(
     snapshots: Sequence[SubscriptionLimitSnapshot],
     *,
     now: datetime | None = None,
+    max_age: timedelta | None = timedelta(minutes=15),
 ) -> tuple[SubscriptionLimitSnapshot, ...]:
     """Reconcile stored observations against today's account inventory.
 
-    Disabled/deleted/hidden profiles cannot leave ghost dashboard rows. Unknown
-    and stale data never turn into full/zero remaining quota.
+    Disabled/deleted/hidden profiles cannot leave ghost dashboard rows. Stale data
+    becomes unknown by default; max_age=None retains the last observation for
+    the dashboard's explicit stale marker.
     """
     observed = now or datetime.now(UTC)
     visible = {
@@ -237,9 +287,13 @@ def subscription_inventory(
         )
         if latest is None:
             latest = _unavailable(profile, observed, "limits_not_collected")
-        elif latest.ok and (
-            observed - _utc(latest.observed_at) > timedelta(minutes=15)
-            or _utc(latest.observed_at) > observed + timedelta(minutes=2)
+        elif (
+            latest.ok
+            and max_age is not None
+            and (
+                observed - _utc(latest.observed_at) > max_age
+                or _utc(latest.observed_at) > observed + timedelta(minutes=2)
+            )
         ):
             latest = replace(
                 latest,
@@ -637,53 +691,72 @@ def format_subscription_limits_html(
     snapshots: Sequence[SubscriptionLimitSnapshot],
     *,
     html_escape: Callable[[object], str],
+    now: datetime | None = None,
+    rich: bool = False,
 ) -> list[str]:
-    """Render the limits section as HTML lines (without the section header)."""
+    """Render used quota and compact errors using the ordinary or rich HTML subset."""
 
     if not snapshots:
         return ["Нет подключённых профилей подписки."]
+    observed = now or datetime.now(UTC)
     lines: list[str] = []
-    for snap in snapshots:
-        # Pre-evidence rows may contain the old fabricated Plus/Super defaults.
-        # Keep their storage compatible, but never advertise them as verified.
+    for snap in sorted(snapshots, key=lambda item: not item.ok):
+        if not snap.ok:
+            detail = _SHORT_UNAVAILABLE_DETAILS.get(snap.detail, _SHORT_UNAVAILABLE_FALLBACK)
+            line = (
+                f"• {html_escape(snap.company)} · <code>{html_escape(snap.profile_id)}</code>"
+                f" — ⚠️ {html_escape(detail)}"
+            )
+            lines.append(f"<p>{line}</p>" if rich else line)
+            continue
+        # Old plan_label values may contain fabricated defaults; require evidence.
         plan_label = snap.plan.label if snap.plan else "тариф неизвестен"
-        if snap.plan and snap.plan.stale:
-            plan_label += " (данные устарели)"
         company = "OpenAI / Codex" if snap.plan and snap.plan.service == "codex" else snap.company
         title = (
             f"• <b>{html_escape(company)} · {html_escape(plan_label)}</b> · "
             f"<code>{html_escape(snap.profile_id)}</code>"
         )
-        if lines:
+        if snap.observed_at is None or observed - _utc(snap.observed_at) > timedelta(minutes=30):
+            title += " · <i>данные устарели</i>"
+        if lines and not rich:
             lines.append("")
-        lines.append(title)
-        if not snap.ok:
-            detail = html_escape(_safe_unavailable_detail(snap.detail))
-            lines.append(f"  ⚠️ {detail}")
-            continue
+        lines.append(f"<p>{title}</p>" if rich else title)
+        rows: list[str] = []
         if snap.source in _GO_USAGE_SOURCES:
             labels = {"rolling": "5h", "weekly": "7d", "monthly": "1mo"}
             for window in snap.windows:
-                remaining = f"{window.remaining_percent:g}"
-                line = f"  <b>{labels[window.id]}</b> · {remaining}%"
-                if window.status == "rate-limited":
-                    line += " ⛔"
-                line += f" · <i>{_format_reset(window.reset_at)}</i>"
-                lines.append(line)
-            if snap.use_balance:
-                lines.append(
-                    "  ⚠️ Провайдер сообщает включённый платный перерасход. Вузол его не менял."
+                rows.append(
+                    _format_usage_window(
+                        labels[window.id],
+                        window.used_percent,
+                        window.reset_at,
+                        rate_limited=window.status == "rate-limited",
+                        rich=rich,
+                    )
                 )
-            continue
-        long_window_label = "1d" if snap.weekly.window_seconds == 24 * 3600 else "7d"
-        window_lines = (
-            *_format_window_block("5h", snap.five_hour, html_escape),
-            *_format_window_block(long_window_label, snap.weekly, html_escape),
-        )
-        if not window_lines:
-            lines.append("  ⚠️ Провайдер не сообщил данные по лимитам.")
-            continue
-        lines.extend(window_lines)
+        else:
+            long_label = "1d" if snap.weekly.window_seconds == 24 * 3600 else "7d"
+            for label, legacy in (("5h", snap.five_hour), (long_label, snap.weekly)):
+                if legacy.available and legacy.remaining_percent is not None:
+                    rows.append(
+                        _format_usage_window(
+                            label, 100 - legacy.remaining_percent, legacy.reset_at, rich=rich
+                        )
+                    )
+        if rows and rich:
+            lines.append(
+                "<table><tr><th>Окно</th><th>Использовано</th><th>Сброс</th></tr>"
+                + "".join(rows)
+                + "</table>"
+            )
+        elif rows:
+            lines.extend(rows)
+        else:
+            warning = "⚠️ Провайдер не сообщил данные по лимитам."
+            lines.append(f"<p>{warning}</p>" if rich else f"  {warning}")
+        if snap.source in _GO_USAGE_SOURCES and snap.use_balance:
+            warning = "⚠️ Провайдер сообщает включённый платный перерасход. Вузол его не менял."
+            lines.append(f"<p>{warning}</p>" if rich else f"  {warning}")
     return lines
 
 
@@ -695,20 +768,27 @@ def _safe_unavailable_detail(detail: str) -> str:
     )
 
 
-def _format_window_block(
+def _format_usage_window(
     label: str,
-    window: LimitWindow,
-    html_escape: Callable[[object], str],
-) -> tuple[str, ...]:
-    """Skip windows without usable remaining %; never invent a missing 5h row."""
-
-    if not window.available or window.remaining_percent is None:
-        return ()
-    line = f"  <b>{html_escape(label)}</b> · {window.remaining_percent}%"
-    if window.reset_at is None:
-        return (line,)
-    reset = _format_reset(window.reset_at)
-    return (f"{line} · <i>{html_escape(reset)}</i>",)
+    used_percent: float,
+    reset_at: datetime | None,
+    *,
+    rate_limited: bool = False,
+    rich: bool = False,
+) -> str:
+    used = max(0.0, min(100.0, used_percent))
+    filled = int(used / 10 + 0.5)
+    bar = "█" * filled + "░" * (10 - filled)
+    percent = f"{used:g}%"
+    marker = " ⛔" if rate_limited else ""
+    reset = _format_reset(reset_at) if reset_at is not None else "—"
+    if rich:
+        return (
+            f"<tr><td>{label}</td><td><code>{bar}  {percent:>4}</code>{marker}</td>"
+            f"<td>{reset}</td></tr>"
+        )
+    line = f"  <code>{label:<3}  {bar}  {percent:>4}</code>{marker}"
+    return f"{line} · сброс {reset}" if reset_at is not None else line
 
 
 def _format_reset(when: datetime) -> str:

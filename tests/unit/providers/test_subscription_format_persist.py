@@ -50,15 +50,18 @@ def test_format_subscription_limits_html() -> None:
             "codex", "plus", source="codex_usage", observed_at=datetime(2026, 7, 16, tzinfo=UTC)
         ),
     )
-    lines = format_subscription_limits_html((snap,), html_escape=telegram_html)
+    lines = format_subscription_limits_html(
+        (snap,), html_escape=telegram_html, now=snap.observed_at
+    )
     joined = "\n".join(lines)
     assert "OpenAI" in lines[0]
     assert "Plus" in lines[0]
     assert "5h" not in joined
     assert "7d" in joined
-    assert "28%" in joined
+    assert "72%" in joined
+    assert "<code>7d   ███████░░░   72%</code> · сброс 19.07 14:00" in joined
     assert "19.07 14:00" in joined
-    assert all(word not in joined for word in ("осталось", "сброс", "UTC", "Тариф:", "░", "█"))
+    assert all(word not in joined for word in ("осталось", "UTC", "Тариф:"))
     assert len(lines) == 2
     assert snap.fingerprint()
 
@@ -77,7 +80,7 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
         detail="auth missing",
     )
     bad_lines = format_subscription_limits_html((bad,), html_escape=telegram_html)
-    assert "⚠️ Не удалось получить данные. Проверьте состояние профиля." in bad_lines[1]
+    assert bad_lines == ["• OpenAI · <code>x</code> — ⚠️ нет данных лимитов"]
     both = SubscriptionLimitSnapshot(
         profile_id="codex",
         company="OpenAI",
@@ -114,15 +117,15 @@ def test_format_empty_and_unavailable_and_both_windows() -> None:
     [
         (
             "auth.json unreadable",
-            "Авторизация недоступна сборщику: проверьте путь, доступ и формат.",
+            "нет доступа к логину",
         ),
-        ("usage endpoint failed", "Провайдер не ответил. Повторите /update позже."),
-        ("billing unavailable", "Провайдер не отдаёт данные лимитов."),
-        ("limits_snapshot_unreadable", "Снимок лимитов не читается."),
-        ("limits_snapshot_stale", "Данные устарели. Повторите /update."),
+        ("usage endpoint failed", "провайдер не ответил"),
+        ("billing unavailable", "лимиты недоступны"),
+        ("limits_snapshot_unreadable", "снимок не читается"),
+        ("limits_snapshot_stale", "данные устарели"),
         (
             "/home/private/auth.json?token=secret",
-            "Не удалось получить данные. Проверьте состояние профиля.",
+            "нет данных лимитов",
         ),
     ],
 )
@@ -485,7 +488,7 @@ async def test_dashboard_loads_limits_from_db_not_filesystem() -> None:
     ) as load_mock:
         card = await build_project_status_dashboard(session, chat_id=1)
     load_mock.assert_awaited_once()
-    assert "Лимиты подписки" in card.html
-    assert "28%" in card.html
+    assert "Лимиты подписок · использовано" in card.html
+    assert "72%" in card.html
     assert "OpenAI" in card.html
     assert "auth.json" not in card.html

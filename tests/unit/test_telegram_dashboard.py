@@ -52,7 +52,6 @@ async def test_dashboard_surfaces_project_default_executor_pin() -> None:
         ExecutorPreferenceView,
         ExecutorWorkerKey,
     )
-    from vuzol.storage.types import TaskStatus
     from vuzol.telegram.projections import build_project_status_dashboard
 
     task = SimpleNamespace(
@@ -102,6 +101,21 @@ async def test_dashboard_surfaces_project_default_executor_pin() -> None:
             chat_id=-100,
             project_names={"bill-buddy": "Bill Buddy"},
         )
+        task.version += 1
+        task.status = TaskStatus.VALIDATING
+        same = await build_project_status_dashboard(
+            session, chat_id=-100, project_names={"bill-buddy": "Bill Buddy"}
+        )
+        assert same.html == card.html and same.revision == card.revision
+        task.task_draft["task_summary"] = "Fix the other form"
+        changed = await build_project_status_dashboard(
+            session, chat_id=-100, project_names={"bill-buddy": "Bill Buddy"}
+        )
+        assert changed.revision != card.revision
+        renamed = await build_project_status_dashboard(
+            session, chat_id=-100, project_names={"bill-buddy": "New name"}
+        )
+        assert renamed.revision != changed.revision
     finally:
         monkeypatch.undo()
     assert "• <b>Bill Buddy</b> · #200001 · Grok (по умолчанию для проекта)" in card.html
@@ -250,11 +264,37 @@ async def test_task_status_projection_enqueues_project_card_and_dashboard(
 
 
 def test_dashboard_revision_changes_with_content() -> None:
-    task_a = SimpleNamespace(id=uuid.uuid4(), version=1, status=TaskStatus.EXECUTING)
-    task_b = SimpleNamespace(id=task_a.id, version=2, status=TaskStatus.EXECUTING)
-    first = dashboard_revision_for([task_a], {task_a.id: "m1"})  # type: ignore[list-item]
-    second = dashboard_revision_for([task_b], {task_b.id: "m1"})  # type: ignore[list-item]
-    same = dashboard_revision_for([task_a], {task_a.id: "m1"})  # type: ignore[list-item]
-    assert first != second
-    assert first == same
+    first = dashboard_revision_for("task line\nlimits")
+    assert first == dashboard_revision_for("task line\nlimits")
+    assert first != dashboard_revision_for("changed task line\nlimits")
+    assert first != dashboard_revision_for("task line\nchanged limits")
+    assert first != dashboard_revision_for("task line\nlimits", rich_html="<table></table>")
     assert telegram_html("<x>") == "&lt;x&gt;"
+
+
+@pytest.mark.anyio
+async def test_large_dashboard_keeps_fallback_html_balanced(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from xml.etree import ElementTree
+
+    from vuzol.providers.subscription_limits import LimitWindow, SubscriptionLimitSnapshot
+    from vuzol.telegram.projections import build_project_status_dashboard
+
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+    snapshots = [
+        SubscriptionLimitSnapshot(
+            f"codex-{i}",
+            "OpenAI & Co",
+            "Plus",
+            LimitWindow(72, None),
+            LimitWindow(20, None),
+            None,
+            True,
+        )
+        for i in range(200)
+    ]
+    card = await build_project_status_dashboard(session, -100, subscription_snapshots=snapshots)
+    assert len(card.html) <= 4096 and card.html.endswith("…")
+    assert card.rich_html is None  # exceeds the rich transport bound
+    ElementTree.fromstring(f"<root>{card.html}</root>")  # noqa: S314 - generated fixture HTML

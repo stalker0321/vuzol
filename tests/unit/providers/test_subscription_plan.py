@@ -71,7 +71,8 @@ def test_unreadable_auth_is_not_evidence_of_paid_subscription(
     card = "\n".join(
         format_subscription_limits_html([snapshot], html_escape=lambda value: escape(str(value)))
     )
-    assert "тариф неизвестен" in card and "Plus" not in card and "Super" not in card
+    assert "тариф неизвестен" not in card and "Plus" not in card and "Super" not in card
+    assert "⚠️" in card and len(card.splitlines()) == 1
 
 
 @pytest.mark.parametrize(
@@ -126,7 +127,7 @@ def test_plan_upgrade_changes_card_identity_not_account_profile_or_execution(
     assert current.plan and not current.plan.stale
     stale = subscription_inventory([profile], [pro], now=NOW + timedelta(minutes=16))[0]
     assert stale.plan and stale.plan.stale
-    assert "Pro (данные устарели)" in "\n".join(
+    assert "данные устарели" in "\n".join(
         format_subscription_limits_html([stale], html_escape=lambda value: escape(str(value)))
     )
     legacy = replace(pro, plan=None)

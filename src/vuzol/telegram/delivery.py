@@ -558,7 +558,12 @@ async def _prepare_delivery(
         )
     if item.payload.get("role") == PROJECT_STATUS_DASHBOARD_ROLE:
         return await _prepare_project_status_dashboard(
-            session, item, topics=topics, projects=projects, profiles=profiles
+            session,
+            item,
+            topics=topics,
+            projects=projects,
+            profiles=profiles,
+            rich_messages=rich_messages,
         )
     if item.payload.get("role") == TASK_HISTORY_ROLE:
         return await _prepare_task_history_report(session, item, topics=topics, projects=projects)
@@ -1514,6 +1519,7 @@ async def _prepare_project_status_dashboard(
     topics: TopicRegistry | None,
     projects: ProjectRegistry | None,
     profiles: ProfileRegistry | None,
+    rich_messages: bool,
 ) -> PreparedDelivery:
     """Deliver into the forum's configured «Статус проектов» (task_dashboard) topic."""
 
@@ -1570,6 +1576,7 @@ async def _prepare_project_status_dashboard(
             chat_id=chat_id,
             thread_id=thread_id,
             html=card.html,
+            rich_html=card.rich_html if rich_messages else None,
             revision=card.revision,
             message_role=PROJECT_STATUS_DASHBOARD_ROLE,
         )
@@ -1578,6 +1585,7 @@ async def _prepare_project_status_dashboard(
         chat_id=link.chat_id,
         thread_id=link.message_thread_id,
         html=card.html,
+        rich_html=card.rich_html if rich_messages else None,
         revision=card.revision,
         link_id=link.id,
         message_id=link.message_id,
@@ -1712,13 +1720,13 @@ class TelegramDeliveryService:
 
     async def _call_rich_telegram(self, prepared: PreparedDelivery) -> int | None:
         assert prepared.rich_html is not None
-        if prepared.action == DeliveryAction.EDIT_MESSAGE:
+        if prepared.action in {DeliveryAction.EDIT_MESSAGE, DeliveryAction.EDIT_STATUS}:
             assert prepared.message_id is not None
             await self._client.edit_rich_message(
                 chat_id=prepared.chat_id, message_id=prepared.message_id, html=prepared.rich_html
             )
             return None
-        assert prepared.action == DeliveryAction.SEND_DISCUSSION_REPLY
+        assert prepared.action in {DeliveryAction.SEND_DISCUSSION_REPLY, DeliveryAction.SEND_STATUS}
         message_id = await self._client.send_rich_message(
             chat_id=prepared.chat_id,
             thread_id=prepared.thread_id,

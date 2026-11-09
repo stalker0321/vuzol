@@ -31,7 +31,7 @@ def test_status_dashboard_kind_helper() -> None:
 
 
 @pytest.mark.anyio
-async def test_dashboard_includes_updated_timestamp() -> None:
+async def test_dashboard_staleness_replaces_updated_timestamp() -> None:
     snap = SubscriptionLimitSnapshot(
         profile_id="codex-a",
         company="OpenAI",
@@ -44,10 +44,14 @@ async def test_dashboard_includes_updated_timestamp() -> None:
     session = MagicMock()
     session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
     card = await build_project_status_dashboard(
-        session, chat_id=-100, subscription_snapshots=(snap,)
+        session,
+        chat_id=-100,
+        subscription_snapshots=(snap,),
+        now=datetime(2026, 7, 16, 23, 0, tzinfo=UTC),
     )
-    assert "Лимиты подписки" in card.html
-    assert "Обновлено: 17.07 00:30" in card.html
+    assert "Лимиты подписок · использовано" in card.html
+    assert "Обновлено:" not in card.html
+    assert "данные устарели" not in card.html
     assert "UTC" not in card.html
 
     # Naive timestamps are treated as UTC.
@@ -61,9 +65,13 @@ async def test_dashboard_includes_updated_timestamp() -> None:
         ok=True,
     )
     card2 = await build_project_status_dashboard(
-        session, chat_id=-100, subscription_snapshots=(naive,)
+        session,
+        chat_id=-100,
+        subscription_snapshots=(naive,),
+        now=datetime(2026, 7, 16, 12, 31, tzinfo=UTC),
     )
-    assert "Обновлено: 16.07 14:00" in card2.html
+    assert "Обновлено:" not in card2.html
+    assert "данные устарели" in card2.html
 
 
 @pytest.mark.anyio

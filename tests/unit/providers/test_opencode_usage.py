@@ -192,7 +192,7 @@ def test_real_config_collection_render_and_content_identity(tmp_path: Path, monk
     assert snap.ok and snap.observed_at == NOW
     assert snap.five_hour.remaining_percent is None  # no lossy legacy integer mirror
     rendered = "\n".join(format_subscription_limits_html((snap,), html_escape=telegram_html))
-    assert "87.5%" in rendered and "1mo" in rendered and "⛔" in rendered
+    assert "12.5%" in rendered and "1mo" in rendered and "⛔" in rendered
     stale = subscription_inventory(profiles, (snap,), now=NOW + timedelta(minutes=16))[0]
     assert not stale.ok and not stale.windows
     changed = payload()

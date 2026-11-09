@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Protocol
 
 from sqlalchemy import case, func, select
@@ -111,6 +111,7 @@ class DashboardCard:
     chat_id: int
     revision: int
     html: str
+    rich_html: str | None = None
 
 
 def task_title(task: Task) -> str:
@@ -407,20 +408,9 @@ def _humanize_model_slug(slug: str) -> str:
     return " ".join(pretty)
 
 
-def dashboard_revision_for(
-    tasks: Sequence[Task],
-    model_by_task: Mapping[uuid.UUID, str],
-    *,
-    limit_fingerprints: Sequence[str] = (),
-) -> int:
-    """Stable content identity for the dashboard; equal content must not re-edit."""
-
-    parts = [
-        f"{task.id}:{task.version}:{task.status.value}:{model_by_task.get(task.id, '')}"
-        for task in tasks
-    ]
-    parts.extend(limit_fingerprints)
-    digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()
+def dashboard_revision_for(html_body: str, *, rich_html: str | None = None) -> int:
+    """Hash only rendered content; internal task versions and measurement times are invisible."""
+    digest = hashlib.sha256(f"{html_body}\0{rich_html or ''}".encode()).hexdigest()
     return int(digest[:8], 16) % (2**31 - 1) or 1
 
 
@@ -434,6 +424,7 @@ async def build_project_status_dashboard(
     profile_providers: Mapping[str, str] | None = None,
     subscription_profiles: Sequence[ProviderProfileConfig] | None = None,
     subscription_snapshots: Sequence[SubscriptionLimitSnapshot] | None = None,
+    now: datetime | None = None,
 ) -> DashboardCard:
     """Build the single in-progress task list plus subscription limits."""
 
@@ -450,7 +441,7 @@ async def build_project_status_dashboard(
             )
         ).all()
     )
-    model_by_task: dict[uuid.UUID, str] = {}
+    observed = now or datetime.now(UTC)
     lines = [f"<b>{telegram_html(DASHBOARD_CARD_TITLE)}</b>", ""]
     if not tasks:
         lines.append("Сейчас нет активных задач.")
@@ -472,7 +463,6 @@ async def build_project_status_dashboard(
                 preference = await load_preference(session, task.project_id)
                 if not preference.is_auto:
                     model = f"{format_preference_label(preference)} (по умолчанию для проекта)"
-            model_by_task[task.id] = model
             project_id = task.project_id
             if project_id and project_names is not None and project_id in project_names:
                 project_label = project_names[project_id]
@@ -490,34 +480,36 @@ async def build_project_status_dashboard(
         subscription_snapshots = await load_subscription_limits(session)
     if subscription_profiles is not None:
         subscription_snapshots = subscription_inventory(
-            subscription_profiles, subscription_snapshots
+            subscription_profiles, subscription_snapshots, now=observed, max_age=None
         )
+    rich_lines = [f"<h2>{telegram_html(DASHBOARD_CARD_TITLE)}</h2>"]
+    rich_lines.extend(f"<p>{line.strip()}</p>" for line in lines[2:] if line)
     if subscription_snapshots:
-        if lines[-1]:
-            lines.append("")
-        lines.append("<b>Лимиты подписки · доступно %</b>")
+        lines.extend(("", "<b>Лимиты подписок · использовано</b>"))
         lines.extend(
-            format_subscription_limits_html(subscription_snapshots, html_escape=telegram_html)
+            format_subscription_limits_html(
+                subscription_snapshots, html_escape=telegram_html, now=observed
+            )
         )
-        updated_at = max(
-            (snap.observed_at for snap in subscription_snapshots if snap.observed_at is not None),
-            default=None,
+        rich_lines.append("<h3>Лимиты подписок · использовано</h3>")
+        rich_lines.extend(
+            format_subscription_limits_html(
+                subscription_snapshots, html_escape=telegram_html, now=observed, rich=True
+            )
         )
-        if updated_at is not None:
-            if updated_at.tzinfo is None:
-                updated_at = updated_at.replace(tzinfo=UTC)
-            from zoneinfo import ZoneInfo
-
-            stamp = updated_at.astimezone(ZoneInfo("Europe/Amsterdam")).strftime("%d.%m %H:%M")
-            lines.append("")
-            lines.append(f"<i>Обновлено: {telegram_html(stamp)}</i>")
-
-    fingerprints = tuple(snap.fingerprint() for snap in (subscription_snapshots or ()))
+    # Each ordinary line is balanced HTML. Drop whole lines rather than cutting tags/entities.
+    if len("\n".join(lines)) > TELEGRAM_TEXT_LIMIT:
+        while lines and len("\n".join((*lines, "…"))) > TELEGRAM_TEXT_LIMIT:
+            lines.pop()
+        lines.append("…")
     html_body = "\n".join(lines).rstrip()
+    rich_body = "".join(rich_lines)
+    rich_html = rich_body if len(rich_body) <= 32_768 else None
     return DashboardCard(
         chat_id=chat_id,
-        revision=dashboard_revision_for(tasks, model_by_task, limit_fingerprints=fingerprints),
-        html=split_message(html_body)[0],
+        revision=dashboard_revision_for(html_body, rich_html=rich_html),
+        html=html_body,
+        rich_html=rich_html,
     )
 
 
@@ -1369,26 +1361,30 @@ async def enqueue_project_status_dashboard(session: AsyncSession, chat_id: int) 
     if mapping is None:
         return
     card = await build_project_status_dashboard(session, chat_id)
-    key = f"telegram:{PROJECT_STATUS_DASHBOARD_ROLE}:{chat_id}:revision:{card.revision}"
-    existing = await session.scalar(
-        select(TransactionalOutbox.id).where(
+    # Compare the latest queued content, allowing a later return to an earlier rendering.
+    # Include pending rows because callers may enqueue twice before a flush.
+    await session.flush()
+    latest = await session.scalar(
+        select(TransactionalOutbox)
+        .where(
             TransactionalOutbox.destination == "telegram",
-            TransactionalOutbox.idempotency_key == key,
+            TransactionalOutbox.linked_entity_type == "topic_mapping",
+            TransactionalOutbox.linked_entity_id == mapping.id,
+            TransactionalOutbox.payload["role"].astext == PROJECT_STATUS_DASHBOARD_ROLE,
         )
+        .order_by(TransactionalOutbox.created_at.desc(), TransactionalOutbox.id.desc())
+        .limit(1)
     )
-    if existing is not None:
+    if latest is not None and latest.payload.get("revision") == card.revision:
         return
-    # Same transaction can call this twice (e.g. intake_ack + approval_card). The DB
-    # SELECT above does not see unflushed pending rows, so also scan session.new.
-    for pending in session.new:
-        if (
-            isinstance(pending, TransactionalOutbox)
-            and pending.destination == "telegram"
-            and pending.idempotency_key == key
-        ):
-            return
+    previous = str(latest.id) if latest is not None else "initial"
+    key = (
+        f"telegram:{PROJECT_STATUS_DASHBOARD_ROLE}:{chat_id}"
+        f":revision:{card.revision}:after:{previous}"
+    )
     session.add(
         TransactionalOutbox(
+            created_at=datetime.now(UTC),
             destination="telegram",
             operation_type="send_message",
             linked_entity_type="topic_mapping",

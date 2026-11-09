@@ -1,7 +1,8 @@
-# Contracts → executable consumers (D0)
+# Contracts → executable consumers (D0 snapshot)
 
-Status: frozen copies, base 9be9054. Normative schemas/ADRs are immutable;
-this file only maps each contract to its executable consumer or known gap.
+Status: a historical mapping made at base 9be9054 (October 2026). The normative
+schemas and ADRs are immutable; the "Status" column below records what was true
+then and some gaps have since closed. Check the named code before relying on a row.
 
 Tracked copies:
 
@@ -31,4 +32,4 @@ Notes:
 - `permission_envelope_hash = payload_hash` is a known gap for ADR — semantics untouched.
 - Retrieval is not connected to `research_execute` in D0 (D3 scope) — contract + fail-closed consumer only.
 - Memory L0/L1/L2 (`discussion/memory.py`) are distinct from review L0–L3 — not renamed, separated here.
-- Review L1 (mechanical + focused patterns) is not Jev; Jev stays unconnected (`experiments/decision.py` shadow only).
+- Review L1 (mechanical + focused patterns) is not Jev.

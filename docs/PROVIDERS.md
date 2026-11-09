@@ -43,10 +43,10 @@ by workflow step type (`src/vuzol/providers/routing.py`):
 | `lead` | goal → next bounded command batch | project `/model` choice, then `VUZOL_PROJECT_LEAD__PROFILE_ID` |
 | `transcriber` | Telegram voice/audio → raw transcript text | `VUZOL_INTERPRETATION__TRANSCRIPTION_PROFILE_ID` |
 | `interpreter` | raw text plus bounded context → TaskDraft JSON | `VUZOL_INTERPRETATION__PROFILE_ID` |
-| `planner` | task → bounded plan JSON consumed by coding steps | `plan` step |
-| `executor` | coding/agent work in sandboxes (`execute_code`, `execute_agent`) and model-only steps (`execute_model`, `research_execute`) | corresponding steps |
-| `reviewer` | independent read-only review of a finished result | `review` step |
-| `summarizer` | result synthesis | `synthesize` step |
+| `planner` | a goal → a plan revision the owner approves | the lead's `request_plan` (`planner_strong` slot) |
+| `executor` | coding and agent work in sandboxes (`execute_code`, `execute_agent`) | those steps |
+| `reviewer` | independent read-only review of a finished result and of a goal | `review` step, goal verification |
+| `summarizer` | synthesis of legacy research runs | `synthesize` step of old workflows only |
 
 Transcription and interpretation are two independent stages with separate models, profiles, and
 credentials. A voice message is transcribed first, then interpreted; changing, rotating, or
@@ -307,13 +307,22 @@ Lead turns run on `VUZOL_PROJECT_LEAD__LEAD_PARALLELISM` executor lanes (default
 its own owner name, because a goal lease names the lane that holds it. A goal still has one lead
 turn at a time: a lane that finds the lease held defers the wakeup.
 
-### Selecting today's models (configuration, not application code)
+### Current model choices
 
-The 2026-10-21 requested lead selection is **Muse Spark 1.3 Contributor / high**
-through the existing Pi → OpenCode Go account C. Its native Pi 1.0.3 catalog ID
-is `muse-spark-1.3-contributor`; the catalog maps `high` to the upstream `high`
-effort. This is an installation/profile choice, not a model name in application logic.
-The independent reviewer remains MiMo V2.6 Flash. Example overlay addition:
+Model choices are installation configuration, never names in application logic. As of
+November 2026 the deployment uses:
+
+- **Project lead:** Muse Spark through Pi on OpenCode Go (`pi-opencode-go-c-muse`); an
+  unreadable answer is redone, and later tries fall back to DeepSeek V4.1 Flash
+  (`VUZOL_PROJECT_LEAD__LEAD_FALLBACK_PROFILE_IDS`).
+- **Reviewer** (task and goal): MiMo V2.6 Flash through Pi.
+- **Planner and coding executor:** Codex (`gpt-6.1-sol`) on a ChatGPT subscription, with Pi
+  DeepSeek as the planner fallback.
+- **Assistant:** Codex Sol through the model-call relay, with DeepSeek doing web research.
+- **Inbox, monitor triage:** DeepSeek V4.1 Flash over the OpenCode Go API.
+- **Voice:** OpenAI `gpt-4o-transcribe`.
+
+A profile for another model of the same account inherits its binding:
 
 ```toml
 [[profiles]]
@@ -324,267 +333,17 @@ model_reasoning_effort = "high"
 routing_priority = 242
 ```
 
-Set the installation's `VUZOL_PROJECT_LEAD__PROFILE_ID` to that profile, and use
-the existing model-matrix application API or `/model` to change any explicit
-project lead selection. Changing a default alone does not override a project pin.
-Pi now passes `model_reasoning_effort` as `--thinking`; both normal worktree and
-snapshot transports enforce that exact choice. Missing or different effort is
-not silently accepted by the sandbox boundary. Selecting another profile does
-not resume work, replace the reviewer, or rewrite old invocation receipts.
+Select profiles per project with `/model`, or set installation defaults such as
+`VUZOL_PROJECT_LEAD__PROFILE_ID` and `VUZOL_PROJECT_LEAD__REVIEWER_PROFILE_ID`. A default
+does not override a project pin. Pi passes `model_reasoning_effort` as `--thinking`, and the
+sandbox boundary rejects a different effort. Selecting another profile does not resume work,
+replace the reviewer or rewrite old invocation receipts. Model selection grants neither goal
+execution permission nor approval for publication.
 
-The DeepSeek setup below records the preceding rollout, not a fixed dependency.
+Each Codex account needs its own provider state directory and `runtime_identity`; the main
+host is the only refresh owner of its OAuth login (see the deployment guide).
 
-The requested choices are DeepSeek `deepseek-v4.1-flash` for lead and MiMo
-`mimo-v2.6-flash` for review, both through Pi/OpenCode Go account C. These identifiers are
-choices for the local overlay, not constants in lead/review policy, and are not an attestation
-that production has been switched.
-
-Keep `pi-opencode-go-c` as the DeepSeek profile, give it `account_id = "opencode-go-c"`.
-Add another profile inheriting that binding, with a distinct ID and `model = "mimo-v2.6-flash"`.
-Both can declare `roles = ["lead", "planner", "reviewer", "executor"]`: today's assignment
-does not restrict which role either model may be selected for tomorrow. Per-role read-only
-execution and independent-review checks still apply regardless of these capability flags.
-Both share the same identity/state/network/concurrency. Pi's local authenticated provider
-catalog must expose both model IDs; validate metadata without inference. Do not replace Pi
-with a direct API endpoint merely because the account also offers one.
-
-Then select the profiles through `/model`, or set installation defaults:
-
-```text
-VUZOL_PROJECT_LEAD__PROFILE_ID=pi-opencode-go-c
-VUZOL_PROJECT_LEAD__REVIEWER_PROFILE_ID=<local-mimo-c-profile-id>
-VUZOL_EXECUTION__REVIEWER_PROFILE_ID=<local-mimo-c-profile-id>
-```
-
-Keep `VUZOL_PROJECT_LEAD__ENABLED=false` while preparing the release. Test-enable it only
-after migrations, host transport/secret preflight, and independent review; enable a managed
-goal through its normal owner command. Disable new turns with the feature flag, and use
-pause/cancel/revoke for an existing goal and its child work. Model selection grants neither
-goal execution permission nor approval for publication/deployment.
-
-### Model-assignment verification checkpoint (2026-10-21)
-
-Implementation commit: `3e3bf05` on `agent/project-lead-v1` (baseline `44d527a`);
-additional automatic-planner/cleanup assertions: `c38f999`.
-No production deployment, migration, model invocation, Telegram mutation, or push was performed
-for this change. Production was read-only attested on the existing T128 image; all three host
-services remained active. Stop here for independent review before a coordinated rollout.
-
-Verified contracts include role/profile selection and stale-button CAS; real host-entrypoint
-dispatch to API and Pi with fake external I/O; immutable run/turn/reviewer pins; receipt replay
-without another model call; crash between commands; pause/revoke cancellation; late receipt
-accounting; shared-account admission, uncertain commit, disconnect, and cleanup recovery.
-The installed Pi catalog was queried offline with placeholder credentials and network disabled;
-it lists `opencode-go/mimo-v2.6-flash`. Authenticated account metadata (not inference) also listed
-`deepseek-v4.1-flash` and `mimo-v2.6-flash` for account C. This does not attest the quality or
-availability of a real generated response from either model.
-
-The test PostgreSQL instance was an isolated container named
-`vuzol-model-switch-test-20261020`, label `vuzol.disposable-test=model-switch-20261020`,
-bound to loopback port 32774. Database/user were explicitly verified as
-`vuzol_model_switch_test` / `vuzol_model_test`; production/shared/default DSNs were not used.
-The existing disposable test venv was used, not the production venv. The integration fixture
-terminates connections and truncates tables: serialize these commands and never substitute a
-production DSN. Recreate an isolated instance before reusing commands after its removal.
-After verification the named test container and its sole anonymous PostgreSQL volume were
-removed. Test rows were disposable and are not backed up; fixtures recreate them, and the
-representative trace is preserved below. No production database, container, or volume was removed.
-
-Actual command environment (local disposable password, not a production credential):
-
-```sh
-cd /home/owner/vuzol-afterword-stabilization
-export PATH=/tmp/vuzol-stage2.jzwfpD/venv/bin:$PATH
-export PYTHONPATH=src:.
-export PYTHONDONTWRITEBYTECODE=1
-export VUZOL_TEST_DATABASE_DSN=postgresql://vuzol_model_test:disposable-local-only@127.0.0.1:32774/vuzol_model_switch_test # pragma: allowlist secret - disposable test credential
-export VUZOL_MODEL_TEST_DSN=postgresql+psycopg://vuzol_model_test:disposable-local-only@127.0.0.1:32774/vuzol_model_switch_test # pragma: allowlist secret - disposable test credential
-VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_MODEL_TEST_DSN alembic upgrade head
-pytest --no-cov -q -rs tests/unit -m 'not docker' --tb=short
-pytest --no-cov -q tests/integration -m 'not docker' --tb=short
-mypy src/vuzol
-git diff --check
-```
-
-Fresh migrations reached `d7a4f50e9404`; the c6/d7 pair was also downgraded/reapplied in
-this disposable database during development. Do not infer safe production downgrade:
-b5 explicitly refuses restoration of workflow NOT NULL fields once turn history exists.
-A rollback must preserve compatible migration metadata and account/turn cleanup handling;
-an old runtime cannot simply be pointed at the new head.
-
-Final unit result: **3364 passed, 1 skipped** (remote execution is explicitly out of scope).
-Type checking: **298 source files passed**. Changed Python files passed Ruff; the complete
-source-tree Ruff invocation also reported a pre-existing `SIM105` in `execution/git.py`, which
-was not changed. Secret scanning of the complete changed-file set passed after allowlisting
-only literal migration identifiers and the explicitly disposable test DSNs, not production
-credentials. Coverage collection was disabled in these
-test commands; these are not coverage claims.
-
-Full integration result: **898 passed, 1 skipped, 15 deselected** (`not docker`), 662.06 seconds.
-The existing skipped test is `test_completed_plan_enqueues_system_trace`; its skip marker was
-not changed. Docker-marked acceptance tests were excluded, not reported as passed.
-This run started before the final auto-planner dispatch adjustment; the final routing/provider/
-leadership paths were rerun separately afterward. The full run emitted 12 Telegram deprecation
-warnings and one SQLAlchemy warning about a garbage-collected, non-checked-in connection. Its
-allocation site was not established; it is not claimed fixed or suppressed. The warning appeared
-during a Telegram projection test, which does not by itself establish the leaking caller.
-
-After the final auto-planner adjustment, the following real-PostgreSQL group passed
-**224 tests**, with SQLAlchemy warnings treated as errors and no reported warnings:
-
-```sh
-pytest --no-cov -q -rs tests/integration/providers tests/integration/leadership tests/integration/test_secret_scan.py --tb=short -W error::sqlalchemy.exc.SAWarning
-git diff --name-only -z 44d527a -- '*.py' | xargs -0 ruff check
-git diff --name-only -z 44d527a | xargs -0 detect-secrets-hook --baseline .secrets.baseline
-```
-
-An early development run also observed one non-reproduced shared-account turn ending with
-an unknown receipt. A separate simultaneous receipt/watchdog failure race was reproduced and
-fixed with deterministic fault tests, but it was not proven to be the original observation's
-cause. Subsequent focused and full runs passed; repeated disconnect/cancellation soak testing
-remains appropriate at independent review.
-
-Rollout prerequisites include agreeing worker/host ownership flags, validating the local account
-overlay with the new shared-account binding, scoped credentials for selected API roles, and a
-schema-compatible rollback. In the inspected production configuration, enabled planning/review
-profiles are CLI profiles; no extra API secret was copied or granted to the host. Adding an API
-profile later still requires its scoped credential to be provisioned for its execution owner.
-
-The original stage-2 goal/review/repair/restart scenario remains a real local Git/PostgreSQL test
-with fake models and Telegram delivery, not a production scenario. Its request is explicitly a
-marker-file outcome; the separate OAuth regression verifies that marker files cannot prove an
-OAuth goal. Reproduce its trace after other integration tests finish:
-
-```sh
-pytest --no-cov -q -s tests/integration/leadership/test_managed_goal_flow.py::test_managed_goal_reviews_repairs_and_resumes_after_restart
-```
-
-Trace contract: owner `/lead` → package A → review rejection → repair → approved managed
-integration commit (main unchanged) → new Python process and fresh database composition →
-package B exactly once → independent criterion evidence → completed goal → meaningful fake
-Telegram result/status. Turn-bound Pi transport and model switching are verified separately
-through the actual executor entrypoint; the two tests are not presented as a paid DeepSeek/MiMo
-end-to-end run.
-
-Final trace plus model-matrix checks: **13 passed**, 22.78 seconds, with SQLAlchemy and
-unraisable-exception warnings treated as errors (no warnings reported):
-
-```sh
-pytest --no-cov -q -s tests/integration/leadership/test_managed_goal_flow.py::test_managed_goal_reviews_repairs_and_resumes_after_restart tests/integration/providers/test_model_assignments.py --tb=short -W error::sqlalchemy.exc.SAWarning -W error::pytest.PytestUnraisableExceptionWarning
-```
-
-Captured disposable-scenario trace (2026-10-20 23:09 UTC / 2026-10-21 Amsterdam):
-
-```text
-package_a=5a1d8415-756c-4cbd-833f-59258739bfd5
-head_a=59a4fcd81d6b53a58fb98917d743f928ff17377f
-restart=separate Python process; fresh composition and DB engine
-goal=55f66b00-90cc-4a2d-82b0-fb2d9b8333d8
-branch=vuzol-managed/vuzol/847ef779c02d
-package_b=3f89db67-30ac-4b35-a3ba-44d5d1638c55
-lifecycle=completed
-head_b=14dbe1f926358fce7bbdbe0b84115bd053384061
-main=852d20746552746979014caf39b06e558de62361
-```
-
-### HTTP-account review follow-up (2026-10-21)
-
-Baseline: clean `agent/project-lead-v1` at `24d0367`. Review input:
-`/home/owner/vuzol-audit-2026-10-21/REVIEW_MODEL_ROLES.md` and its accompanying
-`test_account_http_rejection.py`. P1 is fixed by the explicit completion-evidence contract
-above, not by changing roles, setting `request_sent=False`, inventing usage, or expiring tickets.
-No new migration is needed. Production, defaults, live accounts and services were not changed;
-the existing rollout prerequisites and disabled-by-default lead setting still apply.
-
-The original external probe produced **3 failures** and was left unchanged. Its injected
-`httpx.AsyncClient` lacks `base_url`: with this installed httpx, the mock sees the request but
-cookie/URL processing then raises `ValueError("unknown url type: '/chat/completions'")` before
-the adapter receives the rejection. This is not itself proof of HTTP rejection classification.
-The stock copy sets the client's base URL and additionally asserts the actual failure category;
-all original ticket/second-HTTP-call assertions remain. With the old account-release condition
-temporarily restored, this corrected test produced **7 assertion failures** for
-429/401/400/403/404/413/422 (ticket retained, one HTTP call). With the fix, these pass.
-The unmodified external script is not reported as passing.
-
-Regression coverage includes real `AdapterRegistry` construction/secret resolution and a real
-HTTP adapter with only `httpx.MockTransport` substituted: rejection → fresh registry with
-corrected credentials/request → successful call by another role on the same account. Timeout,
-disconnect, protocol error, HTTP 408/499/500/502/504 → durable ticket retained → a fresh registry
-cannot send again. These are registry reconstruction tests, not a new OS process or a live
-provider pilot. The real worker entrypoint verifies that a rejected lead call releases admission
-while recording unknown, nonzero conservative cost and parking the goal for the owner.
-CLI tests separately distinguish a returned process result from an uncertain transport exception;
-token mismatch, lost ownership, cancellation and unresolved cleanup still prevent release.
-
-Verification used only disposable container `vuzol-http-review-test-20261021`, label
-`vuzol.disposable-test=http-review-20261021`, loopback port 32775. SQL verified database/user
-as `vuzol_http_review_test` / `vuzol_http_test` before migrations reached `d7a4f50e9404`.
-Use the disposable venv, not the production venv. Serialize PostgreSQL tests: the fixture
-terminates connections and truncates its selected database. The DSNs below are recorded test
-values, never production/shared defaults; recreate the isolated database before reusing them.
-
-```sh
-cd /home/owner/vuzol-afterword-stabilization
-export PATH=/tmp/vuzol-stage2.jzwfpD/venv/bin:$PATH
-export PYTHONPATH=src:.
-export PYTHONDONTWRITEBYTECODE=1
-export VUZOL_TEST_DATABASE_DSN=postgresql://vuzol_http_test:disposable-local-only@127.0.0.1:32775/vuzol_http_review_test # pragma: allowlist secret - disposable test credential
-export VUZOL_HTTP_TEST_DSN=postgresql+psycopg://vuzol_http_test:disposable-local-only@127.0.0.1:32775/vuzol_http_review_test # pragma: allowlist secret - disposable test credential
-VUZOL_DATABASE_DSN_REFERENCE=env:VUZOL_HTTP_TEST_DSN alembic upgrade head
-pytest --no-cov -q -rs tests/unit --tb=short
-pytest --no-cov -q tests/integration/providers/test_account_http_rejection.py tests/integration/leadership/test_runtime_provider_boundary.py --tb=short -W error::sqlalchemy.exc.SAWarning -W error::pytest.PytestUnraisableExceptionWarning
-pytest --no-cov -q -rs tests/integration/providers tests/integration/leadership tests/integration/telegram/test_durable_ingress.py tests/integration/telegram/test_polling_commit.py tests/integration/workflows/test_production_consent.py tests/integration/test_secret_scan.py --tb=short -W error::sqlalchemy.exc.SAWarning -W error::pytest.PytestUnraisableExceptionWarning
-mypy src/vuzol
-git diff --check
-```
-
-Full unit result: **3391 passed, 1 skipped**, 35.71 seconds; the existing remote-execution
-out-of-scope test remains skipped. Three dependency deprecation warnings (Starlette/PTB) were
-reported, not suppressed. Focused HTTP/entrypoint check: **24 passed**, 14.20 seconds.
-Final expanded integration group (the third pytest command): **271 passed**, 212.92 seconds,
-no skips/deselections or warnings reported. This includes the final cross-role request checks.
-Type checking: **298 source files passed**. These commands disable coverage collection;
-there is no coverage claim. The full integration suite, paid/live providers, real Telegram
-mutations and Docker-marked acceptance tests were not run for this follow-up. The pre-existing
-full-suite connection warning described above is not claimed fixed by these changes.
-
-All 12 changed Python files passed Ruff lint and format checks; changed-file secret scanning
-and `git diff --check` passed. Reproduce lint/scanning against the pre-fix baseline:
-
-```sh
-git diff --name-only -z 24d0367 -- '*.py' | xargs -0 ruff check
-git diff --name-only -z 24d0367 -- '*.py' | xargs -0 ruff format --check
-git diff --name-only -z 24d0367 | xargs -0 detect-secrets-hook --baseline .secrets.baseline
-```
-
-After verification, the exact disposable container and its sole anonymous PostgreSQL volume
-were removed and their absence checked. No production/shared data was deleted. Test rows are
-not backed up; the fixtures recreate them in a new disposable database.
-
-Remaining limit: genuinely unknown tickets still have no automatic expiry or operator recovery
-command; no existing ticket is retroactively deleted by this fix. The goal can remain parked
-after a rejection until normal owner controls are used. A bounded live pilot is still required
-before claiming production readiness; this fix does not itself authorize or perform that pilot.
-
-### Historical registry examples
-
-Deployment preflight on 2026-10-21 found one remaining vendor-specific gate in
-`build_bundle`: the installation-default reviewer still required Grok, despite generic
-runtime dispatch. It now validates against the installed adapter catalog, retaining role,
-coding task type, repository-read and CLI sandbox requirements. Regression checks cover all
-four CLI transports and OpenAI-compatible API with execution both on and off; the corrected
-test fixture reproduced 8 failures/2 passes before the fix. The resulting complete unit run
-was **3404 passed, 1 skipped**, with three dependency deprecation warnings. This is separate
-from the independent HTTP-fix acceptance above.
-
-Earlier registries and overlays included the following examples; actual deployment defaults
-must be inspected locally:
-
-| Role | Profile | Model | Credential | Output bound |
-| --- | --- | --- | --- | --- |
-| reviewer | `openrouter-mimo-reviewer-prod` | Xiaomi MiMo-V2.5 via OpenRouter, reasoning effort `low` | `VUZOL_OPENROUTER_REVIEWER_API_KEY` | derives its window from its own profile `output_limit` (8,000) |
-| executor | account profiles (`codex-a`, `grok-subscription-a/b`, `tokenrouter-a`, `pi-opencode-go-a/b/c`) from the local overlay | subscription agent CLIs | subscription auth (no API keys) | sandbox-bound |
-| interpreter / transcriber | configured in the interpreter registry, not this mirror | DeepSeek-based interpretation; OpenAI transcription API | their own credential references | their own profile limits |
+### Planning and report tasks
 
 Planning runs only through `leadership/planning.py` and the `planner_strong` slot.
 Its result is a plan revision requiring owner approval. Per-task planner routing,

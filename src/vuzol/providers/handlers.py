@@ -3,6 +3,7 @@
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
@@ -108,6 +109,7 @@ class ProviderStepHandler:
         research_fetcher: SourceFetcher | None = None,
         research_retriever: str = "approved-http",
         dependency_provisioning_enabled: bool = False,
+        worker_mcp_servers: Mapping[str, str] | None = None,
     ) -> None:
         self._factory = factory
         self._registries = registries
@@ -121,6 +123,7 @@ class ProviderStepHandler:
         self._research_fetcher = research_fetcher
         self._research_retriever = research_retriever
         self._dependency_provisioning_enabled = dependency_provisioning_enabled
+        self._worker_mcp_servers = dict(worker_mcp_servers or {})
         self._commit_messages = DatabaseCommitMessageResolver(factory)
 
     def _accounting(
@@ -1213,11 +1216,21 @@ class ProviderStepHandler:
                     reserved_cost_units=Decimal(reservation.reserved_cost_units),
                     reserved_quota_units=Decimal(reservation.reserved_quota_units),
                     sandbox_reference=(f"worktree:{worktree.id}" if worktree is not None else None),
+                    mcp_servers=worker_mcp_servers(
+                        profile.provider, step.step_type, self._worker_mcp_servers
+                    ),
                 ),
                 profile.id,
                 reservation.id,
                 run.configuration_revision,
             )
+
+
+def worker_mcp_servers(
+    provider: str, step_type: str, configured: Mapping[str, str]
+) -> dict[str, str]:
+    """The executor's worker MCP servers apply to Codex task work, never to reviews."""
+    return dict(configured) if provider == "codex" and step_type != "review" else {}
 
 
 SAFE_PROVIDER_STEP_TYPES = frozenset({"research_execute", "synthesize"})

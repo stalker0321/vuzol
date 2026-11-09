@@ -318,6 +318,9 @@ async def run() -> None:
             worktree_access=worktree_access,
             redaction_patterns=settings.redaction_patterns,
             dependency_provisioning_enabled=settings.dependency_provisioning.enabled,
+            worker_mcp_servers={
+                name: str(url) for name, url in settings.execution.worker_mcp_servers.items()
+            },
         )
         worktree_handler = PrepareWorktreeHandler(
             factory,

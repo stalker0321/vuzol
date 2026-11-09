@@ -442,6 +442,9 @@ class ExecutionSettings(BaseModel):
     model_call_sandbox_profile: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
     # Remote MCP servers a model call may use, and its sandbox may reach (name -> https URL).
     model_call_mcp_servers: dict[str, HttpUrl] = Field(default_factory=dict)
+    # Remote MCP servers every Codex task worker gets, e.g. library docs; reviews
+    # get none. Their hosts are added to the worker's proxy (name -> https URL).
+    worker_mcp_servers: dict[str, HttpUrl] = Field(default_factory=dict)
     nodes: tuple[ExecutionNode, ...] = ()
     recovery_batch_size: int = Field(default=50, ge=1, le=1000)
     proxy_image: str | None = Field(

@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from pydantic import HttpUrl
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vuzol.config.models import SandboxNetworkMode
+from vuzol.config.models import EgressDestination, NetworkPolicy, SandboxNetworkMode
 from vuzol.config.registries import ConfigurationBundle
 from vuzol.config.settings import Settings
 from vuzol.execution.artifacts import ArtifactStore
@@ -122,7 +123,27 @@ class ExecutionEnvelopeFactory:
                 (target.hostname, target.port) not in project_keys for target in profile_targets
             ):
                 raise ValueError("CLI profile egress exceeds the project network policy")
+            servers = self._worker_mcp_servers(profile.provider, step.step_type)
+            if servers:
+                # The executor's own allowlist, like model-call MCP servers.
+                profile_targets += compile_proxy_allowlist(
+                    NetworkPolicy(
+                        enabled=True,
+                        destinations=tuple(
+                            EgressDestination(url=HttpUrl(url), purpose=f"MCP server {name}")
+                            for name, url in sorted(servers.items())
+                        ),
+                    )
+                )
             return profile_targets
+
+    def _worker_mcp_servers(self, provider: str, step_type: str) -> dict[str, str]:
+        from vuzol.providers.handlers import worker_mcp_servers
+
+        configured = {
+            name: str(url) for name, url in self._settings.execution.worker_mcp_servers.items()
+        }
+        return worker_mcp_servers(provider, step_type, configured)
 
     async def build(
         self,
@@ -171,6 +192,7 @@ class ExecutionEnvelopeFactory:
                 profile.model,
                 reasoning_effort=profile.model_reasoning_effort,
                 require_read_only=step.step_type in {"execute_agent", "review"},
+                mcp_servers=self._worker_mcp_servers(profile.provider, step.step_type),
             )
             project = self._registries.projects.get(worktree.project_id)
             sandbox = self._registries.sandboxes.get(project.sandbox_profile)

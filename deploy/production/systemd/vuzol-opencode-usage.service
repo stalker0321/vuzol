@@ -18,7 +18,8 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/owner/.opencode-profiles/3 /var/lib/vuzol/usage-export/opencode-c
+# The shared login lives here, not in a home directory (xdg_root in the config).
+ReadWritePaths=/var/lib/vuzol/opencode-shared /var/lib/vuzol/usage-export/opencode-c
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

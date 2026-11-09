@@ -1080,11 +1080,7 @@ def _host_grok_billing_log_paths(state_directory: Path) -> tuple[Path, ...]:
     }
     if not subjects:
         return ()
-    # Hard-coded host layout used by this dogfood host; missing roots are skipped.
-    roots = (
-        Path("/home/owner/.grok-profiles"),
-        Path.home() / ".grok-profiles",
-    )
+    roots = (Path.home() / ".grok-profiles",)
     matched: list[Path] = []
     seen: set[Path] = set()
     for root in roots:

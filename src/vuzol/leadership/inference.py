@@ -25,6 +25,7 @@ from vuzol.projects.executor_preference import PAYLOAD_MODEL_OVERRIDE
 from vuzol.providers.budgets import (
     BudgetExceeded,
     GoalBudgetExceeded,
+    ProfileBusy,
     accounting_for_profile,
     estimate_reservation,
     release_unsent_invocation,
@@ -176,7 +177,7 @@ async def invoke(
                 )
             )
             if int(active or 0) >= profile.concurrency_limit:
-                raise BudgetExceeded("profile concurrency limit exceeded")
+                raise ProfileBusy("profile concurrency limit exceeded")
             reservation = await reserve_invocation_budget(
                 session,
                 invocation_id=request.task_id,
@@ -210,6 +211,17 @@ async def invoke(
                     )
                 )
     except BudgetExceeded as error:
+        if isinstance(error, ProfileBusy):
+            # Another call holds the account: not spending, and nothing to ask the owner.
+            if phase == "planner":
+                # Research waits for a slot itself; switching models here would let
+                # crash replay revisit this choice (see below).
+                raise LeadModelUnavailable("provider_busy") from error
+            raise LeadModelUnavailable(
+                "lead_model_unavailable",
+                definitive=True,
+                failure_category="provider_unavailable",
+            ) from error
         if isinstance(error, GoalBudgetExceeded):
             raise LeadModelUnavailable("goal_budget_exhausted", retryable=False) from error
         # No durable attempt receipt exists yet: advancing a research chain here

@@ -50,6 +50,10 @@ class BudgetExceeded(RuntimeError):
     """A hard budget cannot accommodate another provider call."""
 
 
+class ProfileBusy(BudgetExceeded):
+    """Every call slot of the profile's account is taken; a later attempt can fit."""
+
+
 class GoalBudgetExceeded(BudgetExceeded):
     """The owner's lifetime goal cost cap cannot fit another provider call."""
 

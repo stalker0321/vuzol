@@ -38,8 +38,10 @@ class ResearchJobRunner:
         enabled: Callable[[], bool],
         concurrency: int = 2,
         lease_seconds: int = 120,
+        busy_retry_delays_seconds: tuple[float, ...] = (15, 30, 60, 120),
     ) -> None:
         self._factory, self._owner, self._model = factory, owner, model
+        self._busy_retry_delays = busy_retry_delays_seconds
         self._enabled, self._concurrency, self._lease_seconds = enabled, concurrency, lease_seconds
         self._attempts: set[asyncio.Task[None]] = set()
         self._loop: asyncio.Task[None] | None = None
@@ -169,8 +171,17 @@ class ResearchJobRunner:
             async with self._factory() as session:
                 job = await session.get(LeadJob, claim.job_id)
                 assert job is not None
-            report, usage = await self._model.research(job)
-            return report, None, usage
+            # The lease renews meanwhile; a lead often starts several research jobs at
+            # once on an account that serves one call at a time (live 2026-11-03).
+            for delay in (*self._busy_retry_delays, None):
+                try:
+                    report, usage = await self._model.research(job)
+                    return report, None, usage
+                except LeadModelUnavailable as error:
+                    if str(error) != "provider_busy" or delay is None:
+                        raise
+                await asyncio.sleep(delay)
+            raise AssertionError("unreachable")
         except LeadModelUnavailable as error:
             return None, str(error), error.usage
         except (ValueError, GitError, OSError):

@@ -162,3 +162,27 @@ async def test_lead_keeps_processing_while_its_runner_calls_and_drains_at_close(
     assert cancelled.is_set()
     assert rows[LeadershipTurn].status == "lost"
     complete.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("frees_up", [True, False])
+async def test_a_busy_account_is_waited_for_not_reported_as_spent(harness, frees_up):
+    # Live 2026-11-03: two research jobs started together; the second failed at once
+    # as "planner_budget_exceeded" because codex-a allows one call at a time.
+    factory, _, _, _, complete = harness
+    model = AsyncMock()
+    busy = LeadModelUnavailable("provider_busy")
+    model.research.side_effect = (
+        [busy, busy, ("Исследование", {"input_tokens": 4})] if frees_up else busy
+    )
+    runner = ResearchJobRunner(
+        factory,
+        owner="runner",
+        model=model,
+        enabled=lambda: True,
+        busy_retry_delays_seconds=(0, 0, 0),
+    )
+    assert await runner.tick()
+    await runner.wait_idle()
+    assert model.research.await_count == (3 if frees_up else 4)
+    assert complete.call_args.kwargs["failure_reason"] == (None if frees_up else "provider_busy")

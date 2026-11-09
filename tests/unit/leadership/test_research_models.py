@@ -309,7 +309,8 @@ async def test_shared_profile_concurrency_limit_stops_before_sending_or_fallback
     chain.store.reservations[uuid.uuid4()] = SimpleNamespace(
         status=BudgetReservationStatus.RESERVED
     )
-    with pytest.raises(LeadModelUnavailable, match="planner_budget_exceeded") as raised:
+    with pytest.raises(LeadModelUnavailable, match=r"^provider_busy$") as raised:
         await chain.model.research(chain.job)
+    assert raised.value.retryable
     assert len(raised.value.usage["failed_attempts"]) == 1
     assert all(adapter.execute.await_count == 0 for adapter in chain.adapters.values())

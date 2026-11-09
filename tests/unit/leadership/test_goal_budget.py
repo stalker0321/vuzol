@@ -333,3 +333,19 @@ async def test_goal_cost_queries_sum_only_its_scopes_and_open_reservations():
             )
     finally:
         engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_a_busy_account_is_an_infrastructure_retry_not_a_spending_limit(ledger):
+    # Live 2026-11-03: every slot taken read as "лимит расходов, нужно твоё решение".
+    counted = ledger.session.scalar.side_effect
+
+    async def all_slots_taken(query):
+        return 99 if "count(" in str(query) else await counted(query)
+
+    ledger.session.scalar.side_effect = all_slots_taken
+    with pytest.raises(LeadModelUnavailable, match=r"^lead_model_unavailable$") as raised:
+        await call(ledger, "project_lead")
+    assert raised.value.retryable and raised.value.definitive
+    assert raised.value.failure_category == "provider_unavailable"
+    ledger.send.assert_not_awaited()

@@ -2,7 +2,23 @@
 
 This file records completed implementation changes, not plans or speculative ideas.
 
-## Unreleased
+## 2026-11-09
+
+- Project leads: unreadable answers are redone and then fall back to another model; a
+  separate request goes into the topic's task queue and starts when the current goal
+  ends; an owner message fenced out mid-turn is redelivered; controls such as «держи на
+  паузе» never enter the goal scope (prompt v22); a nightly pass merges and prunes each
+  project notebook.
+- Assistant topic, private inbox and an optional public-source monitor run in the
+  interpreter. Long replies use rich messages with a plain fallback.
+- Remote execution nodes: Pi model calls and Pi coding steps can run on another machine's
+  Docker through a forwarded socket; the worktree is copied there and back.
+- Codex task workers can use allowlisted remote MCP servers; `/model` offers a project only
+  CLI profiles its network policy allows.
+- Cleanup: about 2,400 lines of unreachable code, the old production deployer and 14 stale
+  handoff documents removed; orphaned proxy networks are reaped; CI installs the `mcp` extra.
+
+## 2026-08 – 2026-10 (undated)
 
 - replaced dense project-lead Telegram state dumps with compact, safely formatted
   status/question/result cards; `/lead_goal` and `/lead_details` expose the full

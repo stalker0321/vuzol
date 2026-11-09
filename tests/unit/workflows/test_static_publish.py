@@ -38,7 +38,7 @@ def _handler(
             static_site_root=sites,
             static_site_base_url="https://example.com/",
             preview_site_root=tmp_path / "preview-sites",
-            preview_site_base_url="https://test.example.com/",
+            preview_site_base_url="https://preview.example.com/",
         ),
         registries=SimpleNamespace(projects=SimpleNamespace(get=lambda _project_id: project)),
     )
@@ -94,7 +94,7 @@ async def test_preview_handler_publishes_to_isolated_preview_host(tmp_path: Path
     outcome = await handler.execute(request, CancellationContext())  # type: ignore[arg-type]
 
     assert outcome.kind is OutcomeKind.SUCCEEDED
-    assert outcome.result["public_url"] == "https://test.example.com/demo/"
+    assert outcome.result["public_url"] == "https://preview.example.com/demo/"
     assert (tmp_path / "preview-sites/demo/current/index.html").read_text() == "<h1>Demo</h1>"
     assert not (tmp_path / "sites/demo/current/index.html").exists()
 

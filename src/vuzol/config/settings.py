@@ -816,10 +816,11 @@ class Settings(BaseSettings):
     worktree_root: Path = Path("/srv/vuzol/worktrees")
     artifact_root: Path = Path("/srv/vuzol/artifacts")
     artifact_delivery_uid: int | None = Field(default=None, ge=1)
-    static_site_root: Path = Path("/srv/vuzol/sites/example.com")
-    static_site_base_url: HttpUrl = HttpUrl("https://example.com")
-    preview_site_root: Path = Path("/srv/vuzol/sites/test.example.com")
-    preview_site_base_url: HttpUrl = HttpUrl("https://test.example.com")
+    # Static publishing: the publisher refuses to start without both public URLs.
+    static_site_root: Path = Path("/srv/vuzol/sites/public")
+    static_site_base_url: HttpUrl | None = None
+    preview_site_root: Path = Path("/srv/vuzol/sites/preview")
+    preview_site_base_url: HttpUrl | None = None
     preview_gateway_host: str = "127.0.0.1"
     preview_gateway_port: int = Field(default=8091, ge=1024, le=65535)
     preview_export_max_bytes: int = Field(default=250_000_000, ge=1)

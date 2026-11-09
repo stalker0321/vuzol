@@ -18,7 +18,7 @@ USER_DAEMON_UNIT = UNITS / "user/vuzol-rootless-docker.service"
 EXECUTOR_UNIT = UNITS / "vuzol-executor.service"
 APPLIER_UNIT = UNITS / "vuzol-applier.service"
 STATIC_PUBLISHER_WORKER = UNITS / "vuzol-static-publisher-worker.service"
-STATIC_SITE_CADDY = REPO_ROOT / "deploy/caddy/example.com.caddy"
+STATIC_SITE_CADDY = REPO_ROOT / "deploy/caddy/vuzol-site.caddy"
 
 
 def test_static_publisher_worker_is_unprivileged_and_path_fenced() -> None:
@@ -26,7 +26,7 @@ def test_static_publisher_worker_is_unprivileged_and_path_fenced() -> None:
     assert "User=vuzol-publisher" in service
     assert "NoNewPrivileges=true" in service
     assert "ProtectSystem=strict" in service
-    assert "ReadWritePaths=/srv/vuzol/sites/" in service
+    assert "ReadWritePaths=/srv/vuzol/sites\n" in service
     assert "ReadOnlyPaths=/srv/vuzol/repositories " in service
     assert "Restart=on-failure" in service
 
@@ -35,7 +35,7 @@ def test_static_site_caddy_route_is_project_generic() -> None:
     config = STATIC_SITE_CADDY.read_text()
 
     assert "path_regexp project" in config
-    assert "/srv/vuzol/sites/example.com/{re.project.1}/current" in config
+    assert "/srv/vuzol/sites/{$VUZOL_SITE_DOMAIN}/{re.project.1}/current" in config
     assert "bill-buddy" not in config
 
 
@@ -44,10 +44,10 @@ def test_split_host_origin_is_private_and_host_scoped() -> None:
     assert "http://:8092" in config
     assert "bind 10.0.0.3" in config
     assert "0.0.0.0" not in config  # noqa: S104 - explicitly forbid wildcard binding
-    assert "@preview host test.example.com" in config
+    assert "@preview host {$VUZOL_PREVIEW_DOMAIN}" in config
     assert "reverse_proxy 127.0.0.1:8091" in config
-    assert "@production host example.com www.example.com" in config
-    assert "/srv/vuzol/sites/example.com/{re.originProject.1}/current" in config
+    assert "@production host {$VUZOL_SITE_DOMAIN} www.{$VUZOL_SITE_DOMAIN}" in config
+    assert "/srv/vuzol/sites/{$VUZOL_SITE_DOMAIN}/{re.originProject.1}/current" in config
     assert 'respond "Unknown publication host" 404' in config
 
 
@@ -57,7 +57,7 @@ def test_split_host_edge_keeps_local_sites_and_proxies_unknown_projects() -> Non
     assert "try_files /index.html" in config
     assert "handle @localProject" in config
     assert config.index("handle @localProject") < config.index("reverse_proxy 10.0.0.3:8092")
-    assert "root * /var/www/example.com" in config
+    assert "root * /var/www/{$VUZOL_SITE_DOMAIN}" in config
     preview = config.split("(vuzol_edge_preview)", 1)[1]
     assert "reverse_proxy 10.0.0.3:8092" in preview
     assert "127.0.0.1:8091" not in preview

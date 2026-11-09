@@ -9,6 +9,22 @@ An edge proxy to 127.0.0.1:8091 therefore returns 502 even while the worker's
 gateway and local TLS site return 200. A production file_server on the edge
 also cannot see a newly approved release written only on the worker.
 
+## Settings
+
+The publisher needs both public URLs and refuses to start without them:
+
+```dotenv
+VUZOL_STATIC_SITE_BASE_URL=https://example.com
+VUZOL_STATIC_SITE_ROOT=/srv/vuzol/sites/example.com
+VUZOL_PREVIEW_SITE_BASE_URL=https://test.example.com
+VUZOL_PREVIEW_SITE_ROOT=/srv/vuzol/sites/test.example.com
+```
+
+The Caddy files in `deploy/caddy` read the domains from Caddy's own environment:
+`VUZOL_SITE_DOMAIN` (`example.com`) and `VUZOL_PREVIEW_DOMAIN` (`test.example.com`), for
+example through a systemd drop-in for `caddy.service`. `vuzol-site.caddy` is the
+single-host variant; the two below are for split edge and worker hosts.
+
 ## Route contract
 
 - Worker Caddy imports `deploy/caddy/vuzol-private-origin.caddy` at top level.

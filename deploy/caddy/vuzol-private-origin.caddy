@@ -1,17 +1,18 @@
+# Caddy fills {$VUZOL_SITE_DOMAIN} and {$VUZOL_PREVIEW_DOMAIN} from its own environment.
 # Worker-side origin for the separate public edge. Import at top level.
 # Bind explicitly: a site address alone does not constrain the listen interface.
 # Firewall: only 10.0.0.2 -> 10.0.0.3:8092 on the private interface is allowed.
 http://:8092 {
 	bind 10.0.0.3
 
-	@preview host test.example.com
+	@preview host {$VUZOL_PREVIEW_DOMAIN}
 	handle @preview {
 		reverse_proxy 127.0.0.1:8091 {
 			flush_interval -1
 		}
 	}
 
-	@production host example.com www.example.com
+	@production host {$VUZOL_SITE_DOMAIN} www.{$VUZOL_SITE_DOMAIN}
 	handle @production {
 		@originProjectExact path_regexp originProjectExact ^/([a-z][a-z0-9-]{0,62})$
 		redir @originProjectExact {http.request.uri.path}/ 308
@@ -19,7 +20,7 @@ http://:8092 {
 		@originProject path_regexp originProject ^/([a-z][a-z0-9-]{0,62})/(.*)$
 		handle @originProject {
 			uri strip_prefix /{re.originProject.1}
-			root * /srv/vuzol/sites/example.com/{re.originProject.1}/current
+			root * /srv/vuzol/sites/{$VUZOL_SITE_DOMAIN}/{re.originProject.1}/current
 			encode gzip zstd
 			try_files {path} {path}/ /index.html
 			file_server

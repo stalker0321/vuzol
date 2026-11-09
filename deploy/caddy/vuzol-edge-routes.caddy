@@ -1,3 +1,4 @@
+# Caddy fills {$VUZOL_SITE_DOMAIN} and {$VUZOL_PREVIEW_DOMAIN} from its own environment.
 # Edge snippets: import this file at top level, then import the named snippets
 # inside the existing hosts. Keep explicit unrelated application handlers first.
 (vuzol_edge_projects) {
@@ -7,12 +8,12 @@
 	@project path_regexp project ^/([a-z][a-z0-9-]{0,62})/(.*)$
 	handle @project {
 		@localProject file {
-			root /srv/vuzol/sites/example.com/{re.project.1}/current
+			root /srv/vuzol/sites/{$VUZOL_SITE_DOMAIN}/{re.project.1}/current
 			try_files /index.html
 		}
 		handle @localProject {
 			uri strip_prefix /{re.project.1}
-			root * /srv/vuzol/sites/example.com/{re.project.1}/current
+			root * /srv/vuzol/sites/{$VUZOL_SITE_DOMAIN}/{re.project.1}/current
 			encode gzip zstd
 			try_files {path} {path}/ /index.html
 			file_server
@@ -25,7 +26,7 @@
 	}
 
 	handle {
-		root * /var/www/example.com
+		root * /var/www/{$VUZOL_SITE_DOMAIN}
 		encode gzip zstd
 		file_server
 	}

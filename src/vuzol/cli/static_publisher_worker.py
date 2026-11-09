@@ -50,6 +50,10 @@ def publisher_handlers(
 async def run() -> None:
     runtime = get_runtime_configuration(validate_profile_credentials=False)
     settings = runtime.settings
+    if settings.static_site_base_url is None or settings.preview_site_base_url is None:
+        raise SystemExit(
+            "set VUZOL_STATIC_SITE_BASE_URL and VUZOL_PREVIEW_SITE_BASE_URL for the publisher"
+        )
     configure_logging(service=f"{settings.service_name}-publisher", level=settings.log_level)
     engine = create_engine(settings, resolve_database_dsn(settings))
     preview_registry: PreviewRuntimeRegistry | None = None

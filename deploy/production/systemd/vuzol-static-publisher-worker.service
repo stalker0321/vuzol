@@ -28,7 +28,7 @@ LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 ReadOnlyPaths=/srv/vuzol/repositories /srv/vuzol/worktrees /srv/vuzol/artifacts /etc/vuzol /var/lib/vuzol/registry
-ReadWritePaths=/srv/vuzol/sites/test.example.com /srv/vuzol/sites/example.com
+ReadWritePaths=/srv/vuzol/sites
 WorkingDirectory=/opt/vuzol/current
 ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.static_publisher_worker
 

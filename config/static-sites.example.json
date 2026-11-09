@@ -3,7 +3,7 @@
     {
       "id": "bill-buddy",
       "source": "/srv/vuzol/repositories/bill-buddy",
-      "destination": "/srv/vuzol/sites/example.com/bill-buddy",
+      "destination": "/srv/vuzol/sites/public/bill-buddy",
       "include": ["index.html", "app.js", "styles.css"],
       "entrypoint": "index.html",
       "keep_releases": 5

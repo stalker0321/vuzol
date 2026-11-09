@@ -4,7 +4,7 @@ FROM ghcr.io/astral-sh/uv:0.11.28 AS uv
 FROM python:3.12-slim AS runtime
 
 ARG VUZOL_BUILD_GIT_SHA=unknown
-LABEL dev.example.vuzol.git-sha=$VUZOL_BUILD_GIT_SHA
+LABEL org.opencontainers.image.revision=$VUZOL_BUILD_GIT_SHA
 ENV VUZOL_BUILD_GIT_SHA=$VUZOL_BUILD_GIT_SHA
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

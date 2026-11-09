@@ -66,6 +66,8 @@ packages = ["src/vuzol"]
 # Remove after automated P0/P1 invariant checks replace percentage gating.
 addopts = "--strict-config --strict-markers --cov=vuzol --cov-branch --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
+# Test helpers are imported as tests.*, whatever directory pytest starts from.
+pythonpath = ["."]
 markers = [
     "postgresql: requires the real PostgreSQL integration database",
     "docker: requires a working Docker daemon (rootless in target setup)",

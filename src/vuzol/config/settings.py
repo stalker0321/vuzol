@@ -675,6 +675,8 @@ class InboxSettings(BaseModel):
     settle_seconds: float = Field(default=3.0, ge=0.5, le=30)
     # Words without a reply apply to the last record only this long after it.
     followup_minutes: int = Field(default=120, ge=1, le=1440)
+    context_messages: int = Field(default=15, ge=1, le=100)
+    context_hours: float = Field(default=3, gt=0, le=168)
     timezone: str = "Europe/Amsterdam"
     timeout_seconds: float = Field(default=120, ge=5, le=600)
 

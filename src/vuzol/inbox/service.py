@@ -9,11 +9,12 @@ import time as time_module
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, time, timedelta
+from html import unescape
 from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, NetworkError, TimedOut
 
@@ -48,6 +49,7 @@ from vuzol.storage.leasing import (
     retry_outbox_item,
 )
 from vuzol.storage.models import InboxItem, InboxLink, InboxMessage, TransactionalOutbox
+from vuzol.storage.types import DeliveryStatus
 from vuzol.telegram.formatting import telegram_answer_rich_html
 from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
 
@@ -57,6 +59,23 @@ _MAX_IMAGE_BYTES = 4_500_000
 _MAX_LINKS = 3
 _EVIDENCE_CHARS = 30_000
 _SEARCH_LIMIT = 40
+_KIND_WORDS = {
+    "event": "событие",
+    "book": "книга",
+    "film": "фильм",
+    "series": "сериал",
+    "music": "музыка",
+    "repo": "репозиторий",
+    "tool": "инструмент приложение",
+    "article": "статья",
+    "post": "пост",
+    "course": "курс",
+    "place": "место",
+    "product": "продукт",
+    "person": "человек",
+    "idea": "идея",
+    "note": "заметка",
+}
 _ATTEMPTS = 3
 _PAGES = 3
 _SWEEP_SECONDS = 600
@@ -153,7 +172,7 @@ class InboxWorker:
             elif operation == "button":
                 await self._button(payload)
             elif operation == "reply":
-                await self._reply(payload)
+                await self._reply(payload, token.item_id)
             else:
                 raise ValueError(f"unknown inbox operation {operation}")
         except LostTelegramResponse:
@@ -258,13 +277,36 @@ class InboxWorker:
         content: Sequence[InboxMessage],
         comment: str,
         messages: Sequence[InboxMessage],
+        *,
+        lookup: bool = False,
     ) -> None:
         evidence, images = await self._evidence(content)
+        conversation = await self._conversation(chat_id, messages)
+        thin = (
+            len(evidence) < 200
+            and not images
+            and not any(m.urls or m.forward_label or m.forward_url for m in content)
+        )
+        web = (
+            await self._look_up(
+                f"Найди в интернете, что это, перед сохранением:\n{comment}\n{evidence}",
+                [],
+                conversation,
+            )
+            if lookup or thin
+            else None
+        )
         cards = await self._model.ask(
             Cards,
             system=self._prompt(CARD_PROMPT),
             user=json.dumps(
-                {"owner_comment": comment or None, "material": evidence}, ensure_ascii=False
+                {
+                    "owner_comment": comment or None,
+                    "material": evidence,
+                    "conversation": conversation,
+                    "web": web,
+                },
+                ensure_ascii=False,
             ),
             images=images,
         )
@@ -288,12 +330,14 @@ class InboxWorker:
         messages: Sequence[InboxMessage],
     ) -> None:
         recent = None if replied else await self._recent_item(chat_id)
+        conversation = await self._conversation(chat_id, messages)
         route = await self._model.ask(
             Route,
             system=self._prompt(ROUTE_PROMPT),
             user=json.dumps(
                 {
                     "owner_words": words,
+                    "conversation": conversation,
                     "replied_record": _brief(replied) if replied else None,
                     "recent_record": _brief(recent) if recent else None,
                 },
@@ -306,7 +350,7 @@ class InboxWorker:
         )
         target = target or replied
         if route.action == "save":
-            await self._save(batch_id, chat_id, user_id, messages, "", messages)
+            await self._save(batch_id, chat_id, user_id, messages, "", messages, lookup=True)
         elif route.action == "ask" and target is not None:
             await self._answer([target], words, chat_id, reply_to=anchor, key=str(batch_id))
 
@@ -358,12 +402,18 @@ class InboxWorker:
             }
             for item in items
         ]
-        web = await self._look_up(question, [_brief(item) for item in items])
+        conversation = await self._conversation(chat_id, reply_to=reply_to)
+        web = await self._look_up(question, [_brief(item) for item in items], conversation)
         answer = await self._model.ask(
             Answer,
             system=self._prompt(ASK_PROMPT),
             user=json.dumps(
-                {"question": question, "records": records, "web": web},
+                {
+                    "question": question,
+                    "records": records,
+                    "web": web,
+                    "conversation": conversation,
+                },
                 ensure_ascii=False,
                 default=str,
             ),
@@ -404,8 +454,6 @@ class InboxWorker:
         tz = ZoneInfo(self._settings.timezone)
         conditions: list[Any] = [InboxItem.owner_user_id == user_id, InboxItem.removed_at.is_(None)]
         order: list[Any] = [InboxItem.created_at.desc()]
-        if spec is not None and spec.kinds:
-            conditions.append(InboxItem.kind.in_(spec.kinds))
         if spec is not None and (spec.date_from or spec.date_to):
             if spec.date_from:
                 start = datetime.combine(spec.date_from, time.min, tz)
@@ -414,29 +462,36 @@ class InboxWorker:
                 end = datetime.combine(spec.date_to, time.max, tz)
                 conditions.append(InboxItem.event_start <= end)
             order = [InboxItem.event_start.asc()]
-        words = [
-            w
-            for w in re.findall(r"\w+", ((spec.words if spec else None) or "").lower())
-            if len(w) >= 3
-        ]
+        terms = (spec.words or "") if spec else ""
+        if spec is not None:
+            terms += " " + " ".join(f"{kind} {_KIND_WORDS.get(kind, '')}" for kind in spec.kinds)
+        words = [w for w in re.findall(r"\w+", terms.lower()) if len(w) >= 3]
         if words:
             query = func.to_tsquery(
                 "simple", " | ".join(sorted({f"{w[: max(4, len(w) - 2)]}:*" for w in words}))
             )
             conditions.append(InboxItem.search.op("@@")(query))
             order = [func.ts_rank(InboxItem.search, query).desc(), *order]
+        if spec is not None and spec.kinds:
+            order = [case((InboxItem.kind.in_(spec.kinds), 1), else_=0).desc(), *order]
         async with self._factory() as session:
             found = list(
                 await session.scalars(
                     select(InboxItem).where(*conditions).order_by(*order).limit(_SEARCH_LIMIT)
                 )
             )
-        web = await self._look_up(question, [_brief(item) for item in found[:10]])
+        conversation = await self._conversation(chat_id, reply_to=reply_to)
+        web = await self._look_up(question, [_brief(item) for item in found[:10]], conversation)
         answer = await self._model.ask(
             Answer,
             system=self._prompt(SEARCH_PROMPT),
             user=json.dumps(
-                {"question": question, "records": [_brief(item) for item in found], "web": web},
+                {
+                    "question": question,
+                    "records": [_brief(item) for item in found],
+                    "web": web,
+                    "conversation": conversation,
+                },
                 ensure_ascii=False,
                 default=str,
             ),
@@ -449,14 +504,22 @@ class InboxWorker:
             markdown=answer.text,
         )
 
-    async def _look_up(self, question: str, records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    async def _look_up(
+        self,
+        question: str,
+        records: list[dict[str, Any]],
+        conversation: Sequence[dict[str, str]] = (),
+    ) -> dict[str, Any] | None:
         """Let the model pick searches, run them and open the best pages."""
         if self._web is None:
             return None
         plan = await self._model.ask(
             Lookup,
             system=self._prompt(LOOKUP_PROMPT),
-            user=json.dumps({"question": question, "records": records}, ensure_ascii=False),
+            user=json.dumps(
+                {"question": question, "records": records, "conversation": conversation},
+                ensure_ascii=False,
+            ),
         )
         if not plan.queries and not plan.github:
             return None
@@ -790,6 +853,7 @@ class InboxWorker:
             payload={
                 "chat_id": chat_id,
                 "html": html,
+                "markdown": markdown,
                 "rich_html": telegram_answer_rich_html(markdown)
                 if markdown and not buttons
                 else None,
@@ -799,7 +863,7 @@ class InboxWorker:
             },
         )
 
-    async def _reply(self, payload: dict[str, Any]) -> None:
+    async def _reply(self, payload: dict[str, Any], outbox_id: uuid.UUID) -> None:
         rich_html = payload.get("rich_html")
         if self._send_rich is not None and rich_html and not payload.get("buttons"):
             try:
@@ -815,6 +879,9 @@ class InboxWorker:
         else:
             message_id = await self._send_reply(payload)
         async with self._factory.begin() as session:
+            row = await session.get(TransactionalOutbox, outbox_id)
+            if row is not None:
+                row.payload = {**row.payload, "message_id": message_id}
             for raw in payload.get("item_ids") or []:
                 session.add(
                     InboxLink(
@@ -832,6 +899,99 @@ class InboxWorker:
             reply_to=payload.get("reply_to"),
             buttons=payload.get("buttons") or [],
         )
+
+    async def _conversation(
+        self,
+        chat_id: int,
+        messages: Sequence[InboxMessage] = (),
+        *,
+        reply_to: int | None = None,
+        now: datetime | None = None,
+    ) -> list[dict[str, str]]:
+        anchor = now or datetime.now(UTC)
+        span = timedelta(hours=self._settings.context_hours)
+        limit = self._settings.context_messages
+        async with self._factory() as session:
+            if not messages and reply_to is not None:
+                current = await session.scalar(
+                    select(InboxMessage).where(
+                        InboxMessage.chat_id == chat_id, InboxMessage.message_id == reply_to
+                    )
+                )
+                if current is not None:
+                    messages = (
+                        list(
+                            await session.scalars(
+                                select(InboxMessage).where(
+                                    InboxMessage.chat_id == chat_id,
+                                    InboxMessage.batch_id == current.batch_id,
+                                )
+                            )
+                        )
+                        if current.batch_id is not None
+                        else [current]
+                    )
+            owner_query = select(InboxMessage).where(InboxMessage.chat_id == chat_id)
+            bot_query = select(TransactionalOutbox).where(
+                TransactionalOutbox.destination == INBOX_DESTINATION,
+                TransactionalOutbox.operation_type == "reply",
+                TransactionalOutbox.status == DeliveryStatus.DELIVERED,
+                TransactionalOutbox.payload["chat_id"].astext == str(chat_id),
+            )
+            replied = None
+            for message in reversed(messages):
+                target = message.reply_to_message_id
+                if target is None:
+                    continue
+                owner = await session.scalar(owner_query.where(InboxMessage.message_id == target))
+                bot = await session.scalar(
+                    bot_query.where(TransactionalOutbox.payload["message_id"].astext == str(target))
+                )
+                if owner is not None:
+                    replied = (owner.received_at, target, "owner", _context_words(owner))
+                elif bot is not None:
+                    replied = (bot.delivered_at or bot.created_at, target, "bot", _reply_words(bot))
+                if replied is not None:
+                    if replied[0] < anchor - span:
+                        anchor = replied[0]
+                    break
+            owners = await session.scalars(
+                owner_query.where(
+                    InboxMessage.received_at.between(anchor - span, anchor),
+                    InboxMessage.id.not_in([m.id for m in messages]),
+                )
+                .order_by(InboxMessage.received_at.desc(), InboxMessage.message_id.desc())
+                .limit(limit)
+            )
+            bots = await session.scalars(
+                bot_query.where(TransactionalOutbox.delivered_at.between(anchor - span, anchor))
+                .order_by(TransactionalOutbox.delivered_at.desc(), TransactionalOutbox.id.desc())
+                .limit(limit)
+            )
+            entries = [
+                (m.received_at, m.message_id, "owner", _context_words(m)) for m in owners
+            ] + [
+                (
+                    b.delivered_at or b.created_at,
+                    int(b.payload.get("message_id", 0)),
+                    "bot",
+                    _reply_words(b),
+                )
+                for b in bots
+            ]
+        entries = sorted((entry for entry in entries if entry[3]), key=lambda e: (e[0], e[1]))[
+            -limit:
+        ]
+        if replied is not None and replied[3] and replied not in entries:
+            entries = sorted(
+                [*(entries[-(limit - 1) :] if limit > 1 else []), replied],
+                key=lambda e: (e[0], e[1]),
+            )
+        tz = ZoneInfo(self._settings.timezone)
+        return [
+            {"role": role, "time": at.astimezone(tz).isoformat(), "text": text[:500]}
+            for at, _, role, text in entries
+        ]
 
     async def _replied_item(
         self, chat_id: int, messages: Sequence[InboxMessage]
@@ -888,6 +1048,19 @@ def _is_content(message: InboxMessage) -> bool:
 
 def _words(message: InboxMessage) -> str:
     return (message.body or message.transcript or "").strip()
+
+
+def _context_words(message: InboxMessage) -> str:
+    return "\n".join(filter(None, (message.forward_label, message.body, message.transcript)))
+
+
+def _reply_words(row: TransactionalOutbox) -> str:
+    payload = row.payload
+    return str(
+        payload.get("markdown")
+        or payload.get("text")
+        or unescape(re.sub(r"<[^>]+>", "", payload.get("html") or ""))
+    )
 
 
 def _brief(item: InboxItem) -> dict[str, Any]:

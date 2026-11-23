@@ -21,7 +21,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vuzol.leadership.persistence import LeadJob, ManagedGoal
-from vuzol.storage.models import ModelCall, Run, Step, TransactionalOutbox
+from vuzol.providers.subscription_limits import short_unavailable_detail
+from vuzol.storage.models import (
+    ModelCall,
+    Run,
+    Step,
+    SubscriptionLimitSnapshotRow,
+    TransactionalOutbox,
+)
 from vuzol.storage.types import DeliveryStatus, RunStatus, StepStatus
 from vuzol.telegram.attention import ATTENTION_REASONS
 
@@ -33,6 +40,10 @@ QUOTA_WARN_PERCENT = 80.0
 STUCK_LEASE_GRACE = timedelta(minutes=10)
 STUCK_QUEUE_AGE = timedelta(hours=1)
 WINDOW = timedelta(hours=24)
+# The collector runs every few minutes; older rows belong to retired accounts.
+ACCOUNT_SNAPSHOT_MAX_AGE = timedelta(hours=2)
+# Details that say nothing about the account itself.
+_NO_ACCOUNT_NEWS = frozenset({"collector_not_supported", "limits_not_collected"})
 # Owner-chosen pauses are not problems.
 _QUIET_WAITING_REASONS = frozenset({"owner_pause"})
 
@@ -70,6 +81,8 @@ class DatabaseFacts:
     failed_jobs: dict[str, int] = field(default_factory=dict)
     failed_model_calls: dict[str, int] = field(default_factory=dict)
     undelivered: dict[str, int] = field(default_factory=dict)
+    # (profile id, collector detail code or "exhausted")
+    accounts: tuple[tuple[str, str], ...] = ()
 
 
 def evaluate(host: HostFacts, db: DatabaseFacts, *, now: datetime) -> list[Finding]:
@@ -106,6 +119,12 @@ def evaluate(host: HostFacts, db: DatabaseFacts, *, now: datetime) -> list[Findi
         if counts:
             detail = ", ".join(f"{key}: {count}" for key, count in sorted(counts.items()))
             findings.append(Finding("warn", f"{title} за сутки: {detail}"))
+    for profile_id, detail in db.accounts:
+        # Live 2026-11-23: OpenCode C lost its Go subscription and lead turns failed
+        # for hours before anyone looked.
+        text = "лимит исчерпан" if detail == "exhausted" else short_unavailable_detail(detail)
+        level = "fail" if detail == "go_entitlement_missing" else "warn"
+        findings.append(Finding(level, f"Аккаунт {profile_id}: {text}"))
     return findings
 
 
@@ -187,7 +206,25 @@ async def database_facts(session: AsyncSession, *, now: datetime) -> DatabaseFac
             TransactionalOutbox.updated_at >= since,
         )
     )
+    snapshots = await session.execute(
+        select(
+            SubscriptionLimitSnapshotRow.profile_id,
+            SubscriptionLimitSnapshotRow.ok,
+            SubscriptionLimitSnapshotRow.detail,
+            SubscriptionLimitSnapshotRow.five_hour_remaining_percent,
+            SubscriptionLimitSnapshotRow.weekly_remaining_percent,
+        )
+        .where(SubscriptionLimitSnapshotRow.observed_at >= now - ACCOUNT_SNAPSHOT_MAX_AGE)
+        .order_by(SubscriptionLimitSnapshotRow.profile_id)
+    )
+    accounts = []
+    for profile_id, ok, detail, five_hour, weekly in snapshots:
+        if ok and 0 in (five_hour, weekly):
+            accounts.append((profile_id, "exhausted"))
+        elif not ok and detail not in _NO_ACCOUNT_NEWS:
+            accounts.append((profile_id, str(detail or "unknown")))
     return DatabaseFacts(
+        accounts=tuple(accounts),
         blocked_runs=int(blocked[0] or 0),
         oldest_blocked=blocked[1],
         stuck_steps=int(expired or 0) + int(starved or 0),

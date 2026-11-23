@@ -702,7 +702,7 @@ def format_subscription_limits_html(
     lines: list[str] = []
     for snap in sorted(snapshots, key=lambda item: not item.ok):
         if not snap.ok:
-            detail = _SHORT_UNAVAILABLE_DETAILS.get(snap.detail, _SHORT_UNAVAILABLE_FALLBACK)
+            detail = short_unavailable_detail(snap.detail)
             line = (
                 f"• {html_escape(snap.company)} · <code>{html_escape(snap.profile_id)}</code>"
                 f" — ⚠️ {html_escape(detail)}"
@@ -758,6 +758,12 @@ def format_subscription_limits_html(
             warning = "⚠️ Провайдер сообщает включённый платный перерасход. Вузол его не менял."
             lines.append(f"<p>{warning}</p>" if rich else f"  {warning}")
     return lines
+
+
+def short_unavailable_detail(detail: str | None) -> str:
+    """A few owner-facing words for a collector detail code."""
+
+    return _SHORT_UNAVAILABLE_DETAILS.get(detail or "", _SHORT_UNAVAILABLE_FALLBACK)
 
 
 def _safe_unavailable_detail(detail: str) -> str:

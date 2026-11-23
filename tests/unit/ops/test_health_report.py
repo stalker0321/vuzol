@@ -97,6 +97,25 @@ def test_database_problems_are_named_and_owner_pauses_are_not() -> None:
     ]
 
 
+def test_account_problems_are_named_and_a_missing_subscription_fails() -> None:
+    # Live 2026-11-23: OpenCode C lost its Go subscription and every lead turn failed
+    # for hours; the daily report said nothing.
+    db = DatabaseFacts(
+        accounts=(
+            ("pi-opencode-go-c-muse", "go_entitlement_missing"),
+            ("codex-b", "auth.json unreadable"),
+            ("codex-a", "exhausted"),
+            ("x", "brand-new-code"),
+        )
+    )
+    assert evaluate(healthy_host(), db, now=NOW) == [
+        Finding("fail", "Аккаунт pi-opencode-go-c-muse: подписка Go не подтверждена"),
+        Finding("warn", "Аккаунт codex-b: нет доступа к логину"),
+        Finding("warn", "Аккаунт codex-a: лимит исчерпан"),
+        Finding("warn", "Аккаунт x: нет данных лимитов"),
+    ]
+
+
 def test_failures_lead_the_message_and_text_is_escaped() -> None:
     text = render([Finding("warn", "a <b>"), Finding("fail", "disk")])
     assert text.splitlines() == [

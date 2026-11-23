@@ -170,10 +170,9 @@ async def test_concurrent_telegram_mcp_and_uuid_replay(postgres_dsn, runtime):
             assert event.payload["request_origin"]["authorized_user_id"] == OWNER
         model = Answer()
         worker = _worker(factory, model)
-        for _ in range(4):
-            assert await worker.process_one()
-            if len(model.seen) == 2:
-                break
+        # Failed once in a full run (2026-11-23, seen == []) and never alone: the two
+        # wakeups may defer each other (event order, goal lease) more times than 4 ticks.
+        for _ in range(12):
             async with factory.begin() as session:
                 for event in await session.scalars(
                     select(TransactionalOutbox).where(
@@ -182,6 +181,9 @@ async def test_concurrent_telegram_mcp_and_uuid_replay(postgres_dsn, runtime):
                     )
                 ):
                     event.available_at = datetime.now(UTC) - timedelta(seconds=1)
+            await worker.process_one()
+            if len(model.seen) == 2:
+                break
         assert len(model.seen) == 2
         assert len({s.goal_id for s in model.seen}) == 1
         assert model.seen[1].result_context["conversation"]

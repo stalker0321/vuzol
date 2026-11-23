@@ -127,7 +127,7 @@
     "module:vuzol.cli.worker": "execution",
     "module:vuzol.cli.execution_history": "delivery",
     "module:vuzol.cli.grok_limit_exporter": "accounts",
-    "module:vuzol.cli.accounts": "accounts",
+    "module:vuzol.cli.accounts": "accounts", "module:vuzol.cli.add_opencode_account": "accounts",
     "module:vuzol.cli.opencode_usage_export": "accounts",
     "module:vuzol.cli.opencode_owner": "accounts",
     "cli:vuzol-app": "operations",

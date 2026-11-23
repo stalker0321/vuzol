@@ -104,6 +104,9 @@ class MonitorWorker:
         self._client = client
         self._clock = clock
         self._log = get_logger(__name__)
+        # Live 2026-11-23: a source that keeps failing (Reddit 404 from this host) was
+        # retried and logged every tick. A failure waits the source's interval too.
+        self._failed: dict[str, datetime] = {}
 
     async def process_one(self) -> bool:
         if not self._settings.enabled:
@@ -133,10 +136,11 @@ class MonitorWorker:
         fetched = False
         for source in self._settings.sources:
             cursor = await session.get(MonitorSourceFetch, source.id)
-            if (
-                cursor is not None
-                and cursor.fetched_at + timedelta(minutes=source.interval_minutes) > now
-            ):
+            interval = timedelta(minutes=source.interval_minutes)
+            if cursor is not None and cursor.fetched_at + interval > now:
+                continue
+            failed = self._failed.get(source.id)
+            if failed is not None and failed + interval > now:
                 continue
             try:
                 # A failed source rolls back its writes, leaving others intact.
@@ -183,7 +187,12 @@ class MonitorWorker:
                         cursor.fetched_at = now
                     await session.flush()
                 fetched = True
+                self._failed.pop(source.id, None)
+            except httpx.HTTPError as error:
+                self._failed[source.id] = now
+                self._log.warning("monitor source failed: %s: %s", source.id, error)
             except Exception:
+                self._failed[source.id] = now
                 self._log.exception("monitor source failed: %s", source.id)
         return fetched
 

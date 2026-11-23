@@ -388,3 +388,34 @@ async def test_digest_fallback_preserves_complete_titles_and_summaries(factory):
     async with factory() as session:
         events = list(await session.scalars(select(MonitorEvent)))
     assert 1 <= sum(event.state == "digested" for event in events) < 15
+
+
+async def test_a_failing_source_waits_its_interval_and_logs_no_traceback(factory, caplog):
+    """Live 2026-11-23: Reddit answered 404 and every tick logged a traceback (118 a day)."""
+
+    now = [NOW]
+    requests = []
+
+    def respond(request):
+        requests.append(request.url.path)
+        return httpx.Response(404)
+
+    bad = SOURCE.model_copy(update={"id": "bad", "interval_minutes": 120})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        worker = MonitorWorker(
+            factory,
+            settings(bad),
+            model=Model(),
+            send=AsyncMock(),
+            client=client,
+            clock=lambda: now[0],
+        )
+        await worker.process_one()
+        now[0] += timedelta(minutes=30)
+        await worker.process_one()
+        assert len(requests) == 1
+        now[0] += timedelta(minutes=91)
+        await worker.process_one()
+    assert len(requests) == 2
+    assert "bad" in caplog.text and "404" in caplog.text
+    assert "Traceback" not in caplog.text

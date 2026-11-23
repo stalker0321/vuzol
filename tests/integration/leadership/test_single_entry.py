@@ -170,9 +170,11 @@ async def test_concurrent_telegram_mcp_and_uuid_replay(postgres_dsn, runtime):
             assert event.payload["request_origin"]["authorized_user_id"] == OWNER
         model = Answer()
         worker = _worker(factory, model)
-        # Failed once in a full run (2026-11-23, seen == []) and never alone: the two
-        # wakeups may defer each other (event order, goal lease) more times than 4 ticks.
-        for _ in range(12):
+        # Only future wakeups are pulled in: a wakeup the lead deferred for event order
+        # keeps its later due time. Resetting every row (in heap order) let the deferred
+        # later message be claimed first on every tick (CI 2026-11-23).
+        for _ in range(4):
+            due = datetime.now(UTC) - timedelta(seconds=1)
             async with factory.begin() as session:
                 for event in await session.scalars(
                     select(TransactionalOutbox).where(
@@ -180,7 +182,7 @@ async def test_concurrent_telegram_mcp_and_uuid_replay(postgres_dsn, runtime):
                         TransactionalOutbox.status == DeliveryStatus.PENDING,
                     )
                 ):
-                    event.available_at = datetime.now(UTC) - timedelta(seconds=1)
+                    event.available_at = min(event.available_at, due)
             await worker.process_one()
             if len(model.seen) == 2:
                 break

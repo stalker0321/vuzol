@@ -395,6 +395,9 @@ class ProviderProfileConfig(FrozenModel):
     cost_class: CostClass
     roles: frozenset[ProviderRole] = frozenset()
     routing_priority: int = Field(default=100, ge=0, le=10_000)
+    # Profiles with the same pool label may stand in for each other when an account
+    # dies. Opt-in only: a metered API key must never inherit a subscription's work.
+    account_pool: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$", max_length=100)
     supported_task_types: frozenset[str]
     fallback_profile_ids: tuple[str, ...] = ()
     sandbox_required: bool = True

@@ -24,6 +24,11 @@ def content_revision(value: BaseModel | Mapping[str, Any]) -> str:
 
     if isinstance(value, BaseModel):
         raw: object = value.model_dump(mode="python")
+        if isinstance(value, RegistryDocument):
+            assert isinstance(raw, dict)
+            for profile in raw.get("profiles", ()):
+                if profile.get("account_pool") is None:
+                    profile.pop("account_pool", None)
         if isinstance(value, RegistryDocument) and not value.accounts:
             assert isinstance(raw, dict)
             raw.pop("accounts", None)
@@ -33,6 +38,7 @@ def content_revision(value: BaseModel | Mapping[str, Any]) -> str:
         if isinstance(value, ProviderProfileConfig):
             assert isinstance(raw, dict)
             raw.pop("subscription_limits_visible", None)
+            raw.pop("account_pool", None)  # Routing policy; pins and runs keep their revision.
             if value.account is None:
                 raw.pop("account", None)  # Preserve all existing frozen profile revisions.
             else:

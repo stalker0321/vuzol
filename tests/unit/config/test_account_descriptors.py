@@ -82,13 +82,14 @@ def test_conflicts_are_not_last_overlay_wins(tmp_path: Path, changes: dict[str, 
 def test_legacy_profile_revision_is_unchanged(tmp_path: Path) -> None:
     profile = _cli_profile("legacy", "pi", tmp_path)
     raw = profile.model_dump(mode="python")
-    for key in ("account", "control_reserved_slots", "subscription_limits_visible"):
+    for key in ("account", "control_reserved_slots", "subscription_limits_visible", "account_pool"):
         raw.pop(key)
     assert content_revision(profile) == content_revision(raw)
     registry = RegistryDocument(profiles=(profile,))
     legacy = registry.model_dump(mode="python")
     legacy.pop("accounts")
     legacy["profiles"][0].pop("account")
+    legacy["profiles"][0].pop("account_pool")
     assert content_revision(registry) == content_revision(legacy)
 
 

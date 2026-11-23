@@ -50,6 +50,15 @@ from vuzol.storage.models import SubscriptionLimitSnapshotRow
 # Outbox destination claimed by the executor (provider-state ACL for auth/logs).
 SUBSCRIPTION_LIMITS_DESTINATION = "subscription_limits"
 _GO_USAGE_SOURCES = ("opencode_go_usage_v1", "opencode_go_oauth_v1")
+_ACCOUNT_UNUSABLE_DETAILS = frozenset(
+    {
+        "go_entitlement_missing",
+        "auth_expired",
+        "reauth_required",
+        "auth_invalid",
+        "usage_permission_denied",
+    }
+)
 
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 GROK_BILLING_URLS = (
@@ -199,6 +208,28 @@ class SubscriptionLimitSnapshot:
                 (self,), html_escape=lambda value: html.escape(str(value)), now=now
             )
         )
+
+
+def subscription_account_unusable(row: SubscriptionLimitSnapshotRow, *, now: datetime) -> bool:
+    """Fresh account failures or exhausted windows justify account substitution."""
+    if row.observed_at is None or not now - timedelta(hours=2) <= row.observed_at <= now:
+        return False
+    if not row.ok:
+        return row.detail in _ACCOUNT_UNUSABLE_DETAILS
+    if any(
+        remaining == 0 and reset is not None and reset > now
+        for remaining, reset in (
+            (row.five_hour_remaining_percent, row.five_hour_reset_at),
+            (row.weekly_remaining_percent, row.weekly_reset_at),
+        )
+    ):
+        return True
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    try:
+        windows = tuple(QuotaWindow.model_validate(raw) for raw in payload.get("windows", []))
+    except (ValueError, TypeError):
+        return False
+    return any(window.remaining_percent == 0 and window.reset_at > now for window in windows)
 
 
 def subscription_profiles(

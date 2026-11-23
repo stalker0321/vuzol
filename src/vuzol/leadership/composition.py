@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import Capability, LaunchMode, ProviderProfileConfig
@@ -35,7 +38,8 @@ from vuzol.projects.model_matrix import SLOT_ROLES, ModelAssignment, assignment_
 from vuzol.providers.catalog import supported_profile
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
-from vuzol.storage.models import ProjectExecutorPreference
+from vuzol.providers.subscription_limits import subscription_account_unusable
+from vuzol.storage.models import ProjectExecutorPreference, SubscriptionLimitSnapshotRow
 
 # Account or transport failures, not a bad plan: another planner may succeed.
 _FALLBACK_PLANNER_REASONS = frozenset(
@@ -167,6 +171,9 @@ class _TurnModels:
             "planner_strong": planner_adapter,
         }
         self._repositories = dict(repository_paths or {})
+        self._account_states: ContextVar[tuple[uuid.UUID, frozenset[str]] | None] = ContextVar(
+            "lead_account_states", default=None
+        )
 
     async def _pins(self) -> dict[str, ModelAssignment]:
         context = current_turn.get()
@@ -202,15 +209,51 @@ class _TurnModels:
                             content_revision=assignment_revision(profile),
                         ).model_dump(mode="json")
                 turn.model_assignments = pins
+            await self._load_account_states(session)
             return {
                 slot: ModelAssignment.model_validate(raw)
                 for slot, raw in turn.model_assignments.items()
             }
 
+    async def _load_account_states(self, session: AsyncSession) -> None:
+        context = current_turn.get()
+        if context is None:
+            raise LeadModelUnavailable("lead_model_unavailable")
+        states = self._account_states.get()
+        if states is not None and states[0] == context.turn_id:
+            return
+        accounts = {
+            profile.id: profile.account_id
+            for profile in self._profiles.items()
+            if profile.account_id is not None
+        }
+        rows = (
+            await session.scalars(
+                select(SubscriptionLimitSnapshotRow).where(
+                    SubscriptionLimitSnapshotRow.profile_id.in_(accounts)
+                )
+            )
+            if accounts
+            else ()
+        )
+        now = datetime.now(UTC)
+        self._account_states.set(
+            (
+                context.turn_id,
+                frozenset(
+                    accounts[row.profile_id]
+                    for row in rows
+                    if subscription_account_unusable(row, now=now)
+                ),
+            )
+        )
+
     async def research(self, job: LeadJob) -> tuple[str, dict[str, Any]]:
         from vuzol.leadership.research import generate_research
 
         if self._settings.project_lead.research_models:
+            async with self._factory.begin() as session:
+                await self._load_account_states(session)
             # Validate the whole chain before sending, including currently unused fallbacks.
             choices = [
                 self._resolve_research(choice)
@@ -284,6 +327,7 @@ class _TurnModels:
             if choice.reasoning_effort is not None:
                 overrides[PAYLOAD_EFFORT_OVERRIDE] = choice.reasoning_effort
             profile = apply_profile_overrides(profile, overrides)
+            profile = self._usable_sibling(profile, "planner_strong", research=True)
             adapter = self._injected["planner_strong"]
             if adapter is None and self._registry is not None:
                 adapter = self._registry.get(profile.id)
@@ -330,6 +374,56 @@ class _TurnModels:
     def _fallback_planner(self, profile_id: str) -> tuple[ProviderProfileConfig, ProviderAdapter]:
         return self._fallback(profile_id, "planner_strong")
 
+    def _usable_sibling(
+        self, profile: ProviderProfileConfig, slot: str, *, research: bool = False
+    ) -> ProviderProfileConfig:
+        states = self._account_states.get()
+        context = current_turn.get()
+        if (
+            states is None
+            or profile.account_pool is None
+            or context is None
+            or states[0] != context.turn_id
+            or profile.account_id not in states[1]
+        ):
+            return profile
+        # Live 2026-11-23: losing Go on one account stranded every pinned lead.
+        account_fields = {
+            field: getattr(profile, field)
+            for field in (
+                "id",
+                "account_id",
+                "account",
+                "api_base_url",
+                "credential_reference",
+                "runtime_identity",
+                "state_directory",
+            )
+        }
+        revision = assignment_revision(profile)
+        for sibling in sorted(
+            self._profiles.items(), key=lambda candidate: (candidate.routing_priority, candidate.id)
+        ):
+            if (
+                sibling.enabled
+                and sibling.account_pool == profile.account_pool
+                and sibling.account_id is not None
+                and sibling.account_id != profile.account_id
+                and sibling.account_id not in states[1]
+                and SLOT_ROLES[slot] in sibling.roles
+                and supported_profile(sibling)
+                and assignment_revision(sibling.model_copy(update=account_fields)) == revision
+                and (
+                    not research
+                    or (
+                        Capability.REPOSITORY_READ in sibling.capabilities
+                        and (sibling.launch_mode is not LaunchMode.CLI or sibling.sandbox_required)
+                    )
+                )
+            ):
+                return sibling
+        return profile
+
     def _fallback(
         self, profile_id: str, slot: str
     ) -> tuple[ProviderProfileConfig, ProviderAdapter]:
@@ -341,6 +435,7 @@ class _TurnModels:
                 or not supported_profile(profile)
             ):
                 raise ValueError("fallback profile is disabled or unsupported")
+            profile = self._usable_sibling(profile, slot)
             adapter = self._injected[slot]
             if adapter is None and self._registry is not None:
                 adapter = self._registry.get(profile.id)
@@ -365,6 +460,7 @@ class _TurnModels:
                 or profile.model_reasoning_effort != pin.reasoning_effort
             ):
                 raise ValueError("selected profile is disabled, changed or unsupported")
+            profile = self._usable_sibling(profile, slot)
             adapter = self._injected[slot]
             if adapter is None and self._registry is not None:
                 adapter = self._registry.get(profile.id)
@@ -382,6 +478,8 @@ class _TurnModels:
             if override:
                 # The owner pressed "switch" on a planner quota wait.
                 try:
+                    async with self._factory.begin() as session:
+                        await self._load_account_states(session)
                     chosen = self._fallback_planner(str(override))
                 except LeadModelUnavailable:
                     return outcome_decision(snapshot, {"reason": "planner_fallback_unavailable"})

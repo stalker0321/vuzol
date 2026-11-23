@@ -315,6 +315,10 @@ class LeadershipCommandService:
             return _Outcome(CommandStatus.DENIED, "goal_parked", {}, goal)
         if goal.lifecycle in _TERMINAL and name not in READ_COMMANDS:
             return _Outcome(CommandStatus.DENIED, "goal_terminal", {}, goal)
+        if goal.constraints.get("pending_close") and name not in READ_COMMANDS | {
+            LeadCommandName.CLOSE_GOAL
+        }:
+            return _Outcome(CommandStatus.WAITING, "pending_close", {}, goal)
         if goal.lifecycle == "paused" and name not in READ_COMMANDS | MEMORY_COMMANDS | (
             QUEUE_COMMANDS
         ) | {
@@ -401,28 +405,33 @@ class LeadershipCommandService:
             parked = await park_goal(uow, goal, actor_id=actor.subject)
             return _Outcome(CommandStatus.APPLIED, None, {**parked, "version": goal.version}, goal)
         if name is LeadCommandName.CLOSE_GOAL:
-            from vuzol.leadership.acceptance import queue_close
-            from vuzol.leadership.jobs import cancel_goal_jobs
-            from vuzol.leadership.retrospective import enqueue_retrospective
+            from vuzol.leadership.tasks import accepted_applies
             from vuzol.storage.models import TransactionalOutbox
+            from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES
 
             source = await uow.session.get(TransactionalOutbox, claim.wakeup_id) if claim else None
             if actor.kind is not ActorKind.HUMAN and (
                 source is None or source.payload.get("wakeup_kind") != "owner_message"
             ):
                 return _Outcome(CommandStatus.DENIED, "owner_request_required", {}, goal)
-            await cancel_goal_jobs(uow.session, goal_id=goal.id)
-            await _settle_children(uow.session, goal, actor, stop=True)
-            outcome = _transition(
-                goal, actor, "cancelled", "closed_by_owner", CommandStatus.APPLIED
-            )
-            await enqueue_retrospective(
-                uow.session, goal, outcome="cancelled", reason=command.reason or "closed_by_owner"
-            )
-            # Live 2026-11-03: «закрой цель» cancelled a goal and its reviewed README work
-            # never reached main. Closing keeps the work; the applier merges it.
-            queue_close(uow.session, goal)
-            return outcome
+            applying = [
+                str(task.id)
+                for task, _ in await accepted_applies(uow.session, goal)
+                if task.status not in USER_TERMINAL_TASK_STATUSES
+            ]
+            if applying or goal.constraints.get("pending_close"):
+                # Live 2026-11-23: accept_result queues the apply; closing cancelled it.
+                if not goal.constraints.get("pending_close"):
+                    goal.constraints = {
+                        **goal.constraints,
+                        "pending_close": {"task_ids": applying, "reason": command.reason},
+                    }
+                goal.wakeup_condition = {
+                    "kind": "package",
+                    "package_id": str(goal.current_package_id),
+                }
+                return _transition(goal, actor, "waiting", "pending_close", CommandStatus.WAITING)
+            return await _finish_close(uow.session, goal, actor, reason=command.reason)
         if name is LeadCommandName.SKIP_ITEM:
             from vuzol.leadership.skip import skip_goal_item
             from vuzol.storage.models import TransactionalOutbox
@@ -993,6 +1002,50 @@ def _version_problem(
     if command.expected_version != goal.version:
         return "stale_version"
     return None
+
+
+async def _finish_close(
+    session: AsyncSession, goal: ManagedGoal, actor: Actor, *, reason: str
+) -> _Outcome:
+    from vuzol.leadership.acceptance import queue_close
+    from vuzol.leadership.jobs import cancel_goal_jobs
+    from vuzol.leadership.retrospective import enqueue_retrospective
+
+    await cancel_goal_jobs(session, goal_id=goal.id)
+    await _settle_children(session, goal, actor, stop=True)
+    goal.wakeup_condition = None
+    outcome = _transition(goal, actor, "cancelled", "closed_by_owner", CommandStatus.APPLIED)
+    await enqueue_retrospective(
+        session, goal, outcome="cancelled", reason=reason or "closed_by_owner"
+    )
+    queue_close(session, goal)
+    return outcome
+
+
+async def finish_pending_close(session: AsyncSession, goal: ManagedGoal) -> bool:
+    """Finish the saved owner request under the goal lock, without another lead turn."""
+    from vuzol.leadership.tasks import accepted_applies
+    from vuzol.storage.types import USER_TERMINAL_TASK_STATUSES, StepStatus
+
+    pending = goal.constraints.get("pending_close")
+    if not pending or goal.lifecycle in _TERMINAL:
+        return False
+    applies = await accepted_applies(session, goal)
+    if any(task.status not in USER_TERMINAL_TASK_STATUSES for task, _ in applies):
+        return False
+    failed = [
+        str(task.id)
+        for task, step in applies
+        if str(task.id) in pending["task_ids"]
+        and (step is None or step.status is not StepStatus.COMPLETED)
+    ]
+    actor = Actor(ActorKind.HUMAN, str(goal.owner_user_id), "worker")
+    await _finish_close(session, goal, actor, reason=pending["reason"])
+    goal.constraints = {k: v for k, v in goal.constraints.items() if k != "pending_close"}
+    if failed:
+        goal.constraints = {**goal.constraints, "close_failed_applies": failed}
+    await enqueue_goal_status(session, goal)
+    return True
 
 
 def _transition(

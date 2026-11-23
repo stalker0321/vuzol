@@ -273,6 +273,27 @@ async def accept_result(
     }
 
 
+async def accepted_applies(
+    session: AsyncSession, goal: ManagedGoal
+) -> list[tuple[Task, Step | None]]:
+    rows = await session.execute(
+        select(Task, Event.payload)
+        .join(MaterializationLink, MaterializationLink.task_id == Task.id)
+        .join(Event, Event.entity_id == Task.id)
+        .where(
+            MaterializationLink.work_package_id == goal.current_package_id,
+            Event.entity_type == "task",
+            Event.event_type == "result.accepted_by_lead",
+        )
+    )
+    results = []
+    for task, payload in rows:
+        approval = await session.get(Approval, uuid.UUID(payload["approval_id"]))
+        step = await session.get(Step, approval.step_id) if approval else None
+        results.append((task, step))
+    return results
+
+
 async def task_context(session: AsyncSession, goal: ManagedGoal) -> dict[str, Any]:
     package = (
         await session.get(WorkPackage, goal.current_package_id) if goal.current_package_id else None

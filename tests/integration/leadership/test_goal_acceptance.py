@@ -251,3 +251,211 @@ async def test_closing_a_goal_keeps_its_accepted_work_in_main(postgres_dsn, tmp_
                 )
             )
             assert "влита в main" in notice.payload["html"]
+
+
+@pytest.mark.parametrize("apply_fails", [False, True])
+async def test_close_waits_for_the_result_accepted_in_the_same_turn(
+    postgres_dsn, tmp_path, apply_fails
+):
+    """Live 2026-11-23: accept_result + close_goal cancelled the queued apply."""
+    import uuid
+
+    from tests.integration.leadership.planning_helpers import seed_plan
+    from tests.integration.leadership.test_lead_surface import owner_message
+    from tests.integration.leadership.test_plan_revisions import approve_plan, start
+    from tests.integration.leadership.test_task_control import command
+
+    from vuzol.discussion.sequencer import WorkPackageSequenceConsumer
+    from vuzol.execution.git import LocalGit
+    from vuzol.execution.worktrees import WorktreeService
+    from vuzol.leadership.acceptance import GoalAcceptanceConsumer
+    from vuzol.leadership.actor import server_agent_principal
+    from vuzol.leadership.commands import LeadCommand
+    from vuzol.leadership.model import LeadCommandDraft, LeadDecision
+    from vuzol.leadership.persistence import LeadershipCommandReceipt
+    from vuzol.leadership.tasks import task_context
+    from vuzol.storage.models import Run, Step, Task
+    from vuzol.storage.types import DeliveryStatus, StepStatus, TaskStatus
+    from vuzol.workflows.dispatch import WorkflowDispatcher
+    from vuzol.workflows.transitions import transition_step, transition_task
+
+    repository = tmp_path / "repositories" / flow.PROJECT
+    base = flow._git_init(repository)
+    runtime = flow._runtime(tmp_path, repository, lead=True)
+    git = LocalGit()
+    async with flow._factory(postgres_dsn) as factory:
+        goal_id = await flow._enable(factory, await flow._session(factory))
+        plan = flow._plan("Two items", "First marker", ["marker-a"], "MARKER.txt")
+        second = flow._plan("Second", "Second marker", ["requested-outcome"], "SECOND.txt")
+        plan["items"].append({**second["items"][0], "local_id": "second", "dependencies": ["work"]})
+        assert (await seed_plan(factory, goal_id, {"plan": plan})).status == "applied"
+        assert (await approve_plan(factory, goal_id)).code == "applied"
+        assert (await start(factory, goal_id)).status == "applied"
+        background = (
+            WorkflowDispatcher(runtime, factory, owner="dispatch"),
+            *flow._workflow_workers(
+                runtime,
+                factory,
+                git,
+                WorktreeService(runtime.settings.worktree_root, git, retention_days=1),
+            ),
+            WorkPackageSequenceConsumer(runtime.settings, factory, owner="sequence", enabled=True),
+        )
+        await flow._drain(background)
+        await flow.accept_current_result(factory)
+        await flow._drain(background)
+        assert (await start(factory, goal_id)).status == "applied"
+        await flow._drain(background)
+        async with factory.begin() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            tasks = (await task_context(session, goal))["tasks"]
+            spec = next(t["accept_spec"] for t in tasks if t["status"] == "waiting_approval")
+            branch = goal.integration_branch
+            first_head = await git.resolve_commit(repository, branch)
+            for item in await session.scalars(select(TransactionalOutbox)):
+                item.status = DeliveryStatus.DELIVERED
+        event = await owner_message(factory, tmp_path, text="прими и закрой")
+
+        class AcceptAndClose:
+            calls = 0
+
+            async def decide(self, snapshot):
+                self.calls += 1
+                assert self.calls == 1, "pending close must not invoke the lead again"
+                return LeadDecision(
+                    reply="Вторую часть приняла, закрываю.",
+                    commands=(
+                        LeadCommandDraft(name="accept_result", payload=spec),
+                        LeadCommandDraft(name="close_goal", payload={}, reason="прими и закрой"),
+                    ),
+                )
+
+        model = AcceptAndClose()
+        worker = flow._worker(factory, model)
+        assert await worker.process_one()
+        task_id = uuid.UUID(spec["task_id"])
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            task = await session.get(Task, task_id)
+            step = await session.scalar(
+                select(Step)
+                .join(Run, Run.id == Step.run_id)
+                .where(
+                    Run.task_id == task_id,
+                    Step.step_type == "approval",
+                    Step.payload["requested_action"].astext == "apply_result",
+                )
+            )
+            assert step.status is StepStatus.QUEUED
+            assert task.status is TaskStatus.EXECUTING
+            assert goal.lifecycle == "waiting"
+            assert goal.constraints.get("pending_close")
+            assert not await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.operation_type == "close_goal"
+                )
+            )
+            card = await session.scalar(
+                select(TransactionalOutbox)
+                .where(TransactionalOutbox.payload["projection_role"].astext == f"ls:{goal.id.hex}")
+                .order_by(TransactionalOutbox.created_at.desc())
+                .limit(1)
+            )
+            assert "Закрываю после вливания принятой работы" in card.payload["html"]
+            assert "НУЖНО РЕШЕНИЕ" not in card.payload["html"]
+            assert not await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.payload["role"].astext == "attention",
+                    TransactionalOutbox.payload["reason"].astext == "pending_close",
+                )
+            )
+            step_id = step.id
+            receipt = await session.scalar(
+                select(LeadershipCommandReceipt).where(
+                    LeadershipCommandReceipt.command_name == "close_goal"
+                )
+            )
+            close_command = LeadCommand(
+                name="close_goal",
+                project_id=flow.PROJECT,
+                goal_id=goal_id,
+                expected_version=receipt.expected_version,
+                idempotency_key=receipt.idempotency_key,
+                payload=receipt.payload,
+                reason="прими и закрой",
+            )
+        replay = await flow._lead_service(factory).apply_agent(
+            server_agent_principal(flow.PROJECT), "worker", close_command
+        )
+        assert replay.status == "duplicate"
+        async with factory.begin() as session:
+            redelivery = await session.get(TransactionalOutbox, event.id)
+            redelivery.status = DeliveryStatus.PENDING
+        assert await worker.process_one()
+        assert (
+            await command(factory, goal_id, "request_permission", {"question": "Что дальше?"})
+        ).status != "applied"
+        assert (await start(factory, goal_id)).status != "applied"
+        assert _main(tmp_path) == base
+        if apply_fails:
+            async with factory.begin() as session:
+                step = await session.get(Step, step_id)
+                await transition_step(session, step, StepStatus.LEASED, actor_type="test")
+                await transition_step(session, step, StepStatus.RUNNING, actor_type="test")
+                await transition_step(session, step, StepStatus.FAILED, actor_type="test")
+                task = await session.get(Task, task_id)
+                await transition_task(session, task, TaskStatus.FAILED, actor_type="test")
+        else:
+            await flow._drain(background)
+
+        worker = flow._worker(factory, model, owner="restarted")
+        if apply_fails:
+            # Recover even if terminal wakeups were lost and finalization rolled back.
+            async with factory.begin() as session:
+                for item in await session.scalars(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.destination == "project_lead"
+                    )
+                ):
+                    item.status = DeliveryStatus.DELIVERED
+            with pytest.raises(RuntimeError, match="crash"):
+                async with factory.begin() as session:
+                    await worker._reconcile(session)
+                    raise RuntimeError("crash before commit")
+            async with factory() as session:
+                assert (await session.get(ManagedGoal, goal_id)).constraints.get("pending_close")
+        for _ in range(10):
+            if not await worker.process_one():
+                break
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert (goal.lifecycle, goal.waiting_reason) == ("cancelled", "closed_by_owner")
+            assert not goal.constraints.get("pending_close")
+            jobs = list(
+                await session.scalars(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.operation_type == "close_goal"
+                    )
+                )
+            )
+            assert len(jobs) == 1
+            assert not await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.idempotency_key.like("%lead:question:%")
+                )
+            )
+        consumer = GoalAcceptanceConsumer(
+            factory, owner="test", repositories={flow.PROJECT: repository}
+        )
+        assert await consumer.process_one()
+        assert not await consumer.process_one()
+        assert _main(tmp_path) == (first_head if apply_fails else spec["result_commit"])
+        async with factory() as session:
+            notice = await session.scalar(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.idempotency_key.like("%lead:close-notice:%")
+                )
+            )
+            if apply_fails:
+                assert "Последний принятый результат не попал" in notice.payload["html"]
+        assert model.calls == 1

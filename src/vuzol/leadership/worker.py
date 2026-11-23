@@ -316,6 +316,17 @@ class ProjectLeadWorker:
             if goal is None:
                 await self._complete(uow.session, token)
                 return None
+            if goal.constraints.get("pending_close"):
+                from vuzol.leadership.service import finish_pending_close
+
+                closed = await finish_pending_close(uow.session, goal)
+                if item.payload.get("wakeup_kind") != "owner_message":
+                    await self._complete(uow.session, token)
+                    return None
+                if not closed:
+                    # The owner's new message goes to whatever follows the close.
+                    await self._defer_in_session(uow.session, token, "pending_close")
+                    return None
             owner_event = item.payload.get("wakeup_kind") == "owner_message"
             job_event = item.payload.get("wakeup_kind") == "job_finished"
             if job_event and goal.lifecycle == "paused":
@@ -1325,6 +1336,11 @@ class ProjectLeadWorker:
             )
         ).all()
         for goal in goals:
+            if goal.constraints.get("pending_close"):
+                from vuzol.leadership.service import finish_pending_close
+
+                await finish_pending_close(session, goal)
+                continue
             await sync_goal_attention(session, goal)
             if (
                 goal.lease_owner is not None

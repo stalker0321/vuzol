@@ -322,12 +322,15 @@ class GoalAcceptanceConsumer:
                     payload={"commit": commit},
                 )
             )
+        text = _CLOSE_NOTICES[outcome].format(
+            commit=(commit or "")[:8], branch=goal.integration_branch
+        )
+        if goal.constraints.get("close_failed_applies"):
+            text += " Последний принятый результат не попал в main: применение не завершилось."
         await enqueue_chat_notice(
             session,
             chat_id=goal.source_chat_id,
             thread_id=goal.source_thread_id,
             key=f"lead:close-notice:{item_id}",
-            text=_CLOSE_NOTICES[outcome].format(
-                commit=(commit or "")[:8], branch=goal.integration_branch
-            ),
+            text=text,
         )

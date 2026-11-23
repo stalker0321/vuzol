@@ -184,6 +184,10 @@ def render_goal_card(view: Mapping[str, object]) -> str:
         heading = "🟡 **ПЛАН ГОТОВ · Руководитель**"
         now = "План подготовлен. Работа ещё не запущена."
         action = "Выбери действие под карточкой плана."
+    elif reason == "pending_close":
+        heading = "⏳ **ЗАКРЫВАЮ · Руководитель**"
+        now = "Закрываю после вливания принятой работы."
+        action = "Сейчас от тебя ничего не требуется."
     elif lifecycle == "waiting" and reason != "wait_for":
         heading = (
             "🔴 **ОШИБКА · Руководитель**"

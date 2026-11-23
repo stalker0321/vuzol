@@ -137,6 +137,8 @@ async def sync_attention(
     """
     if goal.source_chat_id is None or goal.source_thread_id is None:
         return
+    if goal.constraints.get("pending_close"):
+        reason, resolve_all = None, True
     await _lock(session, goal.id)
     rows = list(
         await session.scalars(

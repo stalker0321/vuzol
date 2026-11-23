@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import datetime
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class _Model(BaseModel):
@@ -25,6 +27,21 @@ class NewProject(_Model):
     first_request: str | None = Field(default=None, max_length=6000)
 
 
+class Reminder(_Model):
+    at: AwareDatetime
+    text: str = Field(min_length=1, max_length=500)
+
+
+class Note(_Model):
+    # A knowledge-base category slug (book, film, idea, note, place, event...).
+    kind: str = Field(min_length=1, max_length=30)
+    title: str = Field(min_length=1, max_length=300)
+    summary: str = Field(default="", max_length=2000)
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    url: str | None = Field(default=None, max_length=1000)
+    event_start: datetime | None = None
+
+
 class Turn(_Model):
     reply: str = Field(min_length=1, max_length=3500)
     dispatches: list[Dispatch] = Field(default_factory=list, max_length=8)
@@ -34,6 +51,13 @@ class Turn(_Model):
     research: list[str] = Field(default_factory=list, max_length=4)
     # A project to create on the owner's button.
     new_project: NewProject | None = None
+    # Searches over the owner's knowledge base, answered before the final reply.
+    knowledge: list[str] = Field(default_factory=list, max_length=4)
+    # Records to save into the knowledge base.
+    save: list[Note] = Field(default_factory=list, max_length=5)
+    remind: list[Reminder] = Field(default_factory=list, max_length=5)
+    # Ids from the reminders list.
+    cancel_reminders: list[str] = Field(default_factory=list, max_length=10)
 
 
 TURN_PROMPT = (
@@ -57,6 +81,16 @@ TURN_PROMPT = (
     "If you have tools of your own (for example a flight search), use them first for live "
     "data such as prices, times and availability, and give their links. "
     "{lookup}\n"
+    "- The owner's knowledge base holds what they saved: books, films, repos, tools, ideas, "
+    "notes, places, events. When they ask what they saved or were recommended, fill knowledge "
+    "with short queries (names, topics, key words); you then get the matches and answer again. "
+    "When they ask to remember or save something, put it in save: kind is one of book, film, "
+    "series, game, music, article, course, repo, tool, product, person, place, event, idea, "
+    "note, other; event_start for an event with a known date.\n"
+    "- Reminders: «напомни ...» goes to remind with the exact time (ISO 8601 with offset; "
+    "a day without a time means 10:00) and a short text. The pending ones are in reminders; "
+    "to cancel or move one, put its id in cancel_reminders (and a new one in remind). The "
+    "system confirms saves and reminders under your reply: do not repeat them.\n"
     "- Questions about the projects: answer from the projects data. For an overview, per "
     "project: what goes on now, what waits for the owner (a waiting or draft goal), queued "
     "tasks, what ended this week (recent_goals). Lead with what waits for the owner; mention "

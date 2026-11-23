@@ -12,7 +12,7 @@ from telegram import Bot, CallbackQuery, Update
 from tests.integration.leadership.test_managed_goal_flow import CHAT, OWNER, _factory
 from vuzol.assistant.ingress import schedule
 from vuzol.assistant.research import Finding, Researcher
-from vuzol.assistant.schemas import Dispatch, NewProject, Turn
+from vuzol.assistant.schemas import Dispatch, NewProject, Note, Reminder, Turn
 from vuzol.assistant.service import EDIT_LABEL, SEND_LABEL, AssistantWorker, ProjectRef
 from vuzol.config import Settings
 from vuzol.config.settings import AssistantSettings
@@ -20,6 +20,7 @@ from vuzol.inbox.search import Hit
 from vuzol.leadership.persistence import GoalDelegation, ManagedGoal
 from vuzol.storage.models import (
     AssistantEntry,
+    InboxItem,
     ProjectDiscussionSession,
     ProjectTaskQueueItem,
     TransactionalOutbox,
@@ -146,7 +147,11 @@ async def drain(worker):
         async with worker._factory.begin() as session:
             await session.execute(
                 update(TransactionalOutbox)
-                .where(TransactionalOutbox.destination == "assistant")
+                .where(
+                    TransactionalOutbox.destination == "assistant",
+                    # Reminders wait for their time.
+                    TransactionalOutbox.idempotency_key.not_like("assistant:remind:%"),
+                )
                 .values(available_at=datetime.now(UTC) - timedelta(seconds=1))
             )
 
@@ -592,3 +597,95 @@ async def test_an_overview_question_sees_each_projects_queue_and_recent_goals(po
             "queued_tasks": [],
             "recent_goals": [],
         }
+
+
+async def reminders(factory):
+    async with factory() as session:
+        return list(
+            await session.scalars(
+                select(TransactionalOutbox)
+                .where(TransactionalOutbox.idempotency_key.like("assistant:remind:%"))
+                .order_by(TransactionalOutbox.available_at)
+            )
+        )
+
+
+async def test_a_reminder_comes_back_into_the_topic_at_its_time_and_can_be_cancelled(
+    postgres_dsn,
+):
+    now = datetime.now(UTC).replace(microsecond=0)
+    at = now + timedelta(days=1)
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "напомни завтра купить хлеб, и вчера позвонить"))
+        model = FakeModel(
+            Turn(
+                reply="Хорошо.",
+                remind=[
+                    Reminder(at=at, text="Купить хлеб"),
+                    Reminder(at=now - timedelta(hours=1), text="Позвонить"),
+                ],
+            ),
+            Turn(reply="Отменил.", cancel_reminders=["placeholder"]),
+        )
+        worker, telegram, _ = worker_for(factory, model)
+        await drain(worker)
+
+        (pending,) = await reminders(factory)
+        assert abs((pending.available_at - at).total_seconds()) < 5
+        assert pending.payload["thread_id"] == THREAD
+        assert pending.payload["html"] == "⏰ Напоминаю: Купить хлеб"
+        assert "⏰ Напомню" in telegram.sent[0]["html"]
+        assert "Позвонить" in telegram.sent[0]["html"] and "прошло" in telegram.sent[0]["html"]
+
+        model.answers[0].cancel_reminders = [str(pending.id)]
+        await admit(factory, topic(2, "отмени напоминание про хлеб"))
+        await drain(worker)
+        listed = model.calls[1]["reminders"]
+        assert [(r["id"], r["text"]) for r in listed] == [(str(pending.id), "Купить хлеб")]
+        assert await reminders(factory) == []
+        assert "Отменил напоминание: Купить хлеб" in telegram.sent[1]["html"]
+
+
+async def test_the_assistant_searches_and_saves_the_knowledge_base(postgres_dsn):
+    async with _factory(postgres_dsn) as factory:
+        async with factory.begin() as session:
+            session.add(
+                InboxItem(
+                    owner_user_id=OWNER,
+                    chat_id=OWNER,
+                    kind="book",
+                    title="Дюна",
+                    summary="Фрэнк Герберт, советовал Петя",
+                )
+            )
+        await admit(factory, topic(1, "что мне советовали почитать? и запомни фильм Сталкер"))
+        model = FakeModel(
+            Turn(reply="ищу", knowledge=["книги советовали"]),
+            Turn(
+                reply="Дюну.",
+                save=[
+                    Note(kind="film", title="Сталкер", summary="Тарковский"),
+                    Note(kind="nonsense", title="Мысль", summary="про лес"),
+                ],
+            ),
+        )
+        worker, telegram, _ = worker_for(factory, model)
+        await drain(worker)
+
+        assert "knowledge" not in model.calls[0]
+        (hit,) = model.calls[1]["knowledge"]["книги советовали"]
+        assert "Дюна" in hit["text"]
+        async with factory() as session:
+            saved = {
+                item.title: item
+                for item in await session.scalars(
+                    select(InboxItem).where(InboxItem.title != "Дюна")
+                )
+            }
+        assert {title: item.kind for title, item in saved.items()} == {
+            "Сталкер": "film",
+            "Мысль": "note",
+        }
+        assert saved["Сталкер"].owner_user_id == saved["Сталкер"].chat_id == OWNER
+        assert len(telegram.sent) == 1
+        assert "📝 Сохранил: Сталкер, Мысль" in telegram.sent[0]["html"]

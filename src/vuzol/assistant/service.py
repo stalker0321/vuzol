@@ -12,17 +12,18 @@ from html import escape
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, NetworkError, TimedOut
 
 from vuzol.assistant import ASSISTANT_DESTINATION
 from vuzol.assistant.ingress import schedule
 from vuzol.assistant.research import Researcher, look_up
-from vuzol.assistant.schemas import RESEARCH_LOOKUP, SEARCH_LOOKUP, TURN_PROMPT, Turn
+from vuzol.assistant.schemas import RESEARCH_LOOKUP, SEARCH_LOOKUP, TURN_PROMPT, Note, Turn
 from vuzol.config.settings import AssistantSettings
 from vuzol.inbox.fetch import describe_link
 from vuzol.inbox.model import InboxModel, ModelChain
+from vuzol.inbox.recall import inbox_hits
 from vuzol.inbox.render import answer_html
 from vuzol.inbox.search import WebSearch
 from vuzol.interpretation.service import voice_heard_text
@@ -38,11 +39,13 @@ from vuzol.storage.leasing import (
 )
 from vuzol.storage.models import (
     AssistantEntry,
+    InboxCategory,
+    InboxItem,
     ProjectDiscussionSession,
     ProjectTaskQueueItem,
     TransactionalOutbox,
 )
-from vuzol.storage.types import DiscussionSessionStatus
+from vuzol.storage.types import DeliveryStatus, DiscussionSessionStatus
 from vuzol.telegram.formatting import telegram_answer_rich_html
 from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
 
@@ -54,6 +57,7 @@ _GOAL_CHARS = 400
 # Ended goals the assistant sees per project, for «что по проектам?».
 _RECENT_GOALS = timedelta(days=7)
 _RECENT_GOAL_LIMIT = 3
+_REMINDER_KEY = "assistant:remind:"
 SEND_LABEL = "🚀 Отправить"
 EDIT_LABEL = "✏️ Изменить"
 
@@ -260,8 +264,16 @@ class AssistantWorker:
             return  # A later message answers the whole burst, or it was answered already.
         refs = {ref.project_id: ref for ref in self._projects()}
         context = await self._context(entry, refs)
+        owner = int(payload["user_id"])
         try:
             turn = await self._think(context)
+            if turn.knowledge:
+                async with self._factory() as session:
+                    context["knowledge"] = {
+                        query: await inbox_hits(session, owner_user_id=owner, query=query)
+                        for query in turn.knowledge
+                    }
+                turn = await self._think(context)
         except Exception:
             if not final:
                 raise
@@ -282,7 +294,13 @@ class AssistantWorker:
             )
             new_project = None
         await self._answer(
-            entry, reply, dispatches, {k: v.name for k, v in refs.items()}, new_project
+            entry,
+            reply,
+            dispatches,
+            {k: v.name for k, v in refs.items()},
+            new_project,
+            turn=turn,
+            owner=owner,
         )
 
     async def _think(self, context: dict[str, Any]) -> Turn:
@@ -385,6 +403,16 @@ class AssistantWorker:
                 .order_by(ManagedGoal.updated_at.desc())
             ):
                 ended.setdefault(goal.project_id, []).append(goal)
+            pending_reminders = list(
+                await session.scalars(
+                    select(TransactionalOutbox)
+                    .where(
+                        TransactionalOutbox.idempotency_key.startswith(_REMINDER_KEY),
+                        TransactionalOutbox.status == DeliveryStatus.PENDING,
+                    )
+                    .order_by(TransactionalOutbox.available_at)
+                )
+            )
             queued: dict[str, list[str]] = {}
             for item in await session.scalars(
                 select(ProjectTaskQueueItem)
@@ -416,6 +444,14 @@ class AssistantWorker:
                 }
                 for ref in refs.values()
             ],
+            "reminders": [
+                {
+                    "id": str(item.id),
+                    "at": item.available_at.astimezone(self._tz()).isoformat(timespec="minutes"),
+                    "text": item.payload.get("text", ""),
+                }
+                for item in pending_reminders
+            ],
             "conversation": [_entry_view(item) for item in earlier],
             "latest_owner_message": "\n".join(item.body for item in latest if item.body),
         }
@@ -437,9 +473,16 @@ class AssistantWorker:
         dispatches: list[dict[str, Any]],
         names: dict[str, str],
         new_project: dict[str, Any] | None = None,
+        *,
+        turn: Turn | None = None,
+        owner: int | None = None,
     ) -> None:
         planned = bool(dispatches or new_project)
         async with self._factory.begin() as session:
+            if turn is not None and owner is not None:
+                done = await self._keep(session, entry, turn, owner)
+                if done:
+                    reply += "\n\n" + "\n".join(done)
             if planned:
                 # A new plan replaces any plan still waiting for the owner.
                 for old in await session.scalars(
@@ -483,6 +526,60 @@ class AssistantWorker:
                     "entry_id": str(answer.id),
                 },
             )
+
+    async def _keep(
+        self, session: AsyncSession, entry: AssistantEntry, turn: Turn, owner: int
+    ) -> list[str]:
+        """Reminders and knowledge-base records the turn asked for; lines for the reply."""
+        lines: list[str] = []
+        now = datetime.now(UTC)
+        if turn.cancel_reminders:
+            ids = []
+            for value in turn.cancel_reminders:
+                try:
+                    ids.append(uuid.UUID(value))
+                except ValueError:
+                    continue
+            for item in await session.scalars(
+                select(TransactionalOutbox).where(
+                    TransactionalOutbox.id.in_(ids),
+                    TransactionalOutbox.idempotency_key.startswith(_REMINDER_KEY),
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                )
+            ):
+                lines.append(f"Отменил напоминание: {item.payload.get('text', '')}")
+                await session.execute(
+                    delete(TransactionalOutbox).where(TransactionalOutbox.id == item.id)
+                )
+        for index, reminder in enumerate(turn.remind):
+            if reminder.at <= now:
+                lines.append(f"⚠️ Время уже прошло, не ставлю: {reminder.text}")
+                continue
+            await schedule(
+                session,
+                operation="reply",
+                key=f"{_REMINDER_KEY}{entry.id}:{index}",
+                payload={
+                    "chat_id": entry.chat_id,
+                    "thread_id": entry.message_thread_id,
+                    "html": escape(f"⏰ Напоминаю: {reminder.text}"),
+                    "text": reminder.text,
+                    "reply_to": None,
+                    "buttons": [],
+                },
+                delay=(reminder.at - now).total_seconds(),
+            )
+            when = reminder.at.astimezone(self._tz()).strftime("%d.%m %H:%M")
+            lines.append(f"⏰ Напомню {when}: {reminder.text}")
+        if turn.save:
+            kinds = set(await session.scalars(select(InboxCategory.slug)))
+            for note in turn.save:
+                session.add(_inbox_item(note, owner, kinds))
+            lines.append("📝 Сохранил: " + ", ".join(note.title for note in turn.save))
+        return lines
+
+    def _tz(self) -> ZoneInfo:
+        return ZoneInfo(self._settings.timezone)
 
     async def _button(self, payload: dict[str, Any]) -> None:
         entry_id = uuid.UUID(payload["entry_id"])
@@ -750,6 +847,21 @@ def _goal_view(goal: ManagedGoal | None) -> dict[str, Any] | None:
         "since": goal.created_at.date().isoformat(),
         "updated": goal.updated_at.date().isoformat(),
     }
+
+
+def _inbox_item(note: Note, owner: int, kinds: set[str]) -> InboxItem:
+    fields = {"url": note.url, "source": "assistant"} if note.url else {"source": "assistant"}
+    return InboxItem(
+        owner_user_id=owner,
+        # The knowledge base lives in the owner's private chat, whose id is their user id.
+        chat_id=owner,
+        kind=note.kind if note.kind in kinds else "note",
+        title=note.title,
+        summary=note.summary,
+        tags=note.tags,
+        fields=fields,
+        event_start=note.event_start if note.event_start and note.event_start.tzinfo else None,
+    )
 
 
 def _ended_view(goal: ManagedGoal) -> dict[str, Any]:

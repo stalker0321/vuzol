@@ -745,6 +745,14 @@ class AssistantSettings(BaseModel):
     mcp_servers: dict[str, str] = Field(default_factory=dict)
     timezone: str = "Europe/Amsterdam"
     timeout_seconds: float = Field(default=180, ge=5, le=900)
+    # Owner 2026-11-23: the owner's Google Calendar and Gmail (read-only), from the token
+    # file vuzol.cli.google_login writes. Unset or missing file: no calendar, no mail.
+    google_token_path: Path | None = None
+
+    @field_validator("google_token_path", mode="before")
+    @classmethod
+    def blank_path_is_unset(cls, value: object) -> object:
+        return None if value == "" else value
 
     @field_validator("chat_id", "message_thread_id", mode="before")
     @classmethod

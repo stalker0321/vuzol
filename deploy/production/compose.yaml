@@ -38,11 +38,11 @@ x-roles: &roles
   VUZOL_MONITOR__ENABLED: ${VUZOL_MONITOR__ENABLED:-false}
   VUZOL_MONITOR__CHAT_ID: ${VUZOL_MONITOR_CHAT_ID:-}
   VUZOL_MONITOR__MESSAGE_THREAD_ID: ${VUZOL_MONITOR_THREAD_ID:-}
-  VUZOL_MONITOR__PROFILE_IDS: ${VUZOL_MONITOR_PROFILE_IDS:-["inbox-flash-c","inbox-flash-a"]}
+  VUZOL_MONITOR__PROFILE_IDS: ${VUZOL_MONITOR_PROFILE_IDS:-["inbox-flash-a","inbox-flash-c"]}
   VUZOL_MONITOR__INTERESTS: ${VUZOL_MONITOR_INTERESTS:-[]}
   VUZOL_MONITOR__SOURCES: ${VUZOL_MONITOR_SOURCES:-[]}
-  VUZOL_INBOX__PROFILE_ID: inbox-flash-c
-  VUZOL_INBOX__FALLBACK_PROFILE_IDS: '["inbox-flash-a"]'
+  VUZOL_INBOX__PROFILE_ID: ${VUZOL_INBOX_PROFILE_ID:-inbox-flash-a}
+  VUZOL_INBOX__FALLBACK_PROFILE_IDS: ${VUZOL_INBOX_FALLBACK_PROFILE_IDS:-["inbox-flash-c"]}
   # Account ids are private: /srv/vuzol/.env holds the JSON map.
   VUZOL_INBOX__OPENCODE_ORG_IDS: ${VUZOL_OPENCODE_ORG_IDS:-{}}
   # Web search for answers: Brave when its key file exists, else our SearXNG.
@@ -58,10 +58,11 @@ x-roles: &roles
   VUZOL_ASSISTANT__SEARCH_ROUNDS: ${VUZOL_ASSISTANT_SEARCH_ROUNDS:-5}
   VUZOL_ASSISTANT__SEARCHES_PER_ROUND: ${VUZOL_ASSISTANT_SEARCHES_PER_ROUND:-5}
   VUZOL_ASSISTANT__TIMEOUT_SECONDS: ${VUZOL_ASSISTANT_TIMEOUT_SECONDS:-180}
-  VUZOL_ASSISTANT__RESEARCH_PROFILE_IDS: ${VUZOL_ASSISTANT_RESEARCH_PROFILE_IDS:-["inbox-flash-c","inbox-flash-a"]}
+  VUZOL_ASSISTANT__RESEARCH_PROFILE_IDS: ${VUZOL_ASSISTANT_RESEARCH_PROFILE_IDS:-["inbox-flash-a","inbox-flash-c"]}
   VUZOL_ASSISTANT__RESEARCH_ROUNDS: ${VUZOL_ASSISTANT_RESEARCH_ROUNDS:-2}
   VUZOL_ASSISTANT__NATIVE_SEARCH: ${VUZOL_ASSISTANT_NATIVE_SEARCH:-false}
   VUZOL_ASSISTANT__MCP_SERVERS: '{"kiwi": "https://mcp.kiwi.com"}'
+  VUZOL_ASSISTANT__GOOGLE_TOKEN_PATH: /run/vuzol-google/token.json
   VUZOL_PROJECT_SETUP__ENABLED: ${VUZOL_PROJECT_SETUP_ENABLED:-false}
   VUZOL_ASSISTANT__OPENCODE_ORG_IDS: ${VUZOL_OPENCODE_ORG_IDS:-{}}
 
@@ -178,6 +179,8 @@ services:
       # A directory, not the file: editors replace the file and a file bind keeps the old one.
       - /var/lib/vuzol/vocabulary:/run/vuzol-vocabulary:ro
       - /srv/vuzol/repositories:/srv/vuzol/repositories:ro
+      # The owner's Google login (vuzol.cli.google_login); empty until they sign in.
+      - /var/lib/vuzol/google:/run/vuzol-google:ro
 
   # Private metasearch for the inbox; reachable only inside this compose network.
   searxng:

@@ -20,6 +20,7 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
+from vuzol.assistant.google import GoogleAccount
 from vuzol.assistant.research import Researcher
 from vuzol.assistant.service import AssistantWorker, ProjectRef
 from vuzol.config import (
@@ -334,6 +335,11 @@ def build_assistant_worker(
         researcher=researcher,
         # The root host unit does the rest; without it the button would hang.
         create_topic=create_topic if runtime.settings.project_setup.enabled else None,
+        google=(
+            GoogleAccount(config.google_token_path, timezone=config.timezone)
+            if config.google_token_path is not None and config.google_token_path.exists()
+            else None
+        ),
         owner=owner,
     )
 

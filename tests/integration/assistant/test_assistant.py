@@ -12,7 +12,7 @@ from telegram import Bot, CallbackQuery, Update
 from tests.integration.leadership.test_managed_goal_flow import CHAT, OWNER, _factory
 from vuzol.assistant.ingress import schedule
 from vuzol.assistant.research import Finding, Researcher
-from vuzol.assistant.schemas import Dispatch, NewProject, Note, Reminder, Turn
+from vuzol.assistant.schemas import Dispatch, NewEvent, NewProject, Note, Period, Reminder, Turn
 from vuzol.assistant.service import EDIT_LABEL, SEND_LABEL, AssistantWorker, ProjectRef
 from vuzol.config import Settings
 from vuzol.config.settings import AssistantSettings
@@ -689,3 +689,57 @@ async def test_the_assistant_searches_and_saves_the_knowledge_base(postgres_dsn)
         assert saved["Сталкер"].owner_user_id == saved["Сталкер"].chat_id == OWNER
         assert len(telegram.sent) == 1
         assert "📝 Сохранил: Сталкер, Мысль" in telegram.sent[0]["html"]
+
+
+class FakeGoogle:
+    def __init__(self):
+        self.added = []
+
+    async def events(self, start, end):
+        return [{"title": f"Стоматолог {start.isoformat()}", "start": "10:00"}]
+
+    async def mail(self, query):
+        return [{"from": "KLM", "subject": f"Билет ({query})", "text": "рейс KL1234"}]
+
+    async def add_event(self, event_id, **event):
+        self.added.append((event_id, event))
+        return True
+
+
+async def test_calendar_and_mail_are_read_before_the_answer_and_events_are_added(postgres_dsn):
+    start = datetime(2026, 11, 24, 15, tzinfo=UTC)
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "что у меня завтра, где билет klm, и поставь созвон в 16"))
+        model = FakeModel(
+            Turn(
+                reply="смотрю", calendar=Period(start="2026-11-24", end="2026-11-24"), mail=["klm"]
+            ),
+            Turn(reply="Завтра стоматолог.", add_events=[NewEvent(title="Созвон", start=start)]),
+        )
+        worker, telegram, _ = worker_for(factory, model)
+        google = worker._google = FakeGoogle()
+        await drain(worker)
+
+        second = model.calls[1]
+        assert second["calendar"] == [{"title": "Стоматолог 2026-11-24", "start": "10:00"}]
+        assert second["mail"]["klm"][0]["subject"] == "Билет (klm)"
+        ((event_id, event),) = google.added
+        assert len(event_id) >= 5 and set(event_id) <= set("0123456789abcdefghijklmnopqrstuv")
+        assert event["end"] - event["start"] == timedelta(hours=1)
+        assert "📅 Добавил в календарь" in telegram.sent[0]["html"]
+
+
+async def test_without_google_the_model_is_told_and_nothing_is_added(postgres_dsn):
+    async with _factory(postgres_dsn) as factory:
+        await admit(factory, topic(1, "что у меня завтра?"))
+        model = FakeModel(
+            Turn(reply="смотрю", calendar=Period(start="2026-11-24", end="2026-11-24")),
+            Turn(
+                reply="Календарь не подключён.",
+                add_events=[NewEvent(title="Созвон", start=datetime(2026, 11, 24, 15, tzinfo=UTC))],
+            ),
+        )
+        worker, telegram, _ = worker_for(factory, model)
+        await drain(worker)
+        assert model.calls[1]["google"] == {"error": "календарь и почта не подключены"}
+        assert "Календарь не подключён, событие не добавлено" in telegram.sent[0]["html"]

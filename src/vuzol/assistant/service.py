@@ -17,9 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, NetworkError, TimedOut
 
 from vuzol.assistant import ASSISTANT_DESTINATION
+from vuzol.assistant.google import GoogleAccount, GoogleError
 from vuzol.assistant.ingress import schedule
 from vuzol.assistant.research import Researcher, look_up
-from vuzol.assistant.schemas import RESEARCH_LOOKUP, SEARCH_LOOKUP, TURN_PROMPT, Note, Turn
+from vuzol.assistant.schemas import (
+    GOOGLE_TOOLS,
+    RESEARCH_LOOKUP,
+    SEARCH_LOOKUP,
+    TURN_PROMPT,
+    Note,
+    Turn,
+)
 from vuzol.config.settings import AssistantSettings
 from vuzol.inbox.fetch import describe_link
 from vuzol.inbox.model import InboxModel, ModelChain
@@ -156,6 +164,7 @@ class AssistantWorker:
         read_link: LinkReader = describe_link,
         researcher: Researcher | None = None,
         create_topic: TopicCreator | None = None,
+        google: GoogleAccount | None = None,
         owner: str = "assistant",
     ) -> None:
         self._factory = factory
@@ -172,6 +181,7 @@ class AssistantWorker:
         self._read_link = read_link
         self._researcher = researcher
         self._create_topic = create_topic
+        self._google = google
         self._owner = f"assistant:{owner}"
 
     async def process_one(self) -> bool:
@@ -267,12 +277,8 @@ class AssistantWorker:
         owner = int(payload["user_id"])
         try:
             turn = await self._think(context)
-            if turn.knowledge:
-                async with self._factory() as session:
-                    context["knowledge"] = {
-                        query: await inbox_hits(session, owner_user_id=owner, query=query)
-                        for query in turn.knowledge
-                    }
+            if turn.knowledge or turn.calendar or turn.mail:
+                await self._look_into(context, turn, owner)
                 turn = await self._think(context)
         except Exception:
             if not final:
@@ -527,6 +533,27 @@ class AssistantWorker:
                 },
             )
 
+    async def _look_into(self, context: dict[str, Any], turn: Turn, owner: int) -> None:
+        """The owner's own records the turn asked about, for one more round."""
+        if turn.knowledge:
+            async with self._factory() as session:
+                context["knowledge"] = {
+                    query: await inbox_hits(session, owner_user_id=owner, query=query)
+                    for query in turn.knowledge
+                }
+        if turn.calendar is not None or turn.mail:
+            if self._google is None:
+                context["google"] = {"error": "календарь и почта не подключены"}
+                return
+            try:
+                if turn.calendar is not None:
+                    end = min(turn.calendar.end, turn.calendar.start + timedelta(days=62))
+                    context["calendar"] = await self._google.events(turn.calendar.start, end)
+                if turn.mail:
+                    context["mail"] = {query: await self._google.mail(query) for query in turn.mail}
+            except GoogleError as error:
+                context["google"] = {"error": str(error)}
+
     async def _keep(
         self, session: AsyncSession, entry: AssistantEntry, turn: Turn, owner: int
     ) -> list[str]:
@@ -571,6 +598,25 @@ class AssistantWorker:
             )
             when = reminder.at.astimezone(self._tz()).strftime("%d.%m %H:%M")
             lines.append(f"⏰ Напомню {when}: {reminder.text}")
+        for index, event in enumerate(turn.add_events):
+            if self._google is None:
+                lines.append("⚠️ Календарь не подключён, событие не добавлено.")
+                break
+            try:
+                # Google ids are base32hex; the turn's id keeps a retried turn from adding it twice.
+                await self._google.add_event(
+                    f"{entry.id.hex}{index}",
+                    title=event.title,
+                    start=event.start,
+                    end=event.end or event.start + timedelta(hours=1),
+                    location=event.location,
+                    description=event.description,
+                )
+            except GoogleError:
+                lines.append(f"⚠️ Не получилось добавить в календарь: {event.title}")
+                continue
+            when = event.start.astimezone(self._tz()).strftime("%d.%m %H:%M")
+            lines.append(f"📅 Добавил в календарь {when}: {event.title}")
         if turn.save:
             kinds = set(await session.scalars(select(InboxCategory.slug)))
             for note in turn.save:
@@ -826,7 +872,10 @@ class AssistantWorker:
             else SEARCH_LOOKUP.format(per_round=self._settings.searches_per_round)
         )
         return TURN_PROMPT.format(
-            tz=self._settings.timezone, now=now.isoformat(timespec="minutes"), lookup=lookup
+            tz=self._settings.timezone,
+            now=now.isoformat(timespec="minutes"),
+            lookup=lookup,
+            google=GOOGLE_TOOLS if self._google is not None else "",
         )
 
 

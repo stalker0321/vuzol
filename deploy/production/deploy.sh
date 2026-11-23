@@ -59,6 +59,8 @@ install -m 0644 "$REL"/deploy/production/systemd/*.service "$REL"/deploy/product
 systemctl daemon-reload
 systemctl enable --quiet --now $TIMERS
 systemctl enable --quiet $UNITS
+# The interpreter reads the owner's Google login from here (vuzol.cli.google_login).
+install -d -o 1000 -g 10001 -m 0700 /var/lib/vuzol/google
 /usr/local/bin/vuzol-compose up -d --remove-orphans --wait postgres
 /usr/local/bin/vuzol-compose up -d --remove-orphans
 systemctl restart $UNITS

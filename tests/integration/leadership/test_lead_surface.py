@@ -1102,7 +1102,7 @@ async def test_an_idle_turn_leaves_a_queued_wakeup_to_the_lead(
     async with _factory(postgres_dsn) as factory:
 
         class _LateEvent(_Transport):
-            async def execute(self, request, profile, cancellation):  # type: ignore[no-untyped-def]
+            async def execute(self, request, profile, cancellation):
                 if not self.requests:
                     async with factory() as session, session.begin():
                         goal = await session.scalar(select(ManagedGoal))

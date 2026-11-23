@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -24,7 +25,9 @@ def token(tmp_path: Path) -> Path:
     return path
 
 
-def account(tmp_path: Path, handler) -> tuple[GoogleAccount, list[httpx.Request]]:
+def account(
+    tmp_path: Path, handler: Callable[[httpx.Request], httpx.Response]
+) -> tuple[GoogleAccount, list[httpx.Request]]:
     seen: list[httpx.Request] = []
 
     def record(request: httpx.Request) -> httpx.Response:

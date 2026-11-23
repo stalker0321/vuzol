@@ -160,7 +160,7 @@ def test_a_broken_registry_write_leaves_no_state_directory(
     def refuse(*_args: object) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(cli.os, "replace", refuse)
+    monkeypatch.setattr("vuzol.cli.add_opencode_account.os.replace", refuse)
     with pytest.raises(OSError):
         cli.add_account(name="d", key_file=_key(tmp_path), registry=registry, state_root=state)
     assert not (state / "pi-opencode-go-d").exists()

@@ -873,6 +873,25 @@ class ProjectLeadWorker:
             ):
                 goal = await session.get(ManagedGoal, goal_id)
                 keep_wait = goal is not None and goal.lifecycle == "waiting"
+            if not commands and not keep_wait:
+                # Live 2026-11-23: the lead woke on a review result half a second
+                # before acceptance was due and said "still checking". The next
+                # wakeup is already queued; it decides, not the owner.
+                keep_wait = (
+                    await session.scalar(
+                        select(TransactionalOutbox.id)
+                        .where(
+                            TransactionalOutbox.destination == "project_lead",
+                            TransactionalOutbox.id != wakeup_id,
+                            TransactionalOutbox.payload["goal_id"].as_string() == str(goal_id),
+                            TransactionalOutbox.status.in_(
+                                (DeliveryStatus.PENDING, DeliveryStatus.LEASED)
+                            ),
+                        )
+                        .limit(1)
+                    )
+                    is not None
+                )
         if not commands:
             if owner_event or keep_wait:
                 return

@@ -1089,3 +1089,49 @@ async def test_long_document_reaches_the_lead_as_an_excerpt(postgres_dsn, tmp_pa
             assert live_id is None or stored.goal_id == live_id
             goal = await session.get(ManagedGoal, stored.goal_id)
             assert len(goal.scope_text) < 4_000
+
+
+async def test_an_idle_turn_leaves_a_queued_wakeup_to_the_lead(
+    postgres_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Live 2026-11-23: a review result woke the lead half a second before the
+    # task reached acceptance. The idle answer asked the owner "что делать", and
+    # the wakeup for the acceptance was then dropped as a waiting-goal event.
+    from vuzol.leadership.wakeups import enqueue_goal_wakeup
+
+    async with _factory(postgres_dsn) as factory:
+
+        class _LateEvent(_Transport):
+            async def execute(self, request, profile, cancellation):  # type: ignore[no-untyped-def]
+                if not self.requests:
+                    async with factory() as session, session.begin():
+                        goal = await session.scalar(select(ManagedGoal))
+                        assert goal is not None
+                        await enqueue_goal_wakeup(
+                            session,
+                            goal_id=goal.id,
+                            idempotency_key="late-review-result",
+                            package_id=None,
+                            kind="review_result",
+                        )
+                return await super().execute(request, profile, cancellation)
+
+        transport = _LateEvent({"commands": []})
+        await _enable(factory, await _session(factory))
+        worker = build_project_lead_worker(
+            factory,
+            settings=_settings(monkeypatch, "lead-local"),
+            profiles=ProfileRegistry((_profile(),)),
+            owner="lead-late-event",
+            default_branches={PROJECT: "main"},
+            adapter=transport,
+        )
+        assert await worker.process_one()
+        async with factory() as session:
+            goal = await session.scalar(select(ManagedGoal))
+            assert goal is not None and goal.waiting_reason is None
+        assert await worker.process_one()
+        assert len(transport.requests) == 2
+        async with factory() as session:
+            goal = await session.scalar(select(ManagedGoal))
+            assert goal is not None and goal.waiting_reason == "model_idle"

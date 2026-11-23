@@ -184,7 +184,20 @@ async def test_concurrent_telegram_mcp_and_uuid_replay(postgres_dsn, runtime):
             await worker.process_one()
             if len(model.seen) == 2:
                 break
-        assert len(model.seen) == 2
+        async with factory() as session:
+            wakeups = [
+                (item.status.value, item.attempt_count, item.last_error_category)
+                for item in await session.scalars(
+                    select(TransactionalOutbox).where(
+                        TransactionalOutbox.destination == "project_lead"
+                    )
+                )
+            ]
+            goals = [
+                (goal.lifecycle, goal.waiting_reason, goal.lease_owner)
+                for goal in await session.scalars(select(ManagedGoal))
+            ]
+        assert len(model.seen) == 2, (wakeups, goals)
         assert len({s.goal_id for s in model.seen}) == 1
         assert model.seen[1].result_context["conversation"]
         await finish_goal(factory, receipt["goal_id"])

@@ -24,7 +24,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from vuzol.storage.base import Base
 from vuzol.storage.types import (
@@ -2174,6 +2174,25 @@ class InboxMessage(IdentityMixin, Base):
     )
 
 
+class InboxCategory(Base):
+    """The owner's catalog also instructs the model where each record belongs."""
+
+    __tablename__ = "inbox_categories"
+    __table_args__ = (
+        CheckConstraint("slug ~ '^[a-z]+(-[a-z]+)*$'", name="slug_format"),
+        CheckConstraint("created_by IN ('seed', 'model')", name="created_by"),
+    )
+
+    slug: Mapped[str] = mapped_column(String(30), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    emoji: Mapped[str] = mapped_column(String(30), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(10), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class InboxItem(IdentityMixin, TimestampMixin, Base):
     """A knowledge-base record built from inbox messages: an event, a book, a repo..."""
 
@@ -2189,7 +2208,10 @@ class InboxItem(IdentityMixin, TimestampMixin, Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String(30), ForeignKey("inbox_categories.slug"), nullable=False
+    )
+    category: Mapped[InboxCategory] = relationship(lazy="selectin")
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)

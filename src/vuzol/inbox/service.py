@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.error import BadRequest, NetworkError, TimedOut
 
@@ -34,6 +35,7 @@ from vuzol.inbox.schemas import (
     Card,
     Cards,
     Lookup,
+    NewCategory,
     Patch,
     Route,
 )
@@ -48,7 +50,13 @@ from vuzol.storage.leasing import (
     mark_outbox_ambiguous,
     retry_outbox_item,
 )
-from vuzol.storage.models import InboxItem, InboxLink, InboxMessage, TransactionalOutbox
+from vuzol.storage.models import (
+    InboxCategory,
+    InboxItem,
+    InboxLink,
+    InboxMessage,
+    TransactionalOutbox,
+)
 from vuzol.storage.types import DeliveryStatus
 from vuzol.telegram.formatting import telegram_answer_rich_html
 from vuzol.telegram.projections import LostTelegramResponse, RichMessageRejected
@@ -59,23 +67,6 @@ _MAX_IMAGE_BYTES = 4_500_000
 _MAX_LINKS = 3
 _EVIDENCE_CHARS = 30_000
 _SEARCH_LIMIT = 40
-_KIND_WORDS = {
-    "event": "событие",
-    "book": "книга",
-    "film": "фильм",
-    "series": "сериал",
-    "music": "музыка",
-    "repo": "репозиторий",
-    "tool": "инструмент приложение",
-    "article": "статья",
-    "post": "пост",
-    "course": "курс",
-    "place": "место",
-    "product": "продукт",
-    "person": "человек",
-    "idea": "идея",
-    "note": "заметка",
-}
 _ATTEMPTS = 3
 _PAGES = 3
 _SWEEP_SECONDS = 600
@@ -298,7 +289,7 @@ class InboxWorker:
         )
         cards = await self._model.ask(
             Cards,
-            system=self._prompt(CARD_PROMPT),
+            system=await self._catalog_prompt(CARD_PROMPT),
             user=json.dumps(
                 {
                     "owner_comment": comment or None,
@@ -333,7 +324,7 @@ class InboxWorker:
         conversation = await self._conversation(chat_id, messages)
         route = await self._model.ask(
             Route,
-            system=self._prompt(ROUTE_PROMPT),
+            system=await self._catalog_prompt(ROUTE_PROMPT),
             user=json.dumps(
                 {
                     "owner_words": words,
@@ -463,8 +454,12 @@ class InboxWorker:
                 conditions.append(InboxItem.event_start <= end)
             order = [InboxItem.event_start.asc()]
         terms = (spec.words or "") if spec else ""
-        if spec is not None:
-            terms += " " + " ".join(f"{kind} {_KIND_WORDS.get(kind, '')}" for kind in spec.kinds)
+        if spec is not None and spec.kinds:
+            async with self._factory() as session:
+                names = await session.scalars(
+                    select(InboxCategory.name).where(InboxCategory.slug.in_(spec.kinds))
+                )
+                terms += " " + " ".join([*spec.kinds, *names])
         words = [w for w in re.findall(r"\w+", terms.lower()) if len(w) >= 3]
         if words:
             query = func.to_tsquery(
@@ -541,7 +536,14 @@ class InboxWorker:
             stored = await session.get(InboxItem, item.id, with_for_update=True)
             if stored is None:
                 return
-            for name in ("kind", "title", "summary", "tags", "event_start", "event_end"):
+            created = False
+            if patch.category is not None or patch.new_category is not None:
+                category, created = await _resolve_category(
+                    session, patch.category, patch.new_category
+                )
+                stored.category = category
+                stored.kind = category.slug
+            for name in ("title", "summary", "tags", "event_start", "event_end"):
                 value = getattr(patch, name)
                 if value is not None:
                     setattr(stored, name, value)
@@ -551,7 +553,9 @@ class InboxWorker:
             await self._enqueue(
                 session,
                 chat_id,
-                card_html(stored, self._settings.timezone, header="✏️ Поправил"),
+                card_html(
+                    stored, self._settings.timezone, header="✏️ Поправил", new_category=created
+                ),
                 reply_to=reply_to,
                 key=f"update:{key}",
                 item_ids=[stored.id],
@@ -684,7 +688,7 @@ class InboxWorker:
         text = "\n".join(filter(None, (_words(m) or m.forward_label for m in messages)))
         urls = [url for message in messages for url in message.urls]
         card = Card(
-            kind="note",
+            category="note",
             title=(text.splitlines()[0] if text else urls[0] if urls else "Без текста")[:200],
             summary=text[:1500],
             fields={"url": urls[0]} if urls else {},
@@ -780,7 +784,13 @@ class InboxWorker:
         """Records, their cards and the question's answer job commit together."""
         async with self._factory.begin() as session:
             items: list[InboxItem] = []
+            created_categories: set[str] = set()
             for ordinal, card in enumerate(cards):
+                category, created = await _resolve_category(
+                    session, card.category, card.new_category
+                )
+                if created:
+                    created_categories.add(category.slug)
                 fields = dict(card.fields)
                 if card.verdict:
                     fields["verdict"] = card.verdict
@@ -789,7 +799,8 @@ class InboxWorker:
                     chat_id=chat_id,
                     batch_id=batch_id,
                     ordinal=ordinal,
-                    kind=card.kind,
+                    kind=category.slug,
+                    category=category,
                     title=card.title,
                     summary=card.summary,
                     tags=[tag.strip().lower() for tag in card.tags if tag.strip()],
@@ -806,7 +817,12 @@ class InboxWorker:
                 await self._enqueue(
                     session,
                     chat_id,
-                    card_html(item, self._settings.timezone, header=header),
+                    card_html(
+                        item,
+                        self._settings.timezone,
+                        header=header,
+                        new_category=item.kind in created_categories,
+                    ),
                     reply_to=reply_to,
                     key=f"cards:{batch_id}:{item.ordinal}",
                     item_ids=[item.id],
@@ -1032,6 +1048,19 @@ class InboxWorker:
             )
             return recent
 
+    async def _catalog_prompt(self, template: str) -> str:
+        async with self._factory() as session:
+            categories = await session.scalars(select(InboxCategory).order_by(InboxCategory.slug))
+            catalog = [
+                {"slug": category.slug, "name": category.name, "description": category.description}
+                for category in categories
+            ]
+        return (
+            self._prompt(template)
+            + "\nCategory catalog:\n"
+            + json.dumps(catalog, ensure_ascii=False)
+        )
+
     def _prompt(self, template: str) -> str:
         now = datetime.now(ZoneInfo(self._settings.timezone))
         return template.format(tz=self._settings.timezone, now=now.isoformat(timespec="minutes"))
@@ -1061,6 +1090,33 @@ def _reply_words(row: TransactionalOutbox) -> str:
         or payload.get("text")
         or unescape(re.sub(r"<[^>]+>", "", payload.get("html") or ""))
     )
+
+
+async def _resolve_category(
+    session: AsyncSession, slug: str | None, proposal: NewCategory | None
+) -> tuple[InboxCategory, bool]:
+    slug = proposal.slug if proposal is not None else slug
+    if slug is not None and len(slug) <= 30 and re.fullmatch(r"[a-z]+(?:-[a-z]+)*", slug):
+        if proposal is not None:
+            category = await session.scalar(
+                insert(InboxCategory)
+                .values(**proposal.model_dump(exclude={"why_none_fits"}), created_by="model")
+                .on_conflict_do_nothing(index_elements=[InboxCategory.slug])
+                .returning(InboxCategory)
+            )
+            if category is not None:
+                return category, True
+        else:
+            category = await session.get(InboxCategory, slug)
+            if category is not None:
+                return category, False
+    _LOG.warning(
+        "invalid or unknown inbox category; using other",
+        extra={"event": "inbox.category_fallback", "slug": slug},
+    )
+    other = await session.get(InboxCategory, "other")
+    assert other is not None
+    return other, False
 
 
 def _brief(item: InboxItem) -> dict[str, Any]:

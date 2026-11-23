@@ -60,7 +60,7 @@ class FakeModel:
         self.calls = []
 
     async def ask(self, output, *, system, user, images=()):
-        self.calls.append({"output": output, "user": user, "images": images})
+        self.calls.append({"output": output, "system": system, "user": user, "images": images})
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -196,7 +196,7 @@ async def test_rich_answer_keeps_record_reply_link_and_cards_keep_buttons(postgr
             factory,
             FakeModel(
                 Route(action="save"),
-                Cards(cards=[Card(kind="book", title="Книга", summary="Описание")]),
+                Cards(cards=[Card(category="book", title="Книга", summary="Описание")]),
             ),
             send_rich=send_rich,
         )
@@ -277,7 +277,7 @@ async def test_comment_then_forward_is_one_record_with_an_answer(postgres_dsn):
             private(3, user=OWNER + 1, text="hi"),
         )
         card = Card(
-            kind="repo",
+            category="repo",
             title="agent-kit",
             summary="Набор инструментов для агентов.",
             tags=["ai", "agents"],
@@ -319,7 +319,7 @@ async def test_reply_to_card_corrects_it_and_search_finds_events_by_date(postgre
             private(10, photo=[{"file_id": "p1", "file_unique_id": "u1", "width": 9, "height": 9}]),
         )
         event = Card(
-            kind="event",
+            category="event",
             title="Rave X",
             summary="Ночной рейв.",
             event_start=datetime(2026, 11, 15, 23, 0),
@@ -406,7 +406,7 @@ async def test_question_answer_searches_the_web_first(postgres_dsn):
             ),
         )
         model = FakeModel(
-            Cards(cards=[Card(kind="repo", title="b")], question="Есть альтернативы?"),
+            Cards(cards=[Card(category="repo", title="b")], question="Есть альтернативы?"),
             Lookup(queries=["android whisper dictation"], github=["whisper keyboard android"]),
             Answer(text="Да: Superwhisper и x/whisper-kb (900★)."),
         )
@@ -456,7 +456,7 @@ async def test_reply_to_own_forward_and_plain_web_question_search_online(postgre
             ),
         )
         model = FakeModel(
-            Cards(cards=[Card(kind="tool", title="phone-whisper")]),
+            Cards(cards=[Card(category="tool", title="phone-whisper")]),
             # Reply to the owner's own forward, not to the bot's card.
             Route(action="ask", target="replied"),
             Lookup(queries=["mature android dictation apps"]),
@@ -553,7 +553,7 @@ async def test_card_buttons_analyze_and_delete(postgres_dsn, monkeypatch):
         await admit(factory, private(50, text="Дюна, Фрэнк Герберт"))
         model = FakeModel(
             Route(action="save"),
-            Cards(cards=[Card(kind="book", title="Дюна")]),
+            Cards(cards=[Card(category="book", title="Дюна")]),
             Answer(text="Классика, читать."),
         )
         worker, telegram = worker_for(factory, model)
@@ -591,7 +591,7 @@ async def test_documents_are_read_into_the_evidence(postgres_dsn):
                 },
             ),
         )
-        model = FakeModel(Cards(cards=[Card(kind="event", title="Fest")]))
+        model = FakeModel(Cards(cards=[Card(category="event", title="Fest")]))
         worker, _ = worker_for(factory, model, download="Сцена A: Amelie Lens 23:00".encode())
         await drain(worker)
         assert "Amelie Lens 23:00" in model.calls[0]["user"]

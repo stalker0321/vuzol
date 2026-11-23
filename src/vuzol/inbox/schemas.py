@@ -3,45 +3,50 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
-
-Kind = Literal[
-    "event",
-    "book",
-    "film",
-    "series",
-    "music",
-    "repo",
-    "tool",
-    "article",
-    "post",
-    "course",
-    "place",
-    "product",
-    "person",
-    "idea",
-    "note",
-    "other",
-]
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _Model(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-class Card(_Model):
-    kind: Kind
+class NewCategory(_Model):
+    slug: str
+    name: str = Field(min_length=1, max_length=100)
+    emoji: str = Field(min_length=1, max_length=30)
+    description: str = Field(min_length=1, max_length=1500)
+    why_none_fits: str = Field(min_length=1, max_length=1500)
+
+
+class _CategoryChoice(_Model):
+    category: str | None = None
+    new_category: NewCategory | None = None
+
+    @model_validator(mode="after")
+    def exclusive_category(self) -> Self:
+        if self.category is not None and self.new_category is not None:
+            raise ValueError("Choose category OR new_category")
+        return self
+
+
+class Card(_CategoryChoice):
     title: str = Field(min_length=1, max_length=200)
     summary: str = Field(default="", max_length=1500)
     tags: list[str] = Field(default_factory=list, max_length=8)
     event_start: datetime | None = None
     event_end: datetime | None = None
-    # Kind-specific facts: author, year, location, url, price, license, stars...
+    # Category-specific facts: author, year, location, url, price, license, stars...
     fields: dict[str, str] = Field(default_factory=dict, max_length=12)
     # First-look assessment for a repo, tool or article: is it any good, is it safe.
     verdict: str | None = Field(default=None, max_length=800)
+
+    @model_validator(mode="after")
+    def required_category(self) -> Self:
+        if self.category is None and self.new_category is None:
+            raise ValueError("Choose category OR new_category")
+        return self
 
 
 class Cards(_Model):
@@ -52,13 +57,12 @@ class Cards(_Model):
 
 class Search(_Model):
     words: str | None = Field(default=None, max_length=200)
-    kinds: list[Kind] = Field(default_factory=list)
+    kinds: list[str] = Field(default_factory=list)
     date_from: date | None = None
     date_to: date | None = None
 
 
-class Patch(_Model):
-    kind: Kind | None = None
+class Patch(_CategoryChoice):
     title: str | None = Field(default=None, max_length=200)
     summary: str | None = Field(default=None, max_length=1500)
     tags: list[str] | None = Field(default=None, max_length=8)
@@ -101,9 +105,14 @@ CARD_PROMPT = (
     _COMMON + "\nThe owner forwarded or sent material. Build knowledge-base records from it.\n"
     "- One record per distinct thing worth finding later; usually exactly one. A post that "
     "lists several tools, books or events may give up to five.\n"
-    "- kind: event (party, concert, meetup, exhibition), book, film, series, music, repo "
-    "(a code repository), tool (an app or service), article, post (a channel post whose point "
-    "is the text itself), course, place, product, person, idea, note, other.\n"
+    "- Choose exactly one category slug from the supplied catalog by its description. "
+    "The subject determines the category, even for a short note or a list: game lists are "
+    "game, film lists are film, not note/post/product. other is a last resort.\n"
+    "- Set category OR new_category, never both. Propose new_category only if no existing "
+    "description fits, with a new lowercase Latin kebab-case slug (letters and hyphens, "
+    "at most 30 characters), Russian name, emoji, a sharp 1-2 sentence description of what "
+    "belongs and what does not, and why_none_fits explaining why every plausible existing "
+    "category fails. Do not create synonyms or narrower variants of existing categories.\n"
     "- title: the name of the thing itself (the event, the book, the repo), not of the post.\n"
     "- summary: what it is and why it may matter, 1-3 sentences. Read images: screenshots and "
     "posters often hold all the facts.\n"
@@ -133,12 +142,15 @@ ROUTE_PROMPT = (
     "including requests to find alternatives or look something about it up online.\n"
     '- search: a question about the base as a whole ("что у нас на ноябрь?", "какие книги я '
     'хотел прочитать?", "что было про бэкапы?"). Fill search: words to look for (null for '
-    "a pure date or kind question), kinds, date range for events.\n"
+    "a pure date or category question), kinds (catalog slugs), date range for events.\n"
     '- web: a question that needs the internet and is not about one record ("поищи в инете", '
     '"что сейчас лучше для X?"). When it continues the latest record, prefer ask with '
     "target=recent.\n"
-    "- update: a correction to a record (date, title, kind, tags...). Fill patch with only "
-    "the changed fields.\n"
+    "- update: a correction to a record (date, title, category, tags...). Fill patch with only "
+    "the changed fields. For a category change choose category from the supplied catalog, "
+    "or new_category only when no description fits: give slug (lowercase Latin letters "
+    "with single hyphens, at most 30 characters), Russian name, emoji, description and "
+    "why_none_fits. Never set both; never propose synonyms or narrower variants.\n"
     "- delete: they ask to remove a record.\n"
     "- chat: anything else; answer briefly in reply.\n"
     "Prefer replied over recent. Use recent only when the words obviously refer to the "

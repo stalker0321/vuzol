@@ -30,7 +30,7 @@ async def test_own_title_is_looked_up_before_card(postgres_dsn, words):
         model = FakeModel(
             Route(action="save"),
             Lookup(queries=["pathogenic Steam"]),
-            Cards(cards=[Card(kind="other", title="PATHOGENIC", fields={"url": STEAM})]),
+            Cards(cards=[Card(category="other", title="PATHOGENIC", fields={"url": STEAM})]),
         )
         worker, _ = worker_for(factory, model, search=web)
         worker._read_link = page
@@ -48,7 +48,7 @@ async def test_forward_with_link_does_not_search_again(postgres_dsn):
     web = AsyncMock()
     page = AsyncMock(return_value="Detailed forwarded post")
     async with _factory(postgres_dsn) as factory:
-        model = FakeModel(Cards(cards=[Card(kind="post", title="Игры")]))
+        model = FakeModel(Cards(cards=[Card(category="post", title="Игры")]))
         worker, _ = worker_for(factory, model, search=web)
         worker._read_link = page
         await admit(
@@ -76,7 +76,7 @@ async def test_thin_material_gets_lookup_even_without_route(postgres_dsn):
     async with _factory(postgres_dsn) as factory:
         model = FakeModel(
             Lookup(queries=["pathogenic game"]),
-            Cards(cards=[Card(kind="other", title="Pathogenic")]),
+            Cards(cards=[Card(category="other", title="Pathogenic")]),
         )
         worker, _ = worker_for(factory, model, search=web, download=b"pathogenic")
         await admit(

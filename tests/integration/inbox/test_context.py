@@ -41,7 +41,7 @@ async def test_followup_payloads_keep_title_and_bot_question(postgres_dsn, words
     question = 'Не понял, что делать со словом "pathogenic"…'
     answers = [Route(action="chat", reply=question), Route(action=action)]
     if action == "save":
-        answers.append(Cards(cards=[Card(kind="other", title="Pathogenic")]))
+        answers.append(Cards(cards=[Card(category="other", title="Pathogenic")]))
     elif action in {"ask", "search"}:
         answers.append(Answer(text="Нашёл"))
     async with _factory(postgres_dsn) as factory:

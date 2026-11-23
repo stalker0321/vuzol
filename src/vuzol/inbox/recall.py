@@ -39,6 +39,7 @@ async def inbox_hits(
                     None,
                     (
                         item.title,
+                        f"{item.category.emoji} {item.category.name}",
                         item.summary,
                         item.fields.get("verdict"),
                         item.fields.get("url"),

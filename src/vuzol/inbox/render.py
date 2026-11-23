@@ -12,24 +12,6 @@ from zoneinfo import ZoneInfo
 
 from vuzol.storage.models import InboxItem
 
-KIND_LABELS = {
-    "event": ("🎫", "мероприятие"),
-    "book": ("📚", "книга"),
-    "film": ("🎬", "фильм"),
-    "series": ("📺", "сериал"),
-    "music": ("🎵", "музыка"),
-    "repo": ("🧰", "репозиторий"),
-    "tool": ("🛠", "инструмент"),
-    "article": ("📰", "статья"),
-    "post": ("💬", "пост"),
-    "course": ("🎓", "курс"),
-    "place": ("📍", "место"),
-    "product": ("🛒", "вещь"),
-    "person": ("👤", "человек"),
-    "idea": ("💡", "идея"),
-    "note": ("📝", "заметка"),
-    "other": ("📎", "запись"),
-}
 _DAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 _MONTHS = (
     "января",
@@ -62,9 +44,13 @@ def when(moment: datetime, tz: str) -> str:
     return text
 
 
-def card_html(item: InboxItem, tz: str, *, header: str = "📥 Сохранил") -> str:
-    icon, label = KIND_LABELS.get(item.kind, KIND_LABELS["other"])
-    lines = [f"{header} · {icon} {label}", f"<b>{escape(item.title)}</b>"]
+def card_html(
+    item: InboxItem, tz: str, *, header: str = "📥 Сохранил", new_category: bool = False
+) -> str:
+    icon, label = item.category.emoji, item.category.name
+    lines = [f"{header} · {escape(icon)} {escape(label)}", f"<b>{escape(item.title)}</b>"]
+    if new_category:
+        lines.append(f"🆕 новая категория: {escape(label)} — {escape(item.category.description)}")
     facts: list[str] = []
     if item.event_start is not None:
         facts.append("📅 " + when(item.event_start, tz))
@@ -106,15 +92,16 @@ def digest_html(saved: Sequence[InboxItem], soon: Sequence[InboxItem], tz: str) 
     if saved:
         lines.append(f"\nСохранено: {len(saved)}")
         for item in saved[:15]:
-            icon = KIND_LABELS.get(item.kind, KIND_LABELS["other"])[0]
-            lines.append(f"{icon} {escape(item.title)}")
+            label = f"{item.category.emoji} {item.category.name}"
+            lines.append(f"{escape(label)} · {escape(item.title)}")
         if len(saved) > 15:
             lines.append(f"…и ещё {len(saved) - 15}")
     if soon:
         lines.append("\n📅 <b>В ближайший месяц</b>")
         for item in soon[:15]:
             assert item.event_start is not None
-            lines.append(f"{when(item.event_start, tz)} — {escape(item.title)}")
+            label = f"{item.category.emoji} {item.category.name}"
+            lines.append(f"{when(item.event_start, tz)} — {escape(label)} · {escape(item.title)}")
     return "\n".join(lines)
 
 
@@ -128,13 +115,17 @@ def digest_markdown(saved: Sequence[InboxItem], soon: Sequence[InboxItem], tz: s
     if saved:
         lines.append(f"\nСохранено: {len(saved)}\n")
         for item in saved[:15]:
-            icon = KIND_LABELS.get(item.kind, KIND_LABELS["other"])[0]
-            lines.append(f"- {icon} {literal(item.title)}")
+            label = f"{item.category.emoji} {item.category.name}"
+            lines.append(f"- {literal(label)} · {literal(item.title)}")
         if len(saved) > 15:
             lines.append(f"\n…и ещё {len(saved) - 15}")
     if soon:
         lines.append("\n## 📅 В ближайший месяц\n")
         for item in soon[:15]:
             assert item.event_start is not None
-            lines.append(f"- {literal(when(item.event_start, tz))} — {literal(item.title)}")
+            label = f"{item.category.emoji} {item.category.name}"
+            lines.append(
+                f"- {literal(when(item.event_start, tz))} — "
+                f"{literal(label)} · {literal(item.title)}"
+            )
     return "\n".join(lines)

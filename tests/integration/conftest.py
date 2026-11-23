@@ -42,10 +42,14 @@ def clean_postgres(request: pytest.FixtureRequest) -> Iterator[None]:
         tables = connection.execute(
             """
             SELECT tablename FROM pg_tables
-            WHERE schemaname = 'public' AND tablename <> 'alembic_version'
+            WHERE schemaname = 'public'
+              AND tablename NOT IN ('alembic_version', 'inbox_categories')
             """
         ).fetchall()
         if tables:
             quoted = ", ".join(f'"{row[0]}"' for row in tables)
             connection.execute(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
+        catalog = connection.execute("SELECT to_regclass('public.inbox_categories')").fetchone()
+        if catalog is not None and catalog[0] is not None:
+            connection.execute("DELETE FROM inbox_categories WHERE created_by = 'model'")
     yield

@@ -14,6 +14,7 @@ _ESCAPES = str.maketrans({character: "\\" + character for character in punctuati
 _REASONS = {
     "owner": "Нужно твоё решение, чтобы продолжить.",
     "owner_pause": "Ты поставил работу на паузу.",
+    "lead_pause": "Руководитель поставил работу на паузу и ждёт твоего решения.",
     "delegation_revoked": "Разрешение руководителю отозвано.",
     "feature_disabled": "Руководитель отключён в настройках.",
     "work_package_limit_reached": "Достигнут заданный тобой лимит пакетов работы.",

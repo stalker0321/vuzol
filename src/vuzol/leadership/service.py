@@ -494,7 +494,9 @@ class LeadershipCommandService:
             return _Outcome(CommandStatus.APPLIED, None, {"work_limits": limits.model_dump()}, goal)
         if name is LeadCommandName.PAUSE_GOAL:
             await _settle_children(uow.session, goal, actor, stop=False)
-            return _transition(goal, actor, "paused", "owner_pause", CommandStatus.APPLIED)
+            # The owner's pause is quiet; a pause the lead decides asks for the owner.
+            reason = "owner_pause" if actor.kind is ActorKind.HUMAN else "lead_pause"
+            return _transition(goal, actor, "paused", reason, CommandStatus.APPLIED)
         if name is LeadCommandName.RESUME_GOAL:
             if goal.lifecycle != "paused":
                 return _Outcome(CommandStatus.DENIED, "goal_not_paused", {}, goal)

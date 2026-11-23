@@ -22,8 +22,6 @@ since were removed; they remain in Git history.
 
 ## Leads
 
-- A pause the lead decides on its own is recorded with the owner's pause reason
-  (`owner_pause`).
 - Leads have no MCP tools: Pi has no MCP client. Assistant and Codex workers do.
 
 ## Product ideas (owner, not scheduled)

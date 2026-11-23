@@ -1135,3 +1135,29 @@ async def test_an_idle_turn_leaves_a_queued_wakeup_to_the_lead(
         async with factory() as session:
             goal = await session.scalar(select(ManagedGoal))
             assert goal is not None and goal.waiting_reason == "model_idle"
+
+
+async def test_a_pause_the_lead_decides_is_not_recorded_as_the_owners(postgres_dsn: str) -> None:
+    async with _factory(postgres_dsn) as factory:
+        goal_id = await _enable(factory, await _session(factory))
+        async with factory() as session:
+            loaded = await session.get(ManagedGoal, goal_id)
+            assert loaded is not None
+            version = loaded.version
+        paused = await _lead_service(factory).apply_agent(
+            server_agent_principal(PROJECT),
+            "worker",
+            LeadCommand(
+                name="pause_goal",
+                project_id=PROJECT,
+                goal_id=goal_id,
+                expected_version=version,
+                idempotency_key="lead-pause",
+                payload={},
+            ),
+        )
+        assert paused.status == "applied"
+        async with factory() as session:
+            goal = await session.get(ManagedGoal, goal_id)
+            assert goal is not None
+            assert (goal.lifecycle, goal.waiting_reason) == ("paused", "lead_pause")

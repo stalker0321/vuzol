@@ -9,8 +9,8 @@ Revises: c3f5a7b9d102
 import sqlalchemy as sa
 from alembic import op
 
-revision = "c7a9e1b3d544"
-down_revision = "c3f5a7b9d102"
+revision = "c7a9e1b3d544"  # pragma: allowlist secret
+down_revision = "c3f5a7b9d102"  # pragma: allowlist secret
 branch_labels = None
 depends_on = None
 

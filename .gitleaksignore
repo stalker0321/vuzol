@@ -5,3 +5,5 @@ a8b65009a01b509371b8adc1439f61a40dbe84d5:src/vuzol/assistant/service.py:generic-
 # Synthetic strings used to test secret rejection; never real credentials.
 e14cd2202d32e301a73404b0da27c18178808cfa:tests/integration/interpretation/test_chat_recovery_memory.py:generic-api-key:345
 6f53fb1a10438ac3226376eed0e7fc7d2aeb2fba:tests/unit/discussion/test_memory_units.py:generic-api-key:118
+# A snapshot detail ("auth_expired") in a test, not a key.
+fc5e1f2df9c804e5fbf6415df3f3991dc4dc2f79:tests/unit/providers/test_subscription_account_state.py:generic-api-key:39

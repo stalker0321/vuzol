@@ -20,7 +20,7 @@ def test_inbox_catalog_migration(postgres_dsn, monkeypatch):
     dsn = postgres_dsn.replace("postgresql+psycopg://", "postgresql://")
     try:
         command.upgrade(config, "head")
-        command.downgrade(config, "c3f5a7b9d102")
+        command.downgrade(config, "c3f5a7b9d102")  # pragma: allowlist secret
         cases = [
             ("other", '["игра"]', False, "game"),
             ("product", '["игры"]', False, "game"),

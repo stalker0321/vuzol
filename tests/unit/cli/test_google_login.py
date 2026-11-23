@@ -39,7 +39,7 @@ def test_the_landing_address_is_exchanged_and_the_token_written_privately(tmp_pa
     assert code == 0 and "SECRET" not in printed and "REFRESH" not in printed
     assert json.loads(out.read_text()) == {
         "client_id": "id1",
-        "client_secret": "SECRET",
+        "client_secret": "SECRET",  # pragma: allowlist secret
         "refresh_token": "REFRESH",
     }
     assert out.stat().st_mode & 0o777 == 0o600

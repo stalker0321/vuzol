@@ -1,7 +1,7 @@
 """Pure deterministic provider eligibility and ordering policy."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -13,6 +13,7 @@ from vuzol.config.models import (
     ProviderProfileConfig,
     ProviderRole,
 )
+from vuzol.providers.account_pool import usable_sibling
 from vuzol.providers.catalog import CONVERSATION_TASK_TYPE, conversation_compatible
 from vuzol.providers.domain import EffectiveProfileState, QuotaState
 
@@ -196,3 +197,35 @@ def _exclusions(
     ):
         reasons.append(ExclusionReason.PROJECT_PIN)
     return reasons
+
+
+def substitute_account(
+    request: RoutingRequest,
+    profiles: tuple[ProviderProfileConfig, ...],
+    states: Mapping[str, EffectiveProfileState],
+    *,
+    unusable_accounts: frozenset[str],
+) -> RoutingRequest:
+    """Admit a pool sibling only when it passes the existing work routing policy."""
+    primary = next((p for p in profiles if p.id == request.trusted_profile_id), None)
+    if primary is None or request.task_type == CONVERSATION_TASK_TYPE:
+        return request
+
+    def sibling_request(sibling: ProviderProfileConfig) -> RoutingRequest:
+        return replace(
+            request,
+            trusted_profile_id=sibling.id,
+            restrict_to_profile_ids=(request.restrict_to_profile_ids or frozenset()) | {sibling.id},
+        )
+
+    sibling = usable_sibling(
+        primary,
+        profiles,
+        unusable_accounts=unusable_accounts,
+        role=request.role,
+        extra_check=lambda candidate: (
+            select_profile(sibling_request(candidate), (candidate,), states).selected_profile_id
+            is not None
+        ),
+    )
+    return request if sibling.id == primary.id else sibling_request(sibling)

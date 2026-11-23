@@ -103,3 +103,24 @@ def test_pool_label_keeps_existing_pins_and_revisions() -> None:
     pooled = profile.model_copy(update={"account_pool": "opencode-go"})
     assert content_revision(pooled) == content_revision(profile)
     assert assignment_revision(pooled) == assignment_revision(profile)
+
+
+def test_a_run_of_account_failures_marks_the_account() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from vuzol.providers.account_pool import failing_accounts
+
+    t = datetime(2026, 11, 23, 12, tzinfo=UTC)
+
+    def calls(account: str, *failed: bool) -> list[tuple[str, datetime, bool]]:
+        return [(account, t + timedelta(minutes=i), f) for i, f in enumerate(failed)]
+
+    assert failing_accounts(
+        [
+            *calls("dead", True, True, True),
+            *calls("recovered", True, True, True, False),
+            *calls("flaky", True, False, True, True),
+            *calls("few", True, True),
+            *calls("came-back-dead", False, True, True, True),
+        ]
+    ) == {"dead", "came-back-dead"}

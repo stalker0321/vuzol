@@ -1,7 +1,7 @@
 """Transactional provider routing, budget reservation, and fenced step claim."""
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,7 @@ from vuzol.config.models import (
     ProviderRole,
 )
 from vuzol.config.registries import ConfigurationBundle, RegistryError
-from vuzol.config.revision import assignment_matches
+from vuzol.config.revision import assignment_matches, assignment_revision
 from vuzol.config.settings import Settings
 from vuzol.context.execution import execution_constraints_context
 from vuzol.ops.disk_pressure import (
@@ -32,11 +32,13 @@ from vuzol.projects.executor_preference import (
 )
 from vuzol.projects.model_matrix import (
     MATRIX_KEY,
+    ModelAssignment,
     assignment_profile,
     legacy_executor_preference,
     pinned_assignment,
     slot_for_role,
 )
+from vuzol.providers.account_pool import unusable_accounts
 from vuzol.providers.budgets import (
     ADMISSION_ONLY_CONSENT_SUMMARY,
     EXPLICIT_MONEY_CAP_EXCEEDED_SUMMARY,
@@ -62,6 +64,7 @@ from vuzol.providers.policy import (
     PolicyDecision,
     RoutingRequest,
     select_profile,
+    substitute_account,
 )
 from vuzol.providers.result_schema import result_schema_for_step, schema_char_count
 from vuzol.storage.leasing import STEP_CLAIM_LOCK_KEY
@@ -548,6 +551,13 @@ async def claim_routed_step(
                 else LaunchMode.API
             ),
         )
+        policy_request = substitute_account(
+            policy_request,
+            profiles,
+            states,
+            unusable_accounts=await unusable_accounts(session, profiles, datetime.now(UTC)),
+        )
+        pin_family_ids = policy_request.restrict_to_profile_ids
         decision = select_profile(policy_request, profiles, states)
         # Routing stays authoritative; node capacity must not change the chosen provider.
         if profile_ids is not None and decision.selected_profile_id not in profile_ids:
@@ -728,8 +738,6 @@ async def claim_routed_step(
             "budget_reservation_id": str(reservation.id),
         }
         if chat_profile_id is not None:
-            from vuzol.projects.model_matrix import ModelAssignment
-
             # Carry the immutable identity through the host sandbox boundary as
             # well, using its existing profile revision fence (not live /model).
             next_payload.pop("executor_model_override", None)
@@ -751,7 +759,16 @@ async def claim_routed_step(
             next_payload.update(
                 {
                     "project_model_slot": matrix_slot,
-                    "project_model_assignment": matrix_choice.model_dump(mode="json"),
+                    "project_model_assignment": (
+                        matrix_choice
+                        if selected.id == matrix_choice.profile_id
+                        else ModelAssignment(
+                            profile_id=selected.id,
+                            model=selected.model,
+                            reasoning_effort=selected.model_reasoning_effort,
+                            content_revision=assignment_revision(selected),
+                        )
+                    ).model_dump(mode="json"),
                 }
             )
         if project_pin is not None and pin_family_ids is not None:

@@ -357,3 +357,94 @@ async def test_task_transport_cannot_complete_turn_process_without_task_identity
     with pytest.raises(ValueError, match="lacks fenced task identity"):
         await c.envelopes.complete(uuid.uuid4(), CodexProcessResult(0, "output", "", 1), artifacts)
     artifacts.persist.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_pool_sibling_uses_own_runtime_state_and_egress(envelope_call, tmp_path):
+    from vuzol.config.models import EgressDestination, NetworkPolicy, SandboxNetworkMode
+    from vuzol.config.revision import assignment_revision
+    from vuzol.providers.account_pool import usable_sibling
+
+    c = envelope_call
+    pinned = c.profile.model_copy(update={"account_id": "c", "account_pool": "subscription"})
+    sibling_state = tmp_path / "sibling-state"
+    sibling_state.mkdir()
+    network = NetworkPolicy(
+        enabled=True,
+        destinations=(EgressDestination(url="https://sibling.example", purpose="provider"),),
+    )
+    sibling = pinned.model_copy(
+        update={
+            "id": "sibling",
+            "account_id": "a",
+            "runtime_identity": "account-a",
+            "state_directory": sibling_state,
+            "runtime_network": network,
+        }
+    )
+    selected = usable_sibling(
+        pinned, (pinned, sibling), unusable_accounts=frozenset({"c"}), role=ProviderRole.REVIEWER
+    )
+    assert selected is sibling
+    c.runtime.registries.profiles.items.return_value = (pinned, sibling)
+    c.runtime.registries.profiles.get.side_effect = lambda profile_id: {
+        pinned.id: pinned,
+        sibling.id: sibling,
+    }[profile_id]
+    c.runtime.registries.projects.get.return_value.network = network
+    sandbox = c.runtime.registries.sandboxes.get.return_value
+    c.runtime.registries.sandboxes.get.return_value = sandbox.model_copy(
+        update={
+            "network_mode": SandboxNetworkMode.HTTPS_PROXY,
+        }
+    )
+    c.factory.return_value.__aenter__.return_value = c.session
+    c.step.payload.update(
+        project_model_slot="reviewer_light",
+        project_model_assignment={
+            "profile_id": sibling.id,
+            "model": sibling.model,
+            "reasoning_effort": sibling.model_reasoning_effort,
+            "content_revision": assignment_revision(sibling),
+        },
+    )
+    built = []
+
+    async def run(invocation, cancellation):
+        assert invocation.profile_id == sibling.id
+        assert invocation.runtime_identity == sibling.runtime_identity
+        assert invocation.state_directory == str(sibling.state_directory)
+        targets = await c.envelopes.proxy_targets(invocation)
+        assert [(target.hostname, target.port) for target in targets] == [("sibling.example", 443)]
+        built.append(
+            await c.envelopes.build(
+                invocation,
+                proxy_network="proxy",
+                https_proxy_url="http://proxy:8080",
+            )
+        )
+        outputs = {
+            "codex": '{"text":"reviewed"}',
+            "grok": '{"type":"text","data":"reviewed"}\n{"type":"end","stopReason":"EndTurn"}',
+            "kimi": '{"role":"assistant","content":"reviewed"}',
+            "pi": '{"type":"agent_end","messages":[{"role":"assistant",'
+            '"content":[{"type":"text","text":"reviewed"}]}]}\n'
+            '{"type":"agent_settled"}',
+        }
+        return CodexProcessResult(0, outputs[sibling.provider], "", 1)
+
+    adapters = {
+        "codex": CodexCliAdapter,
+        "grok": GrokCliAdapter,
+        "kimi": KimiCliAdapter,
+        "pi": PiCliAdapter,
+    }
+    c.wrapper._adapter = adapters[sibling.provider](MagicMock(run=AsyncMock(side_effect=run)))
+    c.session.scalar.side_effect = [0, c.worktree, None]
+    await c.wrapper.execute(c.request, selected, c.cancellation)
+    envelope, _ = built[0]
+    assert envelope.profile_id == sibling.id
+    assert (
+        next(mount.source for mount in envelope.sandbox.mounts if mount.purpose == "provider-state")
+        == sibling_state
+    )

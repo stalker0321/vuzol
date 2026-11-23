@@ -400,6 +400,7 @@ async def test_database_review_accounting_reserves_reconciles_and_releases(
     factory = MagicMock()
     review_session = MagicMock()
     review_session.scalar = AsyncMock(return_value=None)
+    review_session.get = AsyncMock(return_value=SimpleNamespace(policy_revision="test-policy.v1"))
     factory.begin.return_value = AsyncContext(review_session)
     accounting = DatabaseReviewAccounting(factory, HardLimits())
 
@@ -431,6 +432,7 @@ async def test_database_review_accounting_reserves_reconciles_and_releases(
     await accounting.release(reservation=reservation, lease=lease)
 
     assert reservation.id == reservation_id
+    assert review_session.add.call_args.args[0].selected_profile_id == profile.id
     reserve.assert_awaited_once()
     assert reserve.await_args is not None
     # D3 Q4: deductible allowance replaces the bypass flag.

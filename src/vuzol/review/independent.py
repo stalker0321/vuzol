@@ -21,9 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import LaunchMode, ProviderProfileConfig, ProviderRole
 from vuzol.config.registries import ConfigurationBundle
-from vuzol.config.revision import assignment_matches, assignment_revision
+from vuzol.config.revision import assignment_matches, assignment_revision, content_revision
 from vuzol.config.settings import HardLimits
 from vuzol.execution.domain import GitInspection
+from vuzol.providers.account_pool import unusable_accounts, usable_sibling
 from vuzol.providers.budgets import (
     BudgetExceeded,
     account_usage,
@@ -54,7 +55,7 @@ from vuzol.review.domain import (
 from vuzol.review.partitions import PartitionManifest, build_manifest, verify_chunk_receipts
 from vuzol.review.policy import REVIEW_POLICY_REVISION, IndependentReviewError
 from vuzol.storage.errors import LeaseLost
-from vuzol.storage.models import Run, Step, Task
+from vuzol.storage.models import RoutingDecision, Run, Step, Task
 from vuzol.storage.records import LeaseToken
 from vuzol.storage.types import RiskLevel, RunStatus, StepStatus
 from vuzol.workflows.ports import CancellationContext
@@ -233,6 +234,28 @@ class DatabaseReviewAccounting:
                 raise IndependentReviewError(
                     f"independent review budget is exhausted: {error}"
                 ) from error
+            decision = await session.scalar(
+                select(RoutingDecision).where(
+                    RoutingDecision.step_id == request.step_id,
+                    RoutingDecision.provider_attempt == request.provider_attempt,
+                )
+            )
+            if decision is None:
+                run = await session.get(Run, request.run_id)
+                assert run is not None
+                session.add(
+                    RoutingDecision(
+                        run_id=request.run_id,
+                        step_id=request.step_id,
+                        provider_attempt=request.provider_attempt,
+                        decision_kind="independent_review",
+                        role=ProviderRole.REVIEWER.value,
+                        selected_profile_id=profile.id,
+                        alternatives=[],
+                        inputs={},
+                        policy_revision=run.policy_revision,
+                    )
+                )
         return ReviewBudgetReservation(
             id=row.id,
             cost_units=estimate.cost_units,
@@ -390,6 +413,7 @@ class IndependentModelReviewer:
             _level = None
         profile: ProviderProfileConfig | None = None
         executor_profile_ids: set[str] = set()
+        account_failures: frozenset[str] = frozenset()
         if self._factory is not None:
             from vuzol.projects.executor_preference import ExecutorPreferenceError
             from vuzol.projects.model_matrix import (
@@ -446,6 +470,9 @@ class IndependentModelReviewer:
                     raise IndependentReviewError(
                         "pinned reviewer is unavailable or changed"
                     ) from error
+                account_failures = await unusable_accounts(
+                    session, self._registries.profiles.items(), datetime.now(UTC)
+                )
                 executor_profile_ids = set(
                     await session.scalars(
                         select(Step.executor_profile_id).where(
@@ -484,8 +511,6 @@ class IndependentModelReviewer:
             raise IndependentReviewError(
                 "no openai-compatible reviewer or planner profile is configured"
             )
-        if profile.id in executor_profile_ids:
-            raise IndependentReviewError("reviewer must differ from the actual executor profile")
         if self._factory is not None:
             pin = ModelAssignment(
                 profile_id=profile.id,
@@ -508,6 +533,30 @@ class IndependentModelReviewer:
                 if previous is not None and previous != pin:
                     raise IndependentReviewError("reviewer assignment changed before claim")
                 step.payload = {**step.payload, "independent_reviewer_pin": pin}
+                pinned_profile = profile
+                profile = usable_sibling(
+                    profile,
+                    self._registries.profiles.items(),
+                    unusable_accounts=account_failures,
+                    role=ProviderRole.REVIEWER,
+                    extra_check=lambda sibling: sibling.id not in executor_profile_ids,
+                )
+                if profile.id in executor_profile_ids:
+                    raise IndependentReviewError(
+                        "reviewer must differ from the actual executor profile"
+                    )
+                if profile.id != pinned_profile.id and step.payload.get("cli_reviewer_pin") == {
+                    "profile_id": pinned_profile.id,
+                    "profile_revision": content_revision(pinned_profile),
+                }:
+                    step.payload = {
+                        **step.payload,
+                        "cli_reviewer_pin": {
+                            "profile_id": profile.id,
+                            "profile_revision": content_revision(profile),
+                        },
+                    }
+                step.executor_profile_id = profile.id
         try:
             adapter = self._adapters.get(profile.id)
         except Exception as error:  # adapter registry raises LookupError/KeyError

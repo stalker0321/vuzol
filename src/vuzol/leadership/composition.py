@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vuzol.config.models import Capability, LaunchMode, ProviderProfileConfig
@@ -35,11 +34,11 @@ from vuzol.projects.executor_preference import (
     apply_profile_overrides,
 )
 from vuzol.projects.model_matrix import SLOT_ROLES, ModelAssignment, assignment_snapshot
+from vuzol.providers.account_pool import unusable_accounts, usable_sibling
 from vuzol.providers.catalog import supported_profile
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
-from vuzol.providers.subscription_limits import subscription_account_unusable
-from vuzol.storage.models import ProjectExecutorPreference, SubscriptionLimitSnapshotRow
+from vuzol.storage.models import ProjectExecutorPreference
 
 # Account or transport failures, not a bad plan: another planner may succeed.
 _FALLBACK_PLANNER_REASONS = frozenset(
@@ -222,29 +221,10 @@ class _TurnModels:
         states = self._account_states.get()
         if states is not None and states[0] == context.turn_id:
             return
-        accounts = {
-            profile.id: profile.account_id
-            for profile in self._profiles.items()
-            if profile.account_id is not None
-        }
-        rows = (
-            await session.scalars(
-                select(SubscriptionLimitSnapshotRow).where(
-                    SubscriptionLimitSnapshotRow.profile_id.in_(accounts)
-                )
-            )
-            if accounts
-            else ()
-        )
-        now = datetime.now(UTC)
         self._account_states.set(
             (
                 context.turn_id,
-                frozenset(
-                    accounts[row.profile_id]
-                    for row in rows
-                    if subscription_account_unusable(row, now=now)
-                ),
+                await unusable_accounts(session, self._profiles.items(), datetime.now(UTC)),
             )
         )
 
@@ -387,42 +367,19 @@ class _TurnModels:
             or profile.account_id not in states[1]
         ):
             return profile
-        # Live 2026-11-23: losing Go on one account stranded every pinned lead.
-        account_fields = {
-            field: getattr(profile, field)
-            for field in (
-                "id",
-                "account_id",
-                "account",
-                "api_base_url",
-                "credential_reference",
-                "runtime_identity",
-                "state_directory",
-            )
-        }
-        revision = assignment_revision(profile)
-        for sibling in sorted(
-            self._profiles.items(), key=lambda candidate: (candidate.routing_priority, candidate.id)
-        ):
-            if (
-                sibling.enabled
-                and sibling.account_pool == profile.account_pool
-                and sibling.account_id is not None
-                and sibling.account_id != profile.account_id
-                and sibling.account_id not in states[1]
-                and SLOT_ROLES[slot] in sibling.roles
-                and supported_profile(sibling)
-                and assignment_revision(sibling.model_copy(update=account_fields)) == revision
-                and (
-                    not research
-                    or (
-                        Capability.REPOSITORY_READ in sibling.capabilities
-                        and (sibling.launch_mode is not LaunchMode.CLI or sibling.sandbox_required)
-                    )
+        return usable_sibling(
+            profile,
+            self._profiles.items(),
+            unusable_accounts=states[1],
+            role=SLOT_ROLES[slot],
+            extra_check=lambda sibling: (
+                not research
+                or (
+                    Capability.REPOSITORY_READ in sibling.capabilities
+                    and (sibling.launch_mode is not LaunchMode.CLI or sibling.sandbox_required)
                 )
-            ):
-                return sibling
-        return profile
+            ),
+        )
 
     def _fallback(
         self, profile_id: str, slot: str

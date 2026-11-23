@@ -7,7 +7,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -39,6 +39,7 @@ from vuzol.storage.leasing import (
 from vuzol.storage.models import (
     AssistantEntry,
     ProjectDiscussionSession,
+    ProjectTaskQueueItem,
     TransactionalOutbox,
 )
 from vuzol.storage.types import DiscussionSessionStatus
@@ -50,6 +51,9 @@ _ATTEMPTS = 3
 _PAGES = 3
 _PAGE_CHARS = 6_000
 _GOAL_CHARS = 400
+# Ended goals the assistant sees per project, for «что по проектам?».
+_RECENT_GOALS = timedelta(days=7)
+_RECENT_GOAL_LIMIT = 3
 SEND_LABEL = "🚀 Отправить"
 EDIT_LABEL = "✏️ Изменить"
 
@@ -370,6 +374,27 @@ class AssistantWorker:
                     .order_by(ManagedGoal.created_at)
                 )
             }
+            ended: dict[str, list[ManagedGoal]] = {}
+            for goal in await session.scalars(
+                select(ManagedGoal)
+                .where(
+                    ManagedGoal.project_id.in_(list(refs)),
+                    ManagedGoal.lifecycle.not_in(LIVE_GOAL_LIFECYCLES),
+                    ManagedGoal.updated_at >= datetime.now(UTC) - _RECENT_GOALS,
+                )
+                .order_by(ManagedGoal.updated_at.desc())
+            ):
+                ended.setdefault(goal.project_id, []).append(goal)
+            queued: dict[str, list[str]] = {}
+            for item in await session.scalars(
+                select(ProjectTaskQueueItem)
+                .where(
+                    ProjectTaskQueueItem.project_id.in_(list(refs)),
+                    ProjectTaskQueueItem.state == "queued",
+                )
+                .order_by(ProjectTaskQueueItem.created_at)
+            ):
+                queued.setdefault(item.project_id, []).append(item.summary)
         history.reverse()
         # The burst since the last reply is the latest message; earlier turns are history.
         last_reply = max(
@@ -383,6 +408,11 @@ class AssistantWorker:
                     "project_id": ref.project_id,
                     "name": ref.name,
                     "live_goal": _goal_view(goals.get(ref.project_id)),
+                    "queued_tasks": queued.get(ref.project_id, []),
+                    "recent_goals": [
+                        _ended_view(goal)
+                        for goal in ended.get(ref.project_id, [])[:_RECENT_GOAL_LIMIT]
+                    ],
                 }
                 for ref in refs.values()
             ],
@@ -718,6 +748,17 @@ def _goal_view(goal: ManagedGoal | None) -> dict[str, Any] | None:
         "lifecycle": goal.lifecycle,
         "waiting_reason": goal.waiting_reason,
         "since": goal.created_at.date().isoformat(),
+        "updated": goal.updated_at.date().isoformat(),
+    }
+
+
+def _ended_view(goal: ManagedGoal) -> dict[str, Any]:
+    request = goal.original_request
+    return {
+        "request": request[:_GOAL_CHARS] + ("…" if len(request) > _GOAL_CHARS else ""),
+        "lifecycle": goal.lifecycle,
+        "reason": goal.waiting_reason,
+        "ended": goal.updated_at.date().isoformat(),
     }
 
 

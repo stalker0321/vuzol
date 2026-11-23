@@ -1,6 +1,7 @@
 """Owner 2026-11-02: a master topic that answers errands and hands tasks to project leads."""
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -16,7 +17,13 @@ from vuzol.assistant.service import EDIT_LABEL, SEND_LABEL, AssistantWorker, Pro
 from vuzol.config import Settings
 from vuzol.config.settings import AssistantSettings
 from vuzol.inbox.search import Hit
-from vuzol.storage.models import AssistantEntry, ProjectDiscussionSession, TransactionalOutbox
+from vuzol.leadership.persistence import GoalDelegation, ManagedGoal
+from vuzol.storage.models import (
+    AssistantEntry,
+    ProjectDiscussionSession,
+    ProjectTaskQueueItem,
+    TransactionalOutbox,
+)
 from vuzol.storage.repositories.discussion import DiscussionRepository
 from vuzol.storage.types import DiscussionSessionStatus
 from vuzol.telegram.durable_ingress import DurableTelegramIngress
@@ -500,3 +507,88 @@ async def test_each_voice_is_heard_and_echoed_before_the_answer(postgres_dsn):
             (2, "🎙 Расслышал: «вторая часть»\nЕсли не так — поправь текстом."),
             (2, "Понял."),
         ]
+
+
+async def test_an_overview_question_sees_each_projects_queue_and_recent_goals(postgres_dsn):
+    """Owner 2026-11-23: a project overview needs more than the live goal."""
+
+    now = datetime.now(UTC)
+    async with _factory(postgres_dsn) as factory:
+        await sessions(factory)
+        async with factory.begin() as session:
+            discussion = {
+                row.project_id: row.id
+                for row in await session.scalars(select(ProjectDiscussionSession))
+            }
+            delegation = GoalDelegation(
+                project_id="diplom",
+                owner_user_id=OWNER,
+                agent_principal_id="agent:lead-diplom",
+                policy_revision="p1",
+                integration_branch="vuzol/goal",
+            )
+            session.add(delegation)
+            await session.flush()
+
+            def goal(request, lifecycle, age, **extra):
+                return ManagedGoal(
+                    project_id="diplom",
+                    owner_user_id=OWNER,
+                    discussion_session_id=discussion["diplom"],
+                    delegation_id=delegation.id,
+                    original_request=request,
+                    scope_text=request,
+                    integration_branch="vuzol/goal",
+                    lifecycle=lifecycle,
+                    created_at=now - age,
+                    updated_at=now - age,
+                    **extra,
+                )
+
+            live = goal("Глава 2", "waiting", timedelta(days=2), waiting_reason="owner_approval")
+            session.add_all(
+                [
+                    live,
+                    goal("Введение", "completed", timedelta(days=3)),
+                    goal(
+                        "Черновик",
+                        "cancelled",
+                        timedelta(days=1),
+                        waiting_reason="closed_by_owner",
+                    ),
+                    goal("Старое", "completed", timedelta(days=30)),
+                ]
+            )
+            await session.flush()
+            session.add(
+                ProjectTaskQueueItem(
+                    project_id="diplom",
+                    owner_user_id=OWNER,
+                    discussion_session_id=discussion["diplom"],
+                    source_event_id=uuid.uuid4(),
+                    body={},
+                    summary="Список литературы",
+                    queued_by_goal_id=live.id,
+                )
+            )
+        await admit(factory, topic(1, "что у нас по проектам?"))
+        model = FakeModel(Turn(reply="Диплом ждёт тебя."))
+        worker, _, _ = worker_for(factory, model)
+        await drain(worker)
+
+        diplom, site = model.calls[0]["projects"]
+        assert diplom["live_goal"]["request"] == "Глава 2"
+        assert diplom["live_goal"]["updated"] == (now - timedelta(days=2)).date().isoformat()
+        assert diplom["queued_tasks"] == ["Список литературы"]
+        assert [(g["request"], g["lifecycle"]) for g in diplom["recent_goals"]] == [
+            ("Черновик", "cancelled"),
+            ("Введение", "completed"),
+        ]
+        assert diplom["recent_goals"][0]["ended"] == (now - timedelta(days=1)).date().isoformat()
+        assert site == {
+            "project_id": "site",
+            "name": "Сайт",
+            "live_goal": None,
+            "queued_tasks": [],
+            "recent_goals": [],
+        }

@@ -126,8 +126,8 @@ class GoogleAccount:
             raise GoogleError(f"calendar_insert_{response.status_code}")
         return True
 
-    async def mail(self, query: str) -> list[dict[str, Any]]:
-        listed = await self._call("GET", _GMAIL, params={"q": query, "maxResults": _MAIL_RESULTS})
+    async def mail(self, query: str, *, limit: int = _MAIL_RESULTS) -> list[dict[str, Any]]:
+        listed = await self._call("GET", _GMAIL, params={"q": query, "maxResults": limit})
         if listed.status_code != 200:
             raise GoogleError(f"gmail_{listed.status_code}")
         found = []
@@ -141,6 +141,7 @@ class GoogleAccount:
             }
             found.append(
                 {
+                    "id": ref["id"],
                     "from": headers.get("from"),
                     "subject": headers.get("subject"),
                     "date": headers.get("date"),

@@ -19,13 +19,26 @@ from telegram.error import BadRequest, NetworkError, TimedOut
 from vuzol.assistant import ASSISTANT_DESTINATION
 from vuzol.assistant.google import GoogleAccount, GoogleError
 from vuzol.assistant.ingress import schedule
+from vuzol.assistant.mail import (
+    MAIL_CATCH_UP_HOURS,
+    MAIL_CHECK_KEY,
+    MAIL_LIMIT,
+    MAIL_PROMPT,
+    MailOffers,
+    Offer,
+    mail_query,
+    mail_view,
+    quiet,
+)
 from vuzol.assistant.research import Researcher, look_up
 from vuzol.assistant.schemas import (
     GOOGLE_TOOLS,
     RESEARCH_LOOKUP,
     SEARCH_LOOKUP,
     TURN_PROMPT,
+    NewEvent,
     Note,
+    Reminder,
     Turn,
 )
 from vuzol.config.settings import AssistantSettings
@@ -66,6 +79,9 @@ _GOAL_CHARS = 400
 _RECENT_GOALS = timedelta(days=7)
 _RECENT_GOAL_LIMIT = 3
 _REMINDER_KEY = "assistant:remind:"
+# Mail newer than this is left for the next check: Gmail may not have indexed it yet.
+_MAIL_SETTLE = timedelta(minutes=2)
+_OFFER_ICONS = {"event": "📅", "remind": "⏰"}
 SEND_LABEL = "🚀 Отправить"
 EDIT_LABEL = "✏️ Изменить"
 
@@ -165,6 +181,7 @@ class AssistantWorker:
         researcher: Researcher | None = None,
         create_topic: TopicCreator | None = None,
         google: GoogleAccount | None = None,
+        mail_model: InboxModel | ModelChain | None = None,
         owner: str = "assistant",
     ) -> None:
         self._factory = factory
@@ -182,6 +199,7 @@ class AssistantWorker:
         self._researcher = researcher
         self._create_topic = create_topic
         self._google = google
+        self._mail_model = mail_model
         self._owner = f"assistant:{owner}"
 
     async def process_one(self) -> bool:
@@ -215,6 +233,8 @@ class AssistantWorker:
                 await self._project_failed(payload)
             elif operation == "reply":
                 await self._reply(payload)
+            elif operation == "mail_check":
+                await self._mail_check(payload)
             else:
                 raise ValueError(f"unknown assistant operation {operation}")
         except LostTelegramResponse:
@@ -579,44 +599,13 @@ class AssistantWorker:
                     delete(TransactionalOutbox).where(TransactionalOutbox.id == item.id)
                 )
         for index, reminder in enumerate(turn.remind):
-            if reminder.at <= now:
-                lines.append(f"⚠️ Время уже прошло, не ставлю: {reminder.text}")
-                continue
-            await schedule(
-                session,
-                operation="reply",
-                key=f"{_REMINDER_KEY}{entry.id}:{index}",
-                payload={
-                    "chat_id": entry.chat_id,
-                    "thread_id": entry.message_thread_id,
-                    "html": escape(f"⏰ Напоминаю: {reminder.text}"),
-                    "text": reminder.text,
-                    "reply_to": None,
-                    "buttons": [],
-                },
-                delay=(reminder.at - now).total_seconds(),
-            )
-            when = reminder.at.astimezone(self._tz()).strftime("%d.%m %H:%M")
-            lines.append(f"⏰ Напомню {when}: {reminder.text}")
+            lines.append(await self._remind(session, entry, reminder, f"{entry.id}:{index}", now))
         for index, event in enumerate(turn.add_events):
             if self._google is None:
                 lines.append("⚠️ Календарь не подключён, событие не добавлено.")
                 break
-            try:
-                # Google ids are base32hex; the turn's id keeps a retried turn from adding it twice.
-                await self._google.add_event(
-                    f"{entry.id.hex}{index}",
-                    title=event.title,
-                    start=event.start,
-                    end=event.end or event.start + timedelta(hours=1),
-                    location=event.location,
-                    description=event.description,
-                )
-            except GoogleError:
-                lines.append(f"⚠️ Не получилось добавить в календарь: {event.title}")
-                continue
-            when = event.start.astimezone(self._tz()).strftime("%d.%m %H:%M")
-            lines.append(f"📅 Добавил в календарь {when}: {event.title}")
+            # Google ids are base32hex; the turn's id keeps a retried turn from adding it twice.
+            lines.append(await self._add_event(f"{entry.id.hex}{index}", event))
         if turn.save:
             kinds = set(await session.scalars(select(InboxCategory.slug)))
             for note in turn.save:
@@ -624,12 +613,227 @@ class AssistantWorker:
             lines.append("📝 Сохранил: " + ", ".join(note.title for note in turn.save))
         return lines
 
+    async def _remind(
+        self,
+        session: AsyncSession,
+        entry: AssistantEntry,
+        reminder: Reminder,
+        key: str,
+        now: datetime,
+    ) -> str:
+        if reminder.at <= now:
+            return f"⚠️ Время уже прошло, не ставлю: {reminder.text}"
+        await schedule(
+            session,
+            operation="reply",
+            key=f"{_REMINDER_KEY}{key}",
+            payload={
+                "chat_id": entry.chat_id,
+                "thread_id": entry.message_thread_id,
+                "html": escape(f"⏰ Напоминаю: {reminder.text}"),
+                "text": reminder.text,
+                "reply_to": None,
+                "buttons": [],
+            },
+            delay=(reminder.at - now).total_seconds(),
+        )
+        when = reminder.at.astimezone(self._tz()).strftime("%d.%m %H:%M")
+        return f"⏰ Напомню {when}: {reminder.text}"
+
+    async def _add_event(self, event_id: str, event: NewEvent) -> str:
+        assert self._google is not None
+        try:
+            await self._google.add_event(
+                event_id,
+                title=event.title,
+                start=event.start,
+                end=event.end or event.start + timedelta(hours=1),
+                location=event.location,
+                description=event.description,
+            )
+        except GoogleError:
+            return f"⚠️ Не получилось добавить в календарь: {event.title}"
+        when = event.start.astimezone(self._tz()).strftime("%d.%m %H:%M")
+        return f"📅 Добавил в календарь {when}: {event.title}"
+
     def _tz(self) -> ZoneInfo:
         return ZoneInfo(self._settings.timezone)
 
+    async def start_mail_watch(self) -> None:
+        """Start the hourly mail check unless one is already scheduled."""
+        if self._google is None or self._mail_model is None:
+            return
+        async with self._factory.begin() as session:
+            scheduled = await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.idempotency_key.startswith(MAIL_CHECK_KEY),
+                    TransactionalOutbox.status.in_((DeliveryStatus.PENDING, DeliveryStatus.LEASED)),
+                )
+            )
+            if scheduled is None:
+                since = datetime.now(UTC) - timedelta(minutes=self._settings.mail_check_minutes)
+                await self._next_mail_check(session, since, delay=0)
+
+    async def _next_mail_check(self, session: AsyncSession, since: datetime, delay: float) -> None:
+        due = datetime.now(UTC) + timedelta(seconds=delay)
+        await schedule(
+            session,
+            operation="mail_check",
+            key=f"{MAIL_CHECK_KEY}{due:%Y-%m-%dT%H:%M}",
+            payload={"since": since.isoformat()},
+            delay=delay,
+        )
+
+    async def _mail_check(self, payload: dict[str, Any]) -> None:
+        """Read the mail since the last check, offer what it needs, schedule the next check.
+
+        A failed or quiet-hours check keeps its start, so the next one reads that mail too.
+        """
+        if self._google is None or self._mail_model is None:
+            return  # The watch was switched off; the chain ends here.
+        now = datetime.now(UTC)
+        until = now - _MAIL_SETTLE
+        since = max(
+            datetime.fromisoformat(payload["since"]), now - timedelta(hours=MAIL_CATCH_UP_HOURS)
+        )
+        offers: list[Offer] = []
+        read = False
+        if not quiet(now.astimezone(self._tz()).hour, self._settings.mail_quiet_hours):
+            try:
+                offers = await self._mail_offers(since, until)
+                read = True
+            except Exception as failure:  # Google or the model is down: the next check retries.
+                _LOG.warning(
+                    "assistant mail check failed",
+                    extra={"event": "assistant.mail_failed", "error": type(failure).__name__},
+                )
+        async with self._factory.begin() as session:
+            if offers:
+                await self._offer(session, offers, key=f"assistant:offers:{since.isoformat()}")
+            await self._next_mail_check(
+                session, until if read else since, delay=self._settings.mail_check_minutes * 60
+            )
+
+    async def _mail_offers(self, since: datetime, until: datetime) -> list[Offer]:
+        assert self._google is not None and self._mail_model is not None
+        if until <= since:
+            return []
+        messages = await self._google.mail(mail_query(since, until), limit=MAIL_LIMIT)
+        if not messages:
+            return []
+        today = until.astimezone(self._tz()).date()
+        calendar = await self._google.events(today, today + timedelta(days=62))
+        answer = await self._mail_model.ask(
+            MailOffers,
+            system=MAIL_PROMPT.format(
+                tz=self._settings.timezone,
+                now=until.astimezone(self._tz()).isoformat(timespec="minutes"),
+            ),
+            user=json.dumps(
+                {
+                    "mail": mail_view(messages),
+                    "calendar": [{"title": e["title"], "start": e["start"]} for e in calendar],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return [
+            offer
+            for offer in answer.offers
+            if offer.kind == "notice"
+            or (offer.kind == "event" and offer.event is not None)
+            or (offer.kind == "remind" and offer.remind is not None and offer.remind.at > until)
+        ]
+
+    async def _offer(self, session: AsyncSession, offers: list[Offer], key: str) -> None:
+        if await session.scalar(
+            select(TransactionalOutbox.id).where(TransactionalOutbox.idempotency_key == key)
+        ):
+            return  # A retried check that already offered.
+        chat_id, thread_id = self._settings.chat_id, self._settings.message_thread_id
+        assert chat_id is not None and thread_id is not None
+        body = "📬 Из почты:\n" + "\n".join(f"• {offer.text}" for offer in offers)
+        entry = AssistantEntry(
+            id=uuid.uuid4(),
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            role="assistant",
+            body=body,
+            dispatches=[],
+            offers=[{**offer.model_dump(mode="json"), "state": "open"} for offer in offers],
+        )
+        session.add(entry)
+        await session.flush()
+        buttons: Buttons = [
+            [[f"{_OFFER_ICONS[offer.kind]} {offer.label}", f"as:m{index}:{entry.id.hex}"]]
+            for index, offer in enumerate(offers)
+            if offer.kind in _OFFER_ICONS
+        ]
+        if buttons:
+            buttons.append([["🙅 Не надо", f"as:x:{entry.id.hex}"]])
+        await schedule(
+            session,
+            operation="reply",
+            key=key,
+            payload={
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "html": "<b>📬 Из почты</b>\n"
+                + "\n".join(f"• {escape(offer.text)}" for offer in offers),
+                "reply_to": None,
+                "buttons": buttons,
+                "entry_id": str(entry.id),
+            },
+        )
+
+    async def _take_offer(self, entry_id: uuid.UUID, action: str) -> None:
+        async with self._factory.begin() as session:
+            entry = await session.get(AssistantEntry, entry_id, with_for_update=True)
+            if entry is None or not entry.offers:
+                return
+            offers = [dict(offer) for offer in entry.offers]
+            if action == "x":
+                for offer in offers:
+                    if offer["state"] == "open":
+                        offer["state"] = "dismissed"
+            else:
+                index = int(action[1:])
+                if index >= len(offers) or offers[index]["state"] != "open":
+                    await self._say(session, entry, "Это уже сделано.", key="offer")
+                    return
+                taken = Offer.model_validate(offers[index])
+                if taken.event is not None:
+                    if self._google is None:
+                        line = "⚠️ Календарь не подключён, событие не добавлено."
+                    else:
+                        line = await self._add_event(f"{entry.id.hex}m{index}", taken.event)
+                elif taken.remind is not None:
+                    line = await self._remind(
+                        session, entry, taken.remind, f"{entry.id}:m{index}", datetime.now(UTC)
+                    )
+                else:
+                    return
+                if line.startswith("⚠️"):
+                    await self._say(session, entry, line, key="offer")
+                    return
+                offers[index]["state"] = "done"
+                await self._say(session, entry, line, key="offer")
+            entry.offers = offers
+            actionable = [o for o in offers if o["kind"] in _OFFER_ICONS and o["state"] == "open"]
+            if not actionable and entry.telegram_message_id is not None:
+                await schedule(
+                    session,
+                    operation="reply",
+                    key=f"assistant:clear:{entry.id}",
+                    payload={"clear": entry.telegram_message_id, "chat_id": entry.chat_id},
+                )
+
     async def _button(self, payload: dict[str, Any]) -> None:
         entry_id = uuid.UUID(payload["entry_id"])
-        if payload["action"] == "e":
+        action = payload["action"]
+        if action == "x" or action.startswith("m"):
+            await self._take_offer(entry_id, action)
+        elif action == "e":
             await self._edit(entry_id)
         else:
             await self._send_plan(entry_id, int(payload["user_id"]))
@@ -928,4 +1132,6 @@ def _entry_view(entry: AssistantEntry) -> dict[str, Any]:
     if entry.dispatches:
         view["plan"] = entry.dispatches
         view["plan_status"] = entry.plan_status
+    if entry.offers:
+        view["offers"] = [{"text": o["text"], "state": o["state"]} for o in entry.offers]
     return view

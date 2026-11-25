@@ -748,6 +748,12 @@ class AssistantSettings(BaseModel):
     # Owner 2026-11-23: the owner's Google Calendar and Gmail (read-only), from the token
     # file vuzol.cli.google_login writes. Unset or missing file: no calendar, no mail.
     google_token_path: Path | None = None
+    # Owner 2026-11-25: a cheap model reads new mail every hour and offers what to do with it
+    # (an event to add, a reminder before a renewal). Empty: mail is read only when asked.
+    mail_profile_ids: tuple[str, ...] = ()
+    mail_check_minutes: int = Field(default=60, ge=15, le=1440)
+    # Local hours [start, end) without checks; the first check after them reads the night.
+    mail_quiet_hours: tuple[int, int] = (23, 8)
 
     @field_validator("google_token_path", mode="before")
     @classmethod

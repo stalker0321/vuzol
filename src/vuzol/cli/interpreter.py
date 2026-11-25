@@ -340,6 +340,20 @@ def build_assistant_worker(
             if config.google_token_path is not None and config.google_token_path.exists()
             else None
         ),
+        mail_model=(
+            build_model_chain(
+                runtime,
+                resolver,
+                profile_id=config.mail_profile_ids[0],
+                fallback_profile_ids=config.mail_profile_ids[1:],
+                org_ids=config.opencode_org_ids,
+                timeout_seconds=config.timeout_seconds,
+                factory=factory,
+                purpose="assistant_mail",
+            )
+            if config.mail_profile_ids
+            else None
+        ),
         owner=owner,
     )
 
@@ -599,6 +613,7 @@ async def run() -> None:
                     transcriber,
                     owner,
                 )
+                await assistant.start_mail_watch()
                 loops.append(
                     asyncio.create_task(
                         _poll(assistant.process_one, stop_event, config.poll_interval_seconds)

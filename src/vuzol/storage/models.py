@@ -2266,6 +2266,8 @@ class AssistantEntry(IdentityMixin, Base):
     plan_status: Mapped[str | None] = mapped_column(String(12))
     # A project the plan creates: the proposal, then its topic and setup state.
     new_project: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # What the assistant proposes from new mail (an event, a reminder), each done on a button.
+    offers: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

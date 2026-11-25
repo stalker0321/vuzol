@@ -82,6 +82,8 @@ async def test_unsupported_provider_is_visible_as_unknown_not_full() -> None:
     assert snapshots[0].detail == "collector_not_supported"
     text = "\n".join(format_subscription_limits_html(snapshots, html_escape=telegram_html))
     assert "нет сборщика лимитов" in text
+    # Owner 2026-11-25: a Pi account is an OpenCode Go one, like those whose limits are read.
+    assert "OpenCode · <code>pi-b</code>" in text
 
 
 def test_visibility_is_not_an_execution_policy_revision() -> None:

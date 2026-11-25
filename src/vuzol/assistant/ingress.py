@@ -21,8 +21,9 @@ from vuzol.storage.types import DeliveryStatus
 
 # A few seconds for a second message to join the first before the assistant answers.
 SETTLE_SECONDS = 2.0
-_BUTTON = re.compile(r"^as:([se]):([0-9a-f]{32})$")
-_BUTTON_NOTES = {"s": "🚀 Отправляю…", "e": "✏️ Жду правку"}
+# s/e: send or edit a plan; m<n>/x: take an offer from mail, or none of them.
+_BUTTON = re.compile(r"^as:([sex]|m\d):([0-9a-f]{32})$")
+_BUTTON_NOTES = {"s": "🚀 Отправляю…", "e": "✏️ Жду правку", "m": "👌", "x": "Ок, пропускаю"}
 
 
 def is_assistant_update(update: Update, settings: Settings) -> bool:
@@ -111,7 +112,7 @@ async def _accept_button(
             },
         )
     with suppress(TelegramError):
-        await query.answer(text=_BUTTON_NOTES[match.group(1)])
+        await query.answer(text=_BUTTON_NOTES[match.group(1)[0]])
     return True
 
 

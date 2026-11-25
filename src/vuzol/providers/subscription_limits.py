@@ -855,6 +855,9 @@ def _company_and_default_plan(provider: str) -> tuple[str, str]:
         return "OpenAI", "тариф неизвестен"
     if provider == "grok":
         return "xAI", "тариф неизвестен"
+    if provider == "pi":
+        # Owner 2026-11-25: every Go account reads «OpenCode», whether its limits are read or not.
+        return "OpenCode", "тариф неизвестен"
     return provider, "тариф неизвестен"
 
 

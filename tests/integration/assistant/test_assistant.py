@@ -149,8 +149,9 @@ async def drain(worker):
                 update(TransactionalOutbox)
                 .where(
                     TransactionalOutbox.destination == "assistant",
-                    # Reminders wait for their time.
+                    # Reminders wait for their time; the next mail check for its hour.
                     TransactionalOutbox.idempotency_key.not_like("assistant:remind:%"),
+                    TransactionalOutbox.idempotency_key.not_like("assistant:mailcheck:%"),
                 )
                 .values(available_at=datetime.now(UTC) - timedelta(seconds=1))
             )
@@ -698,7 +699,7 @@ class FakeGoogle:
     async def events(self, start, end):
         return [{"title": f"Стоматолог {start.isoformat()}", "start": "10:00"}]
 
-    async def mail(self, query):
+    async def mail(self, query, *, limit=6):
         return [{"from": "KLM", "subject": f"Билет ({query})", "text": "рейс KL1234"}]
 
     async def add_event(self, event_id, **event):

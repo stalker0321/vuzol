@@ -184,10 +184,14 @@ def test_discovered_exports_publish_where_the_card_looks(tmp_path, monkeypatch):
         "collect",
         lambda self, account: GoUsage(datetime.now(UTC), detail="usage_unavailable"),
     )
-    with pytest.raises(SystemExit) as done:
-        opencode_usage_export.main()
+    mask = os.umask(0o077)  # the unit's
+    try:
+        with pytest.raises(SystemExit) as done:
+            opencode_usage_export.main()
+    finally:
+        os.umask(mask)
     assert done.value.code == 2  # the measurement failed, the export did not
     directory = setup.usage_root / "opencode-go-a"
-    assert directory.stat().st_mode & 0o7777 == 0o2750
+    assert directory.stat().st_mode & 0o777 == 0o750
     (binding,) = discovered_bindings(setup.usage_root)
     assert binding.scope_id == "opencode:organization:org-1:account:user-1"

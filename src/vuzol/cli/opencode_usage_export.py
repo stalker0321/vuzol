@@ -316,9 +316,13 @@ def main() -> None:
         for config in configs:
             directory = config.output.path.parent
             if not directory.exists():
-                # The group comes from usage_root's setgid; the unit's umask would hide it.
-                directory.mkdir()
-                directory.chmod(0o2750)
+                # Group and setgid come from usage_root. Not chmod: for an owner outside the
+                # group the kernel drops setgid, and the files would lose the group.
+                mask = os.umask(0o027)
+                try:
+                    directory.mkdir(mode=0o750)
+                finally:
+                    os.umask(mask)
             snapshot = export_once(config, verify_cli=args.verify_cli)
             _report(snapshot)
             failed = failed or bool(snapshot.detail)

@@ -2342,6 +2342,14 @@ class MonitorEvent(IdentityMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text)
     reason: Mapped[str | None] = mapped_column(Text)
     digested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Owner 2026-11-25: what it offers and why it matters, behind «подробнее».
+    details: Mapped[str | None] = mapped_column(Text)
+    # like | dislike, from the buttons under the news; both teach the classifier.
+    feedback: Mapped[str | None] = mapped_column(String(8))
+    saved: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    message_id: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class MonitorSourceFetch(Base):

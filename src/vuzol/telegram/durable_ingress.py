@@ -12,6 +12,7 @@ from telegram import Bot, Update
 from vuzol.assistant.ingress import accept_assistant_update, is_assistant_update
 from vuzol.config import Settings
 from vuzol.inbox.ingress import accept_inbox_update, is_inbox_update
+from vuzol.monitor.feedback import accept_monitor_update, is_monitor_update
 from vuzol.storage.errors import LeaseLost
 from vuzol.storage.leasing import (
     claim_outbox_item,
@@ -135,6 +136,14 @@ class DurableTelegramIngress:
                 is_assistant_update(update, self._settings)
                 and await asyncio.wait_for(
                     accept_assistant_update(self._factory, self._settings, update),
+                    timeout=self._processing_seconds,
+                )
+            )
+            # Verdicts on news in the monitor topic.
+            handled = handled or (
+                is_monitor_update(update, self._settings)
+                and await asyncio.wait_for(
+                    accept_monitor_update(self._factory, self._settings, update),
                     timeout=self._processing_seconds,
                 )
             )

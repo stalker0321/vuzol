@@ -640,6 +640,9 @@ class MonitorSettings(BaseModel):
     interests: tuple[str, ...] = ()
     digest_hours: tuple[Annotated[int, Field(ge=0, le=23)], ...] = (9, 21)
     sources: tuple[MonitorSource, ...] = ()
+    # Owner 2026-11-25: fewer, better news; each one its own message.
+    threshold: float = Field(default=0.7, ge=0, le=1)
+    max_items: int = Field(default=5, ge=1, le=15)
 
     @field_validator("chat_id", "message_thread_id", mode="before")
     @classmethod

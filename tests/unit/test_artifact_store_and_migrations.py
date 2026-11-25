@@ -38,7 +38,7 @@ def test_migration_chain_has_single_head() -> None:
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
     # The inbox catalog follows the existing migration chain.
-    assert heads == ["c7a9e1b3d544"]  # pragma: allowlist secret - migration identifier
+    assert heads == ["e5f9a2b3c4d6"]  # pragma: allowlist secret - migration identifier
     seen: set[str] = set()
     revision: str | None = heads[0]
     while revision is not None:

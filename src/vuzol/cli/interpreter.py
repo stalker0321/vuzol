@@ -435,22 +435,19 @@ def build_monitor_worker(
     config = runtime.settings.monitor
     first, *rest = config.profile_ids
     assistant = runtime.settings.assistant
-    client = PythonTelegramClient(bot)
 
-    async def send(*, chat_id: int, thread_id: int, html: str) -> int:
+    async def send(
+        *, chat_id: int, thread_id: int, html: str, buttons: list[list[list[str]]]
+    ) -> int:
         message = await bot.send_message(
             chat_id=chat_id,
             message_thread_id=thread_id,
             text=html,
             parse_mode=ParseMode.HTML,
+            reply_markup=_markup(buttons),
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return message.message_id
-
-    async def send_rich(*, chat_id: int, thread_id: int, html: str) -> int:
-        return await client.send_rich_message(
-            chat_id=chat_id, thread_id=thread_id, html=html, reply_to=None
-        )
 
     return MonitorWorker(
         factory,
@@ -467,7 +464,6 @@ def build_monitor_worker(
         ),
         timezone=assistant.timezone,
         send=send,
-        send_rich=send_rich,
     )
 
 

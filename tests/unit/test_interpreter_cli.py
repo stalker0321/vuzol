@@ -158,7 +158,9 @@ def test_interpreter_runtime_composes_and_stops_cleanly(
     )
     monitor_builder = Mock(return_value=Mock(process_one=AsyncMock(return_value=False)))
     monkeypatch.setattr(interpreter_cli, "build_monitor_worker", monitor_builder)
-    assistant_builder = Mock(return_value=Mock(process_one=AsyncMock(return_value=False)))
+    assistant_builder = Mock(
+        return_value=Mock(process_one=AsyncMock(return_value=False), start_mail_watch=AsyncMock())
+    )
     inbox_builder = Mock(return_value=Mock(process_one=AsyncMock(return_value=False)))
     monkeypatch.setattr(interpreter_cli, "build_assistant_worker", assistant_builder)
     monkeypatch.setattr(interpreter_cli, "build_inbox_worker", inbox_builder)
@@ -206,6 +208,8 @@ def test_interpreter_runtime_composes_and_stops_cleanly(
     assert engine.disposed
     assert monitor_builder.call_count == int(monitor_enabled)
     assert assistant_builder.call_count == int(assistant_enabled)
+    if assistant_enabled:
+        assistant_builder.return_value.start_mail_watch.assert_awaited_once()
     assert inbox_builder.call_count == int(inbox_enabled)
 
 
@@ -473,10 +477,11 @@ async def test_monitor_builder_uses_model_chain_and_monitor_topic(tmp_path, monk
     assert calls[0]["profile_id"] == "interpreter"
     assert calls[0]["fallback_profile_ids"] == ("spare",)
     assert calls[0]["purpose"] == "monitor_classification"
-    assert await worker._send(chat_id=-100, thread_id=7, html="Текст") == 12
-    assert bot.send_message.await_args.kwargs["message_thread_id"] == 7
-    assert await worker._send_rich(chat_id=-100, thread_id=7, html="<p>Текст</p>") == 17
-    assert bot.do_api_request.await_args.kwargs["api_kwargs"]["message_thread_id"] == 7
+    buttons = [[["👍", "mn:l:x"]]]
+    assert await worker._send(chat_id=-100, thread_id=7, html="Текст", buttons=buttons) == 12
+    sent = bot.send_message.await_args.kwargs
+    assert sent["message_thread_id"] == 7
+    assert sent["reply_markup"].inline_keyboard[0][0].callback_data == "mn:l:x"
 
 
 @pytest.mark.parametrize("builder", ["build_inbox_model", "build_profile_transcriber"])

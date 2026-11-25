@@ -26,7 +26,7 @@ def healthy_host(**changes: object) -> HostFacts:
         "disk_used_percent": 60.0,
         "services": {"vuzol-executor.service": UnitState("active")},
         "backup": BACKED_UP,
-        "usage_snapshot": FRESH_USAGE,
+        "usage_snapshots": {"opencode-go-a": FRESH_USAGE},
     }
     values.update(changes)
     return HostFacts(**values)  # type: ignore[arg-type]
@@ -61,14 +61,21 @@ def test_a_healthy_system_says_so_in_one_quiet_line() -> None:
             Finding("fail", "Бэкапа не было 3 д"),
         ),
         (
-            healthy_host(usage_snapshot={"generated_at": "2026-11-09T06:00:00Z"}),
-            Finding("warn", "Учёт лимитов OpenCode не обновляется"),
+            healthy_host(
+                usage_snapshots={"opencode-go-a": {"generated_at": "2026-11-09T06:00:00Z"}}
+            ),
+            Finding("warn", "Учёт лимитов OpenCode opencode-go-a не обновляется"),
         ),
         (
             healthy_host(
-                usage_snapshot={**FRESH_USAGE, "windows": [{"id": "monthly", "used_percent": 91}]}
+                usage_snapshots={
+                    "opencode-go-c": {
+                        **FRESH_USAGE,
+                        "windows": [{"id": "monthly", "used_percent": 91}],
+                    }
+                }
             ),
-            Finding("warn", "OpenCode, окно monthly: 91%"),
+            Finding("warn", "OpenCode opencode-go-c, окно monthly: 91%"),
         ),
     ],
 )
@@ -142,18 +149,20 @@ def test_host_facts_read_systemd_and_the_usage_file(monkeypatch, tmp_path) -> No
         return SimpleNamespace(stdout=output)
 
     monkeypatch.setattr("vuzol.ops.health_report.subprocess.run", show)
-    usage = tmp_path / "usage.json"
-    usage.write_text('{"generated_at": "2026-11-09T07:59:00Z"}')
-    facts = health_report.host_facts(services=("svc",), backup_unit="backup", usage_file=usage)
+    for account, text in (
+        ("opencode-go-a", '{"generated_at": "2026-11-09T07:59:00Z"}'),
+        ("opencode-go-c", "{"),
+    ):
+        (tmp_path / account).mkdir()
+        (tmp_path / account / "usage.json").write_text(text)
+    facts = health_report.host_facts(services=("svc",), backup_unit="backup", usage_dir=tmp_path)
     assert facts.disk_used_percent == 75.0
     assert facts.services == {"svc": UnitState("active", restarts=1)}
     assert facts.backup is not None and facts.backup.last_exit is not None
-    assert facts.usage_snapshot == {"generated_at": "2026-11-09T07:59:00Z"}
-    broken = tmp_path / "broken.json"
-    broken.write_text("{")
+    assert facts.usage_snapshots == {
+        "opencode-go-a": {"generated_at": "2026-11-09T07:59:00Z"},
+        "opencode-go-c": {},
+    }
     assert (
-        health_report.host_facts(
-            services=(), backup_unit="backup", usage_file=broken
-        ).usage_snapshot
-        == {}
+        health_report.host_facts(services=(), backup_unit="b", usage_dir=None).usage_snapshots == {}
     )

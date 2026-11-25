@@ -1,4 +1,10 @@
-"""One usage export tick. The official OpenCode CLI alone rotates OAuth tokens."""
+"""One usage export tick. The official OpenCode CLI alone rotates OAuth tokens.
+
+Owner 2026-11-25: limits of every OpenCode Go account are read without per-account
+setup. ``--setup`` finds each Pi account of the registry whose console login lives in
+``accounts_root/<account_id>`` and writes ``usage_root/<account_id>/usage.json``; a new
+account needs only its login (``vuzol.cli.opencode_owner --account <id> -- console login``).
+"""
 
 from __future__ import annotations
 
@@ -17,11 +23,17 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from vuzol.config.models import AccountConfig
+from vuzol.config.loader import load_document
+from vuzol.config.models import AccountConfig, LaunchMode, OpenCodeUsageOAuthConfig
+from vuzol.config.registries import ProfileRegistry
 from vuzol.config.settings import OpenCodeSnapshotBinding
 from vuzol.providers.account_auth import AccountAuthError
 from vuzol.providers.opencode_oauth import read_go_oauth
-from vuzol.providers.opencode_snapshot import UsageSnapshot, publish_usage_snapshot
+from vuzol.providers.opencode_snapshot import (
+    UsageSnapshot,
+    execution_binding,
+    publish_usage_snapshot,
+)
 from vuzol.providers.opencode_usage import GoUsage, OpenCodeUsageCollector
 
 
@@ -57,6 +69,97 @@ class ExportConfig(BaseModel):
         return self
 
 
+class Setup(BaseModel):
+    """Where account logins and usage snapshots live; nothing per account."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    registry: Path
+    accounts_root: Path
+    usage_root: Path
+    cli_binary: Path
+    cli_version: str
+    owner_launcher: Path | None = None
+    owner_launcher_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+def login_root(setup: Setup, account_id: str) -> Path:
+    return setup.accounts_root / account_id
+
+
+def store_identity(store: Path) -> tuple[str, str] | None:
+    """The one console account of a login store and its active org, or None."""
+    try:
+        with closing(sqlite3.connect(store.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as db:
+            accounts = db.execute("SELECT id FROM account LIMIT 2").fetchall()
+            state = db.execute(
+                "SELECT active_account_id, active_org_id FROM account_state LIMIT 2"
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    if len(accounts) != 1 or len(state) != 1 or state[0][0] != accounts[0][0] or not state[0][1]:
+        return None
+    return str(accounts[0][0]), str(state[0][1])
+
+
+def discover(setup: Setup) -> list[ExportConfig]:
+    """An export for every enabled Pi account of the registry that has a console login."""
+    configs: list[ExportConfig] = []
+    seen: set[str] = set()
+    for profile in ProfileRegistry(load_document(setup.registry).profiles).items():
+        account_id = profile.account_id
+        if (
+            account_id is None
+            or account_id in seen
+            or not profile.enabled
+            or profile.provider != "pi"
+            or profile.launch_mode is not LaunchMode.CLI
+            or profile.state_directory is None
+            or profile.runtime_identity is None
+        ):
+            continue
+        root = login_root(setup, account_id)
+        store = root / "data/opencode/opencode.db"
+        identity = store_identity(store) if store.is_file() else None
+        if identity is None:
+            continue
+        seen.add(account_id)
+        oauth = OpenCodeUsageOAuthConfig(
+            store_path=store, store_format="account_v1", account_id=identity[0], org_id=identity[1]
+        )
+        configs.append(
+            ExportConfig(
+                account=AccountConfig(
+                    id=account_id,
+                    service="opencode-go",
+                    provider="pi",
+                    launch_mode=LaunchMode.CLI,
+                    auth_method="static_api_key",
+                    runtime_identity=profile.runtime_identity,
+                    state_directory=profile.state_directory,
+                    concurrency_limit=profile.concurrency_limit,
+                    control_reserved_slots=profile.control_reserved_slots,
+                    quota_collector="opencode_go",
+                    quota_scope_id=oauth.scope_id,
+                    quota_oauth=oauth,
+                ),
+                output=OpenCodeSnapshotBinding(
+                    account_id=account_id,
+                    scope_id=oauth.scope_id,
+                    path=setup.usage_root / account_id / "usage.json",
+                ),
+                binding_digest=execution_binding(profile),
+                cli_binary=setup.cli_binary,
+                cli_version=setup.cli_version,
+                xdg_root=root,
+                lock_file=root / "data/opencode/vuzol-owner.lock",
+                owner_launcher=setup.owner_launcher,
+                owner_launcher_sha256=setup.owner_launcher_sha256,
+            )
+        )
+    return configs
+
+
 @contextmanager
 def owner_lock(path: Path, *, wait: bool = False) -> Iterator[int]:
     if path.parent.resolve() != path.parent or path.parent.stat().st_mode & 0o022:
@@ -79,16 +182,16 @@ def owner_lock(path: Path, *, wait: bool = False) -> Iterator[int]:
         os.close(fd)
 
 
-def cli_environment(config: ExportConfig) -> dict[str, str]:
+def cli_environment(xdg_root: Path) -> dict[str, str]:
     # Do not forward API-key overrides, plugins, proxy settings or debug logging.
     return {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "HOME": str(Path.home()),
         "LANG": "C.UTF-8",
-        "XDG_DATA_HOME": str(config.xdg_root / "data"),
-        "XDG_CONFIG_HOME": str(config.xdg_root / "config"),
-        "XDG_STATE_HOME": str(config.xdg_root / "state"),
-        "XDG_CACHE_HOME": str(config.xdg_root / "cache"),
+        "XDG_DATA_HOME": str(xdg_root / "data"),
+        "XDG_CONFIG_HOME": str(xdg_root / "config"),
+        "XDG_STATE_HOME": str(xdg_root / "state"),
+        "XDG_CACHE_HOME": str(xdg_root / "cache"),
         "OPENCODE_DISABLE_AUTOUPDATE": "true",
         "OPENCODE_DISABLE_MODELS_FETCH": "true",
     }
@@ -123,7 +226,7 @@ def refresh_with_cli(
         rows = db.execute("SELECT id FROM account LIMIT 2").fetchall()
         if rows != [(oauth.account_id,)]:
             raise AccountAuthError("auth_refresh_scope_invalid")
-    environment = cli_environment(config)
+    environment = cli_environment(config.xdg_root)
     try:
         version = subprocess.run(  # noqa: S603
             [str(config.cli_binary), "--version"],
@@ -184,25 +287,42 @@ def export_once(config: ExportConfig, *, verify_cli: bool = False) -> UsageSnaps
     return snap
 
 
+def _report(snapshot: UsageSnapshot) -> None:
+    print(
+        json.dumps(
+            {
+                "account": snapshot.account_id,
+                "ok": not snapshot.detail,
+                "detail": snapshot.detail,
+                "at": snapshot.generated_at.isoformat(),
+            }
+        )
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--config", type=Path, help="one account's export config")
+    source.add_argument("--setup", type=Path, help="every account with a console login")
     parser.add_argument("--verify-cli", action="store_true")
     args = parser.parse_args()
     try:
-        config = ExportConfig.model_validate_json(args.config.read_bytes())
-        snapshot = export_once(config, verify_cli=args.verify_cli)
-        print(
-            json.dumps(
-                {
-                    "account": snapshot.account_id,
-                    "ok": not snapshot.detail,
-                    "detail": snapshot.detail,
-                    "at": snapshot.generated_at.isoformat(),
-                }
-            )
-        )
-        raise SystemExit(0 if not snapshot.detail else 2)
+        if args.config is not None:
+            configs = [ExportConfig.model_validate_json(args.config.read_bytes())]
+        else:
+            configs = discover(Setup.model_validate_json(args.setup.read_bytes()))
+        failed = False
+        for config in configs:
+            directory = config.output.path.parent
+            if not directory.exists():
+                # The group comes from usage_root's setgid; the unit's umask would hide it.
+                directory.mkdir()
+                directory.chmod(0o2750)
+            snapshot = export_once(config, verify_cli=args.verify_cli)
+            _report(snapshot)
+            failed = failed or bool(snapshot.detail)
+        raise SystemExit(2 if failed else 0)
     except (OSError, ValueError):
         print('{"error":"usage_export_configuration_or_output_invalid"}')
         raise SystemExit(1) from None

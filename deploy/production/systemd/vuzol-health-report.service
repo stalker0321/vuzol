@@ -13,7 +13,7 @@ EnvironmentFile=/etc/vuzol/secrets.env
 # VUZOL_TELEGRAM_BOT_TOKEN, VUZOL_HEALTH_CHAT_ID, VUZOL_HEALTH_THREAD_ID (root 0600).
 EnvironmentFile=/etc/vuzol/health-report.env
 WorkingDirectory=/opt/vuzol/current
-ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.health_report --usage-file /var/lib/vuzol/usage-export/opencode-c/usage.json
+ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.health_report --usage-dir /var/lib/vuzol/usage-export
 TimeoutStartSec=2m
 NoNewPrivileges=true
 PrivateTmp=true

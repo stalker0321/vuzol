@@ -71,6 +71,8 @@ class SubscriptionLimitSettings(BaseModel):
     snapshot_file: Path | None = None
     snapshot_max_age_seconds: int = Field(default=900, ge=1, le=86_400)
     opencode_snapshots: tuple[OpenCodeSnapshotBinding, ...] = ()
+    # Owner 2026-11-25: every account's snapshot under <root>/<account_id>/usage.json.
+    opencode_usage_root: Path | None = None
 
     @field_validator("opencode_snapshots")
     @classmethod

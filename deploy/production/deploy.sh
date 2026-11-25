@@ -61,6 +61,9 @@ systemctl enable --quiet --now $TIMERS
 systemctl enable --quiet $UNITS
 # The interpreter reads the owner's Google login from here (vuzol.cli.google_login).
 install -d -o 1000 -g 10001 -m 0700 /var/lib/vuzol/google
+# Owner 2026-11-25: the usage exporter (the owner's account) adds a directory per OpenCode
+# account here; setgid keeps them readable by the executor.
+install -d -o 1000 -g vuzol-executor -m 2750 /var/lib/vuzol/usage-export
 /usr/local/bin/vuzol-compose up -d --remove-orphans --wait postgres
 /usr/local/bin/vuzol-compose up -d --remove-orphans
 systemctl restart $UNITS

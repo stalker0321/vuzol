@@ -152,3 +152,28 @@ def load_usage_snapshot(
         return GoUsage(now, detail="limits_snapshot_unreadable")
     except (ValueError, TypeError, RecursionError):
         return GoUsage(now, detail="limits_snapshot_invalid")
+
+
+def discovered_bindings(
+    root: Path | None, known: tuple[OpenCodeSnapshotBinding, ...] = ()
+) -> tuple[OpenCodeSnapshotBinding, ...]:
+    """Owner 2026-11-25: ``root/<account_id>/usage.json`` of each account the exporter found.
+
+    The scope comes from the snapshot itself; loading it still checks the account and the
+    execution binding of the profile it is shown for.
+    """
+    if root is None or not root.is_dir():
+        return known
+    taken = {binding.account_id for binding in known}
+    found = list(known)
+    for path in sorted(root.glob("*/usage.json")):
+        account_id = path.parent.name
+        if account_id in taken:
+            continue
+        try:
+            with path.open("rb") as stream:
+                scope = json.loads(stream.read(MAX_BYTES))["scope_id"]
+            found.append(OpenCodeSnapshotBinding(account_id=account_id, scope_id=scope, path=path))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return tuple(found)

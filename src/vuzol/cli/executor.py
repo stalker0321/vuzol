@@ -64,6 +64,7 @@ from vuzol.providers.catalog import cli_adapter, credential_access_policy, suppo
 from vuzol.providers.cli_readonly import ReadOnlyCliAdapter
 from vuzol.providers.handlers import ProviderStepHandler, executor_provider_handlers
 from vuzol.providers.health import synchronize_profiles
+from vuzol.providers.opencode_snapshot import discovered_bindings
 from vuzol.providers.ports import ProviderAdapter
 from vuzol.providers.registry import AdapterRegistry
 from vuzol.providers.role_cli import RoleBoundCliAdapter
@@ -805,7 +806,9 @@ async def _refresh_subscription_limits_tick(
                 grok_limit_source=settings.source,
                 grok_limit_snapshot_file=settings.snapshot_file,
                 grok_limit_snapshot_max_age=timedelta(seconds=settings.snapshot_max_age_seconds),
-                opencode_snapshots=settings.opencode_snapshots,
+                opencode_snapshots=discovered_bindings(
+                    settings.opencode_usage_root, settings.opencode_snapshots
+                ),
             )
             if force_chat_ids:
                 chats: list[int] = force_chat_ids

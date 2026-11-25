@@ -10,16 +10,17 @@ User=vodkolyan
 Group=vodkolyan
 WorkingDirectory=/opt/vuzol/current
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.opencode_usage_export --config /etc/vuzol/opencode-usage-c.json
-TimeoutStartSec=50
+ExecStart=/opt/vuzol/current/.venv/bin/python -m vuzol.cli.opencode_usage_export --setup /etc/vuzol/opencode-usage.json
+# Each account with a console login, one after another.
+TimeoutStartSec=170
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
-# The shared login lives here, not in a home directory (xdg_root in the config).
-ReadWritePaths=/var/lib/vuzol/opencode-shared /var/lib/vuzol/usage-export/opencode-c
+# The shared logins live here, not in a home directory (accounts_root in the setup).
+ReadWritePaths=/var/lib/vuzol/opencode-shared /var/lib/vuzol/usage-export
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

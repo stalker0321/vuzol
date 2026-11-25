@@ -59,16 +59,23 @@ commit. Migrations are not downgraded, so they must stay compatible with the pre
 
 ## OpenCode usage export
 
-`vuzol-opencode-usage.timer` runs about once a minute as the owner's Unix account, which owns
-the OpenCode OAuth store in `/var/lib/vuzol/opencode-shared/<account>` (`xdg_root` in
-`/etc/vuzol/opencode-usage-c.json`; the owner's old profile path is a symlink to it). It writes a token-free snapshot to
-`/var/lib/vuzol/usage-export/opencode-c/usage.json` (directory `2750`, file `0640`, group
-`vuzol-executor`); the executor reads only that file and rejects it when stale (over 15 minutes),
-malformed or bound to another account. The installed OpenCode CLI stays the only refresh owner:
-`/usr/local/bin/opencode` is the dispatcher from `deploy/opencode-dispatch.py`, which serializes
-interactive use and the exporter with one `flock`; the exporter checks its SHA-256
-(`owner_launcher_sha256`), so update that after reinstalling it. Upgrading OpenCode requires rechecking the
-dispatcher and the pinned store schema; until then the exporter stops with an explicit error.
+`vuzol-opencode-usage.timer` runs about once a minute as the owner's Unix account. Its setup,
+`/etc/vuzol/opencode-usage.json`, names the registry, `accounts_root`
+(`/var/lib/vuzol/opencode-shared`), `usage_root` (`/var/lib/vuzol/usage-export`) and the CLI.
+Every enabled Pi account of the registry whose console login is in `accounts_root/<account_id>`
+gets a token-free snapshot at `usage_root/<account_id>/usage.json` (directory `2750`, file
+`0640`, group `vuzol-executor`); the executor finds those files itself
+(`VUZOL_SUBSCRIPTION_LIMITS__OPENCODE_USAGE_ROOT`) and rejects one that is stale (over 15
+minutes), malformed or bound to another account. A new account needs only its login, once:
+
+    /opt/vuzol/current/.venv/bin/python -m vuzol.cli.opencode_owner --account opencode-go-x -- console login
+
+The installed OpenCode CLI stays the only refresh owner: `/usr/local/bin/opencode` is the
+dispatcher from `deploy/opencode-dispatch.py`, which sends a shared login through
+`vuzol.cli.opencode_owner` and so serializes interactive use and the exporter with one `flock`
+per account; the exporter checks the dispatcher's SHA-256 (`owner_launcher_sha256`), so update
+that after reinstalling it. Upgrading OpenCode requires rechecking the dispatcher and the pinned
+store schema; until then the exporter stops with an explicit error.
 
 ## Health summary
 

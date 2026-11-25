@@ -69,7 +69,8 @@ class HostFacts:
     disk_used_percent: float
     services: dict[str, UnitState] = field(default_factory=dict)
     backup: UnitState | None = None
-    usage_snapshot: dict[str, object] | None = None
+    # Owner 2026-11-25: every OpenCode account's usage snapshot, by account id.
+    usage_snapshots: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +103,8 @@ def evaluate(host: HostFacts, db: DatabaseFacts, *, now: datetime) -> list[Findi
         findings.append(Finding("fail", f"Последний бэкап упал: {host.backup.result}"))
     elif now - host.backup.last_exit > BACKUP_MAX_AGE:
         findings.append(Finding("fail", f"Бэкапа не было {_age(now - host.backup.last_exit)}"))
-    findings.extend(_usage(host.usage_snapshot, now=now))
+    for account, snapshot in sorted(host.usage_snapshots.items()):
+        findings.extend(_usage(account, snapshot, now=now))
     if db.blocked_runs:
         oldest = f", старейший {_age(now - db.oldest_blocked)}" if db.oldest_blocked else ""
         findings.append(Finding("warn", f"Задач ждут решения: {db.blocked_runs}{oldest}"))
@@ -139,12 +141,10 @@ def render(findings: list[Finding]) -> str:
     return "\n".join(lines)
 
 
-def _usage(snapshot: dict[str, object] | None, *, now: datetime) -> list[Finding]:
-    if snapshot is None:
-        return []
+def _usage(account: str, snapshot: dict[str, object], *, now: datetime) -> list[Finding]:
     generated = _parse_time(snapshot.get("generated_at"))
     if generated is None or now - generated > USAGE_EXPORT_MAX_AGE:
-        return [Finding("warn", "Учёт лимитов OpenCode не обновляется")]
+        return [Finding("warn", f"Учёт лимитов OpenCode {account} не обновляется")]
     findings = []
     windows = snapshot.get("windows")
     for window in windows if isinstance(windows, list) else []:
@@ -152,7 +152,9 @@ def _usage(snapshot: dict[str, object] | None, *, now: datetime) -> list[Finding
             continue
         used = window.get("used_percent")
         if isinstance(used, int | float) and used >= QUOTA_WARN_PERCENT:
-            findings.append(Finding("warn", f"OpenCode, окно {window.get('id')}: {used:.0f}%"))
+            findings.append(
+                Finding("warn", f"OpenCode {account}, окно {window.get('id')}: {used:.0f}%")
+            )
     return findings
 
 
@@ -235,24 +237,22 @@ async def database_facts(session: AsyncSession, *, now: datetime) -> DatabaseFac
     )
 
 
-def host_facts(
-    *, services: tuple[str, ...], backup_unit: str, usage_file: Path | None
-) -> HostFacts:
+def host_facts(*, services: tuple[str, ...], backup_unit: str, usage_dir: Path | None) -> HostFacts:
     usage = os.statvfs("/")
     total = usage.f_blocks * usage.f_frsize
     free = usage.f_bavail * usage.f_frsize
-    snapshot = None
-    if usage_file is not None:
+    snapshots: dict[str, dict[str, object]] = {}
+    for usage_file in sorted(usage_dir.glob("*/usage.json")) if usage_dir is not None else []:
         try:
             loaded = json.loads(usage_file.read_text())
         except (OSError, ValueError):
             loaded = {}
-        snapshot = loaded if isinstance(loaded, dict) else {}
+        snapshots[usage_file.parent.name] = loaded if isinstance(loaded, dict) else {}
     return HostFacts(
         disk_used_percent=100.0 * (total - free) / total if total else 0.0,
         services={name: _unit(name) for name in services},
         backup=_unit(backup_unit),
-        usage_snapshot=snapshot,
+        usage_snapshots=snapshots,
     )
 
 

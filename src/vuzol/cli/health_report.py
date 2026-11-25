@@ -27,13 +27,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--dry-run", action="store_true", help="print instead of sending")
     parser.add_argument("--service", action="append", help="systemd unit to check (repeatable)")
     parser.add_argument("--backup-unit", default="vuzol-backup.service")
-    parser.add_argument("--usage-file", type=Path)
+    parser.add_argument("--usage-dir", type=Path, help="<dir>/<account>/usage.json")
     args = parser.parse_args(argv)
     text = asyncio.run(
         _report(
             services=tuple(args.service or SERVICES),
             backup_unit=args.backup_unit,
-            usage_file=args.usage_file,
+            usage_dir=args.usage_dir,
         )
     )
     if args.dry_run:
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> None:
     asyncio.run(_send(text))
 
 
-async def _report(*, services: tuple[str, ...], backup_unit: str, usage_file: Path | None) -> str:
+async def _report(*, services: tuple[str, ...], backup_unit: str, usage_dir: Path | None) -> str:
     settings = get_runtime_configuration(validate_profile_credentials=False).settings
     engine = create_engine(settings, resolve_database_dsn(settings))
     now = datetime.now(UTC)
@@ -51,7 +51,7 @@ async def _report(*, services: tuple[str, ...], backup_unit: str, usage_file: Pa
             db = await database_facts(session, now=now)
     finally:
         await engine.dispose()
-    host = host_facts(services=services, backup_unit=backup_unit, usage_file=usage_file)
+    host = host_facts(services=services, backup_unit=backup_unit, usage_dir=usage_dir)
     return render(evaluate(host, db, now=now))
 
 

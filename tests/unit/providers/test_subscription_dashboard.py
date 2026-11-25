@@ -44,7 +44,7 @@ def test_usage_bar_escaping_and_compact_errors_after_working_accounts(rich):
     assert "\n\n• pi" not in rendered
     if rich:
         assert "<table>" in rendered
-        assert "<th>Окно</th><th>Использовано</th><th>Сброс</th>" in rendered
+        assert "<th>" not in rendered
     else:
         assert "  <code>5h   ███░░░░░░░   28%</code> · сброс 09.11 19:26" in rendered
         assert "<table>" not in rendered

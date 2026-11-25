@@ -17,8 +17,9 @@ from tests.integration.assistant.test_assistant import (
     worker_for,
 )
 from tests.integration.leadership.test_managed_goal_flow import _factory
+from vuzol.assistant import service
 from vuzol.assistant.google import GoogleError
-from vuzol.assistant.mail import MailOffers, Offer, quiet
+from vuzol.assistant.mail import Briefing, MailOffers, Offer, quiet
 from vuzol.assistant.schemas import NewEvent, Reminder
 from vuzol.storage.models import AssistantEntry, TransactionalOutbox
 from vuzol.storage.types import DeliveryStatus
@@ -74,11 +75,10 @@ PROMO_OFFER = Offer(
 
 
 def watcher(factory, model, mailbox, **settings):
-    worker, telegram, _ = worker_for(factory, None)
+    worker, telegram, _ = worker_for(factory, model)
     worker._google = mailbox
     worker._mail_model = model
-    if settings:
-        worker._settings = worker._settings.model_copy(update=settings)
+    worker._settings = worker._settings.model_copy(update={"briefing": False, **settings})
     return worker, telegram
 
 
@@ -226,3 +226,43 @@ async def test_a_failed_or_night_check_leaves_its_mail_for_the_next(postgres_dsn
 def test_quiet_hours_may_wrap_midnight():
     assert [h for h in range(24) if quiet(h, (23, 8))] == [0, 1, 2, 3, 4, 5, 6, 7, 23]
     assert [h for h in range(24) if quiet(h, (1, 3))] == [1, 2]
+
+
+async def test_the_first_check_of_the_morning_is_a_briefing_once_a_day(postgres_dsn, monkeypatch):
+    monkeypatch.setattr(service, "_BRIEFING_LATEST_HOUR", 24)
+    async with _factory(postgres_dsn) as factory:
+        mailbox = Mailbox()
+        model = FakeModel(
+            Briefing(text="**Сегодня**\n• Стоматолог в 10:00", offers=[CONCERT_OFFER]),
+            offers(),
+        )
+        worker, telegram = watcher(factory, model, mailbox, mail_quiet_hours=awake(), briefing=True)
+        await worker.start_mail_watch()
+        await run_check(worker)
+
+        seen = model.calls[0]
+        assert {"today", "calendar", "reminders", "projects", "mail"} <= set(seen)
+        assert [p["project_id"] for p in seen["projects"]] == ["diplom", "site"]
+        assert seen["mail"][0]["subject"] == "Билеты"
+        (message,) = telegram.sent
+        assert message["html"].startswith("<b>☀️ Доброе утро</b>")
+        assert "<b>Сегодня</b>" in message["html"] and "Стоматолог в 10:00" in message["html"]
+        assert [row[0][0] for row in message["buttons"]] == ["📅 Концерт 12.01", "🙅 Не надо"]
+
+        # Later checks the same day read mail as usual.
+        await run_check(worker)
+        assert len(model.calls) == 2 and "projects" not in model.calls[1]
+        assert len(telegram.sent) == 1
+
+
+async def test_a_quiet_morning_still_gets_its_briefing(postgres_dsn, monkeypatch):
+    monkeypatch.setattr(service, "_BRIEFING_LATEST_HOUR", 24)
+    async with _factory(postgres_dsn) as factory:
+        model = FakeModel(Briefing(text="День свободен."))
+        worker, telegram = watcher(
+            factory, model, Mailbox(), mail_quiet_hours=awake(), briefing=True
+        )
+        await worker.start_mail_watch()
+        await run_check(worker)
+        (message,) = telegram.sent
+        assert "День свободен." in message["html"] and message["buttons"] == []

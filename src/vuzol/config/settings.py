@@ -759,6 +759,8 @@ class AssistantSettings(BaseModel):
     mail_check_minutes: int = Field(default=60, ge=15, le=1440)
     # Local hours [start, end) without checks; the first check after them reads the night.
     mail_quiet_hours: tuple[int, int] = (23, 8)
+    # Owner 2026-11-25: the first check after the quiet hours is a morning briefing.
+    briefing: bool = True
 
     @field_validator("google_token_path", mode="before")
     @classmethod

@@ -775,11 +775,8 @@ def format_subscription_limits_html(
                         )
                     )
         if rows and rich:
-            lines.append(
-                "<table><tr><th>Окно</th><th>Использовано</th><th>Сброс</th></tr>"
-                + "".join(rows)
-                + "</table>"
-            )
+            # Owner 2026-11-25: no header row, the columns speak for themselves.
+            lines.append("<table>" + "".join(rows) + "</table>")
         elif rows:
             lines.extend(rows)
         else:

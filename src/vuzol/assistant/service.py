@@ -20,10 +20,12 @@ from vuzol.assistant import ASSISTANT_DESTINATION
 from vuzol.assistant.google import GoogleAccount, GoogleError
 from vuzol.assistant.ingress import schedule
 from vuzol.assistant.mail import (
+    BRIEFING_PROMPT,
     MAIL_CATCH_UP_HOURS,
     MAIL_CHECK_KEY,
     MAIL_LIMIT,
     MAIL_PROMPT,
+    Briefing,
     MailOffers,
     Offer,
     mail_query,
@@ -82,6 +84,9 @@ _REMINDER_KEY = "assistant:remind:"
 # Mail newer than this is left for the next check: Gmail may not have indexed it yet.
 _MAIL_SETTLE = timedelta(minutes=2)
 _OFFER_ICONS = {"event": "📅", "remind": "⏰"}
+_BRIEFING_KEY = "assistant:briefing:"
+# A morning briefing that could not go out by noon is skipped for the day.
+_BRIEFING_LATEST_HOUR = 12
 SEND_LABEL = "🚀 Отправить"
 EDIT_LABEL = "✏️ Изменить"
 
@@ -407,48 +412,8 @@ class AssistantWorker:
                     .limit(self._settings.history_turns + 8)
                 )
             )
-            goals = {
-                goal.project_id: goal
-                for goal in await session.scalars(
-                    select(ManagedGoal)
-                    .where(
-                        ManagedGoal.project_id.in_(list(refs)),
-                        ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
-                    )
-                    .order_by(ManagedGoal.created_at)
-                )
-            }
-            ended: dict[str, list[ManagedGoal]] = {}
-            for goal in await session.scalars(
-                select(ManagedGoal)
-                .where(
-                    ManagedGoal.project_id.in_(list(refs)),
-                    ManagedGoal.lifecycle.not_in(LIVE_GOAL_LIFECYCLES),
-                    ManagedGoal.updated_at >= datetime.now(UTC) - _RECENT_GOALS,
-                )
-                .order_by(ManagedGoal.updated_at.desc())
-            ):
-                ended.setdefault(goal.project_id, []).append(goal)
-            pending_reminders = list(
-                await session.scalars(
-                    select(TransactionalOutbox)
-                    .where(
-                        TransactionalOutbox.idempotency_key.startswith(_REMINDER_KEY),
-                        TransactionalOutbox.status == DeliveryStatus.PENDING,
-                    )
-                    .order_by(TransactionalOutbox.available_at)
-                )
-            )
-            queued: dict[str, list[str]] = {}
-            for item in await session.scalars(
-                select(ProjectTaskQueueItem)
-                .where(
-                    ProjectTaskQueueItem.project_id.in_(list(refs)),
-                    ProjectTaskQueueItem.state == "queued",
-                )
-                .order_by(ProjectTaskQueueItem.created_at)
-            ):
-                queued.setdefault(item.project_id, []).append(item.summary)
+            projects = await self._projects_view(session, refs)
+            pending_reminders = await self._pending_reminders(session)
         history.reverse()
         # The burst since the last reply is the latest message; earlier turns are history.
         last_reply = max(
@@ -457,30 +422,81 @@ class AssistantWorker:
         earlier, latest = history[: last_reply + 1], history[last_reply + 1 :]
         earlier = earlier[-self._settings.history_turns :] if self._settings.history_turns else []
         return {
-            "projects": [
-                {
-                    "project_id": ref.project_id,
-                    "name": ref.name,
-                    "live_goal": _goal_view(goals.get(ref.project_id)),
-                    "queued_tasks": queued.get(ref.project_id, []),
-                    "recent_goals": [
-                        _ended_view(goal)
-                        for goal in ended.get(ref.project_id, [])[:_RECENT_GOAL_LIMIT]
-                    ],
-                }
-                for ref in refs.values()
-            ],
-            "reminders": [
-                {
-                    "id": str(item.id),
-                    "at": item.available_at.astimezone(self._tz()).isoformat(timespec="minutes"),
-                    "text": item.payload.get("text", ""),
-                }
-                for item in pending_reminders
-            ],
+            "projects": projects,
+            "reminders": self._reminders_view(pending_reminders),
             "conversation": [_entry_view(item) for item in earlier],
             "latest_owner_message": "\n".join(item.body for item in latest if item.body),
         }
+
+    async def _pending_reminders(self, session: AsyncSession) -> list[TransactionalOutbox]:
+        return list(
+            await session.scalars(
+                select(TransactionalOutbox)
+                .where(
+                    TransactionalOutbox.idempotency_key.startswith(_REMINDER_KEY),
+                    TransactionalOutbox.status == DeliveryStatus.PENDING,
+                )
+                .order_by(TransactionalOutbox.available_at)
+            )
+        )
+
+    def _reminders_view(self, items: Sequence[TransactionalOutbox]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": str(item.id),
+                "at": item.available_at.astimezone(self._tz()).isoformat(timespec="minutes"),
+                "text": item.payload.get("text", ""),
+            }
+            for item in items
+        ]
+
+    async def _projects_view(
+        self, session: AsyncSession, refs: dict[str, ProjectRef]
+    ) -> list[dict[str, Any]]:
+        goals = {
+            goal.project_id: goal
+            for goal in await session.scalars(
+                select(ManagedGoal)
+                .where(
+                    ManagedGoal.project_id.in_(list(refs)),
+                    ManagedGoal.lifecycle.in_(LIVE_GOAL_LIFECYCLES),
+                )
+                .order_by(ManagedGoal.created_at)
+            )
+        }
+        ended: dict[str, list[ManagedGoal]] = {}
+        for goal in await session.scalars(
+            select(ManagedGoal)
+            .where(
+                ManagedGoal.project_id.in_(list(refs)),
+                ManagedGoal.lifecycle.not_in(LIVE_GOAL_LIFECYCLES),
+                ManagedGoal.updated_at >= datetime.now(UTC) - _RECENT_GOALS,
+            )
+            .order_by(ManagedGoal.updated_at.desc())
+        ):
+            ended.setdefault(goal.project_id, []).append(goal)
+        queued: dict[str, list[str]] = {}
+        for item in await session.scalars(
+            select(ProjectTaskQueueItem)
+            .where(
+                ProjectTaskQueueItem.project_id.in_(list(refs)),
+                ProjectTaskQueueItem.state == "queued",
+            )
+            .order_by(ProjectTaskQueueItem.created_at)
+        ):
+            queued.setdefault(item.project_id, []).append(item.summary)
+        return [
+            {
+                "project_id": ref.project_id,
+                "name": ref.name,
+                "live_goal": _goal_view(goals.get(ref.project_id)),
+                "queued_tasks": queued.get(ref.project_id, []),
+                "recent_goals": [
+                    _ended_view(goal) for goal in ended.get(ref.project_id, [])[:_RECENT_GOAL_LIMIT]
+                ],
+            }
+            for ref in refs.values()
+        ]
 
     async def _look_up(self, queries: Sequence[str]) -> dict[str, Any]:
         assert self._web is not None
@@ -696,11 +712,16 @@ class AssistantWorker:
         since = max(
             datetime.fromisoformat(payload["since"]), now - timedelta(hours=MAIL_CATCH_UP_HOURS)
         )
+        local = now.astimezone(self._tz())
         offers: list[Offer] = []
+        briefing: str | None = None
         read = False
-        if not quiet(now.astimezone(self._tz()).hour, self._settings.mail_quiet_hours):
+        if not quiet(local.hour, self._settings.mail_quiet_hours):
             try:
-                offers = await self._mail_offers(since, until)
+                if await self._briefing_due(local):
+                    briefing, offers = await self._briefing(since, until)
+                else:
+                    offers = await self._mail_offers(since, until)
                 read = True
             except Exception as failure:  # Google or the model is down: the next check retries.
                 _LOG.warning(
@@ -708,11 +729,74 @@ class AssistantWorker:
                     extra={"event": "assistant.mail_failed", "error": type(failure).__name__},
                 )
         async with self._factory.begin() as session:
-            if offers:
+            if briefing is not None:
+                await self._offer(
+                    session,
+                    offers,
+                    key=f"{_BRIEFING_KEY}{local.date().isoformat()}",
+                    header="☀️ Доброе утро",
+                    intro=briefing,
+                )
+            elif offers:
                 await self._offer(session, offers, key=f"assistant:offers:{since.isoformat()}")
             await self._next_mail_check(
                 session, until if read else since, delay=self._settings.mail_check_minutes * 60
             )
+
+    async def _briefing_due(self, local: datetime) -> bool:
+        """The first check of the morning, once a day."""
+        if not self._settings.briefing or local.hour >= _BRIEFING_LATEST_HOUR:
+            return False
+        async with self._factory() as session:
+            sent = await session.scalar(
+                select(TransactionalOutbox.id).where(
+                    TransactionalOutbox.idempotency_key
+                    == f"{_BRIEFING_KEY}{local.date().isoformat()}"
+                )
+            )
+        return sent is None
+
+    async def _briefing(self, since: datetime, until: datetime) -> tuple[str, list[Offer]]:
+        """Today's calendar and reminders, the night's mail and projects waiting for the owner."""
+        assert self._google is not None
+        messages = (
+            await self._google.mail(mail_query(since, until), limit=MAIL_LIMIT)
+            if until > since
+            else []
+        )
+        today = until.astimezone(self._tz()).date()
+        calendar = await self._google.events(today, today + timedelta(days=62))
+        refs = {ref.project_id: ref for ref in self._projects()}
+        async with self._factory() as session:
+            projects = await self._projects_view(session, refs)
+            reminders = self._reminders_view(await self._pending_reminders(session))
+        answer = await self._model.ask(
+            Briefing,
+            system=BRIEFING_PROMPT.format(
+                tz=self._settings.timezone,
+                now=until.astimezone(self._tz()).isoformat(timespec="minutes"),
+            ),
+            user=json.dumps(
+                {
+                    "today": today.isoformat(),
+                    "calendar": calendar,
+                    "reminders": reminders,
+                    "projects": projects,
+                    "mail": mail_view(messages),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return answer.text, self._usable(answer.offers, until)
+
+    def _usable(self, offers: Sequence[Offer], until: datetime) -> list[Offer]:
+        return [
+            offer
+            for offer in offers
+            if offer.kind == "notice"
+            or (offer.kind == "event" and offer.event is not None)
+            or (offer.kind == "remind" and offer.remind is not None and offer.remind.at > until)
+        ]
 
     async def _mail_offers(self, since: datetime, until: datetime) -> list[Offer]:
         assert self._google is not None and self._mail_model is not None
@@ -737,22 +821,25 @@ class AssistantWorker:
                 ensure_ascii=False,
             ),
         )
-        return [
-            offer
-            for offer in answer.offers
-            if offer.kind == "notice"
-            or (offer.kind == "event" and offer.event is not None)
-            or (offer.kind == "remind" and offer.remind is not None and offer.remind.at > until)
-        ]
+        return self._usable(answer.offers, until)
 
-    async def _offer(self, session: AsyncSession, offers: list[Offer], key: str) -> None:
+    async def _offer(
+        self,
+        session: AsyncSession,
+        offers: list[Offer],
+        key: str,
+        *,
+        header: str = "📬 Из почты",
+        intro: str | None = None,
+    ) -> None:
         if await session.scalar(
             select(TransactionalOutbox.id).where(TransactionalOutbox.idempotency_key == key)
         ):
             return  # A retried check that already offered.
         chat_id, thread_id = self._settings.chat_id, self._settings.message_thread_id
         assert chat_id is not None and thread_id is not None
-        body = "📬 Из почты:\n" + "\n".join(f"• {offer.text}" for offer in offers)
+        lines = [f"• {offer.text}" for offer in offers]
+        body = "\n".join([f"{header}:", *([intro] if intro else []), *lines])
         entry = AssistantEntry(
             id=uuid.uuid4(),
             chat_id=chat_id,
@@ -760,7 +847,7 @@ class AssistantWorker:
             role="assistant",
             body=body,
             dispatches=[],
-            offers=[{**offer.model_dump(mode="json"), "state": "open"} for offer in offers],
+            offers=[{**offer.model_dump(mode="json"), "state": "open"} for offer in offers] or None,
         )
         session.add(entry)
         await session.flush()
@@ -778,8 +865,13 @@ class AssistantWorker:
             payload={
                 "chat_id": chat_id,
                 "thread_id": thread_id,
-                "html": "<b>📬 Из почты</b>\n"
-                + "\n".join(f"• {escape(offer.text)}" for offer in offers),
+                "html": "\n".join(
+                    [
+                        f"<b>{escape(header)}</b>",
+                        *([answer_html(intro)] if intro else []),
+                        *(f"• {escape(offer.text)}" for offer in offers),
+                    ]
+                ),
                 "reply_to": None,
                 "buttons": buttons,
                 "entry_id": str(entry.id),

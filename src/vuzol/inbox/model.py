@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 from urllib.parse import urlsplit
@@ -17,6 +18,12 @@ from pydantic import BaseModel, SecretStr, ValidationError
 M = TypeVar("M", bound=BaseModel)
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
+
+
+class UsageHook(Protocol):
+    def __call__(
+        self, *, model: str, usage: dict[str, Any], duration_ms: int
+    ) -> Awaitable[None]: ...
 
 
 class InboxModelError(RuntimeError):
@@ -43,6 +50,7 @@ class InboxModel:
         output_tokens: int = 4_000,
         headers: dict[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
+        on_usage: UsageHook | None = None,
     ) -> None:
         self._headers = dict(headers or {})
         self._base_url = base_url.rstrip("/")
@@ -51,6 +59,7 @@ class InboxModel:
         self._timeout = timeout_seconds
         self._output_tokens = output_tokens
         self._client = client
+        self._on_usage = on_usage
 
     async def ask(
         self,
@@ -108,6 +117,7 @@ class InboxModel:
             # OpenCode Go refuses requests without a per-conversation routing id.
             headers["x-opencode-session"] = str(uuid.uuid4())
             headers["x-opencode-client"] = "vuzol"
+        started = time.monotonic()
         try:
             if self._client is not None:
                 response = await self._client.post(
@@ -125,11 +135,19 @@ class InboxModel:
                         timeout=self._timeout,
                     )
             response.raise_for_status()
-            text = response.json()["choices"][0]["message"]["content"]
+            body = response.json()
+            text = body["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as error:
             raise InboxModelError(f"http_{error.response.status_code}") from error
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
             raise InboxModelError(type(error).__name__) from error
+        usage = body.get("usage") if isinstance(body, dict) else None
+        if self._on_usage is not None and isinstance(usage, dict):
+            await self._on_usage(
+                model=str(body.get("model") or self.model),
+                usage=usage,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
         if not isinstance(text, str) or not text.strip():
             raise InboxModelError("empty_model_output")
         return text

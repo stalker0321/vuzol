@@ -95,6 +95,7 @@ async def test_dashboard_surfaces_project_default_executor_pin() -> None:
         "vuzol.telegram.projections.load_subscription_limits",
         AsyncMock(return_value=()),
     )
+    monkeypatch.setattr("vuzol.telegram.projections._tokens_spent", AsyncMock(return_value=[]))
     try:
         card = await build_project_status_dashboard(
             session,
@@ -294,6 +295,7 @@ async def test_large_dashboard_keeps_fallback_html_balanced(monkeypatch):
         )
         for i in range(200)
     ]
+    monkeypatch.setattr("vuzol.telegram.projections._tokens_spent", AsyncMock(return_value=[]))
     card = await build_project_status_dashboard(session, -100, subscription_snapshots=snapshots)
     assert len(card.html) <= 4096 and card.html.endswith("…")
     assert card.rich_html is None  # exceeds the rich transport bound

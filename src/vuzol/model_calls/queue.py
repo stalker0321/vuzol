@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vuzol.inbox.usage import usage_record
 from vuzol.storage.models import ModelCall
 
 # A failed call is settled, not retried: the caller falls back to its next model.
@@ -137,6 +138,19 @@ async def finish_call(
     assert call is not None
     _settle(call, output=output, error=error)
     call.usage = usage or {}
+    if usage and (usage.get("input_tokens") is not None or usage.get("output_tokens") is not None):
+        # Owner 2026-11-26: the tokens of system work are counted with the project work.
+        session.add(
+            usage_record(
+                provider=str(usage.get("provider") or "cli"),
+                profile_id=call.profile_id,
+                model=str(usage.get("model") or ""),
+                purpose=call.purpose,
+                usage=usage,
+                duration_ms=int(usage.get("duration_ms") or 0),
+                outcome=call.state,
+            )
+        )
     await session.flush()
     return True
 

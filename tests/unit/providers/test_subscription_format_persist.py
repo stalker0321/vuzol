@@ -481,6 +481,7 @@ async def test_dashboard_loads_limits_from_db_not_filesystem() -> None:
     )
     session = MagicMock()
     session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+    session.execute = AsyncMock(return_value=[])  # no tokens spent
 
     with patch(
         "vuzol.telegram.projections.load_subscription_limits",

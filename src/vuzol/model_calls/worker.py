@@ -91,7 +91,7 @@ class ModelCallWorker:
         finally:
             current_model_call.reset(token)
         usage = result.usage.model_dump(mode="json")
-        usage.update(profile_id=profile.id, model=profile.model)
+        usage.update(profile_id=profile.id, model=profile.model, provider=profile.provider)
         if result.status is ProviderResultStatus.SUCCEEDED and result.structured_output:
             return result.structured_output, None, usage
         category = result.failure.category.value if result.failure else result.status.value

@@ -156,3 +156,45 @@ async def test_unknown_first_rich_dashboard_send_has_no_ordinary_duplicate(
             assert await session.scalar(select(TelegramMessageLink)) is None
     finally:
         await engine.dispose()
+
+
+async def test_the_dashboard_counts_the_last_days_tokens_per_kind_of_work(postgres_dsn):
+    from vuzol.storage.models import UsageRecord
+
+    engine, factory = storage(postgres_dsn)
+    now = datetime.now(UTC)
+    try:
+        await seed(factory, snapshot())
+        async with factory.begin() as session:
+            for purpose, tokens, at in (
+                ("project_lead", 1_500_000, now),
+                ("coding", 200_000, now),
+                ("monitor_classification", 42_400, now),
+                ("assistant_turn", 900, now),
+                ("probe", 5_000, now),
+                ("monitor_classification", 99_000, now - timedelta(days=2)),
+            ):
+                session.add(
+                    UsageRecord(
+                        provider="p",
+                        profile_id="x",
+                        model="m",
+                        input_tokens=tokens,
+                        output_tokens=tokens // 10,
+                        duration_ms=1,
+                        outcome="succeeded",
+                        purpose=purpose,
+                        created_at=at,
+                    )
+                )
+        async with factory() as session:
+            card = await build_project_status_dashboard(session, CHAT_ID, now=now)
+        block = card.html.split("<b>Токены за сутки</b>\n", 1)[1].splitlines()
+        assert block == [
+            "• Проекты: 1.7M вх / 170k вых",
+            "• Ассистент: 900 вх / 90 вых",
+            "• Новости: 42k вх / 4k вых",
+        ]
+        assert "<h3>Токены за сутки</h3>" in card.rich_html
+    finally:
+        await engine.dispose()

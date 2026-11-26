@@ -242,3 +242,66 @@ def test_inbox_row_keeps_a_poll_as_text_and_skips_a_story() -> None:
     assert row["body"] == "Опрос: Куда идём?\n- Кино\n- Бар"
     story = {"chat": {"id": 9, "type": "channel"}, "id": 3}
     assert inbox_row(Message.de_json({**base, "story": story}, None), 5) is None
+
+
+async def test_each_answered_completion_reports_its_usage():
+    replies = iter(["not json", '{"text": "Готово"}'])
+    seen = []
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4.1-flash",
+                "choices": [{"message": {"content": next(replies)}}],
+                "usage": {
+                    "prompt_tokens": 300,
+                    "completion_tokens": 20,
+                    "prompt_tokens_details": {"cached_tokens": 256},
+                },
+            },
+        )
+
+    async def on_usage(*, model, usage, duration_ms):
+        seen.append((model, usage["prompt_tokens"], duration_ms >= 0))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = InboxModel(
+            base_url="https://llm.example/v1",
+            credential=SecretStr("k"),
+            model="m",
+            client=client,
+            on_usage=on_usage,
+        )
+        assert (await model.ask(Answer, system="s", user="u")).text == "Готово"
+    # The repair turn costs tokens too.
+    assert seen == [("deepseek-v4.1-flash", 300, True)] * 2
+
+
+def test_a_usage_record_reads_openai_and_provider_usage():
+    from vuzol.inbox.usage import usage_record
+
+    openai = usage_record(
+        provider="openai-compatible",
+        profile_id="inbox-flash-a",
+        model="m",
+        purpose="monitor_classification",
+        usage={
+            "prompt_tokens": 300,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 256},
+        },
+        duration_ms=50,
+        outcome="succeeded",
+    )
+    assert (openai.input_tokens, openai.output_tokens, openai.cached_tokens) == (300, 20, 256)
+    odd = usage_record(
+        provider="p",
+        profile_id="x",
+        model="m",
+        purpose="inbox",
+        usage={"input_tokens": "lots", "output_tokens": -1},
+        duration_ms=-5,
+        outcome="succeeded",
+    )
+    assert (odd.input_tokens, odd.output_tokens, odd.duration_ms) == (None, None, 0)

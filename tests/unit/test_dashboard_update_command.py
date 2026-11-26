@@ -43,6 +43,7 @@ async def test_dashboard_staleness_replaces_updated_timestamp() -> None:
     )
     session = MagicMock()
     session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+    session.execute = AsyncMock(return_value=[])  # no tokens spent
     card = await build_project_status_dashboard(
         session,
         chat_id=-100,

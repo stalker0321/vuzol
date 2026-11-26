@@ -378,3 +378,44 @@ async def test_a_node_lane_takes_only_its_profiles_and_reaps_only_its_sandboxes(
         proxy.cleanup_fails = False
         assert await ModelCallReconciler(factory, runtime, proxy).reconcile() == 0
         assert await ModelCallReconciler(factory, runtime, proxy, node="gcp").reconcile() == 1
+
+
+async def test_an_answered_call_leaves_a_usage_record_with_its_purpose(postgres_dsn):
+    from vuzol.storage.models import UsageRecord
+
+    async with _factory(postgres_dsn) as factory:
+        async with factory.begin() as session:
+            for _ in range(2):
+                await submit_call(
+                    session,
+                    purpose="assistant_mail",
+                    profile_id="codex-a",
+                    system="s",
+                    user="u",
+                    output_schema={},
+                    timeout_seconds=60,
+                    wait_seconds=600,
+                )
+        usage = {
+            "provider": "codex",
+            "model": "gpt-6.1-sol",
+            "input_tokens": 1200,
+            "output_tokens": 80,
+            "cached_tokens": 1000,
+            "duration_ms": 900,
+        }
+        async with factory.begin() as session:
+            answered = await claim_call(session, owner="executor")
+            assert await finish_call(session, answered, output={"reply": "ok"}, usage=usage)
+            # A call that failed before the model ran has no tokens to count.
+            failed = await claim_call(session, owner="executor")
+            assert await finish_call(session, failed, error="quota_exhausted")
+        async with factory() as session:
+            (record,) = list(await session.scalars(select(UsageRecord)))
+        assert (record.purpose, record.profile_id, record.provider) == (
+            "assistant_mail",
+            "codex-a",
+            "codex",
+        )
+        assert (record.input_tokens, record.output_tokens, record.cached_tokens) == (1200, 80, 1000)
+        assert record.outcome == "succeeded" and record.duration_ms == 900

@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from sqlalchemy import case, func, select
@@ -408,6 +408,52 @@ def _humanize_model_slug(slug: str) -> str:
     return " ".join(pretty)
 
 
+# Owner 2026-11-26: system work (news, mail, the assistant) is counted next to the projects.
+_SPENT_GROUPS = {
+    "assistant_turn": "Ассистент",
+    "assistant_research": "Ассистент",
+    "assistant_mail": "Почта и сводка",
+    "monitor_classification": "Новости",
+    "inbox": "Инбокс",
+}
+_SPENT_ORDER = ("Проекты", "Ассистент", "Почта и сводка", "Новости", "Инбокс")
+
+
+def _short_tokens(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{round(value / 1_000)}k"
+    return str(value)
+
+
+async def _tokens_spent(session: AsyncSession, now: datetime) -> list[str]:
+    """Input and output tokens of the last 24 hours, per kind of work."""
+    rows = await session.execute(
+        select(
+            UsageRecord.purpose,
+            func.coalesce(func.sum(UsageRecord.input_tokens), 0),
+            func.coalesce(func.sum(UsageRecord.output_tokens), 0),
+        )
+        .where(
+            UsageRecord.created_at > now - timedelta(days=1),
+            func.coalesce(UsageRecord.purpose, "") != "probe",
+        )
+        .group_by(UsageRecord.purpose)
+    )
+    totals: dict[str, list[int]] = {}
+    for purpose, input_tokens, output_tokens in rows:
+        group = _SPENT_GROUPS.get(purpose or "", "Проекты")
+        total = totals.setdefault(group, [0, 0])
+        total[0] += int(input_tokens)
+        total[1] += int(output_tokens)
+    return [
+        f"• {group}: {_short_tokens(totals[group][0])} вх / {_short_tokens(totals[group][1])} вых"
+        for group in _SPENT_ORDER
+        if group in totals and any(totals[group])
+    ]
+
+
 def dashboard_revision_for(html_body: str, *, rich_html: str | None = None) -> int:
     """Hash only rendered content; internal task versions and measurement times are invisible."""
     digest = hashlib.sha256(f"{html_body}\0{rich_html or ''}".encode()).hexdigest()
@@ -497,6 +543,12 @@ async def build_project_status_dashboard(
                 subscription_snapshots, html_escape=telegram_html, now=observed, rich=True
             )
         )
+    spent = await _tokens_spent(session, observed)
+    if spent:
+        lines.extend(("", "<b>Токены за сутки</b>"))
+        lines.extend(spent)
+        rich_lines.append("<h3>Токены за сутки</h3>")
+        rich_lines.extend(f"<p>{line}</p>" for line in spent)
     # Each ordinary line is balanced HTML. Drop whole lines rather than cutting tags/entities.
     if len("\n".join(lines)) > TELEGRAM_TEXT_LIMIT:
         while lines and len("\n".join((*lines, "…"))) > TELEGRAM_TEXT_LIMIT:

@@ -32,9 +32,10 @@ from vuzol.config import (
 from vuzol.config.models import LaunchMode, TopicKind
 from vuzol.experiments.canary import canary_policy_from_settings
 from vuzol.inbox.fetch import describe_link
-from vuzol.inbox.model import ChatModel, InboxModel, ModelChain
+from vuzol.inbox.model import ChatModel, InboxModel, ModelChain, UsageHook
 from vuzol.inbox.search import WebSearch
 from vuzol.inbox.service import InboxWorker
+from vuzol.inbox.usage import UsageRecorder
 from vuzol.interpretation.adapters import (
     OpenAICompatibleInterpreter,
     OpenAICompatibleTranscriber,
@@ -105,6 +106,7 @@ def build_inbox_model(
     profile_id: str,
     timeout_seconds: float,
     org_id: str | None = None,
+    on_usage: UsageHook | None = None,
 ) -> InboxModel:
     profile = registries.profiles.get(profile_id)
     if profile.provider != "openai-compatible" or profile.api_base_url is None:
@@ -118,6 +120,7 @@ def build_inbox_model(
         timeout_seconds=timeout_seconds,
         output_tokens=profile.output_limit or 8_000,
         headers={"x-opencode-org-id": org_id} if org_id else None,
+        on_usage=on_usage,
     )
 
 
@@ -153,6 +156,13 @@ def build_model_chain(
             profile_id=profile_id,
             timeout_seconds=timeout_seconds,
             org_id=org_ids.get(profile_id),
+            on_usage=(
+                UsageRecorder(
+                    factory, provider=profile.provider, profile_id=profile.id, purpose=purpose
+                )
+                if factory is not None
+                else None
+            ),
         )
 
     models = [build(profile_id)]
@@ -375,6 +385,7 @@ def build_inbox_worker(
         fallback_profile_ids=config.fallback_profile_ids,
         org_ids=config.opencode_org_ids,
         timeout_seconds=config.timeout_seconds,
+        factory=factory,
     )
     client = PythonTelegramClient(bot)
     interpretation = runtime.settings.interpretation

@@ -744,3 +744,105 @@ async def test_without_google_the_model_is_told_and_nothing_is_added(postgres_ds
         await drain(worker)
         assert model.calls[1]["google"] == {"error": "календарь и почта не подключены"}
         assert "Календарь не подключён, событие не добавлено" in telegram.sent[0]["html"]
+
+
+NEWS_THREAD = 55
+
+
+async def test_a_reply_to_a_news_item_is_discussed_with_the_assistant_in_the_news_topic(
+    postgres_dsn,
+):
+    from vuzol.assistant.ingress import is_assistant_update
+    from vuzol.config.settings import MonitorSettings
+    from vuzol.storage.models import MonitorEvent
+
+    settings = SETTINGS.model_copy(
+        update={
+            "monitor": MonitorSettings(
+                enabled=True, chat_id=CHAT, message_thread_id=NEWS_THREAD, profile_ids=("fast",)
+            )
+        }
+    )
+    reply = Update.de_json(
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 801,
+                "date": 1792000000,
+                "from": {"id": OWNER, "is_bot": False, "first_name": "Owner"},
+                "chat": {"id": CHAT, "type": "supergroup", "is_forum": True},
+                "message_thread_id": NEWS_THREAD,
+                "is_topic_message": True,
+                "text": "а чем это лучше того, что у нас?",
+                "reply_to_message": {
+                    "message_id": 700,
+                    "date": 1792000000,
+                    "chat": {"id": CHAT, "type": "supergroup", "is_forum": True},
+                    "message_thread_id": NEWS_THREAD,
+                    "text": "news",
+                },
+            },
+        },
+        BOT,
+    )
+    verdict = Update.de_json(
+        {
+            "update_id": 2,
+            "callback_query": {
+                "id": "cb2",
+                "from": {"id": OWNER, "is_bot": False, "first_name": "Owner"},
+                "chat_instance": "ci",
+                "data": f"mn:l:{uuid.uuid4().hex}",
+                "message": {
+                    "message_id": 700,
+                    "date": 1792000000,
+                    "chat": {"id": CHAT, "type": "supergroup", "is_forum": True},
+                    "message_thread_id": NEWS_THREAD,
+                    "is_topic_message": True,
+                    "text": "news",
+                },
+            },
+        },
+        BOT,
+    )
+    # The 👍 · 💾 · 👎 under the news stay the monitor's.
+    assert is_assistant_update(reply, settings) and not is_assistant_update(verdict, settings)
+    off = settings.model_copy(
+        update={"monitor": settings.monitor.model_copy(update={"discussion": False})}
+    )
+    assert not is_assistant_update(reply, off)
+    async with _factory(postgres_dsn) as factory:
+        async with factory.begin() as session:
+            session.add(
+                MonitorEvent(
+                    source_id="hn",
+                    external_id="x",
+                    url="https://example.com/agent",
+                    title="Новый агент",
+                    excerpt="",
+                    fetched_at=datetime.now(UTC),
+                    digested_at=datetime.now(UTC),
+                    state="digested",
+                    summary="Агент для кода",
+                    details="Что даёт: много",
+                    message_id=700,
+                )
+            )
+        ingress = DurableTelegramIngress(
+            factory,
+            settings=settings,
+            bot_id="fixture",
+            on_message=AsyncMock(side_effect=AssertionError("project path")),
+            on_control=AsyncMock(side_effect=AssertionError("project controls")),
+        )
+        await ingress.admit(reply)
+        while await ingress.process_one(BOT):
+            pass
+        model = FakeModel(Turn(reply="Он умеет больше."))
+        worker, telegram, _ = worker_for(factory, model)
+        await drain(worker)
+        (news,) = model.calls[0]["news"]
+        assert news["title"] == "Новый агент" and news["details"] == "Что даёт: много"
+        assert news["url"] == "https://example.com/agent"
+        assert telegram.sent[0]["thread"] == NEWS_THREAD
+        assert telegram.sent[0]["html"] == "Он умеет больше."

@@ -29,13 +29,25 @@ _BUTTON_NOTES = {"s": "🚀 Отправляю…", "e": "✏️ Жду прав
 def is_assistant_update(update: Update, settings: Settings) -> bool:
     config = settings.assistant
     message, user = update.effective_message, update.effective_user
-    return (
+    if not (
         config.enabled
         and message is not None
         and user is not None
-        and message.chat_id == config.chat_id
-        and message.message_thread_id == config.message_thread_id
         and user.id in settings.allowed_user_ids
+    ):
+        return False
+    if (message.chat_id, message.message_thread_id) == (config.chat_id, config.message_thread_id):
+        return True
+    # Owner 2026-11-26: news are discussed with the assistant in the news topic, by a reply.
+    # The 👍 · 💾 · 👎 under the news stay the monitor's.
+    monitor, query = settings.monitor, update.callback_query
+    return (
+        monitor.enabled
+        and monitor.discussion
+        and monitor.message_thread_id is not None
+        and message.chat_id == monitor.chat_id
+        and message.message_thread_id == monitor.message_thread_id
+        and (query is None or (query.data or "").startswith("as:"))
     )
 
 

@@ -640,9 +640,14 @@ class MonitorSettings(BaseModel):
     interests: tuple[str, ...] = ()
     digest_hours: tuple[Annotated[int, Field(ge=0, le=23)], ...] = (9, 21)
     sources: tuple[MonitorSource, ...] = ()
-    # Owner 2026-11-25: fewer, better news; each one its own message.
-    threshold: float = Field(default=0.7, ge=0, le=1)
-    max_items: int = Field(default=5, ge=1, le=15)
+    # Owner 2026-11-25: each news item its own message. Owner 2026-11-26: 15-20 a day at
+    # first, interesting rather than only useful, so the verdicts show what they like.
+    threshold: float = Field(default=0.5, ge=0, le=1)
+    max_items: int = Field(default=10, ge=1, le=20)
+    # The interests are rebuilt from the owner's verdicts this often.
+    profile_days: int = Field(default=3, ge=1, le=30)
+    # A message in the news topic is a discussion with the assistant.
+    discussion: bool = True
 
     @field_validator("chat_id", "message_thread_id", mode="before")
     @classmethod

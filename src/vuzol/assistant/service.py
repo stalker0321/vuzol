@@ -64,6 +64,7 @@ from vuzol.storage.models import (
     AssistantEntry,
     InboxCategory,
     InboxItem,
+    MonitorEvent,
     ProjectDiscussionSession,
     ProjectTaskQueueItem,
     TransactionalOutbox,
@@ -77,6 +78,8 @@ _ATTEMPTS = 3
 _PAGES = 3
 _PAGE_CHARS = 6_000
 _GOAL_CHARS = 400
+# News items a discussion in the news topic carries.
+_NEWS_IN_CONTEXT = 5
 # Ended goals the assistant sees per project, for «что по проектам?».
 _RECENT_GOALS = timedelta(days=7)
 _RECENT_GOAL_LIMIT = 3
@@ -414,6 +417,7 @@ class AssistantWorker:
             )
             projects = await self._projects_view(session, refs)
             pending_reminders = await self._pending_reminders(session)
+            news = await self._replied_news(session, entry, history)
         history.reverse()
         # The burst since the last reply is the latest message; earlier turns are history.
         last_reply = max(
@@ -421,12 +425,44 @@ class AssistantWorker:
         )
         earlier, latest = history[: last_reply + 1], history[last_reply + 1 :]
         earlier = earlier[-self._settings.history_turns :] if self._settings.history_turns else []
-        return {
+        context: dict[str, Any] = {
             "projects": projects,
             "reminders": self._reminders_view(pending_reminders),
             "conversation": [_entry_view(item) for item in earlier],
             "latest_owner_message": "\n".join(item.body for item in latest if item.body),
         }
+        if news:
+            context["news"] = news
+        return context
+
+    async def _replied_news(
+        self, session: AsyncSession, entry: AssistantEntry, history: Sequence[AssistantEntry]
+    ) -> list[dict[str, Any]]:
+        """In the news topic, the news items the owner replies to."""
+        if (entry.chat_id, entry.message_thread_id) == (
+            self._settings.chat_id,
+            self._settings.message_thread_id,
+        ):
+            return []
+        replied = [item.reply_to_message_id for item in history if item.reply_to_message_id]
+        if not replied:
+            return []
+        news = await session.scalars(
+            select(MonitorEvent)
+            .where(MonitorEvent.message_id.in_(replied))
+            .order_by(MonitorEvent.digested_at.desc())
+            .limit(_NEWS_IN_CONTEXT)
+        )
+        return [
+            {
+                "message_id": event.message_id,
+                "title": event.title,
+                "url": event.url,
+                "summary": event.summary,
+                "details": event.details,
+            }
+            for event in news
+        ]
 
     async def _pending_reminders(self, session: AsyncSession) -> list[TransactionalOutbox]:
         return list(

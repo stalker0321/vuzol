@@ -2352,6 +2352,18 @@ class MonitorEvent(IdentityMixin, Base):
     message_id: Mapped[int | None] = mapped_column(BigInteger)
 
 
+class MonitorProfile(IdentityMixin, Base):
+    """Owner 2026-11-26: the news interests, rebuilt from the owner's verdicts every few days."""
+
+    __tablename__ = "monitor_profiles"
+    __table_args__ = (Index("ix_monitor_profiles_created", "created_at"),)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    interests: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    # What changed against the previous profile, as told to the owner.
+    changes: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class MonitorSourceFetch(Base):
     """Successful fetch cursor, persisted across interpreter restarts."""
 

@@ -12,8 +12,13 @@ from telegram import Bot
 
 from vuzol.config.settings import MonitorSettings, MonitorSource
 from vuzol.inbox.model import InboxModelError
-from vuzol.monitor.service import Explanation, MonitorWorker
-from vuzol.storage.models import MonitorDigest, MonitorEvent, MonitorSourceFetch
+from vuzol.monitor.service import Explanation, MonitorWorker, Profile
+from vuzol.storage.models import (
+    MonitorDigest,
+    MonitorEvent,
+    MonitorProfile,
+    MonitorSourceFetch,
+)
 
 pytestmark = [pytest.mark.postgresql, pytest.mark.anyio]
 OWNER = 42
@@ -59,6 +64,10 @@ class Model:
         self.calls.append((system, json.loads(user)))
         if self.bad:
             raise InboxModelError("invalid_model_output")
+        if output is Profile:
+            return Profile(
+                interests=["Агенты", "Модели", "Робототехника"], changes="+ Робототехника"
+            )
         if output is Explanation:
             data = json.loads(user)
             return Explanation(
@@ -204,7 +213,7 @@ async def test_empty_low_relevance_and_disabled_monitor_send_nothing(factory):
     await seed(factory, 1)
     async with factory.begin() as session:
         event = await session.scalar(select(MonitorEvent))
-        event.state, event.relevance, event.details = "classified", 0.69, "x"
+        event.state, event.relevance, event.details = "classified", 0.49, "x"
     await worker.process_one()
     await MonitorWorker(
         factory, MonitorSettings(), model=Model(), send=send, clock=lambda: NOW
@@ -510,3 +519,99 @@ async def test_verdicts_mark_the_buttons_teach_the_classifier_and_save_to_the_kn
     _, data = model.calls[0]
     assert data["owner_liked"] == ["Новость 0 — Агент"]
     assert data["owner_disliked"] == ["Новость 1 — "]
+
+
+async def test_saving_a_news_item_likes_it(factory, monkeypatch):
+    from telegram import CallbackQuery
+
+    from vuzol.config import Settings
+    from vuzol.monitor.feedback import accept_monitor_update
+
+    monkeypatch.setattr(CallbackQuery, "edit_message_reply_markup", AsyncMock())
+    monkeypatch.setattr(CallbackQuery, "answer", AsyncMock())
+    config = Settings(
+        environment="test", allowed_user_ids=(OWNER,), allowed_chat_ids=(-100,), monitor=settings()
+    )
+    await seed(factory, 1, state="digested", relevance=0.8)
+    async with factory() as session:
+        event = await session.scalar(select(MonitorEvent))
+    assert await accept_monitor_update(factory, config, verdict_press(1, "s", event.id))
+    async with factory() as session:
+        stored = await session.get(MonitorEvent, event.id)
+    assert stored.saved and stored.feedback == "like"
+
+
+async def sent_digest(factory, key, verdicts, *, at=NOW):
+    """A sent digest of news with the given verdicts: like, dislike, save or None."""
+    ids = []
+    async with factory.begin() as session:
+        for index, verdict in enumerate(verdicts):
+            event = MonitorEvent(
+                source_id="news",
+                external_id=f"{key}{index}",
+                url=f"https://example.com/{key}{index}",
+                title=f"{key} {index}",
+                excerpt="",
+                published_at=at,
+                fetched_at=at,
+                digested_at=at,
+                state="digested",
+                summary="кратко",
+                message_id=1000 + index,
+                feedback="like" if verdict == "save" else verdict,
+                saved=verdict == "save",
+            )
+            session.add(event)
+            await session.flush()
+            ids.append(str(event.id))
+        session.add(MonitorDigest(key=key, state="sent", created_at=at, event_ids=ids))
+
+
+async def test_news_left_alone_in_a_digest_the_owner_reacted_to_are_neutral(factory):
+    await sent_digest(factory, "seen", ["like", None, None])
+    # No reaction at all: maybe unread, says nothing.
+    await sent_digest(factory, "unread", [None, None])
+    await seed(factory, 1, external_id_prefix="new")
+    model = Model()
+    await MonitorWorker(
+        factory, settings(digest_hours=()), model=model, send=AsyncMock(), clock=lambda: NOW
+    ).process_one()
+    _, data = model.calls[0]
+    assert data["owner_liked"] == ["seen 0 — кратко"]
+    assert sorted(data["owner_neutral"]) == ["seen 1 — кратко", "seen 2 — кратко"]
+
+
+async def test_the_interests_are_rebuilt_from_verdicts_every_few_days(factory):
+    start = NOW - timedelta(days=3, hours=1)
+    await sent_digest(factory, "a", ["like", "save", "dislike", None], at=start)
+    send = AsyncMock(return_value=500)
+
+    def worker(model, now):
+        return MonitorWorker(
+            factory, settings(digest_hours=()), model=model, send=send, clock=lambda: now
+        )
+
+    # Too few verdicts: nothing yet.
+    model = Model()
+    await worker(model, NOW).process_one()
+    assert not [c for c in model.calls if "owner_saved" in c[1]]
+    await sent_digest(factory, "b", ["like", "dislike", None], at=start)
+    # Not three days since the first verdicts yet.
+    await worker(model, start + timedelta(days=2)).process_one()
+    assert not [c for c in model.calls if "owner_saved" in c[1]]
+    await worker(model, NOW).process_one()
+    ((_, data),) = [c for c in model.calls if "owner_saved" in c[1]]
+    assert data["interests"] == ["ИИ и Python"]
+    assert data["owner_saved"] == ["a 1 — кратко"] and len(data["owner_liked"]) == 3
+    assert len(data["owner_neutral"]) == 2
+    notice = send.await_args.kwargs
+    assert "Обновил профиль интересов" in notice["html"] and "Робототехника" in notice["html"]
+    async with factory() as session:
+        (profile,) = list(await session.scalars(select(MonitorProfile)))
+    assert profile.interests == ["Агенты", "Модели", "Робототехника"]
+    # The classifier now reads the rebuilt interests; no new profile within three days.
+    await seed(factory, 1, external_id_prefix="new")
+    model = Model()
+    await worker(model, NOW + timedelta(hours=1)).process_one()
+    assert model.calls[0][1]["interests"] == ["Агенты", "Модели", "Робототехника"]
+    assert not [c for c in model.calls if "owner_saved" in c[1]]

@@ -1,7 +1,7 @@
 """Owner 2026-11-25: 👍 · 💾 · 👎 under each news item.
 
 A like or a dislike teaches the classifier (it sees the owner's latest verdicts); 💾 puts
-the news into the owner's knowledge base, where the assistant finds it.
+the news into the owner's knowledge base, where the assistant finds it, and likes it.
 """
 
 from __future__ import annotations
@@ -54,6 +54,8 @@ async def accept_monitor_update(
             note = "💾 Уже в базе знаний" if event.saved else "💾 Сохранил в базу знаний"
             if not event.saved:
                 event.saved = True
+                # Owner 2026-11-26: a saved news item is a good one.
+                event.feedback = "like"
                 session.add(_knowledge(event, user.id))
         else:
             verdict = _VERDICTS[key]

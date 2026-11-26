@@ -59,8 +59,9 @@ def is_inbox_update(update: Update, settings: Settings) -> bool:
 
 
 def inbox_row(message: Message, user_id: int) -> dict[str, Any] | None:
-    attachments = _attachments(message)
-    text = message.text or message.caption or _poll_text(message)
+    rich_text, rich_urls, rich_photo = _rich(message)
+    attachments = _attachments(message) or ([rich_photo] if rich_photo else [])
+    text = message.text or message.caption or _poll_text(message) or rich_text
     if not text and not attachments:
         return None
     label, link = _forward(message)
@@ -71,7 +72,7 @@ def inbox_row(message: Message, user_id: int) -> dict[str, Any] | None:
         "body": text,
         "forward_label": label,
         "forward_url": link,
-        "urls": _urls(message),
+        "urls": list(dict.fromkeys(_urls(message) + rich_urls))[:_MAX_URLS],
         "attachments": attachments,
         "media_group_id": message.media_group_id,
         "reply_to_message_id": (
@@ -198,6 +199,7 @@ def _poll_text(message: Message) -> str | None:
     return f"Опрос: {message.poll.question}\n{options}"
 
 
+_RICH_CHARS = 20_000
 _ENVELOPE = {
     "message_id",
     "date",
@@ -216,6 +218,70 @@ _ENVELOPE = {
     "message_thread_id",
     "show_caption_above_media",
 }
+
+
+def _rich(message: Message) -> tuple[str, list[str], dict[str, Any] | None]:
+    """Owner 2026-11-26: a forwarded rich post (headings, lists, code, photos) was refused.
+
+    The bot library keeps the new ``rich_message`` field unparsed: its text, links and the
+    first photo are read from the raw blocks.
+    """
+    rich = (message.api_kwargs or {}).get("rich_message")
+    if not isinstance(rich, dict):
+        return "", [], None
+    lines: list[str] = []
+    urls: list[str] = []
+    photos: list[dict[str, Any]] = []
+
+    def inline(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "".join(inline(item) for item in value)
+        if isinstance(value, dict):
+            url = value.get("url")
+            if isinstance(url, str) and url and " " not in url:
+                # Like plain-text links, a bare domain gets a scheme.
+                urls.append(url if url.startswith(("http://", "https://")) else "https://" + url)
+            return inline(value.get("text", ""))
+        return ""
+
+    def block(value: object, prefix: str = "") -> None:
+        if not isinstance(value, dict):
+            return
+        if value.get("type") == "photo":
+            sizes = [
+                p for p in value.get("photo") or [] if isinstance(p, dict) and p.get("file_id")
+            ]
+            if sizes:
+                photos.append(
+                    max(sizes, key=lambda p: (p.get("width") or 0) * (p.get("height") or 0))
+                )
+        if value.get("type") == "list":
+            for item in value.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or "•")
+                for index, inner in enumerate(item.get("blocks") or []):
+                    block(inner, f"{prefix}{label} " if index == 0 else prefix + "  ")
+            return
+        text = inline(value.get("text", ""))
+        if text.strip():
+            lines.append(prefix + text)
+        for inner in value.get("blocks") or []:
+            block(inner, prefix)
+
+    for value in rich.get("blocks") or []:
+        block(value)
+    photo = None
+    if photos:
+        photo = {
+            "kind": "photo",
+            "file_id": photos[0]["file_id"],
+            "size": photos[0].get("file_size") or 0,
+            "mime": "image/jpeg",
+        }
+    return "\n".join(lines)[:_RICH_CHARS], urls, photo
 
 
 def _attachments(message: Message) -> list[dict[str, Any]]:

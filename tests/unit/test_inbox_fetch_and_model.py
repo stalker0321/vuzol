@@ -244,6 +244,71 @@ def test_inbox_row_keeps_a_poll_as_text_and_skips_a_story() -> None:
     assert inbox_row(Message.de_json({**base, "story": story}, None), 5) is None
 
 
+def test_inbox_row_reads_a_forwarded_rich_post() -> None:
+    from telegram import Message
+
+    from vuzol.inbox.ingress import inbox_row
+
+    rich = {
+        "blocks": [
+            {"type": "heading", "size": 1, "text": "Colab для ComfyUI"},
+            {
+                "type": "paragraph",
+                "text": [
+                    "Шаблон ",
+                    {"type": "bold", "text": "быстрый"},
+                    ", ",
+                    {"type": "url", "text": "репозиторий", "url": "https://github.com/acme/colab"},
+                    " ",
+                    {"type": "url", "text": "docs.acme.dev", "url": "docs.acme.dev"},
+                ],
+            },
+            {
+                "type": "list",
+                "items": [
+                    {"label": "1.", "blocks": [{"type": "paragraph", "text": "Flux"}]},
+                    {
+                        "label": "2.",
+                        "blocks": [
+                            {
+                                "type": "paragraph",
+                                "text": [{"type": "code", "text": "pip install x"}],
+                            }
+                        ],
+                    },
+                ],
+            },
+            {"type": "divider"},
+            {
+                "type": "photo",
+                "photo": [
+                    {"file_id": "small", "file_unique_id": "s", "width": 90, "height": 60},
+                    {"file_id": "big", "file_unique_id": "b", "width": 1280, "height": 853},
+                ],
+            },
+        ]
+    }
+    message = Message.de_json(
+        {
+            "message_id": 7,
+            "date": 0,
+            "chat": {"id": 5, "type": "private"},
+            "forward_date": 0,
+            "forward_from_chat": {"id": -1001, "type": "channel", "title": "Канал"},
+            "forward_from_message_id": 42,
+            "rich_message": rich,
+        },
+        None,
+    )
+    row = inbox_row(message, 5)
+    assert row is not None
+    assert row["body"] == (
+        "Colab для ComfyUI\nШаблон быстрый, репозиторий docs.acme.dev\n1. Flux\n2. pip install x"  # noqa: RUF001
+    )
+    assert row["urls"] == ["https://github.com/acme/colab", "https://docs.acme.dev"]
+    assert [a["file_id"] for a in row["attachments"]] == ["big"]
+
+
 async def test_each_answered_completion_reports_its_usage():
     replies = iter(["not json", '{"text": "Готово"}'])
     seen = []
